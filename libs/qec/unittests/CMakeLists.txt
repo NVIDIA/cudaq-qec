@@ -307,8 +307,10 @@ if(TARGET cudaq-qec-realtime-decoding-quantinuum)
   add_dependencies(CUDAQXQECUnitTests test_quantinuum_private)
   gtest_discover_tests(test_quantinuum_private
     DISCOVERY_MODE PRE_TEST
-    PROPERTIES ENVIRONMENT
-      "CUDAQ_QTM_PRIVATE_IMPL=1;LD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}/qec_cc_private:$ENV{LD_LIBRARY_PATH}")
+    PROPERTIES
+      ENVIRONMENT "CUDAQ_QTM_PRIVATE_IMPL=1"
+      ENVIRONMENT_MODIFICATION
+        "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/qec_cc_private")
 endif()
 
 add_executable(test_qec test_qec.cpp)
