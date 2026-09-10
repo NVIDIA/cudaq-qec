@@ -848,6 +848,15 @@ decoders:
   const auto &args = parsed.decoders[0].decoder_custom_args.map();
   EXPECT_EQ(args.get<std::string>("global_decoder"), "my_plugin");
   EXPECT_FALSE(args.contains("global_decoder_params"));
+
+  // Hand-built maps with only "global_decoder" still synthesize empty
+  // global_decoder_params before the O_sparse early return.
+  auto params =
+      cudaq::qec::decoding::host::prepare_decoder_params(parsed.decoders[0]);
+  ASSERT_TRUE(params.contains("global_decoder_params"));
+  EXPECT_TRUE(
+      params.get<cudaqx::heterogeneous_map>("global_decoder_params").empty());
+  EXPECT_FALSE(params.contains("O"));
 }
 
 TEST(DecoderYAMLTest, TrtDecoderParamsWithoutDecoderThrows) {
@@ -2860,3 +2869,232 @@ TEST(ChromobiusOnDecodingServer, DemReachesANestedGlobalDecoder) {
   EXPECT_EQ(global_decoder->get_syndrome_size(), 4);
 }
 #endif // CUDAQX_QEC_HAS_CHROMOBIUS
+
+TEST(DecoderSchemaTest, F64MatrixAndSubschemaRoundTripAndJsonSchema) {
+  using namespace cudaq::qec::decoding::config;
+
+  register_decoder_schema(
+      {"cc_test_nested_engine", {{"gain", param_kind::f64}}});
+  register_decoder_schema(
+      {"cc_test_matrix_decoder",
+       {{"weights", param_kind::f64_matrix},
+        {"nested", param_kind::subschema, false, "cc_test_nested_engine"},
+        {"gain", param_kind::f64}}});
+
+  const std::string yaml = R"(
+decoders:
+  - id: 0
+    type: cc_test_matrix_decoder
+    block_size: 1
+    syndrome_size: 1
+    H_sparse: [0, -1]
+    O_sparse: [0, -1]
+    D_sparse: [0, -1]
+    decoder_custom_args:
+      gain: 1.25
+      weights:
+        - [1.0, 0.0]
+        - [0.0, 1.0]
+      nested:
+        gain: 2.5
+)";
+  auto config = multi_decoder_config::from_yaml_str(yaml);
+  const auto &args = config.decoders[0].decoder_custom_args.map();
+  EXPECT_EQ(args.get<double>("gain"), 1.25);
+  EXPECT_EQ(args.get<std::vector<std::vector<double>>>("weights"),
+            (std::vector<std::vector<double>>{{1.0, 0.0}, {0.0, 1.0}}));
+  EXPECT_EQ(args.get<cudaqx::heterogeneous_map>("nested").get<double>("gain"),
+            2.5);
+
+  const auto emitted = config.to_yaml_str(200);
+  EXPECT_NE(emitted.find("weights"), std::string::npos);
+  EXPECT_NE(emitted.find("nested"), std::string::npos);
+  auto round_tripped = multi_decoder_config::from_yaml_str(emitted);
+  EXPECT_EQ(round_tripped, config);
+
+  const auto schema = decoder_config_json_schema();
+  EXPECT_NE(schema.find("cc_test_matrix_decoder"), std::string::npos);
+  EXPECT_NE(schema.find("cc_test_nested_engine"), std::string::npos);
+}
+
+TEST(DecoderSchemaTest, JsonPointerEscapesTildeAndSlashInSchemaName) {
+  using namespace cudaq::qec::decoding::config;
+  register_decoder_schema({"cc~test/name", {{"x", param_kind::f64}}});
+  const auto schema = decoder_config_json_schema();
+  EXPECT_NE(schema.find("cc~0test~1name"), std::string::npos) << schema;
+}
+
+TEST(DecoderSchemaTest, UnknownKeyWarnsOnYamlEmit) {
+  using namespace cudaq::qec::decoding::config;
+  register_decoder_schema(
+      {"cc_test_unknown_key_decoder", {{"gain", param_kind::f64}}});
+
+  decoder_config dc;
+  dc.id = 0;
+  dc.type = "cc_test_unknown_key_decoder";
+  dc.block_size = 1;
+  dc.syndrome_size = 1;
+  dc.H_sparse = {0, -1};
+  dc.O_sparse = {0, -1};
+  dc.D_sparse = {0, -1};
+  dc.decoder_custom_args.map().insert("gain", 0.5);
+  dc.decoder_custom_args.map().insert("not_in_schema", 1);
+  multi_decoder_config multi;
+  multi.decoders.push_back(dc);
+
+  const auto previous = cudaq::qec::detail::get_log_level();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::warn);
+  testing::internal::CaptureStderr();
+  const auto emitted = multi.to_yaml_str(200);
+  cudaq::qec::detail::flush_logs();
+  const std::string logged = testing::internal::GetCapturedStderr();
+  cudaq::qec::detail::set_log_level(previous);
+
+  EXPECT_NE(logged.find("not_in_schema"), std::string::npos) << logged;
+  EXPECT_EQ(emitted.find("not_in_schema"), std::string::npos);
+}
+
+TEST(DecoderDemChunksYAMLTest, SeamSpecsMappingRoundTripsWithoutExpand) {
+  const std::string yaml = R"(
+decoders:
+  - id: 0
+    type: sample_decoder
+    dem_chunks:
+      seam:
+        from: next_round
+        to: prev_round
+      connections:
+        - {from: init, to: final}
+      num_rounds: 2
+      phases:
+        - name: init
+          spec:
+            num_faults: 1
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: next_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+        - name: final
+          spec:
+            num_faults: 1
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: next_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+)";
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(config.decoders.size(), 1u);
+  ASSERT_TRUE(config.decoders[0].dem_chunks.has_value());
+  ASSERT_FALSE(config.decoders[0].dem_chunks->phases.empty());
+  EXPECT_FALSE(
+      config.decoders[0].dem_chunks->phases[0].spec.seam_specs.empty());
+
+  const auto emitted = config.to_yaml_str(200);
+  EXPECT_NE(emitted.find("seam_specs"), std::string::npos);
+}
+
+TEST(DecoderDemChunksYAMLTest, ValidateRejectsErrorRateLengthMismatch) {
+  const std::string yaml = R"(
+decoders:
+  - id: 0
+    type: sample_decoder
+    dem_chunks:
+      seam:
+        from: next_round
+        to: prev_round
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: final}
+      num_rounds: 2
+      phases:
+        - name: init
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+        - name: bulk
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01, 0.01]
+        - name: final
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01, 0.01]
+)";
+  EXPECT_THROW(
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml),
+      std::runtime_error);
+}
+
+TEST(DecoderDemChunksYAMLTest, ExpandCloseAllRejectsANonContractedSeam) {
+  const std::string yaml = R"(
+decoders:
+  - id: 0
+    type: sample_decoder
+    dem_chunks:
+      seam:
+        from: next_round
+        to: prev_round
+      connections:
+        - {from: init, to: final}
+      num_rounds: 2
+      phases:
+        - name: init
+          spec:
+            num_faults: 1
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: next_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: side
+                spec: {H_sparse: [0, -1], O_sparse: []}
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+        - name: final
+          spec:
+            num_faults: 1
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: next_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: side
+                spec: {H_sparse: [0, -1], O_sparse: []}
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+)";
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(config.decoders.size(), 1u);
+  EXPECT_THROW(
+      cudaq::qec::decoding::config::expand_dem_chunks(config.decoders[0]),
+      std::runtime_error);
+}
+
+TEST(DecoderConfigTest, ConfigureFromStrLogsInfoWhenDebugDumpEnabled) {
+  using namespace cudaq::qec::decoding::config;
+  ScopedEnv debugEnv("CUDAQ_QEC_DEBUG_DECODER", "1");
+  const auto previous = cudaq::qec::detail::get_log_level();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
+
+  multi_decoder_config multi_config;
+  multi_config.decoders.push_back(create_test_empty_decoder_config(0));
+  const auto yaml = multi_config.to_yaml_str(200);
+  EXPECT_EQ(configure_decoders_from_str(yaml.c_str()), 0);
+  finalize_decoders();
+
+  cudaq::qec::detail::set_log_level(previous);
+}
