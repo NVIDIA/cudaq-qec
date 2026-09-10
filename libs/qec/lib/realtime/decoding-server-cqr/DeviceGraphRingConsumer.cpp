@@ -52,7 +52,8 @@ bool populate_device_call(cudaq_function_entry_t &entry, const char *symbol,
                           uint32_t function_id) {
   auto fn = reinterpret_cast<populate_fn>(::dlsym(RTLD_DEFAULT, symbol));
   if (!fn) {
-    CUDA_QEC_ERROR(
+    // Non-throwing: the caller still has to release ft_host_ on failure.
+    cudaq::qec::error(
         "DeviceGraphRingConsumer: dlsym({}) failed -- the process must "
         "absorb libcudaq-qec-realtime-cudevice-proprietary.a as WHOLE_ARCHIVE "
         "and link with --export-dynamic",
@@ -64,9 +65,9 @@ bool populate_device_call(cudaq_function_entry_t &entry, const char *symbol,
   entry.routing_key = 0;
   if (entry.dispatch_mode != CUDAQ_DISPATCH_DEVICE_CALL ||
       !entry.handler.device_fn_ptr) {
-    CUDA_QEC_ERROR("DeviceGraphRingConsumer: {} did not produce a valid "
-                   "DEVICE_CALL entry",
-                   symbol);
+    cudaq::qec::error("DeviceGraphRingConsumer: {} did not produce a valid "
+                      "DEVICE_CALL entry",
+                      symbol);
     return false;
   }
   return true;
@@ -185,8 +186,17 @@ DeviceGraphRingConsumer::DeviceGraphRingConsumer(const cudaq_ringbuffer_t &ring,
   shutdown_host_ = static_cast<volatile int *>(sd_host);
   shutdown_dev_ = static_cast<volatile int *>(sd_dev);
 
-  if (cudaMalloc(&d_stats_, sizeof(std::uint64_t)) != cudaSuccess ||
-      cudaMemset(d_stats_, 0, sizeof(std::uint64_t)) != cudaSuccess) {
+  if (cudaMalloc(&d_stats_, sizeof(std::uint64_t)) != cudaSuccess) {
+    cudaFreeHost(ft_host_);
+    ft_host_ = nullptr;
+    cudaFreeHost(sd_host);
+    shutdown_host_ = nullptr;
+    shutdown_dev_ = nullptr;
+    throw std::runtime_error("DeviceGraphRingConsumer: d_stats_ alloc failed");
+  }
+  if (cudaMemset(d_stats_, 0, sizeof(std::uint64_t)) != cudaSuccess) {
+    cudaFree(d_stats_);
+    d_stats_ = nullptr;
     cudaFreeHost(ft_host_);
     ft_host_ = nullptr;
     cudaFreeHost(sd_host);
@@ -344,7 +354,8 @@ cudaqx_qec_make_device_graph_ring_consumer(const void *ring,
         *static_cast<const cudaq_ringbuffer_t *>(ring), num_slots, slot_size,
         gpu_id, graph_resources);
   } catch (const std::exception &e) {
-    CUDA_QEC_ERROR("cudaqx_qec_make_device_graph_ring_consumer: {}", e.what());
+    cudaq::qec::error("cudaqx_qec_make_device_graph_ring_consumer: {}",
+                      e.what());
     return nullptr;
   }
 }

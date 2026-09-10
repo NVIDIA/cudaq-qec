@@ -8,7 +8,9 @@
 
 #include "DecodingServer.h"
 #include "DecodingSession.h"
+#include "ITransceiver.h"
 #include "RpcSlot.h"
+#include "qec_cc_test_helpers.h"
 #include "../lib/hardware_guards.h"
 #include "../lib/realtime/realtime_decoding.h"
 
@@ -22,8 +24,11 @@
 #include <cstdint>
 #include <cstring>
 #include <cuda_runtime_api.h>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -62,8 +67,36 @@ public:
     return result;
   }
 
+  const uint8_t *get_obs_corrections() const override {
+    if (return_null_corrections)
+      return nullptr;
+    return decoder::get_obs_corrections();
+  }
+
+  void clear_corrections() override {
+    if (throw_on_clear)
+      throw std::runtime_error("controlled clear_corrections failure");
+    decoder::clear_corrections();
+  }
+
+  void reset_decoder() override {
+    if (throw_on_reset)
+      throw std::runtime_error("controlled reset_decoder failure");
+    decoder::reset_decoder();
+  }
+
+  void pin_to_impossible() {
+    int count = 0;
+    if (cudaGetDeviceCount(&count) != cudaSuccess)
+      count = 0;
+    cuda_device_id_ = count + 7;
+  }
+
   bool converged = false;
   bool throw_on_decode = false;
+  bool return_null_corrections = false;
+  bool throw_on_clear = false;
+  bool throw_on_reset = false;
 };
 
 std::pair<std::unique_ptr<DecodingSession>, ControlledDecoder *>
@@ -470,6 +503,287 @@ TEST(DecodingSessionInline, SaveSyndromeCaptureMatchesTheLegacyFormat) {
 
   ASSERT_EQ(g_captured_syndrome_bytes.size(), 1u);
   EXPECT_EQ(g_captured_syndrome_bytes[0], 0x80u); // bit 0, MSB-first
+}
+
+std::vector<uint8_t> make_header_only_slot(uint32_t function_id,
+                                           uint32_t request_id, uint32_t magic,
+                                           uint32_t arg_len) {
+  std::vector<uint8_t> slot(sizeof(RPCHeader));
+  RPCHeader header{};
+  header.magic = magic;
+  header.function_id = function_id;
+  header.arg_len = arg_len;
+  header.request_id = request_id;
+  std::memcpy(slot.data(), &header, sizeof(header));
+  return slot;
+}
+
+TEST(RpcSlotParse, RejectsNullShortWrongMagicAndWrongFunction) {
+  slot::EnqueueView eq;
+  slot::GetCorrectionsView gc;
+  slot::ResetView rst;
+  uint64_t id = 0;
+  EXPECT_FALSE(slot::parse_enqueue(nullptr, 64, eq));
+  EXPECT_FALSE(slot::parse_get_corrections(nullptr, 64, gc));
+  EXPECT_FALSE(slot::parse_reset(nullptr, 64, rst));
+  EXPECT_FALSE(slot::peek_decoder_id(nullptr, 64, id));
+
+  std::vector<uint8_t> tiny(4, 0);
+  EXPECT_FALSE(slot::parse_enqueue(tiny.data(), tiny.size(), eq));
+  EXPECT_FALSE(slot::parse_get_corrections(tiny.data(), tiny.size(), gc));
+  EXPECT_FALSE(slot::parse_reset(tiny.data(), tiny.size(), rst));
+  EXPECT_FALSE(slot::peek_decoder_id(tiny.data(), tiny.size(), id));
+
+  auto wrong_magic = make_header_only_slot(kEnqueueSyndromesFunctionId, 1,
+                                           /*magic=*/0xDEADBEEF, 32);
+  EXPECT_FALSE(slot::parse_enqueue(wrong_magic.data(), wrong_magic.size(), eq));
+  EXPECT_FALSE(
+      slot::peek_decoder_id(wrong_magic.data(), wrong_magic.size(), id));
+
+  auto wrong_fn =
+      make_cqr_slot(kResetDecoderFunctionId, 1, make_enqueue_payload(0, {1}));
+  EXPECT_FALSE(slot::parse_enqueue(wrong_fn.data(), wrong_fn.size(), eq));
+  auto wrong_gc = make_cqr_slot(kEnqueueSyndromesFunctionId, 1,
+                                make_get_corrections_payload(1, false));
+  EXPECT_FALSE(
+      slot::parse_get_corrections(wrong_gc.data(), wrong_gc.size(), gc));
+  auto wrong_rst =
+      make_cqr_slot(kEnqueueSyndromesFunctionId, 1, make_reset_payload());
+  EXPECT_FALSE(slot::parse_reset(wrong_rst.data(), wrong_rst.size(), rst));
+}
+
+TEST(RpcSlotParse, RejectsTruncatedU64AndIllegalSyndromeCounts) {
+  slot::EnqueueView view;
+  // arg_len=8 is enough for decoder_id but not the remaining three u64s.
+  auto short_args =
+      make_cqr_slot(kEnqueueSyndromesFunctionId, 1, std::vector<uint8_t>(8, 0));
+  reinterpret_cast<RPCHeader *>(short_args.data())->arg_len = 8;
+  EXPECT_FALSE(slot::parse_enqueue(short_args.data(), short_args.size(), view));
+
+  auto zero = make_cqr_slot(kEnqueueSyndromesFunctionId, 2,
+                            std::vector<uint8_t>(4 * sizeof(uint64_t), 0));
+  EXPECT_FALSE(slot::parse_enqueue(zero.data(), zero.size(), view));
+
+  std::vector<uint8_t> too_many(4 * sizeof(uint64_t), 0);
+  const uint64_t n = static_cast<uint64_t>(kMaxSyndromeBits) + 1;
+  std::memcpy(too_many.data() + 3 * sizeof(uint64_t), &n, sizeof(n));
+  auto huge = make_cqr_slot(kEnqueueSyndromesFunctionId, 3, too_many);
+  EXPECT_FALSE(slot::parse_enqueue(huge.data(), huge.size(), view));
+}
+
+TEST(SessionRegistryCore, MixedDispatchAndConstLookup) {
+  const auto path = qec_cc::write_temp(qec_cc::mixed_lut_yaml());
+  SessionRegistry registry;
+  registry.load_from_config(path);
+  EXPECT_TRUE(registry.mixed_dispatch());
+  EXPECT_EQ(registry.dispatch_for(0),
+            cudaq::qec::decoding::config::DecoderDispatch::host);
+  EXPECT_EQ(registry.dispatch_for(1),
+            cudaq::qec::decoding::config::DecoderDispatch::device_graph);
+  EXPECT_THROW(registry.required_dispatch(), std::runtime_error);
+
+  const SessionRegistry &cref = registry;
+  EXPECT_NO_THROW(cref.get(0));
+  EXPECT_THROW(cref.get(99), std::out_of_range);
+  EXPECT_EQ(registry.find(99), nullptr);
+  std::filesystem::remove(path);
+}
+
+TEST(SessionRegistryCore, UniformHostRequiredDispatch) {
+  const auto path = qec_cc::write_temp(qec_cc::lut_yaml(0, "host"));
+  SessionRegistry registry;
+  registry.load_from_config(path);
+  EXPECT_FALSE(registry.mixed_dispatch());
+  EXPECT_EQ(registry.required_dispatch(),
+            cudaq::qec::decoding::config::DecoderDispatch::host);
+  std::filesystem::remove(path);
+}
+
+TEST(DecodingSessionInline, EnqueueWhileFailedIsANoOp) {
+  auto [session, decoder] = make_session();
+  decoder->throw_on_decode = true;
+  std::vector<uint8_t> tx(64, 0);
+  auto eq0 = make_cqr_slot(kEnqueueSyndromesFunctionId, 1,
+                           make_enqueue_payload(0, {1}));
+  auto eq1 = make_cqr_slot(kEnqueueSyndromesFunctionId, 2,
+                           make_enqueue_payload(1, {0}));
+  session->handle_enqueue(eq0.data(), tx.data(), eq0.size());
+  session->handle_enqueue(eq1.data(), tx.data(), eq1.size());
+  EXPECT_EQ(session->shot_state, DecodingSession::ShotState::failed);
+
+  auto eq2 = make_cqr_slot(kEnqueueSyndromesFunctionId, 3,
+                           make_enqueue_payload(2, {1}));
+  session->handle_enqueue(eq2.data(), tx.data(), eq2.size());
+  expect_tx_status(tx, RpcStatus::OK, 3);
+  EXPECT_EQ(session->shot_state, DecodingSession::ShotState::failed);
+}
+
+TEST(DecodingSessionInline, GetCorrectionsRejectsNonPositiveAndWrongSize) {
+  auto [session, decoder] = make_session();
+  (void)decoder;
+  std::vector<uint8_t> tx(64, 0);
+  auto gc0 = make_cqr_slot(kGetCorrectionsFunctionId, 1,
+                           make_get_corrections_payload(0, false));
+  session->handle_get_corrections(gc0.data(), tx.data(), gc0.size());
+  expect_tx_status(tx, RpcStatus::BAD_REQUEST, 1);
+
+  auto gc2 = make_cqr_slot(kGetCorrectionsFunctionId, 2,
+                           make_get_corrections_payload(2, false));
+  session->handle_get_corrections(gc2.data(), tx.data(), gc2.size());
+  expect_tx_status(tx, RpcStatus::BAD_REQUEST, 2);
+}
+
+TEST(DecodingSessionInline, NullCorrectionsFailTheShot) {
+  auto [session, decoder] = make_session();
+  decoder->return_null_corrections = true;
+  std::vector<uint8_t> tx(64, 0);
+  auto eq0 = make_cqr_slot(kEnqueueSyndromesFunctionId, 1,
+                           make_enqueue_payload(0, {1}));
+  auto eq1 = make_cqr_slot(kEnqueueSyndromesFunctionId, 2,
+                           make_enqueue_payload(1, {0}));
+  session->handle_enqueue(eq0.data(), tx.data(), eq0.size());
+  session->handle_enqueue(eq1.data(), tx.data(), eq1.size());
+  auto gc = make_cqr_slot(kGetCorrectionsFunctionId, 3,
+                          make_get_corrections_payload(1, false));
+  session->handle_get_corrections(gc.data(), tx.data(), gc.size());
+  expect_tx_status(tx, RpcStatus::INTERNAL_ERROR, 3);
+}
+
+TEST(DecodingSessionInline, ClearAndResetThrowsBecomeInternalError) {
+  auto [session, decoder] = make_session();
+  std::vector<uint8_t> tx(64, 0);
+  auto eq0 = make_cqr_slot(kEnqueueSyndromesFunctionId, 1,
+                           make_enqueue_payload(0, {1}));
+  auto eq1 = make_cqr_slot(kEnqueueSyndromesFunctionId, 2,
+                           make_enqueue_payload(1, {0}));
+  session->handle_enqueue(eq0.data(), tx.data(), eq0.size());
+  session->handle_enqueue(eq1.data(), tx.data(), eq1.size());
+  decoder->throw_on_clear = true;
+  auto gc = make_cqr_slot(kGetCorrectionsFunctionId, 3,
+                          make_get_corrections_payload(1, true));
+  session->handle_get_corrections(gc.data(), tx.data(), gc.size());
+  expect_tx_status(tx, RpcStatus::INTERNAL_ERROR, 3);
+
+  decoder->throw_on_reset = true;
+  auto rst = make_cqr_slot(kResetDecoderFunctionId, 4, make_reset_payload());
+  session->handle_reset(rst.data(), tx.data(), rst.size());
+  expect_tx_status(tx, RpcStatus::INTERNAL_ERROR, 4);
+}
+
+struct CaptureThrowRestore {
+  explicit CaptureThrowRestore(void (*cb)(const uint8_t *, size_t)) {
+    cudaq::qec::decoding::host::_set_syndrome_capture_callback(cb);
+  }
+  ~CaptureThrowRestore() {
+    cudaq::qec::decoding::host::_set_syndrome_capture_callback(nullptr);
+  }
+};
+
+void throw_runtime_on_capture(const uint8_t *, size_t) {
+  throw std::runtime_error("capture hook");
+}
+
+void throw_int_on_capture(const uint8_t *, size_t) { throw 42; }
+
+TEST(DecodingSessionInline, CaptureHookStdAndNonStdExceptions) {
+  auto [session, decoder] = make_session();
+  (void)decoder;
+  std::vector<uint8_t> tx(64, 0);
+  auto eq = make_cqr_slot(kEnqueueSyndromesFunctionId, 1,
+                          make_enqueue_payload(0, {1}));
+  {
+    CaptureThrowRestore restore(throw_runtime_on_capture);
+    session->handle_enqueue(eq.data(), tx.data(), eq.size());
+  }
+  expect_tx_status(tx, RpcStatus::OK, 1);
+  EXPECT_EQ(session->shot_state, DecodingSession::ShotState::failed);
+
+  auto rst = make_cqr_slot(kResetDecoderFunctionId, 2, make_reset_payload());
+  session->handle_reset(rst.data(), tx.data(), rst.size());
+  {
+    CaptureThrowRestore restore(throw_int_on_capture);
+    session->handle_enqueue(eq.data(), tx.data(), eq.size());
+  }
+  expect_tx_status(tx, RpcStatus::OK, 1);
+  EXPECT_EQ(session->shot_state, DecodingSession::ShotState::failed);
+}
+
+TEST(DecodingSessionInline, PinFailureOnGetAndResetIsInternalError) {
+  auto [session, decoder] = make_session();
+  decoder->pin_to_impossible();
+  std::vector<uint8_t> tx(64, 0);
+  auto gc = make_cqr_slot(kGetCorrectionsFunctionId, 1,
+                          make_get_corrections_payload(1, false));
+  session->handle_get_corrections(gc.data(), tx.data(), gc.size());
+  expect_tx_status(tx, RpcStatus::INTERNAL_ERROR, 1);
+
+  auto rst = make_cqr_slot(kResetDecoderFunctionId, 2, make_reset_payload());
+  session->handle_reset(rst.data(), tx.data(), rst.size());
+  expect_tx_status(tx, RpcStatus::INTERNAL_ERROR, 2);
+}
+
+TEST(GraphResourcesDeleter, ReleasesOnceForNonNullPointer) {
+  class ReleaseCountingDecoder final : public cudaq::qec::decoder {
+  public:
+    ReleaseCountingDecoder()
+        : decoder(
+              cudaq::qec::sparse_binary_matrix::from_csr(1, 1, {0, 1}, {0})) {}
+    cudaq::qec::decoder_result
+    decode(const std::vector<cudaq::qec::float_t> &) override {
+      return {};
+    }
+    void release_decode_graph(void *p) override {
+      ++releases;
+      delete static_cast<char *>(p);
+    }
+    int releases = 0;
+  };
+  ReleaseCountingDecoder owner;
+  auto *sentinel = new char;
+  GraphResourcesDeleter deleter{&owner};
+  deleter(sentinel);
+  EXPECT_EQ(owner.releases, 1);
+  deleter(nullptr);
+  EXPECT_EQ(owner.releases, 1);
+}
+
+TEST(ITransceiverDefaults, MinimalImplementationUsesBaseHooks) {
+  struct MinimalTx : ITransceiver {
+    RxFrame recv() override { return {}; }
+    void send(const PeerId &, const uint8_t *, size_t) override {}
+  };
+  MinimalTx tx;
+  tx.shutdown();
+  EXPECT_FALSE(tx.launch_device_scheduler(nullptr));
+  ReleaseFn empty;
+  EXPECT_FALSE(static_cast<bool>(empty));
+  int fired = 0;
+  {
+    ReleaseFn once{[&fired] { ++fired; }};
+    EXPECT_TRUE(static_cast<bool>(once));
+  }
+  EXPECT_EQ(fired, 1);
+}
+
+TEST(DecodingServerErrors, MissingFileEmptyHostAndUnlinkedGraph) {
+  EXPECT_THROW((DecodingServer("/no/such/qec-cc-config.yaml")),
+               std::runtime_error);
+
+  const auto empty = qec_cc::write_temp("decoders: []\n");
+  EXPECT_THROW((DecodingServer(empty)), std::runtime_error);
+  std::filesystem::remove(empty);
+
+  const auto host = qec_cc::write_temp(qec_cc::lut_yaml(0, "host"));
+  EXPECT_THROW((DecodingServer(host)), std::runtime_error);
+  std::filesystem::remove(host);
+
+  const auto graph = qec_cc::write_temp(qec_cc::lut_yaml(0, "device_graph"));
+  EXPECT_THROW((DecodingServer(graph)), std::runtime_error);
+  std::filesystem::remove(graph);
+
+  const auto mixed = qec_cc::write_temp(qec_cc::mixed_lut_yaml());
+  EXPECT_THROW((DecodingServer(mixed)), std::runtime_error);
+  std::filesystem::remove(mixed);
 }
 
 } // namespace

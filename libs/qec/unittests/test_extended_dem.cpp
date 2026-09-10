@@ -1518,7 +1518,7 @@ TEST(ExtendedDemStreaming, AWindowIsTheExperimentRestrictedToItsOwnChunks) {
       EXPECT_EQ(window.error_rates, want)
           << "rounds=" << rounds << " step=" << step;
     } // end - for(step)
-  } // end - for(rounds)
+  }   // end - for(rounds)
 }
 
 // The observables travel with the window, so a round can say what its committed
