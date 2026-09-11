@@ -202,7 +202,8 @@ DeviceGraphRingConsumer::DeviceGraphRingConsumer(const cudaq_ringbuffer_t &ring,
     cudaFreeHost(sd_host);
     shutdown_host_ = nullptr;
     shutdown_dev_ = nullptr;
-    throw std::runtime_error("DeviceGraphRingConsumer: d_stats_ alloc failed");
+    throw std::runtime_error(
+        "DeviceGraphRingConsumer: d_stats_ initialisation failed");
   }
 
   if (cudaError_t serr = cudaStreamCreate(&sched_stream_);
