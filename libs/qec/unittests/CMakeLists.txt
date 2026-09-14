@@ -76,7 +76,7 @@ if(TARGET cudaq-qec-decoding-server)
   gtest_discover_tests(test_decoding_server_core)
 
   # -------------------------------------------------------------------------
-  # Coverage-oriented realtime / tools tests (qec-cc-plan-20260910)
+  # Realtime, tool, and isolated-fixture tests
   # -------------------------------------------------------------------------
   set(_qec_cc_cqr_dir ${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/decoding-server-cqr)
   set(_qec_cc_tools_decoding_server

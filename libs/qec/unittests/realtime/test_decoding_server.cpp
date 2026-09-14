@@ -167,9 +167,9 @@ public:
       for (auto &a : args)
         argv.push_back(a.data());
       argv.push_back(nullptr);
-      // Cover production on_dispatcher_thread + hopstats::report() /
-      // print_stats at shutdown. Extra stdout lines are skipped by
-      // readLineWithPrefix. Do not set these in the parent.
+      // Enable child-process statistics so shutdown exercises the production
+      // reporting paths. Extra stdout lines are skipped by readLineWithPrefix.
+      // Do not set these in the parent.
       ::setenv("QEC_DECODING_SERVER_HOP_STATS", "full", 1);
       ::setenv("QEC_DECODING_SERVER_STATS", "1", 1);
       ::execv(server.c_str(), argv.data());
