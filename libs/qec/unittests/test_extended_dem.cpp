@@ -2152,6 +2152,9 @@ TEST(DemChunksSpec, RepeatingPhaseAndSelfLoopSequence) {
   EXPECT_EQ(seq[2], phase_name::dem_bulk);
 }
 
+// chain_o_columns skips a default 0x0 O (it has no per-fault columns to copy).
+// dem_stitch_all still sizes the result to n_faults, so two 1-fault chunks
+// yield 0 rows x 2 cols rather than remaining 0x0.
 TEST(ExtendedDemStitch, DefaultObservablesAreSkipped) {
   auto make = [] {
     extended_dem dem;
@@ -2163,8 +2166,11 @@ TEST(ExtendedDemStitch, DefaultObservablesAreSkipped) {
     return dem;
   };
   auto out = dem_stitch_all({make(), make()});
-  EXPECT_EQ(out.num_faults(), 2u);
-  EXPECT_EQ(out.O.num_cols(), 0u);
+  ASSERT_EQ(out.num_faults(), 2u);
+  EXPECT_EQ(out.num_observables(), 0u);
+  EXPECT_EQ(out.O.num_rows(), 0u);
+  EXPECT_EQ(out.O.num_cols(), 2u);
+  EXPECT_NO_THROW(out.validate("stitched default O"));
 }
 
 } // namespace
