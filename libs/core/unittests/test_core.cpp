@@ -677,9 +677,8 @@ TEST(TensorTest, CopyData) {
 
 TEST(TensorTest, TakeData) {
   std::vector<std::size_t> shape = {2, 2};
-  auto data = new std::complex<double>[4] {
-    {1.0, 0.0}, {0.0, 1.0}, {0.0, -1.0}, { 1.0, 0.0 }
-  };
+  auto data = new std::complex<double>[4]{
+      {1.0, 0.0}, {0.0, 1.0}, {0.0, -1.0}, {1.0, 0.0}};
   cudaqx::tensor t(shape);
 
   t.take(data, shape);
