@@ -1888,5 +1888,284 @@ TEST(ExtendedDemValidate, MisalignedObservablesThrow) {
   EXPECT_THROW(dem.validate("misaligned O"), std::invalid_argument);
 }
 
+// Defaulted comparisons must visit each member; short-circuit would hide later
+// fields if we only compared equal values.
+TEST(ExtendedDemValueSemantics, EqualityVisitsEachMember) {
+  seam_id a{"alpha"};
+  seam_id b{"beta"};
+  EXPECT_EQ(a, a);
+  EXPECT_NE(a, b);
+  EXPECT_TRUE((a < b) != (b < a));
+
+  dem_seam_spec s{{0, -1}, {1, -1}};
+  EXPECT_EQ(s, s);
+  auto s_h = s;
+  s_h.H_sparse = {0, 1, -1};
+  EXPECT_NE(s, s_h);
+  auto s_o = s;
+  s_o.O_sparse = {0, -1};
+  EXPECT_NE(s, s_o);
+
+  seam_spec_entry e{seam_name::prev_round, s};
+  EXPECT_EQ(e, e);
+  auto e_id = e;
+  e_id.id = seam_name::next_round;
+  EXPECT_NE(e, e_id);
+  auto e_spec = e;
+  e_spec.spec.H_sparse = {1, -1};
+  EXPECT_NE(e, e_spec);
+
+  dem_chunk_spec chunk;
+  chunk.num_faults = 1;
+  chunk.H_sparse = {0, -1};
+  chunk.O_sparse = {0, -1};
+  chunk.error_rates = {0.01};
+  chunk.seam_specs = {e};
+  EXPECT_EQ(chunk, chunk);
+  auto c1 = chunk;
+  c1.num_faults = 2;
+  EXPECT_NE(chunk, c1);
+  auto c2 = chunk;
+  c2.H_sparse = {1, -1};
+  EXPECT_NE(chunk, c2);
+  auto c3 = chunk;
+  c3.seam_specs.clear();
+  EXPECT_NE(chunk, c3);
+  auto c4 = chunk;
+  c4.O_sparse = {1, -1};
+  EXPECT_NE(chunk, c4);
+  auto c5 = chunk;
+  c5.error_rates = {0.02};
+  EXPECT_NE(chunk, c5);
+
+  seam_connection sc{seam_name::next_round, seam_name::prev_round};
+  EXPECT_EQ(sc, sc);
+  auto sc2 = sc;
+  sc2.from_seam = seam_name::prev_round;
+  EXPECT_NE(sc, sc2);
+  auto sc3 = sc;
+  sc3.to_seam = seam_name::next_round;
+  EXPECT_NE(sc, sc3);
+
+  phase_connection pc{phase_name::dem_init, phase_name::dem_bulk};
+  EXPECT_EQ(pc, pc);
+  auto pc2 = pc;
+  pc2.from_phase = phase_name::dem_bulk;
+  EXPECT_NE(pc, pc2);
+  auto pc3 = pc;
+  pc3.to_phase = phase_name::dem_final;
+  EXPECT_NE(pc, pc3);
+
+  phase_spec_entry pe{phase_name::dem_bulk, chunk};
+  EXPECT_EQ(pe, pe);
+  auto pe2 = pe;
+  pe2.id = phase_name::dem_final;
+  EXPECT_NE(pe, pe2);
+  auto pe3 = pe;
+  pe3.spec.num_faults = 2;
+  EXPECT_NE(pe, pe3);
+
+  dem_chunks_spec spec;
+  spec.phases = {pe};
+  spec.connections = {pc};
+  spec.seam = sc;
+  spec.num_rounds = 4;
+  EXPECT_EQ(spec, spec);
+  auto sp1 = spec;
+  sp1.phases.clear();
+  EXPECT_NE(spec, sp1);
+  auto sp2 = spec;
+  sp2.connections.clear();
+  EXPECT_NE(spec, sp2);
+  auto sp3 = spec;
+  sp3.seam.to_seam = seam_name::next_round;
+  EXPECT_NE(spec, sp3);
+  auto sp4 = spec;
+  sp4.num_rounds = 5;
+  EXPECT_NE(spec, sp4);
+  auto sp5 = spec;
+  sp5.num_rounds.reset();
+  EXPECT_NE(spec, sp5);
+}
+
+extended_dem zero_width_seam_chunk() {
+  extended_dem dem;
+  dem.add_seam(seam_name::prev_round, 0, 0);
+  dem.add_seam(seam_name::next_round, 0, 0);
+  return dem;
+}
+
+// Zero-width contracted seams are a successful no-op, including zero faults.
+TEST(ExtendedDemSeams, ZeroWidthBoundaryStitchAndMerge) {
+  const auto a = zero_width_seam_chunk();
+  ASSERT_NO_THROW(a.validate("zero-width"));
+  auto stitched =
+      dem_stitch(a, a, seam_name::next_round, seam_name::prev_round);
+  EXPECT_EQ(stitched.num_faults(), 0u);
+  auto merged = dem_merge_duplicate_columns(a);
+  EXPECT_EQ(merged.num_faults(), 0u);
+}
+
+TEST(ExtendedDemFromCss, NZeroRejectsRowsAndNonEmptyNoise) {
+  css_noise_params noise;
+  {
+    css_code_matrices code;
+    code.hx = sparse_binary_matrix::from_nested_csc(1, 0, {});
+    EXPECT_THROW(extended_dem_from_css_matrices(code, noise),
+                 std::invalid_argument);
+  }
+  {
+    css_code_matrices code;
+    code.lz = sparse_binary_matrix::from_nested_csc(1, 0, {});
+    EXPECT_THROW(extended_dem_from_css_matrices(code, noise),
+                 std::invalid_argument);
+  }
+  {
+    css_code_matrices code;
+    code.lx = sparse_binary_matrix::from_nested_csc(1, 0, {});
+    EXPECT_THROW(extended_dem_from_css_matrices(code, noise),
+                 std::invalid_argument);
+  }
+  {
+    css_code_matrices code;
+    noise.px_per_qubit = {0.1};
+    EXPECT_THROW(extended_dem_from_css_matrices(code, noise),
+                 std::invalid_argument);
+  }
+  noise = {};
+  css_code_matrices empty;
+  auto dem = extended_dem_from_css_matrices(empty, noise);
+  EXPECT_EQ(dem.num_faults(), 0u);
+}
+
+// All four CSS matrices plus Z and Y faults fill both detector bands and both
+// observable bands.
+TEST(ExtendedDemFromCss, ZyFaultsWriteAllBands) {
+  css_code_matrices code;
+  code.hz = sparse_binary_matrix::from_nested_csc(1, 2, {{0}, {0}});
+  code.hx = sparse_binary_matrix::from_nested_csc(1, 2, {{0}, {0}});
+  code.lz = sparse_binary_matrix::from_nested_csc(1, 2, {{0}, {}});
+  code.lx = sparse_binary_matrix::from_nested_csc(1, 2, {{}, {0}});
+  css_noise_params noise;
+  noise.pz = 0.1;
+  noise.py = 0.2;
+  auto dem = extended_dem_from_css_matrices(code, noise);
+  ASSERT_EQ(dem.H.num_rows(), 4u);
+  ASSERT_EQ(dem.num_faults(), 4u);
+  auto dense = dem.H.to_dense();
+  auto obs = dem.O.to_dense();
+  // Z on q0 is column 0: X-check at nz=1 in both seam copies.
+  EXPECT_EQ(dense.at({1, 0}), 1u);
+  EXPECT_EQ(dense.at({3, 0}), 1u);
+  // Y on q0 is column 2: both checks in both copies, lz on obs 0.
+  EXPECT_EQ(dense.at({0, 2}), 1u);
+  EXPECT_EQ(dense.at({1, 2}), 1u);
+  EXPECT_EQ(dense.at({2, 2}), 1u);
+  EXPECT_EQ(dense.at({3, 2}), 1u);
+  EXPECT_EQ(obs.at({0, 2}), 1u);
+  EXPECT_EQ(obs.at({1, 3}), 1u);
+}
+
+TEST(DemChunkSpec, IsEmptyAndExpand) {
+  dem_chunk_spec empty;
+  EXPECT_TRUE(empty.is_empty());
+  empty.num_faults = 1;
+  EXPECT_FALSE(empty.is_empty());
+  empty = {};
+  empty.H_sparse = {0, -1};
+  EXPECT_FALSE(empty.is_empty());
+  empty = {};
+  empty.seam_specs.push_back({seam_name::prev_round, {}});
+  EXPECT_FALSE(empty.is_empty());
+  empty = {};
+  empty.O_sparse = {0, -1};
+  EXPECT_FALSE(empty.is_empty());
+  empty = {};
+  empty.error_rates = {0.1};
+  EXPECT_FALSE(empty.is_empty());
+
+  dem_chunk_spec spec;
+  spec.num_faults = 1;
+  spec.H_sparse = {0, -1};
+  spec.error_rates = {0.01};
+  spec.expand({seam_name::prev_round, seam_name::next_round});
+  ASSERT_EQ(spec.seam_specs.size(), 2u);
+  EXPECT_TRUE(spec.H_sparse.empty());
+  auto again = spec;
+  again.expand({seam_name::prev_round});
+  EXPECT_EQ(spec, again);
+
+  dem_chunk_spec no_h;
+  no_h.num_faults = 1;
+  no_h.error_rates = {0.01};
+  no_h.expand({seam_name::prev_round});
+  EXPECT_TRUE(no_h.seam_specs.empty());
+}
+
+TEST(DemChunkFromSpec, EmptyHAndNoSeamFallback) {
+  dem_chunk_spec empty_h;
+  empty_h.num_faults = 1;
+  empty_h.error_rates = {0.01};
+  empty_h.seam_specs = {{seam_name::prev_round, {{}, {}}},
+                        {seam_name::next_round, {{}, {}}}};
+  auto dem = dem_chunk_from_spec(empty_h);
+  EXPECT_EQ(dem.H.num_rows(), 0u);
+  EXPECT_EQ(dem.H.num_cols(), 1u);
+
+  dem_chunk_spec no_seam;
+  no_seam.num_faults = 2;
+  no_seam.error_rates = {0.01, 0.02};
+  auto zero = dem_chunk_from_spec(no_seam);
+  EXPECT_EQ(zero.H.num_rows(), 0u);
+  EXPECT_EQ(zero.H.num_cols(), 2u);
+}
+
+TEST(DemChunksSpec, RepeatingPhaseAndSelfLoopSequence) {
+  dem_chunks_spec linear;
+  linear.connections = {{phase_name::dem_init, phase_name::dem_bulk}};
+  EXPECT_FALSE(linear.has_repeating_phase());
+  EXPECT_THROW(linear.repeating_phase(), std::invalid_argument);
+
+  dem_chunks_spec one;
+  one.connections = {{phase_name::dem_bulk, phase_name::dem_bulk}};
+  EXPECT_TRUE(one.has_repeating_phase());
+  EXPECT_EQ(one.repeating_phase(), phase_name::dem_bulk);
+
+  dem_chunks_spec two;
+  two.connections = {{phase_name::dem_init, phase_name::dem_init},
+                     {phase_name::dem_bulk, phase_name::dem_bulk}};
+  EXPECT_THROW(two.repeating_phase(), std::invalid_argument);
+
+  dem_chunk_spec cs;
+  cs.num_faults = 1;
+  cs.H_sparse = {0, -1};
+  cs.error_rates = {0.01};
+  dem_chunks_spec only_self;
+  only_self.phases.push_back({phase_name::dem_bulk, cs});
+  only_self.connections = {{phase_name::dem_bulk, phase_name::dem_bulk}};
+  only_self.seam = {seam_name::next_round, seam_name::prev_round};
+  only_self.num_rounds = 3;
+  const auto seq = only_self.phase_sequence();
+  ASSERT_EQ(seq.size(), 3u);
+  EXPECT_EQ(seq[0], phase_name::dem_bulk);
+  EXPECT_EQ(seq[1], phase_name::dem_bulk);
+  EXPECT_EQ(seq[2], phase_name::dem_bulk);
+}
+
+TEST(ExtendedDemStitch, DefaultObservablesAreSkipped) {
+  auto make = [] {
+    extended_dem dem;
+    dem.H = sparse_binary_matrix::from_nested_csr(2, 1, {{0}, {0}});
+    dem.error_rates = {0.1};
+    dem.add_seam(seam_name::prev_round, 0, 1);
+    dem.add_seam(seam_name::next_round, 1, 2);
+    dem.tags = {0, 0};
+    return dem;
+  };
+  auto out = dem_stitch_all({make(), make()});
+  EXPECT_EQ(out.num_faults(), 2u);
+  EXPECT_EQ(out.O.num_cols(), 0u);
+}
+
 } // namespace
 } // namespace cudaq::qec

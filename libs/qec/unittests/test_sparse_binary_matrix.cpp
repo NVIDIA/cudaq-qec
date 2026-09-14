@@ -832,5 +832,31 @@ TEST(SparseBinaryMatrix, GenerateRandomPcmRejectsOverflowingDenseDimensions) {
                std::invalid_argument);
 }
 
+// Empty 0 x N PCMs reorder to 0 x |column_order|; row_begin past the empty
+// matrix is a bounds error.
+TEST(SparseBinaryMatrix, ReorderEmptyPcmRows) {
+  const std::vector<std::uint32_t> column_order{2, 0, 1};
+  cudaqx::tensor<std::uint8_t> dense({std::size_t{0}, std::size_t{3}});
+  auto dense_out =
+      cudaq::qec::reorder_pcm_columns(dense, column_order, /*row_begin=*/0);
+  ASSERT_EQ(dense_out.rank(), 2u);
+  EXPECT_EQ(dense_out.shape()[0], 0u);
+  EXPECT_EQ(dense_out.shape()[1], column_order.size());
+
+  auto sparse = sparse_binary_matrix::from_nested_csc(0, 3, {{}, {}, {}});
+  auto sparse_out =
+      cudaq::qec::reorder_pcm_columns(sparse, column_order, /*row_begin=*/0);
+  EXPECT_EQ(sparse_out.num_rows(), 0u);
+  EXPECT_EQ(sparse_out.num_cols(),
+            static_cast<index_type>(column_order.size()));
+
+  EXPECT_THROW(cudaq::qec::reorder_pcm_columns(dense, column_order,
+                                               /*row_begin=*/1),
+               std::invalid_argument);
+  EXPECT_THROW(cudaq::qec::reorder_pcm_columns(sparse, column_order,
+                                               /*row_begin=*/1),
+               std::invalid_argument);
+}
+
 } // namespace
 } // namespace cudaq::qec
