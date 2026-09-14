@@ -1290,8 +1290,8 @@ TEST(GraphTest, EdgeExists) {
 }
 
 // scheduleTearDown is only pulled from the static archive when a test calls
-// it. A helper process must return from main so static destruction (and gcov
-// flush) still run; the marker proves runTearDown executed at exit.
+// it. The helper returns normally so static destruction runs; the marker then
+// verifies that runTearDown executed during process exit.
 TEST(TearDown, ProcessExitRunsScheduledService) {
   namespace fs = std::filesystem;
   const auto marker =
