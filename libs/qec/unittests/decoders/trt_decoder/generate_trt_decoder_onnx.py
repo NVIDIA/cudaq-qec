@@ -68,6 +68,19 @@ def main():
         TensorProto.FLOAT,
         [1, 3],
     )
+    make_cast_model(
+        os.path.join(args.out_dir, "trt_float_to_uint8.onnx"),
+        "trt_float_to_uint8",
+        TensorProto.FLOAT,
+        TensorProto.UINT8,
+        [1, 3],
+    )
+    make_identity_model(
+        os.path.join(args.out_dir, "trt_scalar_identity.onnx"),
+        "trt_scalar_identity",
+        TensorProto.FLOAT,
+        [],
+    )
 
 
 if __name__ == "__main__":
