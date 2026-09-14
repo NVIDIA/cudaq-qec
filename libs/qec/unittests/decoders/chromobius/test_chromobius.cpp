@@ -9,6 +9,7 @@
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoding_task_graph.h"
 
+#include <cmath>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
@@ -158,4 +159,22 @@ TEST(ChromobiusDecoder, taskGraphRejectsAnErrorPatternDecoderForStimDem) {
   EXPECT_THROW(
       (void)cudaq::qec::decoding_task_graph::from_topology(std::move(nodes)),
       std::invalid_argument);
+}
+
+// return_weight stores a finite double in opt_results; get_version is the
+// wrapper identity string.
+TEST(ChromobiusDecoder, ReturnWeightAndVersion) {
+  cudaqx::heterogeneous_map params;
+  params.insert("return_weight", true);
+  auto decoder = cudaq::qec::decoder::get(
+      "chromobius", std::string_view{chromobius_dem}, params);
+
+  std::vector<cudaq::qec::float_t> syndrome = {1, 0, 0, 0};
+  auto result = decoder->decode(syndrome);
+  EXPECT_TRUE(result.converged);
+  ASSERT_TRUE(result.opt_results.has_value());
+  ASSERT_TRUE(result.opt_results->contains("weight"));
+  const double weight = result.opt_results->get<double>("weight");
+  EXPECT_TRUE(std::isfinite(weight));
+  EXPECT_EQ(decoder->get_version(), "CUDA-Q QEC Chromobius Decoder wrapper");
 }

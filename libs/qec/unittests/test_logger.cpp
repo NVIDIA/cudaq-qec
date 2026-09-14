@@ -5,12 +5,14 @@
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
+#include "logger_forwarder.h"
 #include "cudaq/qec/logger.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -333,5 +335,142 @@ TEST(Logger, DisabledForwarderDoesNotEnqueueRecords) {
 
   EXPECT_EQ(after.enqueued_records, before.enqueued_records);
 } // end - TEST(Logger, DisabledForwarderDoesNotEnqueueRecords)
+
+// Direct log_message still guards on should_log, unlike the macros which skip
+// the call entirely.
+TEST(Logger, DirectLogMessageRespectsLevelGuard) {
+  ForwarderGuard guard;
+  cudaq::qec::detail::clear_forwarder();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::error);
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  cudaq::qec::detail::log_message(cudaq::qec::detail::log_level::info,
+                                  "direct-hidden", __FILE__, __LINE__);
+  cudaq::qec::detail::flush_logs();
+  EXPECT_TRUE(testing::internal::GetCapturedStdout().empty());
+  EXPECT_TRUE(testing::internal::GetCapturedStderr().empty());
+}
+
+// Basename extraction for a plain name and for both supported separators.
+TEST(Logger, PathToFileNameStripsBothSeparators) {
+  EXPECT_EQ(cudaq::qec::detail::path_to_file_name("plain.cpp"), "plain.cpp");
+  EXPECT_EQ(cudaq::qec::detail::path_to_file_name("dir/sub\\file.cpp"),
+            "file.cpp");
+}
+
+// An empty callback leaves forwarding disabled.
+TEST(Logger, EmptyCallbackDoesNotEnableForwarder) {
+  ForwarderGuard guard;
+  cudaq::qec::detail::clear_forwarder();
+  cudaq::qec::detail::set_forwarder(cudaq::qec::detail::forwarder_config{
+      .callback = {}, .queue_capacity = 4});
+  EXPECT_FALSE(cudaq::qec::detail::is_forwarder_enabled());
+}
+
+// Zero capacities are clamped to one so a record can still be forwarded.
+TEST(Logger, ZeroCapacitiesClampToOne) {
+  ForwarderGuard guard;
+  cudaq::qec::detail::clear_forwarder();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
+  std::vector<cudaq::qec::detail::forwarded_log_record> records;
+  cudaq::qec::detail::set_forwarder(cudaq::qec::detail::forwarder_config{
+      .callback =
+          [&](cudaq::qec::detail::forwarded_log_record &&record) {
+            records.push_back(std::move(record));
+          },
+      .queue_capacity = 0,
+      .message_capacity = 0});
+  EXPECT_EQ(cudaq::qec::detail::get_forwarder_message_capacity(), 1u);
+  CUDA_QEC_INFO("Z");
+  cudaq::qec::detail::flush_logs();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records.front().message, "Z");
+}
+
+// Enqueue while disabled is a no-op even when called out-of-line.
+TEST(Logger, DisabledEnqueueIsIgnored) {
+  ForwarderGuard guard;
+  cudaq::qec::detail::clear_forwarder();
+  const auto before = cudaq::qec::detail::get_forwarder_stats();
+  cudaq::qec::detail::forwarder_internal::queued_log_record record;
+  record.message_len = 3;
+  std::memcpy(record.message.data(), "abc", 3);
+  cudaq::qec::detail::forwarder_internal::enqueue(std::move(record));
+  const auto after = cudaq::qec::detail::get_forwarder_stats();
+  EXPECT_EQ(after.enqueued_records, before.enqueued_records);
+}
+
+// A throwing callback is counted as a forward failure, not a crash.
+TEST(Logger, ThrowingCallbackCountsForwardFailure) {
+  ForwarderGuard guard;
+  cudaq::qec::detail::clear_forwarder();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
+  cudaq::qec::detail::set_forwarder(cudaq::qec::detail::forwarder_config{
+      .callback = [](cudaq::qec::detail::forwarded_log_record &&) {
+        throw std::runtime_error("callback boom");
+      }});
+  CUDA_QEC_INFO("throw-me");
+  cudaq::qec::detail::flush_logs();
+  EXPECT_EQ(cudaq::qec::detail::get_forwarder_stats().forward_failures, 1u);
+}
+
+// log_message_formatted bypasses the header's truncation and still annotates
+// a long payload through the out-of-line packer.
+TEST(Logger, FormattedLongMessageIsTruncatedByForwarder) {
+  ForwarderGuard guard;
+  cudaq::qec::detail::clear_forwarder();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
+  std::vector<cudaq::qec::detail::forwarded_log_record> records;
+  cudaq::qec::detail::set_forwarder(cudaq::qec::detail::forwarder_config{
+      .callback =
+          [&](cudaq::qec::detail::forwarded_log_record &&record) {
+            records.push_back(std::move(record));
+          },
+      .queue_capacity = 8,
+      .message_capacity = 16});
+  const std::string long_msg(64, 'x');
+  cudaq::qec::detail::log_message_formatted(cudaq::qec::detail::log_level::info,
+                                            long_msg, __FILE__, __LINE__);
+  cudaq::qec::detail::flush_logs();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records.front().message.size(), 16u);
+  EXPECT_NE(records.front().message.find("[truncated]"), std::string::npos);
+  EXPECT_EQ(cudaq::qec::detail::get_forwarder_stats().truncated_records, 1u);
+}
+
+// Direct sinks and cudaq::qec::log cover both timestamp entry points.
+TEST(Logger, DirectSinksAndTimestampHelpers) {
+  ForwarderGuard guard;
+  cudaq::qec::detail::clear_forwarder();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::trace);
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  cudaq::qec::detail::trace("t-sink");
+  cudaq::qec::detail::debug("d-sink");
+  cudaq::qec::detail::info("i-sink");
+  cudaq::qec::detail::warn("w-sink");
+  cudaq::qec::detail::error("e-sink");
+  cudaq::qec::log("ts-no-fwd {}", 1);
+  cudaq::qec::detail::flush_logs();
+  const std::string out = testing::internal::GetCapturedStdout();
+  const std::string err = testing::internal::GetCapturedStderr();
+  EXPECT_NE(out.find("t-sink"), std::string::npos);
+  EXPECT_NE(out.find("d-sink"), std::string::npos);
+  EXPECT_NE(out.find("i-sink"), std::string::npos);
+  EXPECT_NE(err.find("w-sink"), std::string::npos);
+  EXPECT_NE(err.find("e-sink"), std::string::npos);
+  EXPECT_NE(out.find("ts-no-fwd 1"), std::string::npos);
+  EXPECT_EQ(out.find("test_logger.cpp"), std::string::npos);
+
+  std::vector<std::string> forwarded;
+  cudaq::qec::detail::set_forwarder(cudaq::qec::detail::forwarder_config{
+      .callback = [&](cudaq::qec::detail::forwarded_log_record &&record) {
+        forwarded.push_back(record.message);
+      }});
+  cudaq::qec::log("ts-fwd {}", 2);
+  cudaq::qec::detail::flush_logs();
+  ASSERT_EQ(forwarded.size(), 1u);
+  EXPECT_EQ(forwarded.front(), "ts-fwd 2");
+}
 
 } // namespace

@@ -7,15 +7,20 @@
  ******************************************************************************/
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <optional>
 #include <random>
+#include <string>
 #include <unistd.h>
 
 #include "cuda-qx/core/library_utils.h"
 #include "cudaq/qec/codes/surface_code.h"
+#include "cudaq/qec/environment.h"
 #include "cudaq/qec/experiments.h"
+#include "cudaq/qec/logger.h"
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/plugin_loader.h"
 #include "cudaq/qec/version.h"
@@ -2425,4 +2430,70 @@ TEST(PluginLoaderTester, checkCleanupPluginsEdgeCases) {
   // with type PluginType::DECODER, so cleanup with type PluginType::CODE will
   // not do anything.
   cudaq::qec::cleanup_plugins(cudaq::qec::PluginType::CODE);
+}
+
+// Mixed-case "On" is a documented true spelling of get_env_bool.
+TEST(Environment, GetEnvBoolAcceptsMixedCaseOn) {
+  const char *name = "CUDAQ_QEC_CC_ENV_BOOL_ON";
+  std::optional<std::string> old;
+  if (const char *value = std::getenv(name))
+    old = value;
+  ASSERT_EQ(setenv(name, "On", 1), 0);
+  EXPECT_TRUE(cudaq::qec::get_env_bool(name, false));
+  if (old)
+    setenv(name, old->c_str(), 1);
+  else
+    unsetenv(name);
+}
+
+// First-round rows of the include_first_round generator are identity [i,-1]
+// before the later XOR rows.
+TEST(PCMUtilsTester, TimelikeDetectorMatrixIncludesFirstRoundIdentity) {
+  auto matrix = cudaq::qec::generate_timelike_sparse_detector_matrix(
+      /*num_syndromes_per_round=*/3, /*num_rounds=*/2,
+      /*include_first_round=*/true);
+  EXPECT_EQ(matrix, (std::vector<int64_t>{0, -1, 1, -1, 2, -1, 0, 3, -1, 1, 4,
+                                          -1, 2, 5, -1}));
+}
+
+// Load a real test .so plus an invalid sibling, then cleanup must dlclose.
+TEST(PluginLoaderTester, LoadAndUnloadTestPluginFixture) {
+  namespace fs = std::filesystem;
+  const fs::path src = QEC_CC_TEST_PLUGIN_SO;
+  ASSERT_TRUE(fs::exists(src)) << src;
+  const fs::path tmp_dir = fs::temp_directory_path() /
+                           ("cudaq_qec_plugin_cc_" + std::to_string(getpid()));
+  fs::create_directories(tmp_dir);
+  fs::copy_file(src, tmp_dir / "libqec_cc_test_plugin.so",
+                fs::copy_options::overwrite_existing);
+  {
+    std::ofstream bad(tmp_dir / "bad_plugin.so");
+    bad << "not an ELF shared object";
+  }
+  const fs::path marker = tmp_dir / "unloaded.txt";
+  fs::remove(marker);
+  ASSERT_EQ(setenv("QEC_CC_PLUGIN_UNLOAD_MARKER", marker.string().c_str(), 1),
+            0);
+
+  const auto previous = cudaq::qec::detail::get_log_level();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  cudaq::qec::load_plugins(tmp_dir.string(), cudaq::qec::PluginType::DECODER);
+  cudaq::qec::cleanup_plugins(cudaq::qec::PluginType::DECODER);
+  cudaq::qec::detail::flush_logs();
+  const std::string out = testing::internal::GetCapturedStdout();
+  const std::string err = testing::internal::GetCapturedStderr();
+  cudaq::qec::detail::set_log_level(previous);
+  unsetenv("QEC_CC_PLUGIN_UNLOAD_MARKER");
+
+  EXPECT_NE(out.find("Successfully loaded plugin"), std::string::npos);
+  EXPECT_NE(out.find("Failed to load plugin"), std::string::npos);
+  (void)err;
+  std::ifstream in(marker);
+  std::string line;
+  ASSERT_TRUE(static_cast<bool>(in));
+  ASSERT_TRUE(static_cast<bool>(std::getline(in, line)));
+  EXPECT_EQ(line, "closed");
+  fs::remove_all(tmp_dir);
 }
