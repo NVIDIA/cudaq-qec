@@ -17,6 +17,7 @@
 //     last-round boundary, observable propagation across rounds, Stim
 //     cross-check for T=2.
 
+#include "dem_construction_utils.h"
 #include "cudaq/qec/code_matrices.h"
 #include "cudaq/qec/dem_construction.h"
 #include "cudaq/qec/detector_error_model.h"
@@ -642,6 +643,85 @@ TEST(DemConstruction, MalformedHz_RowsWithZeroCols_Throws) {
   noise.pz = 0.01;
 
   EXPECT_THROW(dem_from_css_matrices(code, noise), std::invalid_argument);
+}
+
+// Two rounds with both Z and Y faults write the X-check offset, the next-round
+// band, and both observable bands.
+TEST(DemConstruction, TwoRoundZyWritesBothBands) {
+  css_code_matrices code;
+  code.hz = sparse_binary_matrix::from_nested_csc(1, 2, {{0}, {0}});
+  code.hx = sparse_binary_matrix::from_nested_csc(1, 2, {{0}, {0}});
+  code.lz = sparse_binary_matrix::from_nested_csc(1, 2, {{0}, {}});
+  code.lx = sparse_binary_matrix::from_nested_csc(1, 2, {{}, {0}});
+  css_noise_params noise;
+  noise.pz = 0.1;
+  noise.py = 0.2;
+  auto dem = dem_from_css_matrices(code, noise, /*num_rounds=*/2);
+  ASSERT_EQ(dem.num_detectors(), 4u);
+  ASSERT_EQ(dem.num_error_mechanisms(), 8u);
+  ASSERT_EQ(dem.num_observables(), 2u);
+  // Round-0 Z on qubit 0 writes X-check rows in both round bands.
+  EXPECT_EQ(dem.detector_error_matrix.at({1, 0}), 1u);
+  EXPECT_EQ(dem.detector_error_matrix.at({3, 0}), 1u);
+  // Round-0 Y on qubit 0 writes Z and X checks in both bands and lz.
+  EXPECT_EQ(dem.detector_error_matrix.at({0, 2}), 1u);
+  EXPECT_EQ(dem.detector_error_matrix.at({1, 2}), 1u);
+  EXPECT_EQ(dem.detector_error_matrix.at({2, 2}), 1u);
+  EXPECT_EQ(dem.detector_error_matrix.at({3, 2}), 1u);
+  EXPECT_EQ(dem.observables_flips_matrix.at({0, 2}), 1u);
+  // Round-0 Y on qubit 1 writes lx (observable 1).
+  EXPECT_EQ(dem.observables_flips_matrix.at({1, 3}), 1u);
+  // Final-round Z has no next-round write.
+  EXPECT_EQ(dem.detector_error_matrix.at({3, 4}), 1u);
+  EXPECT_EQ(dem.detector_error_matrix.at({1, 4}), 0u);
+}
+
+// n is taken from lz when hz/hx are empty, and from lx when those and lz are
+// empty.
+TEST(DemConstruction, QubitCountResolvesFromLogicals) {
+  {
+    css_code_matrices code;
+    code.lz = sparse_binary_matrix::from_nested_csc(1, 2, {{0}, {}});
+    css_noise_params noise;
+    noise.px = 0.01;
+    auto dem = dem_from_css_matrices(code, noise);
+    EXPECT_EQ(dem.num_error_mechanisms(), 2u);
+    EXPECT_EQ(dem.num_observables(), 1u);
+  }
+  {
+    css_code_matrices code;
+    code.lx = sparse_binary_matrix::from_nested_csc(1, 2, {{}, {0}});
+    css_noise_params noise;
+    noise.pz = 0.01;
+    auto dem = dem_from_css_matrices(code, noise);
+    EXPECT_EQ(dem.num_error_mechanisms(), 2u);
+    EXPECT_EQ(dem.num_observables(), 1u);
+  }
+}
+
+// has_any_noise visits every scalar and each vector's last non-zero slot.
+TEST(DemConstruction, HasAnyNoiseVisitsEveryField) {
+  using cudaq::qec::detail::has_any_noise;
+  css_noise_params empty;
+  EXPECT_FALSE(has_any_noise(empty));
+  for (double css_noise_params::*field :
+       {&css_noise_params::px, &css_noise_params::py, &css_noise_params::pz,
+        &css_noise_params::pm}) {
+    css_noise_params n;
+    n.*field = 0.1;
+    EXPECT_TRUE(has_any_noise(n));
+  }
+  auto late = [](std::vector<double> css_noise_params::*vec) {
+    css_noise_params n;
+    n.*vec = {0.0, 0.0, 0.2};
+    EXPECT_TRUE(has_any_noise(n));
+    n.*vec = {0.0, 0.0, 0.0};
+    EXPECT_FALSE(has_any_noise(n));
+  };
+  late(&css_noise_params::px_per_qubit);
+  late(&css_noise_params::py_per_qubit);
+  late(&css_noise_params::pz_per_qubit);
+  late(&css_noise_params::pm_per_check);
 }
 
 } // namespace

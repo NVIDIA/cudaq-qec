@@ -11,7 +11,12 @@
 #include "cuda-qx/core/tensor.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <tuple>
+#include <unistd.h>
 
 #include <gtest/gtest.h>
 
@@ -672,8 +677,9 @@ TEST(TensorTest, CopyData) {
 
 TEST(TensorTest, TakeData) {
   std::vector<std::size_t> shape = {2, 2};
-  auto data = new std::complex<double>[4]{
-      {1.0, 0.0}, {0.0, 1.0}, {0.0, -1.0}, {1.0, 0.0}};
+  auto data = new std::complex<double>[4] {
+    {1.0, 0.0}, {0.0, 1.0}, {0.0, -1.0}, { 1.0, 0.0 }
+  };
   cudaqx::tensor t(shape);
 
   t.take(data, shape);
@@ -778,6 +784,9 @@ TEST(HeterogeneousMapTest, Contains) {
   EXPECT_FALSE(map.contains("nonexistent_key"));
   EXPECT_FALSE(map.contains(
       std::vector<std::string>{"nonexistent_key1", "nonexistent_key2"}));
+  // The vector overload must keep searching after an absent first candidate.
+  EXPECT_TRUE(map.contains(
+      std::vector<std::string>{"nonexistent_key1", "existing_key"}));
 }
 
 TEST(HeterogeneousMapTest, Size) {
@@ -1279,4 +1288,25 @@ TEST(GraphTest, EdgeExists) {
   EXPECT_TRUE(g.edge_exists(2, 1));
   EXPECT_FALSE(g.edge_exists(1, 3));
   EXPECT_FALSE(g.edge_exists(3, 4));
+}
+
+// scheduleTearDown is only pulled from the static archive when a test calls
+// it. A helper process must return from main so static destruction (and gcov
+// flush) still run; the marker proves runTearDown executed at exit.
+TEST(TearDown, ProcessExitRunsScheduledService) {
+  namespace fs = std::filesystem;
+  const auto marker =
+      fs::temp_directory_path() /
+      ("cudaqx_teardown_" + std::to_string(::getpid()) + ".txt");
+  fs::remove(marker);
+  const std::string cmd = std::string("\"") + CUDAQX_TEAR_DOWN_HELPER +
+                          "\" \"" + marker.string() + "\"";
+  EXPECT_EQ(std::system(cmd.c_str()), 0);
+  std::ifstream in(marker);
+  std::string line;
+  ASSERT_TRUE(static_cast<bool>(in));
+  ASSERT_TRUE(static_cast<bool>(std::getline(in, line)));
+  EXPECT_EQ(line, "torn-down");
+  in.close();
+  fs::remove(marker);
 }
