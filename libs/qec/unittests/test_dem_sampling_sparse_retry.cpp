@@ -42,9 +42,11 @@ custabilizerStatus_t __wrap_custabilizerSampleProbArraySparseCompute(
 }
 
 TEST(DemSamplingSparseRetry, FirstComputeRetryThenMatchesAllOnes) {
+  // Retry path still calls real cuStabilizer/CUDA; skip on CPU CI like
+  // DemSamplingGPU.
   int gpu = 0;
-  ASSERT_EQ(cudaGetDeviceCount(&gpu), cudaSuccess);
-  ASSERT_GT(gpu, 0);
+  if (cudaGetDeviceCount(&gpu) != cudaSuccess || gpu <= 0)
+    GTEST_SKIP() << "No GPU available";
   const size_t n_checks = 3, n_err = 4, n_shots = 5;
   std::vector<uint8_t> H = {1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1};
   std::vector<double> probs(n_err, 1.0);
