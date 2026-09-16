@@ -849,13 +849,11 @@ decoders:
   EXPECT_EQ(args.get<std::string>("global_decoder"), "my_plugin");
   EXPECT_FALSE(args.contains("global_decoder_params"));
 
-  // Hand-built maps with only "global_decoder" still synthesize empty
-  // global_decoder_params before the O_sparse early return.
+  // Constructor-facing parameters also leave the section absent because an
+  // unregistered global decoder has no schema from which to materialize it.
   auto params =
       cudaq::qec::decoding::host::prepare_decoder_params(parsed.decoders[0]);
-  ASSERT_TRUE(params.contains("global_decoder_params"));
-  EXPECT_TRUE(
-      params.get<cudaqx::heterogeneous_map>("global_decoder_params").empty());
+  EXPECT_FALSE(params.contains("global_decoder_params"));
   EXPECT_FALSE(params.contains("O"));
 }
 
@@ -2150,8 +2148,7 @@ TEST(DecoderYAMLTest, CudaDeviceIdRoundTrip) {
 }
 
 TEST(DecoderYAMLTest, PrepareDecoderParamsSurfacesCudaDeviceId) {
-  // Non-trt type: the insert must happen before prepare_decoder_params()'s
-  // trt-only early return, so the knob reaches every decoder type.
+  // Placement is common factory policy, so every decoder type receives it.
   auto config = create_test_empty_decoder_config(0);
   config.cuda_device_id = 3;
   auto params = cudaq::qec::decoding::host::prepare_decoder_params(config);
@@ -2163,9 +2160,7 @@ TEST(DecoderYAMLTest, PrepareDecoderParamsSurfacesCudaDeviceId) {
   auto params2 = cudaq::qec::decoding::host::prepare_decoder_params(config2);
   EXPECT_FALSE(params2.contains("cuda_device_id"));
 
-  // trt type: still surfaced on the trt branch. prepare_decoder_params only
-  // manipulates the params map (no schema lookup, no filesystem), so empty
-  // custom args exercise the trt path without needing the trt plugin.
+  // The TRT type follows the same common path without constructing a decoder.
   auto config3 = create_test_empty_decoder_config(2);
   config3.type = "trt_decoder";
   config3.cuda_device_id = 1;

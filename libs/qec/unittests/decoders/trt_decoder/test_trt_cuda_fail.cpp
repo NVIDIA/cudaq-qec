@@ -51,6 +51,7 @@ int run_mode(const char *mode) {
 #else
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", std::string(TRT_TEST_UINT8_ONNX_PATH));
+  params.insert("engine_output_format", std::string("errors"));
   std::unique_ptr<cudaq::qec::decoder> dec;
   try {
     dec = cudaq::qec::decoder::get("trt_decoder", make_h(), params);

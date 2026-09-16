@@ -2032,13 +2032,15 @@ TEST(SlidingWindowDecoder, BoundarySyndromeGetter) {
                                              n_syndromes_per_round,
                                              /*weight=*/1, std::mt19937_64(11));
   pcm = cudaq::qec::sort_pcm_columns(pcm, n_syndromes_per_round);
+  const std::vector<double> error_rates(pcm.shape()[1], 0.1);
+  auto inputs = cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(pcm),
+                                         std::nullopt, error_rates);
 
   auto make_params = [&](std::optional<std::size_t> boundary) {
     cudaqx::heterogeneous_map p;
     p.insert("window_size", std::size_t{2});
     p.insert("step_size", std::size_t{1});
     p.insert("num_syndromes_per_round", n_syndromes_per_round);
-    p.insert("error_rate_vec", std::vector<double>(pcm.shape()[1], 0.1));
     p.insert("inner_decoder_name", std::string("single_error_lut"));
     p.insert("inner_decoder_params", cudaqx::heterogeneous_map{});
     if (boundary)
@@ -2046,7 +2048,7 @@ TEST(SlidingWindowDecoder, BoundarySyndromeGetter) {
     return p;
   };
 
-  auto defaulted = cudaq::qec::decoder::get("sliding_window", pcm,
+  auto defaulted = cudaq::qec::decoder::get("sliding_window", inputs,
                                             make_params(std::nullopt));
   auto *sw_default =
       dynamic_cast<cudaq::qec::sliding_window *>(defaulted.get());
@@ -2055,7 +2057,7 @@ TEST(SlidingWindowDecoder, BoundarySyndromeGetter) {
   EXPECT_EQ(sw_default->get_num_boundary_syndromes(), n_syndromes_per_round);
 
   auto explicit_b = cudaq::qec::decoder::get(
-      "sliding_window", pcm, make_params(n_syndromes_per_round));
+      "sliding_window", std::move(inputs), make_params(n_syndromes_per_round));
   auto *sw_explicit =
       dynamic_cast<cudaq::qec::sliding_window *>(explicit_b.get());
   ASSERT_NE(sw_explicit, nullptr);
