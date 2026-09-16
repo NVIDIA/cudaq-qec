@@ -726,8 +726,10 @@ TEST(GraphResourcesDeleter, ReleasesOnceForNonNullPointer) {
   class ReleaseCountingDecoder final : public cudaq::qec::decoder {
   public:
     ReleaseCountingDecoder()
-        : decoder(
-              cudaq::qec::sparse_binary_matrix::from_csr(1, 1, {0, 1}, {0})) {}
+        : decoder(cudaq::qec::decoder_init(
+                      cudaq::qec::sparse_binary_matrix::from_csr(1, 1, {0, 1},
+                                                                 {0})),
+                  cudaq::qec::decode_result_type::errors) {}
     cudaq::qec::decoder_result
     decode(const std::vector<cudaq::qec::float_t> &) override {
       return {};
