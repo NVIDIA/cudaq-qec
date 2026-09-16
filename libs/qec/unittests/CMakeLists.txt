@@ -163,6 +163,7 @@ if(TARGET cudaq-qec-decoding-server)
       "LINKER:--wrap=cudaSetDevice"
       "LINKER:--wrap=cudaGetDevice"
       "LINKER:--wrap=cudaGetDeviceProperties"
+      "LINKER:--wrap=cudaGetDeviceProperties_v2"
       "LINKER:--wrap=cudaHostAlloc"
       "LINKER:--wrap=cudaHostGetDevicePointer"
       "LINKER:--wrap=cudaFreeHost"
