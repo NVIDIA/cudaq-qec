@@ -10,8 +10,11 @@
 
 #include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cudaq::qec {
@@ -26,9 +29,10 @@ int g_current = 1;
 
 class throwing_ctor_decoder : public cudaq::qec::decoder {
 public:
-  throwing_ctor_decoder(const cudaq::qec::sparse_binary_matrix &H,
+  throwing_ctor_decoder(cudaq::qec::decoder_init inputs,
+                        cudaq::qec::decode_result_type output,
                         const cudaqx::heterogeneous_map &)
-      : decoder(H) {
+      : decoder(std::move(inputs), output) {
     throw std::runtime_error("ctor-fail");
   }
   cudaq::qec::decoder_result
@@ -36,11 +40,14 @@ public:
     return {};
   }
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
-      throwing_ctor_decoder, static std::unique_ptr<cudaq::qec::decoder> create(
-                                 const cudaq::qec::decoder_init &init,
-                                 const cudaqx::heterogeneous_map &params) {
-        return cudaq::qec::make_pcm_decoder<throwing_ctor_decoder>(init,
-                                                                   params);
+      throwing_ctor_decoder,
+      static std::unique_ptr<cudaq::qec::decoder> create(
+          cudaq::qec::decoder_init inputs,
+          std::optional<cudaq::qec::decode_result_type> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<throwing_ctor_decoder>(
+            std::move(inputs),
+            output.value_or(cudaq::qec::decode_result_type::errors), params);
       })
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(throwing_ctor_decoder)
