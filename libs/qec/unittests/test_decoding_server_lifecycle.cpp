@@ -144,7 +144,9 @@ public:
   int capture_device = -99;
   pinned_test_decoder()
       : decoder(
-            cudaq::qec::sparse_binary_matrix::from_nested_csr(1, 1, {{0}})) {
+            cudaq::qec::decoder_init(
+                cudaq::qec::sparse_binary_matrix::from_nested_csr(1, 1, {{0}})),
+            cudaq::qec::decode_result_type::errors) {
     cuda_device_id_ = 1;
   }
   void set_cuda_device_id(int id) { cuda_device_id_ = id; }

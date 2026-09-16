@@ -13,6 +13,8 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
+#include <utility>
 
 namespace cudaq::qec {
 
@@ -24,13 +26,9 @@ public:
   inline static std::atomic<int> last_reserved_sms{-1};
   inline static std::atomic<int> release_count{0};
 
-  cc_test_graph_decoder(const sparse_binary_matrix &H,
-                        const cudaqx::heterogeneous_map &params)
-      : decoder(H) {
-    (void)params;
-    set_O_sparse(std::vector<std::vector<uint32_t>>{{0}});
-    set_D_sparse(std::vector<std::vector<uint32_t>>{{0}});
-  }
+  cc_test_graph_decoder(decoder_init inputs, decode_result_type output,
+                        const cudaqx::heterogeneous_map &)
+      : decoder(std::move(inputs), output) {}
 
   decoder_result decode(const std::vector<float_t> &syndrome) override {
     decoder_result result;
@@ -57,8 +55,11 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       cc_test_graph_decoder,
       static std::unique_ptr<decoder> create(
-          const decoder_init &init, const cudaqx::heterogeneous_map &params) {
-        return make_pcm_decoder<cc_test_graph_decoder>(init, params);
+          decoder_init inputs, std::optional<decode_result_type> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<cc_test_graph_decoder>(
+            std::move(inputs), output.value_or(decode_result_type::errors),
+            params);
       })
 };
 
@@ -66,13 +67,9 @@ public:
 // hits the "requires graph dispatch" throw.
 class cc_test_null_graph_decoder : public decoder {
 public:
-  cc_test_null_graph_decoder(const sparse_binary_matrix &H,
-                             const cudaqx::heterogeneous_map &params)
-      : decoder(H) {
-    (void)params;
-    set_O_sparse(std::vector<std::vector<uint32_t>>{{0}});
-    set_D_sparse(std::vector<std::vector<uint32_t>>{{0}});
-  }
+  cc_test_null_graph_decoder(decoder_init inputs, decode_result_type output,
+                             const cudaqx::heterogeneous_map &)
+      : decoder(std::move(inputs), output) {}
 
   decoder_result decode(const std::vector<float_t> &) override { return {}; }
 
@@ -86,8 +83,11 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       cc_test_null_graph_decoder,
       static std::unique_ptr<decoder> create(
-          const decoder_init &init, const cudaqx::heterogeneous_map &params) {
-        return make_pcm_decoder<cc_test_null_graph_decoder>(init, params);
+          decoder_init inputs, std::optional<decode_result_type> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<cc_test_null_graph_decoder>(
+            std::move(inputs), output.value_or(decode_result_type::errors),
+            params);
       })
 };
 
