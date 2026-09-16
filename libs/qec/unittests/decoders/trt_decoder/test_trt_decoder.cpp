@@ -1051,6 +1051,7 @@ TEST_F(TRTDecoderTest, FloatToUint8IdentityDecode) {
 
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("errors"));
   params.insert("use_cuda_graph", false);
   auto dec = decoder::get("trt_decoder", make_identity_h(3), params);
   auto result = dec->decode({0.0, 1.0, 1.0});
@@ -1068,6 +1069,7 @@ TEST_F(TRTDecoderTest, ScalarIdentityUsesBatchSizeOne) {
   ASSERT_TRUE(onnx_path && std::filesystem::exists(*onnx_path));
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("errors"));
   params.insert("use_cuda_graph", false);
   auto dec = decoder::get("trt_decoder", make_identity_h(1), params);
   auto result = dec->decode({0.75});
@@ -1082,10 +1084,13 @@ TEST_F(TRTDecoderTest, GlobalLutWithoutObservablesMovesResidual) {
   ASSERT_TRUE(onnx_path && std::filesystem::exists(*onnx_path));
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("residual_detectors"));
   params.insert("use_cuda_graph", false);
   params.insert("global_decoder", std::string("single_error_lut"));
   params.insert("global_decoder_params", cudaqx::heterogeneous_map{});
-  auto dec = decoder::get("trt_decoder", make_identity_h(3), params);
+  auto dec = decoder::get(
+      "trt_decoder", decoder_init(sparse_binary_matrix(make_identity_h(3))),
+      cudaq::qec::decode_result_type::errors, params);
   auto result = dec->decode({1.0, 0.0, 0.0});
   ASSERT_TRUE(result.converged);
   ASSERT_EQ(result.result.size(), 3u);
@@ -1105,15 +1110,15 @@ detector(0, 0, 0, 1) D0
 detector(1, 0, 0, 2) D1
 detector(2, 0, 0, 0) D2
 )DEM";
-  cudaqx::heterogeneous_map gp;
-  gp.insert("stim_dem", std::string(dem));
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("residual_detectors"));
   params.insert("batch_size", std::size_t{1});
   params.insert("use_cuda_graph", false);
   params.insert("global_decoder", std::string("chromobius"));
-  params.insert("global_decoder_params", gp);
-  auto dec = decoder::get("trt_decoder", make_identity_h(3), params);
+  params.insert("global_decoder_params", cudaqx::heterogeneous_map{});
+  auto dec = decoder::get("trt_decoder", decoder_init::from_stim_dem(dem),
+                          cudaq::qec::decode_result_type::observables, params);
   auto result = dec->decode({1.0, 0.0, 0.0});
   ASSERT_TRUE(result.converged);
 }
@@ -1188,6 +1193,7 @@ TEST_F(TRTDecoderTest, TwoOptimizationProfilesDisableCudaGraphs) {
   testing::internal::CaptureStderr();
   cudaqx::heterogeneous_map params;
   params.insert("engine_load_path", engine_path.string());
+  params.insert("engine_output_format", std::string("errors"));
   // Two-profile engines keep a dynamic batch dim; the loader needs batch_size
   // to size I/O buffers even though CUDA graphs will be refused.
   params.insert("batch_size", std::size_t{1});
@@ -1212,6 +1218,7 @@ TEST_F(TRTDecoderTest, InfoLogCountsZeroAndNonzeroDetectors) {
   cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("errors"));
   params.insert("use_cuda_graph", false);
   auto dec = decoder::get("trt_decoder", make_identity_h(3), params);
   testing::internal::CaptureStdout();
