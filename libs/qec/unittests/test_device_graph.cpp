@@ -138,6 +138,11 @@ cudaError_t __wrap_cudaGetDevice(int *d) {
     *d = 0;
   return g_ctl.get_device;
 }
+#ifdef cudaGetDeviceProperties
+#undef cudaGetDeviceProperties
+#endif
+// CUDA 12 aliases this API to cudaGetDeviceProperties_v2, so both linker
+// wraps must exist or the constructor hits real CUDA on CPU CI.
 cudaError_t __wrap_cudaGetDeviceProperties(cudaDeviceProp *p, int) {
   if (!p)
     return cudaErrorInvalidValue;
@@ -146,6 +151,9 @@ cudaError_t __wrap_cudaGetDeviceProperties(cudaDeviceProp *p, int) {
   p->minor = 0;
   std::strncpy(p->name, "qec-test-gpu", sizeof(p->name) - 1);
   return cudaSuccess;
+}
+cudaError_t __wrap_cudaGetDeviceProperties_v2(cudaDeviceProp *p, int device) {
+  return __wrap_cudaGetDeviceProperties(p, device);
 }
 cudaError_t __wrap_cudaHostAlloc(void **p, size_t bytes, unsigned int) {
   ++g_host_alloc_n;
