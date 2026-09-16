@@ -121,6 +121,14 @@ cudaError_t __wrap_cudaGraphExecDestroy(cudaGraphExec_t e) {
 } // extern "C"
 
 TEST(TrtCudaFail, HelperModes) {
+  // Helpers still construct a real TRT decoder, so skip on CPU CI like
+  // TRTDecoderTest.
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0)
+    GTEST_SKIP() << "No CUDA GPU available";
+#ifndef TRT_TEST_UINT8_ONNX_PATH
+  GTEST_SKIP() << "Generated uint8 ONNX fixture is unavailable";
+#endif
   EXPECT_EQ(qec_cc::exec_self("memset"), 0);
   EXPECT_EQ(qec_cc::exec_self("begin"), 0);
   EXPECT_EQ(qec_cc::exec_self("end"), 0);
