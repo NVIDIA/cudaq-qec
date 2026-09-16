@@ -1741,9 +1741,10 @@ CUDAQ_EXT_PT_REGISTER_TYPE(device_recording_decoder)
 /// logging records Errors:0.
 class one_error_decoder : public cudaq::qec::decoder {
 public:
-  one_error_decoder(const cudaq::qec::sparse_binary_matrix &H,
+  one_error_decoder(cudaq::qec::decoder_init inputs,
+                    cudaq::qec::decode_result_type output,
                     const cudaqx::heterogeneous_map &)
-      : decoder(H) {}
+      : decoder(std::move(inputs), output) {}
   cudaq::qec::decoder_result
   decode(const std::vector<cudaq::qec::float_t> &) override {
     cudaq::qec::decoder_result r;
@@ -1754,10 +1755,14 @@ public:
     return r;
   }
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
-      one_error_decoder, static std::unique_ptr<cudaq::qec::decoder> create(
-                             const cudaq::qec::decoder_init &init,
-                             const cudaqx::heterogeneous_map &params) {
-        return cudaq::qec::make_pcm_decoder<one_error_decoder>(init, params);
+      one_error_decoder,
+      static std::unique_ptr<cudaq::qec::decoder> create(
+          cudaq::qec::decoder_init inputs,
+          std::optional<cudaq::qec::decode_result_type> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<one_error_decoder>(
+            std::move(inputs),
+            output.value_or(cudaq::qec::decode_result_type::errors), params);
       })
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(one_error_decoder)
@@ -2060,11 +2065,12 @@ TEST(SlidingWindowDecoder, BoundarySyndromeGetter) {
 // decode_to_errs with a set result bit logs Errors:0 and flips observable 0.
 TEST(EnqueueSyndrome, DecodeToErrsLogsSetErrorIndex) {
   ScopedLogLevel scoped(cudaq::qec::detail::log_level::info);
-  cudaqx::tensor<uint8_t> H({std::size_t{1}, std::size_t{1}});
-  H.at({0, 0}) = 1;
-  auto dec = cudaq::qec::decoder::get("one_error_decoder", H);
-  dec->set_D_sparse(std::vector<std::vector<uint32_t>>{{0}});
-  dec->set_O_sparse(std::vector<std::vector<uint32_t>>{{0}});
+  using matrix = cudaq::qec::sparse_binary_matrix;
+  auto identity = [] { return matrix::from_nested_csr(1, 1, {{0}}); };
+  auto dec = cudaq::qec::decoder::get(
+      "one_error_decoder",
+      cudaq::qec::decoder_init(identity(), identity(), {}, identity()),
+      cudaq::qec::decode_result_type::errors);
   testing::internal::CaptureStdout();
   EXPECT_TRUE(dec->enqueue_syndrome(std::vector<uint8_t>{1}));
   cudaq::qec::detail::flush_logs();

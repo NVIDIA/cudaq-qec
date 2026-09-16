@@ -422,6 +422,7 @@ gtest_discover_tests(test_decoder_config_payload)
 add_executable(test_decoder_cuda_rollback
   test_decoder_cuda_rollback.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder_init.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoders/sliding_window.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder_stats.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder_config_schema.cpp
