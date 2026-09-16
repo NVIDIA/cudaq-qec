@@ -12,8 +12,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <sys/wait.h>
+#include <system_error>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -36,6 +38,31 @@ inline std::string mixed_lut_yaml() {
          "-1]\n";
 }
 
+// Remove helper-created files on normal process exit, including early returns.
+class temp_file_registry {
+public:
+  void add(std::filesystem::path path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    paths_.push_back(std::move(path));
+  }
+
+  ~temp_file_registry() {
+    for (const auto &path : paths_) {
+      std::error_code ignored;
+      std::filesystem::remove(path, ignored);
+    }
+  }
+
+private:
+  std::mutex mutex_;
+  std::vector<std::filesystem::path> paths_;
+};
+
+inline temp_file_registry &temp_files() {
+  static temp_file_registry files;
+  return files;
+}
+
 inline std::string write_temp(const std::string &contents,
                               const char *suffix = ".yaml") {
   static std::atomic<int> n{0};
@@ -44,6 +71,7 @@ inline std::string write_temp(const std::string &contents,
                std::to_string(n++) + suffix);
   std::ofstream out(path);
   out << contents;
+  temp_files().add(path);
   return path.string();
 }
 
