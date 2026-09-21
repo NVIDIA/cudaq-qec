@@ -128,6 +128,10 @@ sliding_window::sliding_window(cudaq::qec::decoder_init inputs,
     : decoder(canonicalize_sliding_window_inputs(std::move(inputs)),
               requested_output),
       H(get_inputs().detector_error_matrix()) {
+  if (requested_output ==
+      decode_result_type::observables_and_residual_detectors)
+    throw std::invalid_argument(
+        "sliding_window does not produce residual-detector auxiliary output");
   // This decoder composes an error frame from its windows. Producing
   // observables requires an observable mapping to project through; reject at
   // construction rather than on the first decode.

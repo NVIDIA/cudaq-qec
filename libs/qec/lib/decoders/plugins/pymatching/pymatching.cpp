@@ -120,6 +120,10 @@ public:
              decode_result_type requested_output,
              const cudaqx::heterogeneous_map &params)
       : decoder(std::move(inputs), requested_output) {
+    if (requested_output ==
+        decode_result_type::observables_and_residual_detectors)
+      throw std::invalid_argument(
+          "pymatching does not produce residual-detector auxiliary output");
     const auto &H = get_inputs().detector_error_matrix();
     error_rate_vec = get_inputs().error_rates();
     decode_to_observables = requested_output == decode_result_type::observables;

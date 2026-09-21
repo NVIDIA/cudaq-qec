@@ -116,8 +116,11 @@
             required ``global_decoder``.
           - ``"observables"``: one value per row of ``O``.
           - ``"observables_and_residual_detectors"``: an observable prefix
-            followed by residual detectors consumed by the required
-            ``global_decoder``.
+            followed by residual detectors. A standalone TensorRT decoder
+            requires ``global_decoder`` for this format. A task-graph
+            ``predecoder`` with ``residual_from: model`` may instead route the
+            observable prefix and residual detectors to separate downstream
+            graph edges.
 
         **Required model source (choose one):**
 
@@ -159,13 +162,17 @@
           the batch. The `decode_batch()` method requires the number of syndromes
           to be an integral multiple of the model's batch size.
 
-        - `global_decoder` (string): Name of an optional second-stage "global"
-          decoder to chain after the TensorRT model (composite decoding). The TRT
-          model acts as a first-stage predecoder whose output is passed to the
-          named global decoder (for example ``"pymatching"`` or ``"chromobius"``).
-          When omitted, the TRT model's output is returned directly. See
-          :ref:`the real-time decoding API <python_realtime_decoding_api>` for
-          configuring composite decoding from YAML. Introduced in 0.7.0.
+        - `global_decoder` (string): Name of a second-stage "global" decoder to
+          chain after the TensorRT model (composite decoding). It is required
+          for standalone ``"residual_detectors"`` and
+          ``"observables_and_residual_detectors"`` output. The TRT model acts
+          as a first-stage predecoder whose residual output is passed to the
+          named global decoder (for example ``"pymatching"`` or
+          ``"chromobius"``). It may be omitted for output formats that need no
+          second stage, or when a task graph explicitly routes model residuals
+          to a downstream decoder. See :ref:`the real-time decoding API
+          <python_realtime_decoding_api>` for configuring composite decoding
+          from YAML. Introduced in 0.7.0.
 
         - `global_decoder_params` (map): Parameters forwarded to the
           `global_decoder`. The accepted keys follow the parameter schema of the

@@ -247,6 +247,20 @@ TEST(DecoderOutputContract, OutputFormIsImmutablePerInstance) {
   EXPECT_EQ(errors.result, std::vector<cudaq::qec::float_t>({1.0, 0.0}));
 }
 
+TEST(DecoderOutputContract, DecoderWithoutResidualOutputRejectsCombinedType) {
+  auto H = cudaq::qec::sparse_binary_matrix::from_nested_csc(
+      2, 2, std::vector<std::vector<std::uint32_t>>{{0}, {1}});
+  auto O = cudaq::qec::sparse_binary_matrix::from_nested_csr(
+      1, 2, std::vector<std::vector<std::uint32_t>>{{0}});
+
+  EXPECT_THROW(
+      cudaq::qec::get_decoder(
+          "single_error_lut",
+          cudaq::qec::decoder_init(std::move(H), std::move(O)),
+          cudaq::qec::decode_result_type::observables_and_residual_detectors),
+      std::invalid_argument);
+}
+
 TEST(DecoderOutputContract, ModelDataIsRejectedInCustomParameters) {
   auto H = cudaq::qec::sparse_binary_matrix::from_nested_csc(1, 1, {{0}});
   cudaqx::heterogeneous_map params;

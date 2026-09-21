@@ -67,6 +67,11 @@ Out-of-tree decoder plugins must be rebuilt and migrated as follows:
 * Choose the plugin's default result basis when the optional request is empty,
   and reject unsupported explicit requests during construction. The presence
   of ``O`` does not select observable output.
+* ``observables_and_residual_detectors`` is a multi-output composition
+  contract, not a third standalone result basis. A plugin accepts it only if
+  it returns ``observables`` in ``decoder_result::result`` and residual detectors in
+  ``decoder_result::opt_results["residual_detectors"]``; all other plugins must
+  reject it during construction.
 * Remove calls to the deleted ``set_O_sparse`` and ``set_D_sparse`` methods.
   The base constructor now derives the corresponding model state and buffer
   sizes. A streaming decoder supplies only its layer geometry through
@@ -106,8 +111,10 @@ The main source migration maps old symbols as follows:
 For direct callers, construct ``decoder_init`` with the model data and use the
 ``get_decoder`` overload taking :cpp:enum:`cudaq::qec::decode_result_type` when
 the result basis must be explicit. Python callers use ``output="errors"`` or
-``output="observables"``. See the PyMatching API for the migration from its
-former ``O``-implies-observables behavior.
+``output="observables"``. Python intentionally does not expose
+``observables_and_residual_detectors``; composition infrastructure requests
+that contract from a compatible decoder. See the PyMatching API for the
+migration from its former ``O``-implies-observables behavior.
 
 Implementing a New Decoder in C++
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

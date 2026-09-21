@@ -524,6 +524,7 @@ bool decoder::enqueue_syndrome(const uint8_t *syndrome,
       expected_result_size = block_size;
       break;
     case decode_result_type::observables:
+    case decode_result_type::observables_and_residual_detectors:
       result_type_str = "obs";
       result_type_name = "observables";
       expected_result_size = num_observables;
@@ -552,6 +553,7 @@ bool decoder::enqueue_syndrome(const uint8_t *syndrome,
 
     switch (result_type_) {
     case decode_result_type::observables:
+    case decode_result_type::observables_and_residual_detectors:
       // Observable-frame path: decoder already projected to observables via its
       // internal "O" matrix; use the result directly.
       for (std::size_t i = 0; i < num_observables; i++)

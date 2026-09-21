@@ -30,11 +30,22 @@ using float_t = CUDAQX_QEC_FLOAT_TYPE;
 using float_t = double;
 #endif
 
-/// @brief The basis of a decoder result.
+/// @brief The requested decoder output contract.
 enum class decode_result_type : std::uint8_t {
-  errors,
-  observables,
+  errors,      ///< Primary result is an error frame.
+  observables, ///< Primary result is an observable frame.
+  /// Multi-output composition contract: observable primary result plus
+  /// `opt_results["residual_detectors"]`. This is not a standalone output
+  /// basis; decoders that do not implement the auxiliary output must reject it.
+  observables_and_residual_detectors,
 };
+
+/// @brief Whether the primary result is an observable frame.
+constexpr bool
+has_observable_primary_result(decode_result_type result_type) noexcept {
+  return result_type == decode_result_type::observables ||
+         result_type == decode_result_type::observables_and_residual_detectors;
+}
 
 /// @brief Validates that all keys in a heterogeneous map are found in a list of
 /// acceptable types

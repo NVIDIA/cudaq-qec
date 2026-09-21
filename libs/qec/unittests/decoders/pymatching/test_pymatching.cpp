@@ -265,6 +265,12 @@ TEST(PyMatchingDecoder, ObservableModelDoesNotSelectOutputBasis) {
   const auto observable_result = observable_decoder->decode({1.0, 0.0});
   ASSERT_TRUE(observable_result.converged);
   EXPECT_EQ(observable_result.result, (std::vector<cudaq::qec::float_t>{1.0}));
+
+  EXPECT_THROW(
+      (void)cudaq::qec::decoder::get(
+          "pymatching", inputs,
+          cudaq::qec::decode_result_type::observables_and_residual_detectors),
+      std::invalid_argument);
 }
 
 TEST(PyMatchingDecoder, ObservableModelDoesNotChangeErrorMergeDefault) {
