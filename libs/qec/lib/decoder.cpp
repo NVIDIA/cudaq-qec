@@ -23,7 +23,7 @@
 #include <vector>
 
 INSTANTIATE_REGISTRY(cudaq::qec::decoder, cudaq::qec::decoder_init,
-                     std::optional<cudaq::qec::decode_result_type>,
+                     std::optional<cudaq::qec::decoder_output_request>,
                      const cudaqx::heterogeneous_map &)
 
 // Include decoder implementations AFTER registry instantiation
@@ -101,9 +101,9 @@ struct decoder::rt_impl {
 
 void decoder::rt_impl_deleter::operator()(rt_impl *p) const { delete p; }
 
-decoder::decoder(decoder_init inputs, decode_result_type requested_output)
+decoder::decoder(decoder_init inputs, decoder_output_request requested_output)
     : pimpl(std::unique_ptr<rt_impl, rt_impl_deleter>(new rt_impl())),
-      inputs_(std::move(inputs)), result_type_(requested_output) {
+      inputs_(std::move(inputs)), output_request_(requested_output) {
   syndrome_size = inputs_.num_detectors();
   block_size = inputs_.num_error_mechanisms();
 
@@ -287,14 +287,14 @@ decoder::get(const std::string &name, decoder_init inputs,
 
 std::unique_ptr<decoder>
 decoder::get(const std::string &name, decoder_init inputs,
-             decode_result_type output,
+             decoder_output_request output,
              const cudaqx::heterogeneous_map &param_map) {
   return get_impl(name, std::move(inputs), output, param_map);
 }
 
 std::unique_ptr<decoder>
 decoder::get_impl(const std::string &name, decoder_init inputs,
-                  std::optional<decode_result_type> output,
+                  std::optional<decoder_output_request> output,
                   const cudaqx::heterogeneous_map &param_map) {
   for (const char *reserved : {"H", "O", "D", "error_rate_vec"})
     if (param_map.contains(reserved))
@@ -517,14 +517,13 @@ bool decoder::enqueue_syndrome(const uint8_t *syndrome,
     const char *result_type_str = nullptr;
     const char *result_type_name = nullptr;
     std::size_t expected_result_size = 0;
-    switch (result_type_) {
+    switch (output_request_.primary) {
     case decode_result_type::errors:
       result_type_str = "errs";
       result_type_name = "errors";
       expected_result_size = block_size;
       break;
     case decode_result_type::observables:
-    case decode_result_type::observables_and_residual_detectors:
       result_type_str = "obs";
       result_type_name = "observables";
       expected_result_size = num_observables;
@@ -551,9 +550,8 @@ bool decoder::enqueue_syndrome(const uint8_t *syndrome,
     if (should_log)
       log_t2 = std::chrono::high_resolution_clock::now();
 
-    switch (result_type_) {
+    switch (output_request_.primary) {
     case decode_result_type::observables:
-    case decode_result_type::observables_and_residual_detectors:
       // Observable-frame path: decoder already projected to observables via its
       // internal "O" matrix; use the result directly.
       for (std::size_t i = 0; i < num_observables; i++)
@@ -701,7 +699,7 @@ std::unique_ptr<decoder> get_decoder(const std::string &name,
 
 std::unique_ptr<decoder> get_decoder(const std::string &name,
                                      decoder_init inputs,
-                                     decode_result_type output,
+                                     decoder_output_request output,
                                      const cudaqx::heterogeneous_map options) {
   return decoder::get(name, std::move(inputs), output, options);
 }

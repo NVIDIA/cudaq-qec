@@ -34,18 +34,56 @@ using float_t = double;
 enum class decode_result_type : std::uint8_t {
   errors,      ///< Primary result is an error frame.
   observables, ///< Primary result is an observable frame.
-  /// Multi-output composition contract: observable primary result plus
-  /// `opt_results["residual_detectors"]`. This is not a standalone output
-  /// basis; decoders that do not implement the auxiliary output must reject it.
-  observables_and_residual_detectors,
 };
 
-/// @brief Whether the primary result is an observable frame.
-constexpr bool
-has_observable_primary_result(decode_result_type result_type) noexcept {
-  return result_type == decode_result_type::observables ||
-         result_type == decode_result_type::observables_and_residual_detectors;
+/// @brief Standardized auxiliary outputs a decoder may be requested to return.
+/// Values are independent flags and may be combined.
+enum class decoder_auxiliary_result_type : std::uint8_t {
+  none = 0,
+  /// Residual detector values in `opt_results["residual_detectors"]`.
+  residual_detectors = 1u << 0,
+};
+
+constexpr decoder_auxiliary_result_type
+operator|(decoder_auxiliary_result_type lhs,
+          decoder_auxiliary_result_type rhs) noexcept {
+  return static_cast<decoder_auxiliary_result_type>(
+      static_cast<std::uint8_t>(lhs) | static_cast<std::uint8_t>(rhs));
 }
+
+constexpr decoder_auxiliary_result_type
+operator&(decoder_auxiliary_result_type lhs,
+          decoder_auxiliary_result_type rhs) noexcept {
+  return static_cast<decoder_auxiliary_result_type>(
+      static_cast<std::uint8_t>(lhs) & static_cast<std::uint8_t>(rhs));
+}
+
+constexpr decoder_auxiliary_result_type
+operator~(decoder_auxiliary_result_type value) noexcept {
+  return static_cast<decoder_auxiliary_result_type>(
+      ~static_cast<std::uint8_t>(value));
+}
+
+/// @brief Immutable primary and auxiliary output contract for a decoder.
+struct decoder_output_request {
+  constexpr decoder_output_request(
+      decode_result_type primary,
+      decoder_auxiliary_result_type auxiliary =
+          decoder_auxiliary_result_type::none) noexcept
+      : primary(primary), auxiliary(auxiliary) {}
+
+  decode_result_type primary;
+  decoder_auxiliary_result_type auxiliary;
+
+  constexpr bool requests(decoder_auxiliary_result_type output) const noexcept {
+    return output != decoder_auxiliary_result_type::none &&
+           (auxiliary & output) == output;
+  }
+
+  constexpr bool has_auxiliary_outputs() const noexcept {
+    return auxiliary != decoder_auxiliary_result_type::none;
+  }
+};
 
 /// @brief Validates that all keys in a heterogeneous map are found in a list of
 /// acceptable types
@@ -147,7 +185,7 @@ public:
 /// decoder.
 class decoder
     : public cudaqx::extension_point<decoder, decoder_init,
-                                     std::optional<decode_result_type>,
+                                     std::optional<decoder_output_request>,
                                      const cudaqx::heterogeneous_map &> {
 private:
   struct rt_impl;
@@ -165,7 +203,8 @@ public:
   /// @param requested_output The result basis this instance produces, fixed
   /// for its lifetime.
   decoder(decoder_init inputs,
-          decode_result_type requested_output = decode_result_type::errors);
+          decoder_output_request requested_output = decoder_output_request{
+              decode_result_type::errors});
 
   /// @brief Decode a single syndrome
   /// @param syndrome A vector of syndrome measurements where the floating point
@@ -234,10 +273,10 @@ public:
   get(const std::string &name, decoder_init inputs,
       const cudaqx::heterogeneous_map &param_map = cudaqx::heterogeneous_map());
 
-  /// @brief Construct a registered decoder with an explicit instance-default
-  /// result form.
+  /// @brief Construct a registered decoder with an explicit output contract.
   static std::unique_ptr<decoder>
-  get(const std::string &name, decoder_init inputs, decode_result_type output,
+  get(const std::string &name, decoder_init inputs,
+      decoder_output_request output,
       const cudaqx::heterogeneous_map &param_map = cudaqx::heterogeneous_map());
 
   static std::unique_ptr<decoder>
@@ -281,7 +320,17 @@ public:
 
   /// @brief The result form this instance was constructed to produce. Fixed at
   /// construction; every decode operation returns this form.
-  decode_result_type get_result_type() const noexcept { return result_type_; }
+  decode_result_type get_result_type() const noexcept {
+    return output_request_.primary;
+  }
+
+  decoder_auxiliary_result_type get_auxiliary_result_type() const noexcept {
+    return output_request_.auxiliary;
+  }
+
+  const decoder_output_request &get_output_request() const noexcept {
+    return output_request_;
+  }
 
   // -- Begin realtime decoding API --
 
@@ -412,11 +461,11 @@ protected:
 private:
   static std::unique_ptr<decoder>
   get_impl(const std::string &name, decoder_init inputs,
-           std::optional<decode_result_type> output,
+           std::optional<decoder_output_request> output,
            const cudaqx::heterogeneous_map &param_map);
   /// @brief The decoder's immutable construction inputs.
   const decoder_init inputs_;
-  const decode_result_type result_type_;
+  const decoder_output_request output_request_;
 };
 
 /// @brief Convert a single soft probability to a hard 0/1 decision.
@@ -579,7 +628,7 @@ get_decoder(const std::string &name, decoder_init inputs,
 
 std::unique_ptr<decoder>
 get_decoder(const std::string &name, decoder_init inputs,
-            decode_result_type output,
+            decoder_output_request output,
             const cudaqx::heterogeneous_map options = {});
 
 inline std::unique_ptr<decoder>

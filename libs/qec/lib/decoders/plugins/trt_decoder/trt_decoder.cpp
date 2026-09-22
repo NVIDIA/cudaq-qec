@@ -196,10 +196,6 @@ decode_result_type trt_emitted_output(trt_engine_output_format format,
     return decode_result_type::errors;
   if (format == trt_engine_output_format::residual_detectors)
     return requested_output;
-  if (format == trt_engine_output_format::observables_and_residual_detectors &&
-      requested_output ==
-          decode_result_type::observables_and_residual_detectors)
-    return requested_output;
   return decode_result_type::observables;
 }
 
@@ -473,7 +469,7 @@ private:
 
 public:
   trt_decoder(cudaq::qec::decoder_init inputs,
-              decode_result_type requested_output,
+              decoder_output_request requested_output,
               trt_engine_output_format engine_output_format,
               const cudaqx::heterogeneous_map &params);
 
@@ -488,11 +484,14 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       trt_decoder, static std::unique_ptr<decoder> create(
                        cudaq::qec::decoder_init inputs,
-                       std::optional<decode_result_type> output,
+                       std::optional<decoder_output_request> output,
                        const cudaqx::heterogeneous_map &params) {
         const auto format = parse_engine_output_format(params);
         return std::make_unique<trt_decoder>(
-            std::move(inputs), output.value_or(natural_trt_output(format)),
+            std::move(inputs),
+            output.value_or(
+                decoder_output_request{natural_trt_output(format),
+                                       decoder_auxiliary_result_type::none}),
             format, params);
       })
 
@@ -595,24 +594,34 @@ struct trt_decoder::Impl {
 // ============================================================================
 
 trt_decoder::trt_decoder(cudaq::qec::decoder_init inputs,
-                         decode_result_type requested_output,
+                         decoder_output_request requested_output,
                          trt_engine_output_format engine_output_format,
                          const cudaqx::heterogeneous_map &params)
     : decoder(std::move(inputs), requested_output),
       engine_output_format_(engine_output_format),
       emitted_output_(
-          trt_emitted_output(engine_output_format, requested_output)) {
+          trt_emitted_output(engine_output_format, requested_output.primary)) {
+  constexpr auto supported_auxiliary =
+      decoder_auxiliary_result_type::residual_detectors;
+  const auto unsupported_auxiliary =
+      requested_output.auxiliary & ~supported_auxiliary;
+  if (unsupported_auxiliary != decoder_auxiliary_result_type::none)
+    throw std::runtime_error(
+        "TensorRT decoder received an unsupported auxiliary output request");
   const bool has_global_decoder =
       params.contains("global_decoder") &&
       !params.get<std::string>("global_decoder").empty();
   const bool packed_output =
       engine_output_format_ ==
       trt_engine_output_format::observables_and_residual_detectors;
-  const bool multiple_outputs =
-      requested_output ==
-      decode_result_type::observables_and_residual_detectors;
+  const bool multiple_outputs = requested_output.requests(
+      decoder_auxiliary_result_type::residual_detectors);
 
   if (multiple_outputs) {
+    if (requested_output.primary != decode_result_type::observables)
+      throw std::runtime_error(
+          "TensorRT residual-detector auxiliary output requires observable "
+          "primary output");
     if (!packed_output)
       throw std::runtime_error(
           "TensorRT multiple-output construction requires "
@@ -635,9 +644,7 @@ trt_decoder::trt_decoder(cudaq::qec::decoder_init inputs,
   if ((engine_output_format_ == trt_engine_output_format::observables ||
        engine_output_format_ ==
            trt_engine_output_format::observables_and_residual_detectors) &&
-      requested_output != decode_result_type::observables &&
-      requested_output !=
-          decode_result_type::observables_and_residual_detectors)
+      requested_output.primary != decode_result_type::observables)
     throw std::runtime_error(
         "engine_output_format declares observables, so this decoder cannot be "
         "constructed for error-frame output");
@@ -647,7 +654,7 @@ trt_decoder::trt_decoder(cudaq::qec::decoder_init inputs,
   // observable mapping there is nothing to project through, so reject here
   // rather than returning an unprojected error frame at decode time.
   if (emitted_output_ == decode_result_type::errors &&
-      requested_output == decode_result_type::observables &&
+      requested_output.primary == decode_result_type::observables &&
       !get_inputs().has_observable_model())
     throw std::runtime_error(
         "This TensorRT engine emits an error frame and was constructed for "
@@ -886,7 +893,7 @@ trt_decoder::trt_decoder(cudaq::qec::decoder_init inputs,
             engine_output_format_ ==
                     trt_engine_output_format::observables_and_residual_detectors
                 ? decode_result_type::observables
-                : requested_output;
+                : requested_output.primary;
         global_decoder_ = decoder::get(global_decoder_name,
                                        get_inputs().decoder_init_without_d(),
                                        global_output, global_decoder_params_);
@@ -1195,9 +1202,13 @@ std::vector<decoder_result> trt_decoder::decode_batch_impl(
         const bool packed =
             engine_output_format_ ==
             trt_engine_output_format::observables_and_residual_detectors;
+        const bool emit_residual_detectors =
+            packed && get_output_request().requests(
+                          decoder_auxiliary_result_type::residual_detectors);
         // Packed output exposes only pre_L as the primary observable result
-        // and carries residual detectors as auxiliary data. Every other
-        // format returns the engine's complete output unchanged.
+        // and carries residual detectors as auxiliary data only when the
+        // instance's output contract requests them. Every other format
+        // returns the engine's complete output unchanged.
         const size_t primary_size =
             packed ? num_observables_ : output_size_per_sample_;
         for (size_t batch_idx = 0; batch_idx < actual_batch; ++batch_idx) {
@@ -1213,7 +1224,7 @@ std::vector<decoder_result> trt_decoder::decode_batch_impl(
               result.result[i] = trt_io_to_binary(row[i]);
             }
           }
-          if (packed) {
+          if (emit_residual_detectors) {
             std::vector<float_t> residual(residual_size);
             for (size_t i = 0; i < residual_size; ++i) {
               if constexpr (std::is_same_v<OutputType, float>)

@@ -120,7 +120,8 @@
             requires ``global_decoder`` for this format. A task-graph
             ``predecoder`` with ``residual_from: model`` may instead route the
             observable prefix and residual detectors to separate downstream
-            graph edges.
+            graph edges by requesting observable primary output with the
+            ``residual_detectors`` auxiliary-output flag.
 
         **Required model source (choose one):**
 

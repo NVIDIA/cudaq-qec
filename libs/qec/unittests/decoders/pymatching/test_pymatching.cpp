@@ -269,7 +269,9 @@ TEST(PyMatchingDecoder, ObservableModelDoesNotSelectOutputBasis) {
   EXPECT_THROW(
       (void)cudaq::qec::decoder::get(
           "pymatching", inputs,
-          cudaq::qec::decode_result_type::observables_and_residual_detectors),
+          cudaq::qec::decoder_output_request{
+              cudaq::qec::decode_result_type::observables,
+              cudaq::qec::decoder_auxiliary_result_type::residual_detectors}),
       std::invalid_argument);
 }
 

@@ -53,7 +53,10 @@ resolve_decoder_init(
 __attribute__((visibility("default"))) std::unique_ptr<cudaq::qec::decoder>
 create_realtime_decoder(
     const cudaq::qec::decoding::config::decoder_config &decoder_config,
-    cudaq::qec::decoder_init inputs);
+    cudaq::qec::decoder_init inputs,
+    cudaq::qec::decoder_output_request output =
+        cudaq::qec::decoder_output_request{
+            cudaq::qec::decode_result_type::observables});
 
 __attribute__((visibility("default"))) void
 get_corrections(std::size_t decoder_id, uint8_t *corrections,
