@@ -732,6 +732,7 @@ add_subdirectory(backend-specific)
 add_subdirectory(realtime)
 add_subdirectory(decoders/pymatching)
 add_subdirectory(decoders/chromobius)
+add_subdirectory(playback-emulator)
 
 # HSB rig tools (FPGA playback + graph-launched QLDPC bridge)
 if(CUDAQX_QEC_ENABLE_HSB_TOOLS)
