@@ -155,8 +155,10 @@ RUN set -e; \
 # against this source + build tree. Only the two needed targets are
 # built; unrelated operators are stripped to avoid their dependencies.
 #
-# cuda_native_arch: CMake CUDA architecture list for all GPU code built
-# in this file -- e.g. 90 (GH200), 100 (GB200), 121 (DGX Spark GB10).
+# cuda_native_arch: CMake CUDA architecture list for HSB only (it reads
+# CUDA_NATIVE_ARCH from the environment) -- e.g. 90 (GH200), 100 (GB200),
+# 121 (DGX Spark GB10). cudaq-realtime and cudaqx/qec choose their own
+# multi-arch lists from the CUDA toolkit version.
 ARG cuda_native_arch=90
 RUN set -e; \
     git clone --depth 1 --branch 2.6.0-EA2 \
@@ -193,9 +195,6 @@ RUN set -e; \
 # directories must land at the identical path in both stages.
 # ---------------------------------------------------------------------------
 FROM toolchain AS builder
-# Re-declared: ARG scope is per-stage; one --build-arg on the command line
-# still overrides both declarations.
-ARG cuda_native_arch=90
 ENV CUDAQ_INSTALL_PREFIX=/opt/nvidia/cudaq \
     CUDAQ_REALTIME_ROOT=/opt/nvidia/cudaq-realtime \
     CUDAQX_INSTALL_PREFIX=/opt/nvidia/cudaqx
@@ -214,10 +213,8 @@ COPY . .
 # NOT this repo's .cudaq_version: realtime and CUDA-Q share a
 # co-developed dispatch/RPC protocol, so the pair must come from the same
 # commit.
-RUN --mount=type=cache,target=/root/.ccache,sharing=locked \
-    set -e; \
+RUN set -e; \
     . scripts/cudaq_realtime_cmake_flags.sh; \
-    export CUDA_NATIVE_ARCH="${cuda_native_arch}"; \
     CUDAQ_SHA=$(sed -n 's/^source-sha: //p' "$CUDAQ_INSTALL_PREFIX/build_info.txt"); \
     test -n "$CUDAQ_SHA"; \
     echo "== cudaq-realtime source: NVIDIA/cuda-quantum@$CUDAQ_SHA (from build_info.txt)"; \
@@ -228,7 +225,6 @@ RUN --mount=type=cache,target=/root/.ccache,sharing=locked \
     cmake -G Ninja -S /tmp/cudaq-src/realtime -B /tmp/realtime-build \
         -DCMAKE_INSTALL_PREFIX="$CUDAQ_REALTIME_ROOT" \
         -DCMAKE_CUDA_FLAGS="$(cudaq_realtime_cmake_cuda_flags)" \
-        -DCMAKE_CUDA_ARCHITECTURES="${cuda_native_arch}" \
         -DCUDAQ_REALTIME_ENABLE_HSB_TOOLS=ON \
         -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/opt/holoscan-sensor-bridge \
         -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/opt/holoscan-sensor-bridge/build; \
@@ -248,7 +244,6 @@ RUN --mount=type=cache,target=/root/.ccache,sharing=locked \
 # build patchelfs each plugin's rpath in place at configure time. The
 # cudevice archive is only ever read, so it's used from the mount as-is.
 RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
-    --mount=type=cache,target=/root/.ccache,sharing=locked \
     set -e; \
     _cudevice_archive=""; \
     if [ -f /mnt/artifacts/libcudaq-qec-realtime-cudevice-proprietary.a ]; then \
@@ -274,9 +269,6 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER=gcc-12 \
         -DCMAKE_CXX_COMPILER=g++-12 \
-        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-        -DCMAKE_CUDA_ARCHITECTURES="${cuda_native_arch}" \
         -DCUDAQ_DIR="$CUDAQ_INSTALL_PREFIX/lib/cmake/cudaq/" \
         -DCUDAQX_INCLUDE_TESTS=ON \
         -DCUDAQX_BINDINGS_PYTHON=OFF \
