@@ -47,8 +47,6 @@
 # cudaq_image and cuda_runtime_image_tag -- see the args below; they
 # aren't derived from each other.
 
-# syntax=docker/dockerfile:1.7
-
 ARG CUDA_VERSION=13.0
 ARG TARGETARCH
 # The official published CUDA-Q container whose /opt/nvidia/cudaq install
@@ -216,14 +214,6 @@ COPY . .
 # NOT this repo's .cudaq_version: realtime and CUDA-Q share a
 # co-developed dispatch/RPC protocol, so the pair must come from the same
 # commit.
-#
-# TODO: for builds pinning a versioned cudaq_image (0.16.0+), the same
-# release also ships a prebuilt HSB-enabled realtime installer
-# (install_cuda_quantum_realtime_*) that could stand in for this rebuild.
-# Not adopted (yet): nightly builds have no paired installer, so the
-# rebuild path must remain regardless, and the installer's dispatch
-# archive is built for CUDA archs "80-real;90" only -- unverified against
-# our sm_100/sm_121 targets.
 RUN --mount=type=cache,target=/root/.ccache,sharing=locked \
     set -e; \
     . scripts/cudaq_realtime_cmake_flags.sh; \

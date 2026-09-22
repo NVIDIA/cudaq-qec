@@ -1,4 +1,4 @@
-name: Build decoding-server image
+name: Build Decoding Server Release Image
 
 on:
   workflow_dispatch:
@@ -73,8 +73,6 @@ jobs:
       - name: Create artifacts dir
         run: mkdir -p artifacts
 
-      # TEMPORARY: fetching directly in this job (instead of a separate
-      # fetch-assets job + actions/upload-artifact hand-off) while testing
       - name: Fetch and extract decoder assets
         if: ${{ inputs.assets_repo != '' && inputs.assets_tag != '' }}
         env:
@@ -196,8 +194,6 @@ jobs:
         id: publish-ghcr
         env:
           IMAGE_NAME: ${{ inputs.image_name }}
-          CUDA_VERSION: ${{ matrix.cuda_version }}
-          GIT_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -213,14 +209,15 @@ jobs:
           # multi-platform manifest.
           short_sha="${GITHUB_SHA:0:8}"
           build_date=$(date -u +%Y%m%d)
-          cuda_major="${CUDA_VERSION%%.*}"
+          cuda_version="${{ matrix.cuda_version }}"
+          cuda_major="${cuda_version%%.*}"
           tag_suffixes=(
             "cu${cuda_major}-${build_date}-${short_sha}"
             "cu${cuda_major}-latest"
           )
 
-          if [[ "$GIT_REF_NAME" == releases/* ]]; then
-            release_version=$(echo "$GIT_REF_NAME" | grep -Eo '([0-9]+\.)+[0-9]+')
+          if [[ "$GITHUB_REF_NAME" == releases/v* ]]; then
+            release_version=$(echo "$GITHUB_REF_NAME" | grep -Eo '([0-9]+\.)+[0-9]+')
             tag_suffixes+=("cu${cuda_major}-${release_version}")
           fi
 
@@ -307,14 +304,13 @@ jobs:
           test -n "$staging_digest"
           echo "staging_digest=$staging_digest" >> "$GITHUB_OUTPUT"
 
-      # Hand the digest refs and tag suffixes to the promote job (a
-      # separate job, so step outputs don't reach it directly; this
-      # mirrors the digest-artifact hand-off from the build job and keeps
-      # the tag logic defined in one place).
+      # Hand the digest refs (and the staging manifest ref, when the
+      # staging copy ran) to the promote job -- a separate job, so step
+      # outputs don't reach it directly; this mirrors the digest-artifact
+      # hand-off from the build job.
       - name: Save publish info for promote job
         env:
           REFS: ${{ steps.publish-ghcr.outputs.refs }}
-          TAG_SUFFIXES: ${{ steps.publish-ghcr.outputs.tag_suffixes }}
           # Empty when the staging copy was skipped.
           STAGING_DIGEST: ${{ steps.ngc-staging.outputs.staging_digest }}
         run: |
@@ -336,9 +332,9 @@ jobs:
   promote:
     name: Promote decoding-server image to NGC (CUDA ${{ matrix.cuda_version }})
     needs: publish
-    # TODO: additionally gate this to release branches once the flow is
-    # validated, e.g. `&& startsWith(github.ref_name, 'releases/')`.
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    # Release branches only: the promoted tag is derived from the branch
+    # name (releases/v<version>).
+    if: ${{ !cancelled() && needs.publish.result == 'success' && startsWith(github.ref_name, 'releases/v') }}
     runs-on: ubuntu-latest
     # TODO: configure ngc-prod environment with appropriate approver gate
     environment: ngc-prod
@@ -387,11 +383,19 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Promoted tag is cu<major>-<version>, with the version taken
+          # from the releases/v<version> branch name this run is gated to.
+          cuda_version="${{ matrix.cuda_version }}"
+          cuda_major="${cuda_version%%.*}"
+          release_version=$(echo "$GITHUB_REF_NAME" | grep -Eo '([0-9]+\.)+[0-9]+')
+          test -n "$release_version"
+          release_tag="cu${cuda_major}-${release_version}"
+
           if [ -s /tmp/publish-info/staging_ref ]; then
             refs=("$(cat /tmp/publish-info/staging_ref)")
           else
             read -ra refs <<< "$(cat /tmp/publish-info/refs)"
           fi
-          
-          docker buildx imagetools create --tag "${NGC_PROD_IMAGE_NAME}:prod-test" "${refs[@]}"
-          docker buildx imagetools inspect "${NGC_PROD_IMAGE_NAME}:prod-test"
+
+          docker buildx imagetools create --tag "${NGC_PROD_IMAGE_NAME}:${release_tag}" "${refs[@]}"
+          docker buildx imagetools inspect "${NGC_PROD_IMAGE_NAME}:${release_tag}"
