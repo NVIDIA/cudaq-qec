@@ -70,7 +70,7 @@ KERNEL_BIN=""
 NV_QLDPC_PLUGIN="${CUDAQ_QEC_NV_QLDPC_PLUGIN:-}"
 # Ising artifact directory for the trt_decoder profile (six locally prepared
 # files: model.onnx, H_csr.bin, O_csr.bin, priors.bin, metadata.txt,
-# D_sparse.txt). Nothing in it ships with CUDA-QX; see the docs recipe.
+# D_sparse.txt). Nothing in it ships with CUDA-Q QEC; see the docs recipe.
 ISING_ARTIFACTS_DIR="${QEC_ISING_ARTIFACTS_DIR:-}"
 
 # Surface-code experiment parameters. The generator applies two-qubit

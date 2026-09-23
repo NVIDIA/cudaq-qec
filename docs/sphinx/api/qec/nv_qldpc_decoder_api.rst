@@ -20,7 +20,7 @@
     `Decoding Across the Quantum LDPC Code Landscape <https://arxiv.org/pdf/2005.07016>`_
 
     .. note::
-      It is required to create decoders with the `get_decoder` API from the CUDA-QX
+      It is required to create decoders with the `get_decoder` API from the CUDA-Q QEC
       extension points API, such as
 
       .. tab:: Python

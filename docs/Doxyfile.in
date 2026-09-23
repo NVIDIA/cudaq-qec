@@ -2,7 +2,7 @@
 # Project related configuration options
 #---------------------------------------------------------------------------
 
-PROJECT_NAME           = "CUDA-QX"
+PROJECT_NAME           = "CUDA-Q QEC"
 INPUT                  = @DOXYGEN_INPUT@
 FILE_PATTERNS          = *.h \
                          *.hpp

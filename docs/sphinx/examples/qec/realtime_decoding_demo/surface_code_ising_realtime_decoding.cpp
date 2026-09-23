@@ -25,7 +25,7 @@
 // live measurement stream.
 //
 // The artifact directory (--ising-artifacts-dir, or QEC_ISING_ARTIFACTS_DIR)
-// holds six files, none of which ship with CUDA-QX:
+// holds six files, none of which ship with CUDA-Q QEC:
 //   model.onnx    the exported Ising predecoder (from the gated Hugging Face
 //                 SafeTensors checkpoint via the NVIDIA/Ising-Decoding repo)
 //   H_csr.bin     detector-error matrix, Ising detector order (binary CSR)
@@ -1362,7 +1362,7 @@ void show_help() {
          "metadata.txt, and D_sparse.txt. Required with --decoder_type "
          "trt_decoder and --save_dem; QEC_ISING_ARTIFACTS_DIR is honored "
          "when the flag is absent. Nothing in this directory ships with "
-         "CUDA-QX -- see the example docs for the preparation recipe.\n");
+         "CUDA-Q QEC -- see the example docs for the preparation recipe.\n");
   printf("  --save_dem <string> Generate the DEM + decoder config and save to "
          "a YAML file (generation phase).\n");
   printf(

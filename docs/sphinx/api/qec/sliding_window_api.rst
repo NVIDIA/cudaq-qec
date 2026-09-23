@@ -44,7 +44,7 @@
     `Toward Low-latency Iterative Decoding of QLDPC Codes Under Circuit-Level Noise <https://arxiv.org/abs/2403.18901>`_
 
     .. note::
-      It is required to create decoders with the `get_decoder` API from the CUDA-QX
+      It is required to create decoders with the `get_decoder` API from the CUDA-Q QEC
       extension points API, such as
 
       .. tab:: Python

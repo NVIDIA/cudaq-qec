@@ -53,7 +53,7 @@ Software
 - **CUDA-Q SDK**: pre-installed (provides ``libcudaq``, ``libnvqir``, ``nvq++``)
 - **DOCA**: 3.3 or later (for ``gpu_roce_transceiver`` RDMA transport)
 - **PyMatching decoder plugin**: the ``cudaq-qec-pymatching`` shared library
-  (``libcudaq-qec-pymatching.so``).  Built as part of the cudaqx build and
+  (``libcudaq-qec-pymatching.so``).  Built as part of the CUDA-Q QEC build and
   required at runtime.
 - **Predecoder ONNX model** (e.g. ``predecoder_memory_d13_T104_X.onnx``)
   placed under ``libs/qec/lib/realtime/``.  A cached TensorRT ``.engine`` file
@@ -71,8 +71,8 @@ Source Repositories
    * - Repository
      - URL
      - Version
-   * - **cudaqx**
-     - https://github.com/NVIDIA/cudaqx
+   * - **cudaq-qec**
+     - https://github.com/NVIDIA/cudaq-qec
      - ``main`` branch (or your feature branch)
    * - **cuda-quantum** (realtime)
      - https://github.com/NVIDIA/cuda-quantum
@@ -94,7 +94,7 @@ the ``GpuRoceTransceiver`` library for RDMA transport.
 Repository Layout
 -----------------
 
-Key files within ``cudaqx``:
+Key files within ``cudaq-qec``:
 
 .. code-block:: text
 
@@ -203,8 +203,8 @@ Building the FPGA demo requires ``holoscan-sensor-bridge`` and
    ninja && ninja install
    cd ../../..
 
-   # 4. Build cudaqx with HSB tools enabled
-   cmake -S cudaqx -B cudaqx/build \
+   # 4. Build cudaq-qec with HSB tools enabled
+   cmake -S cudaq-qec -B cudaq-qec/build \
      -DCMAKE_BUILD_TYPE=Release \
      -DCUDAQ_DIR=/path/to/cudaq-install/lib/cmake/cudaq/ \
      -DCUDAQ_REALTIME_ROOT=/tmp/cudaq-realtime \
@@ -214,7 +214,7 @@ Building the FPGA demo requires ``holoscan-sensor-bridge`` and
      -DCUDAQX_QEC_ENABLE_HSB_TOOLS=ON \
      -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/path/to/holoscan-sensor-bridge \
      -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/path/to/holoscan-sensor-bridge/build
-   cmake --build cudaqx/build --target \
+   cmake --build cudaq-qec/build --target \
      gpu_roce_predecoder_bridge \
      hsb_fpga_syndrome_playback \
      cudaq-qec-pymatching
@@ -251,7 +251,7 @@ Running
      --emulate \
      --setup-network \
      --cuda-quantum-dir /path/to/cuda-quantum \
-     --cuda-qx-dir /path/to/cudaqx \
+     --cuda-qx-dir /path/to/cudaq-qec \
      --data-dir /path/to/syndrome_data
 
 The ``--setup-network`` flag configures the ConnectX interface with the
@@ -264,7 +264,7 @@ After the initial network setup, subsequent runs are faster:
    ./libs/qec/unittests/realtime/gpu_roce_predecoder_test.sh \
      --emulate \
      --cuda-quantum-dir /path/to/cuda-quantum \
-     --cuda-qx-dir /path/to/cudaqx \
+     --cuda-qx-dir /path/to/cudaq-qec \
      --data-dir /path/to/syndrome_data
 
 
@@ -293,7 +293,7 @@ Running
 
    ./libs/qec/unittests/realtime/gpu_roce_predecoder_test.sh \
      --cuda-quantum-dir /path/to/cuda-quantum \
-     --cuda-qx-dir /path/to/cudaqx \
+     --cuda-qx-dir /path/to/cudaq-qec \
      --data-dir /path/to/syndrome_data \
      --device mlx5_4 \
      --bridge-ip 192.168.0.1 \
@@ -458,7 +458,7 @@ Directory Options
      - cuda-quantum source directory
    * - ``--cuda-qx-dir DIR``
      - ``/workspaces/cudaqx``
-     - cudaqx source directory
+     - cudaq-qec source directory
    * - ``--data-dir DIR``
      - Per-config default
      - Syndrome data directory (expects ``detectors.bin``)

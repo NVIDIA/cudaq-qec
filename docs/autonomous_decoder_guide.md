@@ -602,4 +602,4 @@ The mock decoder demonstrates:
 - **CUDA-Q Realtime API**: `cuda-quantum/realtime/include/cudaq/nvqlink/daemon/dispatcher/cudaq_realtime.h`
 - **Dispatch Kernel Source**: `cuda-quantum/realtime/lib/daemon/dispatcher/dispatch_kernel.cu`
 
-For questions or issues, consult the CUDA-QX development team.
+For questions or issues, consult the CUDA-Q QEC development team.

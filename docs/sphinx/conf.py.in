@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath('@CMAKE_BINARY_DIR@/python'))
 
 # -- Project information -----------------------------------------------------
 
-project = 'NVIDIA CUDA-QX'
+project = 'NVIDIA CUDA-Q QEC'
 copyright = '2025, NVIDIA Corporation & Affiliates'
 author = 'NVIDIA Corporation & Affiliates'
 
@@ -240,7 +240,7 @@ redirects = {
     "examples_rst/qec/stim_dem_decoder": "decoders.html",
     "examples_rst/qec/dem_sampling": "decoders.html",
     "examples_rst/qec/nv_qldpc_gamma_ensemble_user_guide": "../../performance/nv_qldpc_gamma_ensemble_user_guide.html",
-    # CUDA-Q Solvers was removed from CUDA-QX after the 0.6.0 release. Point the
+    # CUDA-Q Solvers was removed from this repository after the 0.6.0 release. Point the
     # previously published Solvers pages at CUDA-Q Algorithms, which supersedes
     # it, so existing links and search results do not 404.
     "components/solvers/introduction": _ALGORITHMS_DOCS,

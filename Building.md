@@ -1,10 +1,10 @@
-# Building CUDA-QX from Source
+# Building CUDA-Q QEC from Source
 
 This document is intended for anyone who wants to develop their own
 modifications of, or contributions to, this code base. This document may change
 over time, so be sure to always refer to the latest version of this document.
 
-Using the latest version of CUDA-QX often requires using a recent version of
+Using the latest version of CUDA-Q QEC often requires using a recent version of
 CUDA-Q. The instructions below refer to a public dev container that is made
 available on this repository. It will always contain a recent version of CUDA-Q
 (currently updated approximately weekly).
@@ -36,8 +36,8 @@ export CUDAQX_INSTALL_PREFIX=~/.cudaqx
 cd /workspaces
 
 # Get latest source code
-git clone https://github.com/NVIDIA/cudaqx.git
-cd cudaqx
+git clone https://github.com/NVIDIA/cudaq-qec.git
+cd cudaq-qec
 mkdir build && cd build
 
 # Configure your build (adjust as necessary)
@@ -69,7 +69,7 @@ Additionally, the following CMake options can be configured:
 - `CUDAQ_QEC_DECODERS_ONLY`: Build only the QEC decoder stack, with no CUDA-Q
   install required (see [Decoders-only Build](#decoders-only-build-no-cuda-q-required))
 
-If you want to change which version of CUDA-Q that CUDA-QX is paired with, you
+If you want to change which version of CUDA-Q that CUDA-Q QEC is paired with, you
 will need to rebuild CUDA-Q from source. This is achievable by going to the
 `/workspaces/cudaq` directory in that image and using the appropriate `git`
 commands to switch to whichever version you need. You can then use
@@ -80,7 +80,7 @@ support. This script rebuilds CUDA-Q from source using the same recipe as the
 CUDA-Q QEC CI.
 
 The above instructions provide a fully open-source way of building and
-contributing to CUDA-QX, but it should be noted that while this environment
+contributing to CUDA-Q QEC, but it should be noted that while this environment
 will have many GPU-accelerated simulators installed in it, it won't contain the
 *highest* performing CUDA-Q simulators. See [this note](https://nvidia.github.io/cuda-quantum/latest/using/install/data_center_install.html)
 for more details.
@@ -191,12 +191,12 @@ Consequently the two-process test (`test_decoding_server`) is a full-build
 test: it compiles the caller side, a quantum kernel, with `nvq++`. A
 decoders-only build verifies the server by building and starting it.
 
-## Building CUDA-QX Documentation from Source
+## Building CUDA-Q QEC Documentation from Source
 
 If you want to build and render our documentation from source, you can do this
 with the same environment as above. In particular, after running `ninja install`,
 you can run `ninja docs`. This places the documentation into the
-`/workspaces/cudaqx/build/docs/build/` directory. From there, you can open
+`/workspaces/cudaq-qec/build/docs/build/` directory. From there, you can open
 the `index.html` file in your browser, or if you are using VSCode or Cursor, you
 can simply browse to the `index.html` file in the Explorer panel, right click on
 the file, and select "Open with Live Server", and that will open your browser

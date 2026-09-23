@@ -76,7 +76,7 @@
     currentSpan.className = "rst-current-version";
     currentSpan.setAttribute("data-toggle", "rst-current-version");
     currentSpan.innerHTML =
-      '<span class="fa fa-book"> CUDA-QX</span> v: ' + current + " " +
+      '<span class="fa fa-book"> CUDA-Q QEC</span> v: ' + current + " " +
       '<span class="fa fa-caret-down"></span>';
     flyout.appendChild(currentSpan);
 
