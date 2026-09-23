@@ -167,6 +167,11 @@ public:
       for (auto &a : args)
         argv.push_back(a.data());
       argv.push_back(nullptr);
+      // Enable child-process statistics so shutdown exercises the production
+      // reporting paths. Extra stdout lines are skipped by readLineWithPrefix.
+      // Do not set these in the parent.
+      ::setenv("QEC_DECODING_SERVER_HOP_STATS", "full", 1);
+      ::setenv("QEC_DECODING_SERVER_STATS", "1", 1);
       ::execv(server.c_str(), argv.data());
       std::perror("execv decoding_server");
       _exit(127);

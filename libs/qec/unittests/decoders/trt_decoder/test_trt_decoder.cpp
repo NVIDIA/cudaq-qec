@@ -9,6 +9,7 @@
 #include "trt_test_data.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
+#include "cudaq/qec/logger.h"
 #include "cudaq/qec/trt_decoder_internal.h"
 #include <chrono>
 #include <cmath>
@@ -76,6 +77,22 @@ std::optional<std::string> get_uint8_onnx_asset_path() {
 std::optional<std::string> get_uint8_to_float_onnx_asset_path() {
 #ifdef TRT_TEST_UINT8_TO_FLOAT_ONNX_PATH
   return std::string(TRT_TEST_UINT8_TO_FLOAT_ONNX_PATH);
+#else
+  return std::nullopt;
+#endif
+}
+
+std::optional<std::string> get_float_to_uint8_onnx_asset_path() {
+#ifdef TRT_TEST_FLOAT_TO_UINT8_ONNX_PATH
+  return std::string(TRT_TEST_FLOAT_TO_UINT8_ONNX_PATH);
+#else
+  return std::nullopt;
+#endif
+}
+
+std::optional<std::string> get_scalar_onnx_asset_path() {
+#ifdef TRT_TEST_SCALAR_ONNX_PATH
+  return std::string(TRT_TEST_SCALAR_ONNX_PATH);
 #else
   return std::nullopt;
 #endif
@@ -882,6 +899,199 @@ TEST_F(TRTDecoderTest, CompositeGlobalDecoderCombinesLogicalFrame) {
   ASSERT_EQ(results[1].result.size(), 1u);
   EXPECT_FLOAT_EQ(results[0].result[0], 0.0);
   EXPECT_FLOAT_EQ(results[1].result[0], 1.0);
+}
+
+TEST_F(TRTDecoderTest, FloatToUint8IdentityDecode) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  auto onnx_path = get_float_to_uint8_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated float-to-uint8 ONNX fixture is unavailable";
+
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("errors"));
+  params.insert("use_cuda_graph", false);
+  auto dec = decoder::get("trt_decoder", make_identity_h(3), params);
+  auto result = dec->decode({0.0, 1.0, 1.0});
+  ASSERT_TRUE(result.converged);
+  ASSERT_EQ(result.result.size(), 3u);
+  EXPECT_FLOAT_EQ(result.result[0], 0.0);
+  EXPECT_FLOAT_EQ(result.result[1], 1.0);
+  EXPECT_FLOAT_EQ(result.result[2], 1.0);
+}
+
+TEST_F(TRTDecoderTest, ScalarIdentityUsesBatchSizeOne) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  auto onnx_path = get_scalar_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated scalar ONNX fixture is unavailable";
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("errors"));
+  params.insert("use_cuda_graph", false);
+  auto dec = decoder::get("trt_decoder", make_identity_h(1), params);
+  auto result = dec->decode({0.75});
+  ASSERT_TRUE(result.converged);
+  ASSERT_EQ(result.result.size(), 1u);
+}
+
+TEST_F(TRTDecoderTest, GlobalLutWithoutObservablesMovesResidual) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  auto onnx_path = get_uint8_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated uint8 ONNX fixture is unavailable";
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("residual_detectors"));
+  params.insert("use_cuda_graph", false);
+  params.insert("global_decoder", std::string("single_error_lut"));
+  params.insert("global_decoder_params", cudaqx::heterogeneous_map{});
+  auto dec = decoder::get(
+      "trt_decoder", decoder_init(sparse_binary_matrix(make_identity_h(3))),
+      cudaq::qec::decode_result_type::errors, params);
+  auto result = dec->decode({1.0, 0.0, 0.0});
+  ASSERT_TRUE(result.converged);
+  ASSERT_EQ(result.result.size(), 3u);
+}
+
+#ifdef CUDAQX_QEC_HAS_CHROMOBIUS
+TEST_F(TRTDecoderTest, GlobalChromobiusFromStimDem) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  auto onnx_path = get_dynamic_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated dynamic ONNX fixture is unavailable";
+  constexpr const char *dem = R"DEM(
+error(0.1) D0 D1
+error(0.1) D2
+error(0.1) D0 L0
+detector(0, 0, 0, 1) D0
+detector(1, 0, 0, 2) D1
+detector(2, 0, 0, 0) D2
+)DEM";
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("residual_detectors"));
+  params.insert("batch_size", std::size_t{1});
+  params.insert("use_cuda_graph", false);
+  params.insert("global_decoder", std::string("chromobius"));
+  params.insert("global_decoder_params", cudaqx::heterogeneous_map{});
+  auto dec = decoder::get("trt_decoder", decoder_init::from_stim_dem(dem),
+                          cudaq::qec::decode_result_type::observables, params);
+  auto result = dec->decode({1.0, 0.0, 0.0});
+  ASSERT_TRUE(result.converged);
+}
+#endif
+
+// Two static-range profiles on a dynamic ONNX: the support probe must refuse
+// CUDA graphs (dynamic dims and/or profile count > 1).
+TEST_F(TRTDecoderTest, TwoOptimizationProfilesDisableCudaGraphs) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  auto onnx_path = get_dynamic_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated dynamic ONNX fixture is unavailable";
+
+  TestTrtLogger logger;
+  std::unique_ptr<nvinfer1::IBuilder> builder;
+  std::unique_ptr<nvinfer1::INetworkDefinition> network;
+  std::unique_ptr<nvonnxparser::IParser> parser;
+  std::unique_ptr<nvinfer1::IBuilderConfig> config;
+  std::unique_ptr<nvinfer1::ICudaEngine> engine;
+  try {
+    builder.reset(nvinfer1::createInferBuilder(logger));
+    ASSERT_NE(builder, nullptr);
+    network.reset(builder->createNetworkV2(
+        1U << static_cast<uint32_t>(
+            nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED)));
+    ASSERT_NE(network, nullptr);
+    parser.reset(nvonnxparser::createParser(*network, logger));
+    ASSERT_NE(parser, nullptr);
+    auto onnx_data = cudaq::qec::trt_decoder_internal::load_file(*onnx_path);
+    ASSERT_TRUE(parser->parse(onnx_data.data(), onnx_data.size()));
+    config.reset(builder->createBuilderConfig());
+    ASSERT_NE(config, nullptr);
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE,
+                               1ULL << 28);
+    ASSERT_GT(network->getNbInputs(), 0);
+    nvinfer1::ITensor *input = network->getInput(0);
+    ASSERT_NE(input, nullptr);
+    nvinfer1::Dims dims = input->getDimensions();
+    ASSERT_GT(dims.nbDims, 0);
+    ASSERT_EQ(dims.d[0], -1);
+    for (int32_t batch : {1, 2}) {
+      nvinfer1::IOptimizationProfile *profile =
+          builder->createOptimizationProfile();
+      ASSERT_NE(profile, nullptr);
+      nvinfer1::Dims shaped = dims;
+      shaped.d[0] = batch;
+      ASSERT_TRUE(profile->setDimensions(
+          input->getName(), nvinfer1::OptProfileSelector::kMIN, shaped));
+      ASSERT_TRUE(profile->setDimensions(
+          input->getName(), nvinfer1::OptProfileSelector::kOPT, shaped));
+      ASSERT_TRUE(profile->setDimensions(
+          input->getName(), nvinfer1::OptProfileSelector::kMAX, shaped));
+      config->addOptimizationProfile(profile);
+    }
+    engine.reset(builder->buildEngineWithConfig(*network, *config));
+  } catch (const std::exception &e) {
+    FAIL() << "TensorRT two-profile build failed: " << e.what();
+  }
+  ASSERT_NE(engine, nullptr);
+  ASSERT_GT(engine->getNbOptimizationProfiles(), 1);
+
+  const auto engine_path =
+      make_temp_engine_path("cudaq_qec_trt_two_profile.engine");
+  std::filesystem::remove(engine_path);
+  cudaq::qec::trt_decoder_internal::save_engine_to_file(engine.get(),
+                                                        engine_path.string());
+  engine.reset();
+
+  const auto prev = cudaq::qec::detail::get_log_level();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  cudaqx::heterogeneous_map params;
+  params.insert("engine_load_path", engine_path.string());
+  params.insert("engine_output_format", std::string("errors"));
+  // Two-profile engines keep a dynamic batch dim; the loader needs batch_size
+  // to size I/O buffers even though CUDA graphs will be refused.
+  params.insert("batch_size", std::size_t{1});
+  auto dec = decoder::get("trt_decoder", make_identity_h(3), params);
+  cudaq::qec::detail::flush_logs();
+  const std::string out = testing::internal::GetCapturedStdout() +
+                          testing::internal::GetCapturedStderr();
+  cudaq::qec::detail::set_log_level(prev);
+  std::filesystem::remove(engine_path);
+  EXPECT_NE(out.find("CUDA graphs not supported"), std::string::npos);
+  auto result = dec->decode({1.0, 0.0, 0.0});
+  ASSERT_TRUE(result.converged);
+  ASSERT_EQ(result.result.size(), 3u);
+}
+
+TEST_F(TRTDecoderTest, InfoLogCountsZeroAndNonzeroDetectors) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  auto onnx_path = get_uint8_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated uint8 ONNX fixture is unavailable";
+  const auto prev = cudaq::qec::detail::get_log_level();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("errors"));
+  params.insert("use_cuda_graph", false);
+  auto dec = decoder::get("trt_decoder", make_identity_h(3), params);
+  testing::internal::CaptureStdout();
+  auto result = dec->decode({0.0, 1.0, 0.0});
+  cudaq::qec::detail::flush_logs();
+  const std::string out = testing::internal::GetCapturedStdout();
+  cudaq::qec::detail::set_log_level(prev);
+  ASSERT_TRUE(result.converged);
+  EXPECT_NE(out.find("non-zero input detectors"), std::string::npos);
 }
 
 // Note: Constructor tests and parse_precision tests are disabled because they

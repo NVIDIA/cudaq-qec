@@ -30,6 +30,7 @@ endif()
 include(GoogleTest)
 
 find_package(CUDAToolkit REQUIRED)
+find_package(Threads REQUIRED)
 
 # ==============================================================================
 add_compile_options(-Wno-attributes) 
@@ -73,13 +74,258 @@ if(TARGET cudaq-qec-decoding-server)
     CUDA::cudart)
   add_dependencies(CUDAQXQECUnitTests test_decoding_server_core)
   gtest_discover_tests(test_decoding_server_core)
+
+  # -------------------------------------------------------------------------
+  # Realtime, tool, and isolated-fixture tests
+  # -------------------------------------------------------------------------
+  set(_qec_cc_cqr_dir ${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/decoding-server-cqr)
+  set(_qec_cc_tools_decoding_server
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools/decoding-server/decoding_server.cpp)
+
+  function(qec_cc_gtest_target name)
+    add_dependencies(CUDAQXQECUnitTests ${name})
+    gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
+  endfunction()
+
+  if(TARGET cudaq-qec-realtime-decoding-server-cqr)
+    add_executable(test_decoding_server_cqr test_decoding_server_cqr.cpp)
+    target_include_directories(test_decoding_server_cqr PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${_qec_cc_cqr_dir}
+      ${CUDAQ_REALTIME_INCLUDE_DIR}
+      ${CUDAQ_DEVICE_CALL_INCLUDE_DIR}
+      ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(test_decoding_server_cqr PRIVATE
+      GTest::gtest
+      cudaq-qec-realtime-decoding-server-cqr
+      cudaq-qec-realtime-decoding
+      cudaq-qec-decoders)
+    qec_cc_gtest_target(test_decoding_server_cqr)
+  endif()
+
+  add_executable(test_decoding_server_lifecycle
+    test_decoding_server_lifecycle.cpp
+    qec_test_cuda_pass.cpp)
+  target_include_directories(test_decoding_server_lifecycle PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${_qec_cc_cqr_dir}
+    ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(test_decoding_server_lifecycle PRIVATE
+    GTest::gtest_main
+    cudaq-qec-decoding-server
+    cudaq::cudaq
+    CUDA::cudart)
+  target_link_options(test_decoding_server_lifecycle PRIVATE
+    "LINKER:--wrap=cudaSetDevice"
+    "LINKER:--wrap=cudaGetDevice"
+    "LINKER:--wrap=cudaGetDeviceCount"
+    "LINKER:--wrap=cudaGetErrorString")
+  qec_cc_gtest_target(test_decoding_server_lifecycle)
+
+  add_executable(test_hopstats test_hopstats.cpp)
+  target_include_directories(test_hopstats PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${_qec_cc_cqr_dir}
+    ${CUDAQ_REALTIME_INCLUDE_DIR}
+    ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(test_hopstats PRIVATE GTest::gtest Threads::Threads)
+  target_link_options(test_hopstats PRIVATE
+    "LINKER:--wrap=pthread_setaffinity_np")
+  qec_cc_gtest_target(test_hopstats)
+
+  if(TARGET cudaq-qec-decoding-server-device-graph)
+    set(_qec_cc_bridge_dir "${CMAKE_CURRENT_BINARY_DIR}/qec_cc_bridge")
+    file(MAKE_DIRECTORY "${_qec_cc_bridge_dir}")
+    file(WRITE "${_qec_cc_bridge_dir}/libcudaq-realtime-bridge-gpu-roce.so" "")
+    file(WRITE "${_qec_cc_bridge_dir}/libcudaq-realtime-bridge-gpu_roce.so" "")
+
+    add_executable(test_device_graph
+      test_device_graph.cpp
+      ${_qec_cc_cqr_dir}/DeviceGraphFactory.cpp
+      ${_qec_cc_cqr_dir}/DeviceGraphTransceiver.cpp
+      ${_qec_cc_cqr_dir}/DeviceGraphRingConsumer.cpp)
+    target_compile_definitions(test_device_graph PRIVATE
+      CUDAQ_QEC_DEVICE_GRAPH_AVAILABLE
+      QEC_BRIDGE_PROVIDER_DIR="${_qec_cc_bridge_dir}")
+    target_include_directories(test_device_graph PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${_qec_cc_cqr_dir}
+      ${CUDAQ_REALTIME_INCLUDE_DIR}
+      ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(test_device_graph PRIVATE
+      GTest::gtest_main
+      cudaq-qec-decoding-server
+      CUDA::cudart
+      ${CMAKE_DL_LIBS})
+    target_link_options(test_device_graph PRIVATE
+      "LINKER:--wrap=cudaSetDevice"
+      "LINKER:--wrap=cudaGetDevice"
+      "LINKER:--wrap=cudaGetDeviceProperties"
+      "LINKER:--wrap=cudaGetDeviceProperties_v2"
+      "LINKER:--wrap=cudaHostAlloc"
+      "LINKER:--wrap=cudaHostGetDevicePointer"
+      "LINKER:--wrap=cudaFreeHost"
+      "LINKER:--wrap=cudaMalloc"
+      "LINKER:--wrap=cudaMemset"
+      "LINKER:--wrap=cudaFree"
+      "LINKER:--wrap=cudaStreamCreate"
+      "LINKER:--wrap=cudaStreamCreateWithFlags"
+      "LINKER:--wrap=cudaStreamSynchronize"
+      "LINKER:--wrap=cudaStreamDestroy"
+      "LINKER:--wrap=cudaMemcpyAsync"
+      "LINKER:--wrap=cudaGetErrorString"
+      "LINKER:--wrap=cudaq_bridge_create_from_library"
+      "LINKER:--wrap=cudaq_bridge_destroy"
+      "LINKER:--wrap=cudaq_bridge_get_transport_context"
+      "LINKER:--wrap=cudaq_bridge_get_ring_geometry"
+      "LINKER:--wrap=cudaq_bridge_get_endpoint_info"
+      "LINKER:--wrap=cudaq_bridge_connect"
+      "LINKER:--wrap=cudaq_bridge_launch"
+      "LINKER:--wrap=cudaq_bridge_disconnect"
+      "LINKER:--wrap=dlsym")
+    qec_cc_gtest_target(test_device_graph)
+  endif()
+
+  if(EXISTS "${_qec_cc_tools_decoding_server}")
+    set(_qec_cc_bridge_dir "${CMAKE_CURRENT_BINARY_DIR}/qec_cc_bridge")
+    file(MAKE_DIRECTORY "${_qec_cc_bridge_dir}")
+    file(WRITE "${_qec_cc_bridge_dir}/libcudaq-realtime-bridge-gpu-roce.so" "")
+    file(WRITE "${_qec_cc_bridge_dir}/libcudaq-realtime-bridge-gpu_roce.so" "")
+    set(_qec_cc_cli_wrap
+      "LINKER:--wrap=open"
+      "LINKER:--wrap=open64"
+      "LINKER:--wrap=close"
+      "LINKER:--wrap=cudaq_bridge_create_from_library"
+      "LINKER:--wrap=cudaq_bridge_destroy"
+      "LINKER:--wrap=cudaq_bridge_disconnect"
+      "LINKER:--wrap=cudaq_bridge_connect"
+      "LINKER:--wrap=cudaq_bridge_launch"
+      "LINKER:--wrap=cudaq_bridge_get_ring_geometry"
+      "LINKER:--wrap=cudaq_bridge_get_endpoint_info"
+      "LINKER:--wrap=cudaq_bridge_get_transport_context"
+      "LINKER:--wrap=cudaq_dispatch_manager_create"
+      "LINKER:--wrap=cudaq_dispatch_manager_destroy"
+      "LINKER:--wrap=cudaq_dispatcher_create"
+      "LINKER:--wrap=cudaq_dispatcher_destroy"
+      "LINKER:--wrap=cudaq_dispatcher_set_ringbuffer"
+      "LINKER:--wrap=cudaq_dispatcher_set_function_table"
+      "LINKER:--wrap=cudaq_dispatcher_set_control"
+      "LINKER:--wrap=cudaq_dispatcher_start"
+      "LINKER:--wrap=cudaq_dispatcher_stop")
+
+    add_executable(test_decoding_server_cli
+      test_decoding_server_cli.cpp
+      qec_test_cuda_pass.cpp
+      ${_qec_cc_tools_decoding_server})
+    set_source_files_properties(${_qec_cc_tools_decoding_server}
+      PROPERTIES COMPILE_DEFINITIONS "main=decoding_server_main")
+    target_compile_definitions(test_decoding_server_cli PRIVATE
+      QEC_HAVE_DEVICE_GRAPH_DISPATCH
+      QEC_CC_STRONG_DEVICE_GRAPH
+      QEC_BRIDGE_PROVIDER_DIR="${CMAKE_CURRENT_BINARY_DIR}/qec_cc_bridge")
+    target_include_directories(test_decoding_server_cli PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${_qec_cc_cqr_dir}
+      ${CUDAQ_REALTIME_INCLUDE_DIR}
+      ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(test_decoding_server_cli PRIVATE
+      GTest::gtest
+      cudaq-qec-decoding-server
+      cudaq-qec-realtime-decoding
+      cudaq-qec-decoders
+      CUDA::cudart)
+    target_link_options(test_decoding_server_cli PRIVATE
+      ${_qec_cc_cli_wrap}
+      "LINKER:--wrap=cudaSetDevice"
+      "LINKER:--wrap=cudaGetDevice"
+      "LINKER:--wrap=cudaGetDeviceCount"
+      "LINKER:--wrap=cudaGetErrorString")
+    qec_cc_gtest_target(test_decoding_server_cli)
+
+    add_executable(test_decoding_server_cli_nograph
+      test_decoding_server_cli.cpp
+      ${_qec_cc_tools_decoding_server})
+    target_compile_definitions(test_decoding_server_cli_nograph PRIVATE
+      QEC_BRIDGE_PROVIDER_DIR="${CMAKE_CURRENT_BINARY_DIR}/qec_cc_bridge")
+    target_include_directories(test_decoding_server_cli_nograph PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${_qec_cc_cqr_dir}
+      ${CUDAQ_REALTIME_INCLUDE_DIR}
+      ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(test_decoding_server_cli_nograph PRIVATE
+      GTest::gtest
+      cudaq-qec-decoding-server
+      cudaq-qec-realtime-decoding
+      cudaq-qec-decoders)
+    target_link_options(test_decoding_server_cli_nograph PRIVATE ${_qec_cc_cli_wrap})
+    qec_cc_gtest_target(test_decoding_server_cli_nograph)
+  endif()
 else()
   message(STATUS "Skipping test_decoders_yaml / test_decoding_server_core "
                  "(cudaq-qec-decoding-server not built)")
 endif()
 
+if(TARGET cudaq-qec-realtime-decoding-cudaq-stubs)
+  add_executable(test_cudaq_stubs test_cudaq_stubs.cpp)
+  target_link_libraries(test_cudaq_stubs PRIVATE
+    GTest::gtest_main
+    cudaq-qec-realtime-decoding-cudaq-stubs)
+  add_dependencies(CUDAQXQECUnitTests test_cudaq_stubs)
+  gtest_discover_tests(test_cudaq_stubs)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/simulation-cqr/simulation_cqr_host.cpp"
+   AND TARGET cudaq-qec-realtime-decoding)
+  add_executable(test_simulation_cqr_host
+    test_simulation_cqr_host.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/simulation-cqr/simulation_cqr_host.cpp)
+  target_include_directories(test_simulation_cqr_host PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime)
+  target_link_libraries(test_simulation_cqr_host PRIVATE
+    GTest::gtest_main
+    cudaq-qec-realtime-decoding
+    cudaq-qec-decoders)
+  add_dependencies(CUDAQXQECUnitTests test_simulation_cqr_host)
+  gtest_discover_tests(test_simulation_cqr_host)
+endif()
+
+if(TARGET cudaq-qec-realtime-decoding-quantinuum)
+  add_library(cudaq-qec-realtime-decoding-quantinuum-private SHARED
+    quantinuum_private_impl.cpp)
+  set_target_properties(cudaq-qec-realtime-decoding-quantinuum-private PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qec_cc_private"
+    OUTPUT_NAME cudaq-qec-realtime-decoding-quantinuum-private)
+  add_executable(test_quantinuum_private test_quantinuum_private.cpp)
+  target_link_libraries(test_quantinuum_private PRIVATE
+    GTest::gtest_main
+    cudaq-qec-realtime-decoding-quantinuum
+    cudaq::cudaq
+    cudaq::cudaq-common)
+  target_link_options(test_quantinuum_private PRIVATE
+    "LINKER:--export-dynamic")
+  add_dependencies(test_quantinuum_private
+    cudaq-qec-realtime-decoding-quantinuum-private)
+  add_dependencies(CUDAQXQECUnitTests test_quantinuum_private)
+  gtest_discover_tests(test_quantinuum_private
+    DISCOVERY_MODE PRE_TEST
+    PROPERTIES
+      ENVIRONMENT "CUDAQ_QTM_PRIVATE_IMPL=1"
+      ENVIRONMENT_MODIFICATION
+        "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/qec_cc_private")
+endif()
+
+add_library(qec_cc_test_plugin SHARED qec_cc_test_plugin.cpp)
+set_target_properties(qec_cc_test_plugin PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qec_cc_test_plugins"
+  PREFIX "lib"
+  OUTPUT_NAME qec_cc_test_plugin)
+
 add_executable(test_qec test_qec.cpp)
 target_link_libraries(test_qec PRIVATE GTest::gtest_main cudaq-qec cudaq::cudaq-stim-target)
+target_compile_definitions(test_qec PRIVATE
+  QEC_CC_TEST_PLUGIN_SO="$<TARGET_FILE:qec_cc_test_plugin>")
+add_dependencies(test_qec qec_cc_test_plugin)
 add_dependencies(CUDAQXQECUnitTests test_qec)
 gtest_discover_tests(test_qec)
 
@@ -89,6 +335,28 @@ target_link_libraries(test_dem_sampling PRIVATE CUDA::cudart)
 target_include_directories(test_dem_sampling PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 add_dependencies(CUDAQXQECUnitTests test_dem_sampling)
 gtest_discover_tests(test_dem_sampling)
+
+add_executable(test_dem_sampling_sparse_retry
+  test_dem_sampling_sparse_retry.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/dem_sampling/dem_sampling_gpu.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/dem_sampling/dem_sampling_utils.cu)
+set_source_files_properties(
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/dem_sampling/dem_sampling_utils.cu
+  PROPERTIES LANGUAGE CUDA)
+target_include_directories(test_dem_sampling_sparse_retry PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/dem_sampling
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${CMAKE_SOURCE_DIR}/libs/core/include
+  ${CUDAToolkit_INCLUDE_DIRS})
+target_link_libraries(test_dem_sampling_sparse_retry PRIVATE
+  GTest::gtest
+  CUDA::cudart
+  cuStabilizer::cuStabilizer
+  cudaqx-core)
+target_link_options(test_dem_sampling_sparse_retry PRIVATE
+  "LINKER:--wrap=custabilizerSampleProbArraySparseCompute")
+add_dependencies(CUDAQXQECUnitTests test_dem_sampling_sparse_retry)
+gtest_discover_tests(test_dem_sampling_sparse_retry)
 
 add_executable(test_sparse_binary_matrix test_sparse_binary_matrix.cpp)
 target_link_libraries(test_sparse_binary_matrix PRIVATE GTest::gtest_main
@@ -103,6 +371,8 @@ add_dependencies(CUDAQXQECUnitTests test_extended_dem)
 gtest_discover_tests(test_extended_dem)
 
 add_executable(test_dem_construction test_dem_construction.cpp)
+target_include_directories(test_dem_construction PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
 target_link_libraries(test_dem_construction PRIVATE GTest::gtest_main
                                             cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_dem_construction)
@@ -116,9 +386,88 @@ add_dependencies(CUDAQXQECUnitTests test_dem_construction_code)
 gtest_discover_tests(test_dem_construction_code)
 
 add_executable(test_logger test_logger.cpp)
+target_include_directories(test_logger PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
 target_link_libraries(test_logger PRIVATE GTest::gtest_main cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_logger)
 gtest_discover_tests(test_logger)
+
+add_executable(test_logger_level_helper test_logger_level_helper.cpp)
+target_link_libraries(test_logger_level_helper PRIVATE cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_logger_level_helper)
+function(qec_cc_logger_env_test name level)
+  add_test(NAME LoggerEnv.${name} COMMAND test_logger_level_helper ${name})
+  set_tests_properties(LoggerEnv.${name} PROPERTIES
+    ENVIRONMENT "CUDAQ_LOG_LEVEL=${level}"
+    LABELS "qec")
+endfunction()
+qec_cc_logger_env_test(trace trace)
+qec_cc_logger_env_test(debug debug)
+qec_cc_logger_env_test(info info)
+qec_cc_logger_env_test(warning warning)
+qec_cc_logger_env_test(error error)
+qec_cc_logger_env_test(invalid not-a-level)
+
+add_executable(test_decoder_config_payload
+  test_decoder_config_payload.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder_config_payload.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder_config_payload_provider.cpp)
+target_include_directories(test_decoder_config_payload PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/cc_payload_stubs
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${CMAKE_SOURCE_DIR}/libs/core/include)
+target_link_libraries(test_decoder_config_payload PRIVATE GTest::gtest)
+add_dependencies(CUDAQXQECUnitTests test_decoder_config_payload)
+gtest_discover_tests(test_decoder_config_payload)
+
+add_executable(test_decoder_cuda_rollback
+  test_decoder_cuda_rollback.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder_init.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoders/sliding_window.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder_stats.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoder_config_schema.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/logger.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/logger_forwarder.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/plugin_loader.cpp)
+target_include_directories(test_decoder_cuda_rollback PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${CMAKE_SOURCE_DIR}/libs/core/include
+  ${CUDAToolkit_INCLUDE_DIRS})
+target_link_libraries(test_decoder_cuda_rollback PRIVATE
+  GTest::gtest
+  cudaq-qec-dem
+  cudaqx-core
+  fmt::fmt-header-only
+  Threads::Threads
+  ${CMAKE_DL_LIBS})
+add_dependencies(CUDAQXQECUnitTests test_decoder_cuda_rollback)
+gtest_discover_tests(test_decoder_cuda_rollback)
+
+set(_qec_fwd_src "${CMAKE_CURRENT_SOURCE_DIR}/../lib/logger_forwarder.cpp")
+set(_qec_fwd_gen "${CMAKE_CURRENT_BINARY_DIR}/logger_forwarder_races_tu.cpp")
+add_custom_command(
+  OUTPUT "${_qec_fwd_gen}"
+  COMMAND python3
+    "${CMAKE_CURRENT_SOURCE_DIR}/gen_logger_forwarder_races_tu.py"
+    "${_qec_fwd_src}" "${_qec_fwd_gen}"
+  DEPENDS
+    "${_qec_fwd_src}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gen_logger_forwarder_races_tu.py"
+  COMMENT "Instrumenting logger_forwarder.cpp for isolated race tests")
+add_executable(test_logger_forwarder_races
+  test_logger_forwarder_races.cpp
+  ${_qec_fwd_gen})
+target_include_directories(test_logger_forwarder_races PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${CMAKE_SOURCE_DIR}/libs/core/include)
+target_link_libraries(test_logger_forwarder_races PRIVATE
+  GTest::gtest
+  Threads::Threads
+  fmt::fmt-header-only)
+add_dependencies(CUDAQXQECUnitTests test_logger_forwarder_races)
+gtest_discover_tests(test_logger_forwarder_races)
 
 # TensorRT decoder test is only built for x86 architectures
 if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(AMD64|amd64)|(^i.86$)")
@@ -173,11 +522,15 @@ if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(A
       set(_trt_dynamic_identity_onnx "${_trt_generated_onnx_dir}/trt_dynamic_identity.onnx")
       set(_trt_uint8_identity_onnx "${_trt_generated_onnx_dir}/trt_uint8_identity.onnx")
       set(_trt_uint8_to_float_onnx "${_trt_generated_onnx_dir}/trt_uint8_to_float.onnx")
+      set(_trt_float_to_uint8_onnx "${_trt_generated_onnx_dir}/trt_float_to_uint8.onnx")
+      set(_trt_scalar_identity_onnx "${_trt_generated_onnx_dir}/trt_scalar_identity.onnx")
       add_custom_command(
         OUTPUT
           "${_trt_dynamic_identity_onnx}"
           "${_trt_uint8_identity_onnx}"
           "${_trt_uint8_to_float_onnx}"
+          "${_trt_float_to_uint8_onnx}"
+          "${_trt_scalar_identity_onnx}"
         COMMAND ${Python_EXECUTABLE}
           "${CMAKE_CURRENT_SOURCE_DIR}/decoders/trt_decoder/generate_trt_decoder_onnx.py"
           --out-dir "${_trt_generated_onnx_dir}"
@@ -187,12 +540,16 @@ if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(A
         DEPENDS
           "${_trt_dynamic_identity_onnx}"
           "${_trt_uint8_identity_onnx}"
-          "${_trt_uint8_to_float_onnx}")
+          "${_trt_uint8_to_float_onnx}"
+          "${_trt_float_to_uint8_onnx}"
+          "${_trt_scalar_identity_onnx}")
       add_dependencies(test_trt_decoder generate_trt_decoder_onnx)
       target_compile_definitions(test_trt_decoder PRIVATE
         TRT_TEST_DYNAMIC_ONNX_PATH="${_trt_dynamic_identity_onnx}"
         TRT_TEST_UINT8_ONNX_PATH="${_trt_uint8_identity_onnx}"
-        TRT_TEST_UINT8_TO_FLOAT_ONNX_PATH="${_trt_uint8_to_float_onnx}")
+        TRT_TEST_UINT8_TO_FLOAT_ONNX_PATH="${_trt_uint8_to_float_onnx}"
+        TRT_TEST_FLOAT_TO_UINT8_ONNX_PATH="${_trt_float_to_uint8_onnx}"
+        TRT_TEST_SCALAR_ONNX_PATH="${_trt_scalar_identity_onnx}")
     else()
       message(WARNING "Python package onnx not found. "
                       "Skipping generated TensorRT decoder ONNX fixtures.")
@@ -204,6 +561,74 @@ if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(A
     TRT_TEST_ONNX_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../../assets/tests/surface_code_decoder.onnx")
   add_dependencies(CUDAQXQECUnitTests test_trt_decoder)
   gtest_discover_tests(test_trt_decoder)
+
+  if(TARGET cudaq-qec-chromobius)
+    add_dependencies(test_trt_decoder cudaq-qec-chromobius)
+    target_compile_definitions(test_trt_decoder PRIVATE CUDAQX_QEC_HAS_CHROMOBIUS)
+  endif()
+
+  find_library(TENSORRT_ONNX_LIBRARY nvonnxparser
+      PATHS
+          ${TENSORRT_ROOT}/lib
+          /usr/lib/x86_64-linux-gnu
+          /usr/lib/aarch64-linux-gnu
+          /usr/local/cuda/lib64
+          /usr/local/tensorrt/lib
+          /opt/tensorrt/lib
+      NO_DEFAULT_PATH
+  )
+  if(TENSORRT_ONNX_LIBRARY)
+    target_link_libraries(test_trt_decoder PRIVATE ${TENSORRT_ONNX_LIBRARY})
+  endif()
+
+  add_executable(test_trt_decoder_internal
+    decoders/trt_decoder/test_trt_decoder_internal.cpp)
+  target_include_directories(test_trt_decoder_internal PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/libs/core/include
+    ${CUDAToolkit_INCLUDE_DIRS}
+    ${TENSORRT_INCLUDE_DIR})
+  target_link_libraries(test_trt_decoder_internal PRIVATE
+    GTest::gtest
+    cudaq-qec-decoders
+    CUDA::cudart
+    ${TENSORRT_LIBRARY}
+    ${TENSORRT_ONNX_LIBRARY})
+  target_link_options(test_trt_decoder_internal PRIVATE
+    "LINKER:--wrap=cudaGraphDestroy"
+    "LINKER:--wrap=cudaGraphExecDestroy")
+  add_dependencies(CUDAQXQECUnitTests test_trt_decoder_internal)
+  gtest_discover_tests(test_trt_decoder_internal)
+
+  add_executable(test_trt_cuda_fail
+    decoders/trt_decoder/test_trt_cuda_fail.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../lib/decoders/plugins/trt_decoder/trt_decoder.cpp)
+  target_include_directories(test_trt_cuda_fail PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/libs/core/include
+    ${CUDAToolkit_INCLUDE_DIRS}
+    ${TENSORRT_INCLUDE_DIR})
+  target_link_libraries(test_trt_cuda_fail PRIVATE
+    GTest::gtest
+    cudaq-qec-decoders
+    CUDA::cudart
+    ${TENSORRT_LIBRARY}
+    ${TENSORRT_ONNX_LIBRARY})
+  target_link_options(test_trt_cuda_fail PRIVATE
+    "LINKER:--wrap=cudaMemset"
+    "LINKER:--wrap=cudaStreamBeginCapture"
+    "LINKER:--wrap=cudaStreamEndCapture"
+    "LINKER:--wrap=cudaGraphInstantiate"
+    "LINKER:--wrap=cudaGraphDestroy"
+    "LINKER:--wrap=cudaGraphExecDestroy")
+  if(DEFINED _trt_uint8_identity_onnx)
+    add_dependencies(test_trt_cuda_fail generate_trt_decoder_onnx)
+    target_compile_definitions(test_trt_cuda_fail PRIVATE
+      TRT_TEST_UINT8_ONNX_PATH="${_trt_uint8_identity_onnx}")
+  endif()
+  add_dependencies(CUDAQXQECUnitTests test_trt_cuda_fail)
+  gtest_discover_tests(test_trt_cuda_fail)
 endif()
 
 # ==============================================================================

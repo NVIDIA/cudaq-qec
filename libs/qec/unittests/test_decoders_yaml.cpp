@@ -848,6 +848,13 @@ decoders:
   const auto &args = parsed.decoders[0].decoder_custom_args.map();
   EXPECT_EQ(args.get<std::string>("global_decoder"), "my_plugin");
   EXPECT_FALSE(args.contains("global_decoder_params"));
+
+  // Constructor-facing parameters also leave the section absent because an
+  // unregistered global decoder has no schema from which to materialize it.
+  auto params =
+      cudaq::qec::decoding::host::prepare_decoder_params(parsed.decoders[0]);
+  EXPECT_FALSE(params.contains("global_decoder_params"));
+  EXPECT_FALSE(params.contains("O"));
 }
 
 TEST(DecoderYAMLTest, TrtDecoderParamsWithoutDecoderThrows) {
@@ -1919,6 +1926,105 @@ TEST(DecoderSchemaTest, CustomArgsEqualityIsSignAware) {
   EXPECT_TRUE(custom_args_maps_equal(b, e));
 }
 
+// Every param_kind accepts its canonical type and RelatedTypesMap entries, and
+// a wrong type names that kind in the error. Equality covers the integral
+// family, float cross-family, and unequal map shapes.
+TEST(DecoderSchemaTest, KindMatrixAndEqualityFamily) {
+  using namespace cudaq::qec::decoding::config;
+  register_decoder_schema(
+      {"cc_test_all_kinds",
+       {{"flag", param_kind::boolean},
+        {"count", param_kind::int32},
+        {"n", param_kind::uint64},
+        {"gain", param_kind::f64},
+        {"name", param_kind::string},
+        {"weights", param_kind::f64_vec},
+        {"matrix", param_kind::f64_matrix},
+        {"nested", param_kind::subschema, false, "cc_test_nested_kind"},
+        {"engine_params", param_kind::discriminated, false, "", "engine"}}});
+  register_decoder_schema({"cc_test_nested_kind", {{"gain", param_kind::f64}}});
+  register_decoder_schema({"cc_test_engine", {{"gain", param_kind::f64}}});
+
+  auto expect_ok = [](const char *key, auto value) {
+    cudaqx::heterogeneous_map args;
+    args.insert(key, value);
+    EXPECT_NO_THROW(validate_custom_args("cc_test_all_kinds", args)) << key;
+  };
+  expect_ok("flag", true);
+  expect_ok("flag", 1);
+  expect_ok("count", 3);
+  expect_ok("count", std::size_t{3});
+  expect_ok("n", std::size_t{4});
+  expect_ok("n", 4);
+  expect_ok("gain", 1.25);
+  expect_ok("gain", 1.25f);
+  expect_ok("name", std::string("x"));
+  expect_ok("weights", std::vector<double>{1.0, 2.0});
+  expect_ok("matrix", std::vector<std::vector<double>>{{1.0}, {2.0}});
+  {
+    cudaqx::heterogeneous_map nested;
+    nested.insert("gain", 0.5);
+    expect_ok("nested", nested);
+  }
+
+  auto expect_kind = [](const char *key, auto value, const char *desc) {
+    cudaqx::heterogeneous_map args;
+    args.insert(key, value);
+    try {
+      validate_custom_args("cc_test_all_kinds", args);
+      FAIL() << key << " should reject a wrong type";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(desc), std::string::npos)
+          << e.what();
+    }
+  };
+  expect_kind("flag", std::string("no"), "boolean");
+  expect_kind("count", std::string("no"), "32-bit int");
+  expect_kind("n", std::string("no"), "non-negative int");
+  expect_kind("gain", std::string("no"), "float");
+  expect_kind("name", 1, "string");
+  expect_kind("weights", 1, "list-of-float");
+  expect_kind("matrix", 1, "list-of-list-of-float");
+  expect_kind("nested", 1, "mapping");
+  expect_kind("engine_params", 1, "mapping");
+
+  auto eq_one = [](auto a, auto b) {
+    cudaqx::heterogeneous_map left;
+    left.insert("v", a);
+    cudaqx::heterogeneous_map right;
+    right.insert("v", b);
+    return custom_args_maps_equal(left, right);
+  };
+  EXPECT_TRUE(eq_one(int{5}, long{5}));
+  EXPECT_TRUE(eq_one(long{5}, static_cast<long long>(5)));
+  EXPECT_TRUE(eq_one(static_cast<short>(5), int{5}));
+  EXPECT_TRUE(eq_one(5u, static_cast<unsigned long>(5)));
+  EXPECT_TRUE(eq_one(static_cast<unsigned long>(5),
+                     static_cast<unsigned long long>(5)));
+  EXPECT_TRUE(eq_one(static_cast<unsigned short>(5), 5u));
+  EXPECT_TRUE(eq_one(5, 5.0));
+  EXPECT_TRUE(eq_one(5.0f, 5));
+  EXPECT_FALSE(eq_one(5, 6.0));
+  EXPECT_FALSE(eq_one(5.0, 6));
+  EXPECT_FALSE(eq_one(true, 1));
+  EXPECT_FALSE(eq_one(1, true));
+  EXPECT_FALSE(eq_one(std::string("a"), std::vector<double>{1.0}));
+  EXPECT_FALSE(eq_one(std::vector<double>{1.0},
+                      std::vector<std::vector<double>>{{1.0}}));
+  EXPECT_FALSE(eq_one(std::vector<int>{1}, 1));
+
+  cudaqx::heterogeneous_map bigger;
+  bigger.insert("a", 1);
+  bigger.insert("b", 2);
+  cudaqx::heterogeneous_map smaller;
+  smaller.insert("a", 1);
+  EXPECT_FALSE(custom_args_maps_equal(bigger, smaller));
+  cudaqx::heterogeneous_map other;
+  other.insert("a", 1);
+  other.insert("c", 2);
+  EXPECT_FALSE(custom_args_maps_equal(bigger, other));
+}
+
 TEST(DecoderSchemaTest, SlidingWindowValidateHookRejectsBadWindowing) {
   using namespace cudaq::qec::decoding::config;
 
@@ -2042,8 +2148,7 @@ TEST(DecoderYAMLTest, CudaDeviceIdRoundTrip) {
 }
 
 TEST(DecoderYAMLTest, PrepareDecoderParamsSurfacesCudaDeviceId) {
-  // Non-trt type: the insert must happen before prepare_decoder_params()'s
-  // trt-only early return, so the knob reaches every decoder type.
+  // Placement is common factory policy, so every decoder type receives it.
   auto config = create_test_empty_decoder_config(0);
   config.cuda_device_id = 3;
   auto params = cudaq::qec::decoding::host::prepare_decoder_params(config);
@@ -2055,9 +2160,7 @@ TEST(DecoderYAMLTest, PrepareDecoderParamsSurfacesCudaDeviceId) {
   auto params2 = cudaq::qec::decoding::host::prepare_decoder_params(config2);
   EXPECT_FALSE(params2.contains("cuda_device_id"));
 
-  // trt type: still surfaced on the trt branch. prepare_decoder_params only
-  // manipulates the params map (no schema lookup, no filesystem), so empty
-  // custom args exercise the trt path without needing the trt plugin.
+  // The TRT type follows the same common path without constructing a decoder.
   auto config3 = create_test_empty_decoder_config(2);
   config3.type = "trt_decoder";
   config3.cuda_device_id = 1;
@@ -2860,3 +2963,232 @@ TEST(ChromobiusOnDecodingServer, DemReachesANestedGlobalDecoder) {
   EXPECT_EQ(global_decoder->get_syndrome_size(), 4);
 }
 #endif // CUDAQX_QEC_HAS_CHROMOBIUS
+
+TEST(DecoderSchemaTest, F64MatrixAndSubschemaRoundTripAndJsonSchema) {
+  using namespace cudaq::qec::decoding::config;
+
+  register_decoder_schema(
+      {"cc_test_nested_engine", {{"gain", param_kind::f64}}});
+  register_decoder_schema(
+      {"cc_test_matrix_decoder",
+       {{"weights", param_kind::f64_matrix},
+        {"nested", param_kind::subschema, false, "cc_test_nested_engine"},
+        {"gain", param_kind::f64}}});
+
+  const std::string yaml = R"(
+decoders:
+  - id: 0
+    type: cc_test_matrix_decoder
+    block_size: 1
+    syndrome_size: 1
+    H_sparse: [0, -1]
+    O_sparse: [0, -1]
+    D_sparse: [0, -1]
+    decoder_custom_args:
+      gain: 1.25
+      weights:
+        - [1.0, 0.0]
+        - [0.0, 1.0]
+      nested:
+        gain: 2.5
+)";
+  auto config = multi_decoder_config::from_yaml_str(yaml);
+  const auto &args = config.decoders[0].decoder_custom_args.map();
+  EXPECT_EQ(args.get<double>("gain"), 1.25);
+  EXPECT_EQ(args.get<std::vector<std::vector<double>>>("weights"),
+            (std::vector<std::vector<double>>{{1.0, 0.0}, {0.0, 1.0}}));
+  EXPECT_EQ(args.get<cudaqx::heterogeneous_map>("nested").get<double>("gain"),
+            2.5);
+
+  const auto emitted = config.to_yaml_str(200);
+  EXPECT_NE(emitted.find("weights"), std::string::npos);
+  EXPECT_NE(emitted.find("nested"), std::string::npos);
+  auto round_tripped = multi_decoder_config::from_yaml_str(emitted);
+  EXPECT_EQ(round_tripped, config);
+
+  const auto schema = decoder_config_json_schema();
+  EXPECT_NE(schema.find("cc_test_matrix_decoder"), std::string::npos);
+  EXPECT_NE(schema.find("cc_test_nested_engine"), std::string::npos);
+}
+
+TEST(DecoderSchemaTest, JsonPointerEscapesTildeAndSlashInSchemaName) {
+  using namespace cudaq::qec::decoding::config;
+  register_decoder_schema({"cc~test/name", {{"x", param_kind::f64}}});
+  const auto schema = decoder_config_json_schema();
+  EXPECT_NE(schema.find("cc~0test~1name"), std::string::npos) << schema;
+}
+
+TEST(DecoderSchemaTest, UnknownKeyWarnsOnYamlEmit) {
+  using namespace cudaq::qec::decoding::config;
+  register_decoder_schema(
+      {"cc_test_unknown_key_decoder", {{"gain", param_kind::f64}}});
+
+  decoder_config dc;
+  dc.id = 0;
+  dc.type = "cc_test_unknown_key_decoder";
+  dc.block_size = 1;
+  dc.syndrome_size = 1;
+  dc.H_sparse = {0, -1};
+  dc.O_sparse = {0, -1};
+  dc.D_sparse = {0, -1};
+  dc.decoder_custom_args.map().insert("gain", 0.5);
+  dc.decoder_custom_args.map().insert("not_in_schema", 1);
+  multi_decoder_config multi;
+  multi.decoders.push_back(dc);
+
+  const auto previous = cudaq::qec::detail::get_log_level();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::warn);
+  testing::internal::CaptureStderr();
+  const auto emitted = multi.to_yaml_str(200);
+  cudaq::qec::detail::flush_logs();
+  const std::string logged = testing::internal::GetCapturedStderr();
+  cudaq::qec::detail::set_log_level(previous);
+
+  EXPECT_NE(logged.find("not_in_schema"), std::string::npos) << logged;
+  EXPECT_EQ(emitted.find("not_in_schema"), std::string::npos);
+}
+
+TEST(DecoderDemChunksYAMLTest, SeamSpecsMappingRoundTripsWithoutExpand) {
+  const std::string yaml = R"(
+decoders:
+  - id: 0
+    type: sample_decoder
+    dem_chunks:
+      seam:
+        from: next_round
+        to: prev_round
+      connections:
+        - {from: init, to: final}
+      num_rounds: 2
+      phases:
+        - name: init
+          spec:
+            num_faults: 1
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: next_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+        - name: final
+          spec:
+            num_faults: 1
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: next_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+)";
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(config.decoders.size(), 1u);
+  ASSERT_TRUE(config.decoders[0].dem_chunks.has_value());
+  ASSERT_FALSE(config.decoders[0].dem_chunks->phases.empty());
+  EXPECT_FALSE(
+      config.decoders[0].dem_chunks->phases[0].spec.seam_specs.empty());
+
+  const auto emitted = config.to_yaml_str(200);
+  EXPECT_NE(emitted.find("seam_specs"), std::string::npos);
+}
+
+TEST(DecoderDemChunksYAMLTest, ValidateRejectsErrorRateLengthMismatch) {
+  const std::string yaml = R"(
+decoders:
+  - id: 0
+    type: sample_decoder
+    dem_chunks:
+      seam:
+        from: next_round
+        to: prev_round
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: final}
+      num_rounds: 2
+      phases:
+        - name: init
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+        - name: bulk
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01, 0.01]
+        - name: final
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01, 0.01]
+)";
+  EXPECT_THROW(
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml),
+      std::runtime_error);
+}
+
+TEST(DecoderDemChunksYAMLTest, ExpandCloseAllRejectsANonContractedSeam) {
+  const std::string yaml = R"(
+decoders:
+  - id: 0
+    type: sample_decoder
+    dem_chunks:
+      seam:
+        from: next_round
+        to: prev_round
+      connections:
+        - {from: init, to: final}
+      num_rounds: 2
+      phases:
+        - name: init
+          spec:
+            num_faults: 1
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: next_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: side
+                spec: {H_sparse: [0, -1], O_sparse: []}
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+        - name: final
+          spec:
+            num_faults: 1
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: next_round
+                spec: {H_sparse: [0, -1], O_sparse: []}
+              - name: side
+                spec: {H_sparse: [0, -1], O_sparse: []}
+            O_sparse: [0, -1]
+            error_rates: [0.01]
+)";
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(config.decoders.size(), 1u);
+  EXPECT_THROW(
+      cudaq::qec::decoding::config::expand_dem_chunks(config.decoders[0]),
+      std::runtime_error);
+}
+
+TEST(DecoderConfigTest, ConfigureFromStrLogsInfoWhenDebugDumpEnabled) {
+  using namespace cudaq::qec::decoding::config;
+  ScopedEnv debugEnv("CUDAQ_QEC_DEBUG_DECODER", "1");
+  const auto previous = cudaq::qec::detail::get_log_level();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
+
+  multi_decoder_config multi_config;
+  multi_config.decoders.push_back(create_test_empty_decoder_config(0));
+  const auto yaml = multi_config.to_yaml_str(200);
+  EXPECT_EQ(configure_decoders_from_str(yaml.c_str()), 0);
+  finalize_decoders();
+
+  cudaq::qec::detail::set_log_level(previous);
+}
