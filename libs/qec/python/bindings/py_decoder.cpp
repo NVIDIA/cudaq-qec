@@ -299,7 +299,8 @@ batch_decoder_result makeBatchDecoderResult(
 } // namespace
 
 namespace {
-/// Read and remove the "output" keyword, which selects the result basis.
+/// Read and remove the primary-result basis. Standardized auxiliary-output
+/// requests are reserved for composition infrastructure.
 std::optional<decode_result_type> pop_requested_output(nb::kwargs &options) {
   if (!options.contains("output"))
     return std::nullopt;
@@ -309,7 +310,8 @@ std::optional<decode_result_type> pop_requested_output(nb::kwargs &options) {
     return decode_result_type::errors;
   if (value == "observables")
     return decode_result_type::observables;
-  throw std::runtime_error("output must be 'errors' or 'observables'");
+  throw std::runtime_error(
+      "standalone output must be 'errors' or 'observables'");
 }
 } // namespace
 

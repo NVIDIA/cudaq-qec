@@ -115,6 +115,9 @@ public:
   sliding_window(cudaq::qec::decoder_init inputs,
                  decode_result_type requested_output,
                  const cudaqx::heterogeneous_map &params);
+  sliding_window(cudaq::qec::decoder_init inputs,
+                 decoder_output_request request,
+                 const cudaqx::heterogeneous_map &params);
 
   /// @brief Decode a syndrome vector
   /// @param syndrome The syndrome measurements to decode
@@ -175,11 +178,12 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       sliding_window, static std::unique_ptr<decoder> create(
                           cudaq::qec::decoder_init inputs,
-                          std::optional<decode_result_type> output,
+                          std::optional<decoder_output_request> output,
                           const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<sliding_window>(
-            std::move(inputs), output.value_or(decode_result_type::errors),
-            params);
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<sliding_window>(std::move(inputs), request,
+                                                params);
       })
 };
 

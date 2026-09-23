@@ -165,6 +165,11 @@ Decoder Interfaces
 
 .. doxygenenum:: cudaq::qec::decode_result_type
 
+.. doxygenenum:: cudaq::qec::decoder_auxiliary_result_type
+
+.. doxygenstruct:: cudaq::qec::decoder_output_request
+   :members:
+
 .. doxygenenum:: cudaq::qec::decoder_model_source
 
 .. doxygenstruct:: cudaq::qec::decoder_inputs
