@@ -8,10 +8,41 @@ on:
         description: GHCR image name, without a tag
         default: ghcr.io/nvidia/private/cudaq-decoders
         required: true
-      image_tag:
+      cudaq_image_name:
         type: string
-        description: Base tag; defaults to wiring-<run number>, with -cu<version> added
+        description: >-
+          Official CUDA-Q container to consume, without a tag. Use
+          nvcr.io/nvidia/quantum/cuda-quantum for release builds.
+        default: nvcr.io/nvidia/nightly/cuda-quantum
         required: false
+      cudaq_image_version:
+        type: string
+        description: >-
+          Version segment of the CUDA-Q container tag (full tag becomes
+          cu<major>-<version>): "latest" for nightly, or a release version
+          like "0.16.0".
+        default: latest
+        required: false
+      assets_repo:
+        type: string
+        description: Retrieve decoder assets from a draft release in this repo (e.g. NVIDIA/cudaqx)
+        default: 'NVIDIA/cudaqx'
+        required: false
+      assets_tag:
+        type: string
+        description: Retrieve decoder assets from a draft release with this tag (e.g. docker-files-123)
+        required: false
+      push_to_ngc_staging:
+        type: boolean
+        description: >-
+          Also copy the published image to NGC staging.
+        default: true
+        required: false
+
+env:
+  NGC_STAGING_IMAGE_NAME: nvcr.io/nvstaging/cudaq-qec/cudaq-decoders
+  # TODO: point at the live NGC location once one exists
+  NGC_PROD_IMAGE_NAME: nvcr.io/nvstaging/cudaq-qec/cudaq-decoders
 
 jobs:
   build:
@@ -19,16 +50,61 @@ jobs:
     if: ${{ github.repository == 'NVIDIA/cudaq-qec' }}
     runs-on: linux-${{ matrix.platform }}-cpu8
     permissions:
-      contents: read
+      contents: write
       packages: write
     strategy:
       fail-fast: false
       matrix:
         platform: [amd64, arm64]
         cuda_version: ['12.6', '13.0']
+        include:
+          - cuda_version: '12.6'
+            cuda_major: '12'
+            cuda_runtime_image_tag: 12.6.3-runtime-ubuntu24.04
+          - cuda_version: '13.0'
+            cuda_major: '13'
+            cuda_runtime_image_tag: 13.0.3-runtime-ubuntu24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # Always create the dir (even empty) so build-contexts below has
+      # something to point at regardless of whether assets were supplied.
+      - name: Create artifacts dir
+        run: mkdir -p artifacts
+
+      # TEMPORARY: fetching directly in this job (instead of a separate
+      # fetch-assets job + actions/upload-artifact hand-off) while testing
+      - name: Fetch and extract decoder assets
+        if: ${{ inputs.assets_repo != '' && inputs.assets_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo bash .github/workflows/scripts/install_git_cli.sh
+          # Suppress gh's own download progress output (filenames/sizes) --
+          # public job logs, same reasoning as not logging `gh release view`.
+          # stderr is left alone so auth/network failures are still visible.
+          gh release download -R "${{ inputs.assets_repo }}" "${{ inputs.assets_tag }}" > /dev/null
+
+          # Expects a docker-files-<run> draft release (assets extracted
+          # from the L0_MergeRequest build's installed_files.zip -- the
+          # native Ubuntu 24.04 install tree this image also builds in),
+          # NOT a wheels-<run> release: those carry per-Python
+          # (_py3.<ver>_) variants of the .so extracted from the cudaq_qec
+          # wheels, built under the manylinux toolchain for the wheel
+          # layout. decoding_server dlopens the plugin from C++, so the
+          # native build is the matching artifact.
+          tar -C artifacts -xzvf nv-qldpc-decoder-${{ matrix.platform }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_release.tar.gz
+          test -f artifacts/libcudaq-qec-nv-qldpc-decoder.so
+          # The cudevice archive is NOT bundled in this tarball (verified
+          # against both docker-files-* and wheels-* releases) -- it's a
+          # separate, independently-optional artifact. Don't hard-require it.
+          if [ -f artifacts/libcudaq-qec-realtime-cudevice-proprietary.a ]; then
+            echo "cudevice archive: present"
+          else
+            echo "cudevice archive: absent (device_graph dispatch will not be linked)"
+          fi
 
       - name: Set up context for buildx
         run: docker context create builder_context
@@ -41,6 +117,7 @@ jobs:
           driver-opts: |
             network=host
             image=moby/buildkit:v0.19.0
+          buildkitd-config: /etc/buildkit/buildkitd.toml # hardcoded for NVIDIA runner
 
       - name: Log in to GitHub CR
         uses: docker/login-action@v3
@@ -54,13 +131,19 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/decoding-server/Dockerfile
+          file: docker/release/Dockerfile.decoding-server
           platforms: linux/${{ matrix.platform }}
+          build-contexts: |
+            artifacts=./artifacts
           build-args: |
             CUDA_VERSION=${{ matrix.cuda_version }}
+            cuda_runtime_image_tag=${{ matrix.cuda_runtime_image_tag }}
+            cudaq_image=${{ inputs.cudaq_image_name }}:cu${{ matrix.cuda_major }}-${{ inputs.cudaq_image_version }}
           labels: |
             org.opencontainers.image.source=${{ github.repositoryUrl }}
             org.opencontainers.image.revision=${{ github.sha }}
+          # nvcr.io 400s on buildx's default attestation manifest, so build plain manifests.
+          provenance: false
           outputs: type=image,name=${{ inputs.image_name }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export image digest
@@ -83,6 +166,7 @@ jobs:
   publish:
     name: Publish decoding-server multi-platform image (CUDA ${{ matrix.cuda_version }})
     needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -109,15 +193,43 @@ jobs:
           merge-multiple: true
 
       - name: Create and verify multi-platform image
+        id: publish-ghcr
         env:
           IMAGE_NAME: ${{ inputs.image_name }}
-          IMAGE_TAG: ${{ inputs.image_tag || format('wiring-{0}', github.run_number) }}
           CUDA_VERSION: ${{ matrix.cuda_version }}
+          GIT_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
+          # Two tags per build, plus the release version when built from a
+          # releases/vX.Y.Z branch (cu<ver>- prefix first, matching the
+          # official CUDA-Q image convention, and date before SHA so tags
+          # sort chronologically): the date+SHA tag is the immutable
+          # handle for pinning a specific build (the SHA alone wouldn't
+          # determine the contents -- the consumed CUDA-Q nightly floats,
+          # so commit and build date together identify an image), and
+          # cu<ver>-latest is the moving pointer to the most recent build
+          # for that CUDA version. All tags from one run point at the same
+          # multi-platform manifest.
+          short_sha="${GITHUB_SHA:0:8}"
+          build_date=$(date -u +%Y%m%d)
+          cuda_major="${CUDA_VERSION%%.*}"
+          tag_suffixes=(
+            "cu${cuda_major}-${build_date}-${short_sha}"
+            "cu${cuda_major}-latest"
+          )
+
+          if [[ "$GIT_REF_NAME" == releases/* ]]; then
+            release_version=$(echo "$GIT_REF_NAME" | grep -Eo '([0-9]+\.)+[0-9]+')
+            tag_suffixes+=("cu${cuda_major}-${release_version}")
+          fi
+
+          tags=()
+          for suffix in "${tag_suffixes[@]}"; do
+            tags+=("${IMAGE_NAME}:${suffix}")
+          done
+
           cd /tmp/digests
-          image_ref="${IMAGE_NAME}:${IMAGE_TAG}-cu${CUDA_VERSION}"
           mapfile -t digests < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
           if [[ "${#digests[@]}" != 2 ]]; then
             echo "::error::Expected 2 image digests, found ${#digests[@]}"
@@ -129,8 +241,16 @@ jobs:
             refs+=("${IMAGE_NAME}@sha256:${digest}")
           done
 
-          docker buildx imagetools create --tag "$image_ref" "${refs[@]}"
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$tag")
+          done
 
+          docker buildx imagetools create "${tag_args[@]}" "${refs[@]}"
+
+          # All tags above point at the same manifest; verify/inspect via
+          # the first (always-present) one.
+          image_ref="${tags[0]}"
           manifest=$(docker buildx imagetools inspect --raw "$image_ref")
           for architecture in amd64 arm64; do
             jq -e \
@@ -139,4 +259,139 @@ jobs:
               <<< "$manifest" > /dev/null
           done
 
+          echo "Tagged as:"
+          printf '  %s\n' "${tags[@]}"
           docker buildx imagetools inspect "$image_ref"
+
+          # Hand the digest refs and tag suffixes to the (optional) NGC
+          # staging copy below.
+          echo "refs=${refs[*]}" >> "$GITHUB_OUTPUT"
+          echo "tag_suffixes=${tag_suffixes[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to NGC staging
+        if: ${{ inputs.push_to_ngc_staging }}
+        uses: docker/login-action@v3
+        with:
+          registry: nvcr.io
+          # Literal string: nvcr.io's convention for API-key auth.
+          username: $oauthtoken
+          password: ${{ secrets.NGC_API_KEY }}
+
+      # Registry-to-registry copy of the just-published manifest: imagetools
+      # reads the per-platform images from GHCR by digest and pushes them,
+      # plus a new manifest list, to NGC staging. Nothing is rebuilt.
+      - name: Copy image to NGC staging
+        if: ${{ inputs.push_to_ngc_staging }}
+        id: ngc-staging
+        env:
+          REFS: ${{ steps.publish-ghcr.outputs.refs }}
+          TAG_SUFFIXES: ${{ steps.publish-ghcr.outputs.tag_suffixes }}
+        run: |
+          set -euo pipefail
+
+          read -ra refs <<< "$REFS"
+          read -ra tag_suffixes <<< "$TAG_SUFFIXES"
+          for suffix in "${tag_suffixes[@]}"; do
+            docker buildx imagetools create --tag "${NGC_STAGING_IMAGE_NAME}:${suffix}" "${refs[@]}"
+          done
+
+          # All suffixes point at the same manifest; inspect via the first
+          # (always-present) one.
+          docker buildx imagetools inspect "${NGC_STAGING_IMAGE_NAME}:${tag_suffixes[0]}"
+
+          # Record the created manifest's digest: it gives the promote job
+          # an immutable, same-registry source (tags can move before the
+          # promotion approval happens; the digest cannot).
+          staging_digest=$(docker buildx imagetools inspect "${NGC_STAGING_IMAGE_NAME}:${tag_suffixes[0]}" \
+              | awk '/^Digest:/ {print $2}')
+          test -n "$staging_digest"
+          echo "staging_digest=$staging_digest" >> "$GITHUB_OUTPUT"
+
+      # Hand the digest refs and tag suffixes to the promote job (a
+      # separate job, so step outputs don't reach it directly; this
+      # mirrors the digest-artifact hand-off from the build job and keeps
+      # the tag logic defined in one place).
+      - name: Save publish info for promote job
+        env:
+          REFS: ${{ steps.publish-ghcr.outputs.refs }}
+          TAG_SUFFIXES: ${{ steps.publish-ghcr.outputs.tag_suffixes }}
+          # Empty when the staging copy was skipped.
+          STAGING_DIGEST: ${{ steps.ngc-staging.outputs.staging_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/publish-info
+          echo "$REFS" > /tmp/publish-info/refs
+          if [ -n "$STAGING_DIGEST" ]; then
+            echo "${NGC_STAGING_IMAGE_NAME}@${STAGING_DIGEST}" > /tmp/publish-info/staging_ref
+          fi
+
+      - name: Upload publish info
+        uses: actions/upload-artifact@v4
+        with:
+          name: decoding-server-publish-info-cu${{ matrix.cuda_version }}
+          path: /tmp/publish-info/*
+          if-no-files-found: error
+          retention-days: 30
+
+  promote:
+    name: Promote decoding-server image to NGC (CUDA ${{ matrix.cuda_version }})
+    needs: publish
+    # TODO: additionally gate this to release branches once the flow is
+    # validated, e.g. `&& startsWith(github.ref_name, 'releases/')`.
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    # TODO: configure ngc-prod environment with appropriate approver gate
+    environment: ngc-prod
+    permissions:
+      actions: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version: ['12.6', '13.0']
+    steps:
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Read access to the GHCR package the per-platform images
+      # are copied from.
+      - name: Log in to GitHub CR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Log in to NGC
+        uses: docker/login-action@v3
+        with:
+          registry: nvcr.io
+          # Literal string: nvcr.io's convention for API-key auth.
+          username: $oauthtoken
+          password: ${{ secrets.NGC_API_KEY }}
+
+      - name: Download publish info
+        uses: actions/download-artifact@v4
+        with:
+          name: decoding-server-publish-info-cu${{ matrix.cuda_version }}
+          path: /tmp/publish-info
+
+      # Copy by digest, so the promoted image is this run's build by
+      # construction, regardless of where any tag points by now (approval
+      # can land days after publish). Preferred source is the staging
+      # manifest digest -- same registry as the destination, so layer
+      # copies become server-side blob mounts instead of cross-registry
+      # uploads. When the staging push was skipped, fall back to the
+      # per-platform GHCR digests.
+      - name: Copy image to NGC
+        run: |
+          set -euo pipefail
+
+          if [ -s /tmp/publish-info/staging_ref ]; then
+            refs=("$(cat /tmp/publish-info/staging_ref)")
+          else
+            read -ra refs <<< "$(cat /tmp/publish-info/refs)"
+          fi
+          
+          docker buildx imagetools create --tag "${NGC_PROD_IMAGE_NAME}:prod-test" "${refs[@]}"
+          docker buildx imagetools inspect "${NGC_PROD_IMAGE_NAME}:prod-test"
