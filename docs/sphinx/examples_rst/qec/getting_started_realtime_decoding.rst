@@ -417,7 +417,7 @@ Before diving into compilation details, it is helpful to understand the typical 
 A full set of common examples is provided to guide development.
 These examples describe the complete workflow for developing an application that uses realtime decoding in a single file.
 The relevant C++ and Python examples can be found at the following path:
-`libs/qec/unittests/realtime/app_examples <https://github.com/NVIDIA/cudaqx/tree/main/libs/qec/unittests/realtime/app_examples>`_.
+`libs/qec/unittests/realtime/app_examples <https://github.com/NVIDIA/cudaq-qec/tree/main/libs/qec/unittests/realtime/app_examples>`_.
 The files have names like ``surface_code-1.cpp`` and ``surface_code_1.py``. The rest of this section shows how to compile and run these 2 examples.
 
 These examples provide comprehensive support for application development with realtime decoding.

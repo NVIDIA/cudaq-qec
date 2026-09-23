@@ -109,7 +109,7 @@ Build options:
                          (default: /workspaces/holoscan-sensor-bridge)
   --cuda-quantum-dir DIR cuda-quantum source directory
                          (default: /workspaces/cuda-quantum)
-  --cuda-qx-dir DIR      cudaqx (public) source dir that builds the bridge +
+  --cuda-qx-dir DIR      cudaq-qec (public) source dir that builds the bridge +
                          playback (default: /workspaces/cudaqx)
   --cuda-qx-priv-dir DIR cuda-qx (proprietary, decode_server1) tree that
                          provides the cudevice archive + nv-qldpc plugin
@@ -608,10 +608,10 @@ do_build() {
     cmake --build "$cq_build" -j "$JOBS" \
         --target cudaq-realtime-bridge-gpu-roce hsb_fpga_emulator 2>&1 | tail -5
 
-    # ---- Stage 3: cuda-qx QLDPC graph bridge + playback ----
-    _banner "Stage 3/3: Building cuda-qx QLDPC graph bridge + playback"
+    # ---- Stage 3: cudaq-qec QLDPC graph bridge + playback ----
+    _banner "Stage 3/3: Building cudaq-qec QLDPC graph bridge + playback"
     if [[ ! -d "$CUDA_QX_DIR" ]]; then
-        _err "cuda-qx source not found at $CUDA_QX_DIR"
+        _err "cudaq-qec source not found at $CUDA_QX_DIR"
         return 1
     fi
 
@@ -655,7 +655,7 @@ do_build() {
         2>&1 | tail -5
 
     # The plugin loader searches relative to libcudaq-qec.so; symlink the
-    # cuda-qx-built nv-qldpc plugin into the cudaqx decoder-plugins dir.
+    # proprietary cuda-qx-built nv-qldpc plugin into the cudaq-qec decoder-plugins dir.
     mkdir -p "$cuda_qx_build/lib/decoder-plugins"
     ln -sf "$NV_QLDPC_PLUGIN" \
         "$cuda_qx_build/lib/decoder-plugins/$(basename "$NV_QLDPC_PLUGIN")"
@@ -664,7 +664,7 @@ do_build() {
         --target gpu_roce_qldpc_graph_decoder_bridge \
                  hsb_fpga_syndrome_playback \
         2>&1 | tail -5
-    _info "cuda-qx tools built: $cuda_qx_build/libs/qec/unittests/utils/"
+    _info "cudaq-qec tools built: $cuda_qx_build/libs/qec/unittests/utils/"
 
     _banner "Build complete"
 }

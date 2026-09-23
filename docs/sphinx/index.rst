@@ -1,10 +1,10 @@
-CUDA-QX - The CUDA-Q Libraries Collection
-==========================================
+CUDA-Q QEC - The CUDA-Q Quantum Error Correction Library
+=========================================================
 
-CUDA-QX is a collection of libraries that build upon the CUDA-Q programming model
+CUDA-Q QEC is a library that builds upon the CUDA-Q programming model
 to enable the rapid development of hybrid quantum-classical application code leveraging
-state-of-the-art CPUs, GPUs, and QPUs. It provides C++ libraries and Python
-packages that enable research, development, and application creation for use
+state-of-the-art CPUs, GPUs, and QPUs. It provides a C++ library and Python
+package that enable research, development, and application creation for use
 cases in quantum error correction.
 
 .. note::
@@ -61,7 +61,7 @@ cases in quantum error correction.
 Key Features
 -------------
 
-CUDA-QX provides cudaq-qec, a library enabling performant research workflows for
+CUDA-Q QEC (``cudaq-qec``) is a library enabling performant research workflows for
 quantum error correction, built upon the CUDA-Q programming model.
 
 * **cudaq-qec** (actively developed and supported): Quantum Error Correction Library

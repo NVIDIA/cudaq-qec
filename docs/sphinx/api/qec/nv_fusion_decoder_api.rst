@@ -65,7 +65,7 @@
 
     .. note::
       It is required to create decoders with the ``get_decoder`` API from the
-      CUDA-QX extension points API, such as
+      CUDA-Q QEC extension points API, such as
 
       .. tab:: Python
 

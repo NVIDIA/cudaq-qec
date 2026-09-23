@@ -2,7 +2,7 @@
 CUDA-Q QEC by Example
 *************************
 
-Examples that illustrate how to use CUDA-QX for application development are available in C++ and Python.
+Examples that illustrate how to use CUDA-Q QEC for application development are available in C++ and Python.
 
 .. toctree::
    :maxdepth: 1

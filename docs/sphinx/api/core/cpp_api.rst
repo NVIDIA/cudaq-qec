@@ -1,5 +1,5 @@
-CUDA-QX Namespaces and Core Library C++ API
-********************************************
+CUDA-Q QEC Namespaces and Core Library C++ API
+**********************************************
 
 Namespaces
 ==========

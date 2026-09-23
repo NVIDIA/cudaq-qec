@@ -1,8 +1,8 @@
-# CUDA-QX Documentation
+# CUDA-Q QEC Documentation
 
-This folder contains tools and content to build the CUDA-QX documentation.
+This folder contains tools and content to build the CUDA-Q QEC documentation.
 The [script for building docs](../scripts/build_docs.sh) can be used to build
-the complete CUDA-QX documentation. Please see the comment in that script
+the complete CUDA-Q QEC documentation. Please see the comment in that script
 for more detail.
 
 We use [Sphinx](https://www.sphinx-doc.org/) to produce documentation in HTML
@@ -29,10 +29,10 @@ configured by the settings in the [sphinx/conf.py](./sphinx/conf.py) file.
 
 - **Python bindings**: <br/>
   We use [pybind11](https://github.com/pybind/pybind11) to define Python
-  bindings for the CUDA-QX API. Doc comments are defined as part of
+  bindings for the CUDA-Q QEC API. Doc comments are defined as part of
   defining these bindings in C++. To incorporate the API documentation, the
-  `cudaqx` Python package needs to be built and installed prior to generating the
-  CUDA-QX documentation. This project generates
+  `cudaq-qec` Python package needs to be built and installed prior to generating the
+  CUDA-Q QEC documentation. This project generates
   ReStructuredText documentation from Python `docstrings` using `autodoc`.
   The generated `.rst` files are in `docs/source/apidoc`. The files are
   generated automatically by `doc-build` and `doc-clean` will remove them.
@@ -42,7 +42,7 @@ configured by the settings in the [sphinx/conf.py](./sphinx/conf.py) file.
 The extensions we use to generate API docs are outlined and linked in the
 section above. The full list of built-in Sphinx tensions can be found
 [here](https://www.sphinx-doc.org/en/master/usage/extensions/index.html). The
-list of extensions that are enabled for building CUDA-QX documentation is
+list of extensions that are enabled for building CUDA-Q QEC documentation is
 defined by the value of the `extensions` configuration in
 [conf.py](./sphinx/conf.py).
 
