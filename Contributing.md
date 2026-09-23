@@ -1,27 +1,27 @@
 # Contributing
 
-Thank you for your interest in contributing to CUDA-QX! Based on the type of
+Thank you for your interest in contributing to CUDA-Q QEC! Based on the type of
 contribution, it will fall into three categories:
 
 1. Report a bug, feature request, or documentation issue:
 
-    File an [issue][cuda_qx_issues] describing what you encountered or what
+    File an [issue][cudaq_qec_issues] describing what you encountered or what
     you want to see changed. The NVIDIA team will evaluate the issues and triage
     them, scheduling them for a release. If you believe the issue needs priority
     attention comment on the issue to notify the team.
 
-1. Share your work built upon CUDA-QX:
+1. Share your work built upon CUDA-Q QEC:
 
     We would love to hear more about your work! Please share with us on
-    [NVIDIA/cuda-qx GitHub
-    Discussions](https://github.com/NVIDIA/cuda-qx/discussions) or consider
+    [NVIDIA/cudaq-qec GitHub
+    Discussions](https://github.com/NVIDIA/cudaq-qec/discussions) or consider
     contributing to our [examples](./docs/sphinx/examples/)! We also take any
-    CUDA-QX related questions on this forum.
+    CUDA-Q QEC related questions on this forum.
 
 1. Implement a feature or bug-fix:
 
-    Please file an [issue][cuda_qx_issues] on the repository and express
-    your interest in contributing to its implementation. Someone from the CUDA-QX
+    Please file an [issue][cudaq_qec_issues] on the repository and express
+    your interest in contributing to its implementation. Someone from the CUDA-Q QEC
     team will respond on the issue to discuss how to best proceed with the
     suggestion. 
 
@@ -32,7 +32,7 @@ conflict is introduced by your pull-request. To confirm this, you will need to
 [sign off on your commits](#commit-sign-off) as described below. Thanks in advance
 for your patience as we review your contributions; we do appreciate them!
 
-[cuda_qx_issues]: https://github.com/NVIDIA/cuda-qx/issues
+[cudaq_qec_issues]: https://github.com/NVIDIA/cudaq-qec/issues
 
 ## Pull Request Guidelines
 
