@@ -71,6 +71,9 @@ Out-of-tree decoder plugins must be rebuilt and migrated as follows:
   The base constructor now derives the corresponding model state and buffer
   sizes. A streaming decoder supplies only its layer geometry through
   ``initialize_streaming_layout`` during construction.
+* Rebuild against the new header: the cancellable ``decode`` and
+  ``decode_batch`` overloads add virtual methods. Override them only if the
+  decoder can honor a stop; the defaults ignore the token.
 
 The main source migration maps old symbols as follows:
 
