@@ -34,7 +34,8 @@ find_package(CUDAToolkit REQUIRED)
 # ==============================================================================
 add_compile_options(-Wno-attributes) 
 
-add_executable(test_decoders test_decoders.cpp decoders/sample_decoder.cpp)
+add_executable(test_decoders test_decoders.cpp decoders/sample_decoder.cpp
+  decoders/cancellation_probe_decoder.cpp)
 target_include_directories(test_decoders PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
 target_link_libraries(test_decoders PRIVATE GTest::gtest_main cudaq-qec-decoders libstim CUDA::cudart)
 add_dependencies(CUDAQXQECUnitTests test_decoders)
@@ -115,6 +116,11 @@ target_link_libraries(test_dem_construction_code PRIVATE GTest::gtest_main
 add_dependencies(CUDAQXQECUnitTests test_dem_construction_code)
 gtest_discover_tests(test_dem_construction_code)
 
+add_executable(test_cancellation test_cancellation.cpp)
+target_link_libraries(test_cancellation PRIVATE GTest::gtest_main cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_cancellation)
+gtest_discover_tests(test_cancellation)
+
 add_executable(test_logger test_logger.cpp)
 target_link_libraries(test_logger PRIVATE GTest::gtest_main cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_logger)
@@ -122,7 +128,8 @@ gtest_discover_tests(test_logger)
 
 # TensorRT decoder test is only built for x86 architectures
 if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(AMD64|amd64)|(^i.86$)")
-  add_executable(test_trt_decoder ./decoders/trt_decoder/test_trt_decoder.cpp)
+  add_executable(test_trt_decoder ./decoders/trt_decoder/test_trt_decoder.cpp
+    ./decoders/cancellation_probe_decoder.cpp)
 
   # Find TensorRT for the test
   find_path(TENSORRT_INCLUDE_DIR NvInfer.h

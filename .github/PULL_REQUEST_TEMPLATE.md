@@ -2,7 +2,7 @@
 Thanks for contributing to CUDA-Q Libraries!
 
 Please read the full Pull Request Guidelines in Contributing.md:
-https://github.com/NVIDIA/cudaqx/blob/main/Contributing.md#pull-request-guidelines
+https://github.com/NVIDIA/cudaq-qec/blob/main/Contributing.md#pull-request-guidelines
 -->
 
 ## Description

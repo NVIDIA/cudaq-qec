@@ -15,6 +15,12 @@
     remain in an intermediate state, awaiting future syndromes. The return
     vector is only non-empty once enough data has been provided to match the
     original syndrome size (calculated from the Parity Check Matrix).
+
+    The cancellable :code:`decode` and :code:`decode_batch` overloads forward
+    the token to the inner decoders. They return the same empty result while a
+    block is incomplete, and :code:`std::nullopt` if an inner decoder honors a
+    stop; the partial block is dropped and the next round starts a new one.
+    :code:`reset_decoder()` also drops a partial block.
     
     Sliding window decoders are advantageous in QEC codes subject to
     circuit-level noise across multiple syndrome extraction rounds. These

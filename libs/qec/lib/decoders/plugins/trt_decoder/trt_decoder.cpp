@@ -473,10 +473,18 @@ public:
               const cudaqx::heterogeneous_map &params);
 
   decoder_result decode(const std::vector<float_t> &syndrome) override;
+  std::optional<decoder_result> decode(const std::vector<float_t> &syndrome,
+                                       cancellation_token tok) override;
 
   using decoder::decode_batch; // keep the batch_opt_results overload visible
   std::vector<decoder_result>
   decode_batch(const std::vector<std::vector<float_t>> &syndromes) override;
+  /// The token is forwarded to the optional global decoder only. The
+  /// TensorRT inference itself is not interruptible, so without a global
+  /// decoder `tok` is ignored.
+  std::optional<std::vector<decoder_result>>
+  decode_batch(const std::vector<std::vector<float_t>> &syndromes,
+               cancellation_token tok) override;
 
   virtual ~trt_decoder();
 
@@ -497,8 +505,9 @@ private:
   /// Typed decode_batch: input and output dtypes are selected independently
   /// from the TensorRT engine metadata (currently float or uint8_t).
   template <typename InputType, typename OutputType>
-  std::vector<decoder_result>
-  decode_batch_impl(const std::vector<std::vector<float_t>> &syndromes) const;
+  std::optional<std::vector<decoder_result>>
+  decode_batch_impl(const std::vector<std::vector<float_t>> &syndromes,
+                    cancellation_token tok) const;
 };
 
 // ============================================================================
@@ -932,6 +941,14 @@ trt_decoder::trt_decoder(cudaq::qec::decoder_init inputs,
 }
 
 decoder_result trt_decoder::decode(const std::vector<float_t> &syndrome) {
+  // A default-constructed token never requests a stop, so this decoder must
+  // always produce a value here.
+  return decode(syndrome, cancellation_token{}).value();
+}
+
+std::optional<decoder_result>
+trt_decoder::decode(const std::vector<float_t> &syndrome,
+                    cancellation_token tok) {
   // Validate syndrome size
   if (syndrome.size() != syndrome_size_per_sample_) {
     throw std::runtime_error("Syndrome size mismatch: expected " +
@@ -961,18 +978,32 @@ decoder_result trt_decoder::decode(const std::vector<float_t> &syndrome) {
     }
 
     // Return only the first result (the real syndrome)
-    return decode_batch(padded_batch)[0];
+    auto results = decode_batch(padded_batch, tok);
+    if (!results)
+      return std::nullopt;
+    return std::move((*results)[0]);
   }
 
   // For batch_size == 1, directly delegate to decode_batch
-  return decode_batch({syndrome})[0];
+  auto results = decode_batch({syndrome}, tok);
+  if (!results)
+    return std::nullopt;
+  return std::move((*results)[0]);
 }
 
 std::vector<decoder_result>
 trt_decoder::decode_batch(const std::vector<std::vector<float_t>> &syndromes) {
+  // A default-constructed token never requests a stop, so this decoder must
+  // always produce a value here.
+  return decode_batch(syndromes, cancellation_token{}).value();
+}
+
+std::optional<std::vector<decoder_result>>
+trt_decoder::decode_batch(const std::vector<std::vector<float_t>> &syndromes,
+                          cancellation_token tok) {
   // Validate that we have syndromes to decode
   if (syndromes.empty()) {
-    return {};
+    return std::vector<decoder_result>{};
   }
 
   // Validate all syndrome sizes match expected size
@@ -986,27 +1017,27 @@ trt_decoder::decode_batch(const std::vector<std::vector<float_t>> &syndromes) {
   }
 
   // Dispatch on the actual engine I/O dtypes independently.
-  std::vector<decoder_result> results;
+  std::optional<std::vector<decoder_result>> results;
   if (impl_->input_dtype == nvinfer1::DataType::kUINT8) {
     if (impl_->output_dtype == nvinfer1::DataType::kUINT8)
-      results = decode_batch_impl<uint8_t, uint8_t>(syndromes);
+      results = decode_batch_impl<uint8_t, uint8_t>(syndromes, tok);
     else
-      results = decode_batch_impl<uint8_t, float>(syndromes);
+      results = decode_batch_impl<uint8_t, float>(syndromes, tok);
   } else if (impl_->output_dtype == nvinfer1::DataType::kUINT8) {
-    results = decode_batch_impl<float, uint8_t>(syndromes);
+    results = decode_batch_impl<float, uint8_t>(syndromes, tok);
   } else {
-    results = decode_batch_impl<float, float>(syndromes);
+    results = decode_batch_impl<float, float>(syndromes, tok);
   }
   // One result per input, always: callers index results positionally, and a
   // misbehaving external global decoder must not turn that into UB.
-  if (results.size() != syndromes.size())
+  if (results && results->size() != syndromes.size())
     throw std::runtime_error("TensorRT decode_batch produced " +
-                             std::to_string(results.size()) + " results for " +
+                             std::to_string(results->size()) + " results for " +
                              std::to_string(syndromes.size()) + " syndromes");
   // The engine's output form and the instance's form are both fixed at
   // construction; only errors -> observables is reachable here.
-  if (emitted_output_ != get_result_type())
-    for (auto &r : results) {
+  if (results && emitted_output_ != get_result_type())
+    for (auto &r : *results) {
       if (r.result.empty())
         continue;
       std::vector<float_t> observables(get_num_observables(), 0.0);
@@ -1018,8 +1049,9 @@ trt_decoder::decode_batch(const std::vector<std::vector<float_t>> &syndromes) {
 }
 
 template <typename InputType, typename OutputType>
-std::vector<decoder_result> trt_decoder::decode_batch_impl(
-    const std::vector<std::vector<float_t>> &syndromes) const {
+std::optional<std::vector<decoder_result>> trt_decoder::decode_batch_impl(
+    const std::vector<std::vector<float_t>> &syndromes,
+    cancellation_token tok) const {
   std::vector<decoder_result> results;
   results.reserve(syndromes.size());
 
@@ -1110,20 +1142,23 @@ std::vector<decoder_result> trt_decoder::decode_batch_impl(
           for (size_t i = 0; i < global_syndrome_size; ++i)
             out[i] = trt_io_to_binary(res[i]);
         }
-        std::vector<decoder_result> global_results =
-            global_decoder_->decode_batch(residual_soft);
+        auto global_results = global_decoder_->decode_batch(residual_soft, tok);
+        if (!global_results) {
+          // The global decoder honored a stop: the whole batch is abandoned.
+          return std::nullopt;
+        }
 
         // The global decoder is an arbitrary registered decoder: validate its
         // output before indexing it. This is composition safety at a trust
         // boundary, checked once per batch, not per-decode contract
         // re-validation.
-        if (global_results.size() != residual_soft.size())
+        if (global_results->size() != residual_soft.size())
           throw std::runtime_error(
               "TensorRT global decoder returned " +
-              std::to_string(global_results.size()) + " results for " +
+              std::to_string(global_results->size()) + " results for " +
               std::to_string(residual_soft.size()) + " residual syndromes");
         if (has_observable_prefix)
-          for (const auto &g : global_results)
+          for (const auto &g : *global_results)
             if (g.result.size() != num_observables_)
               throw std::runtime_error(
                   "TensorRT global decoder returned a " +
@@ -1136,16 +1171,16 @@ std::vector<decoder_result> trt_decoder::decode_batch_impl(
           // decoder's logical-frame prediction via XOR.
           for (size_t batch_idx = 0; batch_idx < actual_batch; ++batch_idx) {
             decoder_result combined;
-            combined.converged = global_results[batch_idx].converged;
+            decoder_result &g_res = (*global_results)[batch_idx];
+            combined.converged = g_res.converged;
             // Carry the global decoder's optional metadata through; the
             // combination changes the result values, not the global decoder's
             // diagnostics.
-            combined.opt_results =
-                std::move(global_results[batch_idx].opt_results);
+            combined.opt_results = std::move(g_res.opt_results);
             combined.result.resize(num_observables_, 0.0f);
             const OutputType *pre_L_row =
                 output_host.data() + batch_idx * output_size_per_sample_;
-            const std::vector<float_t> &g = global_results[batch_idx].result;
+            const std::vector<float_t> &g = g_res.result;
             // Width was validated above, so no bounds guard here: a short
             // global-decoder result must fail loudly rather than be silently
             // zero-filled.
@@ -1157,7 +1192,7 @@ std::vector<decoder_result> trt_decoder::decode_batch_impl(
             results.push_back(std::move(combined));
           }
         } else {
-          for (decoder_result &r : global_results)
+          for (auto &r : *global_results)
             results.push_back(std::move(r));
         }
       } else {
@@ -1200,18 +1235,18 @@ std::vector<decoder_result> trt_decoder::decode_batch_impl(
 }
 
 // Explicit instantiations for the supported single-output engine I/O dtypes.
-template std::vector<decoder_result>
+template std::optional<std::vector<decoder_result>>
 trt_decoder::decode_batch_impl<float, float>(
-    const std::vector<std::vector<float_t>> &) const;
-template std::vector<decoder_result>
+    const std::vector<std::vector<float_t>> &, cancellation_token) const;
+template std::optional<std::vector<decoder_result>>
 trt_decoder::decode_batch_impl<float, uint8_t>(
-    const std::vector<std::vector<float_t>> &) const;
-template std::vector<decoder_result>
+    const std::vector<std::vector<float_t>> &, cancellation_token) const;
+template std::optional<std::vector<decoder_result>>
 trt_decoder::decode_batch_impl<uint8_t, float>(
-    const std::vector<std::vector<float_t>> &) const;
-template std::vector<decoder_result>
+    const std::vector<std::vector<float_t>> &, cancellation_token) const;
+template std::optional<std::vector<decoder_result>>
 trt_decoder::decode_batch_impl<uint8_t, uint8_t>(
-    const std::vector<std::vector<float_t>> &) const;
+    const std::vector<std::vector<float_t>> &, cancellation_token) const;
 
 trt_decoder::~trt_decoder() = default;
 

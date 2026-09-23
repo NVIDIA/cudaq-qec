@@ -16,7 +16,7 @@ on:
 jobs:
   build:
     name: Build decoding-server image (${{ matrix.platform }}, CUDA ${{ matrix.cuda_version }})
-    if: ${{ github.repository == 'NVIDIA/cudaqx' }}
+    if: ${{ github.repository == 'NVIDIA/cudaq-qec' }}
     runs-on: linux-${{ matrix.platform }}-cpu8
     permissions:
       contents: read
