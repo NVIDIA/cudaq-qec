@@ -8,7 +8,7 @@ name: "Sync with upstream repository"
 jobs:
   sync:
     name: Get Updates from Upstream
-    if: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && github.repository != 'NVIDIA/cudaqx' }}
+    if: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && github.repository != 'NVIDIA/cudaq-qec' }}
     runs-on: 'ubuntu-latest'
 
     steps:
@@ -21,7 +21,7 @@ jobs:
       run: |
         git config --global user.email "action@github.com"
         git config --global user.name "GitHub Action"
-        git remote add upstream https://github.com/NVIDIA/cudaqx
+        git remote add upstream https://github.com/NVIDIA/cudaq-qec
         # LFS objects are stored per repository and are not mirrored by a git
         # push, so pull without smudging (the objects referenced by new
         # upstream commits may not exist in this repository's LFS storage
