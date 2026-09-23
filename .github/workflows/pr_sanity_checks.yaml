@@ -87,7 +87,7 @@ jobs:
           sudo ln -s /usr/bin/clang-format-${LLVM_VERSION} /usr/bin/clang-format
 
       # If the `clang-format` file changes, we require the reformatting of all
-      # files. See https://github.com/NVIDIA/cudaqx/pull/15#discussion_r1868174072
+      # files. See https://github.com/NVIDIA/cudaq-qec/pull/15#discussion_r1868174072
       - name: clang-format all things
         if: needs.check-changes.outputs.check-all-cpp == 'true'
         run: |
