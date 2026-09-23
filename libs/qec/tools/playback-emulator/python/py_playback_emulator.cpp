@@ -101,11 +101,38 @@ std::unique_ptr<syndrome_source> make_source(const nb::dict &spec) {
   throw std::invalid_argument("unknown source type: \"" + type + "\"");
 }
 
-/// Parses, plans, and runs `schedule_text` in one call -- the session
-/// backend is picked by which one of `decoders` / `udp_endpoints` /
-/// `null_decoder_ids` is given (exactly one must be). `sources` maps a
-/// schedule's source_id to a plain spec dict (see `make_source`); a fresh
-/// syndrome_source is built from each spec for this run alone.
+/// cpu_roce_options from a spec dict ("device", "local_ip", "slots", ...).
+cpu_roce_options make_cpu_roce_options(const std::optional<nb::dict> &spec) {
+  if (!spec)
+    throw std::invalid_argument(
+        "run: cpu_roce_endpoints= requires cpu_roce_options= ({\"device\", "
+        "\"local_ip\", ...})");
+  cpu_roce_options opts;
+  for (auto [k, v] : *spec) {
+    const auto key = nb::cast<std::string>(k);
+    if (key == "device")
+      opts.device = nb::cast<std::string>(v);
+    else if (key == "local_ip")
+      opts.local_ip = nb::cast<std::string>(v);
+    else if (key == "slots")
+      opts.num_slots = nb::cast<std::uint32_t>(v);
+    else if (key == "slot_size")
+      opts.slot_size = nb::cast<std::uint32_t>(v);
+    else if (key == "connect_timeout_ms")
+      opts.connect_timeout_ms = nb::cast<std::uint32_t>(v);
+    else
+      throw std::invalid_argument("run: unknown cpu_roce_options key \"" + key +
+                                  "\"");
+  }
+  return opts;
+}
+
+/// Parses, plans, and runs `schedule_text` in one call. Each of `decoders` /
+/// `udp_endpoints` / `cpu_roce_endpoints` / `null_decoder_ids` names the
+/// decoder_ids that backend serves; at least one must be given and no id may
+/// appear in two. `sources` maps a schedule's source_id to a plain spec dict
+/// (see `make_source`); a fresh syndrome_source is built from each spec for
+/// this run alone.
 run_result run_schedule(
     const std::string &schedule_text, std::uint64_t tick_ns,
     const std::unordered_map<std::uint32_t, nb::dict> &sources,
@@ -114,27 +141,36 @@ run_result run_schedule(
     const std::optional<std::unordered_map<std::uint64_t, std::string>>
         &udp_endpoints,
     std::uint32_t udp_timeout_ms,
+    const std::optional<std::unordered_map<std::uint64_t, std::string>>
+        &cpu_roce_endpoints,
+    const std::optional<nb::dict> &cpu_roce_options_spec,
+    std::uint32_t cpu_roce_timeout_ms,
     const std::optional<std::vector<std::uint64_t>> &null_decoder_ids,
     std::uint64_t lead_in_ns) {
-  if (int(decoders.has_value()) + int(udp_endpoints.has_value()) +
-          int(null_decoder_ids.has_value()) !=
-      1)
+  if (!decoders && !udp_endpoints && !cpu_roce_endpoints && !null_decoder_ids)
     throw std::invalid_argument(
-        "run: specify exactly one of decoders=, udp_endpoints=, or "
-        "null_decoder_ids= to select the session backend");
+        "run: specify at least one of decoders=, udp_endpoints=, "
+        "cpu_roce_endpoints=, or null_decoder_ids= to select the session "
+        "backend(s)");
 
   std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>>
       owned_sessions;
   std::unordered_map<std::uint64_t, session *> router;
 
-  if (decoders) {
-    owned_sessions = make_inproc_sessions(*decoders);
-  } else if (udp_endpoints) {
-    owned_sessions = make_udp_sessions(*udp_endpoints, udp_timeout_ms);
-  } else {
-    owned_sessions = make_null_sessions(*null_decoder_ids);
-  }
-  route_sessions(owned_sessions, router);
+  if (decoders)
+    adopt_sessions(make_inproc_sessions(*decoders), owned_sessions, router);
+  if (udp_endpoints)
+    adopt_sessions(make_udp_sessions(*udp_endpoints, udp_timeout_ms),
+                   owned_sessions, router);
+  if (cpu_roce_endpoints)
+    adopt_sessions(
+        make_cpu_roce_sessions(*cpu_roce_endpoints,
+                               make_cpu_roce_options(cpu_roce_options_spec),
+                               cpu_roce_timeout_ms),
+        owned_sessions, router);
+  if (null_decoder_ids)
+    adopt_sessions(make_null_sessions(*null_decoder_ids), owned_sessions,
+                   router);
 
   std::vector<std::uint64_t> known_decoder_ids;
   known_decoder_ids.reserve(router.size());
@@ -268,6 +304,9 @@ void bindPlaybackEmulator(nb::module_ &mod) {
   m.def("run", &run_schedule, nb::arg("schedule"), nb::arg("tick_ns"),
         nb::arg("sources"), nb::arg("decoders") = nb::none(),
         nb::arg("udp_endpoints") = nb::none(), nb::arg("udp_timeout_ms") = 200,
+        nb::arg("cpu_roce_endpoints") = nb::none(),
+        nb::arg("cpu_roce_options") = nb::none(),
+        nb::arg("cpu_roce_timeout_ms") = 200,
         nb::arg("null_decoder_ids") = nb::none(),
         nb::arg("lead_in_ns") = 20'000'000,
         "Parse, plan, and run a line-oriented playback schedule. `sources` "
@@ -277,11 +316,14 @@ void bindPlaybackEmulator(nb::module_ &mod) {
         "noise knobs}), or \"cudaq_memory\" ({\"code\": a qec.Code, "
         "\"state_prep\": \"prep0\"|..., \"max_rounds\": N, \"seed\": N, "
         "\"noise\": a cudaq.NoiseModel (optional)}). "
-        "Exactly one of `decoders` (in-process decoders from a "
+        "Each of `decoders` (in-process decoders from a "
         "multi_decoder_config), `udp_endpoints` ({decoder_id: "
-        "\"host:port\"}), or `null_decoder_ids` (discards everything) selects "
-        "the "
-        "session backend.");
+        "\"host:port\"}), `cpu_roce_endpoints` (same, plus `cpu_roce_options` "
+        "= {\"device\", \"local_ip\", \"slots\" (8), \"slot_size\" (256), "
+        "\"connect_timeout_ms\" (5000)}), and `null_decoder_ids` (discards "
+        "everything) names the decoder_ids that backend serves; at least one "
+        "must be given, and backends may be mixed as long as no decoder_id "
+        "appears twice.");
 }
 
 } // namespace cudaq::qec::playback

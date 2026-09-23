@@ -287,11 +287,24 @@ plan(const schedule &sched_in,
     case operation::reset:
       place(build_reset_frame(e.decoder_id, /*rid=*/0), 0, 0);
       break;
-    case operation::get_corrections:
+    case operation::get_corrections: {
+      // The reply rides the same transport as the request, so it is bounded
+      // too (a 256-byte RDMA slot cannot carry a 4096-bit read).
+      const std::size_t reply_bytes =
+          sizeof(cudaq::realtime::RPCResponse) +
+          wire::bit_packed_bytes(return_size_for(e));
+      if (max_frame_bytes != 0 && reply_bytes > max_frame_bytes)
+        throw std::invalid_argument(
+            "event " + std::to_string(i) + ": a " +
+            std::to_string(reply_bytes) +
+            "-byte get_corrections reply exceeds the session's "
+            "max_frame_bytes=" +
+            std::to_string(max_frame_bytes));
       place(build_get_corrections_frame(e.decoder_id, return_size_for(e),
                                         /*rid=*/0),
             0, 0);
       break;
+    }
     case operation::stream:
     case operation::enqueue_data: {
       if (e.source_id == kNoSource) {
