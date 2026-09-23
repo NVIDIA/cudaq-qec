@@ -1,5 +1,6 @@
 BasedOnStyle: LLVM
 AlwaysBreakTemplateDeclarations: Yes
+CommentPragmas: 'SPDX-(FileCopyrightText|License-Identifier)'
 IncludeCategories:
   - Regex:           '^<'
     Priority:        3
