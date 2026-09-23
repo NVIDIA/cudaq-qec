@@ -856,6 +856,7 @@ public:
         rx_data_(
             static_cast<std::uint8_t *>(cpu_roce_get_rx_ring_data_addr(xcvr))),
         rx_flags_(cpu_roce_get_rx_ring_flag_addr(xcvr)),
+        max_inflight_(num_slots > 1 ? num_slots - 1 : 1),
         slot_owner_(num_slots, kNoOwner), reply_scratch_(stride_) {
     max_frame_bytes = slot_size;
   }
@@ -948,7 +949,7 @@ private:
   /// while that slot's last request is unanswered or still being shipped.
   bool try_publish(const request_ring::entry &e) {
     const std::uint32_t slot = rr_;
-    if (slot_owner_[slot] != kNoOwner ||
+    if (pending_.size() >= max_inflight_ || slot_owner_[slot] != kNoOwner ||
         __atomic_load_n(&tx_flags_[slot], __ATOMIC_ACQUIRE) != 0)
       return false;
     const std::uint32_t rid =
@@ -1087,6 +1088,7 @@ private:
   // Worker-thread-only state.
   std::uint32_t rr_ = 0;     // next TX slot to publish into
   std::uint32_t cursor_ = 0; // next RX slot to collect from
+  const std::uint32_t max_inflight_;
   std::unordered_map<std::uint32_t, pending> pending_;
   std::vector<std::uint32_t> slot_owner_; // request_id per slot, or kNoOwner
   std::vector<std::uint8_t> reply_scratch_;
