@@ -69,8 +69,6 @@ DO_BUILD=false
 DO_SETUP_NETWORK=false
 DO_RUN=true
 VERIFY=true
-LOOP_SECONDS=""
-MIN_DECODES=""
 
 # Directory defaults.  HSB_DIR is used as-is (already on the correct branch);
 # CUDA_QUANTUM_DIR should be checked out at the ref in CUDAQX_DIR/.cudaq_version
@@ -220,13 +218,8 @@ Network options:
   --mtu N                MTU size (default: 4096)
 
 Run options:
-  --timeout N            Server watchdog grace in seconds (default: 60). In a
-                         bounded loop run, the requested loop duration is
-                         added so preflight does not consume loop time.
+  --timeout N            Server timeout in seconds (default: 60)
   --no-verify            Skip correction verification
-  --loop-seconds N       Continuously replay the loaded BRAM windows for N
-                         seconds after one finite ILA verification pass.
-  --min-decodes N        Require at least N server decodes with --loop-seconds
   --num-shots N          Limit number of shots
   --page-size N          Ring buffer slot size in bytes (default: 384)
   --frame-size N         Server TX SGE bytes, cpu_roce only (default: 64;
@@ -277,8 +270,6 @@ while [[ $# -gt 0 ]]; do
         --fpga-ip)          FPGA_IP="$2"; shift ;;
         --mtu)              MTU="$2"; shift ;;
         --timeout)          TIMEOUT="$2"; shift ;;
-        --loop-seconds)     LOOP_SECONDS="$2"; shift ;;
-        --min-decodes)      MIN_DECODES="$2"; shift ;;
         --num-shots)        NUM_SHOTS="$2"; shift ;;
         --page-size)        PAGE_SIZE="$2"; shift ;;
         --frame-size)       FRAME_SIZE="$2"; shift ;;
@@ -293,38 +284,6 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
-
-if [[ -n "$MIN_DECODES" && -z "$LOOP_SECONDS" ]]; then
-    echo "ERROR: --min-decodes requires --loop-seconds" >&2
-    exit 1
-fi
-
-if [[ -n "$LOOP_SECONDS" ]]; then
-    if ! [[ "$LOOP_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-        echo "ERROR: --loop-seconds must be a positive integer" >&2
-        exit 1
-    fi
-    if [[ -z "$MIN_DECODES" ]]; then
-        echo "ERROR: --loop-seconds requires --min-decodes" >&2
-        exit 1
-    fi
-    if ! [[ "$MIN_DECODES" =~ ^[1-9][0-9]*$ ]]; then
-        echo "ERROR: --min-decodes must be a positive integer" >&2
-        exit 1
-    fi
-    if ! [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
-        echo "ERROR: --timeout must be a positive integer" >&2
-        exit 1
-    fi
-    if ! $VERIFY; then
-        echo "ERROR: --loop-seconds requires ILA verification; remove --no-verify" >&2
-        exit 1
-    fi
-    if ! $EMULATE; then
-        echo "ERROR: --loop-seconds is supported only with --emulate; it requires software-emulator loop statistics" >&2
-        exit 1
-    fi
-fi
 
 # Resolve the server-side NIC IP by mode: the emulate loop lives on
 # 10.0.0.0/24, the real FPGA on 192.168.0.0/24.  A bridge IP outside the
@@ -443,7 +402,6 @@ _banner() {
 
 PIDS_TO_KILL=()
 TEMP_FILES=()
-PLAYBACK_LOG=""
 
 cleanup() {
     local pid
@@ -1210,15 +1168,6 @@ PY
 
 start_server() {
     local peer_ip="$1" remote_qp="$2" server_log="$3"
-    local server_stats_env=()
-    local server_timeout="$TIMEOUT"
-    if [[ -n "$LOOP_SECONDS" ]]; then
-        server_stats_env+=(QEC_DECODING_SERVER_STATS=1)
-        # TIMEOUT is the watchdog grace for setup and orderly shutdown.  The
-        # measured replay interval is added separately so BRAM programming and
-        # the finite ILA pass cannot shorten the requested loop duration.
-        server_timeout=$((TIMEOUT + LOOP_SECONDS))
-    fi
 
     _log "Starting decoding server (decoder=$DECODER, transport=$TRANSPORT," \
          "remote-qp=$remote_qp)"
@@ -1243,18 +1192,17 @@ start_server() {
         # Eager module loading avoids lazy-load stalls inside the persistent
         # scheduler (same as the old bridge launcher).
         prepare_gpu_roce_config "$peer_ip" "$remote_qp" || return 1
-        env CUDA_MODULE_LOADING=EAGER "${server_stats_env[@]}" \
+        CUDA_MODULE_LOADING=EAGER \
         LD_LIBRARY_PATH="${server_ld_path}:${LD_LIBRARY_PATH:-}" \
         "$SERVER_BIN" \
             --config="$CONFIG_FILE" \
-            --timeout="$server_timeout" \
+            --timeout="$TIMEOUT" \
             > >(tee "$server_log") 2>&1 &
         # The DeviceGraphTransceiver prints the QP/RKey/Buffer handshake during
         # server construction, BEFORE this READY sentinel -- so waiting for
         # READY guarantees the three lines are scrapeable.
         ready_pattern="QEC_DECODING_SERVER_READY device_graph"
     else
-        env "${server_stats_env[@]}" \
         LD_LIBRARY_PATH="${server_ld_path}:${LD_LIBRARY_PATH:-}" \
         "$SERVER_BIN" \
             --config="$CONFIG_FILE" \
@@ -1266,7 +1214,7 @@ start_server() {
             --num-slots="$NUM_SLOTS" \
             --slot-size="$PAGE_SIZE" \
             --frame-size="$FRAME_SIZE" \
-            --timeout="$server_timeout" \
+            --timeout="$TIMEOUT" \
             > >(tee "$server_log") 2>&1 &
         ready_pattern="Bridge Ready"
     fi
@@ -1343,12 +1291,6 @@ run_playback() {
     if $VERIFY; then
         playback_args+=(--verify)
     fi
-    if [[ -n "$LOOP_SECONDS" ]]; then
-        playback_args+=(
-            --loop-seconds "$LOOP_SECONDS"
-            --min-loop-shots "$MIN_DECODES"
-        )
-    fi
     if [[ -n "$NUM_SHOTS" ]]; then
         playback_args+=(--num-shots "$NUM_SHOTS")
     fi
@@ -1356,145 +1298,9 @@ run_playback() {
         playback_args+=(--spacing "$SPACING")
     fi
 
-    PLAYBACK_LOG=$(mktemp /tmp/decoding_server_playback.XXXXXX.log)
-    TEMP_FILES+=("$PLAYBACK_LOG")
-
-    local playback_rc
-    set +e
-    "$PLAYBACK_BIN" "${playback_args[@]}" 2>&1 | tee "$PLAYBACK_LOG"
-    playback_rc=${PIPESTATUS[0]}
-    set -e
-    return "$playback_rc"
-}
-
-verify_loop_statistics() {
-    local server_log="$1" emulator_log="${2:-}"
-    if [[ -z "$PLAYBACK_LOG" ]] || ! grep -q '^  RESULT: PASS$' "$PLAYBACK_LOG"; then
-        _err "Finite ILA verification did not report RESULT: PASS"
-        return 1
-    fi
-
-    local loop_frames loop_responses loop_measurements response_failures
-    loop_frames=$(sed -n 's/^  Playback frames: *\([0-9][0-9]*\)$/\1/p' "$PLAYBACK_LOG" | tail -n 1)
-    loop_responses=$(sed -n 's/^  Correction responses: *\([0-9][0-9]*\)$/\1/p' "$PLAYBACK_LOG" | tail -n 1)
-    loop_measurements=$(sed -n 's/^  Completed measurements: *\([0-9][0-9]*\)$/\1/p' "$PLAYBACK_LOG" | tail -n 1)
-    response_failures=$(sed -n 's/^  RPC status failures: *\([0-9][0-9]*\)$/\1/p' "$PLAYBACK_LOG" | tail -n 1)
-    if [[ -z "$loop_frames" || -z "$loop_responses" || -z "$loop_measurements" || -z "$response_failures" ]]; then
-        _err "Could not parse loop-only playback statistics"
-        return 1
-    fi
-    if (( loop_responses != loop_frames )); then
-        _err "Loop transport failed: frames=$loop_frames responses=$loop_responses"
-        return 1
-    fi
-    if (( loop_measurements < MIN_DECODES )); then
-        _err "Playback acceptance failed: measurements=$loop_measurements required=$MIN_DECODES"
-        return 1
-    fi
-    if (( response_failures != 0 )); then
-        _err "Loop RPC status failures: $response_failures"
-        return 1
-    fi
-
-    local windows responses send_errors timeouts
-    if [[ -n "$emulator_log" ]]; then
-        windows=$(sed -n 's/^  Windows sent: \([0-9][0-9]*\)$/\1/p' "$emulator_log" | tail -n 1)
-        responses=$(sed -n 's/^  Responses received: \([0-9][0-9]*\)$/\1/p' "$emulator_log" | tail -n 1)
-        send_errors=$(sed -n 's/^  Send errors: \([0-9][0-9]*\)$/\1/p' "$emulator_log" | tail -n 1)
-        timeouts=$(sed -n 's/^  Timeouts: \([0-9][0-9]*\)$/\1/p' "$emulator_log" | tail -n 1)
-        if [[ -z "$windows" || -z "$responses" || -z "$send_errors" || -z "$timeouts" ]]; then
-            _err "Could not parse emulator loop statistics"
-            return 1
-        fi
-        if (( send_errors != 0 || timeouts != 0 || responses != windows )); then
-            _err "Emulator loop transport failed: windows=$windows responses=$responses errors=$send_errors timeouts=$timeouts"
-            return 1
-        fi
-    fi
-
-    local server_result
-    if [[ "$TRANSPORT" == "cpu_roce" ]]; then
-        local stats_line decodes errors verification_corrections loop_decodes
-        stats_line=$(grep '^QEC_DECODING_SERVER_DECODER_STATS id=0 ' "$server_log" | tail -n 1 || true)
-        if [[ -z "$stats_line" ]]; then
-            _err "Loop run finished without decoder statistics"
-            return 1
-        fi
-        decodes=$(sed -n 's/.* decodes=\([0-9][0-9]*\).*/\1/p' <<<"$stats_line")
-        errors=$(sed -n 's/.* errors=\([0-9][0-9]*\).*/\1/p' <<<"$stats_line")
-        verification_corrections=$(sed -n \
-            's/^  get_corrections frames: \([0-9][0-9]*\)$/\1/p' \
-            "$PLAYBACK_LOG" | tail -n 1)
-        if [[ -z "$decodes" || -z "$errors" || -z "$verification_corrections" ]]; then
-            _err "Could not parse CPU decoding-server statistics"
-            return 1
-        fi
-        if (( decodes < verification_corrections )); then
-            _err "Decoding-server count is below the finite ILA correction count"
-            return 1
-        fi
-        loop_decodes=$((decodes - verification_corrections))
-        if (( loop_decodes < MIN_DECODES || errors != 0 )); then
-            _err "Decoding-server acceptance failed: loop_decodes=$loop_decodes errors=$errors required=$MIN_DECODES"
-            return 1
-        fi
-        server_result="PASS ($loop_decodes loop measurements, 0 errors)"
-    else
-        # Device-graph execution bypasses DecodingSession::enqueue_core(), so
-        # its host decode_count is not a completion metric. A complete
-        # loop-only RPC response sequence with zero status failures is the
-        # end-to-end completion signal; the playback tool derives measurements
-        # from that sequence.
-        server_result="PASS (device-graph completion verified by successful RPC responses)"
-    fi
-
-    _banner "HSB REGRESSION RESULT"
-    _info "ILA preflight:            PASS"
-    if [[ -n "$emulator_log" ]]; then
-        _info "Loop transport:           PASS ($loop_responses RPC frames, 0 errors, 0 timeouts)"
-    fi
-    _info "Decoding server:          $server_result"
-    _info "Required measurements:    $MIN_DECODES"
-    _info "RESULT: PASS"
-}
-
-finish_loop_run() {
-    local server_log="$1" emulator_log="${2:-}" emulator_pid="${3:-}"
-    [[ -n "$LOOP_SECONDS" ]] || return 0
-
-    _log "Stopping decoding server after bounded loop playback"
-    if kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill -TERM "$SERVER_PID" 2>/dev/null || true
-    fi
-    if ! wait "$SERVER_PID"; then
-        _err "Decoding server exited with an error"
-        return 1
-    fi
-    # The server writes through a background tee process substitution. Wait for
-    # its final CPU decoder statistics to reach the log before parsing them.
-    # This is post-shutdown test bookkeeping, outside the playback and decode
-    # paths.
-    if [[ "$TRANSPORT" == "cpu_roce" ]]; then
-        wait_for_pattern "$server_log" \
-            '^QEC_DECODING_SERVER_DECODER_STATS id=0 ' 5 >/dev/null || {
-            _err "Decoding server statistics were not flushed after shutdown"
-            return 1
-        }
-    fi
-    if [[ -n "$emulator_pid" ]]; then
-        if ! wait "$emulator_pid"; then
-            _err "FPGA emulator exited with an error"
-            return 1
-        fi
-        # The emulator also writes through a tee process substitution. Its
-        # final marker follows the results block parsed below, so waiting for
-        # it makes that parse deterministic.
-        wait_for_pattern "$emulator_log" '^\*\*\* EMULATOR: ' 5 >/dev/null || {
-            _err "FPGA emulator results were not flushed after exit"
-            return 1
-        }
-    fi
-    verify_loop_statistics "$server_log" "$emulator_log"
+    local playback_rc=0
+    "$PLAYBACK_BIN" "${playback_args[@]}" || playback_rc=$?
+    return $playback_rc
 }
 
 # ============================================================================
@@ -1537,8 +1343,7 @@ run_emulated() {
     start_server "$EMULATOR_IP" "$emu_qp" "$server_log" || return 1
 
     # ---- 3. Start playback tool ----
-    run_playback "$EMULATOR_IP" --control-port "$CONTROL_PORT" || return 1
-    finish_loop_run "$server_log" "$emu_log" "$emu_pid"
+    run_playback "$EMULATOR_IP" --control-port "$CONTROL_PORT"
 }
 
 # ============================================================================
@@ -1556,8 +1361,7 @@ run_fpga() {
     start_server "$FPGA_IP" "0x2" "$server_log" || return 1
 
     # ---- 2. Start playback tool (BOOTP enumeration; no control port) ----
-    run_playback "$FPGA_IP" || return 1
-    finish_loop_run "$server_log"
+    run_playback "$FPGA_IP"
 }
 
 # ============================================================================

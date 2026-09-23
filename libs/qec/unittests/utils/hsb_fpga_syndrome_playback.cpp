@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -50,27 +49,9 @@ constexpr std::uint32_t PLAYER_ENABLE_OFFSET = 0x0004;
 constexpr std::uint32_t RAM_NUM = 16;
 constexpr std::uint32_t RAM_DEPTH = 512;
 
-constexpr std::uint32_t PLAYER_ENABLE_SINGLE_PASS =
+constexpr std::uint32_t PLAYER_ENABLE =
     0x0000'000D; // enable + single-pass + ptp_bram_ena
-// ram_ena | ptp_bram_ena: continuously replay the programmed BRAM payload.
-constexpr std::uint32_t PLAYER_ENABLE_LOOP = 0x0000'0009;
 constexpr std::uint32_t PLAYER_DISABLE = 0x0000'0000;
-// LOOP_STATS register map — must match hsb_fpga_emulator.cpp in the
-// cuda-quantum repository.
-constexpr std::uint32_t LOOP_STATS_MAGIC = 0xE000'0000;
-constexpr std::uint32_t LOOP_STATS_STATE = 0xE000'0004;
-constexpr std::uint32_t LOOP_STATS_WINDOWS_LO = 0xE000'0008;
-constexpr std::uint32_t LOOP_STATS_WINDOWS_HI = 0xE000'000C;
-constexpr std::uint32_t LOOP_STATS_RESPONSES_LO = 0xE000'0010;
-constexpr std::uint32_t LOOP_STATS_RESPONSES_HI = 0xE000'0014;
-constexpr std::uint32_t LOOP_STATS_ERRORS = 0xE000'0018;
-constexpr std::uint32_t LOOP_STATS_TIMEOUTS = 0xE000'001C;
-constexpr std::uint32_t LOOP_STATS_ACK = 0xE000'0020;
-constexpr std::uint32_t LOOP_STATS_RESPONSE_FAILURES = 0xE000'0024;
-constexpr std::uint32_t LOOP_STATS_MAGIC_VALUE = 0x4853'4245;
-constexpr std::uint32_t LOOP_STATS_COMPLETE = 2;
-constexpr int kLoopStatsMaxRetries = 100;
-constexpr std::chrono::milliseconds kLoopStatsPollInterval{50};
 
 // Sensor TX streaming threshold register. The Host→FPGA path buffers
 // incoming data until this byte threshold is met before streaming to the
@@ -87,10 +68,6 @@ constexpr std::uint32_t RF_SOC_TIMER_SCALE = 322;
 
 constexpr std::uint32_t MOCK_DECODE_FUNCTION_ID =
     cudaq::realtime::fnv1a_hash("mock_decode");
-
-volatile std::sig_atomic_t loop_stop_requested = 0;
-
-extern "C" void request_loop_stop(int) { loop_stop_requested = 1; }
 
 // ============================================================================
 // ILA Capture Block Constants — from spec_sif_tx.json
@@ -405,9 +382,6 @@ struct Options {
       function_name; // RPC function name (overrides default mock_decode)
   std::optional<std::size_t> num_shots;
   bool verify = false;
-  bool loop = false;
-  std::optional<std::uint32_t> loop_seconds;
-  std::optional<std::size_t> min_loop_shots;
 
   // Per-round mode (device-graph scheduler): emit N enqueue_syndromes frames
   // (one per round) followed by 1 get_corrections frame per shot, instead of a
@@ -458,13 +432,6 @@ void print_usage(const char *argv0) {
          "                        frames-per-shot x spacing)\n"
       << "  --verify              Capture and verify correction responses "
          "via ILA\n"
-      << "  --loop                Continuously replay the loaded BRAM windows "
-         "until Ctrl-C; --verify first checks one finite pass\n"
-      << "  --loop-seconds <n>    Replay continuously for n seconds, then "
-         "disable the player cleanly; requires --control-port\n"
-      << "                        and --verify first checks one pass\n"
-      << "  --min-loop-shots <n> Require at least n completed decoding "
-         "measurements in emulator loop mode; requires --loop\n"
       << "  --per-round           Per-round protocol (device-graph scheduler): "
          "send\n"
       << "                        N enqueue_syndromes frames (one per "
@@ -512,21 +479,6 @@ Options parse_args(int argc, char **argv) {
           static_cast<std::uint32_t>(std::stoul(argv[++i], nullptr, 0));
     } else if (arg == "--verify") {
       options.verify = true;
-    } else if (arg == "--loop") {
-      options.loop = true;
-    } else if (arg == "--loop-seconds" && i + 1 < argc) {
-      const auto seconds = std::stoul(argv[++i], nullptr, 0);
-      if (seconds == 0 || seconds > std::numeric_limits<std::uint32_t>::max())
-        throw std::invalid_argument(
-            "--loop-seconds must be a positive integer");
-      options.loop = true;
-      options.loop_seconds = static_cast<std::uint32_t>(seconds);
-    } else if (arg == "--min-loop-shots" && i + 1 < argc) {
-      const auto min_loop_shots = std::stoull(argv[++i]);
-      if (min_loop_shots == 0)
-        throw std::invalid_argument(
-            "--min-loop-shots must be a positive integer");
-      options.min_loop_shots = min_loop_shots;
     } else if (arg == "--per-round") {
       options.per_round = true;
     } else if (arg == "--qp-number" && i + 1 < argc) {
@@ -1074,183 +1026,6 @@ VerifyResult verify_captured_responses(
   return result;
 }
 
-bool verification_passed(const VerifyResult &result,
-                         std::size_t expected_shots) {
-  return result.correction_errors == 0 && result.header_errors == 0 &&
-         result.responses_matched != 0 &&
-         result.unique_shots_verified >= expected_shots;
-}
-
-struct LoopStats {
-  std::uint64_t frames = 0;
-  std::uint64_t responses = 0;
-  std::uint32_t errors = 0;
-  std::uint32_t timeouts = 0;
-  std::uint32_t response_failures = 0;
-};
-
-struct MeasurementRunSummary {
-  std::uint64_t playback_frames = 0;
-  std::uint64_t response_frames = 0;
-  std::uint64_t completed_measurements = 0;
-  bool all_responses_received = false;
-  std::uint32_t transport_errors = 0;
-  std::uint32_t transport_timeouts = 0;
-  std::uint32_t response_failures = 0;
-  std::optional<std::size_t> requested_measurements;
-};
-
-std::uint64_t read_u64(hololink::Hololink &hsb, std::uint32_t lo,
-                       std::uint32_t hi) {
-  return static_cast<std::uint64_t>(hsb.read_uint32(lo)) |
-         (static_cast<std::uint64_t>(hsb.read_uint32(hi)) << 32);
-}
-
-std::optional<LoopStats> read_loop_stats(hololink::Hololink &hsb) {
-  for (int i = 0; i < kLoopStatsMaxRetries; ++i) {
-    if (hsb.read_uint32(LOOP_STATS_MAGIC) == LOOP_STATS_MAGIC_VALUE &&
-        hsb.read_uint32(LOOP_STATS_STATE) == LOOP_STATS_COMPLETE) {
-      const LoopStats stats{
-          read_u64(hsb, LOOP_STATS_WINDOWS_LO, LOOP_STATS_WINDOWS_HI),
-          read_u64(hsb, LOOP_STATS_RESPONSES_LO, LOOP_STATS_RESPONSES_HI),
-          hsb.read_uint32(LOOP_STATS_ERRORS),
-          hsb.read_uint32(LOOP_STATS_TIMEOUTS),
-          hsb.read_uint32(LOOP_STATS_RESPONSE_FAILURES)};
-      // The software emulator keeps its control-plane session alive until the
-      // client has consumed this final snapshot. This acknowledgement is
-      // outside the playback/RDMA hot path.
-      if (!hsb.write_uint32(LOOP_STATS_ACK, LOOP_STATS_MAGIC_VALUE))
-        throw std::runtime_error("Failed to acknowledge loop statistics");
-      return stats;
-    }
-    std::this_thread::sleep_for(kLoopStatsPollInterval);
-  }
-  return std::nullopt;
-}
-
-MeasurementRunSummary make_measurement_run_summary(
-    const LoopStats &stats, std::size_t frames_per_measurement,
-    std::optional<std::size_t> requested_measurements) {
-  return MeasurementRunSummary{
-      .playback_frames = stats.frames,
-      .response_frames = stats.responses,
-      .completed_measurements = stats.responses / frames_per_measurement,
-      .all_responses_received = stats.responses == stats.frames,
-      .transport_errors = stats.errors,
-      .transport_timeouts = stats.timeouts,
-      .response_failures = stats.response_failures,
-      .requested_measurements = requested_measurements,
-  };
-}
-
-bool measurement_run_passed(const MeasurementRunSummary &summary) {
-  return summary.all_responses_received && summary.transport_errors == 0 &&
-         summary.transport_timeouts == 0 && summary.response_failures == 0 &&
-         (!summary.requested_measurements ||
-          summary.completed_measurements >= *summary.requested_measurements);
-}
-
-void print_verification_summary(const VerifyResult &result,
-                                std::uint32_t actual_samples,
-                                std::size_t expected_shots, bool per_round,
-                                const std::optional<MeasurementRunSummary>
-                                    &measurement_run = std::nullopt) {
-  const std::size_t corrections_returned =
-      result.rpc_responses - result.enqueue_acks;
-  std::cout << "\n=== Verification Summary ===\n"
-            << "  ILA samples captured:   " << actual_samples << "\n"
-            << "  tvalid=0 (idle):        " << result.tvalid_zero << "\n"
-            << "  ILA RPC response frames: " << result.rpc_responses << "\n";
-  if (per_round)
-    std::cout << "  Enqueue ACKs:           " << result.enqueue_acks << "\n"
-              << "  get_corrections frames: " << corrections_returned << "\n";
-  std::cout << "  Non-RPC frames:         " << result.non_rpc_frames << "\n"
-            << "  Unique shots verified:  " << result.unique_shots_verified
-            << "\n"
-            << "  Corrections matched:    " << result.responses_matched << "\n"
-            << "  Header errors:          " << result.header_errors << "\n"
-            << "  Correction errors:      " << result.correction_errors << "\n"
-            << "  Expected shots:         " << expected_shots << "\n";
-  if (measurement_run) {
-    std::cout << "  Completed measurements: "
-              << measurement_run->completed_measurements << "\n"
-              << "  Playback frames:        "
-              << measurement_run->playback_frames << "\n"
-              << "  Correction responses:   "
-              << measurement_run->response_frames << "\n"
-              << "  Transport errors:       "
-              << measurement_run->transport_errors << "\n"
-              << "  Transport timeouts:     "
-              << measurement_run->transport_timeouts << "\n"
-              << "  RPC status failures:    "
-              << measurement_run->response_failures << "\n";
-  }
-  if (!result.latency_samples.empty()) {
-    int64_t lat_min = std::numeric_limits<int64_t>::max();
-    int64_t lat_max = std::numeric_limits<int64_t>::min();
-    int64_t lat_sum = 0;
-    for (const auto &sample : result.latency_samples) {
-      lat_sum += sample.delta_ns;
-      lat_min = std::min(lat_min, sample.delta_ns);
-      lat_max = std::max(lat_max, sample.delta_ns);
-    }
-    const double lat_avg =
-        static_cast<double>(lat_sum) / result.latency_samples.size();
-    for (std::size_t index = 0;
-         index < 5 && index < result.latency_samples.size(); ++index) {
-      const auto &sample = result.latency_samples[index];
-      std::cout << "  rid " << std::setw(3) << sample.request_id << " (shot "
-                << sample.shot << " local " << sample.local << " "
-                << (sample.is_corr ? "get_corrections" : "enqueue")
-                << "): send={sec=" << sample.send_sec
-                << ", nsec=" << sample.send_nsec
-                << "} recv={sec=" << sample.recv_sec
-                << ", nsec=" << sample.recv_nsec
-                << "} delta=" << sample.delta_ns << " ns\n";
-    }
-    std::cout << "\n=== PTP Round-Trip Latency ===\n"
-              << "  Samples:  " << result.latency_samples.size()
-              << " (all captured frames)\n"
-              << "  Min:      " << lat_min << " ns\n"
-              << "  Max:      " << lat_max << " ns\n"
-              << "  Avg:      " << std::fixed << std::setprecision(1) << lat_avg
-              << " ns\n";
-    const std::string csv_path = "ptp_latency.csv";
-    std::ofstream csv(csv_path);
-    if (csv.is_open()) {
-      csv << "request_id,shot,local,kind,send_sec,send_nsec,recv_sec,"
-             "recv_nsec,delta_ns\n";
-      for (const auto &sample : result.latency_samples)
-        csv << sample.request_id << "," << sample.shot << "," << sample.local
-            << "," << (sample.is_corr ? "get_corrections" : "enqueue") << ","
-            << sample.send_sec << "," << sample.send_nsec << ","
-            << sample.recv_sec << "," << sample.recv_nsec << ","
-            << sample.delta_ns << "\n";
-      std::cout << "  CSV written: " << csv_path << " ("
-                << result.latency_samples.size() << " rows)\n";
-    }
-  } else {
-    std::cout << "\n  PTP latency: no valid timestamps found\n";
-  }
-
-  if (!verification_passed(result, expected_shots) ||
-      (measurement_run && !measurement_run_passed(*measurement_run))) {
-    if (result.correction_errors > 0 || result.header_errors > 0)
-      std::cout << "  RESULT: FAIL\n";
-    else if (result.responses_matched == 0)
-      std::cout << "  RESULT: FAIL (no valid responses found)\n";
-    else if (measurement_run && !measurement_run_passed(*measurement_run))
-      std::cout << "  RESULT: FAIL (measurement run did not satisfy the "
-                   "requested acceptance criteria)\n";
-    else
-      std::cout << "  RESULT: FAIL (verified only "
-                << result.unique_shots_verified << " of " << expected_shots
-                << " expected shots)\n";
-    return;
-  }
-  std::cout << "  RESULT: PASS\n";
-}
-
 } // namespace
 
 // ============================================================================
@@ -1259,15 +1034,6 @@ void print_verification_summary(const VerifyResult &result,
 
 int main(int argc, char **argv) {
   Options options = parse_args(argc, argv);
-  if (options.min_loop_shots && !options.loop) {
-    throw std::invalid_argument("--min-loop-shots requires --loop");
-  }
-  if ((options.loop_seconds || options.min_loop_shots) &&
-      !options.control_port) {
-    throw std::invalid_argument(
-        "--loop-seconds and --min-loop-shots require --control-port "
-        "(software emulator only)");
-  }
   // --data-dir is required unless both --config and --syndromes are given
   bool has_explicit_files =
       !options.config_file.empty() && !options.syndromes_file.empty();
@@ -1546,7 +1312,7 @@ int main(int argc, char **argv) {
     hsb_channel.configure_roce(*options.buffer_addr, bytes_per_window,
                                rdma_page_size, rdma_num_pages, ROCEV2_UDP_PORT);
 
-    std::cout << "FPGA SIF registers configured for RDMA\n";
+    std::cout << "FPGA SIF registers configured for RDMA" << std::endl;
   }
 
   // ------------------------------------------------------------------
@@ -1565,16 +1331,17 @@ int main(int argc, char **argv) {
   if (!hsb->write_uint32(config_write))
     throw std::runtime_error("Failed to configure player");
 
-  std::cout << "Writing " << num_windows << " windows to playback BRAM...\n";
+  std::cout << "Writing " << num_windows << " windows to playback BRAM..."
+            << std::endl;
   try {
     write_bram(*hsb, windows, bytes_per_window);
-    std::cout << "BRAM write completed successfully\n";
+    std::cout << "BRAM write completed successfully" << std::endl;
   } catch (const std::exception &e) {
     std::cerr << "BRAM write FAILED: " << e.what() << std::endl;
     return 1;
   }
 
-  std::cout << "Verifying playback BRAM contents...\n";
+  std::cout << "Verifying playback BRAM contents..." << std::endl;
   try {
     if (!verify_bram(*hsb, windows, bytes_per_window)) {
       std::cerr << "BRAM readback verification FAILED\n";
@@ -1620,32 +1387,15 @@ int main(int argc, char **argv) {
   // ------------------------------------------------------------------
   // Enable playback
   // ------------------------------------------------------------------
-  // A loop run with --verify starts with exactly one single-pass playback, so
-  // the ILA can verify a finite and unique response sequence before the BRAM
-  // windows are replayed continuously.
-  const bool verify_first_pass = options.loop && options.verify;
-  const std::uint32_t player_enable = (options.loop && !options.verify)
-                                          ? PLAYER_ENABLE_LOOP
-                                          : PLAYER_ENABLE_SINGLE_PASS;
-  if (!hsb->write_uint32(PLAYER_ADDR + PLAYER_ENABLE_OFFSET, player_enable))
+  if (!hsb->write_uint32(PLAYER_ADDR + PLAYER_ENABLE_OFFSET, PLAYER_ENABLE))
     throw std::runtime_error("Failed to enable player");
 
   std::cout << "Playback enabled: " << num_shots << " shots / " << num_windows
             << " frames on hsb " << options.hsb_ip << "\n";
-  if (verify_first_pass) {
-    std::cout << "\n=== Playback Plan ===\n"
-              << "  ILA verification:        " << num_shots
-              << " unique shots / " << num_windows << " frames\n"
-              << "  Continuous replay unit:  same verified " << num_windows
-              << "-frame BRAM load\n"
-              << "  Frames per decode:       " << frames_per_shot << "\n";
-  }
 
   // ------------------------------------------------------------------
   // ILA capture and correction verification
   // ------------------------------------------------------------------
-  std::optional<VerifyResult> verified_result;
-  std::uint32_t verified_sample_count = 0;
   if (options.verify) {
     std::cout << "\n=== ILA Capture & Verification ===\n";
 
@@ -1681,59 +1431,95 @@ int main(int argc, char **argv) {
     auto samples = ila_dump(*hsb, actual_samples);
     std::cout << "Read " << samples.size() << " samples from ILA\n";
 
-    verified_sample_count = actual_samples;
-    verified_result = verify_captured_responses(
-        samples, syndromes, num_shots, options.per_round, frames_per_shot,
-        rdma_num_pages);
-    if (!verification_passed(*verified_result, num_shots)) {
-      print_verification_summary(*verified_result, verified_sample_count,
-                                 num_shots, options.per_round);
+    // Verify correction responses against expected values.
+    auto vr = verify_captured_responses(samples, syndromes, num_shots,
+                                        options.per_round, frames_per_shot,
+                                        rdma_num_pages);
+
+    // In per-round mode the response frames split into enqueue ACKs
+    // (result_len==0) and get_corrections frames (result_len>0); only the
+    // latter carry corrections.
+    const std::size_t corrections_returned = vr.rpc_responses - vr.enqueue_acks;
+    std::cout << "\n=== Verification Summary ===\n"
+              << "  ILA samples captured:   " << actual_samples << "\n"
+              << "  tvalid=0 (idle):        " << vr.tvalid_zero << "\n"
+              << "  RPC response frames:    " << vr.rpc_responses << "\n";
+    if (options.per_round)
+      std::cout << "  Enqueue ACKs:           " << vr.enqueue_acks << "\n"
+                << "  get_corrections frames: " << corrections_returned << "\n";
+    std::cout << "  Non-RPC frames:         " << vr.non_rpc_frames << "\n"
+              << "  Unique shots verified:  " << vr.unique_shots_verified
+              << "\n"
+              << "  Corrections matched:    " << vr.responses_matched << "\n"
+              << "  Header errors:          " << vr.header_errors << "\n"
+              << "  Correction errors:      " << vr.correction_errors << "\n"
+              << "  Expected shots:         " << num_shots << "\n";
+    if (!vr.latency_samples.empty()) {
+      int64_t lat_min = std::numeric_limits<int64_t>::max();
+      int64_t lat_max = std::numeric_limits<int64_t>::min();
+      int64_t lat_sum = 0;
+      for (auto &s : vr.latency_samples) {
+        lat_sum += s.delta_ns;
+        if (s.delta_ns < lat_min)
+          lat_min = s.delta_ns;
+        if (s.delta_ns > lat_max)
+          lat_max = s.delta_ns;
+      }
+      double lat_avg = static_cast<double>(lat_sum) / vr.latency_samples.size();
+
+      // Print first 5 samples for diagnostic
+      for (std::size_t k = 0; k < 5 && k < vr.latency_samples.size(); ++k) {
+        auto &s = vr.latency_samples[k];
+        std::cout << "  rid " << std::setw(3) << s.request_id << " (shot "
+                  << s.shot << " local " << s.local << " "
+                  << (s.is_corr ? "get_corrections" : "enqueue") << ")"
+                  << ": send={sec=" << s.send_sec << ", nsec=" << s.send_nsec
+                  << "} recv={sec=" << s.recv_sec << ", nsec=" << s.recv_nsec
+                  << "} delta=" << s.delta_ns << " ns\n";
+      }
+
+      std::cout << "\n=== PTP Round-Trip Latency ===\n"
+                << "  Samples:  " << vr.latency_samples.size()
+                << " (all captured frames)\n"
+                << "  Min:      " << lat_min << " ns\n"
+                << "  Max:      " << lat_max << " ns\n"
+                << "  Avg:      " << std::fixed << std::setprecision(1)
+                << lat_avg << " ns\n";
+
+      // One row per captured frame.  `kind` is enqueue|get_corrections;
+      // `local` is the frame index within its shot (per-round).
+      const std::string csv_path = "ptp_latency.csv";
+      std::ofstream csv(csv_path);
+      if (csv.is_open()) {
+        csv << "request_id,shot,local,kind,send_sec,send_nsec,recv_sec,"
+               "recv_nsec,delta_ns\n";
+        for (auto &s : vr.latency_samples)
+          csv << s.request_id << "," << s.shot << "," << s.local << ","
+              << (s.is_corr ? "get_corrections" : "enqueue") << ","
+              << s.send_sec << "," << s.send_nsec << "," << s.recv_sec << ","
+              << s.recv_nsec << "," << s.delta_ns << "\n";
+        csv.close();
+        std::cout << "  CSV written: " << csv_path << " ("
+                  << vr.latency_samples.size() << " rows)\n";
+      }
+    } else {
+      std::cout << "\n  PTP latency: no valid timestamps found\n";
+    }
+
+    if (vr.correction_errors > 0 || vr.header_errors > 0) {
+      std::cout << "  RESULT: FAIL\n";
       return 1;
     }
-    if (!options.loop)
-      print_verification_summary(*verified_result, verified_sample_count,
-                                 num_shots, options.per_round);
-  }
-
-  if (options.loop) {
-    if (verify_first_pass) {
-      if (!hsb->write_uint32(PLAYER_ADDR + PLAYER_ENABLE_OFFSET,
-                             PLAYER_ENABLE_LOOP))
-        throw std::runtime_error("Failed to enable loop player");
+    if (vr.responses_matched == 0) {
+      std::cout << "  RESULT: FAIL (no valid responses found)\n";
+      return 1;
     }
-
-    loop_stop_requested = 0;
-    std::signal(SIGINT, request_loop_stop);
-    const auto loop_start = std::chrono::steady_clock::now();
-    while (!loop_stop_requested) {
-      if (options.loop_seconds &&
-          std::chrono::steady_clock::now() - loop_start >=
-              std::chrono::seconds(*options.loop_seconds))
-        break;
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (vr.unique_shots_verified < num_shots) {
+      std::cout << "  RESULT: FAIL (verified only " << vr.unique_shots_verified
+                << " of " << num_shots << " expected shots)\n";
+      return 1;
     }
-    if (!hsb->write_uint32(PLAYER_ADDR + PLAYER_ENABLE_OFFSET, PLAYER_DISABLE))
-      throw std::runtime_error("Failed to disable loop player");
-    // The real FPGA exposes no equivalent final-counter register map. Its
-    // manual loop contract ends cleanly when the player is disabled. Preserve
-    // the finite ILA verification result even though loop statistics are not
-    // available on hardware.
-    if (!options.control_port) {
-      if (verified_result)
-        print_verification_summary(*verified_result, verified_sample_count,
-                                   num_shots, options.per_round);
-      return 0;
-    }
-    const auto loop_stats = read_loop_stats(*hsb);
-    if (!loop_stats)
-      throw std::runtime_error(
-          "emulator did not publish final loop statistics");
-    const auto measurement_run = make_measurement_run_summary(
-        *loop_stats, frames_per_shot, options.min_loop_shots);
-    if (verified_result)
-      print_verification_summary(*verified_result, verified_sample_count,
-                                 num_shots, options.per_round, measurement_run);
-    return measurement_run_passed(measurement_run) ? 0 : 1;
+    std::cout << "  RESULT: PASS\n";
   }
 
   return 0;
