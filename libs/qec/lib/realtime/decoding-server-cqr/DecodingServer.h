@@ -59,10 +59,6 @@ public:
   /// Thread-safe; releases run() and shuts the transports down.
   void stop();
 
-  /// Print one QEC_DECODING_SERVER_DECODER_STATS line per session to stdout
-  /// (test/diagnostic evidence; callers gate on QEC_DECODING_SERVER_STATS).
-  void print_session_stats() const;
-
 private:
   /// Create a transceiver for \p dispatch and its resolved YAML transport.
   /// Throws for host dispatch (served by the CQR plugin) and when the

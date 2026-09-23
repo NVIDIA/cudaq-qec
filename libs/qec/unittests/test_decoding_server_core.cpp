@@ -184,6 +184,32 @@ TEST(RpcSlotParse, PeeksTheDecoderIdFromEveryRequestKind) {
   EXPECT_FALSE(slot::peek_decoder_id(bare.data(), bare.size(), id));
 }
 
+TEST(RpcSlotWrite, ResultWriterRefusesASlotTooSmallForTheResponseHeader) {
+  // The capacity check must precede the subtraction: a slot shorter than the
+  // response header must report zero room and hand back nullptr, not the huge
+  // capacity an unguarded `slot_size - sizeof(RPCResponse)` underflows to.
+  // get_corrections_core turns that nullptr into INTERNAL_ERROR; a wrapped
+  // capacity would instead let it write past the slot.
+  std::vector<uint8_t> tx(sizeof(RPCResponse) + 8, 0);
+  slot::ResultWriter tight(tx.data(), sizeof(RPCResponse));
+  EXPECT_EQ(tight.payload_capacity(), 0u);
+  EXPECT_NE(tight.payload(0), nullptr);
+  EXPECT_EQ(tight.payload(1), nullptr);
+
+  slot::ResultWriter undersized(tx.data(), sizeof(RPCResponse) - 1);
+  EXPECT_EQ(undersized.payload_capacity(), 0u);
+  EXPECT_EQ(undersized.payload(1), nullptr);
+
+  slot::ResultWriter none(nullptr, 4096);
+  EXPECT_EQ(none.payload_capacity(), 0u);
+  EXPECT_EQ(none.payload(0), nullptr);
+
+  slot::ResultWriter roomy(tx.data(), sizeof(RPCResponse) + 8);
+  EXPECT_EQ(roomy.payload_capacity(), 8u);
+  EXPECT_EQ(roomy.payload(8), tx.data() + sizeof(RPCResponse));
+  EXPECT_EQ(roomy.payload(9), nullptr);
+}
+
 // ---------------------------------------------------------------------------
 // Device resolution + pin probes
 // ---------------------------------------------------------------------------
