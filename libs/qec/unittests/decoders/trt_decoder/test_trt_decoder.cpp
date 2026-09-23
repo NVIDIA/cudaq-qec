@@ -984,6 +984,48 @@ TEST_F(TRTDecoderTest, RejectsPackedOutputWithoutGlobalDecoderAtTopLevel) {
   }
 }
 
+TEST_F(TRTDecoderTest, CompositeGlobalDecoderReceivesCancellationToken) {
+  // TensorRT inference is not interruptible, but the token handed to
+  // decode()/decode_batch() must reach the global decoder unchanged.
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  auto onnx_path = get_dynamic_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated dynamic ONNX fixture is unavailable";
+
+  cudaqx::tensor<uint8_t> H({2, 1});
+  H.at({0, 0}) = 1;
+  cudaqx::tensor<uint8_t> O({1, 1});
+  O.at({0, 0}) = 1;
+
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format",
+                std::string("observables_and_residual_detectors"));
+  params.insert("batch_size", std::size_t{2});
+  params.insert("use_cuda_graph", false);
+  params.insert("global_decoder", std::string("cancellation_probe_decoder"));
+  params.insert("global_decoder_params", cudaqx::heterogeneous_map{});
+
+  std::unique_ptr<decoder> trt_decoder;
+  try {
+    trt_decoder = decoder::get(
+        "trt_decoder",
+        decoder_init(sparse_binary_matrix(H), sparse_binary_matrix(O)),
+        decode_result_type::observables, params);
+  } catch (const std::exception &e) {
+    GTEST_SKIP() << "Failed to create composite TRT decoder: " << e.what();
+  }
+
+  const std::vector<std::vector<cudaq::qec::float_t>> syndromes{
+      {1.0, 1.0, 0.0}, {0.0, 1.0, 0.0}};
+  cancellation_source src;
+  src.request_hard_stop();
+  EXPECT_FALSE(
+      trt_decoder->decode_batch(syndromes, src.get_token()).has_value());
+  EXPECT_FALSE(trt_decoder->decode(syndromes[0], src.get_token()).has_value());
+}
+
 // Note: Constructor tests and parse_precision tests are disabled because they
 // require actual TensorRT/CUDA initialization which is not available in the
 // test environment. Only parameter validation and utility function tests are

@@ -25,8 +25,8 @@ on:
         - 'PyPI'
       assets_repo:
         type: string
-        description: Retrieve assets from a draft release from this repo (e.g. NVIDIA/cudaqx)
-        default: 'NVIDIA/cudaqx'
+        description: Retrieve assets from a draft release from this repo (e.g. NVIDIA/cudaq-qec)
+        default: 'NVIDIA/cudaq-qec'
         required: false
       assets_tag:
         type: string
@@ -301,7 +301,7 @@ jobs:
         cuda_version: ['12.6', '13.0']
     # Use 32 CPUs rather than 8 (above) because we are only spawning one job per
     # platform rather than one job per Python version per platform.
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu32', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu32', matrix.platform) || 'ubuntu-latest' }}
     permissions:
       actions: write
       contents: read

@@ -174,6 +174,9 @@
           to a downstream decoder. See :ref:`the real-time decoding API
           <python_realtime_decoding_api>` for configuring composite decoding
           from YAML. Introduced in 0.7.0.
+          A cancellation token passed to :code:`decode` or :code:`decode_batch`
+          reaches only this global decoder; TensorRT inference itself is not
+          interruptible.
 
         - `global_decoder_params` (map): Parameters forwarded to the
           `global_decoder`. The accepted keys follow the parameter schema of the

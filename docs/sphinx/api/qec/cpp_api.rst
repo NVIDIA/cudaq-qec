@@ -180,6 +180,14 @@ Decoder Interfaces
 
 .. doxygenfunction:: cudaq::qec::d_sparse(const cudaq::M2DSparseMatrix &)
 
+.. doxygenenum:: cudaq::qec::cancellation_level
+
+.. doxygenclass:: cudaq::qec::cancellation_token
+    :members:
+
+.. doxygenclass:: cudaq::qec::cancellation_source
+    :members:
+
 .. doxygenclass:: cudaq::qec::decoder
     :members:
 
