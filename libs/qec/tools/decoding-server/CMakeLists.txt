@@ -18,6 +18,10 @@
 # realtime transport-provider interface (bridge_interface.h).  udp and
 # cpu_roce providers ship with the CUDA-Q realtime install; a partner
 # transport is a path to their own provider .so, with no changes here.
+# --host-loop=unified (default threaded) drives each host ring through CUDA-Q
+# realtime's single-thread unified loop instead of the provider's pump
+# threads; the provider must then be started in its unified mode (udp:
+# --unified).
 #
 # The two-process test (unittests/realtime/test_decoding_server.cpp) spawns
 # this binary as a subprocess.

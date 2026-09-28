@@ -21,6 +21,16 @@
 #                    CUDAQ_CPU_ROCE_TEST_DAEMON_DEVICE  / _DAEMON_IP
 #                  (e.g. a SoftRoCE self-loop: both = rxe_cudaq0 / 10.88.0.1)
 #
+# QEC_DECODING_SERVER_EXTRA_ARGS (optional, word-split) is appended to the
+# server command line after the arguments this script builds, so a repeated
+# flag (e.g. a later --transport=) overrides the earlier one. The CMake
+# host-loop-unified variant uses it to pass "--host-loop=unified --unified".
+#
+# Exit codes: 0 pass, 1 fail, 77 skip (CMake SKIP_RETURN_CODE). The script
+# skips when the server reports that the transport provider does not serve
+# the unified CPU data plane, i.e. --host-loop=unified was requested against
+# a CUDA-Q pin whose udp provider predates its --unified mode.
+#
 # Expected args:
 #   1: path to surface_code-1-cqr executable
 #   2: distance
@@ -79,6 +89,11 @@ if [[ "$TRANSPORT" == "cpu_roce" ]]; then
   SERVER_ARGS+=(--device=${CUDAQ_CPU_ROCE_TEST_DAEMON_DEVICE:-mlx5_0})
   SERVER_ARGS+=(--local-ip=${CUDAQ_CPU_ROCE_TEST_DAEMON_IP:-10.0.0.2})
 fi
+# Caller-supplied extras go last so a repeated flag (e.g. --transport=) wins.
+# 'read -a' word-splits without glob expansion; an empty value yields an
+# empty array.
+read -r -a EXTRA_SERVER_ARGS <<< "${QEC_DECODING_SERVER_EXTRA_ARGS:-}"
+SERVER_ARGS+=("${EXTRA_SERVER_ARGS[@]}")
 # QEC_DECODING_SERVER_STATS makes the server print exact per-decoder session
 # counters at shutdown; the assertions below use them to catch RPCs that were
 # dispatched but never reached their session (e.g. correlation collisions
@@ -98,10 +113,34 @@ for _ in $(seq 1 100); do
   SERVER_PORT=$(grep -m1 "QEC_DECODING_SERVER_READY" $SERVER_LOG 2>/dev/null \
     | sed -n 's/.*port=\([0-9]\+\).*/\1/p')
   [[ -n "$SERVER_PORT" ]] && break
+  # Stop waiting as soon as the server is gone (e.g. it rejected its
+  # arguments); its log is complete at that point.
+  kill -0 $SERVER_PID 2>/dev/null || break
   sleep 0.1
 done
 if [[ -z "$SERVER_PORT" ]]; then
-  echo "Error: server did not print QEC_DECODING_SERVER_READY"
+  # The server may have printed READY between the grep and the liveness check
+  # above and then exited; the log is complete now, so look once more before
+  # deciding.
+  SERVER_PORT=$(grep -m1 "QEC_DECODING_SERVER_READY" $SERVER_LOG 2>/dev/null \
+    | sed -n 's/.*port=\([0-9]\+\).*/\1/p')
+fi
+if [[ -z "$SERVER_PORT" ]]; then
+  # --host-loop=unified against a provider that has no unified CPU data plane
+  # is an environment limitation (CUDA-Q pin), not a test failure: skip.
+  if grep -q "does not serve the unified CPU data plane" $SERVER_LOG 2>/dev/null; then
+    grep "does not serve the unified CPU data plane" $SERVER_LOG || true
+    echo "SKIP: provider lacks the unified CPU data plane (CUDA-Q pin predates udp --unified)"
+    if [[ -z "${KEEP_LOG_FILES}" ]]; then
+      rm -f $CONFIG_FILE $SERVER_LOG save_dem-2proc-$FULL_SUFFIX.log
+    fi
+    exit 77
+  fi
+  if kill -0 $SERVER_PID 2>/dev/null; then
+    echo "Error: timed out waiting for QEC_DECODING_SERVER_READY (log follows)"
+  else
+    echo "Error: server exited before QEC_DECODING_SERVER_READY was seen (log follows)"
+  fi
   cat $SERVER_LOG
   exit 1
 fi
