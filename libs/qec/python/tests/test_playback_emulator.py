@@ -149,6 +149,9 @@ def test_run_accepts_every_documented_keyword_by_name():
         decoders=None,
         udp_endpoints=None,
         udp_timeout_ms=200,
+        cpu_roce_endpoints=None,
+        cpu_roce_options=None,
+        cpu_roce_timeout_ms=200,
         null_decoder_ids=[0],
         lead_in_ns=1_000_000,
     )
@@ -303,19 +306,57 @@ def test_a_missing_syndrome_source_is_a_value_error():
         pb.run("0 enqueue source=9\n", 1000, {}, null_decoder_ids=[0])
 
 
-@pytest.mark.parametrize(
-    "backends",
-    [
-        {},  # none named
-        dict(null_decoder_ids=[0], udp_endpoints={0: "127.0.0.1:1"}),
-        dict(null_decoder_ids=[0], decoders=qec.multi_decoder_config()),
-    ],
-)
-def test_exactly_one_backend_must_be_named(backends):
+def test_at_least_one_backend_must_be_named():
     # This check lives in the binding's own run_schedule() wrapper and has no
     # C++ test, because there is no C++ caller that can get it wrong.
-    with pytest.raises(ValueError, match="exactly one"):
-        pb.run("0 reset\n", 1000, {}, **backends)
+    with pytest.raises(ValueError, match="at least one"):
+        pb.run("0 reset\n", 1000, {})
+
+
+def test_a_decoder_id_named_by_two_backends_is_a_value_error():
+    with pytest.raises(ValueError, match="decoder_id 0 is named by more"):
+        pb.run("0 reset\n",
+               1000, {},
+               null_decoder_ids=[0],
+               udp_endpoints={0: "127.0.0.1:1"})
+
+
+def test_backends_can_be_mixed_per_decoder():
+    # Decoder 0 is null (always OK); decoder 1 is UDP to a port nobody listens
+    # on (always times out). Each record must carry its own backend's verdict.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    result = pb.run("0 reset\n"
+                    "0 reset session=1\n",
+                    1000, {},
+                    null_decoder_ids=[0],
+                    udp_endpoints={1: f"127.0.0.1:{port}"},
+                    udp_timeout_ms=50)
+    by_decoder = {r.decoder_id: r.status for r in result.records}
+    assert by_decoder == {0: "OK", 1: "INTERNAL_ERROR"}
+
+
+def test_cpu_roce_options_are_parsed_before_any_transport_is_touched():
+    # The key checks live in the binding's parser, ahead of the factory; a full
+    # option set reaches the factory and fails there (no device / no transport).
+    eps = {0: "127.0.0.1:1"}
+    with pytest.raises(ValueError, match="cpu_roce_options"):
+        pb.run("0 reset\n", 1000, {}, cpu_roce_endpoints=eps)
+    opts = {"device": "none", "local_ip": "127.0.0.1"}
+    with pytest.raises(ValueError, match="unknown cpu_roce_options key"):
+        pb.run("0 reset\n",
+               1000, {},
+               cpu_roce_endpoints=eps,
+               cpu_roce_options=dict(opts, pages=8))
+    opts.update(slots=8, slot_size=256, connect_timeout_ms=100)
+    with pytest.raises(RuntimeError):
+        pb.run("0 reset\n",
+               1000, {},
+               cpu_roce_endpoints=eps,
+               cpu_roce_options=opts,
+               cpu_roce_timeout_ms=100)
 
 
 # -- syndrome sources --------------------------------------------------------
