@@ -12,8 +12,8 @@ quantum error correction decoders through the :code:`cudaq::qec::decoder` base c
 Class Structure
 ^^^^^^^^^^^^^^^
 
-The decoder base owns immutable model data and fixes the result basis when an
-instance is constructed. The relevant interface is:
+The decoder base owns immutable model data and fixes the primary and auxiliary
+output contract when an instance is constructed. The relevant interface is:
 
 .. code-block:: cpp
 
@@ -48,8 +48,9 @@ Key Components:
   auxiliary outputs
 * **Block Size**: Number of modeled error mechanisms (columns of ``H``)
 * **Syndrome Size**: Number of detector values (rows of ``H``)
-* **Decoder Result**: Contains convergence status, values in the configured
-  error or observable basis, and optional decoder-specific metadata
+* **Decoder Result**: Contains convergence status, primary values in the
+  configured error or observable basis, requested standardized auxiliary
+  outputs in ``opt_results``, and optional decoder-specific metadata
 * **Multiple Decoding Modes**: Single syndrome or batch processing
 
 Migrating Existing C++ Decoder Plugins
@@ -60,23 +61,24 @@ An out-of-tree plugin binary built with the former creator signature cannot be
 loaded by the updated extension registry. Out-of-tree decoder plugins must be
 rebuilt and migrated as follows:
 
-* Replace constructors that take ``H`` with a constructor that takes
-  :cpp:class:`cudaq::qec::decoder_init` by value and passes it to
-  ``decoder(std::move(inputs), requested_output)``.
+* Replace constructors that take ``H`` with constructors that take
+  :cpp:class:`cudaq::qec::decoder_init` by value and
+  ``decoder_output_request``. Forward both to the base constructor as
+  ``decoder(std::move(inputs), request)``.
 * Read model data through ``get_inputs()``. ``H``, ``O``, ``D``, and
   ``error_rate_vec`` are framework model data and must not be passed in the
   heterogeneous custom-parameter map or registered as plugin schema keys.
 * Change custom creator signatures to accept ``decoder_init`` by value,
-  ``std::optional<decoder_output_request>``, and the custom parameter map. The
-  removed ``make_pcm_decoder`` helper must not be used.
-* Choose the plugin's default result basis when the optional request is empty,
-  and reject unsupported explicit requests during construction. The presence
-  of ``O`` does not select observable output.
-* ``decode_result_type`` describes only the primary result basis.
-  ``decoder_output_request::auxiliary`` is a flag set for standardized
-  additional outputs. A plugin that accepts ``residual_detectors`` returns them
-  in ``decoder_result::opt_results["residual_detectors"]``; plugins must reject
-  unsupported auxiliary flags during construction.
+  ``std::optional<cudaq::qec::decoder_output_request>``, and the custom
+  parameter map. The removed ``make_pcm_decoder`` helper must not be used.
+* Replace comparisons on the former ``decode_result_type`` creator parameter
+  with comparisons on ``request.primary``. Choose the plugin's default primary
+  basis when the optional request is empty; the presence of ``O`` does not
+  select observable output.
+* Reject unsupported auxiliary requests during construction, for example with
+  ``if (request.has_auxiliary_outputs()) throw std::invalid_argument(...)``.
+  A plugin that accepts ``residual_detectors`` must return them in
+  ``decoder_result::opt_results["residual_detectors"]``.
 * Remove calls to the deleted ``set_O_sparse`` and ``set_D_sparse`` methods.
   The base constructor now derives the corresponding model state and buffer
   sizes. A streaming decoder supplies only its layer geometry through
