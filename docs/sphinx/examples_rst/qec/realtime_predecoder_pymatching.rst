@@ -17,7 +17,7 @@ syndrome density, and logical error rate statistics.
 The benchmark binary is
 ``test_realtime_predecoder_w_pymatching``, built from
 `libs/qec/unittests/realtime/test_realtime_predecoder_w_pymatching.cpp
-<https://github.com/NVIDIA/cudaqx/blob/main/libs/qec/unittests/realtime/test_realtime_predecoder_w_pymatching.cpp>`_.
+<https://github.com/NVIDIA/cudaq-qec/blob/main/libs/qec/unittests/realtime/test_realtime_predecoder_w_pymatching.cpp>`_.
 
 
 Prerequisites
@@ -105,7 +105,7 @@ Configure and build:
 
 .. code-block:: bash
 
-   cd /path/to/cudaqx
+   cd /path/to/cudaq-qec
 
    cmake -S . -B build \
      -DCMAKE_BUILD_TYPE=Release \

@@ -21,7 +21,7 @@
     for a list of valid GPU configurations.
 
     .. note::
-      It is required to create decoders with the `get_decoder` API from the CUDA-QX
+      It is required to create decoders with the `get_decoder` API from the CUDA-Q QEC
       extension points API, such as
 
       .. tab:: Python
