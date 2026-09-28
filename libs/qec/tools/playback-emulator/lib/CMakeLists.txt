@@ -66,26 +66,22 @@ target_link_libraries(cudaq-qec-playback-emulator
     Threads::Threads
 )
 
-# Optional `cpu_roce` backend (CUDA-Q's CPU RoCE transceiver over libibverbs).
-# Gated on the QEC_TEST_PLAYBACK_CPU_ROCE environment variable.
-# The backend needs a Soft RoCE (or real RDMA).
-
-# TODO: integrate the cpu_roce tests into CI.
-if(DEFINED ENV{QEC_TEST_PLAYBACK_CPU_ROCE})
-  find_library(QEC_PLAYBACK_CPU_ROCE_TRANSPORT_LIBRARY
-    cudaq-realtime-cpu-roce-transport
-    HINTS ${CUDAQ_REALTIME_ROOT} ${CUDAQ_INSTALL_DIR} ${CUDAQ_INSTALL_PREFIX}
-    PATH_SUFFIXES lib)
-  find_library(QEC_PLAYBACK_IBVERBS_LIBRARY ibverbs)
-  if(NOT QEC_PLAYBACK_CPU_ROCE_TRANSPORT_LIBRARY OR NOT QEC_PLAYBACK_IBVERBS_LIBRARY)
-    message(FATAL_ERROR "QEC_TEST_PLAYBACK_CPU_ROCE is set but "
-      "cudaq-realtime-cpu-roce-transport or libibverbs was not found")
-  endif()
-  # PUBLIC: the unit tests' fake RoCE server is compiled under the same guard.
+# Optional `cpu_roce` backend (CUDA-Q's CPU RoCE transceiver over libibverbs),
+# built whenever both are found.
+find_library(QEC_PLAYBACK_CPU_ROCE_TRANSPORT_LIBRARY
+  cudaq-realtime-cpu-roce-transport
+  HINTS ${CUDAQ_REALTIME_ROOT} ${CUDAQ_INSTALL_DIR} ${CUDAQ_INSTALL_PREFIX}
+  PATH_SUFFIXES lib)
+find_library(QEC_PLAYBACK_IBVERBS_LIBRARY ibverbs)
+if(QEC_PLAYBACK_CPU_ROCE_TRANSPORT_LIBRARY AND QEC_PLAYBACK_IBVERBS_LIBRARY)
+  # PUBLIC: the unit tests read it to learn whether the backend was built.
   target_compile_definitions(cudaq-qec-playback-emulator PUBLIC
     CUDAQ_QEC_PLAYBACK_CPU_ROCE)
   target_link_libraries(cudaq-qec-playback-emulator PRIVATE
     ${QEC_PLAYBACK_CPU_ROCE_TRANSPORT_LIBRARY} ${QEC_PLAYBACK_IBVERBS_LIBRARY})
+else()
+  message(STATUS "playback-emulator: cudaq-realtime-cpu-roce-transport or "
+                 "libibverbs not found; cpu_roce backend will not be built.")
 endif()
 
 set_target_properties(cudaq-qec-playback-emulator PROPERTIES

@@ -16,7 +16,7 @@
 #include "session.h"
 #include "syndrome_source.h"
 
-#ifdef CUDAQ_QEC_PLAYBACK_CPU_ROCE
+#ifdef QEC_TEST_PLAYBACK_CPU_ROCE
 #include "cudaq/realtime/cpu_transport/roce_wrapper.h"
 #endif
 
@@ -507,7 +507,7 @@ TEST(CpuRoceOptions, BadRingGeometryIsRejectedBeforeAnyNetworkIO) {
 #endif
 }
 
-#ifdef CUDAQ_QEC_PLAYBACK_CPU_ROCE
+#ifdef QEC_TEST_PLAYBACK_CPU_ROCE
 
 namespace {
 
@@ -777,13 +777,11 @@ TEST_F(CpuRoceBackend, AFullRingBehindADeadServerStillFailsEveryRequest) {
 }
 
 TEST_F(CpuRoceBackend, ALateReplyAfterATimeoutAndRingWrapFreesNoOtherSlot) {
-  // A read answered at 300ms behind a 200ms timeout, with 16 resets queued
-  // behind it. At 200ms the read and the first 7 resets (stuck behind it on
-  // the server) time out and free slots 0-7; resets 8-15 take them and the
-  // 16th queues behind slot 0, now owned by reset 8. The read's late reply
-  // lands at RX slot 0 first: it must not release slot 0, or the 16th reset
-  // overwrites the 8th in the server's ring during the server's 50ms pause
-  // and the 8th is never answered.
+  // A late reply to a request that already timed out must not free that
+  // request's TX slot: the slot has since been reused by a newer request,
+  // and releasing it would let a later request overwrite the newer one in
+  // the server's ring before it is answered. Records 0-6 are the read and
+  // the six resets that time out behind it (max_inflight_ = num_slots-1).
   connect(std::chrono::milliseconds(300), /*reply=*/true,
           /*timeout_ms=*/200, std::chrono::milliseconds(50));
   std::string text = "0 get_corrections return_size=1\n";
@@ -793,7 +791,7 @@ TEST_F(CpuRoceBackend, ALateReplyAfterATimeoutAndRingWrapFreesNoOtherSlot) {
   ASSERT_EQ(result.records.size(), 17u);
   for (std::size_t i = 0; i < 17; ++i)
     EXPECT_EQ(result.records[i].status,
-              static_cast<std::int32_t>(i < 8 ? RpcStatus::INTERNAL_ERROR
+              static_cast<std::int32_t>(i < 7 ? RpcStatus::INTERNAL_ERROR
                                               : RpcStatus::OK))
         << "record " << i;
 }
@@ -833,4 +831,4 @@ TEST_F(CpuRoceBackend,
   ::close(silent_fd);
 }
 
-#endif // CUDAQ_QEC_PLAYBACK_CPU_ROCE
+#endif // QEC_TEST_PLAYBACK_CPU_ROCE
