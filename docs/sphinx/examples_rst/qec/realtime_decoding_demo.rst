@@ -156,6 +156,16 @@ decoder); ``nv-qldpc-decoder --gpu 0`` defaults to the ``hololink`` wire on
 decode graph on-device) and can be forced onto the host path with
 ``--dispatch host``.
 
+A third knob is host-only: the **loop shape**, chosen with
+``decoding_server --host-loop=threaded|unified`` when the server is launched
+directly (``run_realtime_decoding.sh`` does not expose it and always runs the
+default). ``threaded`` (the default) keeps the provider's RX/TX threads plus
+one dispatcher thread per ring; ``unified`` runs each host ring on a single
+thread that drives the wire and the decoder call together through the
+provider's CPU data plane, and requires the provider to be started in its
+unified mode (``--unified`` for the in-tree ``udp`` provider). It does not
+apply to ``device_graph`` decoders.
+
 Both sources apply real pass/fail criteria. The qpu-kernel source uses the
 same checks as the in-tree surface-code tests — no decoder errors, a residual
 logical-error ceiling of ``num_shots/50``, an in-process dispatch count of 0

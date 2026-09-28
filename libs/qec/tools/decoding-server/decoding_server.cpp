@@ -52,6 +52,7 @@
 /// Usage:
 ///   decoding_server --config=<decoders.yaml>
 ///                   [--transport=<name|/path/to/lib.so>] [--timeout=60]
+///                   [--host-loop=threaded|unified]
 ///                   [provider args, forwarded verbatim...]
 /// Configurations containing a device_graph decoder must put the provider and
 /// all provider arguments in the YAML transport section.
@@ -65,6 +66,17 @@
 /// the CQR DecodingServer, whose DeviceGraphTransceiver runs the
 /// self-relaunching GPU scheduler over the same kind of runtime-loaded
 /// provider selected and configured by the YAML transport section.
+/// A third knob, server-wide and command-line only, is the host ring's LOOP
+/// shape (`--host-loop=threaded|unified`, default threaded): threaded keeps
+/// the provider's RX/TX pump threads moving frames between the wire and the
+/// ring while a dispatcher thread polls the ring's flags; unified runs CUDA-Q
+/// realtime's single-thread unified loop, in which the dispatcher thread
+/// itself pulls each request through the provider's rx_poll hook, decodes
+/// inline, and pushes the reply through tx_publish. Unified needs the
+/// provider to serve its CPU data plane, i.e. to be started in its own
+/// unified mode (udp: `--unified`, forwarded like any other provider
+/// argument); the server probes for that before READY and rejects the flag
+/// for configurations containing device_graph decoders.
 
 #include "cudaq/qec/realtime/decoding_config.h"
 
@@ -130,11 +142,30 @@ namespace {
 
 namespace config = cudaq::qec::decoding::config;
 
+// How every host-dispatch ring is driven (--host-loop).
+//   threaded: the provider's own RX/TX pump threads move frames between the
+//             wire and the ring, and a libcudaq-realtime dispatcher thread
+//             polls the ring's flags (two cross-thread hand-offs per RPC).
+//   unified:  CUDA-Q realtime's single-thread unified loop -- the dispatcher
+//             thread itself pulls each request through the provider's rx_poll
+//             hook, decodes inline, and pushes the reply through tx_publish;
+//             no pump threads, no flag hand-offs.  Requires a provider that
+//             serves its CPU data plane (udp: started with --unified).
+enum class HostLoop { threaded, unified };
+
+const char *host_loop_name(HostLoop loop) {
+  return loop == HostLoop::unified ? "unified" : "threaded";
+}
+
 struct ServerConfig {
   std::string config_path;
   std::string transport = "udp";
   bool transport_from_cli = false;
   int timeout_sec = 60;
+  // Loop shape for the host-dispatch rings; see HostLoop.  A command-line
+  // choice about how this server drives the provider, not a YAML property
+  // of the deployment, and not valid for device_graph configurations.
+  HostLoop host_loop = HostLoop::threaded;
   // Everything the server itself does not consume, forwarded verbatim to the
   // provider's create() (providers ignore arguments they don't recognize, so
   // one command line can carry any provider's options).
@@ -153,6 +184,7 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
       std::cout << "Usage: " << argv[0]
                 << " --config=<decoders.yaml> "
                    "[--transport=<name|/path/to/lib.so>] [--timeout=N] "
+                   "[--host-loop=threaded|unified] "
                    "[provider args, forwarded verbatim: e.g. --port=N "
                    "--num-slots=N --slot-size=N --device=NAME "
                    "--local-ip=ADDR --qp_config=rendezvous|hsb_fpga "
@@ -163,6 +195,10 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
                    "a startup error). Configurations containing device_graph "
                    "decoders or using gpu_roce must put the provider and its "
                    "arguments in YAML.\n"
+                   "--host-loop=unified runs each host ring on CUDA-Q "
+                   "realtime's single-thread unified loop; the provider must "
+                   "serve its CPU data plane (udp: pass --unified). Not valid "
+                   "for configurations containing device_graph decoders.\n"
                    "Providers and their args are defined by the installed "
                    "cudaq-realtime (libcudaq-realtime-bridge-<name>.so, "
                    "with '_' in <name> mapping to '-'); "
@@ -182,6 +218,20 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
       } catch (const std::exception &) {
         std::cerr << "ERROR: invalid --timeout value '" << a.substr(10) << "'"
                   << std::endl;
+        return false;
+      }
+    } else if (starts_with(a, "--host-loop=")) {
+      // Consumed here, BEFORE the forwarding default below: forwarded to the
+      // provider it would be rejected at startup as a stray provider argument
+      // for device_graph and gpu_roce configurations.
+      const std::string value = a.substr(12);
+      if (value == "threaded")
+        cfg.host_loop = HostLoop::threaded;
+      else if (value == "unified")
+        cfg.host_loop = HostLoop::unified;
+      else {
+        std::cerr << "ERROR: invalid --host-loop value '" << value
+                  << "' (expected threaded|unified)" << std::endl;
         return false;
       }
     } else
@@ -345,7 +395,8 @@ int main(int argc, char **argv) {
   std::cout << "Configured " << decoder_config.decoders.size()
             << " decoder(s); decoder 0 type: "
             << decoder_config.decoders[0].type
-            << "; transport: " << cfg.transport << std::endl;
+            << "; transport: " << cfg.transport
+            << "; host loop: " << host_loop_name(cfg.host_loop) << std::endl;
 
   // The wire's identity lives in the YAML transport section; --transport is
   // only a fallback default for configs that intentionally leave the wire
@@ -389,6 +440,16 @@ int main(int argc, char **argv) {
           : decoder_config.transport.provider;
   const bool host_uses_gpu_roce =
       has_host && is_gpu_roce_provider(resolved_host_provider);
+  // The unified loop is a host-ring consumer; a device_graph ring's consumer
+  // is the GPU scheduler, which has no loop shape to choose.  Rejected up
+  // front rather than silently applied to the host rings of a mixed config.
+  if (cfg.host_loop == HostLoop::unified && has_device_graph) {
+    std::cerr << "ERROR: --host-loop=unified applies to host-dispatch rings "
+                 "only; this config contains device_graph decoders (drop the "
+                 "flag or use --host-loop=threaded)"
+              << std::endl;
+    return 1;
+  }
   // device_graph providers own GPU-visible rings and must be reproducible from
   // the deployment YAML in every server topology. Generic CLI provider
   // arguments are intentionally rejected rather than guessed to belong to a
@@ -536,6 +597,12 @@ int main(int argc, char **argv) {
     std::uint64_t dispatched = 0;
     cudaq_dispatcher_t *dispatcher = nullptr; // host consumer
     void *dg_consumer = nullptr;              // device-graph consumer
+    // The provider's CPU data plane for --host-loop=unified (host rings
+    // only), filled by the probe in [3].  cudaq_dispatcher_set_cpu_dataplane
+    // STORES this member's address, not a copy, so it lives in the ring: the
+    // rings vector is sized once and never resized, which keeps the address
+    // stable for the dispatcher's lifetime.
+    cudaq_cpu_dataplane_t dataplane{};
   };
   // Sized once up front: set_control hands the dispatcher pointers into
   // these elements, so their addresses must not move.
@@ -649,6 +716,42 @@ int main(int argc, char **argv) {
       teardown_rings();
       return 1;
     }
+    // --host-loop=unified: probe the provider's CPU data plane NOW, before
+    // READY and before connect(), so a provider that does not serve the
+    // unified shape (get_cpu_dataplane left NULL, or a capable provider
+    // started without its unified mode) fails fast and visibly instead of
+    // after a client has been told to dial in.  The struct is handed to the
+    // dispatcher at [4]; set_cpu_dataplane keeps its address.  The unified
+    // loop dereferences the ring's host views and slot strides without
+    // checking them (validate_dispatcher only checks the threaded shape), so
+    // a plane returned with those unpopulated is rejected here as well.
+    if (cfg.host_loop == HostLoop::unified && !ring.device_graph) {
+      const cudaq_status_t status =
+          cudaq_bridge_get_cpu_dataplane(ring.bridge, &ring.dataplane);
+      if (status == CUDAQ_ERR_UNSUPPORTED) {
+        std::cerr << "ERROR: --host-loop=unified: transport provider '"
+                  << ring_lib
+                  << "' does not serve the unified CPU data plane (decoder "
+                  << ring.decoder_id
+                  << "; start it in its unified mode, e.g. --unified for udp, "
+                     "or use --host-loop=threaded)"
+                  << std::endl;
+        teardown_rings();
+        return 1;
+      }
+      if (status != CUDAQ_OK || !ring.dataplane.rx_poll ||
+          !ring.dataplane.tx_publish || !ring.dataplane.ring.rx_data_host ||
+          !ring.dataplane.ring.tx_data_host ||
+          ring.dataplane.ring.rx_stride_sz == 0 ||
+          ring.dataplane.ring.tx_stride_sz == 0) {
+        std::cerr << "ERROR: --host-loop=unified: transport provider '"
+                  << ring_lib
+                  << "' returned an incomplete CPU data plane (decoder "
+                  << ring.decoder_id << ")" << std::endl;
+        teardown_rings();
+        return 1;
+      }
+    }
     char endpoint_info[512] = {0};
     if (cudaq_bridge_get_endpoint_info(ring.bridge, endpoint_info,
                                        sizeof(endpoint_info)) != CUDAQ_OK)
@@ -688,18 +791,28 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  for (auto &ring : rings) {
-    if (cudaq_bridge_connect(ring.bridge) != CUDAQ_OK) {
-      std::cerr << "ERROR: transport provider connect() failed (decoder "
-                << ring.decoder_id << ")" << std::endl;
-      teardown_rings();
-      return 1;
-    }
-    cudaq_ringbuffer_t ringbuffer{};
+  // The ring-buffer context is what the flag-polling consumers adopt (the
+  // threaded host dispatcher and the device-graph scheduler).  A provider
+  // started in its unified mode serves rx_poll/tx_publish instead and refuses
+  // this query, hence the hint.
+  const auto fetch_ringbuffer = [&](const DecoderRing &ring,
+                                    cudaq_ringbuffer_t &ringbuffer) {
     if (cudaq_bridge_get_transport_context(ring.bridge, RING_BUFFER,
                                            &ringbuffer) != CUDAQ_OK) {
       std::cerr << "ERROR: transport provider has no ring-buffer context "
                    "(decoder "
+                << ring.decoder_id
+                << ") (if the provider was started in its unified mode, pass "
+                   "--host-loop=unified)"
+                << std::endl;
+      return false;
+    }
+    return true;
+  };
+
+  for (auto &ring : rings) {
+    if (cudaq_bridge_connect(ring.bridge) != CUDAQ_OK) {
+      std::cerr << "ERROR: transport provider connect() failed (decoder "
                 << ring.decoder_id << ")" << std::endl;
       teardown_rings();
       return 1;
@@ -710,6 +823,11 @@ int main(int argc, char **argv) {
       // dispatch -> decode -> TX runs on the GPU over the provider's
       // (GPU-pollable) rings.  The decoder's captured decode graph comes
       // from the CQR plugin's registry (built at [2], before READY).
+      cudaq_ringbuffer_t ringbuffer{};
+      if (!fetch_ringbuffer(ring, ringbuffer)) {
+        teardown_rings();
+        return 1;
+      }
       if (!cudaqx_qec_make_device_graph_ring_consumer) {
         std::cerr << "ERROR: decoder " << ring.decoder_id
                   << " requests device_graph dispatch but the device-graph "
@@ -747,18 +865,40 @@ int main(int argc, char **argv) {
       continue;
     }
 
+    // Host ring: a libcudaq-realtime dispatcher in the shape --host-loop
+    // selected.  threaded (CUDAQ_KERNEL_REGULAR) polls the provider's ring
+    // flags from its own thread while the provider's pump threads own the
+    // wire; the in-flight TX sentinel must not be written there because the
+    // TX pump treats any non-zero flag as a slot address.  unified
+    // (CUDAQ_KERNEL_UNIFIED) runs cudaq_host_unified_loop, which needs that
+    // sentinel, so the markers stay on.
+    const bool unified = cfg.host_loop == HostLoop::unified;
     cudaq_dispatcher_config_t dispatch_config{};
     dispatch_config.num_slots = ring.num_slots;
     dispatch_config.slot_size = ring.slot_size;
     dispatch_config.dispatch_path = CUDAQ_DISPATCH_PATH_HOST;
     dispatch_config.dispatch_mode = CUDAQ_DISPATCH_HOST_CALL;
-    dispatch_config.kernel_type = CUDAQ_KERNEL_REGULAR;
-    dispatch_config.skip_tx_markers = 1;
+    dispatch_config.kernel_type =
+        unified ? CUDAQ_KERNEL_UNIFIED : CUDAQ_KERNEL_REGULAR;
+    dispatch_config.skip_tx_markers = unified ? 0 : 1;
 
+    // The shape also selects how the dispatcher reaches the wire.  threaded
+    // adopts the provider's ring-buffer context.  unified takes the CPU data
+    // plane probed at [3] instead: its loop drives rx_poll/tx_publish itself,
+    // never reads rx_flags, and needs no ring-buffer context (a unified
+    // provider refuses that query).  set_cpu_dataplane STORES the pointer, so
+    // it points into the rings vector, not at a local.
+    cudaq_ringbuffer_t ringbuffer{};
+    if (!unified && !fetch_ringbuffer(ring, ringbuffer)) {
+      teardown_rings();
+      return 1;
+    }
     if (cudaq_dispatcher_create(manager, &dispatch_config, &ring.dispatcher) !=
             CUDAQ_OK ||
-        cudaq_dispatcher_set_ringbuffer(ring.dispatcher, &ringbuffer) !=
-            CUDAQ_OK ||
+        (unified ? cudaq_dispatcher_set_cpu_dataplane(ring.dispatcher,
+                                                      &ring.dataplane)
+                 : cudaq_dispatcher_set_ringbuffer(ring.dispatcher,
+                                                   &ringbuffer)) != CUDAQ_OK ||
         cudaq_dispatcher_set_function_table(ring.dispatcher, &function_table) !=
             CUDAQ_OK ||
         cudaq_dispatcher_set_control(ring.dispatcher, &ring.shutdown_flag,
@@ -771,6 +911,8 @@ int main(int argc, char **argv) {
     }
 
     // Start the provider's I/O loop last, once the dispatcher is polling.
+    // Called for both shapes: under unified the loop is the server's own and
+    // a unified provider has nothing to start here, which is harmless.
     if (cudaq_bridge_launch(ring.bridge) != CUDAQ_OK) {
       std::cerr << "ERROR: transport provider launch() failed (decoder "
                 << ring.decoder_id << ")" << std::endl;
