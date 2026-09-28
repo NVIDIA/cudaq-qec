@@ -4,14 +4,14 @@
   <meta charset="utf-8" /><meta name="generator" content="Docutils 0.18.1: http://docutils.sourceforge.net/" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Relay BP Decoding with CUDA-Q Realtime &mdash; NVIDIA CUDA-QX  documentation</title>
+  <title>Relay BP Decoding with CUDA-Q Realtime &mdash; NVIDIA CUDA-Q QEC  documentation</title>
       <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
       <link rel="stylesheet" href="../../_static/css/theme.css" type="text/css" />
       <link rel="stylesheet" href="../../_static/tabs.css" type="text/css" />
       <link rel="stylesheet" href="../../_static/copybutton.css" type="text/css" />
       <link rel="stylesheet" href="../../_static/cudaq_override.css" type="text/css" />
       <link rel="stylesheet" href="../../_static/sg_gallery.css" type="text/css" />
-      <link rel="stylesheet" href="/__w/cudaqx/cudaqx/docs/sphinx/_static/cudaq_override.css" type="text/css" />
+      <link rel="stylesheet" href="/__w/cudaq-qec/cudaq-qec/docs/sphinx/_static/cudaq_override.css" type="text/css" />
   <!--[if lt IE 9]>
     <script src="../../_static/js/html5shiv.min.js"></script>
   <![endif]-->
@@ -43,7 +43,7 @@
           
           
           <a href="../../index.html" class="icon icon-home">
-            NVIDIA CUDA-QX
+            NVIDIA CUDA-Q QEC
           </a>
               <div class="version">
                 0.8.0
@@ -323,7 +323,7 @@
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../../api/core/cpp_api.html">CUDA-QX Namespaces and Core Library C++ API</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="../../api/core/cpp_api.html">CUDA-Q QEC Namespaces and Core Library C++ API</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="../../api/core/cpp_api.html#namespaces">Namespaces</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../api/core/cpp_api.html#core">Core</a></li>
 </ul>
@@ -582,7 +582,7 @@
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #76b900" >
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="../../index.html">NVIDIA CUDA-QX</a>
+          <a href="../../index.html">NVIDIA CUDA-Q QEC</a>
       </nav>
 
       <div class="wy-nav-content">
@@ -697,7 +697,7 @@ for how to install it.</p></li>
 <section id="obtaining-the-proprietary-components">
 <h2>Obtaining the proprietary components<a class="headerlink" href="#obtaining-the-proprietary-components" title="Permalink to this heading"></a></h2>
 <p>The realtime decode path uses <strong>two</strong> closed-source artifacts that are not
-built from this (cudaqx) repository:</p>
+built from this (cudaq-qec) repository:</p>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">libcudaq-qec-nv-qldpc-decoder.so</span></code> – the Relay BP decoder <strong>plugin</strong>,
 <code class="docutils literal notranslate"><span class="pre">dlopen</span></code>’d at runtime.  It supplies the device-launchable cooperative
@@ -739,10 +739,10 @@ docker<span class="w"> </span>rm<span class="w"> </span><span class="s2">"</span
 CPU architecture (<code class="docutils literal notranslate"><span class="pre">amd64</span></code> or <code class="docutils literal notranslate"><span class="pre">arm64</span></code>) – no manual override is needed.</p>
 <p>The runtime plugin loader searches for decoder plugins in the
 <code class="docutils literal notranslate"><span class="pre">decoder-plugins/</span></code> subdirectory next to <code class="docutils literal notranslate"><span class="pre">libcudaq-qec.so</span></code>.  For a source
-build of cudaqx, that path is <code class="docutils literal notranslate"><span class="pre">&lt;cudaqx-build&gt;/lib/decoder-plugins/</span></code>:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>mkdir<span class="w"> </span>-p<span class="w"> </span>&lt;cudaqx-build&gt;/lib/decoder-plugins
+build of cudaq-qec, that path is <code class="docutils literal notranslate"><span class="pre">&lt;cudaq-qec-build&gt;/lib/decoder-plugins/</span></code>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>mkdir<span class="w"> </span>-p<span class="w"> </span>&lt;cudaq-qec-build&gt;/lib/decoder-plugins
 cp<span class="w"> </span>libcudaq-qec-nv-qldpc-decoder.so<span class="w"> </span><span class="se">\</span>
-<span class="w">   </span>&lt;cudaqx-build&gt;/lib/decoder-plugins/
+<span class="w">   </span>&lt;cudaq-qec-build&gt;/lib/decoder-plugins/
 </pre></div>
 </div>
 </section>
@@ -761,8 +761,8 @@ cp<span class="w"> </span>libcudaq-qec-nv-qldpc-decoder.so<span class="w"> </spa
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><strong>cudaqx</strong></p></td>
-<td><p><a class="reference external" href="https://github.com/NVIDIA/cudaqx">https://github.com/NVIDIA/cudaqx</a></p></td>
+<tr class="row-even"><td><p><strong>cudaq-qec</strong></p></td>
+<td><p><a class="reference external" href="https://github.com/NVIDIA/cudaq-qec">https://github.com/NVIDIA/cudaq-qec</a></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">main</span></code> branch (or your feature branch)</p></td>
 </tr>
 <tr class="row-odd"><td><p><strong>cuda-quantum</strong> (realtime)</p></td>
@@ -788,7 +788,7 @@ device-side graph dispatch).</p>
 </div>
 <section id="repository-layout">
 <h3>Repository Layout<a class="headerlink" href="#repository-layout" title="Permalink to this heading"></a></h3>
-<p>Key files within <code class="docutils literal notranslate"><span class="pre">cudaqx</span></code>:</p>
+<p>Key files within <code class="docutils literal notranslate"><span class="pre">cudaq-qec</span></code>:</p>
 <div class="highlight-text notranslate"><div class="highlight"><pre><span></span>libs/qec/
   unittests/
     realtime/
@@ -865,10 +865,10 @@ cmake<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </s
 ninja<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ninja<span class="w"> </span>install
 <span class="nb">cd</span><span class="w"> </span>../../..
 
-<span class="c1"># 4. Build cudaqx with HSB tools enabled.</span>
+<span class="c1"># 4. Build cudaq-qec with HSB tools enabled.</span>
 <span class="c1">#    CUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE supplies the DEVICE_CALL</span>
 <span class="c1">#    handlers (WHOLE_ARCHIVE-linked into the bridge + test).</span>
-cmake<span class="w"> </span>-S<span class="w"> </span>cudaqx<span class="w"> </span>-B<span class="w"> </span>cudaqx/build<span class="w"> </span><span class="se">\</span>
+cmake<span class="w"> </span>-S<span class="w"> </span>cudaq-qec<span class="w"> </span>-B<span class="w"> </span>cudaq-qec/build<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Release<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQ_DIR<span class="o">=</span>/path/to/cudaq-install/lib/cmake/cudaq/<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQ_REALTIME_ROOT<span class="o">=</span>/tmp/cudaq-realtime<span class="w"> </span><span class="se">\</span>
@@ -878,7 +878,7 @@ cmake<span class="w"> </span>-S<span class="w"> </span>cudaqx<span class="w"> </
 <span class="w">  </span>-DCUDAQX_QEC_ENABLE_HSB_TOOLS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge/build
-cmake<span class="w"> </span>--build<span class="w"> </span>cudaqx/build<span class="w"> </span>--target<span class="w"> </span><span class="se">\</span>
+cmake<span class="w"> </span>--build<span class="w"> </span>cudaq-qec/build<span class="w"> </span>--target<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>gpu_roce_qldpc_graph_decoder_bridge<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>hsb_fpga_syndrome_playback
 </pre></div>
@@ -902,11 +902,11 @@ with <code class="docutils literal notranslate"><span class="pre">stim</span></c
 number of shots.</p>
 <p>Build the app example (it links the same plugin + proprietary archive as the
 bridge):</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>--build<span class="w"> </span>cudaqx/build<span class="w"> </span>--target<span class="w"> </span>surface_code-1-local
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>--build<span class="w"> </span>cudaq-qec/build<span class="w"> </span>--target<span class="w"> </span>surface_code-1-local
 </pre></div>
 </div>
 <p>Run it in two steps – generate the decoder config (DEM), then run the shots:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>cudaqx/build
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>cudaq-qec/build
 <span class="nb">export</span><span class="w"> </span><span class="nv">CUDAQ_DEFAULT_SIMULATOR</span><span class="o">=</span>stim
 
 <span class="nv">APP</span><span class="o">=</span>./libs/qec/unittests/realtime/app_examples/surface_code-1-local
@@ -1163,7 +1163,7 @@ routing ambiguity that silently drops RDMA packets.</p>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--cuda-qx-dir</span> <span class="pre">DIR</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">/workspaces/cudaqx</span></code></p></td>
-<td><p>cudaqx source directory</p></td>
+<td><p>cudaq-qec source directory</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--jobs</span> <span class="pre">N</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">nproc</span></code></p></td>
