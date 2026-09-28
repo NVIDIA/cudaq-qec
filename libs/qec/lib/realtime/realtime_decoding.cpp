@@ -267,7 +267,8 @@ cudaq::qec::decoder_init resolve_decoder_init(
 
 std::unique_ptr<cudaq::qec::decoder> create_realtime_decoder(
     const cudaq::qec::decoding::config::decoder_config &decoder_config,
-    cudaq::qec::decoder_init inputs) {
+    cudaq::qec::decoder_init inputs,
+    cudaq::qec::decoder_output_request output) {
   if (decoder_config.id < 0 || static_cast<std::uint64_t>(decoder_config.id) >
                                    std::numeric_limits<std::uint32_t>::max())
     throw std::invalid_argument("Decoder ID is outside the uint32_t range: " +
@@ -278,8 +279,7 @@ std::unique_ptr<cudaq::qec::decoder> create_realtime_decoder(
                 decoder_config.type);
 
   auto decoder =
-      cudaq::qec::get_decoder(decoder_config.type, std::move(inputs),
-                              cudaq::qec::decode_result_type::observables,
+      cudaq::qec::get_decoder(decoder_config.type, std::move(inputs), output,
                               prepare_decoder_params(decoder_config));
   decoder->set_decoder_id(decoder_config.id);
 
