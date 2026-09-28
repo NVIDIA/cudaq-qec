@@ -16,7 +16,7 @@ jobs:
   update-cudaq-commit:
     name: Bump CUDA-Q Commit
     runs-on: ubuntu-latest
-    if: ${{ github.repository == 'NVIDIA/cudaqx' }}
+    if: ${{ github.repository == 'NVIDIA/cudaq-qec' }}
     permissions:
       contents: write  # Required to push changes
       pull-requests: write  # Required to open PRs

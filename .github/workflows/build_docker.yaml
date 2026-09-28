@@ -18,8 +18,8 @@ on:
         required: true
       assets_repo:
         type: string
-        description: Retrieve artifacts from this repo (e.g. NVIDIA/cudaqx)
-        default: NVIDIA/cudaqx
+        description: Retrieve artifacts from this repo (e.g. NVIDIA/cudaq-qec)
+        default: NVIDIA/cudaq-qec
         required: false
       assets_tag:
         type: string

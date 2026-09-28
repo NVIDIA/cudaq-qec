@@ -84,7 +84,7 @@ jobs:
   build:
     name: Build
     needs: setup
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && 'linux-amd64-cpu8' || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && 'linux-amd64-cpu8' || 'ubuntu-latest' }}
     container: ${{ needs.setup.outputs.container }}
     permissions:
       actions: write
