@@ -84,7 +84,7 @@ Actions:
 
 Directory options:
   --cuda-quantum-dir DIR (default: /workspaces/cuda-quantum)
-  --cuda-qx-dir DIR      (default: /workspaces/cuda-qx)
+  --cuda-qx-dir DIR      (default: /workspaces/cudaqx)
   --data-dir DIR         Predecoder test data (expects detectors.bin,
                          observables.bin inside; e.g. predecoder/test_data/d13_T104_X)
 
