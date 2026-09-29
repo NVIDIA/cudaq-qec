@@ -65,9 +65,8 @@ damages, liabilities or legal consequences from your use or inability to use
 this software or any retrieved materials. Use this software and the
 retrieved materials at your own risk.
 
-Contributing a pull request to this repository requires accepting the
-Contributor License Agreement (CLA) declaring that you have the right to, and
-actually do, grant us the rights to use your contribution. A CLA-bot will
-automatically determine whether you need to provide a CLA and decorate the PR
-appropriately. Simply follow the instructions provided by the bot. You will only
-need to do this once.
+Contributions to this repository are accepted under the
+[Developer Certificate of Origin (DCO)](https://developercertificate.org/).
+Every commit in a pull request must be signed off (`git commit -s`) to certify
+that you have the right to submit it under the Apache License 2.0. See
+[Contributing.md](./Contributing.md#commit-sign-off) for details.

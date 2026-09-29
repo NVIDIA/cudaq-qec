@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # We need 3.28 because of the `EXCLUDE_FROM_ALL` in FetchContent_Declare
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
