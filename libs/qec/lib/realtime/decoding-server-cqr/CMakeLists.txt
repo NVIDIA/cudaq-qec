@@ -74,8 +74,9 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# Core decoding server: transport abstraction, session registry, per-decoder
-# worker threads, RPC dispatcher.  The wire format (function IDs, payload
+# Core decoding server: transport abstraction, session registry, and the
+# per-decoder sessions whose handle_* entry points serve requests inline on
+# the calling CUDAQ dispatcher thread.  The wire format (function IDs, payload
 # structs, RPCHeader/RPCResponse) comes from cudaq/qec/realtime/
 # decoder_rpc_wire_format.h, which includes the cudaq realtime headers -- so
 # the server (and everything below) is only built when a realtime-enabled
@@ -124,8 +125,8 @@ target_link_libraries(cudaq-qec-decoding-server
     cudaq-qec-decoders
     cudaq-qec-realtime-decoding
   PRIVATE
-    # DecodingSession worker threads pin themselves to their decoder's
-    # cuda_device_id (cudaSetDevice).
+    # DecodingSession pins the calling dispatcher thread to its decoder's
+    # cuda_device_id (pin_decode_device_cached -> cudaSetDevice).
     CUDA::cudart
 )
 

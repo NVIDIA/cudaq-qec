@@ -25,7 +25,6 @@ namespace cudaq::qec::decoding_server {
 using cudaq::qec::decoding::rpc::bit_packed_bytes;
 using cudaq::qec::decoding::rpc::RpcStatus;
 using cudaq::realtime::RPCHeader;
-using cudaq::realtime::RPCResponse;
 
 // Busy high-water mark across all sessions (bumped while a session executes
 // a request inline on a dispatcher thread).
@@ -372,10 +371,10 @@ void DecodingSession::handle_get_corrections(const void *rx_slot, void *tx_slot,
     // The corrections pack straight into the tx slot's payload area; the
     // header (and the magic, last) follow in commit().  result-too-large is
     // detected by the core against the slot capacity — no truncation.
+    const std::size_t out_capacity = writer.payload_capacity();
     status = get_corrections_core(req.return_size, req.reset,
-                                  static_cast<uint8_t *>(tx_slot) +
-                                      sizeof(RPCResponse),
-                                  slot_size - sizeof(RPCResponse), out_len);
+                                  writer.payload(out_capacity), out_capacity,
+                                  out_len);
   } catch (const std::exception &e) {
     cudaq::qec::error("DecodingSession::handle_get_corrections: {}", e.what());
     ++error_count;

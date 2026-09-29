@@ -176,6 +176,15 @@ inline bool peek_decoder_id(const void *rx_slot, std::size_t slot_size,
   return true;
 }
 
+/// Callers gate on `slot_size >= sizeof(RPCHeader)` (dispatch_rpc) and then
+/// write an RPCResponse into a slot of that same size, so the response header
+/// must fit wherever a request header did.  Both are 24 bytes today; assert
+/// the relation rather than leave it implicit -- these structs live in the
+/// cudaq realtime headers and can change independently of this repo.
+static_assert(sizeof(RPCResponse) <= sizeof(RPCHeader),
+              "an RPCResponse must fit in any slot large enough to have "
+              "carried an RPCHeader");
+
 /// Write a header-only RPCResponse (no result payload) into \p tx_slot.
 /// The magic is release-stored LAST so the CUDAQ runtime sees a complete
 /// response before observing the magic word.
@@ -200,9 +209,17 @@ public:
   ResultWriter(void *tx_slot, std::size_t slot_size) noexcept
       : tx_(tx_slot), capacity_(slot_size) {}
 
+  /// Bytes available for the result after the response header, 0 if the slot
+  /// cannot even hold the header.  Order matters: the capacity check must
+  /// precede any subtraction, or a short slot underflows to a huge size_t.
+  std::size_t payload_capacity() const noexcept {
+    if (!tx_ || capacity_ < sizeof(RPCResponse))
+      return 0;
+    return capacity_ - sizeof(RPCResponse);
+  }
+
   uint8_t *payload(std::size_t result_len) noexcept {
-    if (!tx_ || result_len > capacity_ - sizeof(RPCResponse) ||
-        capacity_ < sizeof(RPCResponse))
+    if (!tx_ || result_len > payload_capacity())
       return nullptr;
     return static_cast<uint8_t *>(tx_) + sizeof(RPCResponse);
   }
