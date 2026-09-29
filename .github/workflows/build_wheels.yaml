@@ -231,10 +231,15 @@ jobs:
         shell: bash
         run: |
           if [[ -n "${{ inputs.assets_repo }}" ]] && [[ -n "${{ inputs.assets_tag }}" ]]; then
-            # Extract the decoder that needs to be embedded in the wheel
+            # Extract the decoders that need to be embedded in the wheel.
+            # QEC_EXTERNAL_DECODERS is consumed as a CMake list
+            # (libs/qec/CMakeLists.txt), so multiple paths are
+            # semicolon-separated.
             mkdir -p tmp
             tar -C tmp -xzvf nv-qldpc-decoder-${{ matrix.platform }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_py${{ matrix.python }}_release.tar.gz
-            export QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so
+            test -f tmp/libcudaq-qec-nv-qldpc-decoder.so
+            test -f tmp/libcudaq-qec-nv-fusion-decoder.so
+            export QEC_EXTERNAL_DECODERS="$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so;$(pwd)/tmp/libcudaq-qec-nv-fusion-decoder.so"
           fi
           # This is needed to allow the "git rev-parse" commands in the build
           # scripts to work.
