@@ -4,12 +4,12 @@ Installation Guide
 Installation Methods
 --------------------
 
-CUDA-QX provides multiple installation methods to suit your needs:
+CUDA-Q QEC provides multiple installation methods to suit your needs:
 
 pip install
 ^^^^^^^^^^^^
 
-The simplest way to install CUDA-QX is via pip. (If you're on Mac, your only
+The simplest way to install CUDA-Q QEC is via pip. (If you're on Mac, your only
 option is to use the Docker container as described below.)
 
 .. code-block:: bash
@@ -17,7 +17,7 @@ option is to use the Docker container as described below.)
     # Install QEC library
     pip install cudaq-qec
 
-CUDA-QX provides optional pip-installable components:
+CUDA-Q QEC provides optional pip-installable components:
 
 .. code-block:: bash
 
@@ -26,7 +26,7 @@ CUDA-QX provides optional pip-installable components:
 
 .. note::
 
-    Looking for CUDA-Q Solvers? It has been removed from CUDA-QX and is
+    Looking for CUDA-Q Solvers? It has been removed from this repository and is
     superseded by **CUDA-Q Algorithms**, which is where development continues:
 
     .. code-block:: bash
@@ -43,7 +43,7 @@ CUDA-QX provides optional pip-installable components:
 Docker Container
 ^^^^^^^^^^^^^^^^
 
-CUDA-QX is available as a Docker container with all dependencies pre-installed:
+CUDA-Q QEC is available as a Docker container with all dependencies pre-installed:
 
 1. Pull the container:
 
@@ -64,22 +64,22 @@ CUDA-QX is available as a Docker container with all dependencies pre-installed:
 
 The container includes:
     * CUDA-Q compiler and runtime
-    * CUDA-QX libraries (QEC)
+    * CUDA-Q QEC library
     * All required dependencies
     * Example notebooks and tutorials
 
 Building from Source
 ^^^^^^^^^^^^^^^^^^^^
 
-The instructions for building CUDA-QX from source are maintained on our GitHub
-repository: `Building CUDA-QX from Source <https://github.com/NVIDIA/cudaqx/blob/main/Building.md>`__.
+The instructions for building CUDA-Q QEC from source are maintained on our GitHub
+repository: `Building CUDA-Q QEC from Source <https://github.com/NVIDIA/cudaq-qec/blob/main/Building.md>`__.
 
 .. _installing-pytorch:
 
 Installing PyTorch
 ------------------
 
-PyTorch (``torch``) is required for several CUDA-QX features:
+PyTorch (``torch``) is required for several CUDA-Q QEC features:
 
 * **Tensor Network Decoder**: Used by the QEC library for tensor network-based decoding (CPU version of PyTorch is sufficient)
 * **Training AI Decoders**: Optionally used for training custom neural network decoders (see :ref:`Deploying AI Decoders with TensorRT <deploying-ai-decoders>`)

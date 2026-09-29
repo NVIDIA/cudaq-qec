@@ -52,5 +52,21 @@ target_link_libraries(test_playback_emulator PRIVATE
   libstim
 )
 
+# The CpuRoceBackend tests need a Soft RoCE (or real RDMA) device to run, so
+# they are only compiled when asked for with the QEC_TEST_PLAYBACK_CPU_ROCE
+# environment variable at configure time.
+# TODO: integrate the cpu_roce tests into CI.
+if(DEFINED ENV{QEC_TEST_PLAYBACK_CPU_ROCE})
+  get_target_property(_playback_defs cudaq-qec-playback-emulator
+    INTERFACE_COMPILE_DEFINITIONS)
+  if("CUDAQ_QEC_PLAYBACK_CPU_ROCE" IN_LIST _playback_defs)
+    target_compile_definitions(test_playback_emulator PRIVATE
+      QEC_TEST_PLAYBACK_CPU_ROCE)
+  else()
+    message(STATUS "test_playback_emulator: QEC_TEST_PLAYBACK_CPU_ROCE is set "
+                   "but the cpu_roce backend was not built; skipping its tests.")
+  endif()
+endif()
+
 add_dependencies(CUDAQXQECUnitTests test_playback_emulator)
 gtest_discover_tests(test_playback_emulator)

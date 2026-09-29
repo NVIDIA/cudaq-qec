@@ -4,7 +4,7 @@ Realtime Decoding with CUDA-Q Decoding Server
 .. note::
 
    This page describes a C++ example that you compile against the *installed*
-   CUDA-QX SDK. The decoding server and the FPGA playback tool it drives are
+   CUDA-Q QEC SDK. The decoding server and the FPGA playback tool it drives are
    **deliverables** — prebuilt and installed alongside the SDK, not built from
    this example.
 
@@ -66,7 +66,7 @@ Building the example
      -DCUDAQX_INSTALL_DIR=<cuda-qx install prefix>
    cmake --build build
 
-In a CUDA-QX container ``CUDAQ_INSTALL_DIR`` defaults to ``/usr/local/cudaq``.
+In a CUDA-Q QEC container ``CUDAQ_INSTALL_DIR`` defaults to ``/usr/local/cudaq``.
 If the realtime libraries are in a separate prefix, add
 ``-DCUDAQ_REALTIME_DIR=<realtime prefix>``. The lowered kernel links the
 realtime dispatch archive (relocatable CUDA device code), so the build needs a
