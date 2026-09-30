@@ -8,15 +8,16 @@
 
 // clang-format off
 // Build (loaded at runtime by sifl_demo.py):
-// g++ -std=c++17 -shared -fPIC per_round_decoder.cpp -I${CUDAQX_INSTALL_PREFIX}/include -L${CUDAQX_INSTALL_PREFIX}/lib -lcudaq-qec-decoders -o libper_round_decoder.so
+// g++ -std=c++17 -shared -fPIC per_round_decoder.cpp -I<cudaq-qec install>/include -L<cudaq-qec install>/lib -lcudaq-qec-decoders -o libper_round_decoder.so
 // clang-format on
 
-// A decoder for shots whose number of stabilizer rounds is only known when
-// the shot ends. It holds one sub-decoder per round count r, each built from
-// a full DEM of an r-round circuit (read from `dem_dir/r<r>.txt`), and hands
-// every shot to the one matching its length. A `round_width`-bit syndrome is
-// one stabilizer round; a `terminal_width`-bit syndrome is the data readout
-// that ends the shot and triggers the decode.
+// A decoder for Streaming Interleaved Feed-forward Latency (SIFL) shots, whose
+// number of stabilizer rounds is only known when the shot ends. It holds one
+// sub-decoder per round count r, each built from a full DEM of an r-round
+// circuit (read from `dem_dir/r<r>.txt`), and hands every shot to the one
+// matching its length. A `round_width`-bit syndrome is one stabilizer round; a
+// `terminal_width`-bit syndrome is the data readout that ends the shot and
+// triggers the decode.
 
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
