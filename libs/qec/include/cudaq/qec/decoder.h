@@ -11,6 +11,7 @@
 #include "cuda-qx/core/extension_point.h"
 #include "cuda-qx/core/heterogeneous_map.h"
 #include "cuda-qx/core/tensor.h"
+#include "cudaq/qec/cancellation.h"
 #include "cudaq/qec/decoder_init.h"
 #include <algorithm>
 #include <functional>
@@ -172,6 +173,18 @@ public:
   /// @returns A result in the instance's constructed output form.
   virtual decoder_result decode(const cudaqx::tensor<uint8_t> &syndrome);
 
+  /// @brief Decode a single syndrome (tensor form), cooperatively
+  /// cancellable via `tok`. Converts and delegates to
+  /// `decode(vector, cancellation_token)`.
+  /// @param syndrome An order-1 tensor of syndrome measurements where a 1 bit
+  /// represents that the syndrome measurement is a |1>. The
+  /// length of the syndrome vector should be equal to `syndrome_size`.
+  /// @param tok The cancellation token to use.
+  /// @returns decoder_result, or std::nullopt if a stop was honored before
+  /// any result was available.
+  virtual std::optional<decoder_result>
+  decode(const cudaqx::tensor<uint8_t> &syndrome, cancellation_token tok);
+
   /// @brief Decode a single syndrome
   /// @param syndrome A vector of syndrome measurements where the floating point
   /// value is the probability that the syndrome measurement is a |1>.
@@ -179,6 +192,22 @@ public:
   /// output form.
   virtual std::future<decoder_result>
   decode_async(const std::vector<float_t> &syndrome);
+
+  /// @brief Decode a single syndrome, cooperatively cancellable via `tok`.
+  /// The default implementation ignores `tok` and delegates to
+  /// decode(syndrome), i.e. a decoder is non-cancellable unless it overrides
+  /// this overload. A decoder that can poll `tok` should override this and
+  /// return std::nullopt once `tok.stop_requested()` answers true (see
+  /// `cancellation_token`).
+  /// @param syndrome A vector of syndrome measurements where the floating point
+  /// value is the probability that the syndrome measurement is a |1>.
+  /// @param tok The cancellation token to use.
+  /// @returns decoder_result, or std::nullopt if a stop was honored before
+  /// any result was available.
+  virtual std::optional<decoder_result>
+  decode(const std::vector<float_t> &syndrome, cancellation_token tok) {
+    return decode(syndrome);
+  }
 
   /// @brief Decode multiple independent syndromes (may be done in serial or
   /// parallel depending on the specific implementation)
@@ -211,6 +240,18 @@ public:
   virtual std::vector<decoder_result>
   decode_batch(const std::vector<std::vector<float_t>> &syndrome,
                std::optional<cudaqx::heterogeneous_map> &batch_opt_results);
+
+  /// @brief Decode multiple independent syndromes, cooperatively cancellable
+  /// via `tok`. The default implementation ignores `tok` and delegates to
+  /// decode_batch(syndrome), mirroring the single-syndrome default above.
+  /// @param syndrome A vector of `N` syndrome measurements where the floating
+  /// point value is the probability that the syndrome measurement is a |1>.
+  /// @param tok The cancellation token to use.
+  /// @returns One result per shot, or std::nullopt if a stop was honored
+  /// before the batch completed.
+  virtual std::optional<std::vector<decoder_result>>
+  decode_batch(const std::vector<std::vector<float_t>> &syndrome,
+               cancellation_token tok);
 
   /// @brief Construct a registered decoder by name.
   /// @param name The registered decoder name.

@@ -95,7 +95,12 @@ private:
 
   /// @brief Decode the active window from the rolling buffer, commit, and back
   /// out committed errors into the next window's syndrome mods.
-  void decode_window();
+  /// @return false if the inner decoder abandoned the window.
+  bool decode_window(cancellation_token tok);
+
+  /// @brief Drop any partially streamed block so the next round starts a new
+  /// one.
+  void reset_stream();
 
 public:
   /// @brief Constructor
@@ -116,12 +121,35 @@ public:
   /// @return The decoded error correction
   decoder_result decode(const std::vector<float_t> &syndrome) override;
 
+  /// @brief Decode a syndrome vector, forwarding `tok` to the inner decoders.
+  /// @param syndromes Syndrome measurements to decode
+  /// @param tok The cancellation token to use
+  /// @return std::nullopt if an inner decoder honored a stop (the partial
+  /// block is dropped), a result with an empty `result` vector until the
+  /// final window is complete, otherwise the decoded result.
+  std::optional<decoder_result> decode(const std::vector<float_t> &syndrome,
+                                       cancellation_token tok) override;
+
   /// @brief Decode multiple syndromes in batch
   /// @param syndromes Multiple syndrome measurements to decode
   /// @return The decoded error corrections
   using decoder::decode_batch; // keep the batch_opt_results overload visible
   std::vector<decoder_result>
   decode_batch(const std::vector<std::vector<float_t>> &syndromes) override;
+
+  /// @brief Decode multiple syndromes in batch, forwarding `tok` to the inner
+  /// decoders.
+  /// @param syndromes Multiple syndrome measurements to decode
+  /// @param tok The cancellation token to use
+  /// @return std::nullopt if an inner decoder honored a stop (the partial
+  /// block is dropped), an empty vector until the final window is complete,
+  /// otherwise one entry per shot.
+  std::optional<std::vector<decoder_result>>
+  decode_batch(const std::vector<std::vector<float_t>> &syndromes,
+               cancellation_token tok) override;
+
+  /// @brief Reset the decoder, also dropping any partially streamed block.
+  void reset_decoder() override;
 
   /// @brief Get the number of syndromes per round
   /// @return The number of syndromes measured in each round

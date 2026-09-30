@@ -38,7 +38,7 @@ jobs:
         include:
           - { platform: amd64, cuda_version: '13.0', install_tensorrt: 'on' }
           - { platform: arm64, cuda_version: '13.0', install_tensorrt: 'off' }
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
     permissions:
       contents: read
     steps:
@@ -69,7 +69,7 @@ jobs:
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
     container:
       image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
       # SYS_NICE: the default seccomp profile only admits the NUMA memory-policy
@@ -290,7 +290,7 @@ jobs:
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-gpu-a100-latest-1', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-gpu-a100-latest-1', matrix.platform) || 'ubuntu-latest' }}
     container:
       image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
       env:
