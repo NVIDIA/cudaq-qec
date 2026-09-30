@@ -199,6 +199,8 @@ if(CUDAQ_QEC_DEVICE_GRAPH_AVAILABLE)
   target_link_libraries(cudaq-qec-decoding-server-device-graph-linkcheck PRIVATE
     cudaq-qec-decoding-server-device-graph
   )
+  add_test(NAME cudaq-qec-decoding-server-device-graph-linkcheck
+    COMMAND cudaq-qec-decoding-server-device-graph-linkcheck)
 endif()
 
 # ---------------------------------------------------------------------------
