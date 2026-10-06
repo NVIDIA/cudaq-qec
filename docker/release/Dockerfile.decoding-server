@@ -44,7 +44,7 @@
 #     -t cudaqx-decoding-server .
 #
 # If overriding CUDA_VERSION (e.g. to 12.6), also pass a matching
-# cudaq_image and cuda_runtime_image_tag -- see the args below; they
+# cudaq_image and cuda_base_image_tag -- see the args below; they
 # aren't derived from each other.
 
 ARG CUDA_VERSION=13.0
@@ -66,9 +66,9 @@ ARG cudaq_image=nvcr.io/nvidia/nightly/cuda-quantum:cu13-latest
 # that release builds against.
 ARG devcontainer_image=ghcr.io/nvidia/cuda-quantum-devcontainer
 ARG devcontainer_tag_suffix=gcc12-main
-# nvidia/cuda on Docker Hub tags by full patch version, which a FROM line
+# nvidia/cuda tags by full patch version, which a FROM line
 # can't derive from CUDA_VERSION; update the two together.
-ARG cuda_runtime_image_tag=13.0.3-runtime-ubuntu24.04
+ARG cuda_base_image_tag=13.0.3-base-ubuntu24.04
 
 # Empty placeholder for the optional artifacts build context: a
 # `--build-context artifacts=<dir>` flag overrides this stage entirely;
@@ -245,7 +245,7 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
 # Stage: runtime -- minimal production image. No compilers, no -dev
 # packages, no source tree.
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:${cuda_runtime_image_tag} AS runtime
+FROM nvidia/cuda:${cuda_base_image_tag} AS runtime
 ARG TARGETARCH
 ARG CUDA_VERSION
 

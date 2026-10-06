@@ -60,10 +60,10 @@ jobs:
         include:
           - cuda_version: '12.6'
             cuda_major: '12'
-            cuda_runtime_image_tag: 12.6.3-runtime-ubuntu24.04
+            cuda_base_image_tag: 12.6.3-base-ubuntu24.04
           - cuda_version: '13.0'
             cuda_major: '13'
-            cuda_runtime_image_tag: 13.0.3-runtime-ubuntu24.04
+            cuda_base_image_tag: 13.0.3-base-ubuntu24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -148,7 +148,7 @@ jobs:
             artifacts=./artifacts
           build-args: |
             CUDA_VERSION=${{ matrix.cuda_version }}
-            cuda_runtime_image_tag=${{ matrix.cuda_runtime_image_tag }}
+            cuda_base_image_tag=${{ matrix.cuda_base_image_tag }}
             cudaq_image=${{ inputs.cudaq_image_name }}:cu${{ matrix.cuda_major }}-${{ inputs.cudaq_image_version }}
             CUDAQX_QEC_VERSION=${{ steps.qec-version.outputs.version }}
           labels: |
