@@ -40,6 +40,15 @@ std::string read_file(const std::string &path) {
   return ss.str();
 }
 
+/// Parses an "ID:HOST:PORT" flag value into `endpoints`.
+void add_endpoint(const char *flag, const std::string &v,
+                  std::unordered_map<std::uint64_t, std::string> &endpoints) {
+  const auto colon = v.find(':');
+  if (colon == std::string::npos)
+    throw std::runtime_error(std::string(flag) + " expects ID:HOST:PORT");
+  endpoints[std::stoull(v.substr(0, colon))] = v.substr(colon + 1);
+}
+
 void print_usage() {
   std::cout
       << "Usage: playback-emulator --schedule=<file> [options]\n"
@@ -51,12 +60,21 @@ void print_usage() {
          "Options:\n"
          "  --config=PATH       multi_decoder_config YAML (decoders\n"
          "                      section); required for null/inproc,\n"
-         "                      optional for udp (which can instead derive\n"
-         "                      decoder_ids from --udp-endpoint=)\n"
+         "                      optional for udp/cpu_roce (which can instead\n"
+         "                      derive decoder_ids from their --*-endpoint=)\n"
          "  --tick=DURATION     wall-clock width of one tick (default: 1us)\n"
-         "  --backend=NAME      null | inproc | udp (default: inproc)\n"
+         "  --backend=NAME      null | inproc | udp | cpu_roce (default: "
+         "inproc)\n"
          "  --udp-endpoint=ID:HOST:PORT   repeatable; required for "
          "--backend=udp\n"
+         "  --cpu-roce-endpoint=ID:HOST:PORT   repeatable; required for\n"
+         "                      --backend=cpu_roce (the ring's rendezvous\n"
+         "                      from the server's READY line)\n"
+         "  --cpu-roce-device=NAME     RDMA device (e.g. mlx5_0); required\n"
+         "  --cpu-roce-local-ip=ADDR   this end's RoCE IPv4; required\n"
+         "  --cpu-roce-slots=N, --cpu-roce-slot-size=N   ring geometry\n"
+         "                      (default: 8 x 256 B); must match the\n"
+         "                      server's --num-slots/--slot-size\n"
          "  --source=ID:PATH    static_source for source_id ID, one 0/1 bit\n"
          "                      string per round, one round per line in PATH\n"
          "  --stim-source=ID:key=value,...   stim_memory_source for source_id\n"
@@ -178,6 +196,8 @@ int main(int argc, char **argv) {
   std::string out_path;
   std::uint64_t tick_ns = 1000;
   std::unordered_map<std::uint64_t, std::string> udp_endpoints;
+  std::unordered_map<std::uint64_t, std::string> cpu_roce_endpoints;
+  cpu_roce_options roce_opts;
   std::unordered_map<std::uint32_t, std::string> source_files;
   std::unordered_map<std::uint32_t, stim_source_spec> stim_sources;
 
@@ -198,12 +218,19 @@ int main(int argc, char **argv) {
       } else if (starts_with(a, "--out=")) {
         out_path = a.substr(6);
       } else if (starts_with(a, "--udp-endpoint=")) {
-        const std::string v = a.substr(15);
-        const auto first_colon = v.find(':');
-        if (first_colon == std::string::npos)
-          throw std::runtime_error("--udp-endpoint expects ID:HOST:PORT");
-        const std::uint64_t id = std::stoull(v.substr(0, first_colon));
-        udp_endpoints[id] = v.substr(first_colon + 1);
+        add_endpoint("--udp-endpoint", a.substr(15), udp_endpoints);
+      } else if (starts_with(a, "--cpu-roce-endpoint=")) {
+        add_endpoint("--cpu-roce-endpoint", a.substr(20), cpu_roce_endpoints);
+      } else if (starts_with(a, "--cpu-roce-device=")) {
+        roce_opts.device = a.substr(18);
+      } else if (starts_with(a, "--cpu-roce-local-ip=")) {
+        roce_opts.local_ip = a.substr(20);
+      } else if (starts_with(a, "--cpu-roce-slots=")) {
+        roce_opts.num_slots =
+            static_cast<std::uint32_t>(std::stoul(a.substr(17)));
+      } else if (starts_with(a, "--cpu-roce-slot-size=")) {
+        roce_opts.slot_size =
+            static_cast<std::uint32_t>(std::stoul(a.substr(21)));
       } else if (starts_with(a, "--source=")) {
         const std::string v = a.substr(9);
         const auto colon = v.find(':');
@@ -227,48 +254,63 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    // --config's only job for `udp` is naming decoder_ids (for schedule
-    // `session=` validation) -- the decoder itself lives on the server, not
-    // here. `--udp-endpoint=ID:...` already names every id one by one, so
-    // `udp` can skip --config entirely and derive decoder_ids from that.
-    // `null`/`inproc` have no other source of ids (`inproc` also needs the
-    // full config to build the decoder itself), so --config stays required
-    // for those.
+    // A decoder named by a --*-endpoint= flag talks to that server; --backend
+    // covers the --config decoders left over (`inproc`/`null` need --config,
+    // `udp`/`cpu_roce` may skip it and name every decoder_id by endpoint).
     cudaq::qec::decoding::config::multi_decoder_config config;
-    std::vector<std::uint64_t> decoder_ids;
-    if (!config_path.empty()) {
+    if (!config_path.empty())
       config =
           cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
               read_file(config_path));
-      for (const auto &d : config.decoders)
-        decoder_ids.push_back(static_cast<std::uint64_t>(d.id));
-    } else if (backend_name == "udp") {
-      for (const auto &[id, endpoint] : udp_endpoints)
-        decoder_ids.push_back(id);
-      std::sort(decoder_ids.begin(), decoder_ids.end());
-    } else {
-      throw std::runtime_error(
-          "--config is required unless --backend=udp (which can derive "
-          "decoder_ids from --udp-endpoint= instead)");
-    }
+    const auto claimed = [&](std::int64_t id) {
+      return udp_endpoints.count(id) || cpu_roce_endpoints.count(id);
+    };
+    for (const auto &[id, ep] : cpu_roce_endpoints)
+      if (udp_endpoints.count(id))
+        throw std::runtime_error("decoder " + std::to_string(id) +
+                                 " has both a --udp-endpoint= and a "
+                                 "--cpu-roce-endpoint=");
+    std::vector<std::uint64_t> leftover;
+    for (const auto &d : config.decoders)
+      if (!claimed(d.id))
+        leftover.push_back(static_cast<std::uint64_t>(d.id));
 
     std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>>
         owned_sessions;
     std::unordered_map<std::uint64_t, session *> router;
 
     if (backend_name == "null") {
-      owned_sessions = make_null_sessions(decoder_ids);
+      adopt_sessions(make_null_sessions(leftover), owned_sessions, router);
     } else if (backend_name == "inproc") {
-      owned_sessions = make_inproc_sessions(config);
-    } else if (backend_name == "udp") {
-      if (udp_endpoints.empty())
-        throw std::runtime_error("--backend=udp requires at least one "
-                                 "--udp-endpoint=ID:HOST:PORT");
-      owned_sessions = make_udp_sessions(udp_endpoints);
+      auto &ds = config.decoders;
+      ds.erase(std::remove_if(ds.begin(), ds.end(),
+                              [&](const auto &d) { return claimed(d.id); }),
+               ds.end());
+      adopt_sessions(make_inproc_sessions(config), owned_sessions, router);
+    } else if (backend_name == "udp" || backend_name == "cpu_roce") {
+      if (!leftover.empty())
+        throw std::runtime_error("--backend=" + backend_name + ": decoder " +
+                                 std::to_string(leftover[0]) +
+                                 " in --config has no --*-endpoint=");
     } else {
       throw std::runtime_error("unknown --backend='" + backend_name + "'");
     }
-    route_sessions(owned_sessions, router);
+    if (!udp_endpoints.empty())
+      adopt_sessions(make_udp_sessions(udp_endpoints), owned_sessions, router);
+    if (!cpu_roce_endpoints.empty()) {
+      if (roce_opts.device.empty() || roce_opts.local_ip.empty())
+        throw std::runtime_error("--cpu-roce-endpoint= requires "
+                                 "--cpu-roce-device= and --cpu-roce-local-ip=");
+      adopt_sessions(make_cpu_roce_sessions(cpu_roce_endpoints, roce_opts),
+                     owned_sessions, router);
+    }
+    if (router.empty())
+      throw std::runtime_error("no decoders: give --config and/or "
+                               "--udp-endpoint=/--cpu-roce-endpoint= flags");
+    std::vector<std::uint64_t> decoder_ids;
+    for (const auto &[id, s] : router)
+      decoder_ids.push_back(id);
+    std::sort(decoder_ids.begin(), decoder_ids.end());
 
     std::vector<std::unique_ptr<syndrome_source>> owned_sources;
     std::unordered_map<std::uint32_t, syndrome_source *> sources;

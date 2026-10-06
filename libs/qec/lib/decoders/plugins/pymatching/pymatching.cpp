@@ -116,13 +116,15 @@ private:
 #endif
 
 public:
-  pymatching(cudaq::qec::decoder_init inputs,
-             decode_result_type requested_output,
+  pymatching(cudaq::qec::decoder_init inputs, decoder_output_request request,
              const cudaqx::heterogeneous_map &params)
-      : decoder(std::move(inputs), requested_output) {
+      : decoder(std::move(inputs), request) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "pymatching does not produce auxiliary outputs");
     const auto &H = get_inputs().detector_error_matrix();
     error_rate_vec = get_inputs().error_rates();
-    decode_to_observables = requested_output == decode_result_type::observables;
+    decode_to_observables = request.primary == decode_result_type::observables;
 
     if (!error_rate_vec.empty()) {
       if (error_rate_vec.size() != block_size) {
@@ -309,11 +311,11 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       pymatching, static std::unique_ptr<decoder> create(
                       cudaq::qec::decoder_init inputs,
-                      std::optional<decode_result_type> output,
+                      std::optional<decoder_output_request> output,
                       const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<pymatching>(
-            std::move(inputs), output.value_or(decode_result_type::errors),
-            params);
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<pymatching>(std::move(inputs), request, params);
       })
 };
 

@@ -75,14 +75,16 @@ private:
 
 public:
   chromobius(decoder_init inputs, chromobius_init_data init_data,
-             decode_result_type requested_output,
+             decoder_output_request request,
              const cudaqx::heterogeneous_map &params)
-      : decoder(std::move(inputs), requested_output),
-        dem(std::move(init_data.dem)) {
+      : decoder(std::move(inputs), request), dem(std::move(init_data.dem)) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "Chromobius does not produce auxiliary outputs");
     // Chromobius predicts observable flips directly and cannot be inverted to
     // an error frame. Reject the request at construction rather than on the
     // first live shot.
-    if (requested_output != decode_result_type::observables)
+    if (request.primary != decode_result_type::observables)
       throw std::invalid_argument(
           "Chromobius cannot return an error frame; construct it for "
           "observable output");
@@ -157,12 +159,13 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       chromobius, static std::unique_ptr<decoder> create(
                       cudaq::qec::decoder_init inputs,
-                      std::optional<decode_result_type> output,
+                      std::optional<decoder_output_request> output,
                       const cudaqx::heterogeneous_map &params) {
+        const auto request = output.value_or(
+            decoder_output_request{decode_result_type::observables});
         auto init_data = make_chromobius_init_data(inputs);
         return std::make_unique<chromobius>(
-            std::move(inputs), std::move(init_data),
-            output.value_or(decode_result_type::observables), params);
+            std::move(inputs), std::move(init_data), request, params);
       })
 };
 
