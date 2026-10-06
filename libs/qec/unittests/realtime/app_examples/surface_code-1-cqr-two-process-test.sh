@@ -24,7 +24,8 @@
 # QEC_DECODING_SERVER_EXTRA_ARGS (optional, word-split) is appended to the
 # server command line after the arguments this script builds, so a repeated
 # flag (e.g. a later --transport=) overrides the earlier one. The CMake
-# host-loop-unified variant uses it to pass "--host-loop=unified --unified".
+# host-loop-unified variant uses it to pass "--host-loop=unified" (the server
+# passes --unified to the provider itself).
 #
 # Exit codes: 0 pass, 1 fail, 77 skip (CMake SKIP_RETURN_CODE). The script
 # skips when the server reports that the transport provider does not serve

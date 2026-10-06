@@ -73,10 +73,17 @@
 /// realtime's single-thread unified loop, in which the dispatcher thread
 /// itself pulls each request through the provider's rx_poll hook, decodes
 /// inline, and pushes the reply through tx_publish. Unified needs the
-/// provider to serve its CPU data plane, i.e. to be started in its own
-/// unified mode (udp: `--unified`, forwarded like any other provider
-/// argument); the server probes for that before READY and rejects the flag
-/// for configurations containing device_graph decoders.
+/// provider's CPU data plane; by convention a host-ring provider selects it
+/// with `--unified` (udp does), so under --host-loop=unified the server
+/// appends `--unified` to every host ring's provider arguments itself and
+/// probes for the plane before READY. Device_graph rings are unaffected
+/// (their consumer is the GPU scheduler over the provider's ring-buffer,
+/// 3-kernel shape), so mixed configurations are allowed, while a config with
+/// only device_graph decoders has no host ring and rejects the flag. gpu_roce
+/// host rings cannot be driven unified (gpu_roce serves no CPU data plane;
+/// its own `--unified` selects a GPU kernel), and `--unified`/`--forward`
+/// must not appear among a device_graph ring's or a gpu_roce ring's YAML
+/// transport arguments.
 
 #include "cudaq/qec/realtime/decoding_config.h"
 
@@ -150,7 +157,8 @@ namespace config = cudaq::qec::decoding::config;
 //             thread itself pulls each request through the provider's rx_poll
 //             hook, decodes inline, and pushes the reply through tx_publish;
 //             no pump threads, no flag hand-offs.  Requires a provider that
-//             serves its CPU data plane (udp: started with --unified).
+//             serves its CPU data plane (the server passes --unified to
+//             select it).
 enum class HostLoop { threaded, unified };
 
 const char *host_loop_name(HostLoop loop) {
@@ -164,7 +172,7 @@ struct ServerConfig {
   int timeout_sec = 60;
   // Loop shape for the host-dispatch rings; see HostLoop.  A command-line
   // choice about how this server drives the provider, not a YAML property
-  // of the deployment, and not valid for device_graph configurations.
+  // of the deployment.
   HostLoop host_loop = HostLoop::threaded;
   // Everything the server itself does not consume, forwarded verbatim to the
   // provider's create() (providers ignore arguments they don't recognize, so
@@ -196,9 +204,12 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
                    "decoders or using gpu_roce must put the provider and its "
                    "arguments in YAML.\n"
                    "--host-loop=unified runs each host ring on CUDA-Q "
-                   "realtime's single-thread unified loop; the provider must "
-                   "serve its CPU data plane (udp: pass --unified). Not valid "
-                   "for configurations containing device_graph decoders.\n"
+                   "realtime's single-thread unified loop; the server passes "
+                   "--unified to each host ring's provider to select its CPU "
+                   "data plane (do not add it yourself). device_graph rings "
+                   "are unaffected (a config with only device_graph decoders "
+                   "has no host ring and rejects the flag); gpu_roce host "
+                   "rings are not supported in this mode.\n"
                    "Providers and their args are defined by the installed "
                    "cudaq-realtime (libcudaq-realtime-bridge-<name>.so, "
                    "with '_' in <name> mapping to '-'); "
@@ -332,6 +343,15 @@ bool is_gpu_argument(const std::string &arg) {
   return arg == "--gpu" || starts_with(arg, "--gpu=");
 }
 
+// Provider MODE flags (gpu_roce: GPU unified / echo kernel; udp: CPU data
+// plane).  A ring consumed through the provider's RING_BUFFER context (every
+// device_graph ring, every gpu_roce ring) needs the provider's default
+// 3-kernel shape, so these are rejected in such rings' YAML arguments; host
+// rings get --unified from the server under --host-loop=unified.
+bool is_transport_mode_argument(const std::string &arg) {
+  return arg == "--unified" || arg == "--forward";
+}
+
 // Split a provider endpoint-info line into its port and the remaining
 // tokens.
 std::uint16_t split_endpoint_info(const std::string &endpoint_info,
@@ -440,16 +460,6 @@ int main(int argc, char **argv) {
           : decoder_config.transport.provider;
   const bool host_uses_gpu_roce =
       has_host && is_gpu_roce_provider(resolved_host_provider);
-  // The unified loop is a host-ring consumer; a device_graph ring's consumer
-  // is the GPU scheduler, which has no loop shape to choose.  Rejected up
-  // front rather than silently applied to the host rings of a mixed config.
-  if (cfg.host_loop == HostLoop::unified && has_device_graph) {
-    std::cerr << "ERROR: --host-loop=unified applies to host-dispatch rings "
-                 "only; this config contains device_graph decoders (drop the "
-                 "flag or use --host-loop=threaded)"
-              << std::endl;
-    return 1;
-  }
   // device_graph providers own GPU-visible rings and must be reproducible from
   // the deployment YAML in every server topology. Generic CLI provider
   // arguments are intentionally rejected rather than guessed to belong to a
@@ -489,6 +499,50 @@ int main(int argc, char **argv) {
   if (host_gpu_roce_sets_gpu) {
     std::cerr << "ERROR: gpu_roce transport arguments must not set --gpu; set "
                  "decoder cuda_device_id in YAML instead"
+              << std::endl;
+    return 1;
+  }
+  // Provider MODE flags (--unified/--forward) select a shape other than the
+  // ring-buffer (3-kernel) one, which is the shape every ring consumed
+  // through the RING_BUFFER context needs: device_graph rings (GPU scheduler)
+  // and gpu_roce host rings.  Rejected up front like --gpu.  gpu_roce serves
+  // no CPU data plane at all, so --host-loop=unified is refused for its host
+  // rings here, before any provider is created.
+  if (has_device_graph && std::any_of(resolved_device_graph.args.begin(),
+                                      resolved_device_graph.args.end(),
+                                      is_transport_mode_argument)) {
+    std::cerr << "ERROR: device_graph transport arguments must not set "
+                 "--unified or --forward: the device-graph consumer requires "
+                 "the provider's ring-buffer (3-kernel) shape (device_graph "
+                 "rings inherit the section-level transport.args; under "
+                 "--host-loop=unified the server passes --unified to host "
+                 "rings itself)"
+              << std::endl;
+    return 1;
+  }
+  if (host_uses_gpu_roce && std::any_of(decoder_config.transport.args.begin(),
+                                        decoder_config.transport.args.end(),
+                                        is_transport_mode_argument)) {
+    std::cerr << "ERROR: gpu_roce transport arguments must not set --unified "
+                 "or --forward: a gpu_roce host ring is consumed through the "
+                 "provider's ring-buffer (3-kernel) shape"
+              << std::endl;
+    return 1;
+  }
+  if (cfg.host_loop == HostLoop::unified && host_uses_gpu_roce) {
+    std::cerr << "ERROR: --host-loop=unified is not supported for gpu_roce "
+                 "host rings: gpu_roce serves no CPU data plane (use "
+                 "--host-loop=threaded)"
+              << std::endl;
+    return 1;
+  }
+  // An all-device_graph config has no host ring for --host-loop to drive
+  // (the standalone [2a] path below never reads it), so the flag is refused
+  // rather than reported as active on the info line.
+  if (cfg.host_loop == HostLoop::unified && all_device_graph) {
+    std::cerr << "ERROR: --host-loop=unified has no host ring to drive: every "
+                 "decoder in this config uses device_graph dispatch (drop the "
+                 "flag)"
               << std::endl;
     return 1;
   }
@@ -674,6 +728,23 @@ int main(int argc, char **argv) {
     }
     ring_args.insert(ring_args.end(), ring_extra_args.begin(),
                      ring_extra_args.end());
+    // --host-loop=unified: by convention a host-ring provider selects its CPU
+    // data plane with --unified (udp does), so the server appends it here
+    // rather than making every launcher spell it.  A provider without the
+    // plane ignores the flag and fails the probe below.  An explicit copy in
+    // the forwarded arguments is harmless but redundant; say so once.
+    if (!ring.device_graph && cfg.host_loop == HostLoop::unified) {
+      const bool already_unified =
+          std::any_of(ring_args.begin() + 1, ring_args.end(),
+                      [](const std::string &a) { return a == "--unified"; });
+      if (already_unified) {
+        if (i == 0)
+          std::cout << "note: --unified is implied by --host-loop=unified; "
+                       "the explicit provider argument is redundant"
+                    << std::endl;
+      } else
+        ring_args.push_back("--unified");
+    }
     if (ring.device_graph || ring_uses_gpu_roce)
       ring_args.push_back("--gpu=" + std::to_string(ring.gpu_id));
 
@@ -704,6 +775,11 @@ int main(int argc, char **argv) {
                      "and read each ring's port from the "
                      "QEC_DECODING_SERVER_READY line"
                   << std::endl;
+      if (cfg.host_loop == HostLoop::unified && !ring.device_graph)
+        std::cerr << "note: --host-loop=unified passed --unified to this "
+                     "provider; a provider that rejects unknown arguments "
+                     "cannot be driven unified (use --host-loop=threaded)"
+                  << std::endl;
       teardown_rings();
       return 1;
     }
@@ -718,9 +794,9 @@ int main(int argc, char **argv) {
     }
     // --host-loop=unified: probe the provider's CPU data plane NOW, before
     // READY and before connect(), so a provider that does not serve the
-    // unified shape (get_cpu_dataplane left NULL, or a capable provider
-    // started without its unified mode) fails fast and visibly instead of
-    // after a client has been told to dial in.  The struct is handed to the
+    // unified shape (get_cpu_dataplane left NULL, or one that ignores the
+    // --unified the server passed) fails fast and visibly instead of after a
+    // client has been told to dial in.  The struct is handed to the
     // dispatcher at [4]; set_cpu_dataplane keeps its address.  The unified
     // loop dereferences the ring's host views and slot strides without
     // checking them (validate_dispatcher only checks the threaded shape), so
@@ -733,8 +809,9 @@ int main(int argc, char **argv) {
                   << ring_lib
                   << "' does not serve the unified CPU data plane (decoder "
                   << ring.decoder_id
-                  << "; start it in its unified mode, e.g. --unified for udp, "
-                     "or use --host-loop=threaded)"
+                  << "; the server passed --unified, so this provider either "
+                     "predates the unified data plane or has none; use "
+                     "--host-loop=threaded)"
                   << std::endl;
         teardown_rings();
         return 1;
@@ -794,17 +871,23 @@ int main(int argc, char **argv) {
   // The ring-buffer context is what the flag-polling consumers adopt (the
   // threaded host dispatcher and the device-graph scheduler).  A provider
   // started in its unified mode serves rx_poll/tx_publish instead and refuses
-  // this query, hence the hint.
+  // this query, hence the hint, which applies to host rings.  A device_graph
+  // ring's mode flags are rejected at startup, so reaching this there means
+  // the provider serves no RING_BUFFER context at all.
   const auto fetch_ringbuffer = [&](const DecoderRing &ring,
                                     cudaq_ringbuffer_t &ringbuffer) {
     if (cudaq_bridge_get_transport_context(ring.bridge, RING_BUFFER,
                                            &ringbuffer) != CUDAQ_OK) {
       std::cerr << "ERROR: transport provider has no ring-buffer context "
                    "(decoder "
-                << ring.decoder_id
-                << ") (if the provider was started in its unified mode, pass "
-                   "--host-loop=unified)"
-                << std::endl;
+                << ring.decoder_id << ")";
+      if (ring.device_graph)
+        std::cerr << ": the device-graph consumer requires the provider's "
+                     "ring-buffer context in its default (3-kernel) shape";
+      else
+        std::cerr << " (if the provider was started in its unified mode, pass "
+                     "--host-loop=unified)";
+      std::cerr << std::endl;
       return false;
     }
     return true;

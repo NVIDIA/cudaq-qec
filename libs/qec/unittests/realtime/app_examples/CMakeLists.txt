@@ -346,8 +346,8 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
     # Two-process over the unified host loop: the server runs each ring's
     # host dispatcher as cudaq_host_unified_loop on the provider's CPU data
     # plane (--host-loop=unified) instead of the threaded ring-buffer loop.
-    # The udp provider must be started in its unified mode (--unified) to
-    # serve that data plane; the extra args reach the server via
+    # The server passes --unified to the udp provider itself to select that
+    # data plane; --host-loop=unified reaches the server via
     # QEC_DECODING_SERVER_EXTRA_ARGS. A CUDA-Q pin whose udp provider has no
     # unified mode makes the server exit with "does not serve the unified CPU
     # data plane", which the script turns into a skip (77), so this test goes
@@ -355,7 +355,7 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
     add_test(
       NAME app_examples.surface_code-1-cqr-two-process-test-distance-3-host-loop-unified
       COMMAND
-        ${CMAKE_COMMAND} -E env "QEC_DECODING_SERVER_EXTRA_ARGS=--host-loop=unified --unified"
+        ${CMAKE_COMMAND} -E env "QEC_DECODING_SERVER_EXTRA_ARGS=--host-loop=unified"
         bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-cqr-two-process-test.sh"
           ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
           3 60 30
