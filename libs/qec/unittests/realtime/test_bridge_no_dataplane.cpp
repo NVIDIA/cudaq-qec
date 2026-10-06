@@ -22,9 +22,10 @@
 // The in-tree udp provider can no longer reach these paths from a test: the
 // server appends --unified to every host ring's provider arguments itself
 // under --host-loop=unified, so a udp build that serves the plane always
-// passes the probe (and one that predates the plane only skips the test).
-// test_decoding_server loads this library by path through --transport=, which
-// also exercises the drop-in (out-of-tree) provider path end to end.
+// passes the probe (and one that predates the plane fails the probe, and with
+// it the test). test_decoding_server loads this library by path through
+// --transport=, which also exercises the drop-in (out-of-tree) provider path
+// end to end.
 //
 // Everything else is the minimum that keeps the server's startup sequence
 // going until the probe: create()/destroy() manage a small heap handle,

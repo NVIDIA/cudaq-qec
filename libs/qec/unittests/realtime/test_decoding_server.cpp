@@ -36,10 +36,10 @@
 /// configurations are allowed (device_graph rings keep the provider's
 /// ring-buffer shape) and gpu_roce host rings are refused. A test-only
 /// provider (qec-test-bridge-no-dataplane) covers the refusal paths. The
-/// unified round-trip still SKIPs when the installed provider serves no CPU
-/// data plane (until the CUDA-Q pin moves), and
+/// unified round-trip runs against the installed udp provider (CUDA-Q
+/// 0bba12df or later serves the CPU data plane), and
 ///   QEC_DECODING_SERVER_HOST_LOOP_PROVIDER=/path/to/libcudaq-realtime-bridge-<x>.so
-/// runs it against another provider build (appended as a trailing
+/// runs it against another provider build instead (appended as a trailing
 /// --transport=, which overrides the default one).
 
 #include "cudaq.h"
@@ -929,11 +929,9 @@ TEST(DecodingServerTwoProcess, TwoProcessPerDecoderRings) {
 // The unified host loop end to end: the server is asked for
 // --host-loop=unified alone -- it passes --unified to the udp provider
 // itself, which this test proves -- and the decode round-trips through
-// CUDA-Q's host unified loop. The pinned udp provider ignores the --unified
-// the server passes and serves no CPU data plane, so the server refuses
-// before READY and this test SKIPs; it goes live with the next CUDA-Q pin
-// bump, or today against a newer provider build named by
-// QEC_DECODING_SERVER_HOST_LOOP_PROVIDER.
+// CUDA-Q's host unified loop. The installed udp provider serves the plane at
+// the repository pin, so this test runs for real in CI;
+// QEC_DECODING_SERVER_HOST_LOOP_PROVIDER substitutes another provider build.
 TEST(DecodingServerHostLoop, UnifiedTwoProcess) {
   if (env_or("QEC_DECODING_SERVER_TRANSPORT", "udp") != "udp")
     GTEST_SKIP() << "unified host loop exercised over udp only";
@@ -952,13 +950,6 @@ TEST(DecodingServerHostLoop, UnifiedTwoProcess) {
   const bool started = server.start("decoding_server_config.yaml", error, 15000,
                                     /*transport_cli=*/true,
                                     /*capture_stderr=*/true, server_args);
-  if (!started &&
-      server.captured.find("does not serve the unified CPU data plane") !=
-          std::string::npos)
-    GTEST_SKIP() << "the pinned transport provider lacks the unified CPU data "
-                    "plane (CUDA-Q pin predates udp --unified); server "
-                    "output:\n"
-                 << server.captured;
   ASSERT_TRUE(started) << error;
 
   run_two_process_client_flow(server);
@@ -1145,8 +1136,8 @@ TEST(DecodingServerHostLoop, HostGpuRoceRejectsTransportModeFlag) {
 
 // --host-loop=unified against a provider that serves no CPU data plane: the
 // server probes the plane before READY and refuses, naming the provider.
-// The server now passes --unified itself, so the in-tree udp provider can no
-// longer trigger this once the pin moves; the test-only provider
+// The server passes --unified itself and the in-tree udp provider serves the
+// plane, so it cannot trigger this; the test-only provider
 // (qec-test-bridge-no-dataplane, loaded by path through a trailing
 // --transport=, which wins over ServerProcess's default one) ignores the
 // flag and serves no plane, so the refusal is pin-independent.

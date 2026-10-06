@@ -348,10 +348,7 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
     # plane (--host-loop=unified) instead of the threaded ring-buffer loop.
     # The server passes --unified to the udp provider itself to select that
     # data plane; --host-loop=unified reaches the server via
-    # QEC_DECODING_SERVER_EXTRA_ARGS. A CUDA-Q pin whose udp provider has no
-    # unified mode makes the server exit with "does not serve the unified CPU
-    # data plane", which the script turns into a skip (77), so this test goes
-    # live with the next .cudaq_version bump.
+    # QEC_DECODING_SERVER_EXTRA_ARGS.
     add_test(
       NAME app_examples.surface_code-1-cqr-two-process-test-distance-3-host-loop-unified
       COMMAND
@@ -363,9 +360,6 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
           12
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-    set_tests_properties(
-      app_examples.surface_code-1-cqr-two-process-test-distance-3-host-loop-unified
-      PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endif()
 

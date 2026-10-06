@@ -27,10 +27,7 @@
 # host-loop-unified variant uses it to pass "--host-loop=unified" (the server
 # passes --unified to the provider itself).
 #
-# Exit codes: 0 pass, 1 fail, 77 skip (CMake SKIP_RETURN_CODE). The script
-# skips when the server reports that the transport provider does not serve
-# the unified CPU data plane, i.e. --host-loop=unified was requested against
-# a CUDA-Q pin whose udp provider predates its --unified mode.
+# Exit codes: 0 pass, 1 fail.
 #
 # Expected args:
 #   1: path to surface_code-1-cqr executable
@@ -127,16 +124,6 @@ if [[ -z "$SERVER_PORT" ]]; then
     | sed -n 's/.*port=\([0-9]\+\).*/\1/p')
 fi
 if [[ -z "$SERVER_PORT" ]]; then
-  # --host-loop=unified against a provider that has no unified CPU data plane
-  # is an environment limitation (CUDA-Q pin), not a test failure: skip.
-  if grep -q "does not serve the unified CPU data plane" $SERVER_LOG 2>/dev/null; then
-    grep "does not serve the unified CPU data plane" $SERVER_LOG || true
-    echo "SKIP: provider lacks the unified CPU data plane (CUDA-Q pin predates udp --unified)"
-    if [[ -z "${KEEP_LOG_FILES}" ]]; then
-      rm -f $CONFIG_FILE $SERVER_LOG save_dem-2proc-$FULL_SUFFIX.log
-    fi
-    exit 77
-  fi
   if kill -0 $SERVER_PID 2>/dev/null; then
     echo "Error: timed out waiting for QEC_DECODING_SERVER_READY (log follows)"
   else
