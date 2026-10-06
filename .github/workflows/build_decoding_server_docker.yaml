@@ -73,6 +73,19 @@ jobs:
       - name: Create artifacts dir
         run: mkdir -p artifacts
 
+      # Version string baked into libcudaq-qec: use the release number on a
+      # releases/vX.Y.Z branch; otherwise left empty.
+      - name: Determine QEC version
+        id: qec-version
+        run: |
+          set -euo pipefail
+          version=""
+          if [[ "$GITHUB_REF_NAME" == releases/v* ]]; then
+            version=$(echo "$GITHUB_REF_NAME" | grep -Eo '([0-9]+\.)+[0-9]+')
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "CUDAQX_QEC_VERSION=${version:-<unset>}"
+
       - name: Fetch and extract decoder assets
         if: ${{ inputs.assets_repo != '' && inputs.assets_tag != '' }}
         env:
@@ -137,6 +150,7 @@ jobs:
             CUDA_VERSION=${{ matrix.cuda_version }}
             cuda_runtime_image_tag=${{ matrix.cuda_runtime_image_tag }}
             cudaq_image=${{ inputs.cudaq_image_name }}:cu${{ matrix.cuda_major }}-${{ inputs.cudaq_image_version }}
+            CUDAQX_QEC_VERSION=${{ steps.qec-version.outputs.version }}
           labels: |
             org.opencontainers.image.source=${{ github.repositoryUrl }}
             org.opencontainers.image.revision=${{ github.sha }}

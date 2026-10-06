@@ -197,8 +197,12 @@ RUN set -e; \
 # Plugins are copied out of the read-only artifacts mount because the
 # build patchelfs each plugin's rpath in place at configure time. The
 # cudevice archive is only ever read, so it's used from the mount as-is.
+#
+# CUDAQX_QEC_VERSION is the version string baked into libcudaq-qec.
+ARG CUDAQX_QEC_VERSION
 RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
     set -e; \
+    if [ -n "${CUDAQX_QEC_VERSION:-}" ]; then export CUDAQX_QEC_VERSION; else unset CUDAQX_QEC_VERSION; fi; \
     _cudevice_archive=""; \
     if [ -f /mnt/artifacts/libcudaq-qec-realtime-cudevice-proprietary.a ]; then \
         _cudevice_archive=/mnt/artifacts/libcudaq-qec-realtime-cudevice-proprietary.a; \
