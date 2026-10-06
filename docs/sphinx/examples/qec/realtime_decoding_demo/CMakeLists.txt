@@ -9,7 +9,7 @@
 # Realtime-decoding example.
 #
 # This builds TWO sources, each two ways, against the *installed* CUDA-Q /
-# CUDA-QX SDK -- nothing here reaches into a build tree:
+# CUDA-Q QEC SDK -- nothing here reaches into a build tree:
 #
 #   surface_code_realtime_decoding            generator: --target stim; writes
 #                                             the decoder config + syndrome
@@ -60,7 +60,7 @@ if(NOT EXISTS "${CUDAQ_INSTALL_DIR}/bin/nvq++")
     "Pass -DCUDAQ_INSTALL_DIR=<cuda-quantum install prefix>.")
 endif()
 
-# CUDA-QX: provides cudaq/qec/*.h and the QEC + realtime-decoding libs/plugins.
+# CUDA-Q QEC: provides cudaq/qec/*.h and the QEC + realtime-decoding libs/plugins.
 if(NOT CUDAQX_INSTALL_DIR)
   if(DEFINED ENV{CUDAQX_INSTALL_DIR})
     set(CUDAQX_INSTALL_DIR "$ENV{CUDAQX_INSTALL_DIR}")
@@ -72,7 +72,7 @@ if(NOT CUDAQX_INSTALL_DIR)
 endif()
 if(NOT EXISTS "${CUDAQX_INSTALL_DIR}/include/cudaq/qec/code.h")
   message(FATAL_ERROR
-    "CUDAQX_INSTALL_DIR=${CUDAQX_INSTALL_DIR} does not look like a CUDA-QX "
+    "CUDAQX_INSTALL_DIR=${CUDAQX_INSTALL_DIR} does not look like a CUDA-Q QEC "
     "install (missing include/cudaq/qec/code.h).")
 endif()
 
@@ -97,7 +97,7 @@ set(_src "${CMAKE_CURRENT_SOURCE_DIR}/surface_code_realtime_decoding.cpp")
 set(_ising_src
     "${CMAKE_CURRENT_SOURCE_DIR}/surface_code_ising_realtime_decoding.cpp")
 
-# Only the CUDA-QX headers need an explicit -I; nvq++ already knows its own
+# Only the CUDA-Q QEC headers need an explicit -I; nvq++ already knows its own
 # CUDA-Q include dir (cudaq/*.h, cudaq/realtime.h, common/*.h).
 set(_nvqpp_includes "-I${CUDAQX_INSTALL_DIR}/include")
 
@@ -184,7 +184,7 @@ target_link_options(surface_code_realtime_decoding-cqr PRIVATE
 # Ising decoder profile (trt_decoder): the surface_code-4-lineage source, same
 # two build variants. Requires no extra link inputs -- the TensorRT decoder is
 # a runtime-loaded plugin (lib/decoder-plugins/libcudaq-qec-trt-decoder.so in
-# the CUDA-QX install), discovered by the serving side, never linked here.
+# the CUDA-Q QEC install), discovered by the serving side, never linked here.
 # ---------------------------------------------------------------------------- #
 _add_nvqpp_object(_ising_gen_obj ising-generator "${_ising_src}" --target stim)
 add_executable(surface_code_ising_realtime_decoding "${_ising_gen_obj}")
