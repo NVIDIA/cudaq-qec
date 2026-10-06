@@ -6,93 +6,56 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.    #
 # ============================================================================ #
 #
-# Release image for the CUDA-Q QEC decoding server. Multi-stage: the
-# "toolchain" and "builder" stages (compilers, dev headers, source tree)
-# are discarded; the final "runtime" stage ships only compiled binaries
-# and runtime dependencies. No cudaqx or proprietary source is included.
+# Release image for the CUDA-Q QEC decoding server. The "toolchain" and
+# "builder" stages are discarded; the "runtime" stage ships only compiled
+# binaries and their runtime dependencies.
 #
-# CUDA-Q is NOT built here: the /opt/nvidia/cudaq install is taken from
-# the official published CUDA-Q container (cudaq_image below) and used
-# whole in the builder stage; the runtime stage ships only its lib/
-# directory (proprietary simulator backends included) and license files.
-# Only two things are compiled:
-#   cudaq-realtime -- rebuilt with HSB tools ON (the official install
-#     ships it without them), from the exact cuda-quantum commit the
-#     consumed image was built at. This repo's .cudaq_version does not
-#     govern this image.
-#   cudaqx/qec -- this repo's own code: decoding_server, decoder
-#     plugins, hsb_fpga_syndrome_playback.
+# CUDA-Q itself is not built here: /opt/nvidia/cudaq comes from the
+# official CUDA-Q container (cudaq_image). Two things are compiled:
+#   cudaq-realtime -- rebuilt with HSB tools ON, from the exact
+#     cuda-quantum commit that container was built at (this repo's
+#     .cudaq_version does not apply).
+#   cudaqx/qec -- decoding_server, decoder plugins,
+#     hsb_fpga_syndrome_playback.
 #
-# Prebuilt proprietary artifacts (decoder plugin .so files, the cudevice
-# archive enabling device_graph dispatch) are supplied via an optional
-# build context with a flat layout:
+# Prebuilt proprietary artifacts are supplied via an optional build
+# context with a flat layout; each file, and the context itself, is
+# optional:
 #
 #   artifacts/
-#     libcudaq-qec-<name>-decoder.so   (any number of decoder plugins)
-#     libcudaq-qec-realtime-cudevice-proprietary.a
+#     libcudaq-qec-<name>-decoder.so              (decoder plugins)
+#     libcudaq-qec-realtime-cudevice-proprietary.a (device_graph dispatch)
 #
-# Each is independently optional (as is the build context itself): a
-# missing plugin is simply absent from the image; without the cudevice
-# archive, device_graph dispatch is not linked (host-dispatch decoders
-# still work). In CI, build_decoding_server_docker.yaml populates this
-# from a draft-release asset.
-#
-# Build (from the repo root):
-#   DOCKER_BUILDKIT=1 docker build -f docker/release/Dockerfile.decoding-server \
-#     --build-arg CUDA_VERSION=13.0 \
-#     --build-context artifacts=./path/to/artifacts \
-#     -t cudaqx-decoding-server .
-#
-# If overriding CUDA_VERSION (e.g. to 12.6), also pass a matching
-# cudaq_image and cuda_base_image_tag -- see the args below; they
-# aren't derived from each other.
+# Without the cudevice archive, device_graph dispatch is not linked;
+# host-dispatch decoders still work.
 
 ARG CUDA_VERSION=13.0
 ARG TARGETARCH
-# The official published CUDA-Q container whose /opt/nvidia/cudaq install
-# is consumed at build time and whose lib/ is shipped in the final image.
-#   nightly (tracks cuda-quantum main): nvcr.io/nvidia/nightly/cuda-quantum:cu<major>-latest
-#   releases (retained, versioned):     nvcr.io/nvidia/quantum/cuda-quantum:cu<major>-<version>
-# Release builds should pin a versioned release image. 0.16.0 is the first
-# release with in-container realtime support; earlier releases cannot be used.
+# The official CUDA-Q container whose /opt/nvidia/cudaq is consumed. Expected to be
+# either a nightly or release image.
 ARG cudaq_image=nvcr.io/nvidia/nightly/cuda-quantum:cu13-latest
 # Toolchain for compiling cudaq-realtime and cudaqx/qec: gcc-12, CUDA
-# toolkit, and the LLVM/MLIR dev install CUDA-Q builds against, from the
-# same lineage the official CUDA-Q build uses. Only branch-suffixed
-# floating tags exist for this image; fine for current builds (nothing
-# from it ships, and toolchain drift tends to fail at build time rather
-# than yielding a mismatched binary), but it makes rebuilding an old
-# release image tricky: by then this tag may serve a newer toolchain than
-# that release builds against.
+# toolkit, and the LLVM/MLIR install CUDA-Q builds against.
 ARG devcontainer_image=ghcr.io/nvidia/cuda-quantum-devcontainer
 ARG devcontainer_tag_suffix=gcc12-main
-# nvidia/cuda tags by full patch version, which a FROM line
-# can't derive from CUDA_VERSION; update the two together.
 ARG cuda_base_image_tag=13.0.3-base-ubuntu24.04
 
-# Empty placeholder for the optional artifacts build context: a
-# `--build-context artifacts=<dir>` flag overrides this stage entirely;
-# without the flag, the mount below sees zero files rather than erroring.
+# Empty placeholder for the optional artifacts build context;
+# `--build-context artifacts=<dir>` replaces it.
 FROM scratch AS artifacts
 
-# The official CUDA-Q container, pulled so its /opt/nvidia/cudaq
-# install can be COPY'd into the builder and runtime stages.
 FROM ${cudaq_image} AS cudaq-official
 
 # ---------------------------------------------------------------------------
-# Stage: toolchain -- RDMA/DOCA/Holoscan/TensorRT dev headers and an HSB
-# source build needed to compile the decoding server, plus patchelf
-# (needed at CMake configure time when decoder plugin .so artifacts are
-# supplied). Also holds the cuda-quantum realtime source checkout the
-# builder stage compiles.
+# Stage: toolchain -- dev headers (RDMA/DOCA/Holoscan/TensorRT), an HSB
+# source build, and the cuda-quantum realtime source checkout.
 # ---------------------------------------------------------------------------
 FROM ${devcontainer_image}:${TARGETARCH}-cu${CUDA_VERSION}-${devcontainer_tag_suffix} AS toolchain
 
-# Build tooling and RDMA userspace, plus what the qec build needs beyond
-# the devcontainer: gfortran + libblas-dev (xtensor-blas), cuda-nvtx
-# (profiling hooks), git-lfs. cuStabilizer needs no install: the
-# devcontainer's cuquantum wheel already provides it where
-# FindcuStabilizer.cmake looks.
+# Build tooling, RDMA userspace, and the qec build's extra needs:
+# gfortran + libblas-dev (xtensor-blas), cuda-nvtx, git-lfs, patchelf
+# (rpath-patching supplied decoder plugins). cuStabilizer comes from the
+# devcontainer's cuquantum wheel.
 RUN set -e; \
     CUDA_FULL_VERSION=$(nvcc --version | sed -n 's/^.*release \([0-9]\+\.[0-9]\+\).*$/\1/p'); \
     CUDA_VER_DASH=$(echo "$CUDA_FULL_VERSION" | sed 's/\./-/'); \
@@ -102,8 +65,9 @@ RUN set -e; \
         gfortran libblas-dev cuda-nvtx-$CUDA_VER_DASH git-lfs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# cuda-quantum realtime source. Used here for its dependency scripts and 
-# again in the builder stage to compile cudaq-realtime itself.
+# cuda-quantum realtime source at the exact commit the consumed CUDA-Q
+# image was built from. Used here for its dependency
+# scripts and in the builder stage to compile cudaq-realtime itself.
 COPY --from=cudaq-official /opt/nvidia/cudaq/build_info.txt /tmp/cudaq-build_info.txt
 RUN set -e; \
     CUDAQ_SHA=$(sed -n 's/^source-sha: //p' /tmp/cudaq-build_info.txt); \
@@ -115,25 +79,18 @@ RUN set -e; \
     git -C /opt/cudaq-src checkout "$CUDAQ_SHA"; \
     rm -f /tmp/cudaq-build_info.txt
 
-# DOCA GPUNetIO dev package, cuda-nvrtc-dev, the Holoscan SDK, and a
-# holoscan-sensor-bridge (HSB) source build -- everything cudaq-realtime's
-# gpu_roce bridge and cudaqx/qec's HSB tools compile against -- installed
-# by cuda-quantum's own dependency script (the same one the cudaqx CI
-# build uses), so the DOCA/Holoscan versions, the HSB ref, and the CUDA
-# architectures HSB is compiled for live in one place. The arch list is
-# derived from the toolkit version: Ampere+Hopper on CUDA 12, through
-# Blackwell on CUDA 13. HSB lands at $HSB_ROOT with its build tree at
-# $HSB_ROOT/build; the builder stage passes both paths to CMake.
+# DOCA/HSB dependencies for building cudaq-realtime with HSB tools,
+# installed by cuda-quantum's script. HSB lands at $HSB_ROOT with 
+# its build tree at $HSB_ROOT/build.
 ENV HSB_ROOT=/opt/holoscan-sensor-bridge
 RUN set -e; \
     bash /opt/cudaq-src/realtime/scripts/install_devdeps.sh; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
     test -d "$HSB_ROOT/build"
 
-# TensorRT dev, pinned to the toolkit's CUDA flavor (needed at build time so
-# CUDAQ_QEC_BUILD_TRT_DECODER=AUTO detects it). No arm64 packages exist for
-# CUDA 12.x, only 13.x, so skip the install on that combination rather than
-# fail the build -- trt_decoder just won't be built there (AUTO mode).
+# TensorRT dev, pinned to the toolkit's CUDA flavor, so the qec build
+# detects it and builds trt_decoder. No arm64 packages exist for CUDA
+# 12.x; trt_decoder is simply not built there.
 RUN set -e; \
     ARCH=$(uname -m); \
     CUDA_FULL_VERSION=$(nvcc --version | sed -n 's/^.*release \([0-9]\+\.[0-9]\+\).*$/\1/p'); \
@@ -149,31 +106,23 @@ RUN set -e; \
     fi
 
 # ---------------------------------------------------------------------------
-# Stage: builder -- compile cudaq-realtime (HSB tools ON, producing
-# libcudaq-realtime-bridge-gpu-roce.so) and cudaqx/qec.
+# Stage: builder -- compile cudaq-realtime (HSB tools ON) and cudaqx/qec.
 #
-# Install prefixes are fixed absolute paths reused verbatim by the runtime
-# stage: decoding_server's ELF carries absolute RPATH entries for the
-# CUDA-Q and cudaq-realtime lib dirs (see
-# libs/qec/tools/decoding-server/CMakeLists.txt INSTALL_RPATH), so those
-# directories must land at the identical path in both stages.
+# The three install prefixes are absolute paths that the runtime stage
+# must reproduce exactly: decoding_server's RPATH references the CUDA-Q
+# and cudaq-realtime lib dirs by absolute path.
 # ---------------------------------------------------------------------------
 FROM toolchain AS builder
 ENV CUDAQ_INSTALL_PREFIX=/opt/nvidia/cudaq \
     CUDAQ_REALTIME_ROOT=/opt/nvidia/cudaq-realtime \
     CUDAQX_INSTALL_PREFIX=/opt/nvidia/cudaqx
 
-# The official CUDA-Q install, at the same absolute path it occupies in
-# the published container (load-bearing: RPATHs baked into what we build
-# reference it, and the runtime stage ships it at this path).
 COPY --from=cudaq-official /opt/nvidia/cudaq /opt/nvidia/cudaq
 
 WORKDIR /workspaces/cudaqx
 COPY . .
 
-# cudaq-realtime, rebuilt with HSB tools ON from the source checked out in
-# the toolchain stage (the consumed image's exact commit) and installed
-# alongside the untouched CUDA-Q.
+# cudaq-realtime with HSB tools ON, installed alongside CUDA-Q.
 RUN set -e; \
     . scripts/cudaq_realtime_cmake_flags.sh; \
     cmake -G Ninja -S /opt/cudaq-src/realtime -B /tmp/realtime-build \
@@ -186,19 +135,18 @@ RUN set -e; \
     cmake --install /tmp/realtime-build; \
     rm -rf /tmp/realtime-build
 
-# cudaqx/qec itself: decoding_server, hsb_fpga_syndrome_playback, the QEC
-# and realtime libraries, and the decoder plugins (built-in ones plus
-# every libcudaq-qec-*-decoder.so in the artifacts context, passed via
-# the QEC_EXTERNAL_DECODERS list). CUDAQX_INCLUDE_TESTS stays ON:
-# hsb_fpga_syndrome_playback lives under unittests/utils/ and is only
-# built when tests are enabled (the gtest binaries also compile but are
-# never installed, so they don't ship).
+# cudaqx/qec: decoding_server, hsb_fpga_syndrome_playback, the QEC and
+# realtime libraries, and the decoder plugins (built-in plus any
+# libcudaq-qec-*-decoder.so from the artifacts context, via
+# QEC_EXTERNAL_DECODERS). CUDAQX_INCLUDE_TESTS=ON because
+# hsb_fpga_syndrome_playback lives under unittests/; test binaries are
+# built but not installed.
 #
-# Plugins are copied out of the read-only artifacts mount because the
-# build patchelfs each plugin's rpath in place at configure time. The
-# cudevice archive is only ever read, so it's used from the mount as-is.
+# Supplied plugins are copied out of the read-only mount because the
+# build patches their rpath in place. The cudevice archive is only read.
 #
-# CUDAQX_QEC_VERSION is the version string baked into libcudaq-qec.
+# CUDAQX_QEC_VERSION is the version string baked into libcudaq-qec;
+# unset or empty leaves CMake's 0.0.0 default.
 ARG CUDAQX_QEC_VERSION
 RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
     set -e; \
@@ -242,30 +190,24 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
     test -x "$CUDAQX_INSTALL_PREFIX/bin/hsb_fpga_syndrome_playback"
 
 # ---------------------------------------------------------------------------
-# Stage: runtime -- minimal production image. No compilers, no -dev
-# packages, no source tree.
+# Stage: runtime -- the shipped image. No compilers, headers, or sources.
 # ---------------------------------------------------------------------------
 FROM nvidia/cuda:${cuda_base_image_tag} AS runtime
 ARG TARGETARCH
 ARG CUDA_VERSION
 
-# Runtime package set: RDMA userspace + libnl, the DOCA GPUNetIO runtime
-# behind the gpu_roce transport, NVRTC (a hololink_core JIT dependency the
-# CUDA "runtime" base lacks), libgomp (OpenMP runtime: decoding_server,
-# libcudaq-qec and several CUDA-Q libs link it; the CUDA "runtime" base
-# does not ship it), and the TensorRT runtime libs the trt_decoder plugin
-# loads (libnvinfer, the ONNX parser, and the plugin library some ONNX
-# models need), pinned to this CUDA flavor. Skipped on arm64+CUDA 12.x where
-# no packages exist (the toolchain stage skips trt_decoder there too). The Holoscan SDK is NOT
-# installed: HSB's hololink_core and gpu_roce_transceiver are linked
-# statically into libcudaq-realtime-bridge-gpu-roce.so, and nothing
-# shipped here has a runtime dependency on a Holoscan library (the apt
-# package would also drag in nvcc and gcc via its dependency list).
-# curl/gnupg are installed only to register the DOCA repo and purged
-# afterwards.
+# Runtime packages beyond the base image's cudart:
+#   - RDMA userspace, libnl, and the DOCA GPUNetIO runtime (gpu_roce)
+#   - NVRTC (hololink_core JIT)
+#   - libgomp (OpenMP, linked by decoding_server and libcudaq-qec)
+#   - TensorRT libs for the trt_decoder plugin, pinned to this CUDA
+#     flavor; skipped on arm64+CUDA 12.x, where trt_decoder is not built
+# The Holoscan SDK is not needed: HSB is linked statically into
+# libcudaq-realtime-bridge-gpu-roce.so.
+# curl is installed only to fetch the DOCA repo key and purged afterwards.
 RUN set -e; \
     apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg \
+        ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*; \
     DOCA_ARCH=$(uname -m); case "$DOCA_ARCH" in aarch64|arm64) DOCA_ARCH="arm64-sbsa" ;; esac; \
     DOCA_REPO="https://linux.mellanox.com/public/repo/doca/3.3.0/ubuntu24.04/$DOCA_ARCH"; \
@@ -290,26 +232,17 @@ RUN set -e; \
     else \
         echo "== TensorRT runtime libs: skipping (no arm64 packages for CUDA 12.x)"; \
     fi; \
-    apt-get purge -y curl gnupg; \
+    apt-get purge -y curl; \
     apt-get autoremove -y; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/doca.list /etc/apt/preferences.d/tensorrt-cuda$CUDA_VERSION.pref
 
-# The three install trees, at the SAME absolute paths used in the builder
-# stage (load-bearing: decoding_server's baked-in RPATH entries are
-# absolute). Supplied decoder plugins are already inside the cudaqx tree,
-# rpath-patched; the cudevice archive (if any) is already linked into
-# decoding_server -- neither needs a separate COPY.
-#
-# From the official CUDA-Q install only lib/ (whole, so every library
-# CUDA-Q might dlopen by name is present) and targets/ (the YAML target
-# configs the platform layer reads if a target is ever selected) are
-# shipped, plus the license files and build_info.txt for provenance. The
-# rest of that install -- the nvq++/cudaq-* compiler binaries, headers,
-# Python package and the binding/platform sources under src/ -- is
-# build-time or user-facing material the server never reads. The
-# shipped simulator backends' cuquantum wheel dependencies are not
-# included; the decoding server never loads them.
+# The three install trees at the same absolute paths as in the builder
+# stage (decoding_server's RPATH depends on it). From CUDA-Q, copy only what
+# the server can load at runtime: lib/ (whole, so anything dlopen'd by
+# name is present), targets/, license files, and build_info.txt. Supplied
+# decoder plugins live in the cudaqx tree; the cudevice archive is linked
+# into decoding_server.
 COPY --from=cudaq-official /opt/nvidia/cudaq/lib /opt/nvidia/cudaq/lib
 COPY --from=cudaq-official /opt/nvidia/cudaq/targets /opt/nvidia/cudaq/targets
 COPY --from=cudaq-official /opt/nvidia/cudaq/LICENSES /opt/nvidia/cudaq/LICENSES
@@ -322,10 +255,8 @@ COPY --from=cudaq-official \
 COPY --from=builder /opt/nvidia/cudaq-realtime /opt/nvidia/cudaq-realtime
 COPY --from=builder /opt/nvidia/cudaqx /opt/nvidia/cudaqx
 
-# libcudaq-qec.so links cuStabilizer with an absolute RPATH into the
-# cuquantum wheel's location, so this one file must land at the same path
-# here. Just the single .so (it only depends on glibc); the rest of the
-# wheel is unrelated cuQuantum components.
+# libcudaq-qec.so's RPATH points at cuStabilizer inside the cuquantum
+# wheel, so that one library must land at the same path.
 COPY --from=builder \
     /usr/local/lib/python3.12/dist-packages/cuquantum/lib/libcustabilizer.so.0 \
     /usr/local/lib/python3.12/dist-packages/cuquantum/lib/libcustabilizer.so.0
