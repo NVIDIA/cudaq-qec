@@ -23,15 +23,18 @@ private:
 
 public:
   single_error_lut_example(cudaq::qec::decoder_init inputs,
-                           decode_result_type requested_output,
+                           decoder_output_request request,
                            const cudaqx::heterogeneous_map &params)
-      : decoder(std::move(inputs), requested_output) {
+      : decoder(std::move(inputs), request) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "single_error_lut_example does not produce auxiliary outputs");
     // The requested result form is validated here, at construction, so an
     // unsupported request fails at setup rather than on the first decode. This
     // example produces an error frame only; a decoder that can also project to
     // observables would instead call project_errors_to_observables() before
     // returning.
-    if (requested_output != decode_result_type::errors)
+    if (request.primary != decode_result_type::errors)
       throw std::invalid_argument(
           "single_error_lut_example produces an error frame only; construct it "
           "for error output");
@@ -87,13 +90,15 @@ public:
   virtual ~single_error_lut_example() {}
 
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
-      single_error_lut_example, static std::unique_ptr<decoder> create(
-                                    cudaq::qec::decoder_init inputs,
-                                    std::optional<decode_result_type> output,
-                                    const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<single_error_lut_example>(
-            std::move(inputs), output.value_or(decode_result_type::errors),
-            params);
+      single_error_lut_example,
+      static std::unique_ptr<decoder> create(
+          cudaq::qec::decoder_init inputs,
+          std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<single_error_lut_example>(std::move(inputs),
+                                                          request, params);
       })
 };
 

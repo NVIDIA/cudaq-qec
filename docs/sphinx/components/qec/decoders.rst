@@ -12,16 +12,16 @@ quantum error correction decoders through the :code:`cudaq::qec::decoder` base c
 Class Structure
 ^^^^^^^^^^^^^^^
 
-The decoder base owns immutable model data and fixes the result basis when an
-instance is constructed. The relevant interface is:
+The decoder base owns immutable model data and fixes the primary and auxiliary
+output contract when an instance is constructed. The relevant interface is:
 
 .. code-block:: cpp
 
     class decoder {
     public:
         decoder(decoder_init inputs,
-                decode_result_type requested_output =
-                    decode_result_type::errors);
+                decoder_output_request requested_output =
+                    decoder_output_request{decode_result_type::errors});
 
         virtual decoder_result decode(
             const std::vector<float_t>& syndrome) = 0;
@@ -30,6 +30,8 @@ instance is constructed. The relevant interface is:
             const std::vector<std::vector<float_t>>& syndrome);
 
         decode_result_type get_result_type() const noexcept;
+        decoder_auxiliary_result_type
+        get_auxiliary_result_type() const noexcept;
 
     protected:
         const decoder_init& get_inputs() const noexcept;
@@ -41,36 +43,49 @@ Key Components:
 
 * **Construction inputs**: :code:`decoder_init` owns ``H`` and optional ``O``,
   ``D``, error rates, and authoritative Stim DEM text
-* **Fixed result basis**: An instance returns either error frames or observable
-  flips for its entire lifetime
+* **Fixed output contract**: An instance returns either error frames or
+  observable flips as its primary result and may return requested standardized
+  auxiliary outputs
 * **Block Size**: Number of modeled error mechanisms (columns of ``H``)
 * **Syndrome Size**: Number of detector values (rows of ``H``)
-* **Decoder Result**: Contains convergence status, values in the configured
-  error or observable basis, and optional decoder-specific metadata
+* **Decoder Result**: Contains convergence status, primary values in the
+  configured error or observable basis, requested standardized auxiliary
+  outputs in ``opt_results``, and optional decoder-specific metadata
 * **Multiple Decoding Modes**: Single syndrome or batch processing
 
 Migrating Existing C++ Decoder Plugins
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 This decoder construction contract is a breaking C++ source and ABI change.
-Out-of-tree decoder plugins must be rebuilt and migrated as follows:
+An out-of-tree plugin binary built with the former creator signature cannot be
+loaded by the updated extension registry. Out-of-tree decoder plugins must be
+rebuilt and migrated as follows:
 
-* Replace constructors that take ``H`` with a constructor that takes
-  :cpp:class:`cudaq::qec::decoder_init` by value and passes it to
-  ``decoder(std::move(inputs), requested_output)``.
+* Replace constructors that take ``H`` with constructors that take
+  :cpp:class:`cudaq::qec::decoder_init` by value and
+  ``decoder_output_request``. Forward both to the base constructor as
+  ``decoder(std::move(inputs), request)``.
 * Read model data through ``get_inputs()``. ``H``, ``O``, ``D``, and
   ``error_rate_vec`` are framework model data and must not be passed in the
   heterogeneous custom-parameter map or registered as plugin schema keys.
 * Change custom creator signatures to accept ``decoder_init`` by value,
-  ``std::optional<decode_result_type>``, and the custom parameter map. The
-  removed ``make_pcm_decoder`` helper must not be used.
-* Choose the plugin's default result basis when the optional request is empty,
-  and reject unsupported explicit requests during construction. The presence
-  of ``O`` does not select observable output.
+  ``std::optional<cudaq::qec::decoder_output_request>``, and the custom
+  parameter map. The removed ``make_pcm_decoder`` helper must not be used.
+* Replace comparisons on the former ``decode_result_type`` creator parameter
+  with comparisons on ``request.primary``. Choose the plugin's default primary
+  basis when the optional request is empty; the presence of ``O`` does not
+  select observable output.
+* Reject unsupported auxiliary requests during construction, for example with
+  ``if (request.has_auxiliary_outputs()) throw std::invalid_argument(...)``.
+  A plugin that accepts ``residual_detectors`` must return them in
+  ``decoder_result::opt_results["residual_detectors"]``.
 * Remove calls to the deleted ``set_O_sparse`` and ``set_D_sparse`` methods.
   The base constructor now derives the corresponding model state and buffer
   sizes. A streaming decoder supplies only its layer geometry through
   ``initialize_streaming_layout`` during construction.
+* Rebuild against the new header: the cancellable ``decode`` and
+  ``decode_batch`` overloads add virtual methods. Override them only if the
+  decoder can honor a stop; the defaults ignore the token.
 
 The main source migration maps old symbols as follows:
 
@@ -83,6 +98,12 @@ The main source migration maps old symbols as follows:
      - ``cudaq::qec::decode_result_type::errors``
    * - ``decoder::decode_result_type::decode_to_obs``
      - ``cudaq::qec::decode_result_type::observables``
+   * - ``decode_result_type::observables_and_residual_detectors``
+     - ``decoder_output_request{decode_result_type::observables,
+       decoder_auxiliary_result_type::residual_detectors}``
+   * - Creator argument ``std::optional<decode_result_type>``
+     - ``std::optional<decoder_output_request>``; rebuild the plugin because
+       this changes the extension-point ABI
    * - ``decoder(H)`` and protected ``H``
      - ``decoder(std::move(inputs), requested_output)`` and
        ``get_inputs().detector_error_matrix()``
@@ -103,11 +124,14 @@ The main source migration maps old symbols as follows:
        ``inputs.source()`` / ``inputs.has_stim_dem()`` when source-specific
        handling is required
 
-For direct callers, construct ``decoder_init`` with the model data and use the
-``get_decoder`` overload taking :cpp:enum:`cudaq::qec::decode_result_type` when
-the result basis must be explicit. Python callers use ``output="errors"`` or
-``output="observables"``. See the PyMatching API for the migration from its
-former ``O``-implies-observables behavior.
+For direct callers, construct ``decoder_init`` with the model data and pass a
+:cpp:enum:`cudaq::qec::decode_result_type` to ``get_decoder`` when the result
+basis must be explicit. It converts to a ``decoder_output_request`` with no
+auxiliary outputs. Python callers use ``output="errors"`` or
+``output="observables"``. Python intentionally exposes only the primary result
+basis; composition infrastructure uses ``decoder_output_request`` to request
+standardized auxiliary outputs from a compatible decoder. See the PyMatching
+API for the migration from its former ``O``-implies-observables behavior.
 
 Implementing a New Decoder in C++
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -121,10 +145,13 @@ To implement a new decoder:
     class my_decoder : public cudaq::qec::decoder {
     public:
         my_decoder(cudaq::qec::decoder_init inputs,
-                   cudaq::qec::decode_result_type requested_output,
+                   cudaq::qec::decoder_output_request request,
                    const cudaqx::heterogeneous_map& params)
-            : cudaq::qec::decoder(std::move(inputs), requested_output) {
-            if (requested_output !=
+            : cudaq::qec::decoder(std::move(inputs), request) {
+            if (request.has_auxiliary_outputs())
+                throw std::invalid_argument(
+                    "my_decoder does not produce auxiliary outputs");
+            if (request.primary !=
                 cudaq::qec::decode_result_type::errors)
                 throw std::invalid_argument(
                     "my_decoder produces error frames only");
@@ -151,13 +178,13 @@ To implement a new decoder:
             my_decoder,
             static std::unique_ptr<cudaq::qec::decoder> create(
                 cudaq::qec::decoder_init inputs,
-                std::optional<cudaq::qec::decode_result_type> output,
+                std::optional<cudaq::qec::decoder_output_request> output,
                 const cudaqx::heterogeneous_map& params) {
+                const auto request = output.value_or(
+                    cudaq::qec::decoder_output_request{
+                        cudaq::qec::decode_result_type::errors});
                 return std::make_unique<my_decoder>(
-                    std::move(inputs),
-                    output.value_or(
-                        cudaq::qec::decode_result_type::errors),
-                    params);
+                    std::move(inputs), request, params);
             })
     };
 
@@ -180,10 +207,13 @@ Here's a simple lookup table decoder for the Steane code:
 
     public:
         single_error_lut(cudaq::qec::decoder_init inputs,
-                         cudaq::qec::decode_result_type requested_output,
+                         cudaq::qec::decoder_output_request request,
                          const cudaqx::heterogeneous_map& params)
-            : cudaq::qec::decoder(std::move(inputs), requested_output) {
-            if (requested_output !=
+            : cudaq::qec::decoder(std::move(inputs), request) {
+            if (request.has_auxiliary_outputs())
+                throw std::invalid_argument(
+                    "single_error_lut does not produce auxiliary outputs");
+            if (request.primary !=
                 cudaq::qec::decode_result_type::errors)
                 throw std::invalid_argument(
                     "single_error_lut produces error frames only");
@@ -225,13 +255,13 @@ Here's a simple lookup table decoder for the Steane code:
             single_error_lut,
             static std::unique_ptr<cudaq::qec::decoder> create(
                 cudaq::qec::decoder_init inputs,
-                std::optional<cudaq::qec::decode_result_type> output,
+                std::optional<cudaq::qec::decoder_output_request> output,
                 const cudaqx::heterogeneous_map& params) {
+                const auto request = output.value_or(
+                    cudaq::qec::decoder_output_request{
+                        cudaq::qec::decode_result_type::errors});
                 return std::make_unique<single_error_lut>(
-                    std::move(inputs),
-                    output.value_or(
-                        cudaq::qec::decode_result_type::errors),
-                    params);
+                    std::move(inputs), request, params);
             })
     };
 

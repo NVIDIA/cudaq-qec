@@ -165,6 +165,11 @@ Decoder Interfaces
 
 .. doxygenenum:: cudaq::qec::decode_result_type
 
+.. doxygenenum:: cudaq::qec::decoder_auxiliary_result_type
+
+.. doxygenstruct:: cudaq::qec::decoder_output_request
+   :members:
+
 .. doxygenenum:: cudaq::qec::decoder_model_source
 
 .. doxygenstruct:: cudaq::qec::decoder_inputs
@@ -174,6 +179,14 @@ Decoder Interfaces
     :members:
 
 .. doxygenfunction:: cudaq::qec::d_sparse(const cudaq::M2DSparseMatrix &)
+
+.. doxygenenum:: cudaq::qec::cancellation_level
+
+.. doxygenclass:: cudaq::qec::cancellation_token
+    :members:
+
+.. doxygenclass:: cudaq::qec::cancellation_source
+    :members:
 
 .. doxygenclass:: cudaq::qec::decoder
     :members:
