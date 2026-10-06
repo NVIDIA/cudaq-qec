@@ -1,19 +1,18 @@
 Streaming Interleaved Feed-forward Latency (SIFL)
 =================================================
 
-A real-time decoder must keep up with the syndromes it is given. This example
-runs a Streaming Interleaved Feed-forward Latency (SIFL) experiment: a
-surface-code memory experiment streams one stabilizer round every
+This example runs a Streaming Interleaved Feed-forward Latency (SIFL) experiment: 
+a surface-code memory experiment streams one stabilizer round every
 :math:`T` µs to two decoders that alternate shots, and each shot keeps
 streaming rounds until the previous shot's correction lands. A slow decode
 therefore makes the next shot longer, and so slower to decode. A decoder must
 therefore be able to keep up with the cadence of stabilizer extraction, or else 
 the decoder latency will grow without bound.
 
-The syndromes come from Stim and are streamed by the playback emulator
-(``qec.playback``). ``per_round_decoder.cpp`` is a small decoder plugin that
-hands each shot to a sub-decoder built from the full detector error model
-(DEM) of a circuit with exactly that many rounds.
+The syndromes come from Stim and are streamed by the playback emulator. 
+``per_round_decoder.cpp`` is a small decoder plugin that hands each shot to 
+a sub-decoder built from the full detector error model of a circuit with 
+exactly that many rounds.
 
 Running
 -------
@@ -36,7 +35,7 @@ by the total rounds streamed) and the rounds streamed per shot:
      T =   10 us  decode time per round  9.87 us  [10, 16, 13, 12, 18, 12, 16, ...]
      T =   50 us  decode time per round 12.84 us  [10, 3, 2, 2, 2, 1, 2, ...]
 
-Where the transition falls depends on how fast the machine decodes.
+Where the transition falls depends on how fast the decoder runs.
 
 The example source
 ------------------

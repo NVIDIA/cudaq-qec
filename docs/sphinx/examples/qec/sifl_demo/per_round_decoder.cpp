@@ -7,7 +7,7 @@
  ******************************************************************************/
 
 // clang-format off
-// Build (loaded at runtime by sifl_demo.py):
+// Build the plugin:
 // g++ -std=c++17 -shared -fPIC per_round_decoder.cpp -I<cudaq-qec install>/include -L<cudaq-qec install>/lib -lcudaq-qec-decoders -o libper_round_decoder.so
 // clang-format on
 
