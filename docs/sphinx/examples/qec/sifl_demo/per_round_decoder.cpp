@@ -57,7 +57,7 @@ split_rows(const std::vector<std::int64_t> &flat) {
 
 class per_round_decoder : public decoder {
 public:
-  per_round_decoder(decoder_init inputs, decode_result_type output,
+  per_round_decoder(decoder_init inputs, decoder_output_request output,
                     const cudaqx::heterogeneous_map &params)
       : decoder(std::move(inputs), output) {
     const auto dir = params.get<std::string>("dem_dir");
@@ -127,10 +127,11 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       per_round_decoder,
       static std::unique_ptr<decoder> create(
-          decoder_init inputs, std::optional<decode_result_type> output,
+          decoder_init inputs, std::optional<decoder_output_request> output,
           const cudaqx::heterogeneous_map &params) {
         return std::make_unique<per_round_decoder>(
-            std::move(inputs), output.value_or(decode_result_type::errors),
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
             params);
       })
 
