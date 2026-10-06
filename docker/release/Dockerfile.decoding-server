@@ -253,9 +253,10 @@ ARG CUDA_VERSION
 # behind the gpu_roce transport, NVRTC (a hololink_core JIT dependency the
 # CUDA "runtime" base lacks), libgomp (OpenMP runtime: decoding_server,
 # libcudaq-qec and several CUDA-Q libs link it; the CUDA "runtime" base
-# does not ship it), and TensorRT runtime libs pinned to this
-# CUDA flavor -- skipped on arm64+CUDA 12.x where no packages exist (the
-# toolchain stage skips trt_decoder there too). The Holoscan SDK is NOT
+# does not ship it), and the TensorRT runtime libs the trt_decoder plugin
+# loads (libnvinfer, the ONNX parser, and the plugin library some ONNX
+# models need), pinned to this CUDA flavor. Skipped on arm64+CUDA 12.x where
+# no packages exist (the toolchain stage skips trt_decoder there too). The Holoscan SDK is NOT
 # installed: HSB's hololink_core and gpu_roce_transceiver are linked
 # statically into libcudaq-realtime-bridge-gpu-roce.so, and nothing
 # shipped here has a runtime dependency on a Holoscan library (the apt
@@ -284,9 +285,10 @@ RUN set -e; \
         apt-cache search tensorrt \
             | awk -v v="$CUDA_VERSION" '{print "Package: "$1"\nPin: version *+cuda"v"\nPin-Priority: 1001\n"}' \
             > /etc/apt/preferences.d/tensorrt-cuda$CUDA_VERSION.pref; \
-        apt-get install -y --no-install-recommends tensorrt-libs; \
+        apt-get install -y --no-install-recommends \
+            libnvinfer10 libnvinfer-plugin10 libnvonnxparsers10; \
     else \
-        echo "== tensorrt-libs: skipping (no arm64 packages for CUDA 12.x)"; \
+        echo "== TensorRT runtime libs: skipping (no arm64 packages for CUDA 12.x)"; \
     fi; \
     apt-get purge -y curl gnupg; \
     apt-get autoremove -y; \
