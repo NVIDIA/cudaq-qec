@@ -9,12 +9,13 @@
 # Release image for the CUDA-Q QEC decoding server. Multi-stage: the
 # "toolchain" and "builder" stages (compilers, dev headers, source tree)
 # are discarded; the final "runtime" stage ships only compiled binaries
-# and runtime dependencies. No source code is included.
+# and runtime dependencies. No cudaqx or proprietary source is included.
 #
-# CUDA-Q is NOT built here: the /opt/nvidia/cudaq install is taken
-# verbatim from the official published CUDA-Q container (cudaq_image
-# below), proprietary simulator backends included. Only two things are
-# compiled:
+# CUDA-Q is NOT built here: the /opt/nvidia/cudaq install is taken from
+# the official published CUDA-Q container (cudaq_image below) and used
+# whole in the builder stage; the runtime stage ships only its lib/
+# directory (proprietary simulator backends included) and license files.
+# Only two things are compiled:
 #   cudaq-realtime -- rebuilt with HSB tools ON (the official install
 #     ships it without them), from the exact cuda-quantum commit the
 #     consumed image was built at. This repo's .cudaq_version does not
@@ -39,7 +40,6 @@
 # Build (from the repo root):
 #   DOCKER_BUILDKIT=1 docker build -f docker/release/Dockerfile.decoding-server \
 #     --build-arg CUDA_VERSION=13.0 \
-#     --build-arg cuda_native_arch=90 \
 #     --build-context artifacts=./path/to/artifacts \
 #     -t cudaqx-decoding-server .
 #
@@ -50,7 +50,7 @@
 ARG CUDA_VERSION=13.0
 ARG TARGETARCH
 # The official published CUDA-Q container whose /opt/nvidia/cudaq install
-# is consumed at build time and shipped verbatim in the final image.
+# is consumed at build time and whose lib/ is shipped in the final image.
 #   nightly (tracks cuda-quantum main): nvcr.io/nvidia/nightly/cuda-quantum:cu<major>-latest
 #   releases (retained, versioned):     nvcr.io/nvidia/quantum/cuda-quantum:cu<major>-<version>
 # Release builds should pin a versioned release image. 0.16.0 is the first
@@ -80,9 +80,11 @@ FROM scratch AS artifacts
 FROM ${cudaq_image} AS cudaq-official
 
 # ---------------------------------------------------------------------------
-# Stage: toolchain -- RDMA/DOCA/Holoscan/TensorRT dev headers needed to
-# compile the decoding server, plus patchelf (needed at CMake configure time
-# when decoder plugin .so artifacts are supplied).
+# Stage: toolchain -- RDMA/DOCA/Holoscan/TensorRT dev headers and an HSB
+# source build needed to compile the decoding server, plus patchelf
+# (needed at CMake configure time when decoder plugin .so artifacts are
+# supplied). Also holds the cuda-quantum realtime source checkout the
+# builder stage compiles.
 # ---------------------------------------------------------------------------
 FROM ${devcontainer_image}:${TARGETARCH}-cu${CUDA_VERSION}-${devcontainer_tag_suffix} AS toolchain
 
@@ -100,37 +102,33 @@ RUN set -e; \
         gfortran libblas-dev cuda-nvtx-$CUDA_VER_DASH git-lfs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# DOCA 3.3.0: GPUNetIO dev package only (doca-all conflicts with the base
-# image's preinstalled OFED), plus the matching cuda-nvrtc-dev
-# (hololink_core links CUDA::nvrtc).
+# cuda-quantum realtime source. Used here for its dependency scripts and 
+# again in the builder stage to compile cudaq-realtime itself.
+COPY --from=cudaq-official /opt/nvidia/cudaq/build_info.txt /tmp/cudaq-build_info.txt
 RUN set -e; \
-    DOCA_ARCH=$(uname -m); \
-    case "$DOCA_ARCH" in aarch64|arm64) DOCA_ARCH="arm64-sbsa" ;; esac; \
-    DOCA_REPO="https://linux.mellanox.com/public/repo/doca/3.3.0/ubuntu24.04/$DOCA_ARCH"; \
-    curl -fsSL "$DOCA_REPO/GPG-KEY-Mellanox.pub" -o /usr/share/keyrings/GPG-KEY-Mellanox.pub; \
-    echo "deb [signed-by=/usr/share/keyrings/GPG-KEY-Mellanox.pub] $DOCA_REPO /" \
-        > /etc/apt/sources.list.d/doca.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends libdoca-sdk-gpunetio-dev; \
-    CUDA_FULL_VERSION=$(nvcc --version | sed -n 's/^.*release \([0-9]\+\.[0-9]\+\).*$/\1/p'); \
-    CUDA_VER_DASH=$(echo "$CUDA_FULL_VERSION" | sed 's/\./-/'); \
-    apt-get install -y cuda-nvrtc-dev-$CUDA_VER_DASH 2>/dev/null || true; \
-    apt-get clean && rm -rf /var/lib/apt/lists/*; \
-    test -d /opt/mellanox/doca/include
+    CUDAQ_SHA=$(sed -n 's/^source-sha: //p' /tmp/cudaq-build_info.txt); \
+    test -n "$CUDAQ_SHA"; \
+    echo "== cuda-quantum source: NVIDIA/cuda-quantum@$CUDAQ_SHA (from build_info.txt)"; \
+    git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/cuda-quantum.git /opt/cudaq-src; \
+    git -C /opt/cudaq-src sparse-checkout init --cone; \
+    git -C /opt/cudaq-src sparse-checkout set realtime cmake; \
+    git -C /opt/cudaq-src checkout "$CUDAQ_SHA"; \
+    rm -f /tmp/cudaq-build_info.txt
 
-# Holoscan SDK (force-install fallback: the package's dependency list can
-# miss on the devcontainer base).
+# DOCA GPUNetIO dev package, cuda-nvrtc-dev, the Holoscan SDK, and a
+# holoscan-sensor-bridge (HSB) source build -- everything cudaq-realtime's
+# gpu_roce bridge and cudaqx/qec's HSB tools compile against -- installed
+# by cuda-quantum's own dependency script (the same one the cudaqx CI
+# build uses), so the DOCA/Holoscan versions, the HSB ref, and the CUDA
+# architectures HSB is compiled for live in one place. The arch list is
+# derived from the toolkit version: Ampere+Hopper on CUDA 12, through
+# Blackwell on CUDA 13. HSB lands at $HSB_ROOT with its build tree at
+# $HSB_ROOT/build; the builder stage passes both paths to CMake.
+ENV HSB_ROOT=/opt/holoscan-sensor-bridge
 RUN set -e; \
-    CUDA_MAJOR_VERSION=$(nvcc --version | sed -n 's/^.*release \([0-9]\+\).*$/\1/p'); \
-    apt-get update; \
-    apt-get install -y --no-install-recommends holoscan-cuda-$CUDA_MAJOR_VERSION || { \
-        _hsdk_tmp=$(mktemp -d); \
-        (cd "$_hsdk_tmp" && apt-get download holoscan holoscan-cuda-$CUDA_MAJOR_VERSION \
-            && dpkg --force-depends -i holoscan*.deb); \
-        rm -rf "$_hsdk_tmp"; \
-    }; \
+    bash /opt/cudaq-src/realtime/scripts/install_devdeps.sh; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
-    test -d /opt/nvidia/holoscan
+    test -d "$HSB_ROOT/build"
 
 # TensorRT dev, pinned to the toolkit's CUDA flavor (needed at build time so
 # CUDAQ_QEC_BUILD_TRT_DECODER=AUTO detects it). No arm64 packages exist for
@@ -149,40 +147,6 @@ RUN set -e; \
         apt-get install -y tensorrt-dev; \
         apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi
-
-# holoscan-sensor-bridge (HSB): the FPGA<->GPU RDMA transport library.
-# The cudaq-realtime gpu_roce bridge and cudaqx/qec's HSB tools compile
-# against this source + build tree. Only the two needed targets are
-# built; unrelated operators are stripped to avoid their dependencies.
-#
-# cuda_native_arch: CMake CUDA architecture list for HSB only (it reads
-# CUDA_NATIVE_ARCH from the environment) -- e.g. 90 (GH200), 100 (GB200),
-# 121 (DGX Spark GB10). cudaq-realtime and cudaqx/qec choose their own
-# multi-arch lists from the CUDA toolkit version.
-ARG cuda_native_arch=90
-RUN set -e; \
-    git clone --depth 1 --branch 2.6.0-EA2 \
-        https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git \
-        /opt/holoscan-sensor-bridge; \
-    cd /opt/holoscan-sensor-bridge; \
-    sed -i '/add_subdirectory(audio_packetizer)/d; /add_subdirectory(compute_crc)/d; \
-            /add_subdirectory(csi_to_bayer)/d; /add_subdirectory(image_processor)/d; \
-            /add_subdirectory(iq_dec)/d; /add_subdirectory(iq_enc)/d; \
-            /add_subdirectory(linux_coe_receiver)/d; /add_subdirectory(linux_receiver)/d; \
-            /add_subdirectory(packed_format_converter)/d; /add_subdirectory(sub_frame_combiner)/d; \
-            /add_subdirectory(udp_transmitter)/d; /add_subdirectory(emulator)/d; \
-            /add_subdirectory(sig_gen)/d; /add_subdirectory(sig_viewer)/d' \
-        src/hololink/operators/CMakeLists.txt; \
-    export CUDA_NATIVE_ARCH="${cuda_native_arch}"; \
-    cmake -G Ninja -S . -B build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DHOLOLINK_BUILD_ONLY_NATIVE=OFF \
-        -DHOLOLINK_BUILD_PYTHON=OFF \
-        -DHOLOLINK_BUILD_TESTS=OFF \
-        -DHOLOLINK_BUILD_TOOLS=OFF \
-        -DHOLOLINK_BUILD_EXAMPLES=OFF \
-        -DHOLOLINK_BUILD_EMULATOR=OFF; \
-    cmake --build build --target gpu_roce_transceiver hololink_core
 
 # ---------------------------------------------------------------------------
 # Stage: builder -- compile cudaq-realtime (HSB tools ON, producing
@@ -207,30 +171,20 @@ COPY --from=cudaq-official /opt/nvidia/cudaq /opt/nvidia/cudaq
 WORKDIR /workspaces/cudaqx
 COPY . .
 
-# cudaq-realtime, rebuilt with HSB tools ON and installed alongside the
-# untouched CUDA-Q. The source is checked out at the exact commit the
-# consumed image's binaries were built from (build_info.txt source-sha),
-# NOT this repo's .cudaq_version: realtime and CUDA-Q share a
-# co-developed dispatch/RPC protocol, so the pair must come from the same
-# commit.
+# cudaq-realtime, rebuilt with HSB tools ON from the source checked out in
+# the toolchain stage (the consumed image's exact commit) and installed
+# alongside the untouched CUDA-Q.
 RUN set -e; \
     . scripts/cudaq_realtime_cmake_flags.sh; \
-    CUDAQ_SHA=$(sed -n 's/^source-sha: //p' "$CUDAQ_INSTALL_PREFIX/build_info.txt"); \
-    test -n "$CUDAQ_SHA"; \
-    echo "== cudaq-realtime source: NVIDIA/cuda-quantum@$CUDAQ_SHA (from build_info.txt)"; \
-    git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/cuda-quantum.git /tmp/cudaq-src; \
-    git -C /tmp/cudaq-src sparse-checkout init --cone; \
-    git -C /tmp/cudaq-src sparse-checkout set realtime cmake; \
-    git -C /tmp/cudaq-src checkout "$CUDAQ_SHA"; \
-    cmake -G Ninja -S /tmp/cudaq-src/realtime -B /tmp/realtime-build \
+    cmake -G Ninja -S /opt/cudaq-src/realtime -B /tmp/realtime-build \
         -DCMAKE_INSTALL_PREFIX="$CUDAQ_REALTIME_ROOT" \
         -DCMAKE_CUDA_FLAGS="$(cudaq_realtime_cmake_cuda_flags)" \
         -DCUDAQ_REALTIME_ENABLE_HSB_TOOLS=ON \
-        -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/opt/holoscan-sensor-bridge \
-        -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/opt/holoscan-sensor-bridge/build; \
+        -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR="$HSB_ROOT" \
+        -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR="$HSB_ROOT/build"; \
     cmake --build /tmp/realtime-build; \
     cmake --install /tmp/realtime-build; \
-    rm -rf /tmp/realtime-build /tmp/cudaq-src
+    rm -rf /tmp/realtime-build
 
 # cudaqx/qec itself: decoding_server, hsb_fpga_syndrome_playback, the QEC
 # and realtime libraries, and the decoder plugins (built-in ones plus
@@ -275,8 +229,8 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
         -DCMAKE_INSTALL_PREFIX="$CUDAQX_INSTALL_PREFIX" \
         -DCUDAQ_REALTIME_ROOT="$CUDAQ_REALTIME_ROOT" \
         -DCUDAQX_QEC_ENABLE_HSB_TOOLS=ON \
-        -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/opt/holoscan-sensor-bridge \
-        -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/opt/holoscan-sensor-bridge/build \
+        -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR="$HSB_ROOT" \
+        -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR="$HSB_ROOT/build" \
         ${_cudevice_archive:+-DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE="$_cudevice_archive"}; \
     cmake --build build -j"$(nproc)"; \
     cmake --install build; \
@@ -291,11 +245,17 @@ FROM nvidia/cuda:${cuda_runtime_image_tag} AS runtime
 ARG TARGETARCH
 ARG CUDA_VERSION
 
-# Runtime package set: RDMA userspace + libnl, the DOCA GPUNetIO and
-# Holoscan runtimes behind the gpu_roce transport, NVRTC (a hololink_core
-# JIT dependency the CUDA "runtime" base lacks), and TensorRT runtime
-# libs pinned to this CUDA flavor -- skipped on arm64+CUDA 12.x where no
-# packages exist (the toolchain stage skips trt_decoder there too).
+# Runtime package set: RDMA userspace + libnl, the DOCA GPUNetIO runtime
+# behind the gpu_roce transport, NVRTC (a hololink_core JIT dependency the
+# CUDA "runtime" base lacks), libgomp (OpenMP runtime: decoding_server,
+# libcudaq-qec and several CUDA-Q libs link it; the CUDA "runtime" base
+# does not ship it), and TensorRT runtime libs pinned to this
+# CUDA flavor -- skipped on arm64+CUDA 12.x where no packages exist (the
+# toolchain stage skips trt_decoder there too). The Holoscan SDK is NOT
+# installed: HSB's hololink_core and gpu_roce_transceiver are linked
+# statically into libcudaq-realtime-bridge-gpu-roce.so, and nothing
+# shipped here has a runtime dependency on a Holoscan library (the apt
+# package would also drag in nvcc and gcc via its dependency list).
 # curl/gnupg are installed only to register the DOCA repo and purged
 # afterwards.
 RUN set -e; \
@@ -313,9 +273,9 @@ RUN set -e; \
     CUDA_VER_DASH="$(echo "$CUDA_VERSION" | tr '.' '-')"; \
     apt-get install -y --no-install-recommends \
         rdma-core ibverbs-providers \
-        holoscan-cuda-${CUDA_MAJOR} \
         cuda-nvrtc-${CUDA_VER_DASH} \
-        libnl-3-200 libnl-route-3-200; \
+        libnl-3-200 libnl-route-3-200 \
+        libgomp1; \
     if [ "$TARGETARCH" != "arm64" ] || [ "$CUDA_MAJOR" != "12" ]; then \
         apt-cache search tensorrt \
             | awk -v v="$CUDA_VERSION" '{print "Package: "$1"\nPin: version *+cuda"v"\nPin-Priority: 1001\n"}' \
@@ -333,10 +293,26 @@ RUN set -e; \
 # stage (load-bearing: decoding_server's baked-in RPATH entries are
 # absolute). Supplied decoder plugins are already inside the cudaqx tree,
 # rpath-patched; the cudevice archive (if any) is already linked into
-# decoding_server -- neither needs a separate COPY. The official
-# install's simulator backends ride along, but their cuquantum wheel
-# dependencies are not shipped; the decoding server never loads them.
-COPY --from=cudaq-official /opt/nvidia/cudaq /opt/nvidia/cudaq
+# decoding_server -- neither needs a separate COPY.
+#
+# From the official CUDA-Q install only lib/ (whole, so every library
+# CUDA-Q might dlopen by name is present) and targets/ (the YAML target
+# configs the platform layer reads if a target is ever selected) are
+# shipped, plus the license files and build_info.txt for provenance. The
+# rest of that install -- the nvq++/cudaq-* compiler binaries, headers,
+# Python package and the binding/platform sources under src/ -- is
+# build-time or user-facing material the server never reads. The
+# shipped simulator backends' cuquantum wheel dependencies are not
+# included; the decoding server never loads them.
+COPY --from=cudaq-official /opt/nvidia/cudaq/lib /opt/nvidia/cudaq/lib
+COPY --from=cudaq-official /opt/nvidia/cudaq/targets /opt/nvidia/cudaq/targets
+COPY --from=cudaq-official /opt/nvidia/cudaq/LICENSES /opt/nvidia/cudaq/LICENSES
+COPY --from=cudaq-official \
+    /opt/nvidia/cudaq/LICENSE \
+    /opt/nvidia/cudaq/NOTICE \
+    /opt/nvidia/cudaq/Copyright.txt \
+    /opt/nvidia/cudaq/build_info.txt \
+    /opt/nvidia/cudaq/
 COPY --from=builder /opt/nvidia/cudaq-realtime /opt/nvidia/cudaq-realtime
 COPY --from=builder /opt/nvidia/cudaqx /opt/nvidia/cudaqx
 
