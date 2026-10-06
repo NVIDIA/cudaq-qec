@@ -59,9 +59,12 @@ struct construction_d_probe {
 
 class d_capture_decoder : public decoder {
 public:
-  d_capture_decoder(decoder_init inputs, decode_result_type requested_output,
+  d_capture_decoder(decoder_init inputs, decoder_output_request request,
                     const cudaqx::heterogeneous_map &)
-      : decoder(std::move(inputs), requested_output) {
+      : decoder(std::move(inputs), request) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "d_capture_decoder does not produce auxiliary outputs");
     const auto &in = get_inputs();
     const auto *D = in.measurement_to_detectors();
     construction_d_probe::has_d = D != nullptr;
@@ -97,11 +100,12 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       d_capture_decoder,
       static std::unique_ptr<decoder> create(
-          decoder_init inputs, std::optional<decode_result_type> output,
+          decoder_init inputs, std::optional<decoder_output_request> output,
           const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<d_capture_decoder>(
-            std::move(inputs), output.value_or(decode_result_type::observables),
-            params);
+        const auto request = output.value_or(
+            decoder_output_request{decode_result_type::observables});
+        return std::make_unique<d_capture_decoder>(std::move(inputs), request,
+                                                   params);
       })
 };
 
@@ -1025,8 +1029,10 @@ TEST(DecoderConfigTest, DuplicateDetectorIndicesCollapseInConstructionInputs) {
       config.to_yaml_str(200));
 
   auto decoder = cudaq::qec::decoding::host::create_realtime_decoder(
-      parsed, cudaq::qec::decoding::host::resolve_decoder_init(
-                  parsed, std::filesystem::current_path()));
+      parsed,
+      cudaq::qec::decoding::host::resolve_decoder_init(
+          parsed, std::filesystem::current_path()),
+      {cudaq::qec::decode_result_type::observables});
   ASSERT_NE(decoder, nullptr);
 
   // Construction copy: the duplicate pair has cancelled, measurement 2 remains.

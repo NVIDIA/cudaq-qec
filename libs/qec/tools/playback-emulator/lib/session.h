@@ -108,10 +108,10 @@ public:
   /// the collector happens after this returns.
   virtual void stop(std::chrono::nanoseconds drain) = 0;
 
-  /// The largest frame this session can carry, or 0 for unbounded. Set once
-  /// at construction and validated against the schedule before t0, so a
-  /// session that cannot carry what the schedule asks for is a startup error
-  /// rather than a runtime surprise.
+  /// The largest frame this session can carry in either direction (request
+  /// or reply), or 0 for unbounded. Set once at construction and validated
+  /// against the schedule before t0, so a session that cannot carry what the
+  /// schedule asks for is a startup error rather than a runtime surprise.
   std::uint32_t max_frame_bytes = 0;
 };
 
@@ -124,7 +124,8 @@ std::unique_ptr<session> make_null_session();
 
 /// One `make_null_session()` per decoder_id -- each decoder dispatches on
 /// its own thread, so sharing one instance across decoder_ids is never
-/// safe. Same shape as make_inproc_sessions()/make_udp_sessions() below.
+/// safe. Same shape as make_inproc_sessions()/make_udp_sessions()/
+/// make_cpu_roce_sessions() below.
 std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>>
 make_null_sessions(const std::vector<std::uint64_t> &decoder_ids);
 
@@ -143,12 +144,33 @@ make_udp_sessions(
     const std::unordered_map<std::uint64_t, std::string> &endpoints,
     std::uint32_t timeout_ms = 200);
 
-/// Points `router[id]` at each session's owning pointer, for a
-/// make_*_sessions() result the caller is keeping alive elsewhere. The
-/// shared last step of adopting any backend's sessions into a run.
-void route_sessions(
-    const std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>>
-        &sessions,
+/// Everything a CPU RoCE session needs besides its endpoint. The ring geometry
+/// is the wire contract: it must equal the server's --num-slots/--slot-size.
+struct cpu_roce_options {
+  std::string device;   ///< RDMA device name, e.g. "mlx5_0" or "rxe0"
+  std::string local_ip; ///< this end's RoCE IPv4 (selects the source GID)
+  std::uint32_t num_slots = 8;   ///< ring slots; power of two
+  std::uint32_t slot_size = 256; ///< bytes per slot; bounds request and reply
+  std::uint32_t connect_timeout_ms = 5000; ///< bound on the TCP rendezvous
+};
+
+/// CPU RoCE (libibverbs) client session(s) to a decoding server started with
+/// `--transport=cpu_roce`. `endpoints` maps decoder_id -> "host:port" of that
+/// ring's TCP rendezvous (from the server's READY line). Connects every
+/// session before returning; a failed handshake, or an emulator built without
+/// the CUDA-Q CPU RoCE transport, is a std::runtime_error.
+std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>>
+make_cpu_roce_sessions(
+    const std::unordered_map<std::uint64_t, std::string> &endpoints,
+    const cpu_roce_options &opts, std::uint32_t timeout_ms = 200);
+
+/// Moves a make_*_sessions() result into `owned` and points `router[id]` at
+/// each session: the shared last step of adopting a backend into a run. Called
+/// once per backend, so a run may mix them; a decoder_id already routed (named
+/// by two backends) is a std::invalid_argument.
+void adopt_sessions(
+    std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>> sessions,
+    std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>> &owned,
     std::unordered_map<std::uint64_t, session *> &router);
 
 } // namespace cudaq::qec::playback
