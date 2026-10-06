@@ -54,6 +54,8 @@ args = parser.parse_args()
 if not 0 < args.init_rounds < args.max_rounds:
     parser.error("--init-rounds must be between 1 and --max-rounds - 1")
 STREAM_CAP = args.max_rounds - args.init_rounds
+# Longest shot the schedule can produce.
+MAX_SHOT = max(args.init_rounds, STREAM_CAP)
 
 # Loading the plugin registers `per_round_decoder` with CUDA-Q QEC.
 ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -102,7 +104,7 @@ def ring(decoder_id, dem_dir):
     config.decoder_custom_args = dict(dem_dir=dem_dir,
                                       round_width=round_width,
                                       terminal_width=terminal_width,
-                                      max_rounds=args.max_rounds,
+                                      max_rounds=MAX_SHOT,
                                       delegate_type=args.decoder)
     return config
 
@@ -130,7 +132,7 @@ source = dict(type="stim_memory",
               after_clifford_depolarization=args.p)
 
 with tempfile.TemporaryDirectory() as dem_dir:
-    for r in range(1, args.max_rounds + 1):
+    for r in range(1, MAX_SHOT + 1):
         write_dem(r, f"{dem_dir}/r{r}.txt")
     decoders = qec.multi_decoder_config()
     decoders.decoders = [ring(0, dem_dir), ring(1, dem_dir)]

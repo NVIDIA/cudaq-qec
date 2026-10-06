@@ -85,6 +85,9 @@ public:
           sparse_binary_matrix::from_nested_csr(
               num_detectors, r * round_width_ + terminal_width_, D));
       sub_decoders_.push_back(get_decoder(delegate, std::move(sub)));
+      // Warm up, as realtime setup does for the outer decoder only.
+      auto &d = *sub_decoders_.back();
+      d.decode(std::vector<float_t>(d.get_syndrome_size(), 0.0));
     }
   }
 
@@ -102,6 +105,7 @@ public:
     auto &sub = *sub_decoders_[rounds_ - 1];
     sub.enqueue_syndrome(buffer_.data(), buffer_.size());
     correction_ = *sub.get_obs_corrections();
+    sub.clear_corrections();
     buffer_.clear();
     rounds_ = 0;
     return true;

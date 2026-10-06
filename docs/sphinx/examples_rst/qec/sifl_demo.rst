@@ -17,7 +17,10 @@ exactly that many rounds.
 Running
 -------
 
-From ``examples/qec/sifl_demo``, with the CUDA-Q QEC Python environment set up:
+The demo needs a CUDA-Q QEC install built with CUDA-Q Realtime. It provides the 
+playback emulator and the headers the plugin is built against.
+
+From ``examples/qec/sifl_demo``, with that install's Python environment set up:
 
 .. code-block:: bash
 
