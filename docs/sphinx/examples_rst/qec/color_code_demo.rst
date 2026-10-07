@@ -7,24 +7,22 @@ neural-network predecoder. It plots the logical error rate (LER) per round
 against the decode runtime per round, for two decoders:
 
 - ``chromobius`` — the Chromobius color-code decoder on its own.
-- ``composed`` — the Ising predecoder, run on TensorRT (``trt_decoder``),
-  followed by Chromobius on the residual syndrome.
+- ``trt_decoder`` — the Ising predecoder, run on TensorRT, with Chromobius as
+  the global decoder for the residual syndrome.
 
 The syndromes come from Stim color-code memory experiments (distance
 :math:`d`, :math:`d` rounds, Z basis, physical error rate ``--p``) and are
-replayed by the playback emulator (``qec.playback``). Each runtime is measured
-once per *session*, the path between the emulator and the decoder:
+replayed by the playback emulator. Each runtime is measured
+once per path between the emulator and the decoder (``session``):
 
 - ``inproc`` — the decoder runs inside the emulator process.
 - ``server`` — a ``decoding_server`` over UDP on the local machine.
 
 For each distance, Stim samples ``--shots`` shots (default 100,000) into one
-schedule, which every decoder and session replays once. Each run gives both
-numbers:
+schedule, which every decoder and session replays once. Each run gives:
 
 - The runtime per round: the time until the last correction returns, divided
-  by the rounds decoded. Up to 4 shots are in flight at once, so this is the
-  throughput.
+  by the rounds decoded.
 - The LER per round: the fraction of shots whose correction differs from
   Stim's true observable flip, converted to a per-round rate.
 
@@ -32,7 +30,8 @@ Requirements
 ------------
 
 - A CUDA-Q QEC install with the decoding server, the playback emulator, and
-  the TensorRT decoder plugin; an NVIDIA GPU for ``composed``.
+  the TensorRT decoder plugin
+  (built only if TensorRT 10.x is found; see :doc:`realtime_predecoder_pymatching`).
 - Python packages: ``chromobius``, ``matplotlib``, ``tensorrt``, and the
   Ising-Decoding inference requirements
   (``code/requirements_public_inference.txt`` in its repository).
@@ -43,26 +42,21 @@ Requirements
 Running
 -------
 
-From ``examples/qec/color_code_demo``, with the CUDA-Q QEC Python environment
-set up:
+From any scratch directory, with the CUDA-Q QEC Python environment set up:
 
 .. code-block:: bash
 
-   ./run_color_code_demo.sh --weights <weights>
+   /path/to/examples/qec/color_code_demo/run_color_code_demo.sh --weights <weights>
 
-The script fetches Ising-Decoding into ``./deps``, then runs the demo; ``--help`` lists the options. The demo has three steps, chosen
-with ``--steps`` (default: all):
+The script fetches Ising-Decoding into ``./deps``, then runs the demo;
+``--help`` lists the options. For each distance, the demo writes the detector
+error model, exports the predecoder to ONNX, builds its TensorRT engine, and
+replays the schedule through every decoder and session. It then writes the
+results to ``results.json`` and the figure to ``color_code_demo.png``.
 
-- ``prepare`` — writes each distance's detector error model, exports the
-  predecoder to ONNX, and builds its TensorRT engine.
-- ``run`` — replays each distance's schedule through every decoder and
-  session.
-- ``plot`` — writes ``color_code_demo.png``.
-
-All files go to the current directory; results
-accumulate in ``results.json``, so steps can be run separately.
-In the figure, grey is raw Chromobius and green is the Ising predecoder;
-hollow markers have fewer than 25 logical errors behind them.
+All files go to the current directory.
+In the figure, grey is raw Chromobius and green is the Ising predecoder.
+Runs with no logical errors are left out of the figure.
 
 The example source
 ------------------
