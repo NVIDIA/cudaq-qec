@@ -267,10 +267,22 @@ if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET decoding_server)
     ${CUDAToolkit_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/realtime/decoding-server-cqr
   )
+  # Test-only bridge provider (interface v3) that serves no CPU data plane;
+  # test_decoding_server loads it by path via --transport= for the
+  # --host-loop=unified refusal tests. See the source header.
+  add_library(qec-test-bridge-no-dataplane SHARED test_bridge_no_dataplane.cpp)
+  target_include_directories(qec-test-bridge-no-dataplane PRIVATE
+    ${CUDAQ_REALTIME_INCLUDE_DIR}
+    ${CUDAToolkit_INCLUDE_DIRS}
+  )
+  set_target_properties(qec-test-bridge-no-dataplane PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
   # -DQEC_DECODING_SERVER_PATH tells the test where the server binary lives
-  # (the example configs are placed next to it by tools/decoding-server). It
-  # rides COMPILER_FLAGS because cudaqx_add_device_code compiles with nvq++,
-  # which does not see target_compile_definitions.
+  # (the example configs are placed next to it by tools/decoding-server);
+  # -DQEC_TEST_BRIDGE_NO_DATAPLANE_PATH names the test-only provider library
+  # built above. They ride COMPILER_FLAGS because cudaqx_add_device_code
+  # compiles with nvq++, which does not see target_compile_definitions.
   cudaqx_add_device_code(test_decoding_server
     SOURCES
       test_decoding_server.cpp
@@ -278,6 +290,7 @@ if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET decoding_server)
       --target stim
       -frealtime-lowering
       -DQEC_DECODING_SERVER_PATH=\"$<TARGET_FILE:decoding_server>\"
+      -DQEC_TEST_BRIDGE_NO_DATAPLANE_PATH=\"$<TARGET_FILE:qec-test-bridge-no-dataplane>\"
   )
 
   target_link_directories(test_decoding_server
@@ -302,6 +315,7 @@ if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET decoding_server)
   )
 
   add_dependencies(test_decoding_server decoding_server)
+  add_dependencies(test_decoding_server qec-test-bridge-no-dataplane)
   add_dependencies(CUDAQXQECUnitTests test_decoding_server)
   gtest_discover_tests(test_decoding_server
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
