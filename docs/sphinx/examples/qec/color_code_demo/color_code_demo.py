@@ -12,20 +12,17 @@
 # Chromobius and for the Ising predecoder + Chromobius, on color-code memory
 # experiments of distance d with d rounds.
 #
-# Steps:
-#   * prepare: per distance, write the detector error model (DEM), export the
-#              Ising predecoder to ONNX, and build its TensorRT engine.
-#   * run:     per distance, replay one schedule of sampled shots through each
-#              decoder and session: inproc (decoder in the emulator process)
-#              and server (a decoding_server over UDP).
-#   * plot:    draw the figure from the collected results.
+# Per distance, it writes the detector error model (DEM), exports the Ising
+# predecoder to ONNX, and replays one schedule of sampled shots through each
+# decoder and session: inproc (decoder in the emulator process) and server (a
+# decoding_server over UDP). It then draws the figure from the results.
 
 # [Begin Documentation]
 """Ising color-code decoder: LER per round vs. runtime on the playback emulator.
 
 Usage: ./run_color_code_demo.sh [options]
 """
-import argparse, contextlib, json, os, re, shutil, subprocess, sys, warnings
+import argparse, json, os, re, shutil, subprocess, sys, warnings
 import numpy as np
 import cudaq_qec as qec
 
@@ -36,11 +33,8 @@ parser.add_argument("--ising",
                     required=True,
                     help="Ising-Decoding checkout code.")
 parser.add_argument("--weights",
-                    help="Ising-Decoder-ColorCode-1-Fast .safetensors file "
-                    "(needed by the prepare step)")
-parser.add_argument("--steps",
-                    default="prepare,run,plot",
-                    help="comma-separated list of: prepare, run, plot")
+                    required=True,
+                    help="Ising-Decoder-ColorCode-1-Fast .safetensors file")
 parser.add_argument("--distances", default="5,7,9,11,13")
 parser.add_argument("--p", type=float, default=1e-3, help="physical error rate")
 parser.add_argument("--shots",
@@ -57,12 +51,9 @@ parser.add_argument("--server-timeout",
                     help="decoding_server --timeout, in s")
 args = parser.parse_args()
 
-steps = args.steps.split(",")
 distances = [int(d) for d in args.distances.split(",")]
-if "run" in steps and not args.decoding_server:
+if not args.decoding_server:
     parser.error("decoding_server not found; pass --decoding-server")
-if "prepare" in steps and not args.weights:
-    parser.error("the prepare step needs --weights")
 sys.path.insert(0, os.path.join(args.ising, "code"))
 
 from qec.color_code.color_code import ColorCode
@@ -100,19 +91,38 @@ def measurement_maps(circuit, d):
             np.flatnonzero(obs[data_start:]).tolist())
 
 
-def export_onnx(d, model, cfg, support, onnx_path):
-    """Exports the Ising predecoder, with the observable's support baked in.
-    `cfg` is the model's Ising config; its test section sets the sampling."""
+def export_onnx(d, model, support, onnx_path):
+    """Exports the Ising predecoder, with the observable's support baked in."""
     import torch
+    from qec.color_code import (get_data_to_grid_flat_index,
+                                get_parity_matrix_data_only,
+                                get_stab_to_grid_flat_index)
     from qec.color_code.detector_input import ColorDetectorInputTransform
     from benchmarks.export_detector_input_trtexec import (
         DetectorInputColorEval, DetectorInputModel)
-    from evaluation.logical_error_rate_color import (
-        PreDecoderColorEvalModule, _build_color_code_parity_maps)
+    from evaluation.logical_error_rate_color import PreDecoderColorEvalModule
     xform = ColorDetectorInputTransform(distance=d, rounds=d, basis="Z")
-    maps = _build_color_code_parity_maps(d)
-    obs_support = torch.zeros(int(maps["num_data"]))
+    # Mirrors Ising's private _build_color_code_parity_maps.
+    code = ColorCode(d)
+    H = get_parity_matrix_data_only(code)
+    K = int(H.sum(1).max())
+    H_idx = torch.full((H.shape[0], K), -1, dtype=torch.long)
+    for i, row in enumerate(H):
+        cols = row.nonzero().flatten()
+        H_idx[i, :len(cols)] = cols
+    maps = dict(H_idx=H_idx,
+                H_mask=H_idx >= 0,
+                K=K,
+                stab_to_grid=get_stab_to_grid_flat_index(code),
+                data_to_grid=get_data_to_grid_flat_index(code),
+                num_plaq=H.shape[0],
+                num_data=H.shape[1],
+                n_rows=code.n_rows,
+                n_cols=code.n_cols)
+    obs_support = torch.zeros(H.shape[1])
     obs_support[support] = 1.0
+    # Module defaults match Ising's config.
+    cfg = argparse.Namespace(test=argparse.Namespace())
     pipeline = DetectorInputColorEval(
         DetectorInputModel(xform, model),
         PreDecoderColorEvalModule(model,
@@ -146,10 +156,10 @@ def decoder_config(name, d, m2d, engine_args=None):
     """A one-decoder config. The decoder reads its matrices from the DEM file;
     D_sparse maps the raw measurements to detectors."""
     dc = qec.decoder_config()
-    dc.type = "chromobius" if name == "chromobius" else "trt_decoder"
+    dc.type = name
     dc.D_sparse = qec.d_sparse(m2d)
     dc.stim_dem_path = "dem_d%d.txt" % d
-    if name == "composed":
+    if name == "trt_decoder":
         # The predecoder returns its observable flips and residual detectors;
         # Chromobius decodes the residual.
         dc.decoder_custom_args = {
@@ -167,12 +177,8 @@ def decoder_config(name, d, m2d, engine_args=None):
 
 def write_schedule(circuit, shots, sched_path, chunk=10000):
     """Samples `circuit` and writes a playback schedule.
-
-    Each shot is a reset, one enqueue per measurement layer, and a get_corrections 
-    that expects the shot's true observable flips; the emulator flags replies that 
-    differ. Shot i waits (after=) on the signal raised by shot i - DEPTH, so at 
-    most DEPTH shots are in flight. Every line's trigger is '-': send as soon as
-    the line before it has been sent.
+    Each shot is a reset, one enqueue per measurement layer, and a
+    get_corrections that expects the shot's true observable flips.
     """
     layers, offset = [], 0
     for inst in circuit.flattened():
@@ -205,34 +211,6 @@ def per_round(ler, rounds):
     return float(1 - (1 - np.clip(ler, 1e-12, 1 - 1e-12))**(1 / rounds))
 
 
-@contextlib.contextmanager
-def decoding_server(mdc):
-    """Runs a decoding_server for `mdc`; yields the port it reports."""
-    cfg_path = "server_config.yaml"
-    with open(cfg_path, "w") as f:
-        f.write(mdc.to_yaml_str())
-    proc = subprocess.Popen([
-        args.decoding_server, "--config=" + cfg_path, "--transport=udp",
-        "--port=0",
-        "--timeout=%d" % args.server_timeout
-    ],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True)
-    try:
-        port = next((
-            int(m.group(1))
-            for line in proc.stdout
-            for m in [re.search(r"QEC_DECODING_SERVER_READY port=(\d+)", line)]
-            if m), None)
-        if port is None:
-            raise RuntimeError("decoding_server did not start")
-        yield port
-    finally:
-        proc.terminate()
-        proc.wait()
-
-
 def run_checked(schedule, shots, **session):
     """Runs `schedule`; fails unless every shot returned its correction."""
     result = pb.run(schedule, tick_ns=0, sources={}, **session)
@@ -248,145 +226,145 @@ def run_checked(schedule, shots, **session):
     return result, gc
 
 
-@contextlib.contextmanager
-def session(name, mdc):
-    """Yields the pb.run() arguments that route requests through `name`."""
+def run_session(name, mdc, schedule, shots):
+    """Runs `schedule` with requests routed through session `name`: inproc,
+    or a decoding_server for `mdc` over UDP, stopped once the run ends."""
     if name == "inproc":
-        yield dict(decoders=mdc)
-    else:
-        with decoding_server(mdc) as port:
-            yield dict(udp_endpoints={0: "127.0.0.1:%d" % port},
-                       udp_timeout_ms=5000)
+        return run_checked(schedule, shots, decoders=mdc)
+    cfg_path = "server_config.yaml"
+    with open(cfg_path, "w") as f:
+        f.write(mdc.to_yaml_str())
+    proc = subprocess.Popen([
+        args.decoding_server, "--config=" + cfg_path, "--transport=udp",
+        "--port=0",
+        "--timeout=%d" % args.server_timeout
+    ],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True)
+    try:
+        log = []
+        for line in proc.stdout:
+            log.append(line)
+            m = re.search(r"QEC_DECODING_SERVER_READY port=(\d+)", line)
+            if m:
+                break
+        else:
+            raise RuntimeError("decoding_server did not start:\n" +
+                               "".join(log))
+        return run_checked(schedule,
+                           shots,
+                           udp_endpoints={0: "127.0.0.1:%s" % m.group(1)},
+                           udp_timeout_ms=5000)
+    finally:
+        proc.terminate()
+        proc.wait()
 
 
-results_path = "results.json"
-results = json.load(open(results_path)) if os.path.exists(results_path) else {}
+# Build and run the experiments
+from export.safetensors_utils import load_safetensors
 
-if "prepare" in steps:
-    from export.safetensors_utils import load_safetensors, _build_minimal_cfg
-    model, metadata = load_safetensors(args.weights, device="cpu")
-    model = model.float().eval()
-    cfg = _build_minimal_cfg(metadata["model_id"])
-    for d in distances:
-        circuit = color_circuit(d)
-        m2d, support = measurement_maps(circuit, d)
-        with open("dem_d%d.txt" % d, "w") as f:
-            f.write(str(circuit.detector_error_model()))
-        if not os.path.exists("pre_d%d.onnx" % d):
-            export_onnx(d, model, cfg, support, "pre_d%d.onnx" % d)
-        if not os.path.exists("engine_d%d.trt" % d):
-            # Build and cache the TensorRT engine in a short in-process run.
-            write_schedule(circuit, 100, "schedule.txt")
-            run_checked(open("schedule.txt").read(),
-                        100,
-                        decoders=decoder_config(
-                            "composed", d, m2d, {
-                                "onnx_load_path": "pre_d%d.onnx" % d,
-                                "engine_save_path": "engine_d%d.trt" % d
-                            }))
-        print("d=%-2d %d detectors" % (d, circuit.num_detectors), flush=True)
+model = load_safetensors(args.weights, device="cpu")[0].float().eval()
+results = {}
+for d in distances:
+    circuit = color_circuit(d)
+    m2d, support = measurement_maps(circuit, d)
+    with open("dem_d%d.txt" % d, "w") as f:
+        f.write(str(circuit.detector_error_model()))
+    export_onnx(d, model, support, "pre_d%d.onnx" % d)
+    print("d=%-2d %d detectors" % (d, circuit.num_detectors), flush=True)
+    write_schedule(circuit, args.shots, "schedule.txt")
+    schedule = open("schedule.txt").read()
+    for dec in ("chromobius", "trt_decoder"):
+        for sess in ("inproc", "server"):
+            # The inproc trt_decoder builds the TensorRT engine that the
+            # server then loads.
+            engine_args = {
+                "onnx_load_path": "pre_d%d.onnx" % d,
+                "engine_save_path": "engine_d%d.trt" % d
+            } if sess == "inproc" else None
+            result, gc = run_session(sess,
+                                     decoder_config(dec, d, m2d, engine_args),
+                                     schedule, args.shots)
+            # Runtime per round: the time until the last reply, divided by
+            # the rounds decoded.
+            runtime = max(
+                r.return_ns for r in result.records) / 1e3 / args.shots / d
+            errors = sum(r.correction_mismatch for r in gc)
+            # Per-round rate from the d-round rate, with a binomial error
+            # bar.
+            total = min(max(errors / args.shots, 0.5 / args.shots), 1 - 1e-12)
+            sigma = np.sqrt(total * (1 - total) / args.shots)
+            lo, mid, hi = (
+                per_round(x, d) for x in (total - sigma, total, total + sigma))
+            point = results.setdefault(str(d), {}).setdefault(dec, {})
+            point[sess] = dict(runtime=runtime,
+                               ler=mid,
+                               ler_unc=max(hi - mid, mid - lo),
+                               errors=errors)
+            print("d=%-2d %-10s %-6s %8.3f us/round  LER/round %.3g +/- "
+                  "%.1g (%d/%d)" % (d, dec, sess, runtime, mid,
+                                    point[sess]["ler_unc"], errors, args.shots),
+                  flush=True)
+    json.dump(dict(p=args.p, results=results),
+              open("results.json", "w"),
+              indent=1)
 
-if "run" in steps:
-    for d in distances:
-        circuit = color_circuit(d)
-        m2d = measurement_maps(circuit, d)[0]
-        write_schedule(circuit, args.shots, "schedule.txt")
-        schedule = open("schedule.txt").read()
-        for dec in ("chromobius", "composed"):
-            for sess in ("inproc", "server"):
-                with session(sess, decoder_config(dec, d, m2d)) as kw:
-                    result, gc = run_checked(schedule, args.shots, **kw)
-                # Runtime per round: the time until the last reply, divided by
-                # the rounds decoded.
-                runtime = max(
-                    r.return_ns for r in result.records) / 1e3 / args.shots / d
-                errors = sum(r.correction_mismatch for r in gc)
-                # Per-round rate from the d-round rate, with a binomial error
-                # bar.
-                total = min(max(errors / args.shots, 0.5 / args.shots),
-                            1 - 1e-12)
-                sigma = np.sqrt(total * (1 - total) / args.shots)
-                lo, mid, hi = (per_round(x, d)
-                               for x in (total - sigma, total, total + sigma))
-                point = results.setdefault(str(d), {}).setdefault(dec, {})
-                point[sess] = dict(runtime=runtime,
-                                   ler=mid,
-                                   ler_unc=max(hi - mid, mid - lo),
-                                   errors=errors)
-                print("d=%-2d %-10s %-6s %8.3f us/round  LER/round %.3g +/- "
-                      "%.1g (%d/%d)" %
-                      (d, dec, sess, runtime, mid, point[sess]["ler_unc"],
-                       errors, args.shots),
-                      flush=True)
-        json.dump(results, open(results_path, "w"), indent=1)
+# Plot the results
+import matplotlib
 
-if "plot" in steps:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    labels = {
-        "chromobius": "Raw Chromobius",
-        "composed": "Ising-Decoder-ColorCode-1-Fast"
-    }
-    colors = {"chromobius": "#808080", "composed": "#76b900"}
-    styles = {
-        "server": ("--", "o", "server, UDP"),
-        "inproc": (":", "o", "inproc")
-    }
-    fig, ax = plt.subplots(figsize=(10, 6.5))
-    for dec in labels:
-        for sess, (style, marker, sess_label) in styles.items():
-            pts = sorted((int(d), r[dec][sess])
-                         for d, r in results.items()
-                         if sess in r.get(dec, {}))
-            if not pts:
-                continue
-            x = [p["runtime"] for _, p in pts]
-            y = [p["ler"] for _, p in pts]
-            ax.errorbar(x,
-                        y,
-                        yerr=[p["ler_unc"] for _, p in pts],
-                        color=colors[dec],
-                        linestyle=style,
-                        marker=marker,
-                        markersize=7,
-                        linewidth=2.5,
-                        capsize=3,
-                        label="%s (%s)" % (labels[dec], sess_label))
-            # Hollow markers: fewer than 25 logical errors observed.
-            thin = [(xi, yi)
-                    for (_, p), xi, yi in zip(pts, x, y)
-                    if p["errors"] < 25]
-            if thin:
-                ax.scatter(*zip(*thin),
-                           s=52,
-                           zorder=4,
-                           facecolors="white",
-                           edgecolors=colors[dec],
-                           linewidths=2.5)
-            if sess == "server":
-                for (d, _), xi, yi in zip(pts, x, y):
-                    ax.annotate("d=%d" % d, (xi, yi),
-                                textcoords="offset points",
-                                xytext=(9, 4),
-                                color=colors[dec])
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel(r"Runtime ($\mu$s / round)")
-    ax.set_ylabel("Logical error rate per round")
-    ax.set_title(r"$p = %g$ (Z basis)" % args.p)
-    ax.grid(True, which="both", linestyle=":", alpha=0.6)
-    ax.legend(loc="lower left")
-    xlo, xhi = ax.get_xlim()
-    ylo, _ = ax.get_ylim()
-    ax.set_xlim(xlo / 1.5, xhi * 2.6)
-    xlo = ax.get_xlim()[0]
-    ax.annotate("Faster",
-                xy=(xlo * 1.35, ylo * 2.0),
-                xytext=(xlo * 5.5, ylo * 2.0),
-                va="center",
-                arrowprops=dict(arrowstyle="->", lw=1.6))
-    fig.tight_layout()
-    fig.savefig("color_code_demo.png", dpi=150)
-    print("wrote", "color_code_demo.png")
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+labels = {
+    "chromobius": "Raw Chromobius",
+    "trt_decoder": "Ising-Decoder-ColorCode-1-Fast"
+}
+colors = {"chromobius": "#808080", "trt_decoder": "#76b900"}
+styles = {"server": ("--", "o", "server, UDP"), "inproc": (":", "o", "inproc")}
+fig, ax = plt.subplots(figsize=(10, 6.5))
+for dec in labels:
+    for sess, (style, marker, sess_label) in styles.items():
+        pts = sorted((int(d), r[dec][sess])
+                     for d, r in results.items()
+                     if r.get(dec, {}).get(sess, {}).get("errors"))
+        if not pts:
+            continue
+        x = [p["runtime"] for _, p in pts]
+        y = [p["ler"] for _, p in pts]
+        ax.errorbar(x,
+                    y,
+                    yerr=[p["ler_unc"] for _, p in pts],
+                    color=colors[dec],
+                    linestyle=style,
+                    marker=marker,
+                    markersize=7,
+                    linewidth=2.5,
+                    capsize=3,
+                    label="%s (%s)" % (labels[dec], sess_label))
+        if sess == "server":
+            for (d, _), xi, yi in zip(pts, x, y):
+                ax.annotate("d=%d" % d, (xi, yi),
+                            textcoords="offset points",
+                            xytext=(9, 4),
+                            color=colors[dec])
+ax.set_xscale("log")
+ax.set_yscale("log")
+ax.set_xlabel(r"Runtime ($\mu$s / round)")
+ax.set_ylabel("Logical error rate per round")
+ax.set_title(r"$p = %g$ (Z basis)" % args.p)
+ax.grid(True, which="both", linestyle=":", alpha=0.6)
+ax.legend(loc="lower left")
+xlo, xhi = ax.get_xlim()
+ylo, _ = ax.get_ylim()
+ax.set_xlim(xlo / 1.5, xhi * 2.6)
+xlo = ax.get_xlim()[0]
+ax.annotate("Faster",
+            xy=(xlo * 1.35, ylo * 2.0),
+            xytext=(xlo * 5.5, ylo * 2.0),
+            va="center",
+            arrowprops=dict(arrowstyle="->", lw=1.6))
+fig.tight_layout()
+fig.savefig("color_code_demo.png", dpi=150)
+print("wrote", "color_code_demo.png")
 # [End Documentation]
