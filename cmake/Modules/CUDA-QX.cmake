@@ -211,6 +211,7 @@ function(cudaqx_import_cudaq_targets)
   find_package(CUDAQEnsmallen REQUIRED CONFIG)
   find_package(CUDAQEmDefault REQUIRED CONFIG)
   find_package(CUDAQPlatformDefault REQUIRED CONFIG)
+  find_package(CUDAQMlirRuntime REQUIRED CONFIG)
   find_package(CUDAQPythonInterop CONFIG)
 
   # Import the CUDA-Q library target without loading CUDAQConfig.cmake, which
