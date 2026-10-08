@@ -43,6 +43,7 @@
 #include "stim.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
+#include "cudaq/qec/extended_dem.h"
 #include "cudaq/qec/sparse_binary_matrix.h"
 #include <algorithm>
 #include <chrono>
@@ -57,6 +58,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -81,6 +83,12 @@ using cudaq::qec::benchmark::worker_threads_per_instance;
 
 // ── Options
 // ───────────────────────────────────────────────────────────────────
+
+// The model form every decoder is built from.
+enum class model_source {
+  matrices, ///< H, O and priors of the whole shot
+  chunks,   ///< per-round DEM chunks and the round count
+};
 
 struct options {
   std::vector<std::size_t> distances = {5};
@@ -107,6 +115,11 @@ struct options {
   std::chrono::nanoseconds round_interval{0};
   bool run_batch = true;
   bool run_stream = true;
+  // Result form every decoder is built with. Streaming reads observable
+  // corrections either way.
+  cudaq::qec::decode_result_type output =
+      cudaq::qec::decode_result_type::observables;
+  model_source source = model_source::matrices;
   bool emit_csv = false;
   std::vector<std::pair<std::string, std::string>> extra_params;
 };
@@ -154,6 +167,15 @@ void print_usage(const char *argv0) {
       << "  --round_interval_us T      pace streaming rounds by T "
          "microseconds\n"
       << "  --mode M                   batch, stream, or both (default both)\n"
+      << "  --output F                 observables or errors (default\n"
+      << "                             observables). errors times decode()\n"
+      << "                             returning H columns, scored by O*e;\n"
+      << "                             streaming still reads observables\n"
+      << "  --source S                 matrices or chunks (default\n"
+      << "                             matrices). chunks builds decoders from\n"
+      << "                             per-round DEM chunks of the same "
+         "model,\n"
+      << "                             padded to one detector width per round\n"
       << "  --param KEY=VALUE          extra param forwarded to all decoders\n"
       << "                             (repeatable; auto-typed)\n"
       << "  --csv                      emit machine-readable CSV rows\n"
@@ -268,6 +290,26 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
       opts.run_stream = val == "stream" || val == "both";
       if (!opts.run_batch && !opts.run_stream) {
         std::cerr << "error: --mode must be batch, stream, or both\n";
+        exit_code = 1;
+        return false;
+      }
+    } else if (arg == "--output") {
+      if (val == "observables") {
+        opts.output = cudaq::qec::decode_result_type::observables;
+      } else if (val == "errors") {
+        opts.output = cudaq::qec::decode_result_type::errors;
+      } else {
+        std::cerr << "error: --output must be observables or errors\n";
+        exit_code = 1;
+        return false;
+      }
+    } else if (arg == "--source") {
+      if (val == "matrices") {
+        opts.source = model_source::matrices;
+      } else if (val == "chunks") {
+        opts.source = model_source::chunks;
+      } else {
+        std::cerr << "error: --source must be matrices or chunks\n";
         exit_code = 1;
         return false;
       }
@@ -427,6 +469,11 @@ struct dem_matrices {
   cudaq::qec::sparse_binary_matrix H;
   cudaqx::tensor<uint8_t> O;
   std::vector<double> priors;
+  // Observables each H column flips, as a mask of the first 64. With chunks
+  // set, the columns are the chunks', in the order they close to.
+  std::vector<uint64_t> column_obs;
+  // The same model as per-round chunks, for --source chunks.
+  std::optional<cudaq::qec::dem_chunks_spec> chunks;
 };
 
 // Extract H, O, and priors from the decomposed DEM without depending on
@@ -469,13 +516,17 @@ dem_matrices make_matrices(const stim::DetectorErrorModel &dem) {
   dem_matrices m;
   m.priors.assign(ne, 0.0);
   m.O = cudaqx::tensor<uint8_t>({no, ne});
+  m.column_obs.assign(ne, 0);
   std::vector<std::vector<index_type>> H_nested(ne);
   for (std::size_t col = 0; col < ne; ++col) {
     m.priors[col] = edges[col].p;
     for (auto det : edges[col].detectors)
       H_nested[col].push_back(static_cast<index_type>(det));
-    for (auto o : edges[col].observables)
+    for (auto o : edges[col].observables) {
       m.O.at({o, col}) = 1;
+      if (o < 64)
+        m.column_obs[col] |= uint64_t{1} << o;
+    }
   }
   m.H = cudaq::qec::sparse_binary_matrix::from_nested_csc(
       static_cast<index_type>(nd), static_cast<index_type>(ne), H_nested);
@@ -493,6 +544,193 @@ std::vector<int32_t> detector_round_map(const stim::Circuit &circuit) {
   }
   return dr;
 }
+
+// Give every detector round the widest round's width, renumbering detector d
+// of round r to r * width + d, in the matrices, the sampled syndromes and @p
+// dr. Chunked models carry one detector width per round, and Stim's first and
+// last rounds hold fewer detectors than the bulk; the added detectors flip
+// with no fault, so they never fire.
+void pad_rounds(dem_matrices &m, benchmark_data &data,
+                std::vector<int32_t> &dr) {
+  if (!std::is_sorted(dr.begin(), dr.end()))
+    throw std::runtime_error("--source chunks needs detectors numbered round "
+                             "by round");
+  const std::size_t num_rounds = static_cast<std::size_t>(dr.back()) + 1;
+  std::vector<std::size_t> first(num_rounds, dr.size());
+  for (std::size_t det = dr.size(); det-- > 0;)
+    first[static_cast<std::size_t>(dr[det])] = det;
+  std::size_t width = 0;
+  for (std::size_t r = 0; r < num_rounds; ++r)
+    width = std::max(width, (r + 1 < num_rounds ? first[r + 1] : dr.size()) -
+                                first[r]);
+  std::vector<index_type> padded(dr.size());
+  for (std::size_t det = 0; det < dr.size(); ++det) {
+    const auto r = static_cast<std::size_t>(dr[det]);
+    padded[det] = static_cast<index_type>(r * width + det - first[r]);
+  }
+  const std::size_t nd = num_rounds * width;
+
+  auto columns = m.H.to_nested_csc();
+  for (auto &column : columns)
+    for (auto &det : column)
+      det = padded[det];
+  m.H = cudaq::qec::sparse_binary_matrix::from_nested_csc(
+      static_cast<index_type>(nd), static_cast<index_type>(columns.size()),
+      columns);
+  for (std::size_t s = 0; s < data.soft_syndromes.size(); ++s) {
+    std::vector<cudaq::qec::float_t> soft(nd, 0.0);
+    std::vector<uint8_t> hard(nd, 0);
+    for (std::size_t det = 0; det < dr.size(); ++det) {
+      soft[padded[det]] = data.soft_syndromes[s][det];
+      hard[padded[det]] = data.hard_syndromes[s][det];
+    }
+    data.soft_syndromes[s] = std::move(soft);
+    data.hard_syndromes[s] = std::move(hard);
+  }
+  dr.resize(nd);
+  for (std::size_t det = 0; det < nd; ++det)
+    dr[det] = static_cast<int32_t>(det / width);
+} // end - pad_rounds()
+
+// Split the matrices into one DEM chunk per detector round and record them in
+// m.chunks. A column belongs to the round of its lowest detector, and must
+// reach no further than the next round. The rounds equal to the middle round,
+// up to a shift, are the repeating bulk; every round before and after it is a
+// phase of its own. Closing the chunks numbers detectors as @p dr does.
+void add_chunks(dem_matrices &m, const std::vector<int32_t> &dr) {
+  using namespace cudaq::qec;
+  struct fault {
+    double p = 0.0;
+    std::vector<int64_t> rows, next_rows;
+    uint64_t obs = 0;
+    auto key() const { return std::tie(rows, next_rows, obs); }
+  };
+  if (!std::is_sorted(dr.begin(), dr.end()))
+    throw std::runtime_error("--source chunks needs detectors numbered round "
+                             "by round");
+  const std::size_t num_rounds = static_cast<std::size_t>(dr.back()) + 1;
+  std::vector<int64_t> first(num_rounds + 1, static_cast<int64_t>(dr.size()));
+  for (std::size_t det = dr.size(); det-- > 0;)
+    first[static_cast<std::size_t>(dr[det])] = static_cast<int64_t>(det);
+  const auto width = [&](std::size_t r) {
+    return r < num_rounds ? first[r + 1] - first[r] : int64_t{0};
+  };
+
+  std::vector<std::vector<fault>> rounds(num_rounds);
+  const auto columns = m.H.to_nested_csc();
+  for (std::size_t col = 0; col < columns.size(); ++col) {
+    if (columns[col].empty())
+      throw std::runtime_error("--source chunks needs every column to flip a "
+                               "detector");
+    std::vector<int64_t> dets(columns[col].begin(), columns[col].end());
+    std::sort(dets.begin(), dets.end());
+    const auto r = static_cast<std::size_t>(dr[dets.front()]);
+    fault f;
+    f.p = m.priors[col];
+    f.obs = m.column_obs[col];
+    for (const int64_t det : dets) {
+      const auto at = static_cast<std::size_t>(dr[det]);
+      if (at > r + 1)
+        throw std::runtime_error("--source chunks needs every column within "
+                                 "two consecutive rounds");
+      (at == r ? f.rows : f.next_rows).push_back(det - first[at]);
+    }
+    rounds[r].push_back(std::move(f));
+  }
+  // Stim's decomposition repeats every two rounds: alternate rounds split a
+  // mechanism into columns with the same detectors and observables. Merging
+  // them leaves one model per round, up to rounding in the merged rates.
+  for (auto &faults : rounds) {
+    std::sort(faults.begin(), faults.end(),
+              [](const fault &a, const fault &b) { return a.key() < b.key(); });
+    std::vector<fault> merged;
+    for (auto &f : faults) {
+      if (!merged.empty() && merged.back().key() == f.key()) {
+        double &p = merged.back().p;
+        p = p * (1 - f.p) + f.p * (1 - p);
+      } else {
+        merged.push_back(std::move(f));
+      }
+    }
+    faults = std::move(merged);
+  }
+
+  const auto same = [&](std::size_t a, std::size_t b) {
+    if (width(a) != width(b) || width(a + 1) != width(b + 1) ||
+        rounds[a].size() != rounds[b].size())
+      return false;
+    for (std::size_t i = 0; i < rounds[a].size(); ++i) {
+      const fault &x = rounds[a][i], &y = rounds[b][i];
+      if (x.key() != y.key() || std::abs(x.p - y.p) > 1e-9 * std::max(x.p, y.p))
+        return false;
+    }
+    return true;
+  };
+  const std::size_t middle = num_rounds / 2;
+  std::size_t bulk_first = middle, bulk_last = middle;
+  while (bulk_first > 0 && same(bulk_first - 1, middle))
+    --bulk_first;
+  while (bulk_last + 1 < num_rounds && same(bulk_last + 1, middle))
+    ++bulk_last;
+
+  const std::size_t no = m.O.shape()[0];
+  const auto chunk_of = [&](std::size_t r) {
+    const auto &faults = rounds[r];
+    const auto seam_rows = [&](int64_t rows, bool next) {
+      std::vector<std::vector<int64_t>> by_row(static_cast<std::size_t>(rows));
+      for (std::size_t i = 0; i < faults.size(); ++i)
+        for (const int64_t row : next ? faults[i].next_rows : faults[i].rows)
+          by_row[static_cast<std::size_t>(row)].push_back(
+              static_cast<int64_t>(i));
+      std::vector<int64_t> sparse;
+      for (const auto &row : by_row) {
+        sparse.insert(sparse.end(), row.begin(), row.end());
+        sparse.push_back(-1);
+      }
+      return sparse;
+    };
+    dem_chunk_spec spec;
+    spec.num_faults = faults.size();
+    for (const auto &f : faults)
+      spec.error_rates.push_back(f.p);
+    spec.seam_specs.push_back(
+        {seam_name::prev_round, {seam_rows(width(r), false), {}}});
+    if (r + 1 < num_rounds)
+      spec.seam_specs.push_back(
+          {seam_name::next_round, {seam_rows(width(r + 1), true), {}}});
+    for (std::size_t o = 0; o < no; ++o) {
+      for (std::size_t i = 0; i < faults.size(); ++i)
+        if (o < 64 && (faults[i].obs >> o & 1))
+          spec.O_sparse.push_back(static_cast<int64_t>(i));
+      spec.O_sparse.push_back(-1);
+    }
+    return spec;
+  };
+
+  dem_chunks_spec spec;
+  spec.seam = {seam_name::next_round, seam_name::prev_round};
+  spec.num_rounds = num_rounds;
+  std::vector<phase_id> chain;
+  const auto add_phase = [&](const std::string &name, std::size_t r) {
+    const phase_id id = phase_id::from_name(name);
+    spec.phases.push_back({id, chunk_of(r)});
+    chain.push_back(id);
+  };
+  for (std::size_t r = 0; r < bulk_first; ++r)
+    add_phase("before" + std::to_string(r), r);
+  add_phase("bulk", middle);
+  for (std::size_t r = bulk_last + 1; r < num_rounds; ++r)
+    add_phase("after" + std::to_string(r - bulk_last - 1), r);
+  for (std::size_t i = 0; i + 1 < chain.size(); ++i)
+    spec.connections.push_back({chain[i], chain[i + 1]});
+  spec.connections.push_back({chain[bulk_first], chain[bulk_first]});
+
+  m.column_obs.clear();
+  for (const auto &faults : rounds)
+    for (const auto &f : faults)
+      m.column_obs.push_back(f.obs);
+  m.chunks = std::move(spec);
+} // end - add_chunks()
 
 std::vector<std::size_t> detectors_per_round(const std::vector<int32_t> &dr) {
   const auto max_r = *std::max_element(dr.begin(), dr.end());
@@ -579,7 +817,14 @@ std::size_t auto_thread_share(const options &opts, std::size_t instances) {
 //                 directly, while decoders with strict schema validation
 //                 reject unknown keys. Passed only to nv-fusion-decoder by
 //                 name; add other decoder names here if a future decoder also
-//                 needs temporal round information.
+//                 needs temporal round information.  Withheld when @p dr is
+//                 empty: chunks carry their rounds, and nv-fusion-decoder
+//                 prefers the param over them.
+//
+//   rolling_error_output, rolling_error_margin -- nv-fusion-decoder
+//                 construction knobs that the realtime YAML schema leaves
+//                 out, since YAML always decodes to observables. Forwarded to
+//                 nv-fusion-decoder by name.
 //
 //   num_threads -- a request of 0 ("size yourself from the machine") is
 //                 rewritten to the caller's auto_threads, since a decoder
@@ -610,7 +855,7 @@ cudaqx::heterogeneous_map build_decoder_params(
   cudaqx::heterogeneous_map p;
 
   // ── detector_round (name-gated) ────────────────────────────────────────────
-  if (name == "nv-fusion-decoder")
+  if (name == "nv-fusion-decoder" && !dr.empty())
     p.insert("detector_round", dr);
 
   // ── Schema-gated ──────────────────────────────────────────────────────────
@@ -636,6 +881,14 @@ cudaqx::heterogeneous_map build_decoder_params(
         (auto_threads > 0 && key == "num_threads" && spells_zero(kv.second))
             ? std::to_string(auto_threads)
             : kv.second;
+    if (name == "nv-fusion-decoder" && key == "rolling_error_output") {
+      p.insert(key, val == "true");
+      continue;
+    }
+    if (name == "nv-fusion-decoder" && key == "rolling_error_margin") {
+      p.insert(key, static_cast<uint64_t>(std::stoull(val)));
+      continue;
+    }
     if (!in_schema(key))
       continue;
 
@@ -766,6 +1019,16 @@ uint64_t mask_from_result(const cudaq::qec::decoder_result &r) {
   return mask;
 }
 
+// Observables flipped by the H columns an error-output result selects.
+uint64_t mask_from_errors(const cudaq::qec::decoder_result &r,
+                          const std::vector<uint64_t> &column_obs) {
+  uint64_t mask = 0;
+  for (std::size_t i = 0; i < r.result.size() && i < column_obs.size(); ++i)
+    if (cudaq::qec::convert_soft_to_hard(r.result[i]))
+      mask ^= column_obs[i];
+  return mask;
+}
+
 uint64_t mask_from_corrections(const uint8_t *corr, std::size_t n) {
   uint64_t mask = 0;
   for (std::size_t i = 0; i < n && i < 64; ++i)
@@ -790,8 +1053,9 @@ void warmup_batch(cudaq::qec::decoder &dec, const benchmark_data &data,
 // Timed batch loop for one instance.  Only the decode() call is inside the
 // stopwatch; the observable comparison that follows is bookkeeping.
 void run_batch_instance(cudaq::qec::decoder &dec, const benchmark_data &data,
-                        const options &opts, std::size_t offset,
-                        instance_result &out) {
+                        const dem_matrices &matrices, const options &opts,
+                        std::size_t offset, instance_result &out) {
+  const bool errors = opts.output == cudaq::qec::decode_result_type::errors;
   out.shots = opts.shots;
   out.shot_us.reserve(opts.shots);
   for (std::size_t i = 0; i < opts.shots; ++i) {
@@ -799,7 +1063,10 @@ void run_batch_instance(cudaq::qec::decoder &dec, const benchmark_data &data,
     const auto t0 = clock_type::now();
     auto decoded = dec.decode(data.soft_syndromes[shot]);
     out.shot_us.push_back(elapsed_us(t0, clock_type::now()));
-    if (mask_from_result(decoded) != data.observable_masks[shot])
+    const uint64_t predicted =
+        errors ? mask_from_errors(decoded, matrices.column_obs)
+               : mask_from_result(decoded);
+    if (predicted != data.observable_masks[shot])
       ++out.logical_errors;
   }
 } // end - run_batch_instance()
@@ -942,13 +1209,21 @@ measurement run_point(const options &opts, const benchmark_data &data,
   work.setup = [&](std::size_t instance) {
     std::optional<cudaq::qec::sparse_binary_matrix> D;
     if (mode == bench_mode::stream)
-      D = identity_measurement_map(data.circuit.count_detectors());
-    cudaq::qec::decoder_init inputs(
-        matrices.H, cudaq::qec::sparse_binary_matrix(matrices.O),
-        matrices.priors, std::move(D));
-    auto dec = cudaq::qec::decoder::get(
-        point.name, std::move(inputs),
-        cudaq::qec::decode_result_type::observables, dec_params);
+      D = identity_measurement_map(data.soft_syndromes.front().size());
+    auto inputs = [&] {
+      if (!matrices.chunks)
+        return cudaq::qec::decoder_init(
+            matrices.H, cudaq::qec::sparse_binary_matrix(matrices.O),
+            matrices.priors, std::move(D));
+      return cudaq::qec::decoder_needs_model_matrices(
+                 point.name, cudaq::qec::decoder_model_source::dem_chunks)
+                 ? cudaq::qec::decoder_init::from_dem_chunks_closed(
+                       *matrices.chunks, std::move(D))
+                 : cudaq::qec::decoder_init::from_dem_chunks(*matrices.chunks,
+                                                             std::move(D));
+    }();
+    auto dec = cudaq::qec::decoder::get(point.name, std::move(inputs),
+                                        opts.output, dec_params);
     // Stamp the sweep's id on the decoder so any [DecoderStats] line it logs
     // carries the same ID the table rows report.  Every instance of a point
     // shares that id, matching the one pooled row the point produces.
@@ -968,7 +1243,8 @@ measurement run_point(const options &opts, const benchmark_data &data,
       run_stream_instance(*decoders[instance], data, opts, round_widths, offset,
                           out);
     else
-      run_batch_instance(*decoders[instance], data, opts, offset, out);
+      run_batch_instance(*decoders[instance], data, matrices, opts, offset,
+                         out);
   };
 
   const instance_pool_result pool =
@@ -1001,7 +1277,7 @@ constexpr int col_w_ler = 12;
 // the + 2; deriving the total keeps it correct as columns come and go.
 constexpr int table_width =
     col_w_id + col_w_decoder + 2 + col_w_d + col_w_rounds + col_w_instances +
-    col_w_shots + col_w_noise + 3 * col_w_lat + col_w_tput + col_w_ler;
+    col_w_shots + col_w_noise + 5 * col_w_lat + col_w_tput + col_w_ler;
 
 // The logical error rate divides by the shots of every instance, so a row must
 // carry the total alongside the per-instance count.
@@ -1060,8 +1336,9 @@ void print_table_header(const std::string &title, const std::string &lat_col) {
             << std::setw(col_w_d) << "d" << std::setw(col_w_rounds) << "rounds"
             << std::setw(col_w_instances) << "instances"
             << std::setw(col_w_shots) << "shots/inst" << std::setw(col_w_noise)
-            << "noise" << std::setw(col_w_lat) << (lat_col + " p50")
-            << std::setw(col_w_lat) << "p90" << std::setw(col_w_lat) << "p99"
+            << "noise" << std::setw(col_w_lat) << (lat_col + " min")
+            << std::setw(col_w_lat) << "p50" << std::setw(col_w_lat) << "p90"
+            << std::setw(col_w_lat) << "p99" << std::setw(col_w_lat) << "max"
             << std::setw(col_w_tput) << "rounds/s" << std::setw(col_w_ler)
             << "LER"
             << "\n";
@@ -1078,10 +1355,12 @@ void print_table_row(const measurement &row, bool use_tail) {
             << std::setw(col_w_shots) << row.shots << std::setw(col_w_noise)
             << std::scientific << std::setprecision(2) << row.noise
             << std::fixed << std::setprecision(2) << std::setw(col_w_lat)
-            << lat.p50 << std::setw(col_w_lat) << lat.p90
-            << std::setw(col_w_lat) << lat.p99 << std::setprecision(0)
-            << std::setw(col_w_tput) << row.throughput << std::setprecision(4)
-            << std::setw(col_w_ler) << logical_error_rate(row) << "\n";
+            << lat.min << std::setw(col_w_lat) << lat.p50
+            << std::setw(col_w_lat) << lat.p90 << std::setw(col_w_lat)
+            << lat.p99 << std::setw(col_w_lat) << lat.max
+            << std::setprecision(0) << std::setw(col_w_tput) << row.throughput
+            << std::setprecision(4) << std::setw(col_w_ler)
+            << logical_error_rate(row) << "\n";
 }
 
 void print_csv_row(const std::string &mode, const measurement &row) {
@@ -1090,9 +1369,11 @@ void print_csv_row(const std::string &mode, const measurement &row) {
             << "," << row.instances << "," << row.shots << ","
             << row.total_shots << "," << std::scientific << std::setprecision(2)
             << row.noise << "," << std::fixed << std::setprecision(3)
-            << row.latency.p50 << "," << row.latency.p90 << ","
-            << row.latency.p99 << "," << row.tail.p50 << "," << row.tail.p99
-            << "," << std::setprecision(1) << row.throughput << ","
+            << row.latency.min << "," << row.latency.p50 << ","
+            << row.latency.p90 << "," << row.latency.p99 << ","
+            << row.latency.max << "," << row.tail.min << "," << row.tail.p50
+            << "," << row.tail.p99 << "," << row.tail.max << ","
+            << std::setprecision(1) << row.throughput << ","
             << std::setprecision(4) << logical_error_rate(row) << "\n";
 }
 
@@ -1112,16 +1393,20 @@ int main(int argc, char **argv) {
             << "decoders:  ";
   for (std::size_t i = 0; i < opts.decoders.size(); ++i)
     std::cout << (i ? ", " : "") << "[" << i << "] " << opts.decoders[i];
-  std::cout << "\n"
-            << "round pacing="
-            << (opts.round_interval.count() > 0
-                    ? std::to_string(
-                          static_cast<double>(opts.round_interval.count()) /
-                          1e3) +
-                          " us per round"
-                    : std::string("none"))
-            << "  output=observables\n"
-            << "instances: ";
+  std::cout
+      << "\n"
+      << "round pacing="
+      << (opts.round_interval.count() > 0
+              ? std::to_string(
+                    static_cast<double>(opts.round_interval.count()) / 1e3) +
+                    " us per round"
+              : std::string("none"))
+      << "  output="
+      << (opts.output == cudaq::qec::decode_result_type::errors ? "errors"
+                                                                : "observables")
+      << "  source="
+      << (opts.source == model_source::chunks ? "chunks" : "matrices") << "\n"
+      << "instances: ";
   for (std::size_t i = 0; i < opts.instances_list.size(); ++i)
     std::cout << (i ? ", " : "") << opts.instances_list[i];
   std::cout << "  pinning="
@@ -1159,6 +1444,38 @@ int main(int argc, char **argv) {
 
   // Accumulate all rows first so each mode's table is printed contiguously.
   std::vector<measurement> batch_rows, stream_rows;
+  const std::size_t mode_count = static_cast<std::size_t>(opts.run_batch) +
+                                 static_cast<std::size_t>(opts.run_stream);
+  const std::size_t rounds_count =
+      opts.rounds_list.empty() ? 1 : opts.rounds_list.size();
+  const std::size_t total_points = opts.distances.size() * rounds_count *
+                                   opts.noises.size() * opts.decoders.size() *
+                                   opts.instances_list.size() * mode_count;
+  std::size_t point_number = 0;
+
+  // Keep stdout stable for tables and CSV consumers while making long sweeps
+  // visibly advance on stderr. Each point includes construction and warmup, so
+  // announce it before run_point() rather than only printing after completion.
+  const auto run_and_record =
+      [&](const benchmark_data &data, const dem_matrices &matrices,
+          const cudaqx::heterogeneous_map &dec_params,
+          const std::vector<std::size_t> &round_widths, bench_mode mode,
+          const sweep_point &point, std::vector<measurement> &rows) {
+        const char *mode_name = mode == bench_mode::batch ? "batch" : "stream";
+        ++point_number;
+        std::cerr << "[" << point_number << "/" << total_points << "] running "
+                  << mode_name << " " << point.name << " d=" << point.distance
+                  << " rounds=" << point.rounds << " noise=" << point.noise
+                  << " instances=" << point.instances << " ..." << std::flush;
+        const auto started = clock_type::now();
+        rows.push_back(run_point(opts, data, matrices, dec_params, round_widths,
+                                 mode, point));
+        const double elapsed_seconds =
+            std::chrono::duration<double>(clock_type::now() - started).count();
+        std::cerr << " done (" << std::fixed << std::setprecision(2)
+                  << elapsed_seconds << " s)\n"
+                  << std::defaultfloat;
+      }; // end - run_and_record()
 
   // Outer sweep: distances × rounds × noises.
   for (const std::size_t distance : opts.distances) {
@@ -1176,8 +1493,14 @@ int main(int argc, char **argv) {
       for (const double noise : opts.noises) {
         auto data = generate_data(opts, distance, rounds, noise);
         auto matrices = make_matrices(data.dem);
-        const auto dr = detector_round_map(data.circuit);
+        auto dr = detector_round_map(data.circuit);
+        if (opts.source == model_source::chunks) {
+          pad_rounds(matrices, data, dr);
+          add_chunks(matrices, dr);
+        }
         const auto round_widths = detectors_per_round(dr);
+        const std::vector<int32_t> param_dr =
+            matrices.chunks ? std::vector<int32_t>{} : dr;
 
         for (int id = 0; id < static_cast<int>(opts.decoders.size()); ++id) {
           const auto &name = opts.decoders[static_cast<std::size_t>(id)];
@@ -1187,9 +1510,9 @@ int main(int argc, char **argv) {
             for (const std::size_t instances : opts.instances_list) {
               // Rebuilt per row because a machine-sized thread request
               // resolves against this row's instance count.
-              const cudaqx::heterogeneous_map dec_params =
-                  build_decoder_params(name, dr, block_leaf, opts.extra_params,
-                                       auto_thread_share(opts, instances));
+              const cudaqx::heterogeneous_map dec_params = build_decoder_params(
+                  name, param_dr, block_leaf, opts.extra_params,
+                  auto_thread_share(opts, instances));
               sweep_point point;
               point.decoder_id = id;
               point.name = name;
@@ -1199,13 +1522,11 @@ int main(int argc, char **argv) {
               point.instances = instances;
 
               if (opts.run_batch)
-                batch_rows.push_back(run_point(opts, data, matrices, dec_params,
-                                               round_widths, bench_mode::batch,
-                                               point));
+                run_and_record(data, matrices, dec_params, round_widths,
+                               bench_mode::batch, point, batch_rows);
               if (opts.run_stream)
-                stream_rows.push_back(run_point(opts, data, matrices,
-                                                dec_params, round_widths,
-                                                bench_mode::stream, point));
+                run_and_record(data, matrices, dec_params, round_widths,
+                               bench_mode::stream, point, stream_rows);
             } // end - for(instances)
           } catch (const std::exception &e) {
             std::cerr << "error: decoder [" << id << "] " << name
@@ -1239,7 +1560,8 @@ int main(int argc, char **argv) {
   if (opts.emit_csv) {
     std::cout << "csv,mode,id,decoder,d,rounds,det_rounds,instances,shots,"
                  "total_shots,noise,"
-                 "p50,p90,p99,tail_p50,tail_p99,rounds_s,ler\n";
+                 "latency_min,p50,p90,p99,latency_max,tail_min,tail_p50,"
+                 "tail_p99,tail_max,rounds_s,ler\n";
     for (const auto &row : batch_rows)
       print_csv_row("batch", row);
     for (const auto &row : stream_rows)
