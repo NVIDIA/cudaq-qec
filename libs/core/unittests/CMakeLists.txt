@@ -31,8 +31,14 @@ include(GoogleTest)
 
 # ==============================================================================
 
+add_executable(test_tear_down_helper test_tear_down_helper.cpp)
+target_link_libraries(test_tear_down_helper PRIVATE cudaqx-core)
+
 add_executable(test_core test_core.cpp)
 target_link_libraries(test_core PRIVATE GTest::gtest_main cudaqx-core)
-add_dependencies(CUDAQXCoreUnitTests test_core)
+target_compile_definitions(test_core PRIVATE
+  CUDAQX_TEAR_DOWN_HELPER="$<TARGET_FILE:test_tear_down_helper>")
+add_dependencies(test_core test_tear_down_helper)
+add_dependencies(CUDAQXCoreUnitTests test_core test_tear_down_helper)
 gtest_discover_tests(test_core)
 
