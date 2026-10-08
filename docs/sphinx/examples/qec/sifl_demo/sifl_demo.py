@@ -157,9 +157,11 @@ with tempfile.TemporaryDirectory() as dem_dir:
             r for r in result.records if r.op == pb.operation.get_corrections
         ]
         assert all(r.read_completed for r in reads)
-        # Decode time runs from a shot's data readout to its correction.
+        # Decode time runs from dispatching a shot's data readout to its
+        # correction, excluding the source's time preparing the readout.
         decode_us = sum(
-            (g.return_ns - e.call_ns) / 1e3 for e, g in zip(readouts, reads))
+            (g.return_ns - result.request_timings(e.event_index)[0][1]) / 1e3
+            for e, g in zip(readouts, reads))
         print(f"  T = {period_us:>4g} us  decode time per round "
               f"{decode_us / sum(rounds):5.2f} us  {rounds}")
 # [End Documentation]

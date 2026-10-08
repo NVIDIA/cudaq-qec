@@ -28,8 +28,9 @@ From ``examples/qec/sifl_demo``, with that install's Python environment set up:
 
 The script builds the plugin, runs the demo, and removes the plugin on exit.
 ``--help`` lists the options. For each cadence it prints the decode time per
-round (the total time from each shot's data readout to its correction, divided
-by the total rounds streamed) and the rounds streamed per shot:
+round (the total time from dispatching each shot's data readout to its
+correction, divided by the total rounds streamed) and the rounds streamed per
+shot:
 
 .. code-block:: text
 
