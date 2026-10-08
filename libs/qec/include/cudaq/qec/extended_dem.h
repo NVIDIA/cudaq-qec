@@ -715,6 +715,10 @@ struct chunked_observable_map {
   ///
   /// @param num_columns Error columns the caller holds; the walk stops
   ///   consulting \p is_set past them.
+  /// @param is_set Called as `is_set(column)`; true when that error column is
+  ///   set in the frame being projected.
+  /// @param on_flip Called as `on_flip(column, observable)` once per
+  ///   observable a set column flips.
   template <typename IsSetFn, typename OnFlipFn>
   void for_each_flip(std::size_t num_columns, IsSetFn &&is_set,
                      OnFlipFn &&on_flip) const {

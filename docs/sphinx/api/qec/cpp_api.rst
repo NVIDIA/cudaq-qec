@@ -136,9 +136,26 @@ Streaming decoder maps
 .. doxygenfunction:: cudaq::qec::dem_chunk_rounds
 .. doxygenfunction:: cudaq::qec::dem_chunks_to_rounds
 .. doxygenfunction:: cudaq::qec::dem_chunks_to_detector_round
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse(const std::vector<extended_dem> &, seam_id, seam_id)
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse(const dem_chunks_spec &)
+.. doxygenfunction:: cudaq::qec::dem_chunks_measurement_count
 .. doxygenfunction:: cudaq::qec::dem_chunks_to_o_sparse
 .. doxygenfunction:: cudaq::qec::dem_chunks_to_pcm
+
+Compact chunk forms
+-------------------
+
+.. doxygenvariable:: cudaq::qec::compact_chain_repeating_visits
+
+.. doxygenstruct:: cudaq::qec::compact_chain
+    :members:
+
+.. doxygenstruct:: cudaq::qec::chunked_observable_map
+    :members:
+
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_compact_chain
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_chunked(const std::vector<extended_dem> &, std::size_t, std::size_t, std::uint64_t)
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_chunked(const dem_chunks_spec &)
 
 .. _dem_sampling_cpp_api:
 
@@ -177,6 +194,9 @@ Decoder Interfaces
 
 .. doxygenclass:: cudaq::qec::decoder_init
     :members:
+
+.. doxygenfunction:: cudaq::qec::register_decoder_native_model_source
+.. doxygenfunction:: cudaq::qec::decoder_needs_model_matrices
 
 .. doxygenfunction:: cudaq::qec::d_sparse(const cudaq::M2DSparseMatrix &)
 

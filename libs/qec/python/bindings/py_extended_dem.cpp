@@ -271,8 +271,8 @@ void bindExtendedDem(nb::module_ &mod) {
               "convention even though rows are present.")
       .def("measurements_of", &dem_chunks_spec::measurements_of,
            nb::arg("phase"),
-           "Return the measurement count of the phase's round: its\n"
-           "num_measurements, else measurements_per_round.\n"
+           "Return the measurement count of the phase's round, which is its\n"
+           "num_measurements when set and measurements_per_round otherwise.\n"
            "Raises ValueError if neither is set.")
       .def("has_D_sparse", &dem_chunks_spec::has_D_sparse,
            "True when the phases supply D rather than leaving\n"
