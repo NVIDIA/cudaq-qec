@@ -60,5 +60,6 @@ See Also
 
 * :ref:`Pre-built QEC Decoders <prebuilt_qec_decoders>` — decoders available for realtime use
 * :doc:`Realtime Decoding examples </examples_rst/qec/realtime_decoding>` — runnable end-to-end examples
+* :doc:`Playback Emulator </examples_rst/qec/playback_emulator>` — replay timed decoder calls without a QPU
 * :ref:`realtime_pipeline_api` — Realtime Pipeline C++ API (experimental)
 * :ref:`C++ realtime decoding API <cpp_realtime_decoding_api>` and :ref:`Python realtime decoding API <python_realtime_decoding_api>`
