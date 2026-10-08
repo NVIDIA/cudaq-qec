@@ -79,11 +79,12 @@ TEST(Analyzer, AnEmptyResultProducesTheHeaderAndNothingElse) {
   ASSERT_FALSE(csv.empty());
   EXPECT_EQ(std::count(csv.begin(), csv.end(), '\n'), 1);
   const auto header = columns_of(lines_of(csv)[0]);
-  for (const char *col : {"event_index", "decoder_id", "op", "deadline_ns",
-                          "call_ns", "return_ns", "status", "rounds_streamed",
-                          "read_completed", "syndrome_bits", "correction_bits",
-                          "correction_mismatch", "request_ids", "dispatched",
-                          "request_dispatch_ns", "request_return_ns"})
+  for (const char *col :
+       {"event_index", "decoder_id", "op", "deadline_ns", "call_ns",
+        "return_ns", "status", "rounds_streamed", "read_completed",
+        "syndrome_bits", "correction_bits", "correction_mismatch",
+        "request_ids", "dispatched", "request_dispatch_ns", "request_return_ns",
+        "request_status"})
     EXPECT_NE(std::find(header.begin(), header.end(), col), header.end())
         << "missing column " << col;
 }
@@ -105,6 +106,7 @@ TEST(Analyzer, RecordFieldsSurviveIntoTheCsvRow) {
   EXPECT_EQ(column("decoder_id"), "3");
   EXPECT_EQ(column("op"), "get_corrections");
   EXPECT_EQ(column("request_ids"), "7");
+  EXPECT_EQ(column("request_status"), "0");
 
   // The ostream overload has to agree with the string one exactly, or a
   // report written to a file would differ from the same report in memory.
@@ -146,7 +148,7 @@ std::vector<std::string> csv_lines(const std::string &csv) {
   return lines;
 }
 
-constexpr std::size_t kNumColumns = 16;
+constexpr std::size_t kNumColumns = 17;
 
 // Columns these tests assert on, by position in write_csv()'s header.
 constexpr std::size_t kColOp = 2;
