@@ -31,6 +31,30 @@ using float_t = CUDAQX_QEC_FLOAT_TYPE;
 using float_t = double;
 #endif
 
+/// @brief Declare that the decoder registered under `decoder_name` reads
+/// `source` natively, so its matrices need not be built.
+///
+/// Declare only a source whose matrices are too costly to build
+/// unconditionally -- a chunked DEM, whose closure grows with the round
+/// count. A decoder reading a source that projects cheaply, as chromobius
+/// does, declares nothing. Call from the static initializer that registers
+/// the decoder, under the same name; declarations accumulate and are never
+/// removed.
+__attribute__((visibility("default"))) void
+register_decoder_native_model_source(std::string decoder_name,
+                                     decoder_model_source source);
+
+/// @brief Whether to build H, O and the error rates for `decoder_name` when
+/// its model comes from `source`.
+///
+/// The type-level counterpart of `decoder_init::has_matrices()`, answered
+/// before any handle exists. True unless the decoder declared it reads
+/// `source` natively, so an unknown name is given matrices. Warns once on a
+/// declaration naming no registered decoder.
+__attribute__((visibility("default"))) bool
+decoder_needs_model_matrices(const std::string &decoder_name,
+                             decoder_model_source source);
+
 /// @brief The primary result basis requested from a decoder.
 enum class decode_result_type : std::uint8_t {
   errors,      ///< Primary result is an error frame.

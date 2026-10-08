@@ -9,6 +9,7 @@
 #include "realtime_decoding.h"
 #include "../hardware_guards.h"
 #include "cudaq/qec/decoder.h"
+#include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/logger.h"
 #include "cudaq/qec/pcm_utils.h"
@@ -82,10 +83,46 @@ cudaqx::heterogeneous_map prepare_decoder_params(
 
 namespace {
 
-/// Build D in GF(2)-canonical form from the flat -1-terminated encoding. A
-/// repeated index in a row cancels under the realtime detector XOR, so
-/// canonicalizing here puts that rule in the model rather than leaving each
-/// consumer to interpret duplicates its own way.
+/// Build D in GF(2)-canonical form, one row per detector. A repeated index in a
+/// row cancels under the realtime detector XOR, so canonicalizing here puts
+/// that rule in the model rather than leaving each consumer to interpret
+/// duplicates its own way.
+/// \p declared_width, when given, is the count the model declares rather than
+/// one inferred from the rows: a round's trailing measurements may be read by
+/// no detector, leaving the decoder expecting a short stream.
+cudaq::qec::sparse_binary_matrix canonical_measurement_to_detectors(
+    const std::vector<std::vector<std::uint32_t>> &detector_rows,
+    std::optional<std::uint64_t> declared_width = std::nullopt) {
+  // Width is taken before cancellation, so a trailing measurement referenced
+  // only by a cancelling pair still counts toward the per-decode width.
+  std::uint32_t num_measurements = 0;
+  for (const auto &r : detector_rows)
+    for (auto column : r)
+      num_measurements = std::max(num_measurements, column + 1);
+
+  if (declared_width) {
+    if (*declared_width > std::numeric_limits<std::uint32_t>::max())
+      throw std::runtime_error(
+          fmt::format("declared measurement count {} exceeds uint32_t max",
+                      *declared_width));
+    // A declaration narrower than the rows is not a width, it is a
+    // contradiction: some detector reads a measurement the stream never
+    // carries.
+    if (*declared_width < num_measurements)
+      throw std::runtime_error(fmt::format(
+          "the model declares {} measurements per shot but a detector reads "
+          "measurement index {}",
+          *declared_width, num_measurements - 1));
+    num_measurements = static_cast<std::uint32_t>(*declared_width);
+  }
+
+  return cudaq::qec::sparse_binary_matrix::from_nested_csr(
+             static_cast<std::uint32_t>(detector_rows.size()), num_measurements,
+             detector_rows)
+      .canonicalize();
+} // end - canonical_measurement_to_detectors()
+
+/// As above, from the flat -1-terminated encoding.
 cudaq::qec::sparse_binary_matrix
 canonical_measurement_to_detectors(const std::vector<std::int64_t> &d_sparse) {
   std::vector<std::vector<std::uint32_t>> detector_rows;
@@ -114,19 +151,7 @@ canonical_measurement_to_detectors(const std::vector<std::int64_t> &d_sparse) {
   }
   if (!row.empty())
     detector_rows.push_back(std::move(row));
-
-  // Width is taken before cancellation, so a trailing measurement referenced
-  // only by a cancelling pair still counts toward the per-decode width. The
-  // bound above makes column + 1 safe.
-  std::uint32_t num_measurements = 0;
-  for (const auto &r : detector_rows)
-    for (auto column : r)
-      num_measurements = std::max(num_measurements, column + 1);
-
-  return cudaq::qec::sparse_binary_matrix::from_nested_csr(
-             static_cast<std::uint32_t>(detector_rows.size()), num_measurements,
-             detector_rows)
-      .canonicalize();
+  return canonical_measurement_to_detectors(detector_rows);
 }
 
 void validate_sparse_indices(const std::vector<std::int64_t> &sparse,
@@ -149,6 +174,64 @@ void validate_detector_rows(const std::vector<std::int64_t> &d_sparse,
           fmt::format("D_sparse row is empty for decoder {}", id));
 }
 
+/// A supplied syndrome_size or block_size is only an assertion about the model
+/// named by `source`, which defines both.
+void check_declared_dimensions(
+    const cudaq::qec::decoding::config::decoder_config &config,
+    const cudaq::qec::decoder_init &inputs, const std::string &source,
+    const char *block_size_note = "") {
+  if (config.syndrome_size != 0 &&
+      config.syndrome_size != inputs.num_detectors())
+    throw std::runtime_error(fmt::format(
+        "syndrome_size ({}) does not match the detector count of {} ({})",
+        config.syndrome_size, source, inputs.num_detectors()));
+  if (config.block_size != 0 &&
+      config.block_size != inputs.num_error_mechanisms())
+    throw std::runtime_error(fmt::format(
+        "block_size ({}) does not match the error-mechanism count of {} ({}){}",
+        config.block_size, source, inputs.num_error_mechanisms(),
+        block_size_note));
+}
+
+cudaq::qec::decoder_init resolve_dem_chunks_init(
+    const cudaq::qec::decoding::config::decoder_config &config) {
+  const auto &spec = *config.dem_chunks;
+  std::vector<std::vector<std::uint32_t>> d_rows;
+  try {
+    d_rows = cudaq::qec::dem_chunks_to_d_sparse(spec);
+  } catch (const std::exception &error) {
+    throw std::runtime_error("Cannot expand dem_chunks for decoder " +
+                             std::to_string(config.id) + ": " + error.what());
+  }
+  for (const auto &row : d_rows)
+    if (row.empty())
+      throw std::runtime_error(
+          fmt::format("D_sparse row is empty for decoder {}", config.id));
+
+  const bool needs_matrices = cudaq::qec::decoder_needs_model_matrices(
+      config.type, cudaq::qec::decoder_model_source::dem_chunks);
+  std::optional<cudaq::qec::decoder_init> inputs;
+  try {
+    auto D = canonical_measurement_to_detectors(
+        d_rows, cudaq::qec::dem_chunks_measurement_count(spec));
+    inputs =
+        needs_matrices
+            ? cudaq::qec::decoder_init::from_dem_chunks_closed(spec,
+                                                               std::move(D))
+            : cudaq::qec::decoder_init::from_dem_chunks(spec, std::move(D));
+  } catch (const std::invalid_argument &error) {
+    throw std::runtime_error("Cannot close dem_chunks for decoder " +
+                             std::to_string(config.id) + ": " + error.what());
+  }
+  if (!inputs->has_observable_model())
+    throw std::runtime_error(
+        "dem_chunks for decoder " + std::to_string(config.id) +
+        " flip no observables: the decoding server constructs every decoder "
+        "for observable output, which needs an observable mapping");
+  check_declared_dimensions(config, *inputs, "dem_chunks");
+  return std::move(*inputs);
+}
+
 } // namespace
 
 cudaq::qec::decoder_init resolve_decoder_init(
@@ -160,9 +243,13 @@ cudaq::qec::decoder_init resolve_decoder_init(
         std::to_string(config_in.id) +
         "; each describes the whole DEM on its own");
 
-  // A chunk-form configuration names its model one round at a time. Expand it
-  // into the same flat construction contract used by every matrix decoder,
-  // including the per-fault priors carried only by the closed DEM.
+  // A chunk-form configuration names its model one round at a time, and stays
+  // the authoritative source: a decoder that reads chunks gets them alone, and
+  // any other gets them with their closed model.
+  if (config_in.dem_chunks.has_value() && config_in.H_sparse.empty())
+    return resolve_dem_chunks_init(config_in);
+
+  // A chunk form that already carries its expansion is the flat form.
   auto expanded_config = config_in;
   cudaq::qec::decoding::config::expand_dem_chunks(expanded_config);
   const auto &decoder_config = expanded_config;
@@ -200,23 +287,11 @@ cudaq::qec::decoder_init resolve_decoder_init(
     auto inputs = cudaq::qec::decoder_init::from_stim_dem(std::move(dem_text),
                                                           std::move(D));
 
-    // The DEM defines the detector basis; a supplied syndrome_size is only an
-    // assertion about it.
-    if (decoder_config.syndrome_size != 0 &&
-        decoder_config.syndrome_size != inputs.num_detectors())
-      throw std::runtime_error(fmt::format(
-          "syndrome_size ({}) does not match the detector count of {} ({})",
-          decoder_config.syndrome_size, decoder_config.stim_dem_path,
-          inputs.num_detectors()));
-    if (decoder_config.block_size != 0 &&
-        decoder_config.block_size != inputs.num_error_mechanisms())
-      throw std::runtime_error(fmt::format(
-          "block_size ({}) does not match the error-mechanism count of {} "
-          "({}). The derived value is the column count of the flattened matrix "
-          "projection of the DEM, which need not equal a count reported using "
-          "a different decomposition.",
-          decoder_config.block_size, decoder_config.stim_dem_path,
-          inputs.num_error_mechanisms()));
+    check_declared_dimensions(
+        decoder_config, inputs, decoder_config.stim_dem_path,
+        ". The derived value is the column count of the flattened matrix "
+        "projection of the DEM, which need not equal a count reported using a "
+        "different decomposition.");
     return inputs;
   }
 

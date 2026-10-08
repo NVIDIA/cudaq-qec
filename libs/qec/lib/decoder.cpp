@@ -9,6 +9,7 @@
 #include "cudaq/qec/decoder.h"
 #include "cuda-qx/core/library_utils.h"
 #include "hardware_guards.h"
+#include "cudaq/qec/extended_dem.h"
 #include "cudaq/qec/logger.h"
 #include "cudaq/qec/plugin_loader.h"
 #include "cudaq/qec/version.h"
@@ -19,6 +20,9 @@
 #include <dlfcn.h>
 #include <filesystem>
 #include <fmt/ranges.h>
+#include <map>
+#include <mutex>
+#include <set>
 #include <span>
 #include <vector>
 
@@ -50,6 +54,10 @@ struct decoder::rt_impl {
   /// Persistent buffers to avoid dynamic memory allocation.
   std::vector<uint8_t> persistent_detector_buffer;
   std::vector<float_t> persistent_soft_detector_buffer;
+  /// The model's observable mapping in chunk form, derived at construction
+  /// and held only when there is no O matrix to project through. Bounded by
+  /// the model's distinct phases, not by its round count.
+  std::optional<chunked_observable_map> chunk_observables;
 
   /// Detector rows paired with the number of leading msyn_buffer columns they
   /// need, i.e. one past the last column they read, sorted by that count. A
@@ -127,6 +135,12 @@ decoder::decoder(decoder_init inputs, decoder_output_request requested_output)
   }
   pimpl->persistent_detector_buffer.resize(this->syndrome_size);
   pimpl->persistent_soft_detector_buffer.resize(this->syndrome_size);
+  // Derived here, where allocating is allowed, rather than per shot -- and
+  // only when the matrix path is unavailable, since it is the faster of the
+  // two and every other source has it.
+  if (!inputs_.has_matrices() && inputs_.has_observable_model() &&
+      inputs_.has_dem_chunks())
+    pimpl->chunk_observables = dem_chunks_to_o_chunked(inputs_.dem_chunks());
   reset_decoder();
 
   // We allow detailed logging of decoder stats via the CUDAQ_QEC_DEBUG_DECODER
@@ -151,6 +165,22 @@ void decoder::project_errors_to_observables(
                              "mapping");
   if (observables_size > 0)
     std::fill(observables, observables + observables_size, float_t{0});
+
+  // No O matrix, but the chunks carry the same mapping; walking them
+  // accumulates the same parity into the caller's buffer, column-major.
+  if (pimpl->chunk_observables) {
+    pimpl->chunk_observables->for_each_flip(
+        block_size,
+        [&](std::size_t column) {
+          return convert_soft_to_hard(errors[column]) != 0;
+        },
+        [&](std::size_t, std::uint32_t observable) {
+          if (observable < observables_size)
+            observables[observable] =
+                observables[observable] != float_t{0} ? float_t{0} : float_t{1};
+        });
+    return;
+  }
 
   const auto &O = inputs_.observable_flips_matrix();
   assert(O.layout() == sparse_binary_matrix_layout::csr);
@@ -389,6 +419,15 @@ void decoder::initialize_streaming_layout(
     throw std::invalid_argument(fmt::format(
         "detector layer offsets end at {} but the model has {} detectors",
         detector_layer_offsets.back(), syndrome_size));
+  // Streaming an error frame projects through O every shot, needing either
+  // the O matrix or a chunked map. A model supplying neither cannot stream at
+  // all, so reject here -- construction state -- not from the hot path.
+  if (output_request_.primary == decode_result_type::errors &&
+      !inputs_.has_observable_model())
+    throw std::invalid_argument(
+        "streaming an error-frame decoder projects through O every shot, but "
+        "this model supplies no observable mapping; construct the decoder for "
+        "observable output, or give it a model that maps observables");
 
   pimpl->num_syndromes_per_round = num_syndromes_per_round;
   // A first-round detector layer references a single measurement per detector.
@@ -594,8 +633,17 @@ bool decoder::enqueue_syndrome(const uint8_t *syndrome,
           if (decoded_values[e])
             log_errors.push_back(e);
       // For each observable, flip its correction once for each predicted error
-      // that flips it (net parity over O_sparse[i]).
-      {
+      // that flips it (net parity over O_sparse[i]). A chunked model without
+      // its closed model reaches the same parity through its chunks.
+      if (pimpl->chunk_observables) {
+        pimpl->chunk_observables->for_each_flip(
+            decoded_values.size(),
+            [&](std::size_t column) { return decoded_values[column] != 0; },
+            [&](std::size_t, std::uint32_t observable) {
+              if (observable < num_observables)
+                flip_correction(observable);
+            });
+      } else {
         const auto &O = inputs_.observable_flips_matrix();
         const auto &ptr = O.ptr();
         const auto &indices = O.indices();
@@ -739,4 +787,85 @@ __attribute__((destructor)) void cleanup_decoder_plugins() {
   // Clean up decoder-specific plugins
   cleanup_plugins(PluginType::DECODER);
 }
+// ---------------------------------------------------------------------------
+// Type-level declaration of the model sources a decoder reads natively
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// What one decoder name declared. `checked` stops the re-check; `warned`
+/// only suppresses a repeat log line.
+struct native_model_sources {
+  std::set<decoder_model_source> sources;
+  bool checked = false;
+  bool warned = false;
+};
+
+/// Intentionally leaked, like schema_registry() and INSTANTIATE_REGISTRY: a
+/// query may arrive after static destruction would have run, and a plugin
+/// dlclose'd at exit must not take its declaration with it.
+std::map<std::string, native_model_sources> &model_source_registry() {
+  static auto *registry = new std::map<std::string, native_model_sources>();
+  return *registry;
+}
+
+std::mutex &model_source_registry_mutex() {
+  static auto *m = new std::mutex();
+  return *m;
+}
+
+/// Warn about every declaration whose name is not a registered decoder. A
+/// typo is otherwise silent: nothing queries it, and the decoder that meant
+/// to declare keeps rebuilding matrices it does not need.
+///
+/// A declaration and its decoder register in either order, so only `checked`
+/// latches; a warned name is still re-checked, and only the log line is
+/// suppressed. Called with the registry mutex held.
+void reconcile_declared_names() {
+  for (auto &[name, declared] : model_source_registry()) {
+    if (declared.checked)
+      continue;
+    if (decoder::is_registered(name)) {
+      declared.checked = true;
+      continue;
+    }
+    if (declared.warned)
+      continue;
+    CUDA_QEC_WARN("register_decoder_native_model_source() declared native "
+                  "model sources for \"{}\", which is not a registered "
+                  "decoder; check the name matches the decoder's registration",
+                  name);
+    declared.warned = true;
+  } // end - for(declaration)
+} // end - reconcile_declared_names()
+
+} // namespace
+
+// A set per name rather than a bitmask: the sources are an open enum that a
+// future compact representation extends, and a set needs no flag values kept
+// in step with the enumerators.
+void register_decoder_native_model_source(std::string decoder_name,
+                                          decoder_model_source source) {
+  std::lock_guard<std::mutex> lock(model_source_registry_mutex());
+  model_source_registry()[std::move(decoder_name)].sources.insert(source);
+}
+
+// Default true: an undeclared name gets its matrices, which is the correct
+// answer and not merely the conservative one. A decoder that reads a source
+// natively but whose matrices cost nothing to build (chromobius and its Stim
+// text) declares nothing and still reports true here.
+bool decoder_needs_model_matrices(const std::string &decoder_name,
+                                  decoder_model_source source) {
+  std::lock_guard<std::mutex> lock(model_source_registry_mutex());
+  // Querying a registered decoder means registration has happened, so a
+  // declaration still naming nothing is a mistake rather than a race.
+  if (decoder::is_registered(decoder_name))
+    reconcile_declared_names();
+  auto &registry = model_source_registry();
+  auto iter = registry.find(decoder_name);
+  if (iter == registry.end())
+    return true;
+  return iter->second.sources.count(source) == 0;
+} // end - decoder_needs_model_matrices()
+
 } // namespace cudaq::qec
