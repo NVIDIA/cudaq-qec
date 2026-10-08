@@ -631,6 +631,12 @@ dem_chunks_to_detector_round(const std::vector<extended_dem> &chunks,
 std::vector<std::vector<uint32_t>>
 dem_chunks_to_o_sparse(const std::vector<extended_dem> &chunks);
 
+/// @brief Build a canonicalized CSC parity-check matrix from chunks.
+sparse_binary_matrix
+dem_chunks_to_pcm(const std::vector<extended_dem> &chunks,
+                  seam_id from_seam = seam_name::next_round,
+                  seam_id to_seam = seam_name::prev_round);
+
 /// Rounds the compact chain gives the repeating phase. Two rather than one so
 /// the chain forms that phase's own boundary, which one visit never makes.
 inline constexpr std::uint64_t compact_chain_repeating_visits = 2;
@@ -762,11 +768,5 @@ dem_chunks_to_o_chunked(const std::vector<extended_dem> &chain,
 /// or returns is proportional to the spec's round count.
 /// @throws std::invalid_argument as dem_chunks_to_compact_chain().
 chunked_observable_map dem_chunks_to_o_chunked(const dem_chunks_spec &spec);
-
-/// @brief Build a canonicalized CSC parity-check matrix from chunks.
-sparse_binary_matrix
-dem_chunks_to_pcm(const std::vector<extended_dem> &chunks,
-                  seam_id from_seam = seam_name::next_round,
-                  seam_id to_seam = seam_name::prev_round);
 
 } // namespace cudaq::qec

@@ -89,12 +89,16 @@ struct decoder_config {
   ///     still required, while block_size and syndrome_size are optional
   ///     checked assertions.
   ///
+  /// Throughout a configuration, a `*_path` key names a file and a key without
+  /// the suffix carries its contents inline: `stim_dem_path` is read from disk,
+  /// while a node's `stim_dem` is the model text itself.
+  ///
   /// Chunk form stays authoritative: decoder construction hands the chunks to
-  /// the decoder, alone for one that declared it reads chunks natively (see
-  /// register_decoder_native_model_source())
-  /// (decoder_init::from_dem_chunks()) and with their closed model for any
-  /// other (decoder_init::from_dem_chunks_closed()). expand_dem_chunks() is the
-  /// explicit derivation of the equivalent flat form. DEM form stays
+  /// the decoder, alone for one that declared it reads chunks natively
+  /// (decoder_init::from_dem_chunks(); see
+  /// register_decoder_native_model_source()) and with their closed model for
+  /// any other (decoder_init::from_dem_chunks_closed()). expand_dem_chunks()
+  /// is the explicit derivation of the equivalent flat form. DEM form stays
   /// authoritative: the model text is what the decoder is built from.
   uint64_t block_size = 0;
   uint64_t syndrome_size = 0;
