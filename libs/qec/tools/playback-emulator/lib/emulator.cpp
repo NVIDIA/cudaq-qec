@@ -935,7 +935,7 @@ void write_csv(const run_result &result, std::ostream &out) {
   out << "event_index,decoder_id,op,deadline_ns,call_ns,return_ns,"
          "status,rounds_streamed,read_completed,"
          "syndrome_bits,correction_bits,correction_mismatch,request_ids,"
-         "dispatched,request_dispatch_ns,request_return_ns\n";
+         "dispatched,request_dispatch_ns,request_return_ns,request_status\n";
   for (const auto &r : result.records) {
     const auto [syndrome_bits, syndrome_n] =
         safe_bit_span(result.syndrome_log, r.syndrome_offset, r.syndrome_count);
@@ -955,6 +955,9 @@ void write_csv(const run_result &result, std::ostream &out) {
                     r.request_id_count)
         << ','
         << join_log(result.request_return_ns_log, r.request_id_offset,
+                    r.request_id_count)
+        << ','
+        << join_log(result.request_status_log, r.request_id_offset,
                     r.request_id_count)
         << '\n';
   }

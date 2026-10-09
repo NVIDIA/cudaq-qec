@@ -487,6 +487,11 @@ TEST(UdpBackendAdvanced, SubmitRejectsAFrameShorterThanAnRPCHeader) {
 // CUDAQ_CPU_ROCE_TEST_{CHANNEL,DAEMON}_{DEVICE,IP} (client / fake server; with
 // SoftRoCE both may be the same device and IP).
 
+TEST(UdpOptions, AZeroTimeoutIsRejectedBeforeAnyNetworkIO) {
+  EXPECT_THROW(make_udp_sessions({{0, "127.0.0.1:1"}}, /*timeout_ms=*/0),
+               std::invalid_argument);
+}
+
 TEST(CpuRoceOptions, BadRingGeometryIsRejectedBeforeAnyNetworkIO) {
   // No device needed: options are validated before the transceiver exists.
   cpu_roce_options opts;
@@ -501,8 +506,14 @@ TEST(CpuRoceOptions, BadRingGeometryIsRejectedBeforeAnyNetworkIO) {
   opts.slot_size = 256;
   opts.device.clear();
   EXPECT_THROW(make_cpu_roce_sessions(eps, opts), std::invalid_argument);
+  opts.device = "none";
+  EXPECT_THROW(make_cpu_roce_sessions(eps, opts, /*timeout_ms=*/0),
+               std::invalid_argument);
+  opts.connect_timeout_ms = 0;
+  EXPECT_THROW(make_cpu_roce_sessions(eps, opts), std::invalid_argument);
+  opts.connect_timeout_ms = 5000;
 #ifndef CUDAQ_QEC_PLAYBACK_CPU_ROCE
-  opts.device = "none"; // valid options, but the backend was not built
+  // Valid options, but the backend was not built.
   EXPECT_THROW(make_cpu_roce_sessions(eps, opts), std::runtime_error);
 #endif
 }
