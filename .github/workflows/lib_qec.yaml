@@ -270,6 +270,21 @@ jobs:
           python3 docs/sphinx/examples/qec/color_code_demo/color_code_demo.py --help
 
       # ========================================================================
+      # SIFL demo example
+      #
+      # Builds the per_round_decoder plugin against the INSTALLED SDK and runs
+      # it on the playback emulator. Stim is only installed on x86_64.
+      # ========================================================================
+      - name: Build & run sifl_demo
+        if: matrix.platform == 'amd64'
+        shell: bash
+        run: |
+          export PATH=/cudaq-install/bin:$PATH
+          export PYTHONPATH="/cudaq-install:$HOME/.cudaqx"
+          bash docs/sphinx/examples/qec/sifl_demo/run_sifl_demo.sh \
+            --shots 10 --cadences 2 50
+
+      # ========================================================================
       # Upload build artifacts for GPU tests
       # ========================================================================
       - name: Create artifact archive
