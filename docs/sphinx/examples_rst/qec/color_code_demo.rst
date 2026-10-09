@@ -1,10 +1,11 @@
-Ising Color-Code Decoder: Accuracy vs. Runtime
+Ising Color-Code Predecoder
 ==============================================
 
-This example reproduces the model card figure of the
+This example prepares and runs the 
 `Ising-Decoder-ColorCode-1-Fast <https://huggingface.co/nvidia/Ising-Decoder-ColorCode-1-Fast>`__
-neural-network predecoder. It plots the logical error rate (LER) per round
-against the decode runtime per round, for two decoders:
+neural-network predecoder using the CUDA-Q QEC realtime decoding server.
+It plots the logical error rate (LER) per round against the decode 
+runtime per round, for two configurations:
 
 - ``chromobius`` — the Chromobius color-code decoder on its own.
 - ``trt_decoder`` — the Ising predecoder, run on TensorRT, with Chromobius as
@@ -35,9 +36,9 @@ Requirements
 - Python packages: ``chromobius``, ``matplotlib``, ``tensorrt``, and the
   Ising-Decoding inference requirements
   (``code/requirements_public_inference.txt`` in its repository).
-- The model weights,
-  ``ising_decoder_color_code_1_fast_r13_v1.0.400_fp16.safetensors``, downloaded
-  from the gated model page above (for example with ``hf download``).
+- ``git``, and access to the gated model: accept its terms on the model page
+  above and authenticate the ``hf`` CLI (``hf auth login``), as for the
+  :doc:`realtime decoding demo <realtime_decoding_demo>`.
 
 Running
 -------
@@ -46,17 +47,17 @@ From any scratch directory, with the CUDA-Q QEC Python environment set up:
 
 .. code-block:: bash
 
-   /path/to/examples/qec/color_code_demo/run_color_code_demo.sh --weights <weights>
+   python3 /path/to/examples/qec/color_code_demo/color_code_demo.py
 
-The script fetches Ising-Decoding into ``./deps``, then runs the demo;
-``--help`` lists the options. For each distance, the demo writes the detector
+The demo fetches pinned versions of Ising-Decoding and the model weights into
+``./deps`` (``--weights`` uses a local copy instead); ``--help`` lists the
+options. For each distance, the demo writes the detector
 error model, exports the predecoder to ONNX, builds its TensorRT engine, and
 replays the schedule through every decoder and session. It then writes the
 results to ``results.json`` and the figure to ``color_code_demo.png``.
 
 All files go to the current directory.
 In the figure, grey is raw Chromobius and green is the Ising predecoder.
-Runs with no logical errors are left out of the figure.
 
 The example source
 ------------------

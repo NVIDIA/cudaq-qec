@@ -267,7 +267,7 @@ jobs:
         shell: bash
         run: |
           export PYTHONPATH="/cudaq-install:$HOME/.cudaqx"
-          bash docs/sphinx/examples/qec/color_code_demo/run_color_code_demo.sh --help
+          python3 docs/sphinx/examples/qec/color_code_demo/color_code_demo.py --help
 
       # ========================================================================
       # Upload build artifacts for GPU tests
