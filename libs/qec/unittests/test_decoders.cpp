@@ -598,10 +598,19 @@ TEST(ChunkedObservables, StreamingErrorFramesIsAdmittedForChunkedObservables) {
 TEST(DecoderObservableProjection,
      NoObservableModelRejectsStreamingErrorFrames) {
   using namespace cudaq::qec;
+  auto spec = rep5_chunks_spec(7);
+  const auto sized = decoder_init::from_dem_chunks(spec);
+  const auto detectors = sized.num_detectors();
+  std::vector<std::vector<std::uint32_t>> identity(detectors);
+  for (std::uint32_t row = 0; row < detectors; ++row)
+    identity[row] = {row};
+  auto D =
+      sparse_binary_matrix::from_nested_csr(detectors, detectors, identity);
   decoder_init_probe probe(
-      decoder_init::from_dem_chunks(rep5_chunks_spec(7)).without_observables());
+      decoder_init::from_dem_chunks(std::move(spec), std::move(D))
+          .without_observables());
   ASSERT_FALSE(probe.get_inputs().has_observable_model());
-  const std::vector<std::size_t> layers{probe.get_syndrome_size()};
+  const std::vector<std::size_t> layers{0, probe.get_syndrome_size()};
   EXPECT_NO_THROW(
       probe.initialize_streaming_layout(probe.get_syndrome_size(), layers));
   EXPECT_THROW(probe.enqueue_syndrome(
