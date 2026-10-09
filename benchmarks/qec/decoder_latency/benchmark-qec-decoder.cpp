@@ -84,12 +84,6 @@ using cudaq::qec::benchmark::worker_threads_per_instance;
 // ── Options
 // ───────────────────────────────────────────────────────────────────
 
-// The model form every decoder is built from.
-enum class model_source {
-  matrices, ///< H, O and priors of the whole shot
-  chunks,   ///< per-round DEM chunks and the round count
-};
-
 struct options {
   std::vector<std::size_t> distances = {5};
   // Empty rounds_list means "use distance" for each configuration.
@@ -119,7 +113,10 @@ struct options {
   // corrections either way.
   cudaq::qec::decode_result_type output =
       cudaq::qec::decode_result_type::observables;
-  model_source source = model_source::matrices;
+  // The model form every decoder is built from. `--source chunks` selects
+  // dem_chunks; the CLI keeps the shorter spelling.
+  cudaq::qec::decoder_model_source source =
+      cudaq::qec::decoder_model_source::matrices;
   bool emit_csv = false;
   std::vector<std::pair<std::string, std::string>> extra_params;
 };
@@ -305,9 +302,9 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
       }
     } else if (arg == "--source") {
       if (val == "matrices") {
-        opts.source = model_source::matrices;
+        opts.source = cudaq::qec::decoder_model_source::matrices;
       } else if (val == "chunks") {
-        opts.source = model_source::chunks;
+        opts.source = cudaq::qec::decoder_model_source::dem_chunks;
       } else {
         std::cerr << "error: --source must be matrices or chunks\n";
         exit_code = 1;
@@ -1323,8 +1320,7 @@ measurement run_point(const options &opts, const benchmark_data &data,
         return cudaq::qec::decoder_init(
             matrices.H, cudaq::qec::sparse_binary_matrix(matrices.O),
             matrices.priors, std::move(D));
-      return cudaq::qec::decoder_needs_model_matrices(
-                 point.name, cudaq::qec::decoder_model_source::dem_chunks)
+      return cudaq::qec::decoder_needs_model_matrices(point.name, opts.source)
                  ? cudaq::qec::decoder_init::from_dem_chunks_closed(
                        *matrices.chunks, std::move(D))
                  : cudaq::qec::decoder_init::from_dem_chunks(*matrices.chunks,
@@ -1501,20 +1497,24 @@ int main(int argc, char **argv) {
             << "decoders:  ";
   for (std::size_t i = 0; i < opts.decoders.size(); ++i)
     std::cout << (i ? ", " : "") << "[" << i << "] " << opts.decoders[i];
-  std::cout
-      << "\n"
-      << "round pacing="
-      << (opts.round_interval.count() > 0
-              ? std::to_string(
-                    static_cast<double>(opts.round_interval.count()) / 1e3) +
-                    " us per round"
-              : std::string("none"))
-      << "  output="
-      << (opts.output == cudaq::qec::decode_result_type::errors ? "errors"
-                                                                : "observables")
-      << "  source="
-      << (opts.source == model_source::chunks ? "chunks" : "matrices") << "\n"
-      << "instances: ";
+  std::cout << "\n"
+            << "round pacing="
+            << (opts.round_interval.count() > 0
+                    ? std::to_string(
+                          static_cast<double>(opts.round_interval.count()) /
+                          1e3) +
+                          " us per round"
+                    : std::string("none"))
+            << "  output="
+            << (opts.output == cudaq::qec::decode_result_type::errors
+                    ? "errors"
+                    : "observables")
+            << "  source="
+            << (opts.source == cudaq::qec::decoder_model_source::dem_chunks
+                    ? "chunks"
+                    : "matrices")
+            << "\n"
+            << "instances: ";
   for (std::size_t i = 0; i < opts.instances_list.size(); ++i)
     std::cout << (i ? ", " : "") << opts.instances_list[i];
   std::cout << "  pinning="
@@ -1602,7 +1602,7 @@ int main(int argc, char **argv) {
         auto data = generate_data(opts, distance, rounds, noise);
         auto matrices = make_matrices(data.dem);
         auto dr = detector_round_map(data.circuit);
-        if (opts.source == model_source::chunks) {
+        if (opts.source == cudaq::qec::decoder_model_source::dem_chunks) {
           pad_rounds(matrices, data, dr);
           add_chunks(matrices, dr);
         }
