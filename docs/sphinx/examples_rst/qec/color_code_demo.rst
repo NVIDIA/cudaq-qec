@@ -86,6 +86,13 @@ records:
 
 In the figure, grey is raw Chromobius and green is the Ising predecoder.
 
+.. image:: ../../../../assets/docs/color_code_demo.png
+   :align: center
+   :alt: Logical error rate per round versus runtime per round for raw Chromobius and the Ising predecoder, for distances 5 to 13, in process and over UDP
+
+The figure above is from a run with the default options (100,000 shots per
+distance at :math:`p = 0.001`). Points with no logical errors are not drawn.
+
 The example source
 ------------------
 
