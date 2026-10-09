@@ -267,4 +267,4 @@ ENV CUDAQX_INSTALL_DIR=/opt/nvidia/cudaqx \
     PATH=/opt/nvidia/cudaqx/bin:${PATH}
 
 WORKDIR /opt/nvidia/cudaqx/bin
-ENTRYPOINT ["/opt/nvidia/cudaqx/bin/decoding_server"]
+ENTRYPOINT ["bash", "-l"]
