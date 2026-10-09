@@ -355,15 +355,9 @@ TEST(ParserAdversarial, ArithmeticThatWouldOverflowIsRejectedNotWrapped) {
                       18446744073709551615ull);
 }
 
-TEST(ParserAdversarial, ATickNsOfZeroCollapsesEveryDeadlineToZero) {
-  // tick * 0 == 0: no overflow, every event just fires at t0. Semantically
-  // odd but not a crash -- this documents the current behaviour.
-  for (const char *text : {"0 reset\n", "500 reset\n"}) {
-    SCOPED_TRACE(text);
-    auto sched = parse(text, kTwoDecoders, /*tick_ns=*/0);
-    ASSERT_EQ(sched.events.size(), 1u);
-    EXPECT_EQ(sched.events[0].deadline_ns, 0u);
-  }
+TEST(ParserAdversarial, ATickNsOfZeroIsRejected) {
+  EXPECT_THROW(parse("0 reset\n", kTwoDecoders, /*tick_ns=*/0),
+               std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------
