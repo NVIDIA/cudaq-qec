@@ -884,6 +884,106 @@ TEST_F(TRTDecoderTest, CompositeGlobalDecoderCombinesLogicalFrame) {
   EXPECT_FLOAT_EQ(results[1].result[0], 1.0);
 }
 
+TEST_F(TRTDecoderTest, RejectsResidualOutputWithoutGlobalDecoderAtTopLevel) {
+  cudaqx::heterogeneous_map params;
+
+  params.insert("onnx_load_path", std::string("unused.onnx"));
+  params.insert("engine_output_format", std::string("residual_detectors"));
+
+  try {
+    (void)decoder::get("trt_decoder", make_identity_h(3), params);
+    FAIL() << "expected standalone residual output without a global decoder "
+              "to be rejected";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("requires global_decoder"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+TEST_F(TRTDecoderTest, RejectsUnsupportedAuxiliaryOutput) {
+  const auto H = sparse_binary_matrix::from_nested_csr(
+      1, 1, std::vector<std::vector<uint32_t>>{{0}});
+  const auto O = sparse_binary_matrix::from_nested_csr(
+      1, 1, std::vector<std::vector<uint32_t>>{{0}});
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", std::string("unused.onnx"));
+  params.insert("engine_output_format", std::string("observables"));
+  constexpr auto unsupported =
+      static_cast<decoder_auxiliary_result_type>(1u << 1);
+
+  try {
+    (void)decoder::get(
+        "trt_decoder", decoder_init(H, O),
+        decoder_output_request{decode_result_type::observables, unsupported},
+        params);
+    FAIL() << "expected unsupported auxiliary output to be rejected";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("unsupported auxiliary"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+TEST_F(TRTDecoderTest, MultiOutputPackedChecksWidth) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  const auto onnx_path = get_dynamic_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated dynamic ONNX fixture is unavailable";
+
+  const auto H = sparse_binary_matrix::from_nested_csr(
+      3, 3, std::vector<std::vector<uint32_t>>{{0}, {1}, {2}});
+  const auto O = sparse_binary_matrix::from_nested_csr(
+      1, 3, std::vector<std::vector<uint32_t>>{{0}});
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format",
+                std::string("observables_and_residual_detectors"));
+  params.insert("batch_size", std::size_t{1});
+  params.insert("use_cuda_graph", false);
+
+  // The identity fixture emits three values, but a packed model over this
+  // input must emit one observable followed by three residual detectors.
+  try {
+    (void)decoder::get("trt_decoder", decoder_init(H, O),
+                       decoder_output_request{
+                           decode_result_type::observables,
+                           decoder_auxiliary_result_type::residual_detectors},
+                       params);
+    FAIL() << "expected packed TRT output width to be rejected";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "must equal num_observables + residual detector count"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+TEST_F(TRTDecoderTest, RejectsPackedOutputWithoutGlobalDecoderAtTopLevel) {
+  const auto H = sparse_binary_matrix::from_nested_csr(
+      3, 3, std::vector<std::vector<uint32_t>>{{0}, {1}, {2}});
+  const auto O = sparse_binary_matrix::from_nested_csr(
+      1, 3, std::vector<std::vector<uint32_t>>{{0}});
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", std::string("unused.onnx"));
+  params.insert("engine_output_format",
+                std::string("observables_and_residual_detectors"));
+  params.insert("batch_size", std::size_t{1});
+  params.insert("use_cuda_graph", false);
+
+  try {
+    (void)decoder::get("trt_decoder", decoder_init(H, O),
+                       decode_result_type::observables, params);
+    FAIL() << "expected top-level packed TRT output without a global decoder "
+              "to be rejected";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("requires global_decoder"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
 TEST_F(TRTDecoderTest, CompositeGlobalDecoderReceivesCancellationToken) {
   // TensorRT inference is not interruptible, but the token handed to
   // decode()/decode_batch() must reach the global decoder unchanged.

@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "cudaq/qec/decoder.h"
+#include <stdexcept>
 
 namespace cudaq::qec {
 
@@ -19,9 +20,12 @@ class cancellation_probe_decoder : public decoder {
 
 public:
   cancellation_probe_decoder(cudaq::qec::decoder_init inputs,
-                             decode_result_type requested_output,
+                             decoder_output_request request,
                              const cudaqx::heterogeneous_map &params)
-      : decoder(std::move(inputs), requested_output) {
+      : decoder(std::move(inputs), request) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "cancellation_probe_decoder does not produce auxiliary outputs");
     if (params.get<std::string>("stop_level", "soft") == "hard")
       stop_level_ = cancellation_level::hard;
   }
@@ -60,13 +64,15 @@ public:
   }
 
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
-      cancellation_probe_decoder, static std::unique_ptr<decoder> create(
-                                      cudaq::qec::decoder_init inputs,
-                                      std::optional<decode_result_type> output,
-                                      const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<cancellation_probe_decoder>(
-            std::move(inputs), output.value_or(decode_result_type::errors),
-            params);
+      cancellation_probe_decoder,
+      static std::unique_ptr<decoder> create(
+          cudaq::qec::decoder_init inputs,
+          std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<cancellation_probe_decoder>(std::move(inputs),
+                                                            request, params);
       })
 };
 
