@@ -19,13 +19,16 @@ namespace cudaq::qec {
 class sample_decoder : public decoder {
 public:
   sample_decoder(cudaq::qec::decoder_init inputs,
-                 decode_result_type requested_output,
+                 decoder_output_request request,
                  const cudaqx::heterogeneous_map &params)
-      : decoder(std::move(inputs), requested_output) {
+      : decoder(std::move(inputs), request) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "sample_decoder does not produce auxiliary outputs");
     // This decoder computes an error frame. Producing observables requires an
     // observable mapping to project through; reject at construction rather
     // than on the first decode.
-    if (requested_output == decode_result_type::observables &&
+    if (request.primary == decode_result_type::observables &&
         !get_inputs().has_observable_model())
       throw std::invalid_argument(
           "sample_decoder was constructed for observable output but its model "
@@ -53,11 +56,12 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       sample_decoder, static std::unique_ptr<decoder> create(
                           cudaq::qec::decoder_init inputs,
-                          std::optional<decode_result_type> output,
+                          std::optional<decoder_output_request> output,
                           const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<sample_decoder>(
-            std::move(inputs), output.value_or(decode_result_type::errors),
-            params);
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<sample_decoder>(std::move(inputs), request,
+                                                params);
       })
 };
 

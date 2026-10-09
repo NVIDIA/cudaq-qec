@@ -28,6 +28,19 @@
 /// The kernel's block/syndrome size and expected correction must stay
 /// consistent with the H/O/D matrices in the config file (3-bit identity:
 /// syndrome bit 1 set -> correction bit 1 set for any sane decoder).
+///
+/// The DecodingServerHostLoop suite covers the server's --host-loop knob
+/// (threaded: today's per-ring dispatcher thread; unified: CUDA-Q's host
+/// unified loop over the provider's CPU data plane). Under unified the
+/// server passes --unified to each host ring's provider itself; mixed
+/// configurations are allowed (device_graph rings keep the provider's
+/// ring-buffer shape) and gpu_roce host rings are refused. A test-only
+/// provider (qec-test-bridge-no-dataplane) covers the refusal paths. The
+/// unified round-trip runs against the installed udp provider (CUDA-Q
+/// 0bba12df or later serves the CPU data plane), and
+///   QEC_DECODING_SERVER_HOST_LOOP_PROVIDER=/path/to/libcudaq-realtime-bridge-<x>.so
+/// runs it against another provider build instead (appended as a trailing
+/// --transport=, which overrides the default one).
 
 #include "cudaq.h"
 #include "cudaq/qec/realtime/decoding.h"
@@ -126,6 +139,9 @@ public:
   // configured by the YAML transport section instead of the command line.
   // `capture_stderr` folds the server's stderr into `captured` (used by the
   // conflict-rejection test to see the startup error).
+  // `extra_provider_args` are appended after the default transport arguments
+  // (so a later --transport= among them overrides the default one) and
+  // before --timeout=60.
   bool start(const std::string &config_file, std::string &error,
              int ready_timeout_ms = 15000, bool transport_cli = true,
              bool capture_stderr = false,
@@ -350,13 +366,10 @@ std::vector<std::string> channel_arguments(std::uint16_t server_port) {
           "udp-port=" + std::to_string(server_port)};
 }
 
-// Runs the full two-process round-trip against a server configured with
-// `config_file`. Each invocation spawns a fresh server on an ephemeral port.
-void run_two_process_decode_test(const std::string &config_file) {
-  ServerProcess server;
-  std::string error;
-  ASSERT_TRUE(server.start(config_file, error)) << error;
-
+// Client side of the two-process round-trip against an already-started
+// server: bring up the realtime runtime on the server's channel, run the
+// kernel once, and prove the decode happened on the far side of the wire.
+void run_two_process_client_flow(ServerProcess &server) {
   std::vector<std::string> args = {"test_decoding_server"};
   for (auto &arg : channel_arguments(server.port))
     args.push_back(std::move(arg));
@@ -378,6 +391,15 @@ void run_two_process_decode_test(const std::string &config_file) {
   // calls: reset_decoder, enqueue_syndromes, get_corrections.
   const std::int64_t dispatched = server.stopAndGetDispatchCount();
   EXPECT_GE(dispatched, 3) << "server output:\n" << server.captured;
+}
+
+// Runs the full two-process round-trip against a server configured with
+// `config_file`. Each invocation spawns a fresh server on an ephemeral port.
+void run_two_process_decode_test(const std::string &config_file) {
+  ServerProcess server;
+  std::string error;
+  ASSERT_TRUE(server.start(config_file, error)) << error;
+  run_two_process_client_flow(server);
 }
 
 TEST(DecodingServerTwoProcess, TwoProcessHostDispatch) {
@@ -887,4 +909,272 @@ TEST(DecodingServerTwoProcess, TwoProcessPerDecoderRings) {
                                           << server.captured;
   EXPECT_GE(server.ring_dispatched[1], 3) << "ring 1 idle; server output:\n"
                                           << server.captured;
+}
+
+// ---------------------------------------------------------------------------
+// --host-loop=threaded|unified: how the server consumes each host-dispatch
+// ring. `threaded` (the default) is the per-ring dispatcher thread over the
+// provider's RING_BUFFER context; `unified` runs CUDA-Q's host unified loop
+// over the provider's CPU data plane -- the server appends --unified to each
+// host ring's provider arguments itself and probes for the plane before
+// READY. device_graph rings are untouched (their consumer needs the
+// provider's ring-buffer shape), so mixed configurations are allowed, while
+// an all-device_graph config has no host ring and refuses the flag;
+// gpu_roce host rings are refused (gpu_roce serves no CPU data plane). The
+// selected loop is reported on the server's "Configured N decoder(s); ...;
+// transport: X" info line, and every refusal happens before READY so it is
+// visible in the captured output.
+// ---------------------------------------------------------------------------
+
+// The unified host loop end to end: the server is asked for
+// --host-loop=unified alone -- it passes --unified to the udp provider
+// itself, which this test proves -- and the decode round-trips through
+// CUDA-Q's host unified loop. The installed udp provider serves the plane at
+// the repository pin, so this test runs for real in CI;
+// QEC_DECODING_SERVER_HOST_LOOP_PROVIDER substitutes another provider build.
+TEST(DecodingServerHostLoop, UnifiedTwoProcess) {
+  if (env_or("QEC_DECODING_SERVER_TRANSPORT", "udp") != "udp")
+    GTEST_SKIP() << "unified host loop exercised over udp only";
+
+  // No --unified here: the server adds it to the provider's arguments.
+  std::vector<std::string> server_args = {"--host-loop=unified"};
+  // Appended last so it overrides ServerProcess's default --transport= (the
+  // server keeps the last --transport= it parses).
+  const std::string provider =
+      env_or("QEC_DECODING_SERVER_HOST_LOOP_PROVIDER", "");
+  if (!provider.empty())
+    server_args.push_back("--transport=" + provider);
+
+  ServerProcess server;
+  std::string error;
+  const bool started = server.start("decoding_server_config.yaml", error, 15000,
+                                    /*transport_cli=*/true,
+                                    /*capture_stderr=*/true, server_args);
+  ASSERT_TRUE(started) << error;
+
+  run_two_process_client_flow(server);
+  EXPECT_NE(server.captured.find("host loop: unified"), std::string::npos)
+      << server.captured;
+}
+
+// The default loop selected explicitly: the same round-trip as the implicit
+// form covered by the DecodingServerTwoProcess tests, and the info line
+// reports it.
+TEST(DecodingServerHostLoop, ThreadedExplicit) {
+  ServerProcess server;
+  std::string error;
+  ASSERT_TRUE(server.start("decoding_server_config.yaml", error, 15000,
+                           /*transport_cli=*/true, /*capture_stderr=*/true,
+                           {"--host-loop=threaded"}))
+      << error;
+  run_two_process_client_flow(server);
+  EXPECT_NE(server.captured.find("host loop: threaded"), std::string::npos)
+      << server.captured;
+}
+
+// A value outside threaded|unified is a server command-line error, not a
+// provider argument: the server must reject it itself rather than forward
+// it to a provider that would silently ignore it.
+TEST(DecodingServerHostLoop, InvalidValueRejected) {
+  ServerProcess server;
+  std::string error;
+  EXPECT_FALSE(server.start("decoding_server_config.yaml", error, 8000,
+                            /*transport_cli=*/true, /*capture_stderr=*/true,
+                            {"--host-loop=bogus"}))
+      << "server unexpectedly reached READY: " << server.captured;
+  EXPECT_NE(0, server.exitCode()) << server.captured;
+  EXPECT_NE(server.captured.find("invalid --host-loop value"),
+            std::string::npos)
+      << server.captured;
+}
+
+// --unified / --forward are provider mode flags. A device_graph ring is
+// consumed by the GPU scheduler over the provider's ring-buffer (3-kernel)
+// shape, which those flags switch away from, so they are refused in the
+// device_graph transport arguments. Validation precedes decoder construction
+// and provider loading, so this needs neither a plugin nor a GPU.
+TEST(DecodingServerHostLoop, DeviceGraphRejectsTransportModeFlag) {
+  const std::string config_path =
+      ::testing::TempDir() + "/decoding_server_device_graph_mode_flag.yaml";
+  {
+    std::ofstream config_file(config_path);
+    config_file << "transport:\n"
+                << "  provider: udp\n"
+                << "  device_graph:\n"
+                << "    args: [--unified]\n"
+                << "decoders:\n"
+                << "  - id: 0\n"
+                << "    type: single_error_lut\n"
+                << "    dispatch: device_graph\n"
+                << "    block_size: 3\n"
+                << "    syndrome_size: 3\n"
+                << "    H_sparse: [0, -1, 1, -1, 2, -1]\n"
+                << "    O_sparse: [0, -1, 1, -1, 2, -1]\n"
+                << "    D_sparse: [0, -1, 1, -1, 2, -1]\n";
+  }
+
+  ServerProcess server;
+  std::string error;
+  EXPECT_FALSE(server.start(config_path, error, 8000,
+                            /*transport_cli=*/false,
+                            /*capture_stderr=*/true))
+      << "server unexpectedly reached READY: " << server.captured;
+  EXPECT_NE(0, server.exitCode()) << server.captured;
+  EXPECT_NE(server.captured.find("device_graph transport arguments must not "
+                                 "set --unified or --forward"),
+            std::string::npos)
+      << server.captured;
+}
+
+// --host-loop drives host rings only. An all-device_graph config has none
+// (the standalone device-graph path never reads the flag), so asking for the
+// unified loop there is refused instead of being reported as active.
+// Validation precedes decoder construction and provider loading, so this
+// needs neither a plugin nor a GPU.
+TEST(DecodingServerHostLoop, UnifiedRejectsAllDeviceGraph) {
+  const std::string config_path =
+      ::testing::TempDir() + "/decoding_server_all_device_graph_unified.yaml";
+  {
+    std::ofstream config_file(config_path);
+    config_file << "transport:\n"
+                << "  provider: udp\n"
+                << "decoders:\n"
+                << "  - id: 0\n"
+                << "    type: single_error_lut\n"
+                << "    dispatch: device_graph\n"
+                << "    block_size: 3\n"
+                << "    syndrome_size: 3\n"
+                << "    H_sparse: [0, -1, 1, -1, 2, -1]\n"
+                << "    O_sparse: [0, -1, 1, -1, 2, -1]\n"
+                << "    D_sparse: [0, -1, 1, -1, 2, -1]\n";
+  }
+
+  ServerProcess server;
+  std::string error;
+  EXPECT_FALSE(server.start(config_path, error, 8000,
+                            /*transport_cli=*/false,
+                            /*capture_stderr=*/true, {"--host-loop=unified"}))
+      << "server unexpectedly reached READY: " << server.captured;
+  EXPECT_NE(0, server.exitCode()) << server.captured;
+  EXPECT_NE(server.captured.find("--host-loop=unified has no host ring to "
+                                 "drive"),
+            std::string::npos)
+      << server.captured;
+}
+
+// gpu_roce serves no CPU data plane (its own --unified selects a GPU
+// kernel), so a gpu_roce host ring cannot be driven by the unified host
+// loop; the server refuses the combination up front with a specific error.
+// Validation precedes decoder construction and provider loading, so this
+// needs neither the gpu_roce plugin nor a GPU.
+TEST(DecodingServerHostLoop, HostGpuRoceRejectsUnifiedHostLoop) {
+  const std::string config_path =
+      ::testing::TempDir() + "/decoding_server_host_gpu_roce_unified.yaml";
+  {
+    std::ofstream config_file(config_path);
+    config_file << "transport:\n"
+                << "  provider: gpu_roce\n"
+                << "decoders:\n"
+                << "  - id: 0\n"
+                << "    type: single_error_lut\n"
+                << "    cuda_device_id: 1\n"
+                << "    block_size: 3\n"
+                << "    syndrome_size: 3\n"
+                << "    H_sparse: [0, -1, 1, -1, 2, -1]\n"
+                << "    O_sparse: [0, -1, 1, -1, 2, -1]\n"
+                << "    D_sparse: [0, -1, 1, -1, 2, -1]\n";
+  }
+
+  ServerProcess server;
+  std::string error;
+  EXPECT_FALSE(server.start(config_path, error, 8000,
+                            /*transport_cli=*/false,
+                            /*capture_stderr=*/true, {"--host-loop=unified"}))
+      << "server unexpectedly reached READY: " << server.captured;
+  EXPECT_NE(0, server.exitCode()) << server.captured;
+  EXPECT_NE(server.captured.find("gpu_roce serves no CPU data plane"),
+            std::string::npos)
+      << server.captured;
+}
+
+// A gpu_roce host ring is consumed through the provider's ring-buffer
+// (3-kernel) shape, so --unified / --forward in its transport arguments
+// would hand the server a ring it cannot consume; they are refused at
+// startup. Validation precedes decoder construction and provider loading,
+// so this needs neither the gpu_roce plugin nor a GPU.
+TEST(DecodingServerHostLoop, HostGpuRoceRejectsTransportModeFlag) {
+  const std::string config_path =
+      ::testing::TempDir() + "/decoding_server_host_gpu_roce_mode_flag.yaml";
+  {
+    std::ofstream config_file(config_path);
+    config_file << "transport:\n"
+                << "  provider: gpu_roce\n"
+                << "  args: [--forward]\n"
+                << "decoders:\n"
+                << "  - id: 0\n"
+                << "    type: single_error_lut\n"
+                << "    cuda_device_id: 1\n"
+                << "    block_size: 3\n"
+                << "    syndrome_size: 3\n"
+                << "    H_sparse: [0, -1, 1, -1, 2, -1]\n"
+                << "    O_sparse: [0, -1, 1, -1, 2, -1]\n"
+                << "    D_sparse: [0, -1, 1, -1, 2, -1]\n";
+  }
+
+  ServerProcess server;
+  std::string error;
+  EXPECT_FALSE(server.start(config_path, error, 8000,
+                            /*transport_cli=*/false,
+                            /*capture_stderr=*/true))
+      << "server unexpectedly reached READY: " << server.captured;
+  EXPECT_NE(0, server.exitCode()) << server.captured;
+  EXPECT_NE(server.captured.find("gpu_roce transport arguments must not set "
+                                 "--unified or --forward"),
+            std::string::npos)
+      << server.captured;
+}
+
+// --host-loop=unified against a provider that serves no CPU data plane: the
+// server probes the plane before READY and refuses, naming the provider.
+// The server passes --unified itself and the in-tree udp provider serves the
+// plane, so it cannot trigger this; the test-only provider
+// (qec-test-bridge-no-dataplane, loaded by path through a trailing
+// --transport=, which wins over ServerProcess's default one) ignores the
+// flag and serves no plane, so the refusal is pin-independent.
+TEST(DecodingServerHostLoop, UnifiedRequiresProviderSupport) {
+  ServerProcess server;
+  std::string error;
+  EXPECT_FALSE(server.start(
+      "decoding_server_config.yaml", error, 8000,
+      /*transport_cli=*/true, /*capture_stderr=*/true,
+      {"--host-loop=unified",
+       std::string("--transport=") + QEC_TEST_BRIDGE_NO_DATAPLANE_PATH}))
+      << "server unexpectedly reached READY: " << server.captured;
+  EXPECT_NE(0, server.exitCode()) << server.captured;
+  EXPECT_NE(server.captured.find("does not serve the unified CPU data plane"),
+            std::string::npos)
+      << server.captured;
+  EXPECT_NE(server.captured.find(QEC_TEST_BRIDGE_NO_DATAPLANE_PATH),
+            std::string::npos)
+      << server.captured;
+}
+
+// A provider that answers the probe but hands back an unusable plane (a
+// zeroed table: the test-only provider does that under
+// --incomplete-dataplane, which the server forwards to it as an unknown
+// server argument) is refused before READY as well, since the unified loop
+// would dereference the missing host views unchecked.
+TEST(DecodingServerHostLoop, UnifiedRejectsIncompleteDataplane) {
+  ServerProcess server;
+  std::string error;
+  EXPECT_FALSE(server.start(
+      "decoding_server_config.yaml", error, 8000,
+      /*transport_cli=*/true, /*capture_stderr=*/true,
+      {"--host-loop=unified", "--incomplete-dataplane",
+       std::string("--transport=") + QEC_TEST_BRIDGE_NO_DATAPLANE_PATH}))
+      << "server unexpectedly reached READY: " << server.captured;
+  EXPECT_NE(0, server.exitCode()) << server.captured;
+  EXPECT_NE(server.captured.find("returned an incomplete CPU data plane"),
+            std::string::npos)
+      << server.captured;
 }

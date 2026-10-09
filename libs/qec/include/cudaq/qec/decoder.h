@@ -31,10 +31,59 @@ using float_t = CUDAQX_QEC_FLOAT_TYPE;
 using float_t = double;
 #endif
 
-/// @brief The basis of a decoder result.
+/// @brief The primary result basis requested from a decoder.
 enum class decode_result_type : std::uint8_t {
-  errors,
-  observables,
+  errors,      ///< Primary result is an error frame.
+  observables, ///< Primary result is an observable frame.
+};
+
+/// @brief Standardized auxiliary outputs a decoder may be requested to return.
+/// Values are independent flags and may be combined.
+enum class decoder_auxiliary_result_type : std::uint8_t {
+  none = 0,
+  /// Residual detector values in `opt_results["residual_detectors"]`.
+  residual_detectors = 1u << 0,
+};
+
+constexpr decoder_auxiliary_result_type
+operator|(decoder_auxiliary_result_type lhs,
+          decoder_auxiliary_result_type rhs) noexcept {
+  return static_cast<decoder_auxiliary_result_type>(
+      static_cast<std::uint8_t>(lhs) | static_cast<std::uint8_t>(rhs));
+}
+
+constexpr decoder_auxiliary_result_type
+operator&(decoder_auxiliary_result_type lhs,
+          decoder_auxiliary_result_type rhs) noexcept {
+  return static_cast<decoder_auxiliary_result_type>(
+      static_cast<std::uint8_t>(lhs) & static_cast<std::uint8_t>(rhs));
+}
+
+constexpr decoder_auxiliary_result_type
+operator~(decoder_auxiliary_result_type value) noexcept {
+  return static_cast<decoder_auxiliary_result_type>(
+      ~static_cast<std::uint8_t>(value));
+}
+
+/// @brief Immutable primary and auxiliary output contract for a decoder.
+struct decoder_output_request {
+  constexpr decoder_output_request(
+      decode_result_type primary,
+      decoder_auxiliary_result_type auxiliary =
+          decoder_auxiliary_result_type::none) noexcept
+      : primary(primary), auxiliary(auxiliary) {}
+
+  decode_result_type primary;
+  decoder_auxiliary_result_type auxiliary;
+
+  constexpr bool requests(decoder_auxiliary_result_type output) const noexcept {
+    return output != decoder_auxiliary_result_type::none &&
+           (auxiliary & output) == output;
+  }
+
+  constexpr bool has_auxiliary_outputs() const noexcept {
+    return auxiliary != decoder_auxiliary_result_type::none;
+  }
 };
 
 /// @brief Validates that all keys in a heterogeneous map are found in a list of
@@ -60,16 +109,19 @@ struct decoder_result {
   /// @brief Whether or not the decoder converged.
   bool converged = false;
 
-  /// @brief Decoder values in the instance's construction-time output basis.
-  /// Error results have length `block_size`; observable results have length
-  /// `get_num_observables()`.
+  /// @brief Primary result values in the instance's construction-time output
+  /// basis. Error results have length `block_size`; observable results have
+  /// length `get_num_observables()`.
   std::vector<float_t> result;
 
-  /// @brief Optional additional results from the decoder stored in a
-  /// heterogeneous map. For equality comparison, this field is treated as a
-  /// boolean flag - two decoder_results are considered equal only if both have
-  /// empty opt_results (either std::nullopt or an empty map). If either result
-  /// has non-empty opt_results, they are considered not equal.
+  /// @brief Requested standardized auxiliary outputs and optional
+  /// decoder-specific metadata, stored in a heterogeneous map. Standardized
+  /// keys are documented by `decoder_auxiliary_result_type`.
+  ///
+  /// For equality comparison, this field is treated as a boolean flag - two
+  /// decoder_results are considered equal only if both have empty opt_results
+  /// (either std::nullopt or an empty map). If either result has non-empty
+  /// opt_results, they are considered not equal.
   std::optional<cudaqx::heterogeneous_map> opt_results;
 
   // Manually define the equality operator
@@ -137,7 +189,7 @@ public:
 /// decoder.
 class decoder
     : public cudaqx::extension_point<decoder, decoder_init,
-                                     std::optional<decode_result_type>,
+                                     std::optional<decoder_output_request>,
                                      const cudaqx::heterogeneous_map &> {
 private:
   struct rt_impl;
@@ -152,25 +204,28 @@ public:
   /// @brief Constructor
   /// @param inputs Stable model and measurement inputs. Taken by value so the
   /// factory can move its immutable handle into the decoder.
-  /// @param requested_output The result basis this instance produces, fixed
-  /// for its lifetime.
+  /// @param requested_output The primary and auxiliary output contract this
+  /// instance produces, fixed for its lifetime.
   decoder(decoder_init inputs,
-          decode_result_type requested_output = decode_result_type::errors);
+          decoder_output_request requested_output = decoder_output_request{
+              decode_result_type::errors});
 
   /// @brief Decode a single syndrome
   /// @param syndrome A vector of syndrome measurements where the floating point
   /// value is the probability that the syndrome measurement is a |1>. The
   /// length of the syndrome vector should be equal to `syndrome_size`.
-  /// @returns A result in the form this instance was constructed for. A
-  /// decoder that cannot produce that form rejects construction, so this never
-  /// negotiates the form per call.
+  /// @returns A result satisfying the instance's construction-time output
+  /// contract. The `result` field contains the primary output, and requested
+  /// auxiliary outputs are stored in `opt_results`. A decoder that cannot
+  /// satisfy the contract rejects construction.
   virtual decoder_result decode(const std::vector<float_t> &syndrome) = 0;
 
   /// @brief Decode a single syndrome
   /// @param syndrome An order-1 tensor of syndrome measurements where a 1 bit
   /// represents that the syndrome measurement is a |1>. The
   /// length of the syndrome vector should be equal to `syndrome_size`.
-  /// @returns A result in the instance's constructed output form.
+  /// @returns A result satisfying the instance's construction-time output
+  /// contract.
   virtual decoder_result decode(const cudaqx::tensor<uint8_t> &syndrome);
 
   /// @brief Decode a single syndrome (tensor form), cooperatively
@@ -188,8 +243,8 @@ public:
   /// @brief Decode a single syndrome
   /// @param syndrome A vector of syndrome measurements where the floating point
   /// value is the probability that the syndrome measurement is a |1>.
-  /// @returns A future containing a result in the instance's constructed
-  /// output form.
+  /// @returns A future containing a result satisfying the instance's
+  /// construction-time output contract.
   virtual std::future<decoder_result>
   decode_async(const std::vector<float_t> &syndrome);
 
@@ -213,7 +268,8 @@ public:
   /// parallel depending on the specific implementation)
   /// @param syndrome A vector of `N` syndrome measurements where the floating
   /// point value is the probability that the syndrome measurement is a |1>.
-  /// @returns One result per input in the instance's constructed output form.
+  /// @returns One result per input satisfying the instance's construction-time
+  /// output contract.
   virtual std::vector<decoder_result>
   decode_batch(const std::vector<std::vector<float_t>> &syndrome);
 
@@ -235,8 +291,8 @@ public:
   /// point value is the probability that the syndrome measurement is a |1>.
   /// @param batch_opt_results Output parameter receiving batch-level results,
   /// or left unset if the decoder produces none.
-  /// @returns 2-D vector of size `N` x `block_size` with soft probabilities of
-  /// errors in each index.
+  /// @returns One result per input satisfying the instance's construction-time
+  /// output contract.
   virtual std::vector<decoder_result>
   decode_batch(const std::vector<std::vector<float_t>> &syndrome,
                std::optional<cudaqx::heterogeneous_map> &batch_opt_results);
@@ -264,10 +320,10 @@ public:
   get(const std::string &name, decoder_init inputs,
       const cudaqx::heterogeneous_map &param_map = cudaqx::heterogeneous_map());
 
-  /// @brief Construct a registered decoder with an explicit instance-default
-  /// result form.
+  /// @brief Construct a registered decoder with an explicit output contract.
   static std::unique_ptr<decoder>
-  get(const std::string &name, decoder_init inputs, decode_result_type output,
+  get(const std::string &name, decoder_init inputs,
+      decoder_output_request output,
       const cudaqx::heterogeneous_map &param_map = cudaqx::heterogeneous_map());
 
   static std::unique_ptr<decoder>
@@ -309,9 +365,20 @@ public:
   std::size_t get_block_size() { return block_size; }
   std::size_t get_syndrome_size() { return syndrome_size; }
 
-  /// @brief The result form this instance was constructed to produce. Fixed at
-  /// construction; every decode operation returns this form.
-  decode_result_type get_result_type() const noexcept { return result_type_; }
+  /// @brief The primary result basis this instance was constructed to produce.
+  decode_result_type get_result_type() const noexcept {
+    return output_request_.primary;
+  }
+
+  /// @brief The auxiliary outputs this instance was constructed to produce.
+  decoder_auxiliary_result_type get_auxiliary_result_type() const noexcept {
+    return output_request_.auxiliary;
+  }
+
+  /// @brief The complete construction-time primary and auxiliary contract.
+  const decoder_output_request &get_output_request() const noexcept {
+    return output_request_;
+  }
 
   // -- Begin realtime decoding API --
 
@@ -442,11 +509,11 @@ protected:
 private:
   static std::unique_ptr<decoder>
   get_impl(const std::string &name, decoder_init inputs,
-           std::optional<decode_result_type> output,
+           std::optional<decoder_output_request> output,
            const cudaqx::heterogeneous_map &param_map);
   /// @brief The decoder's immutable construction inputs.
   const decoder_init inputs_;
-  const decode_result_type result_type_;
+  const decoder_output_request output_request_;
 };
 
 /// @brief Convert a single soft probability to a hard 0/1 decision.
@@ -609,7 +676,7 @@ get_decoder(const std::string &name, decoder_init inputs,
 
 std::unique_ptr<decoder>
 get_decoder(const std::string &name, decoder_init inputs,
-            decode_result_type output,
+            decoder_output_request output,
             const cudaqx::heterogeneous_map options = {});
 
 inline std::unique_ptr<decoder>
