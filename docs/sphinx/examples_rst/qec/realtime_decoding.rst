@@ -13,6 +13,7 @@ The examples below cover realtime decoding end to end — start with Getting Sta
    AI Predecoder with CUDA-Q Realtime <realtime_predecoder_pymatching>
    AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection) <realtime_predecoder_fpga>
    Relay BP Decoding with CUDA-Q Realtime <realtime_relay_bp>
+   Ising Color-Code Emulator with Decoding Server <color_code_demo>
    Streaming Interleaved Feed-forward Latency (SIFL) <sifl_demo>
    Dynamic DEM Construction <dyn_dem>
 
