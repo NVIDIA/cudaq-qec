@@ -592,8 +592,9 @@ TEST(ChunkedObservables, StreamingErrorFramesIsAdmittedForChunkedObservables) {
       probe.initialize_streaming_layout(probe.get_syndrome_size(), layers));
 }
 
-// A model with no observable mapping cannot project, and must be refused
-// while streaming is set up rather than on a shot.
+// Setting round geometry is also used by batch sliding-window decoders and
+// therefore does not require an observable mapping. The realtime path rejects
+// the model only when it actually needs to project an error frame.
 TEST(DecoderObservableProjection,
      NoObservableModelRejectsStreamingErrorFrames) {
   using namespace cudaq::qec;
@@ -601,9 +602,11 @@ TEST(DecoderObservableProjection,
       decoder_init::from_dem_chunks(rep5_chunks_spec(7)).without_observables());
   ASSERT_FALSE(probe.get_inputs().has_observable_model());
   const std::vector<std::size_t> layers{probe.get_syndrome_size()};
-  EXPECT_THROW(
-      probe.initialize_streaming_layout(probe.get_syndrome_size(), layers),
-      std::invalid_argument);
+  EXPECT_NO_THROW(
+      probe.initialize_streaming_layout(probe.get_syndrome_size(), layers));
+  EXPECT_THROW(probe.enqueue_syndrome(
+                   std::vector<std::uint8_t>(probe.get_syndrome_size(), 0)),
+               std::runtime_error);
 }
 
 TEST(DecoderObservableProjection, NoObservableModelRejectsDirectProjection) {

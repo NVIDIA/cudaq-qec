@@ -419,15 +419,6 @@ void decoder::initialize_streaming_layout(
     throw std::invalid_argument(fmt::format(
         "detector layer offsets end at {} but the model has {} detectors",
         detector_layer_offsets.back(), syndrome_size));
-  // Streaming an error frame projects through O every shot, needing either
-  // the O matrix or a chunked map. A model supplying neither cannot stream at
-  // all, so reject here -- construction state -- not from the hot path.
-  if (output_request_.primary == decode_result_type::errors &&
-      !inputs_.has_observable_model())
-    throw std::invalid_argument(
-        "streaming an error-frame decoder projects through O every shot, but "
-        "this model supplies no observable mapping; construct the decoder for "
-        "observable output, or give it a model that maps observables");
 
   pimpl->num_syndromes_per_round = num_syndromes_per_round;
   // A first-round detector layer references a single measurement per detector.
