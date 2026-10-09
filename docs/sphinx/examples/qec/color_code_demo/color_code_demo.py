@@ -20,7 +20,7 @@
 # [Begin Documentation]
 """Ising color-code decoder: LER per round vs. runtime on the playback emulator.
 
-Usage: ./run_color_code_demo.sh [options]
+Usage: python3 color_code_demo.py [options]
 """
 import argparse, json, os, re, shutil, subprocess, sys, warnings
 import numpy as np
@@ -29,12 +29,12 @@ import cudaq_qec as qec
 pb = qec.playback
 
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-parser.add_argument("--ising",
-                    required=True,
-                    help="Ising-Decoding checkout code.")
+parser.add_argument("--deps",
+                    default="deps",
+                    help="where to fetch Ising-Decoding and the weights")
 parser.add_argument("--weights",
-                    required=True,
-                    help="Ising-Decoder-ColorCode-1-Fast .safetensors file")
+                    help="Ising-Decoder-ColorCode-1-Fast .safetensors file "
+                    "(default: downloaded into --deps)")
 parser.add_argument("--distances", default="5,7,9,11,13")
 parser.add_argument("--p", type=float, default=1e-3, help="physical error rate")
 parser.add_argument("--shots",
@@ -54,7 +54,43 @@ args = parser.parse_args()
 distances = [int(d) for d in args.distances.split(",")]
 if not args.decoding_server:
     parser.error("decoding_server not found; pass --decoding-server")
-sys.path.insert(0, os.path.join(args.ising, "code"))
+
+# Ising-Decoding source and model weights
+ISING_REPOSITORY = "https://github.com/NVIDIA/Ising-Decoding.git"
+ISING_COMMIT = "33acb152e403bc189f2effdb07f1a87b34c745f1"
+HF_REPOSITORY = "nvidia/Ising-Decoder-ColorCode-1-Fast"
+HF_REVISION = "c5775431d0ebb06ffecc3836935708b787db51ee"
+HF_FILENAME = "ising_decoder_color_code_1_fast_r13_v1.0.400_fp16.safetensors"
+
+ising = os.path.join(args.deps, "Ising-Decoding")
+if not os.path.isdir(ising):
+    # Check out into a scratch directory so an interrupted fetch is redone.
+    partial = ising + ".partial"
+    shutil.rmtree(partial, ignore_errors=True)
+    for command in (
+        ["git", "init", "-q", partial],
+        ["git", "-C", partial, "remote", "add", "origin", ISING_REPOSITORY],
+        ["git", "-C", partial, "sparse-checkout", "init", "--cone"],
+        ["git", "-C", partial, "sparse-checkout", "set", "code"],
+        [
+            "git", "-C", partial, "fetch", "-q", "--depth", "1",
+            "--filter=blob:none", "origin", ISING_COMMIT
+        ],
+        ["git", "-C", partial, "checkout", "-q", "--detach", "FETCH_HEAD"],
+    ):
+        subprocess.run(command, check=True)
+    os.rename(partial, ising)
+weights = args.weights or os.path.join(args.deps, HF_FILENAME)
+if not os.path.exists(weights):
+    if not shutil.which("hf"):
+        sys.exit("the hf CLI is needed to download the weights; install "
+                 "huggingface_hub, or pass --weights")
+    subprocess.run([
+        "hf", "download", HF_REPOSITORY, HF_FILENAME, "--revision", HF_REVISION,
+        "--local-dir", args.deps
+    ],
+                   check=True)
+sys.path.insert(0, os.path.join(ising, "code"))
 
 from qec.color_code.color_code import ColorCode
 from qec.color_code.reference_superdense_noise import build_color_memory_circuit
@@ -264,7 +300,7 @@ def run_session(name, mdc, schedule, shots):
 # Build and run the experiments
 from export.safetensors_utils import load_safetensors
 
-model = load_safetensors(args.weights, device="cpu")[0].float().eval()
+model = load_safetensors(weights, device="cpu")[0].float().eval()
 results = {}
 for d in distances:
     circuit = color_circuit(d)
