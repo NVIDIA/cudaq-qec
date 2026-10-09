@@ -392,14 +392,7 @@ ax.set_title(r"$p = %g$ (Z basis)" % args.p)
 ax.grid(True, which="both", linestyle=":", alpha=0.6)
 ax.legend(loc="lower left")
 xlo, xhi = ax.get_xlim()
-ylo, _ = ax.get_ylim()
 ax.set_xlim(xlo / 1.5, xhi * 2.6)
-xlo = ax.get_xlim()[0]
-ax.annotate("Faster",
-            xy=(xlo * 1.35, ylo * 2.0),
-            xytext=(xlo * 5.5, ylo * 2.0),
-            va="center",
-            arrowprops=dict(arrowstyle="->", lw=1.6))
 fig.tight_layout()
 fig.savefig("color_code_demo.png", dpi=150)
 print("wrote", "color_code_demo.png")
