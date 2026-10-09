@@ -415,10 +415,90 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
 struct benchmark_data {
   stim::Circuit circuit;
   stim::DetectorErrorModel dem;
+  // Batch decode() takes detectors by contract, so both views are kept: the
+  // folded detectors it decodes, and the raw measurement records the
+  // streaming path enqueues for the decoder to fold itself.
   std::vector<std::vector<cudaq::qec::float_t>> soft_syndromes;
   std::vector<std::vector<uint8_t>> hard_syndromes;
+  std::vector<std::vector<uint8_t>> hard_measurements;
   std::vector<uint64_t> observable_masks;
+  // Detector d XORs measurement records measurement_map[d]; the column count
+  // is circuit.count_measurements().
+  std::vector<std::vector<std::uint32_t>> measurement_map;
+  // Measurements each round contributes, in order. Not uniform: the final
+  // data readout measures every data qubit, where a round measures ancillas.
+  std::vector<std::size_t> round_widths;
 };
+
+// Defined below, beside the other detector-round helpers.
+std::vector<int32_t> detector_round_map(const stim::Circuit &circuit);
+
+// Resolve each DETECTOR's `rec[-k]` targets to absolute measurement indices,
+// and the OBSERVABLE_INCLUDE records alongside them.
+//
+// Flattening expands REPEAT blocks, so a running measurement count over the
+// flattened operations is enough: a record target's value() is its offset
+// back from the count at that point.
+struct circuit_records {
+  std::vector<std::vector<std::uint32_t>> detector_to_measurements;
+  std::vector<std::uint32_t> observable_measurements;
+};
+
+circuit_records records_of(const stim::Circuit &circuit) {
+  circuit_records out;
+  std::uint64_t seen = 0;
+  out.detector_to_measurements.reserve(circuit.count_detectors());
+  circuit.flattened().for_each_operation(
+      [&](const stim::CircuitInstruction &op) {
+        if (op.gate_type == stim::GateType::DETECTOR) {
+          std::vector<std::uint32_t> rows;
+          for (const auto target : op.targets)
+            if (target.is_measurement_record_target())
+              rows.push_back(static_cast<std::uint32_t>(
+                  seen + static_cast<std::int64_t>(target.value())));
+          out.detector_to_measurements.push_back(std::move(rows));
+        } else if (op.gate_type == stim::GateType::OBSERVABLE_INCLUDE) {
+          for (const auto target : op.targets)
+            if (target.is_measurement_record_target())
+              out.observable_measurements.push_back(static_cast<std::uint32_t>(
+                  seen + static_cast<std::int64_t>(target.value())));
+        } else {
+          seen += op.count_measurement_results();
+        }
+      });
+  return out;
+} // end - records_of()
+
+// Measurements per round, read off the measurement records each round's
+// detectors touch: a round owns every record above what the rounds before it
+// owned. The last entry is the data readout, which is wider than a round.
+std::vector<std::size_t>
+measurements_per_round(const circuit_records &records,
+                       const std::vector<int32_t> &detector_rounds,
+                       std::size_t total_measurements) {
+  const auto rounds = static_cast<std::size_t>(*std::max_element(
+                          detector_rounds.begin(), detector_rounds.end())) +
+                      1;
+  // Highest measurement record any detector of round r reads.
+  std::vector<std::size_t> high(rounds, 0);
+  for (std::size_t d = 0; d < detector_rounds.size(); ++d) {
+    const auto r = static_cast<std::size_t>(detector_rounds[d]);
+    for (const auto rec : records.detector_to_measurements[d])
+      high[r] = std::max<std::size_t>(high[r], rec + 1);
+  }
+  for (std::size_t r = 1; r < rounds; ++r)
+    high[r] = std::max(high[r], high[r - 1]);
+  // Every remaining record belongs to the final readout.
+  high.back() = std::max(high.back(), total_measurements);
+
+  std::vector<std::size_t> widths(rounds, 0);
+  std::size_t previous = 0;
+  for (std::size_t r = 0; r < rounds; ++r) {
+    widths[r] = high[r] - previous;
+    previous = high[r];
+  }
+  return widths;
+} // end - measurements_per_round()
 
 benchmark_data generate_data(const options &opts, std::size_t distance,
                              std::size_t rounds, double noise) {
@@ -433,27 +513,52 @@ benchmark_data generate_data(const options &opts, std::size_t distance,
 
   const std::size_t total = opts.warmup + opts.shots;
   std::mt19937_64 rng(0);
-  auto sampled = stim::sample_batch_detection_events<stim::MAX_BITWORD_WIDTH>(
-      data.circuit, total, rng);
-  const auto &dets = sampled.first;
-  const auto &obs = sampled.second;
+  // Sample the measurement record, not detection events: the decoder is
+  // handed what the hardware emits and folds it into detectors itself, which
+  // is the work the decoding server's decoders do on every arriving round.
+  const auto reference =
+      stim::TableauSimulator<stim::MAX_BITWORD_WIDTH>::reference_sample_circuit(
+          data.circuit);
+  const auto measurements =
+      stim::sample_batch_measurements<stim::MAX_BITWORD_WIDTH>(
+          data.circuit, reference, total, rng, /*transposed=*/false);
 
-  const std::size_t nd = data.circuit.count_detectors();
-  const std::size_t no = data.circuit.count_observables();
+  const auto records = records_of(data.circuit);
+  data.measurement_map = records.detector_to_measurements;
+  data.round_widths = measurements_per_round(
+      records, detector_round_map(data.circuit),
+      static_cast<std::size_t>(data.circuit.count_measurements()));
+
+  const std::size_t nm =
+      static_cast<std::size_t>(data.circuit.count_measurements());
+  const std::size_t nd = data.measurement_map.size();
   data.soft_syndromes.resize(total);
   data.hard_syndromes.resize(total);
+  data.hard_measurements.resize(total);
   data.observable_masks.assign(total, 0);
   for (std::size_t s = 0; s < total; ++s) {
+    data.hard_measurements[s].assign(nm, 0);
+    for (std::size_t m = 0; m < nm; ++m)
+      if (measurements[m][s])
+        data.hard_measurements[s][m] = 1;
+    // Fold to detectors for the batch path, the same XOR the streaming
+    // decoder performs through D.
     data.soft_syndromes[s].assign(nd, 0.0);
     data.hard_syndromes[s].assign(nd, 0);
-    for (std::size_t d = 0; d < nd; ++d)
-      if (dets[d][s]) {
-        data.soft_syndromes[s][d] = 1.0;
-        data.hard_syndromes[s][d] = 1;
-      }
-    for (std::size_t o = 0; o < no && o < 64; ++o)
-      if (obs[o][s])
-        data.observable_masks[s] ^= uint64_t{1} << o;
+    for (std::size_t d = 0; d < nd; ++d) {
+      std::uint8_t parity = 0;
+      for (const auto rec : data.measurement_map[d])
+        parity ^= data.hard_measurements[s][rec];
+      data.soft_syndromes[s][d] = parity ? 1.0 : 0.0;
+      data.hard_syndromes[s][d] = parity;
+    }
+    // One logical observable for a memory experiment, read off the same
+    // records the circuit's OBSERVABLE_INCLUDE names.
+    std::uint8_t parity = 0;
+    for (const auto rec : records.observable_measurements)
+      parity ^= static_cast<std::uint8_t>(measurements[rec][s]);
+    if (parity)
+      data.observable_masks[s] ^= uint64_t{1};
   }
 
   data.dem = stim::ErrorAnalyzer::circuit_to_detector_error_model(
@@ -587,6 +692,12 @@ void pad_rounds(dem_matrices &m, benchmark_data &data,
     data.soft_syndromes[s] = std::move(soft);
     data.hard_syndromes[s] = std::move(hard);
   }
+  // D follows the detectors into their padded positions. A padding detector
+  // reads no measurement, so its row stays empty and it never fires.
+  std::vector<std::vector<std::uint32_t>> remapped(nd);
+  for (std::size_t det = 0; det < dr.size(); ++det)
+    remapped[padded[det]] = std::move(data.measurement_map[det]);
+  data.measurement_map = std::move(remapped);
   dr.resize(nd);
   for (std::size_t det = 0; det < nd; ++det)
     dr[det] = static_cast<int32_t>(det / width);
@@ -732,19 +843,16 @@ void add_chunks(dem_matrices &m, const std::vector<int32_t> &dr) {
   m.chunks = std::move(spec);
 } // end - add_chunks()
 
-std::vector<std::size_t> detectors_per_round(const std::vector<int32_t> &dr) {
-  const auto max_r = *std::max_element(dr.begin(), dr.end());
-  std::vector<std::size_t> widths(static_cast<std::size_t>(max_r) + 1, 0);
-  for (auto r : dr)
-    ++widths[static_cast<std::size_t>(r)];
-  return widths;
-}
-
-cudaq::qec::sparse_binary_matrix identity_measurement_map(std::size_t nd) {
-  std::vector<std::vector<uint32_t>> d_sparse(nd);
-  for (std::size_t i = 0; i < nd; ++i)
-    d_sparse[i].push_back(static_cast<uint32_t>(i));
-  return cudaq::qec::sparse_binary_matrix::from_nested_csr(nd, nd, d_sparse);
+// The model's measurement-to-detector map: one row per detector, naming the
+// measurement records it XORs. The decoder folds arriving rounds through this
+// on the streaming path, which is why the benchmark supplies the real map
+// rather than an identity standing in for pre-folded detectors.
+cudaq::qec::sparse_binary_matrix
+measurement_map_of(const benchmark_data &data) {
+  return cudaq::qec::sparse_binary_matrix::from_nested_csr(
+      static_cast<std::uint32_t>(data.measurement_map.size()),
+      static_cast<std::uint32_t>(data.circuit.count_measurements()),
+      data.measurement_map);
 }
 
 // ── Parameter helpers
@@ -1085,7 +1193,7 @@ uint64_t stream_shot(cudaq::qec::decoder &dec, const benchmark_data &data,
                      const std::vector<std::size_t> &round_widths,
                      std::size_t shot, std::size_t num_obs, double *shot_us,
                      double *tail_us) {
-  const std::vector<uint8_t> &syn = data.hard_syndromes[shot];
+  const std::vector<uint8_t> &syn = data.hard_measurements[shot];
   double work = 0.0;
   std::size_t offset = 0;
 
@@ -1209,7 +1317,7 @@ measurement run_point(const options &opts, const benchmark_data &data,
   work.setup = [&](std::size_t instance) {
     std::optional<cudaq::qec::sparse_binary_matrix> D;
     if (mode == bench_mode::stream)
-      D = identity_measurement_map(data.soft_syndromes.front().size());
+      D = measurement_map_of(data);
     auto inputs = [&] {
       if (!matrices.chunks)
         return cudaq::qec::decoder_init(
@@ -1498,7 +1606,7 @@ int main(int argc, char **argv) {
           pad_rounds(matrices, data, dr);
           add_chunks(matrices, dr);
         }
-        const auto round_widths = detectors_per_round(dr);
+        const auto &round_widths = data.round_widths;
         const std::vector<int32_t> param_dr =
             matrices.chunks ? std::vector<int32_t>{} : dr;
 

@@ -107,6 +107,21 @@ scored from the observables those columns flip. Streaming reads observable
 corrections in either case. The benchmark also supplies temporal detector-round
 information to NV-Fusion.
 
+`--output errors` with `pymatching` needs an explicit merge strategy:
+
+```bash
+--output errors --param merge_strategy=independent
+```
+
+Error-mechanism output has to map each result index back to a distinct `H`
+column, so the wrapper leaves pymatching's `disallow` merge strategy in place
+and a model with two error mechanisms on the same detector pair is rejected
+(`Edge (i, j) already exists in the graph`). Observable output does not need
+that mapping, so it defaults to `independent` and merges them. Passing
+`independent` explicitly merges parallel edges and reports the first column of
+each, which leaves the logical error rate unchanged for a surface-code memory
+experiment because the merged mechanisms flip the same observables.
+
 `--source chunks` builds every decoder from the same model as per-round DEM
 chunks instead, the form a realtime configuration's `dem_chunks` takes:
 `decoder_init::from_dem_chunks` for a decoder that declared it reads chunks
