@@ -8,6 +8,8 @@
 
 #include "cudaq/qec/decoder_init.h"
 #include "sparse_dem_from_stim_text.h"
+#include "cudaq/qec/extended_dem.h"
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -18,6 +20,9 @@ struct decoder_init::impl {
   std::size_t num_detectors = 0;
   std::size_t num_error_mechanisms = 0;
   std::size_t num_observables = 0;
+  /// False only for a chunked source built without its closed model, which
+  /// leaves H, O and rates empty.
+  bool has_matrices = true;
   sparse_binary_matrix H;
   /// Absent when the model supplies no observable mapping. A present but
   /// zero-row O is a supplied model, not an absent one.
@@ -26,6 +31,16 @@ struct decoder_init::impl {
   std::optional<std::vector<std::size_t>> ids;
   std::optional<sparse_binary_matrix> D;
   std::optional<std::string> raw_stim_dem;
+  std::shared_ptr<const dem_chunks_spec> chunks;
+
+  const impl &matrices(const char *accessor) const {
+    if (!has_matrices)
+      throw std::logic_error(
+          std::string("decoder_init::") + accessor +
+          ": this dem_chunks source was built without its closed model; "
+          "construct it with decoder_init::from_dem_chunks_closed()");
+    return *this;
+  }
 };
 
 namespace {
@@ -51,7 +66,7 @@ void validate_model(const sparse_binary_matrix &H,
 
 } // namespace
 
-std::shared_ptr<const decoder_init::impl> decoder_init::make_matrix_state(
+std::shared_ptr<decoder_init::impl> decoder_init::make_matrix_state(
     decoder_model_source source, sparse_binary_matrix H,
     std::optional<sparse_binary_matrix> O, std::vector<double> rates,
     std::optional<std::vector<std::size_t>> ids,
@@ -117,6 +132,82 @@ decoder_init decoder_init::from_stim_dem(
       std::move(stim_dem_text)));
 }
 
+decoder_init decoder_init::from_dem_chunks(
+    dem_chunks_spec spec,
+    std::optional<sparse_binary_matrix> measurement_to_detectors) {
+  spec.validate();
+  const seam_id from_seam = spec.seam.from_seam;
+  const seam_id to_seam = spec.seam.to_seam;
+
+  // Closing the compact chain runs the chain checks dem_close_all() would,
+  // and each elided round is one more bulk chunk, adding its interior rows,
+  // its outgoing seam and its faults.
+  const auto chain = dem_chunks_to_compact_chain(spec);
+  const auto &chunks = chain.chunks;
+  const std::uint64_t extra = chain.elided_rounds();
+  const std::size_t bulk = chain.repeating;
+  const auto closed = dem_chunks_to_pcm(chunks, from_seam, to_seam);
+  std::size_t detectors = closed.num_rows();
+  std::size_t mechanisms = closed.num_cols();
+  if (extra > 0) {
+    detectors += extra * (chunks[bulk].num_interior_rows() +
+                          chunks[bulk].get_seam(from_seam).num_rows());
+    mechanisms += extra * chunks[bulk].num_faults();
+  }
+  const std::size_t observables = chunks.front().num_observables();
+
+  if (measurement_to_detectors) {
+    *measurement_to_detectors = measurement_to_detectors->to_csr();
+    if (measurement_to_detectors->num_rows() != detectors)
+      throw std::invalid_argument(
+          "decoder_init: D row count must match the dem_chunks detector "
+          "count");
+  }
+
+  auto state = std::make_shared<impl>();
+  state->source = decoder_model_source::dem_chunks;
+  state->num_detectors = detectors;
+  state->num_error_mechanisms = mechanisms;
+  state->num_observables = observables;
+  state->D = std::move(measurement_to_detectors);
+  state->has_matrices = false;
+  state->chunks = std::make_shared<const dem_chunks_spec>(std::move(spec));
+  return decoder_init(std::move(state));
+} // end - decoder_init::from_dem_chunks()
+
+decoder_init decoder_init::from_dem_chunks_closed(
+    dem_chunks_spec spec,
+    std::optional<sparse_binary_matrix> measurement_to_detectors) {
+  const auto chunked = from_dem_chunks(std::move(spec));
+  const auto &kept = *chunked.state_->chunks;
+  const auto expanded = dem_chunks_from_spec(kept);
+  auto H = dem_chunks_to_pcm(expanded, kept.seam.from_seam, kept.seam.to_seam);
+  if (H.num_rows() != chunked.num_detectors() ||
+      H.num_cols() != chunked.num_error_mechanisms())
+    throw std::logic_error("decoder_init: dem_chunks closed model is " +
+                           std::to_string(H.num_rows()) + " x " +
+                           std::to_string(H.num_cols()) + ", not " +
+                           std::to_string(chunked.num_detectors()) + " x " +
+                           std::to_string(chunked.num_error_mechanisms()));
+  std::optional<sparse_binary_matrix> O;
+  if (chunked.num_observables() > 0)
+    O = sparse_binary_matrix::from_nested_csr(
+        static_cast<std::uint32_t>(chunked.num_observables()),
+        static_cast<std::uint32_t>(chunked.num_error_mechanisms()),
+        dem_chunks_to_o_sparse(expanded));
+  std::vector<double> rates;
+  rates.reserve(chunked.num_error_mechanisms());
+  for (const auto &chunk : expanded)
+    rates.insert(rates.end(), chunk.error_rates.begin(),
+                 chunk.error_rates.end());
+
+  auto state = make_matrix_state(decoder_model_source::dem_chunks, std::move(H),
+                                 std::move(O), std::move(rates), std::nullopt,
+                                 std::move(measurement_to_detectors));
+  state->chunks = chunked.state_->chunks;
+  return decoder_init(std::move(state));
+} // end - decoder_init::from_dem_chunks_closed()
+
 decoder_init::decoder_init(std::shared_ptr<const impl> state)
     : state_(std::move(state)) {}
 
@@ -131,21 +222,23 @@ decoder_model_source decoder_init::source() const noexcept {
 }
 
 const sparse_binary_matrix &decoder_init::detector_error_matrix() const {
-  return state_->H;
+  return state_->matrices("detector_error_matrix").H;
 }
 
 bool decoder_init::has_observable_model() const noexcept {
-  return state_->O.has_value();
+  // A chunked source maps observables exactly when its chunks carry any.
+  return state_->has_matrices ? state_->O.has_value()
+                              : state_->num_observables > 0;
 }
 
 const sparse_binary_matrix &decoder_init::observable_flips_matrix() const {
-  if (!state_->O)
+  if (!has_observable_model())
     throw std::logic_error("decoder_init: no observable mapping was supplied");
-  return *state_->O;
+  return *state_->matrices("observable_flips_matrix").O;
 }
 
 const std::vector<double> &decoder_init::error_rates() const {
-  return state_->rates;
+  return state_->matrices("error_rates").rates;
 }
 
 const std::optional<std::vector<std::size_t>> &decoder_init::error_ids() const {
@@ -158,6 +251,9 @@ decoder_init::measurement_to_detectors() const noexcept {
 }
 
 decoder_init decoder_init::canonicalize_H() const {
+  // dem_chunks_to_pcm() already projects a canonical H.
+  if (state_->chunks)
+    return *this;
   auto H = state_->H.canonicalize().to_csc();
   return decoder_init(make_matrix_state(state_->source, std::move(H), state_->O,
                                         state_->rates, state_->ids, state_->D,
@@ -170,6 +266,26 @@ decoder_init decoder_init::decoder_init_without_d() const {
   return decoder_init(std::move(state));
 }
 
+decoder_init decoder_init::without_observables() const {
+  auto state = std::make_shared<impl>(*state_);
+  state->O.reset();
+  state->num_observables = 0;
+  if (state->chunks) {
+    auto chunks = *state->chunks;
+    for (auto &phase : chunks.phases) {
+      phase.spec.O_sparse.clear();
+      for (auto &seam : phase.spec.seam_specs)
+        seam.spec.O_sparse.clear();
+    }
+    state->chunks = std::make_shared<const dem_chunks_spec>(std::move(chunks));
+  }
+  if (state->raw_stim_dem) {
+    state->raw_stim_dem.reset();
+    state->source = decoder_model_source::matrices;
+  }
+  return decoder_init(std::move(state));
+}
+
 bool decoder_init::has_stim_dem() const noexcept {
   return state_->raw_stim_dem.has_value();
 }
@@ -179,6 +295,21 @@ const std::string &decoder_init::stim_dem() const {
     throw std::logic_error(
         "decoder_init: authoritative source is not a Stim DEM");
   return *state_->raw_stim_dem;
+}
+
+bool decoder_init::has_dem_chunks() const noexcept {
+  return state_->chunks != nullptr;
+}
+
+const dem_chunks_spec &decoder_init::dem_chunks() const {
+  if (!state_->chunks)
+    throw std::logic_error(
+        "decoder_init: authoritative source is not a chunked DEM");
+  return *state_->chunks;
+}
+
+bool decoder_init::has_matrices() const noexcept {
+  return state_->has_matrices;
 }
 
 std::size_t decoder_init::num_detectors() const noexcept {

@@ -99,9 +99,53 @@ compare decoders with different option sets.
 
 The benchmark supplies `H`, `O`, the per-error priors, and (for streaming) the
 measurement map together through `decoder_init`. It explicitly requests
-observable output, so batch results can be compared directly with the sampled
-logical outcomes; the presence of `O` does not select that output basis. It
-also supplies temporal detector-round information to NV-Fusion.
+observable output by default, so batch results can be compared directly with
+the sampled logical outcomes; the presence of `O` does not select that output
+basis. `--output errors` requests error-mechanism output instead: batch
+`decode()` then returns one entry per `H` column, and the logical error rate is
+scored from the observables those columns flip. Streaming reads observable
+corrections in either case. The benchmark also supplies temporal detector-round
+information to NV-Fusion.
+
+`--output errors` with `pymatching` needs an explicit merge strategy:
+
+```bash
+--output errors --param merge_strategy=independent
+```
+
+Error-mechanism output has to map each result index back to a distinct `H`
+column, so the wrapper leaves pymatching's `disallow` merge strategy in place
+and a model with two error mechanisms on the same detector pair is rejected
+(`Edge (i, j) already exists in the graph`). Observable output does not need
+that mapping, so it defaults to `independent` and merges them. Passing
+`independent` explicitly merges parallel edges and reports the first column of
+each, which leaves the logical error rate unchanged for a surface-code memory
+experiment because the merged mechanisms flip the same observables.
+
+`--source chunks` builds every decoder from the same model as per-round DEM
+chunks instead, the form a realtime configuration's `dem_chunks` takes:
+`decoder_init::from_dem_chunks` for a decoder that declared it reads chunks
+natively (`register_decoder_native_model_source`), such as NV-Fusion, and
+`decoder_init::from_dem_chunks_closed` for any other. Each column belongs to
+the round of its lowest detector. Columns with the same detectors and
+observables within a round are merged, because Stim's decomposition repeats
+only every two rounds. The rounds that match the middle round form the
+repeating phase. Every round is padded to the bulk's detector count, since
+chunks have one width per round and Stim's first and last rounds are
+narrower; the padding detectors never fire. NV-Fusion is given no
+`detector_round` here, so it builds from the chunks. Use this to measure the
+chunk path against the default `--source matrices`.
+
+NV-Fusion's `rolling_error_output` and `rolling_error_margin` are not in its
+realtime YAML schema, so the benchmark forwards them to NV-Fusion by name.
+Compare rolling error output, a narrower cut margin, and finite error output
+with:
+
+```bash
+--output errors
+--output errors --param rolling_error_margin=1
+--output errors --param rolling_error_output=false
+```
 
 `--block_leaf_size N` is a convenience option for decoders whose schema
 supports that parameter. Omitting it lets the decoder select its own schedule.
@@ -178,15 +222,18 @@ physical cores.
 The human-readable report includes decoder, distance, rounds, instances,
 shots, noise, latency percentiles, detector rounds per second, and logical
 error rate. Streaming output has a separate table for final-round tail
-latency. Tables are printed after the requested point list finishes, so a long
-sweep can remain quiet until completion.
+latency. Tables are printed after the requested point list finishes. While the
+sweep runs, progress for each point is printed immediately to standard error,
+including its ordinal, configuration, and elapsed wall time, so table and CSV
+output on standard output stays machine-readable.
 
 `--csv` additionally emits rows prefixed with `csv,` for machine parsing. The
 CSV columns are:
 
 ```text
 mode,id,decoder,d,rounds,det_rounds,instances,shots,total_shots,noise,
-p50,p90,p99,tail_p50,tail_p99,rounds_s,ler
+latency_min,p50,p90,p99,latency_max,tail_min,tail_p50,tail_p99,tail_max,
+rounds_s,ler
 ```
 
 Percentile resolution is limited by the sample count. With 1,000 timed shots

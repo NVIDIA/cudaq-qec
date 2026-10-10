@@ -185,8 +185,13 @@ sliding_window::sliding_window(cudaq::qec::decoder_init inputs,
   std::vector<std::size_t> detector_layer_offsets(num_detector_layers + 1);
   for (std::size_t r = 0; r <= num_detector_layers; ++r)
     detector_layer_offsets[r] = get_layer_offset(r);
-  initialize_streaming_layout(num_syndromes_per_round,
-                              std::move(detector_layer_offsets));
+  // A model with no observable mapping cannot stream an error frame, which the
+  // base class rejects at this call. It can still decode whole syndromes, so
+  // leave streaming unconfigured for it rather than refusing to construct.
+  if (request.primary == decode_result_type::observables ||
+      get_inputs().has_observable_model())
+    initialize_streaming_layout(num_syndromes_per_round,
+                                std::move(detector_layer_offsets));
 
   // Build the per-window inner decoders from the real (unpadded) sub-PCMs. The
   // boundary-aware round layout is handled by get_pcm_for_rounds.
