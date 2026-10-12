@@ -94,6 +94,14 @@ fi
 echo "Installing QEC library with all optional dependencies"
 ${python} -m pip install ${FIND_LINKS} --extra-index-url https://pypi.nvidia.com/ "cudaq-qec[all]==${cudaqx_version}"
 
+# Install stim for the AMD64 platform: the tensor network decoder examples
+# and the nv-qldpc noise-learning test need it (tests that need stim skip
+# themselves where it is absent).
+if echo $platform | grep -qi "amd64"; then
+  echo "Installing stim and beliefmatching for AMD64 platform"
+  ${python} -m pip install stim beliefmatching
+fi
+
 if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
   ${python} -m pytest -v -s libs/qec/python/tests/
 else
@@ -154,12 +162,6 @@ EOF
 # Test the libraries with examples
 # ======================================
 echo "Testing libraries with examples"
-
-# Install stim for AMD platform for tensor network decoder examples
-if echo $platform | grep -qi "amd64"; then
-  echo "Installing stim and beliefmatching for AMD64 platform"
-  ${python} -m pip install stim beliefmatching
-fi
 
 for domain in "qec"; do
     echo "Testing ${domain} Python examples with Python ${python_version} ..."
