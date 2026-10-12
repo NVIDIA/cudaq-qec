@@ -76,7 +76,8 @@ jobs:
         id: set-container
         run: |
           if [[ "$GITHUB_REF" =~ ^refs/heads/releases/v(.+)$ ]]; then
-            echo "container=ghcr.io/nvidia/cudaqx-dev:${BASH_REMATCH[1]}-amd64-cu12.6" >> $GITHUB_OUTPUT
+            # 0.8.x point releases share the 0.8.0 CUDA-Q pin and reuse its dev image.
+            echo "container=ghcr.io/nvidia/cudaqx-dev:0.8.0-amd64-cu12.6" >> $GITHUB_OUTPUT
           else
             echo "container=ghcr.io/nvidia/cudaqx-dev:latest-amd64-cu12.6" >> $GITHUB_OUTPUT
           fi

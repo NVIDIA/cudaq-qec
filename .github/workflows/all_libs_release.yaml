@@ -34,7 +34,7 @@ jobs:
         ${{
           inputs.release-number == '0.0.0'
           && format('ghcr.io/nvidia/cudaqx-dev:{0}-{1}-cu{2}', 'latest', matrix.runner.arch, matrix.cuda_version)
-          || format('ghcr.io/nvidia/cudaqx-dev:{0}-{1}-cu{2}', inputs.release-number, matrix.runner.arch, matrix.cuda_version)
+          || format('ghcr.io/nvidia/cudaqx-dev:{0}-{1}-cu{2}', '0.8.0', matrix.runner.arch, matrix.cuda_version)
         }}
       env:
         NVIDIA_VISIBLE_DEVICES: ${{ env.NVIDIA_VISIBLE_DEVICES }}
