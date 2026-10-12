@@ -16,7 +16,7 @@
 #     cuda-quantum commit that container was built at (this repo's
 #     .cudaq_version does not apply).
 #   cudaqx/qec -- decoding_server, decoder plugins,
-#     hsb_fpga_syndrome_playback.
+#     hsb_fpga_syndrome_playback, playback-emulator.
 #
 # Prebuilt proprietary artifacts are supplied via an optional build
 # context with a flat layout; each file, and the context itself, is
@@ -135,8 +135,8 @@ RUN set -e; \
     cmake --install /tmp/realtime-build; \
     rm -rf /tmp/realtime-build
 
-# cudaqx/qec: decoding_server, hsb_fpga_syndrome_playback, the QEC and
-# realtime libraries, and the decoder plugins (built-in plus any
+# cudaqx/qec: decoding_server, hsb_fpga_syndrome_playback, playback-emulator,
+# the QEC and realtime libraries, and the decoder plugins (built-in plus any
 # libcudaq-qec-*-decoder.so from the artifacts context, via
 # QEC_EXTERNAL_DECODERS). CUDAQX_INCLUDE_TESTS=ON because
 # hsb_fpga_syndrome_playback lives under unittests/; test binaries are
@@ -187,7 +187,8 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
     cmake --build build -j"$(nproc)"; \
     cmake --install build; \
     test -x "$CUDAQX_INSTALL_PREFIX/bin/decoding_server"; \
-    test -x "$CUDAQX_INSTALL_PREFIX/bin/hsb_fpga_syndrome_playback"
+    test -x "$CUDAQX_INSTALL_PREFIX/bin/hsb_fpga_syndrome_playback"; \
+    test -x "$CUDAQX_INSTALL_PREFIX/bin/playback-emulator"
 
 # ---------------------------------------------------------------------------
 # Stage: runtime -- the shipped image. No compilers, headers, or sources.
