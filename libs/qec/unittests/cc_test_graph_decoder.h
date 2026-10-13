@@ -26,7 +26,7 @@ public:
   inline static std::atomic<int> last_reserved_sms{-1};
   inline static std::atomic<int> release_count{0};
 
-  cc_test_graph_decoder(decoder_init inputs, decode_result_type output,
+  cc_test_graph_decoder(decoder_init inputs, decoder_output_request output,
                         const cudaqx::heterogeneous_map &)
       : decoder(std::move(inputs), output) {}
 
@@ -55,11 +55,12 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       cc_test_graph_decoder,
       static std::unique_ptr<decoder> create(
-          decoder_init inputs, std::optional<decode_result_type> output,
+          decoder_init inputs, std::optional<decoder_output_request> output,
           const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<cc_test_graph_decoder>(
-            std::move(inputs), output.value_or(decode_result_type::errors),
-            params);
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<cc_test_graph_decoder>(std::move(inputs),
+                                                       request, params);
       })
 };
 
@@ -67,7 +68,7 @@ public:
 // hits the "requires graph dispatch" throw.
 class cc_test_null_graph_decoder : public decoder {
 public:
-  cc_test_null_graph_decoder(decoder_init inputs, decode_result_type output,
+  cc_test_null_graph_decoder(decoder_init inputs, decoder_output_request output,
                              const cudaqx::heterogeneous_map &)
       : decoder(std::move(inputs), output) {}
 
@@ -83,11 +84,12 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       cc_test_null_graph_decoder,
       static std::unique_ptr<decoder> create(
-          decoder_init inputs, std::optional<decode_result_type> output,
+          decoder_init inputs, std::optional<decoder_output_request> output,
           const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<cc_test_null_graph_decoder>(
-            std::move(inputs), output.value_or(decode_result_type::errors),
-            params);
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<cc_test_null_graph_decoder>(std::move(inputs),
+                                                            request, params);
       })
 };
 
