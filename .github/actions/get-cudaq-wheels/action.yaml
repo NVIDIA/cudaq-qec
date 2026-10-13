@@ -154,6 +154,20 @@ runs:
           python_version=3.13
         outputs: /cudaq-wheels
 
+    # Since NVIDIA/cuda-quantum#5555, the CUDA-independent cudaq-core wheel is
+    # placed under wheelhouse/candidate-core/ for CUDA 12 builds (only the
+    # CUDA 13 pipeline publishes it). pip --find-links does not recurse, so
+    # move it up where cuda-quantum-cu12's exact dependency on cudaq-core can
+    # be resolved. A no-op for CUDA 13 and for caches that are already flat.
+    - name: Flatten CUDA 12 candidate-core wheels
+      if: inputs.lookup-only == 'false'
+      run: |
+        if compgen -G "/cudaq-wheels/candidate-core/cudaq_core-*.whl" > /dev/null; then
+          mv /cudaq-wheels/candidate-core/cudaq_core-*.whl /cudaq-wheels/
+          rmdir /cudaq-wheels/candidate-core 2>/dev/null || true
+        fi
+      shell: bash --noprofile --norc -euo pipefail {0}
+
     # ==========================================================================
     # Store CUDAQ wheels cache
     # ==========================================================================
