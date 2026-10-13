@@ -8,14 +8,30 @@
 
 #include <gtest/gtest.h>
 
+// Symbols that libcudaq-qec-realtime-decoding-quantinuum.so leaves undefined.
+// The GPU Server preloads the stubs library instead of the CUDA-Q runtime.
 extern "C" {
-void __quantum__qis__x__ctl();
-void __quantum__qis__y__ctl();
-void __quantum__qis__z__ctl();
+void __cudaq_deviceCodeHolderAdd();
+void __cudaq_registerLinkableKernel();
+void __cudaq_registerRunnableKernel();
+void cudaqRegisterArgsCreator();
+void cudaqRegisterKernelName();
 }
 
-TEST(CudaqStubs, CallsTheThreeExportedQisCtlSymbols) {
-  __quantum__qis__x__ctl();
-  __quantum__qis__y__ctl();
-  __quantum__qis__z__ctl();
+namespace cudaq::detail {
+class YamlTargetConfigDisabler {
+public:
+  YamlTargetConfigDisabler();
+};
+} // namespace cudaq::detail
+
+// A return from each call means that symbol is exported by the stubs library.
+TEST(CudaqStubs, CallsTheExportedCudaqSymbols) {
+  __cudaq_deviceCodeHolderAdd();
+  __cudaq_registerLinkableKernel();
+  __cudaq_registerRunnableKernel();
+  cudaqRegisterArgsCreator();
+  cudaqRegisterKernelName();
+  cudaq::detail::YamlTargetConfigDisabler disabler;
+  (void)disabler;
 }
