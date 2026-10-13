@@ -57,6 +57,9 @@ dem_chunks_to_d_sparse(const std::vector<extended_dem> &dem_chunks,
 /// dem_chunks_spec::measurements_of() its phase. Otherwise this is the
 /// memory-experiment convention above, validated on a compact chain without
 /// expanding the full-shot fault model.
+/// The returned map still contains one row per configured detector, so its
+/// storage grows with the configured round count. Compact fault-model
+/// preparation does not make the returned D map constant-size.
 ///
 /// @throws std::invalid_argument if the spec does not expand, a chunk's rows
 ///   do not number its detectors, or an index lies outside the previous and
