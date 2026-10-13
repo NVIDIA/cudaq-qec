@@ -253,6 +253,18 @@ __wrap_cudaq_dispatcher_set_ringbuffer(cudaq_dispatcher_t *,
                                        const cudaq_ringbuffer_t *) {
   return CUDAQ_OK;
 }
+// Threaded scenarios never select the unified host loop, so the probe is
+// unused. Returning unsupported keeps a later unified call from seeing an
+// empty plane.
+cudaq_status_t
+__wrap_cudaq_bridge_get_cpu_dataplane(cudaq_realtime_bridge_handle_t,
+                                      cudaq_cpu_dataplane_t *) {
+  return CUDAQ_ERR_UNSUPPORTED;
+}
+cudaq_status_t __wrap_cudaq_dispatcher_set_cpu_dataplane(cudaq_dispatcher_t *,
+                                                         void *) {
+  return CUDAQ_OK;
+}
 cudaq_status_t
 __wrap_cudaq_dispatcher_set_function_table(cudaq_dispatcher_t *,
                                            const cudaq_function_table_t *) {
