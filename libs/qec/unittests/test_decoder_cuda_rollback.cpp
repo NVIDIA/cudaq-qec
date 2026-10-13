@@ -30,7 +30,7 @@ int g_current = 1;
 class throwing_ctor_decoder : public cudaq::qec::decoder {
 public:
   throwing_ctor_decoder(cudaq::qec::decoder_init inputs,
-                        cudaq::qec::decode_result_type output,
+                        cudaq::qec::decoder_output_request output,
                         const cudaqx::heterogeneous_map &)
       : decoder(std::move(inputs), output) {
     throw std::runtime_error("ctor-fail");
@@ -43,11 +43,12 @@ public:
       throwing_ctor_decoder,
       static std::unique_ptr<cudaq::qec::decoder> create(
           cudaq::qec::decoder_init inputs,
-          std::optional<cudaq::qec::decode_result_type> output,
+          std::optional<cudaq::qec::decoder_output_request> output,
           const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<throwing_ctor_decoder>(
-            std::move(inputs),
-            output.value_or(cudaq::qec::decode_result_type::errors), params);
+        const auto request = output.value_or(cudaq::qec::decoder_output_request{
+            cudaq::qec::decode_result_type::errors});
+        return std::make_unique<throwing_ctor_decoder>(std::move(inputs),
+                                                       request, params);
       })
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(throwing_ctor_decoder)
