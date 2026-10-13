@@ -55,7 +55,8 @@ dem_chunks_to_d_sparse(const std::vector<extended_dem> &dem_chunks,
 /// chunk's rows are rebased onto it, so rounds may differ in width and
 /// detectors need not be adjacent-round differences; each round's size is
 /// dem_chunks_spec::measurements_of() its phase. Otherwise this is the
-/// memory-experiment convention above, over dem_chunks_from_spec(spec).
+/// memory-experiment convention above, validated on a compact chain without
+/// expanding the full-shot fault model.
 ///
 /// @throws std::invalid_argument if the spec does not expand, a chunk's rows
 ///   do not number its detectors, or an index lies outside the previous and

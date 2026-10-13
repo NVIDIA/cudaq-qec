@@ -1498,6 +1498,40 @@ TEST(DemChunkSpec, PerPhaseMapsExpandForAnyRoundCount) {
   }
 }
 
+TEST(DemChunkSpec, ImplicitMemoryMapUsesTheCompactChain) {
+  for (const uint64_t rounds : {3u, 4u, 7u, 1000u}) {
+    const auto spec = rep5_spec(rounds);
+    EXPECT_EQ(dem_chunks_to_d_sparse(spec),
+              dem_chunks_to_d_sparse(dem_chunks_from_spec(spec)))
+        << "rounds=" << rounds;
+  }
+  const auto rows = dem_chunks_to_d_sparse(rep5_spec(100003));
+  ASSERT_EQ(rows.size(), 4u * 100003u);
+  EXPECT_EQ(rows.front(), (std::vector<uint32_t>{0}));
+  EXPECT_EQ(rows.back(),
+            (std::vector<uint32_t>{4u * 100002u - 1u, 4u * 100003u - 1u}));
+}
+
+TEST(DemChunkSpec, ImplicitMemoryMapRejectsIndexOverflowBeforeExpansion) {
+  const auto max = std::numeric_limits<uint32_t>::max();
+  EXPECT_THROW(dem_chunks_to_d_sparse(rep5_spec(uint64_t{max} / 4 + 2)),
+               std::overflow_error);
+}
+
+TEST(DemChunkSpec, ImplicitMemoryMapPreservesZeroLeadingBulkRounds) {
+  for (const uint64_t rounds : {3u, 4u, 7u, 1000u}) {
+    auto spec = rep5_spec(rounds);
+    auto &bulk = spec.phases.at(1).spec;
+    const auto outgoing = std::move(bulk.H_sparse);
+    bulk.H_sparse.clear();
+    bulk.seam_specs = {{seam_name::next_round, {outgoing, {}}},
+                       {seam_name::prev_round, {{}, {}}}};
+    EXPECT_EQ(dem_chunks_to_d_sparse(spec),
+              dem_chunks_to_d_sparse(dem_chunks_from_spec(spec)))
+        << "rounds=" << rounds;
+  }
+}
+
 // A final round that reads more bits than the syndrome rounds, each detector
 // comparing the last syndrome against two of them, as a data readout does.
 TEST(DemChunkSpec, PerPhaseMapsAllowRoundsOfDifferentSize) {

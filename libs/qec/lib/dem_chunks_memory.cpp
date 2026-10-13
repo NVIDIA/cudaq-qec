@@ -97,14 +97,43 @@ std::map<phase_id, uint64_t> detectors_per_phase(const dem_chunks_spec &spec) {
 std::vector<std::vector<uint32_t>>
 dem_chunks_to_d_sparse(const dem_chunks_spec &spec) {
   const seam_id to_seam = spec.seam.to_seam;
-  const auto sequence = spec.phase_sequence();
   if (!spec.has_D_sparse()) {
-    // The memory convention needs the chain itself, for the per-round width
-    // and the contractibility checks dem_chunks_to_rounds() makes.
-    return dem_chunks_to_d_sparse(dem_chunks_from_spec(spec),
-                                  spec.seam.from_seam, to_seam);
+    // Validate both bulk joins on a compact chain, then extend the memory
+    // convention's D directly. No full-shot fault-model chain is needed.
+    const auto chain = dem_chunks_to_compact_chain(spec);
+    auto rows =
+        dem_chunks_to_d_sparse(chain.chunks, spec.seam.from_seam, to_seam);
+    if (chain.elided_rounds() == 0)
+      return rows;
+    const auto &first = chain.chunks.front();
+    uint32_t width =
+        first.has_seam(to_seam) ? first.get_seam(to_seam).num_rows() : 0;
+    if (width == 0)
+      width = first.get_seam(spec.seam.from_seam).num_rows();
+    const uint64_t compact_rounds = rows.size() / width;
+    // Reuse the memory convention's round count, including structural
+    // zero-row leading seams, rather than assuming every chunk adds a round.
+    const uint64_t rounds_per_bulk = dem_chunk_rounds(
+        chain.chunks[chain.repeating], spec.seam.from_seam, to_seam);
+    if (rounds_per_bulk == 0)
+      return rows;
+    const uint64_t max_rounds =
+        (uint64_t{std::numeric_limits<uint32_t>::max()} + 1) / width;
+    if (compact_rounds > max_rounds ||
+        chain.elided_rounds() > (max_rounds - compact_rounds) / rounds_per_bulk)
+      throw std::overflow_error(
+          "dem_chunks_to_d_sparse: measurement bit index exceeds uint32_t max");
+    const uint64_t rounds =
+        compact_rounds + chain.elided_rounds() * rounds_per_bulk;
+    rows.resize(static_cast<std::size_t>(rounds * width));
+    for (uint64_t r = compact_rounds; r < rounds; ++r)
+      for (uint32_t k = 0; k < width; ++k)
+        rows[r * width + k] = {static_cast<uint32_t>((r - 1) * width + k),
+                               static_cast<uint32_t>(r * width + k)};
+    return rows;
   }
   spec.validate();
+  const auto sequence = spec.phase_sequence();
   const auto detectors_of = detectors_per_phase(spec);
 
   std::vector<std::vector<uint32_t>> d_sparse;
