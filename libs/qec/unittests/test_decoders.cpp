@@ -2448,7 +2448,7 @@ CUDAQ_EXT_PT_REGISTER_TYPE(device_recording_decoder)
 class one_error_decoder : public cudaq::qec::decoder {
 public:
   one_error_decoder(cudaq::qec::decoder_init inputs,
-                    cudaq::qec::decode_result_type output,
+                    cudaq::qec::decoder_output_request output,
                     const cudaqx::heterogeneous_map &)
       : decoder(std::move(inputs), output) {}
   cudaq::qec::decoder_result
@@ -2464,11 +2464,12 @@ public:
       one_error_decoder,
       static std::unique_ptr<cudaq::qec::decoder> create(
           cudaq::qec::decoder_init inputs,
-          std::optional<cudaq::qec::decode_result_type> output,
+          std::optional<cudaq::qec::decoder_output_request> output,
           const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<one_error_decoder>(
-            std::move(inputs),
-            output.value_or(cudaq::qec::decode_result_type::errors), params);
+        const auto request = output.value_or(cudaq::qec::decoder_output_request{
+            cudaq::qec::decode_result_type::errors});
+        return std::make_unique<one_error_decoder>(std::move(inputs), request,
+                                                   params);
       })
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(one_error_decoder)
