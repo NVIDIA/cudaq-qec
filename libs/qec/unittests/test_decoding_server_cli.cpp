@@ -28,6 +28,8 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
@@ -56,6 +58,7 @@ int g_dma_closes = 0;
 int g_bridge_fail_on = 0; // 1-based create that fails
 int g_bridge_creates = 0;
 std::string g_last_lib;
+std::string g_create_args;
 std::string g_endpoint = "transport=udp port=9 rest=foo";
 int g_bridge_ok = 1;
 int g_factory_throw = 0;
@@ -89,6 +92,28 @@ public:
   std::atomic<bool> stop_{false};
 };
 #endif
+
+int call_main(std::vector<std::string> args);
+
+struct captured_io {
+  int rc = 0;
+  std::string out;
+  std::string err;
+};
+
+captured_io call_main_captured(std::vector<std::string> args) {
+  std::stringstream out;
+  std::stringstream err;
+  auto *old_out = std::cout.rdbuf(out.rdbuf());
+  auto *old_err = std::cerr.rdbuf(err.rdbuf());
+  captured_io cap;
+  cap.rc = call_main(std::move(args));
+  std::cout.rdbuf(old_out);
+  std::cerr.rdbuf(old_err);
+  cap.out = out.str();
+  cap.err = err.str();
+  return cap;
+}
 
 int call_main(std::vector<std::string> args) {
   std::vector<char *> argv;
@@ -153,9 +178,16 @@ int __wrap_close(int fd) {
 
 cudaq_status_t
 __wrap_cudaq_bridge_create_from_library(cudaq_realtime_bridge_handle_t *out,
-                                        const char *library, int, char **) {
+                                        const char *library, int argc,
+                                        char **argv) {
   ++g_bridge_creates;
   g_last_lib = library ? library : "";
+  for (int i = 0; i < argc; ++i) {
+    if (argv && argv[i]) {
+      g_create_args.push_back('\n');
+      g_create_args += argv[i];
+    }
+  }
   if (g_bridge_fail_on && g_bridge_creates == g_bridge_fail_on)
     return CUDAQ_ERR_INTERNAL;
   if (!g_bridge_ok)
@@ -369,6 +401,7 @@ int run_helper(const char *name) {
   g_n_cons_create = 0;
   g_n_cons_shutdown = 0;
   g_n_cons_destroy = 0;
+  g_create_args.clear();
   g_endpoint = "transport=udp port=9 rest=foo";
 
   auto two_host = [] {
@@ -389,12 +422,25 @@ int run_helper(const char *name) {
            g_n_disp_destroy == disp_d;
   };
 
-  if (std::strcmp(name, "help") == 0)
-    return call_main({"--help"}) == 1 ? 0 : 2;
+  if (std::strcmp(name, "help") == 0) {
+    // A valid config is present, so a missing --help handler cannot hide
+    // behind the missing-config error. --timeout=-1 keeps a broken handler
+    // from waiting out the default timeout.
+    auto p = qec_cc::write_temp(qec_cc::lut_yaml());
+    auto cap = call_main_captured({"--help", "--config=" + p, "--timeout=-1"});
+    return (cap.rc == 1 && cap.out.find("Usage:") != std::string::npos) ? 0 : 2;
+  }
   if (std::strcmp(name, "no_config") == 0)
     return call_main({}) == 1 ? 0 : 2;
-  if (std::strcmp(name, "bad_timeout") == 0)
-    return call_main({"--config=/tmp/x.yaml", "--timeout=abc"}) == 1 ? 0 : 2;
+  if (std::strcmp(name, "bad_timeout") == 0) {
+    // The config exists, so exit 1 can only come from rejecting "abc".
+    // The same file with --timeout=-1 must still start.
+    auto p = qec_cc::write_temp(qec_cc::lut_yaml());
+    auto bad = call_main_captured({"--config=" + p, "--timeout=abc"});
+    if (bad.rc != 1 || bad.err.find("invalid --timeout") == std::string::npos)
+      return 2;
+    return call_main({"--config=" + p, "--timeout=-1"}) == 0 ? 0 : 2;
+  }
   if (std::strcmp(name, "missing") == 0)
     return call_main({"--config=/no/such/qec-cc.yaml"}) == 1 ? 0 : 2;
   if (std::strcmp(name, "empty") == 0) {
@@ -408,12 +454,23 @@ int run_helper(const char *name) {
   if (std::strcmp(name, "dma_fail") == 0) {
     g_dma_fail = 1;
     auto p = qec_cc::write_temp(qec_cc::lut_yaml());
-    return call_main({"--config=" + p, "--timeout=-1"}) == 0 ? 0 : 2;
+    auto cap = call_main_captured({"--config=" + p, "--timeout=-1"});
+    // Failure is non-fatal, and the warning is the only sign the open failed.
+    return (cap.rc == 0 && cap.err.find("cannot hold /dev/cpu_dma_latency") !=
+                               std::string::npos)
+               ? 0
+               : 2;
   }
   if (std::strcmp(name, "dma_ok") == 0) {
     g_dma_fail = 0;
     auto p = qec_cc::write_temp(qec_cc::lut_yaml());
-    return call_main({"--config=" + p, "--timeout=-1"}) == 0 ? 0 : 2;
+    auto cap = call_main_captured({"--config=" + p, "--timeout=-1"});
+    // Default endpoint port=9 must appear, and the DMA warning must not.
+    return (cap.rc == 0 && cap.out.find("port=9") != std::string::npos &&
+            cap.err.find("cannot hold /dev/cpu_dma_latency") ==
+                std::string::npos)
+               ? 0
+               : 2;
   }
   if (std::strcmp(name, "dma_readonly") == 0) {
     g_dma_readonly = 1;
@@ -442,20 +499,34 @@ int run_helper(const char *name) {
   if (std::strcmp(name, "bad_port") == 0) {
     g_endpoint = "transport=udp port=xyz rest=foo";
     auto p = qec_cc::write_temp(qec_cc::lut_yaml());
-    return call_main({"--config=" + p, "--timeout=-1"}) == 0 ? 0 : 2;
+    auto cap = call_main_captured({"--config=" + p, "--timeout=-1"});
+    // "xyz" is rejected to port 0 and is not left in the READY line.
+    return (cap.rc == 0 && cap.out.find("port=0") != std::string::npos &&
+            cap.out.find("port=xyz") == std::string::npos)
+               ? 0
+               : 2;
   }
   if (std::strcmp(name, "explicit_port") == 0) {
     auto yaml = two_host();
     auto p = qec_cc::write_temp(yaml);
-    g_bridge_fail_on = 2;
-    return call_main({"--config=" + p, "--port=1234"}) == 1 ? 0 : 2;
+    auto cap =
+        call_main_captured({"--config=" + p, "--port=1234", "--timeout=-1"});
+    // The port must be forwarded to provider create, not inferred from a
+    // forced second-ring failure.
+    return (cap.rc == 0 &&
+            g_create_args.find("\n--port=1234") != std::string::npos)
+               ? 0
+               : 2;
   }
   if (std::strcmp(name, "port_in_args") == 0) {
     auto yaml = two_host() + "transport:\n  provider: udp\n  args:\n    - "
                              "--port=1234\n";
     auto p = qec_cc::write_temp(yaml);
-    g_bridge_fail_on = 2;
-    return call_main({"--config=" + p}) == 1 ? 0 : 2;
+    auto cap = call_main_captured({"--config=" + p, "--timeout=-1"});
+    return (cap.rc == 0 &&
+            g_create_args.find("\n--port=1234") != std::string::npos)
+               ? 0
+               : 2;
   }
   if (std::strcmp(name, "fail_geometry") == 0) {
     g_fail = 1;
@@ -467,7 +538,13 @@ int run_helper(const char *name) {
   if (std::strcmp(name, "fail_endpoint") == 0) {
     g_fail = 2;
     auto p = qec_cc::write_temp(qec_cc::lut_yaml());
-    return call_main({"--config=" + p, "--timeout=-1"}) == 0 ? 0 : 2;
+    auto cap = call_main_captured({"--config=" + p, "--timeout=-1"});
+    // The provider error is replaced by "transport=<name>". The original
+    // endpoint's rest=foo token must not survive.
+    return (cap.rc == 0 && cap.out.find("transport=udp") != std::string::npos &&
+            cap.out.find("rest=foo") == std::string::npos)
+               ? 0
+               : 2;
   }
   if (std::strcmp(name, "fail_manager") == 0) {
     g_fail = 3;
@@ -545,7 +622,11 @@ int run_helper(const char *name) {
       ::kill(::getpid(), SIGTERM);
     });
     killer.detach();
-    return call_main({"--config=" + p, "--timeout=30"}) == 0 ? 0 : 2;
+    const auto started = std::chrono::steady_clock::now();
+    const int rc = call_main({"--config=" + p, "--timeout=30"});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    // The 30s timeout also returns 0. Only the signal can explain a fast exit.
+    return (rc == 0 && elapsed < std::chrono::seconds(2)) ? 0 : 2;
   }
   if (std::strcmp(name, "all_graph_factory_throw") == 0) {
     g_factory_throw = 1;
