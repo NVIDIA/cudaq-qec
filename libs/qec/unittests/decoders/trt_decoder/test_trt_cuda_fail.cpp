@@ -31,6 +31,7 @@ namespace {
 const char *g_mode = "";
 int g_destroy_graph = 0;
 int g_destroy_exec = 0;
+int g_fail_hits = 0;
 cudaGraph_t g_last_graph = nullptr;
 cudaGraphExec_t g_fake_exec =
     reinterpret_cast<cudaGraphExec_t>(static_cast<uintptr_t>(0xF1));
@@ -46,6 +47,7 @@ int run_mode(const char *mode) {
   g_mode = mode;
   g_destroy_graph = 0;
   g_destroy_exec = 0;
+  g_fail_hits = 0;
 #ifndef TRT_TEST_UINT8_ONNX_PATH
   return 2;
 #else
@@ -64,6 +66,13 @@ int run_mode(const char *mode) {
   if (std::strcmp(mode, "instantiate_throw") == 0 &&
       (g_destroy_graph < 1 || g_destroy_exec < 1))
     return 2;
+  // A fallback that still decodes must have entered the named failing call.
+  // Otherwise a wrapper that never runs looks the same as a handled failure.
+  if ((std::strcmp(mode, "memset") == 0 || std::strcmp(mode, "begin") == 0 ||
+       std::strcmp(mode, "end") == 0 ||
+       std::strcmp(mode, "instantiate") == 0) &&
+      g_fail_hits < 1)
+    return 2;
   return 0;
 #endif
 }
@@ -72,18 +81,23 @@ int run_mode(const char *mode) {
 extern "C" {
 
 cudaError_t __wrap_cudaMemset(void *dev, int v, size_t n) {
-  if (std::strcmp(g_mode, "memset") == 0)
+  if (std::strcmp(g_mode, "memset") == 0) {
+    ++g_fail_hits;
     return cudaErrorUnknown;
+  }
   return __real_cudaMemset(dev, v, n);
 }
 cudaError_t __wrap_cudaStreamBeginCapture(cudaStream_t s,
                                           cudaStreamCaptureMode m) {
-  if (std::strcmp(g_mode, "begin") == 0)
+  if (std::strcmp(g_mode, "begin") == 0) {
+    ++g_fail_hits;
     return cudaErrorUnknown;
+  }
   return __real_cudaStreamBeginCapture(s, m);
 }
 cudaError_t __wrap_cudaStreamEndCapture(cudaStream_t s, cudaGraph_t *g) {
   if (std::strcmp(g_mode, "end") == 0) {
+    ++g_fail_hits;
     cudaGraph_t tmp = nullptr;
     cudaError_t e = __real_cudaStreamEndCapture(s, &tmp);
     if (e == cudaSuccess && tmp)
@@ -96,8 +110,10 @@ cudaError_t __wrap_cudaStreamEndCapture(cudaStream_t s, cudaGraph_t *g) {
 }
 cudaError_t __wrap_cudaGraphInstantiate(cudaGraphExec_t *e, cudaGraph_t g,
                                         unsigned long long f) {
-  if (std::strcmp(g_mode, "instantiate") == 0)
+  if (std::strcmp(g_mode, "instantiate") == 0) {
+    ++g_fail_hits;
     return cudaErrorUnknown;
+  }
   if (std::strcmp(g_mode, "instantiate_throw") == 0) {
     if (e)
       *e = g_fake_exec;
