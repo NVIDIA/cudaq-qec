@@ -300,31 +300,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/simulation-cqr/simulation
   gtest_discover_tests(test_simulation_cqr_host)
 endif()
 
-if(TARGET cudaq-qec-realtime-decoding-quantinuum)
-  add_library(cudaq-qec-realtime-decoding-quantinuum-private SHARED
-    quantinuum_private_impl.cpp)
-  set_target_properties(cudaq-qec-realtime-decoding-quantinuum-private PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qec_cc_private"
-    OUTPUT_NAME cudaq-qec-realtime-decoding-quantinuum-private)
-  add_executable(test_quantinuum_private test_quantinuum_private.cpp)
-  target_link_libraries(test_quantinuum_private PRIVATE
-    GTest::gtest_main
-    cudaq-qec-realtime-decoding-quantinuum
-    cudaq::cudaq
-    cudaq::cudaq-common)
-  target_link_options(test_quantinuum_private PRIVATE
-    "LINKER:--export-dynamic")
-  add_dependencies(test_quantinuum_private
-    cudaq-qec-realtime-decoding-quantinuum-private)
-  add_dependencies(CUDAQXQECUnitTests test_quantinuum_private)
-  gtest_discover_tests(test_quantinuum_private
-    DISCOVERY_MODE PRE_TEST
-    PROPERTIES
-      ENVIRONMENT "CUDAQ_QTM_PRIVATE_IMPL=1"
-      ENVIRONMENT_MODIFICATION
-        "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/qec_cc_private")
-endif()
-
 add_library(qec_cc_test_plugin SHARED qec_cc_test_plugin.cpp)
 set_target_properties(qec_cc_test_plugin PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qec_cc_test_plugins"
