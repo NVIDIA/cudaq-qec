@@ -3872,17 +3872,37 @@ decoders:
       std::runtime_error);
 }
 
+// CUDAQ_QEC_DEBUG_DECODER=1 dumps the config at info. The dump sentence is
+// absent when the variable is off, so a status-0 return alone cannot pass.
 TEST(DecoderConfigTest, ConfigureFromStrLogsInfoWhenDebugDumpEnabled) {
   using namespace cudaq::qec::decoding::config;
-  ScopedEnv debugEnv("CUDAQ_QEC_DEBUG_DECODER", "1");
   const auto previous = cudaq::qec::detail::get_log_level();
   cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::info);
 
   multi_decoder_config multi_config;
   multi_config.decoders.push_back(create_test_empty_decoder_config(0));
   const auto yaml = multi_config.to_yaml_str(200);
-  EXPECT_EQ(configure_decoders_from_str(yaml.c_str()), 0);
-  finalize_decoders();
+  const char *dump = "with config string:";
+
+  {
+    ScopedEnv debugEnv("CUDAQ_QEC_DEBUG_DECODER", "1");
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(configure_decoders_from_str(yaml.c_str()), 0);
+    cudaq::qec::detail::flush_logs();
+    const auto logged = testing::internal::GetCapturedStdout();
+    EXPECT_NE(logged.find(dump), std::string::npos) << logged;
+    EXPECT_NE(logged.find("single_error_lut"), std::string::npos) << logged;
+    finalize_decoders();
+  }
+  {
+    ScopedEnv debugOff("CUDAQ_QEC_DEBUG_DECODER", "0");
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(configure_decoders_from_str(yaml.c_str()), 0);
+    cudaq::qec::detail::flush_logs();
+    const auto logged = testing::internal::GetCapturedStdout();
+    EXPECT_EQ(logged.find(dump), std::string::npos) << logged;
+    finalize_decoders();
+  }
 
   cudaq::qec::detail::set_log_level(previous);
 }

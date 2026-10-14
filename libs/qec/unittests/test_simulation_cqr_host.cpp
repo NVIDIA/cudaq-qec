@@ -40,11 +40,15 @@ make_lut(std::uint64_t bits) {
   dc.block_size = bits;
   dc.syndrome_size = bits;
   dc.H_sparse.clear();
-  dc.O_sparse = {0, -1};
+  dc.O_sparse.clear();
   dc.D_sparse.clear();
+  // Identity H, D, and O: syndrome bit i is error i and flips observable i.
+  // single_error_lut matches only that one-hot syndrome.
   for (std::uint64_t i = 0; i < bits; ++i) {
     dc.H_sparse.push_back(static_cast<std::int64_t>(i));
     dc.H_sparse.push_back(-1);
+    dc.O_sparse.push_back(static_cast<std::int64_t>(i));
+    dc.O_sparse.push_back(-1);
     dc.D_sparse.push_back(static_cast<std::int64_t>(i));
     dc.D_sparse.push_back(-1);
   }
@@ -52,6 +56,8 @@ make_lut(std::uint64_t bits) {
   return cfg;
 }
 
+// LSB-first pack: syndrome bit 0 is correction bit 0, and bit 8 is the low
+// bit of the second correction byte. A broken pack or unpack leaves a zero.
 TEST(SimulationCqrHost, PacksAndUnpacksOneBitAndMultiByteSyndromes) {
   auto one = make_lut(1);
   ASSERT_EQ(cudaq::qec::decoding::config::configure_decoders(one), 0);
@@ -61,17 +67,20 @@ TEST(SimulationCqrHost, PacksAndUnpacksOneBitAndMultiByteSyndromes) {
   std::uint8_t corr_buf = 0;
   byte_span corr{&corr_buf, 1};
   get_corrections(0, corr, true);
+  EXPECT_EQ(corr_buf, 1);
   reset_decoder(0);
   cudaq::qec::decoding::config::finalize_decoders();
 
   auto nine = make_lut(9);
   ASSERT_EQ(cudaq::qec::decoding::config::configure_decoders(nine), 0);
-  std::uint8_t packed9[2] = {0xff, 0x01};
+  std::uint8_t packed9[2] = {0x00, 0x01};
   byte_span syn9{packed9, 9};
   enqueue_syndromes(0, 0, 0, syn9);
   std::uint8_t corr9[2] = {0, 0};
-  byte_span corr_span{corr9, 1};
+  byte_span corr_span{corr9, 9};
   get_corrections(0, corr_span, false);
+  EXPECT_EQ(corr9[0], 0);
+  EXPECT_EQ(corr9[1], 0x01);
   reset_decoder(0);
   cudaq::qec::decoding::config::finalize_decoders();
 }
