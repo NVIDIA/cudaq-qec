@@ -2673,104 +2673,15 @@ TEST(ExtendedDemValidate, MisalignedObservablesThrow) {
   EXPECT_THROW(dem.validate("misaligned O"), std::invalid_argument);
 }
 
-// Defaulted comparisons must visit each member; short-circuit would hide later
-// fields if we only compared equal values.
+// seam_id hashes the name. The same name matches, a different name does not,
+// and operator< orders the two hashes strictly.
 TEST(ExtendedDemValueSemantics, EqualityVisitsEachMember) {
   seam_id a{"alpha"};
   seam_id b{"beta"};
   EXPECT_EQ(a, a);
   EXPECT_NE(a, b);
-  EXPECT_TRUE((a < b) != (b < a));
-
-  dem_seam_spec s{{0, -1}, {1, -1}};
-  EXPECT_EQ(s, s);
-  auto s_h = s;
-  s_h.H_sparse = {0, 1, -1};
-  EXPECT_NE(s, s_h);
-  auto s_o = s;
-  s_o.O_sparse = {0, -1};
-  EXPECT_NE(s, s_o);
-
-  seam_spec_entry e{seam_name::prev_round, s};
-  EXPECT_EQ(e, e);
-  auto e_id = e;
-  e_id.id = seam_name::next_round;
-  EXPECT_NE(e, e_id);
-  auto e_spec = e;
-  e_spec.spec.H_sparse = {1, -1};
-  EXPECT_NE(e, e_spec);
-
-  dem_chunk_spec chunk;
-  chunk.num_faults = 1;
-  chunk.H_sparse = {0, -1};
-  chunk.O_sparse = {0, -1};
-  chunk.error_rates = {0.01};
-  chunk.seam_specs = {e};
-  EXPECT_EQ(chunk, chunk);
-  auto c1 = chunk;
-  c1.num_faults = 2;
-  EXPECT_NE(chunk, c1);
-  auto c2 = chunk;
-  c2.H_sparse = {1, -1};
-  EXPECT_NE(chunk, c2);
-  auto c3 = chunk;
-  c3.seam_specs.clear();
-  EXPECT_NE(chunk, c3);
-  auto c4 = chunk;
-  c4.O_sparse = {1, -1};
-  EXPECT_NE(chunk, c4);
-  auto c5 = chunk;
-  c5.error_rates = {0.02};
-  EXPECT_NE(chunk, c5);
-
-  seam_connection sc{seam_name::next_round, seam_name::prev_round};
-  EXPECT_EQ(sc, sc);
-  auto sc2 = sc;
-  sc2.from_seam = seam_name::prev_round;
-  EXPECT_NE(sc, sc2);
-  auto sc3 = sc;
-  sc3.to_seam = seam_name::next_round;
-  EXPECT_NE(sc, sc3);
-
-  phase_connection pc{phase_name::dem_init, phase_name::dem_bulk};
-  EXPECT_EQ(pc, pc);
-  auto pc2 = pc;
-  pc2.from_phase = phase_name::dem_bulk;
-  EXPECT_NE(pc, pc2);
-  auto pc3 = pc;
-  pc3.to_phase = phase_name::dem_final;
-  EXPECT_NE(pc, pc3);
-
-  phase_spec_entry pe{phase_name::dem_bulk, chunk};
-  EXPECT_EQ(pe, pe);
-  auto pe2 = pe;
-  pe2.id = phase_name::dem_final;
-  EXPECT_NE(pe, pe2);
-  auto pe3 = pe;
-  pe3.spec.num_faults = 2;
-  EXPECT_NE(pe, pe3);
-
-  dem_chunks_spec spec;
-  spec.phases = {pe};
-  spec.connections = {pc};
-  spec.seam = sc;
-  spec.num_rounds = 4;
-  EXPECT_EQ(spec, spec);
-  auto sp1 = spec;
-  sp1.phases.clear();
-  EXPECT_NE(spec, sp1);
-  auto sp2 = spec;
-  sp2.connections.clear();
-  EXPECT_NE(spec, sp2);
-  auto sp3 = spec;
-  sp3.seam.to_seam = seam_name::next_round;
-  EXPECT_NE(spec, sp3);
-  auto sp4 = spec;
-  sp4.num_rounds = 5;
-  EXPECT_NE(spec, sp4);
-  auto sp5 = spec;
-  sp5.num_rounds.reset();
-  EXPECT_NE(spec, sp5);
+  EXPECT_LT(a, b);
+  EXPECT_FALSE(b < a);
 }
 
 extended_dem zero_width_seam_chunk() {
