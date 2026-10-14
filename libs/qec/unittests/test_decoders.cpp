@@ -2760,15 +2760,18 @@ TEST(SlidingWindowDecoder, BoundarySyndromeGetter) {
   auto *sw_default =
       dynamic_cast<cudaq::qec::sliding_window *>(defaulted.get());
   ASSERT_NE(sw_default, nullptr);
-  // A missing/zero boundary width is normalised to the interior round width.
+  // A missing boundary width is normalised to the interior round width.
   EXPECT_EQ(sw_default->get_num_boundary_syndromes(), n_syndromes_per_round);
 
+  // 1 is a legal width (1 <= 2) and is not the normalised default, so a getter
+  // that ignores num_boundary_syndromes cannot return it.
+  constexpr std::size_t explicit_boundary = 1;
   auto explicit_b = cudaq::qec::decoder::get(
-      "sliding_window", std::move(inputs), make_params(n_syndromes_per_round));
+      "sliding_window", std::move(inputs), make_params(explicit_boundary));
   auto *sw_explicit =
       dynamic_cast<cudaq::qec::sliding_window *>(explicit_b.get());
   ASSERT_NE(sw_explicit, nullptr);
-  EXPECT_EQ(sw_explicit->get_num_boundary_syndromes(), n_syndromes_per_round);
+  EXPECT_EQ(sw_explicit->get_num_boundary_syndromes(), explicit_boundary);
 }
 
 // decode_to_errs with a set result bit logs Errors:0 and flips observable 0.
