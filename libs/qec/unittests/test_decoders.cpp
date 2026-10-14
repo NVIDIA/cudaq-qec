@@ -2120,7 +2120,8 @@ TEST(DecoderCudaDeviceId, TwoThreadsTwoDevices) {
   EXPECT_EQ(dev1, 1);
 }
 
-// Zero/NaN clamp into the first histogram bucket; a huge sample clamps high.
+// Zero and NaN clamp into bucket 0; 1e9 us clamps into the top bucket.
+// Interior ranks read those buckets; fractions 0 and 1 only return min/max.
 TEST(DecoderStats, LatencyHistogramClampsLowAndHigh) {
   cudaq::qec::latency_series series;
   series.add(0.0);
@@ -2131,6 +2132,10 @@ TEST(DecoderStats, LatencyHistogramClampsLowAndHigh) {
   EXPECT_DOUBLE_EQ(series.max_us, 1.0e9);
   EXPECT_DOUBLE_EQ(series.percentile_us(0.0), 0.0);
   EXPECT_DOUBLE_EQ(series.percentile_us(1.0), 1.0e9);
+  // Rank 2 is the two low samples: bucket-0 midpoint, 65 ns.
+  EXPECT_DOUBLE_EQ(series.percentile_us(0.5), 0.065);
+  // Rank 3 is the 1e9 us sample: top-bucket midpoint, not the exact max.
+  EXPECT_DOUBLE_EQ(series.percentile_us(0.9), 133169.152);
 }
 
 // collect_set_bits clears stale output and reports only the set indices.
@@ -2204,18 +2209,31 @@ TEST(DecoderStats, DetailFollowsLogLevel) {
   }
 }
 
-// Submit timing, decode-before-submit no-ops, and reset abandon an open shot.
+// Complete-before-submit records nothing. Submit then complete records a
+// sample. Reset drops an open shot, so a later complete still records nothing.
 TEST(DecoderStats, SubmitDecodeResetTiming) {
   ScopedLogLevel scoped(cudaq::qec::detail::log_level::info);
-  cudaq::qec::decoder_stats stats;
-  EXPECT_DOUBLE_EQ(stats.since_last_submit_us(), 0.0);
-  stats.note_decode_complete();
-  stats.note_submit(/*first_of_shot=*/true);
-  EXPECT_GE(stats.since_last_submit_us(), 0.0);
-  stats.note_reset();
-  testing::internal::CaptureStdout();
-  stats.emit_summary();
-  EXPECT_TRUE(testing::internal::GetCapturedStdout().empty());
+  {
+    cudaq::qec::decoder_stats stats;
+    EXPECT_DOUBLE_EQ(stats.since_last_submit_us(), 0.0);
+    stats.note_decode_complete();
+    stats.note_submit(/*first_of_shot=*/true);
+    stats.note_decode_complete();
+    testing::internal::CaptureStdout();
+    stats.emit_summary();
+    EXPECT_NE(testing::internal::GetCapturedStdout().find("stats_summary"),
+              std::string::npos);
+  }
+  {
+    cudaq::qec::decoder_stats stats;
+    stats.note_submit(/*first_of_shot=*/true);
+    stats.note_reset();
+    EXPECT_DOUBLE_EQ(stats.since_last_submit_us(), 0.0);
+    stats.note_decode_complete();
+    testing::internal::CaptureStdout();
+    stats.emit_summary();
+    EXPECT_TRUE(testing::internal::GetCapturedStdout().empty());
+  }
 }
 
 // Both replay-field overloads render every named field; size mismatch yields
