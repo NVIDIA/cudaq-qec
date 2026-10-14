@@ -271,13 +271,9 @@ else()
                  "(cudaq-qec-decoding-server not built)")
 endif()
 
-if(TARGET cudaq-qec-realtime-decoding-cudaq-stubs)
-  add_executable(test_cudaq_stubs test_cudaq_stubs.cpp)
-  target_link_libraries(test_cudaq_stubs PRIVATE
-    GTest::gtest_main
-    cudaq-qec-realtime-decoding-cudaq-stubs)
-  add_dependencies(CUDAQXQECUnitTests test_cudaq_stubs)
-  gtest_discover_tests(test_cudaq_stubs)
+if(TARGET cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck)
+  add_dependencies(CUDAQXQECUnitTests
+    cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/simulation-cqr/simulation_cqr_host.cpp"
