@@ -14,6 +14,20 @@ __attribute__((visibility("default"))) void __cudaq_registerLinkableKernel() {}
 __attribute__((visibility("default"))) void __cudaq_registerRunnableKernel() {}
 __attribute__((visibility("default"))) void cudaqRegisterArgsCreator() {}
 __attribute__((visibility("default"))) void cudaqRegisterKernelName() {}
+
+// nvq++ runtime symbols referenced by the Quantinuum device objects. The GPU
+// Server does not load libcudaq, so these have to be exported here too.
+__attribute__((visibility("default"))) void hybridLaunchKernel() {}
+__attribute__((visibility("default"))) void __nvqpp_cleanup_arrays() {}
+__attribute__((visibility("default"))) void
+__nvqpp_initializer_list_to_vector_bool() {}
+__attribute__((visibility("default"))) void
+__nvqpp_vector_bool_to_initializer_list() {}
+__attribute__((visibility("default"))) void
+__nvqpp_vector_bool_free_temporary_initlists() {}
+__attribute__((visibility("default"))) void
+__quantum__rt__bool_span_record_output() {}
+__attribute__((visibility("default"))) void __quantum__rt__read_result() {}
 }
 
 // nvq++ always defines CUDAQ_DISABLE_YAML_TARGET_CONFIG, so every kernel
