@@ -4790,11 +4790,44 @@ decoders:
   ASSERT_EQ(config.decoders.size(), 1u);
   ASSERT_TRUE(config.decoders[0].dem_chunks.has_value());
   ASSERT_FALSE(config.decoders[0].dem_chunks->phases.empty());
-  EXPECT_FALSE(
-      config.decoders[0].dem_chunks->phases[0].spec.seam_specs.empty());
+  const auto &phases = config.decoders[0].dem_chunks->phases;
+  ASSERT_EQ(phases.size(), 2u);
+  // Names are recovered from the input strings. A parser that only keeps a
+  // non-empty list would not preserve prev_round / next_round or the rows.
+  EXPECT_EQ(phases[0].id.name(), "init");
+  EXPECT_EQ(phases[1].id.name(), "final");
+  for (const auto &phase : phases) {
+    ASSERT_EQ(phase.spec.seam_specs.size(), 2u);
+    EXPECT_EQ(phase.spec.seam_specs[0].id.name(), "prev_round");
+    EXPECT_EQ(phase.spec.seam_specs[1].id.name(), "next_round");
+    EXPECT_EQ(phase.spec.seam_specs[0].spec.H_sparse,
+              (std::vector<std::int64_t>{0, -1}));
+    EXPECT_EQ(phase.spec.seam_specs[1].spec.H_sparse,
+              (std::vector<std::int64_t>{0, -1}));
+    EXPECT_TRUE(phase.spec.seam_specs[0].spec.O_sparse.empty());
+    EXPECT_TRUE(phase.spec.seam_specs[1].spec.O_sparse.empty());
+  }
 
+  // Emission cannot restore a name from its hash, but the sparse rows must
+  // still come back. expand_dem_chunks is not called.
   const auto emitted = config.to_yaml_str(200);
-  EXPECT_NE(emitted.find("seam_specs"), std::string::npos);
+  auto again =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          emitted);
+  ASSERT_TRUE(again.decoders[0].dem_chunks.has_value());
+  const auto &back = again.decoders[0].dem_chunks->phases;
+  ASSERT_EQ(back.size(), phases.size());
+  for (std::size_t phase = 0; phase < phases.size(); ++phase) {
+    ASSERT_EQ(back[phase].spec.seam_specs.size(),
+              phases[phase].spec.seam_specs.size());
+    for (std::size_t seam = 0; seam < phases[phase].spec.seam_specs.size();
+         ++seam) {
+      EXPECT_EQ(back[phase].spec.seam_specs[seam].spec.H_sparse,
+                phases[phase].spec.seam_specs[seam].spec.H_sparse);
+      EXPECT_EQ(back[phase].spec.seam_specs[seam].spec.O_sparse,
+                phases[phase].spec.seam_specs[seam].spec.O_sparse);
+    }
+  }
 }
 
 TEST(DecoderDemChunksYAMLTest, ValidateRejectsErrorRateLengthMismatch) {

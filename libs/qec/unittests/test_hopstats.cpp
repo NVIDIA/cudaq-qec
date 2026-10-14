@@ -15,11 +15,16 @@
 #include <cerrno>
 #include <climits>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
+#include <fstream>
+#include <functional>
 #include <pthread.h>
 #include <sched.h>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 extern "C" {
@@ -36,6 +41,40 @@ int __wrap_pthread_setaffinity_np(pthread_t thread, size_t cpusetsize,
 namespace {
 
 using namespace cudaq::qec::decoding_server::hopstats;
+
+std::string slurp(const std::string &path) {
+  std::ifstream in(path);
+  return std::string(std::istreambuf_iterator<char>(in), {});
+}
+
+// report() and the pin helper write with printf/fprintf, so capture the fds.
+struct report_text {
+  std::string out;
+  std::string err;
+};
+
+report_text capture_stdio(const std::function<void()> &fn) {
+  const auto out_path = qec_cc::write_temp("", ".out");
+  const auto err_path = qec_cc::write_temp("", ".err");
+  std::fflush(stdout);
+  std::fflush(stderr);
+  const int old_out = ::dup(STDOUT_FILENO);
+  const int old_err = ::dup(STDERR_FILENO);
+  const int fd_out = ::open(out_path.c_str(), O_WRONLY | O_TRUNC);
+  const int fd_err = ::open(err_path.c_str(), O_WRONLY | O_TRUNC);
+  ::dup2(fd_out, STDOUT_FILENO);
+  ::dup2(fd_err, STDERR_FILENO);
+  fn();
+  std::fflush(stdout);
+  std::fflush(stderr);
+  ::dup2(old_out, STDOUT_FILENO);
+  ::dup2(old_err, STDERR_FILENO);
+  ::close(fd_out);
+  ::close(fd_err);
+  ::close(old_out);
+  ::close(old_err);
+  return {slurp(out_path), slurp(err_path)};
+}
 using cudaq::qec::decoding::rpc::kEnqueueSyndromesFunctionId;
 using cudaq::qec::decoding::rpc::kGetCorrectionsFunctionId;
 using cudaq::qec::decoding::rpc::kResetDecoderFunctionId;
@@ -88,7 +127,17 @@ int run_helper(const char *name) {
     }
     on_dispatcher_thread();
     on_dispatcher_thread();
-    report();
+    const auto text = capture_stdio([] { report(); });
+    const char *csv_path = std::getenv("QEC_DECODING_SERVER_HOP_STATS_CSV");
+    const auto csv = csv_path ? slurp(csv_path) : std::string{};
+    // One row per request kind, plus the full-mode summary line.
+    if (csv.find("kind,rid,total_ns,stage_parse_ns,stage_decode_ns,"
+                 "stage_respond_ns\n") == std::string::npos ||
+        csv.find("enqueue_syndromes,1,") == std::string::npos ||
+        csv.find("get_corrections,2,") == std::string::npos ||
+        csv.find("reset_decoder,3,") == std::string::npos ||
+        text.out.find("mode=full") == std::string::npos)
+      return 2;
     return 0;
   }
   if (std::strcmp(name, "full_csv_fail") == 0) {
@@ -97,12 +146,12 @@ int run_helper(const char *name) {
       scope.parsed(1);
       scope.decoded();
     }
-    report();
-    return 0;
+    const auto text = capture_stdio([] { report(); });
+    return text.err.find("cannot open csv path") == std::string::npos ? 2 : 0;
   }
   if (std::strcmp(name, "affinity_fail") == 0) {
-    on_dispatcher_thread();
-    return 0;
+    const auto text = capture_stdio([] { on_dispatcher_thread(); });
+    return text.err.find("pin failed") == std::string::npos ? 2 : 0;
   }
   if (std::strcmp(name, "buffer_full") == 0) {
     g_sample_count.store(kMaxSamples);
@@ -110,8 +159,9 @@ int run_helper(const char *name) {
     extra.kind = 0;
     extra.total = 1;
     append_sample(extra);
-    report();
-    return 0;
+    const auto text = capture_stdio([] { report(); });
+    // The extra sample is past the cap, so the report must say it was dropped.
+    return text.out.find("dropped=1") == std::string::npos ? 2 : 0;
   }
   if (std::strcmp(name, "missing_and_empty") == 0) {
     Sample missing{};
@@ -125,8 +175,12 @@ int run_helper(const char *name) {
     enqueue.kind = 0;
     enqueue.total = 10;
     append_sample(enqueue);
-    report();
-    return 0;
+    const auto text = capture_stdio([] { report(); });
+    // kMissing is omitted, so the remaining 10 ns sample is the whole metric.
+    return text.out.find("kind=enqueue_syndromes metric=total subset=all "
+                         "count=1 min_us=0.01") == std::string::npos
+               ? 2
+               : 0;
   }
   return 1;
 }
