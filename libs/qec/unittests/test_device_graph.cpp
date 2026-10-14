@@ -492,12 +492,13 @@ TEST(DeviceGraphRingConsumer, SuccessShutdownDispatchedAndCAbi) {
     DeviceGraphRingConsumer c(ring, 4, 64, 0, &gr);
     c.shutdown();
     c.shutdown();
-    (void)c.dispatched();
+    // No kernel has run, so a skipped or unzeroed counter cannot read as 0.
+    EXPECT_EQ(c.dispatched(), 0u);
   }
   auto *ok = cudaqx_qec_make_device_graph_ring_consumer(&ring, 4, 64, 0, &gr);
   ASSERT_NE(ok, nullptr);
   cudaqx_qec_device_graph_ring_consumer_shutdown(ok);
-  (void)cudaqx_qec_device_graph_ring_consumer_dispatched(ok);
+  EXPECT_EQ(cudaqx_qec_device_graph_ring_consumer_dispatched(ok), 0u);
   cudaqx_qec_device_graph_ring_consumer_destroy(ok);
   EXPECT_EQ(
       cudaqx_qec_make_device_graph_ring_consumer(&ring, 4, 64, 0, nullptr),

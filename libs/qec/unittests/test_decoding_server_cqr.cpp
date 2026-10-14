@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -117,18 +118,31 @@ TEST(DecodingServerCqr, DispatchRpcFailureModesAndShutdown) {
   host_fn(tx.data(), nullptr, 64);
   auto tiny = make_slot(kEnqueueSyndromesFunctionId, 1, enqueue_payload(0));
   host_fn(tiny.data(), tx.data(), 4);
+  // Null and short slots must not write a response.
+  EXPECT_TRUE(std::all_of(tx.begin(), tx.end(),
+                          [](uint8_t byte) { return byte == 0; }));
 
   auto bad_magic =
       make_slot(kEnqueueSyndromesFunctionId, 2, enqueue_payload(0));
   reinterpret_cast<RPCHeader *>(bad_magic.data())->magic = 0xDEADBEEF;
   host_fn(bad_magic.data(), tx.data(), bad_magic.size());
+  auto *resp = reinterpret_cast<const RPCResponse *>(tx.data());
+  EXPECT_EQ(
+      resp->status,
+      static_cast<int32_t>(cudaq::qec::decoding::rpc::RpcStatus::BAD_REQUEST));
+  EXPECT_EQ(resp->request_id, 2u);
 
   auto no_id = make_slot(kEnqueueSyndromesFunctionId, 3, {});
   host_fn(no_id.data(), tx.data(), no_id.size());
+  resp = reinterpret_cast<const RPCResponse *>(tx.data());
+  EXPECT_EQ(
+      resp->status,
+      static_cast<int32_t>(cudaq::qec::decoding::rpc::RpcStatus::BAD_REQUEST));
+  EXPECT_EQ(resp->request_id, 3u);
 
   auto unknown = make_slot(kEnqueueSyndromesFunctionId, 4, enqueue_payload(99));
   host_fn(unknown.data(), tx.data(), unknown.size());
-  const auto *resp = reinterpret_cast<const RPCResponse *>(tx.data());
+  resp = reinterpret_cast<const RPCResponse *>(tx.data());
   EXPECT_EQ(resp->status,
             static_cast<int32_t>(
                 cudaq::qec::decoding::rpc::RpcStatus::INVALID_DECODER));
