@@ -506,27 +506,35 @@ int run_helper(const char *name) {
                ? 0
                : 2;
   }
+  // A later ring that fails with a real --port=N must print the shared-port
+  // note. Exit 1 alone still passes if that port was never forwarded.
+  auto shared_port_note = [&](std::vector<std::string> args) {
+    g_bridge_creates = 0;
+    g_bridge_fail_on = 2;
+    g_create_args.clear();
+    auto cap = call_main_captured(std::move(args));
+    g_bridge_fail_on = 0;
+    return cap.rc == 1 &&
+           cap.err.find("cannot be shared") != std::string::npos &&
+           g_create_args.find("\n--port=1234") != std::string::npos;
+  };
   if (std::strcmp(name, "explicit_port") == 0) {
     auto yaml = two_host();
     auto p = qec_cc::write_temp(yaml);
     auto cap =
         call_main_captured({"--config=" + p, "--port=1234", "--timeout=-1"});
-    // The port must be forwarded to provider create, not inferred from a
-    // forced second-ring failure.
-    return (cap.rc == 0 &&
-            g_create_args.find("\n--port=1234") != std::string::npos)
-               ? 0
-               : 2;
+    if (cap.rc != 0 || g_create_args.find("\n--port=1234") == std::string::npos)
+      return 2;
+    return shared_port_note({"--config=" + p, "--port=1234"}) ? 0 : 2;
   }
   if (std::strcmp(name, "port_in_args") == 0) {
     auto yaml = two_host() + "transport:\n  provider: udp\n  args:\n    - "
                              "--port=1234\n";
     auto p = qec_cc::write_temp(yaml);
     auto cap = call_main_captured({"--config=" + p, "--timeout=-1"});
-    return (cap.rc == 0 &&
-            g_create_args.find("\n--port=1234") != std::string::npos)
-               ? 0
-               : 2;
+    if (cap.rc != 0 || g_create_args.find("\n--port=1234") == std::string::npos)
+      return 2;
+    return shared_port_note({"--config=" + p}) ? 0 : 2;
   }
   if (std::strcmp(name, "fail_geometry") == 0) {
     g_fail = 1;
