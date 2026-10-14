@@ -190,8 +190,13 @@ $python -m auditwheel -v repair dist/*.whl $CUDAQ_EXCLUDE_LIST \
   --exclude libnvonnxparser.so.10 \
   --exclude libcudaq-qec.so \
   --exclude libcudaq-qec-realtime-decoding.so \
+  --exclude libcudaq-qec-decoders.so \
   ${PLAT_STR}
 
+# Make sure auditwheel did not graft a duplicate copy of a library we already
+# ship (or any CUDA-Q library). If this fails, add an --exclude above.
+# (cwd is libs/qec)
+$python ../../.github/workflows/scripts/check_grafted_libs.py /wheels/*.whl
 
 echo "Wheel builds are complete: "
 ls -la /wheels

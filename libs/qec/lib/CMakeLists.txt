@@ -245,8 +245,9 @@ elseif (NOT SKBUILD)
   set_target_properties(${LIBRARY_NAME} PROPERTIES
     INSTALL_RPATH_USE_LINK_PATH TRUE)
 else()
-  # CUDA-Q install its libraries in site-packages/lib (or dist-packages/lib)
-  # Thus, we need the $ORIGIN/../lib.
+  # libcudaq-qec-decoders.so is installed next to this library, so we need
+  # $ORIGIN. CUDA-Q install its libraries in site-packages/lib (or
+  # dist-packages/lib), so we also need $ORIGIN/../../lib.
   #
   # cuStabilizer ships in the sibling cuquantum-python-cuXX pip wheel (declared
   # as a runtime dependency in pyproject.toml).  Its layout in site-packages is
@@ -256,7 +257,7 @@ else()
   # relative path (rather than the absolute cuStabilizer_LIBRARY_DIR resolved
   # at build time) keeps the wheel portable across environments.
   set_target_properties(${LIBRARY_NAME} PROPERTIES
-    INSTALL_RPATH "$ORIGIN/../../lib:$ORIGIN/../../cuquantum/lib"
+    INSTALL_RPATH "$ORIGIN:$ORIGIN/../../lib:$ORIGIN/../../cuquantum/lib"
   )
 endif()
 
