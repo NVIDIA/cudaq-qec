@@ -20,9 +20,12 @@
 #include <cuda_runtime_api.h>
 #include <future>
 #include <gtest/gtest.h>
+#include <limits>
 #include <optional>
 #include <random>
 #include <thread>
+
+#include "decoders/sliding_window.h"
 
 namespace {
 class decoder_init_probe final : public cudaq::qec::decoder {
@@ -1966,6 +1969,37 @@ public:
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(device_recording_decoder)
 
+/// Always predicts error mechanism 0 so enqueue_syndrome's decode_to_errs
+/// logging records Errors:0.
+class one_error_decoder : public cudaq::qec::decoder {
+public:
+  one_error_decoder(cudaq::qec::decoder_init inputs,
+                    cudaq::qec::decoder_output_request output,
+                    const cudaqx::heterogeneous_map &)
+      : decoder(std::move(inputs), output) {}
+  cudaq::qec::decoder_result
+  decode(const std::vector<cudaq::qec::float_t> &) override {
+    cudaq::qec::decoder_result r;
+    r.converged = true;
+    r.result.assign(block_size, 0.0);
+    if (!r.result.empty())
+      r.result[0] = 1.0;
+    return r;
+  }
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      one_error_decoder,
+      static std::unique_ptr<cudaq::qec::decoder> create(
+          cudaq::qec::decoder_init inputs,
+          std::optional<cudaq::qec::decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        const auto request = output.value_or(cudaq::qec::decoder_output_request{
+            cudaq::qec::decode_result_type::errors});
+        return std::make_unique<one_error_decoder>(std::move(inputs), request,
+                                                   params);
+      })
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(one_error_decoder)
+
 } // namespace
 
 TEST(DecoderCudaDeviceId, AbsentKeyIsNoOp) {
@@ -2084,4 +2118,221 @@ TEST(DecoderCudaDeviceId, TwoThreadsTwoDevices) {
   EXPECT_TRUE(ok1);
   EXPECT_EQ(dev0, 0);
   EXPECT_EQ(dev1, 1);
+}
+
+// Zero and NaN clamp into bucket 0; 1e9 us clamps into the top bucket.
+// Interior ranks read those buckets; fractions 0 and 1 only return min/max.
+TEST(DecoderStats, LatencyHistogramClampsLowAndHigh) {
+  cudaq::qec::latency_series series;
+  series.add(0.0);
+  series.add(std::numeric_limits<double>::quiet_NaN());
+  series.add(1.0e9);
+  EXPECT_EQ(series.count, 3u);
+  EXPECT_EQ(series.min_us, 0.0);
+  EXPECT_DOUBLE_EQ(series.max_us, 1.0e9);
+  EXPECT_DOUBLE_EQ(series.percentile_us(0.0), 0.0);
+  EXPECT_DOUBLE_EQ(series.percentile_us(1.0), 1.0e9);
+  // Rank 2 is the two low samples: bucket-0 midpoint, 65 ns.
+  EXPECT_DOUBLE_EQ(series.percentile_us(0.5), 0.065);
+  // Rank 3 is the 1e9 us sample: top-bucket midpoint, not the exact max.
+  EXPECT_DOUBLE_EQ(series.percentile_us(0.9), 133169.152);
+}
+
+// collect_set_bits clears stale output and reports only the set indices.
+TEST(DecoderStats, CollectSetBitsClearsAndReportsSparseIndices) {
+  std::vector<uint32_t> out{99, 100};
+  const uint8_t bits[] = {0, 1, 0, 1, 1};
+  cudaq::qec::collect_set_bits(bits, 5, out);
+  EXPECT_EQ(out, (std::vector<uint32_t>{1, 3, 4}));
+}
+
+// Fractions outside (0, 1) report the exact min/max; one sample is the whole
+// distribution so every rank still equals that sample (the L72 fallback is
+// unreachable because every add() increments exactly one bucket).
+TEST(DecoderStats, LatencyPercentileFractionsAtBounds) {
+  cudaq::qec::latency_series series;
+  series.add(12.5);
+  series.add(3.5);
+  EXPECT_DOUBLE_EQ(series.percentile_us(-0.5), series.min_us);
+  EXPECT_DOUBLE_EQ(series.percentile_us(0.0), series.min_us);
+  EXPECT_DOUBLE_EQ(series.percentile_us(1.0), series.max_us);
+  EXPECT_DOUBLE_EQ(series.percentile_us(2.0), series.max_us);
+}
+
+// CUDAQ_QEC_DEBUG_DECODER=y selects printf arrays mode; a frame call is
+// therefore emitted.
+TEST(DecoderStats, PrintfModeEmitsFrameCall) {
+  ScopedEnv debugEnv("CUDAQ_QEC_DEBUG_DECODER", "y");
+  testing::internal::CaptureStdout();
+  {
+    cudaq::qec::decoder_stats stats;
+    stats.set_decoder_id(3);
+    stats.emit_frame_call("get_obs_corrections", {1, 0, 1});
+  }
+  const auto log = testing::internal::GetCapturedStdout();
+  EXPECT_NE(log.find("get_obs_corrections called"), std::string::npos);
+  EXPECT_NE(log.find("ObservableCorrectionsTotal:1,0,1"), std::string::npos);
+}
+
+// info -> summary (no per-call line); debug -> arrays; a disabled level is off.
+TEST(DecoderStats, DetailFollowsLogLevel) {
+  {
+    ScopedLogLevel scoped(cudaq::qec::detail::log_level::info);
+    cudaq::qec::decoder_stats stats;
+    testing::internal::CaptureStdout();
+    stats.emit_frame_call("get_obs_corrections", {1});
+    EXPECT_TRUE(testing::internal::GetCapturedStdout().empty());
+    testing::internal::CaptureStdout();
+    stats.note_submit(true);
+    stats.note_decode_complete();
+    stats.emit_summary();
+    EXPECT_NE(testing::internal::GetCapturedStdout().find("stats_summary"),
+              std::string::npos);
+  }
+  {
+    ScopedLogLevel scoped(cudaq::qec::detail::log_level::debug);
+    cudaq::qec::decoder_stats stats;
+    testing::internal::CaptureStdout();
+    stats.emit_frame_call("reset_decoder", {0});
+    EXPECT_NE(
+        testing::internal::GetCapturedStdout().find("reset_decoder called"),
+        std::string::npos);
+  }
+  {
+    ScopedLogLevel scoped(cudaq::qec::detail::log_level::error);
+    cudaq::qec::decoder_stats stats;
+    stats.note_submit(true);
+    stats.note_decode_complete();
+    testing::internal::CaptureStdout();
+    stats.emit_summary();
+    EXPECT_TRUE(testing::internal::GetCapturedStdout().empty());
+  }
+}
+
+// Complete-before-submit records nothing. Submit then complete records a
+// sample. Reset drops an open shot, so a later complete still records nothing.
+TEST(DecoderStats, SubmitDecodeResetTiming) {
+  ScopedLogLevel scoped(cudaq::qec::detail::log_level::info);
+  {
+    cudaq::qec::decoder_stats stats;
+    EXPECT_DOUBLE_EQ(stats.since_last_submit_us(), 0.0);
+    stats.note_decode_complete();
+    stats.note_submit(/*first_of_shot=*/true);
+    stats.note_decode_complete();
+    testing::internal::CaptureStdout();
+    stats.emit_summary();
+    EXPECT_NE(testing::internal::GetCapturedStdout().find("stats_summary"),
+              std::string::npos);
+  }
+  {
+    cudaq::qec::decoder_stats stats;
+    stats.note_submit(/*first_of_shot=*/true);
+    stats.note_reset();
+    EXPECT_DOUBLE_EQ(stats.since_last_submit_us(), 0.0);
+    stats.note_decode_complete();
+    testing::internal::CaptureStdout();
+    stats.emit_summary();
+    EXPECT_TRUE(testing::internal::GetCapturedStdout().empty());
+  }
+}
+
+// Both replay-field overloads render every named field; size mismatch yields
+// no flips, equal frames with XOR 1 populate both dense and sparse accessors.
+TEST(DecoderStats, ReplayFieldsAndDiffFrame) {
+  cudaq::qec::decoder_stats stats;
+  stats.diff_frame({0, 1}, {0});
+  EXPECT_TRUE(stats.frame_flips().empty());
+  EXPECT_TRUE(stats.frame_flip_ids().empty());
+
+  stats.diff_frame({0, 1, 1}, {1, 1, 0});
+  EXPECT_EQ(stats.frame_flips(), (std::vector<uint8_t>{1, 0, 1}));
+  EXPECT_EQ(stats.frame_flip_ids(), (std::vector<uint32_t>{0, 2}));
+
+  cudaq::qec::sparse_scratch scratch;
+  scratch.msyn.assign(1, 1);
+  scratch.detectors.assign(1, 2);
+  scratch.errors.assign(1, 3);
+  const std::vector<uint8_t> total{1, 0, 1};
+  std::string from_scratch;
+  stats.append_replay_fields(from_scratch, scratch, total);
+  EXPECT_NE(from_scratch.find("InputMsyn:1"), std::string::npos);
+  EXPECT_NE(from_scratch.find("InputDetectors:2"), std::string::npos);
+  EXPECT_NE(from_scratch.find("Errors:3"), std::string::npos);
+  EXPECT_NE(from_scratch.find("Observables:0,2"), std::string::npos);
+  EXPECT_NE(from_scratch.find("ObservableCorrectionsThisCall:1,0,1"),
+            std::string::npos);
+  EXPECT_NE(from_scratch.find("ObservableCorrectionsTotal:1,0,1"),
+            std::string::npos);
+
+  const std::vector<uint32_t> obs{0};
+  const std::vector<uint8_t> this_call{1};
+  const std::vector<uint8_t> corr_total{1};
+  cudaq::qec::replay_fields fields{scratch.msyn,   scratch.detectors,
+                                   scratch.errors, obs,
+                                   this_call,      corr_total};
+  std::string from_fields;
+  stats.append_replay_fields(from_fields, fields);
+  EXPECT_NE(from_fields.find("Observables:0"), std::string::npos);
+}
+
+TEST(SlidingWindowDecoder, BoundarySyndromeGetter) {
+  constexpr std::size_t n_rounds = 4;
+  constexpr std::size_t n_errs_per_round = 3;
+  constexpr std::size_t n_syndromes_per_round = 2;
+  auto pcm = cudaq::qec::generate_random_pcm(n_rounds, n_errs_per_round,
+                                             n_syndromes_per_round,
+                                             /*weight=*/1, std::mt19937_64(11));
+  pcm = cudaq::qec::sort_pcm_columns(pcm, n_syndromes_per_round);
+  const std::vector<double> error_rates(pcm.shape()[1], 0.1);
+  auto inputs = cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(pcm),
+                                         std::nullopt, error_rates);
+
+  auto make_params = [&](std::optional<std::size_t> boundary) {
+    cudaqx::heterogeneous_map p;
+    p.insert("window_size", std::size_t{2});
+    p.insert("step_size", std::size_t{1});
+    p.insert("num_syndromes_per_round", n_syndromes_per_round);
+    p.insert("inner_decoder_name", std::string("single_error_lut"));
+    p.insert("inner_decoder_params", cudaqx::heterogeneous_map{});
+    if (boundary)
+      p.insert("num_boundary_syndromes", *boundary);
+    return p;
+  };
+
+  auto defaulted = cudaq::qec::decoder::get("sliding_window", inputs,
+                                            make_params(std::nullopt));
+  auto *sw_default =
+      dynamic_cast<cudaq::qec::sliding_window *>(defaulted.get());
+  ASSERT_NE(sw_default, nullptr);
+  // A missing boundary width is normalised to the interior round width.
+  EXPECT_EQ(sw_default->get_num_boundary_syndromes(), n_syndromes_per_round);
+
+  // 1 is a legal width (1 <= 2) and is not the normalised default, so a getter
+  // that ignores num_boundary_syndromes cannot return it.
+  constexpr std::size_t explicit_boundary = 1;
+  auto explicit_b = cudaq::qec::decoder::get(
+      "sliding_window", std::move(inputs), make_params(explicit_boundary));
+  auto *sw_explicit =
+      dynamic_cast<cudaq::qec::sliding_window *>(explicit_b.get());
+  ASSERT_NE(sw_explicit, nullptr);
+  EXPECT_EQ(sw_explicit->get_num_boundary_syndromes(), explicit_boundary);
+}
+
+// decode_to_errs with a set result bit logs Errors:0 and flips observable 0.
+TEST(EnqueueSyndrome, DecodeToErrsLogsSetErrorIndex) {
+  ScopedLogLevel scoped(cudaq::qec::detail::log_level::info);
+  using matrix = cudaq::qec::sparse_binary_matrix;
+  auto identity = [] { return matrix::from_nested_csr(1, 1, {{0}}); };
+  auto dec = cudaq::qec::decoder::get(
+      "one_error_decoder",
+      cudaq::qec::decoder_init(identity(), identity(), {}, identity()),
+      cudaq::qec::decode_result_type::errors);
+  testing::internal::CaptureStdout();
+  EXPECT_TRUE(dec->enqueue_syndrome(std::vector<uint8_t>{1}));
+  cudaq::qec::detail::flush_logs();
+  const auto log = testing::internal::GetCapturedStdout();
+  EXPECT_NE(log.find("Errors:0"), std::string::npos);
+  EXPECT_NE(log.find("ResultType:errs"), std::string::npos);
+  EXPECT_NE(log.find("ObservableCorrectionsThisCall:1"), std::string::npos);
+  EXPECT_EQ(dec->get_obs_corrections()[0], 1u);
 }
