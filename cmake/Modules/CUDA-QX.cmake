@@ -93,7 +93,7 @@ function(cudaqx_add_device_code LIBRARY_NAME)
   # to tell `cudaq-quake` where to look for the toolchain. (This happens when
   # building wheels inside the manylinux container, for example.)
   if (CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN)
-    set(ARGS_COMPILER_FLAGS "${ARGS_COMPILER_FLAGS} --gcc-install-dir=${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}")
+    list(APPEND ARGS_COMPILER_FLAGS "--gcc-install-dir=${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}")
   endif()
 
   set(prop "$<TARGET_PROPERTY:${LIBRARY_NAME},INCLUDE_DIRECTORIES>")
