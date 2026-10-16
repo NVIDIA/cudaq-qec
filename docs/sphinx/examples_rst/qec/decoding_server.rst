@@ -244,14 +244,15 @@ and install its inference requirements. They do not build the server:
 
 .. code-block:: bash
 
-   git clone https://github.com/NVIDIA/Ising-Decoding.git color-model-source
-   git -C color-model-source checkout 33acb152e403bc189f2effdb07f1a87b34c745f1
-   python3 -m pip install -r color-model-source/code/requirements_public_inference.txt
+   mkdir -p model-deps
+   git clone https://github.com/NVIDIA/Ising-Decoding.git model-deps/Ising-Decoding
+   git -C model-deps/Ising-Decoding checkout 33acb152e403bc189f2effdb07f1a87b34c745f1
+   python3 -m pip install -r model-deps/Ising-Decoding/code/requirements_public_inference.txt
    python3 -m pip install huggingface_hub
    hf auth login
    python3 -c 'import cudaq_qec; print(cudaq_qec.playback)'
    python3 "$QEC_SOURCE/docs/sphinx/examples/qec/color_code_demo/color_code_demo.py" \
-     --prepare-only --distances 5 --shots 100 --seed 1234
+     --prepare-only --deps "$PWD/model-deps" --distances 5 --shots 100 --seed 1234
 
 Preparation writes five server inputs in the current directory:
 ``pre_d5.onnx``, ``dem_d5.txt``, ``schedule_d5.txt``,
