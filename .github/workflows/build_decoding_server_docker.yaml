@@ -40,9 +40,9 @@ on:
         required: false
 
 env:
-  NGC_STAGING_IMAGE_NAME: nvcr.io/nvstaging/cudaq-qec/cudaq-decoders
+  NGC_STAGING_IMAGE_NAME: nvcr.io/nvstaging/cudaq-qec/cudaq-decoding
   # TODO: point at the live NGC location once one exists
-  NGC_PROD_IMAGE_NAME: nvcr.io/nvstaging/cudaq-qec/cudaq-decoders
+  NGC_PROD_IMAGE_NAME: nvcr.io/nvstaging/cudaq-qec/cudaq-decoding
 
 jobs:
   build:
