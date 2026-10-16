@@ -9,6 +9,7 @@ The examples below cover realtime decoding end to end — start with Getting Sta
    :maxdepth: 2
 
    Getting Started with Realtime Decoding <getting_started_realtime_decoding>
+   Using the Decoding Server Docker Package <decoding_server>
    Realtime Decoding with CUDA-Q Decoding Server <realtime_decoding_demo>
    AI Predecoder with CUDA-Q Realtime <realtime_predecoder_pymatching>
    AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection) <realtime_predecoder_fpga>

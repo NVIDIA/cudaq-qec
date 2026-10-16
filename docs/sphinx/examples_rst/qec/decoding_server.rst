@@ -1,713 +1,479 @@
-Standalone Decoding Server
-===========================
+.. _decoding-server:
+
+Using the Decoding Server Docker Package
+========================================
+
+The CUDA-Q QEC decoding server receives measurement data from a quantum
+processor's control system, runs configured decoders, and returns predicted
+logical corrections to the runtime executing the experiment. Use the prebuilt
+Docker package to deploy this service independently of your quantum application.
+You do not need to compile the server or run a CUDA-Q program to use it.
+
+This guide starts with a software playback check, then shows color-code AI
+decoding and a CUDA-Q surface-code client. The same server can receive messages
+from a third-party runtime connected to a QPU, provided that runtime implements
+the message and transport contracts described below.
 
 .. note::
 
-   The following information is about a C++ server binary that must be built
-   from source and is not part of any distributed CUDA-Q QEC binaries.
+   The dedicated decoding-server image is being prepared for distribution.
+   Use the image reference supplied with your package, including its version
+   or digest, in ``DECODING_SERVER_IMAGE`` below. The standard CUDA-Q QEC
+   0.8.0 and 0.8.1 images do not include this server. A public registry location
+   and a tested package version must be confirmed before using this guide as
+   release documentation.
 
-The ``decoding_server`` binary is a long-lived process that hosts one or more
-decoder instances and serves the three realtime RPCs
-(``enqueue_syndromes`` / ``get_corrections`` / ``reset_decoder``) over a
-configurable transport.  It is the service-side counterpart to a
-``cc.device_call``-lowered CUDA-Q kernel, and can also be driven directly by the
-``hsb_fpga_decoding_server_test.sh`` orchestration script using real FPGA or
-emulated HSB traffic.
+How it connects to a QPU
+------------------------
 
-Key design points:
-
-- **Decoder-agnostic**: the decoder type and parameters are fully determined by a
-  YAML config file.  Swapping decoders is a config change, not a rebuild.
-- **Transport-selectable at launch**: ``--transport=udp`` (loopback, runs
-  anywhere), ``--transport=cpu_roce`` (SoftRoCE / HSB FPGA HOST_CALL path),
-  or ``--transport=gpu_roce`` (DOCA + Hololink device-graph scheduler, requires
-  ConnectX and a CUDA-capable GPU).
-- **Per-decoder GPU affinity**: the optional ``cuda_device_id`` YAML field pins
-  decoder construction, graph capture, and worker-thread CUDA work to a specific
-  GPU, which must agree with the NIC-affine GPU chosen for the RoCE transport.
-
-Transports
-----------
-
-.. list-table::
-   :header-rows: 1
-   :widths: 15 25 60
-
-   * - Transport
-     - Flag
-     - When to use
-   * - UDP (loopback)
-     - ``--transport=udp``
-     - Development, CI, no NIC required.  The two-process
-       ``test_decoding_server_core`` test uses this.
-   * - CPU RoCE
-     - ``--transport=cpu_roce``
-     - Real RDMA wire with HOST_CALL dispatch (CPU decoding).  Works with any
-       CPU decoder.  Two QP-exchange modes: ``rendezvous`` (TCP swap with a
-       ``CpuRoceChannel`` caller) and ``hsb_fpga`` (HSB FPGA/emulator QP
-       printed to stdout, programmed by the playback tool).
-   * - GPU RoCE
-     - ``--transport=gpu_roce``
-     - DOCA ring buffers DMA'd directly to GPU VRAM; the CUDAQ device-graph
-       scheduler handles ``enqueue_syndromes`` / ``get_corrections`` /
-       ``reset_decoder`` on-device with no CPU in the data path.  Requires
-       ConnectX NIC + Hololink Sensor Bridge + DOCA + ``nv-qldpc-decoder``
-       with graph-dispatch support.
-
-YAML Configuration
-------------------
-
-The server is configured entirely by a YAML file passed via ``--config``.  The
-top-level key is ``decoders``, containing a list of decoder entries.
-
-Minimal example (pymatching, udp or cpu_roce path):
-
-.. code-block:: yaml
-
-   decoders:
-     - id: 0
-       type: pymatching
-       block_size: 3
-       syndrome_size: 3
-       H_sparse: [0, -1, 1, -1, 2, -1]
-       O_sparse: [0, -1, 1, -1, 2, -1]
-       D_sparse: [0, -1, 1, -1, 2, -1]
-       decoder_custom_args:
-         merge_strategy: smallest_weight
-         error_rate_vec: [0.1, 0.1, 0.1]
-
-GPU RoCE example (nv-qldpc-decoder with Relay BP):
-
-.. code-block:: yaml
-
-   decoders:
-     - id: 0
-       type: nv-qldpc-decoder
-       transport: gpu_roce
-       cuda_device_id: 2
-       block_size: ...
-       syndrome_size: ...
-       H_sparse: [...]
-       O_sparse: [...]
-       D_sparse: [...]
-       decoder_custom_args:
-         use_relay_bp: true
-         ...
-
-Per-decoder YAML fields
-^^^^^^^^^^^^^^^^^^^^^^^
-
-.. list-table::
-   :header-rows: 1
-   :widths: 22 12 66
-
-   * - Field
-     - Required
-     - Description
-   * - ``id``
-     - Yes
-     - Integer decoder identifier.  Referenced by ``decoder_id`` in RPC payloads.
-   * - ``type``
-     - Yes
-     - Decoder plugin name: ``pymatching``, ``multi_error_lut``,
-       ``nv-qldpc-decoder``, ``sliding_window``, ``trt_decoder``.
-   * - ``transport``
-     - No
-     - Transport for this decoder's ring: ``cpu_roce`` (default) or
-       ``gpu_roce``.  Must match the ``--transport`` CLI flag.
-   * - ``cuda_device_id``
-     - No
-     - Integer CUDA device index this decoder is pinned to.  Decoder
-       construction, graph capture, and all worker-thread CUDA calls use this
-       device.  **Required for gpu_roce** to guarantee the decoder graph and
-       the Hololink DOCA ring share the same GPU context.  If omitted the
-       device is unpinned (whichever device is current at construction time).
-   * - ``block_size``
-     - Yes
-     - Number of detector bits per decoding block.
-   * - ``syndrome_size``
-     - Yes
-     - Number of syndrome bits per round.
-   * - ``H_sparse``
-     - Yes
-     - Parity-check matrix in flat CSR-style: ``[col, -1, col, -1, ...]``,
-       where ``-1`` is the row sentinel.
-   * - ``O_sparse``
-     - Yes
-     - Observable matrix in the same format.
-   * - ``D_sparse``
-     - Yes
-     - Detector matrix in the same format.
-   * - ``decoder_custom_args``
-     - No
-     - Decoder-specific parameters (see decoder documentation for each type).
-
-.. note::
-
-   The ``transport`` and ``cuda_device_id`` fields are written into the YAML
-   by the orchestration script (``--transport gpu_roce --gpu N``) when
-   generating config from the ``surface_code-4-yaml`` binary.  Manually
-   authored configs for gpu_roce must include both fields explicitly.
-
-.. note::
-
-   **Python bindings**: ``cuda_device_id`` is exposed on the
-   ``cudaq.qec.DecoderConfig`` Python object (bound via
-   ``py_decoding_config.cpp``).  Set it as an integer attribute before passing
-   the config to ``cudaq.qec.configure_decoders``.
-
-GPU device affinity and transport reconciliation
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-When ``--transport=gpu_roce`` is active, the server reconciles
-``cuda_device_id`` (from the YAML) with ``HOLOLINK_GPU_ID`` (from the
-environment) as follows:
-
-- Both set and equal -> proceed.
-- Only one set -> use the set value for both.
-- Both set and **different** -> fatal error at startup.
-- Neither set -> default to GPU 0.
-
-This ensures decoder graph capture and the DOCA ring allocation always target
-the same physical GPU.  Use a GPU that is NUMA-local to the ConnectX NIC for
-lowest latency.
-
-Building
---------
-
-Prerequisites
-^^^^^^^^^^^^^
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 70
-
-   * - Dependency
-     - Notes
-   * - CUDA Toolkit 12.6+
-     - Required for all transports.
-   * - ``cuda-quantum`` realtime libs
-     - ``libcudaq-realtime``, ``libcudaq-realtime-udp-transport``,
-       ``libcudaq-realtime-host-dispatch`` - always required.
-       ``libcudaq-realtime-cpu-roce-transport`` enables ``cpu_roce``.
-       ``libcudaq-realtime-dispatch`` enables the gpu_roce device-graph path.
-   * - Holoscan Sensor Bridge (HSB)
-     - Required for ``cpu_roce`` (hsb_fpga mode) and ``gpu_roce``.
-       Tag ``2.6.0-EA2``.
-   * - DOCA
-     - Required for ``gpu_roce`` (installed at ``/opt/mellanox/doca``).
-   * - ``libcudaq-qec-realtime-cudevice-proprietary.a``
-     - Required for ``gpu_roce``.  Proprietary static archive providing the
-       ``DEVICE_CALL`` handler shims and populate symbols.  Built from the
-       private cuda-qx tree; pass via
-       ``-DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=<path>``.
-   * - ``libcudaq-qec-nv-qldpc-decoder.so``
-     - Required at runtime for ``gpu_roce`` with Relay BP.  See
-       :ref:`realtime_relay_bp` for how to obtain it.
-
-CMake flags
-^^^^^^^^^^^
-
-.. code-block:: bash
-
-   cmake -S cudaqx -B cudaqx/build \
-     -DCMAKE_BUILD_TYPE=Release \
-     -DCUDAQ_DIR=/path/to/cudaq-install/lib/cmake/cudaq \
-     -DCUDAQ_REALTIME_ROOT=/path/to/cudaq-realtime-install \
-     -DCUDAQ_REALTIME_INCLUDE_DIR=/path/to/cudaq-quantum/realtime/include \
-     -DCUDAQ_REALTIME_LIBRARY=/path/to/cudaq-realtime/build/lib/libcudaq-realtime.so \
-     -DCUDAQ_REALTIME_DISPATCH_LIBRARY=/path/to/cudaq-realtime/build/lib/libcudaq-realtime-dispatch.a \
-     -DCUDAQ_REALTIME_HOST_DISPATCH_LIBRARY=/path/to/cudaq-realtime/build/lib/libcudaq-realtime-host-dispatch.a \
-     -DQEC_UDP_TRANSPORT_LIBRARY=/path/to/cudaq-realtime/build/lib/libcudaq-realtime-udp-transport.a \
-     -DQEC_CPU_ROCE_TRANSPORT_LIBRARY=/path/to/cudaq-realtime/build/lib/libcudaq-realtime-cpu-roce-transport.a \
-     -DQEC_HOST_DISPATCH_LIBRARY=/path/to/cudaq-realtime/build/lib/libcudaq-realtime-host-dispatch.a \
-     -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/path/to/holoscan-sensor-bridge/build \
-     -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/path/to/holoscan-sensor-bridge \
-     -DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=/path/to/libcudaq-qec-realtime-cudevice-proprietary.a
-
-   cmake --build cudaqx/build --target decoding_server
-
-Transport availability at build time is reported by CMake:
+The QPU control system measures qubits and delivers the results to its runtime.
+The runtime sends decoder requests through a transport provider loaded by the
+server. The server owns the decoder instances; the runtime owns the quantum
+experiment and decides how to use the returned corrections.
 
 .. code-block:: text
 
-   -- decoding_server: cpu_roce transport enabled
-   -- decoding_server: gpu_roce transport enabled
+   QPU measurements -> third-party runtime or CUDA-Q application
+                               |                       ^
+                        measurement stream      logical corrections
+                               v                       |
+                         transport provider <-> decoding server
+                                                      |
+                                                 decoder(s)
 
-If ``gpu_roce transport enabled`` does not appear, verify that
-``HOLOSCAN_SENSOR_BRIDGE_BUILD_DIR``, ``CUDAQ_REALTIME_INCLUDE_DIR``, and
-all DOCA library paths are correct.
+Before execution, prepare a decoder configuration for the exact circuit,
+measurement ordering, observable definitions, and noise model. During execution:
 
-Private graph-dispatch symbols (private builds)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1. Reset the decoder at the start of an independent shot.
+2. Send the measurement groups in the order described by the configuration,
+   including the final data-qubit measurements required by that circuit.
+3. Request the configured number of logical correction bits when the decoder
+   has enough input. Combine them with the experiment's logical measurement
+   or use them in the runtime's feedback logic.
 
-For ``gpu_roce``, the device-graph RPC dispatch logic lives in
-``libs/qec/lib/realtime/decoder_rpc_dispatch.cu`` (part of the private
-cuda-qx tree).  CMake builds the static library
-``cudaq-qec-realtime-decoder-rpc-dispatch`` when that file is present in the
-source tree, and links it whole-archive into ``decoding_server`` when the
-resulting target exists.  The linker flag ``--export-dynamic`` (also added
-by CMake) lets the running server call ``dlsym`` to locate the dispatch
-entry points at startup.
+A successful enqueue acknowledges receipt; it does not mean decoding has
+finished. Corrections are predicted observable flips, whose interpretation is
+defined by the configuration, rather than a list of physical gates to apply.
+For matrix conventions and the measurement-to-detector transformation, see
+:doc:`/components/qec/realtime_decoding`.
 
-In a public build (without the private tree) this file is absent and the
-library target is never created.  The server still compiles; ``gpu_roce``
-will fail at runtime with a missing symbol diagnostic rather than a link
-error, so CI on public repos is not broken.  If you have access to the
-private archive, pass:
+The server uses CUDA-Q Realtime transport libraries, but a third-party client
+does not need the CUDA-Q compiler or programming model. UDP is useful for
+functional integration checks. Hardware deployments can use CPU RoCE, GPU RoCE,
+or a compatible custom provider. Meeting a QPU's feedback deadline requires
+measurement of the complete control-system-to-decoder path on that hardware;
+the playback examples below do not establish a latency guarantee.
+
+Get the package ready
+---------------------
+
+Use a Linux Docker host and an image matching the host's CPU architecture.
+GPU decoding additionally needs a compatible NVIDIA GPU and driver, the NVIDIA
+Container Toolkit, and a package variant that includes the selected decoder.
+Choose the CUDA variant supported by that driver. The CPU playback check below
+does not require a GPU or RDMA hardware.
+
+On the Docker host, set the exact image reference from the package instructions:
 
 .. code-block:: bash
 
-   -DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=/path/to/libcudaq-qec-realtime-cudevice-proprietary.a
+   # Set this to the supplied registry/repository:tag or repository@sha256:digest.
+   export DECODING_SERVER_IMAGE='REPLACE_WITH_SUPPLIED_IMAGE_REFERENCE'
+   docker pull "$DECODING_SERVER_IMAGE"
+   docker run --rm --entrypoint decoding_server "$DECODING_SERVER_IMAGE" --help
+   docker run --rm --entrypoint playback-emulator "$DECODING_SERVER_IMAGE" --help
 
-Running
--------
+The package supplies the server, the playback CLI, transport libraries, and
+decoder plugins. Decoder availability depends on the package variant. In
+particular, check that ``trt_decoder`` and TensorRT are included before using
+AI decoding; the planned ARM64 CUDA 12 variant does not include TensorRT.
+NVIDIA decoder plugins and GPU device-graph dispatch also depend on the
+artifacts included in the package.
 
-CLI reference
-^^^^^^^^^^^^^
+The runtime image does not supply the CUDA-Q compiler, development headers, or
+the ``cudaq_qec`` Python package. Prepare application code and model exports
+in a compatible SDK environment, then mount their configuration and artifacts
+into the server container. Keep client and server versions compatible with
+the package's CUDA-Q Realtime message protocol. Do not copy decoder libraries
+from a different release into the container: plugin ABI compatibility matters.
 
-.. code-block:: text
+Playback emulator: verify the packaged server
+---------------------------------------------
 
-   decoding_server --config=<decoders.yaml>
-                   [--transport=udp|cpu_roce|gpu_roce]
-                   [--port=N]          # udp: listen port (0 = ephemeral)
-                   [--num-slots=N]     # ring depth (default 8; capped at 64 for hsb_fpga)
-                   [--slot-size=N]     # ring slot stride bytes (default 256)
-                   [--timeout=N]       # shutdown after N seconds (default 60)
-                   # cpu_roce only:
-                   [--device=NAME]     # ConnectX IB device (default mlx5_0)
-                   [--local-ip=ADDR]   # local NIC IP (default 10.0.0.2)
-                   [--qp_config=rendezvous|hsb_fpga]
-                   [--peer-ip=ADDR]    # hsb_fpga: FPGA/emulator IPv4
-                   [--remote-qp=N]     # hsb_fpga: peer QP number (hex or decimal)
-                   [--frame-size=N]    # hsb_fpga: TX SGE bytes (default = slot-size)
+The playback emulator supplies decoder calls from a text schedule in place of
+a live runtime. Use it to check configuration, connectivity, and returned
+corrections before connecting a QPU.
 
-.. note::
+Download :download:`config.yaml <../../examples/qec/decoding_server/config.yaml>`
+and :download:`schedule.txt <../../examples/qec/decoding_server/schedule.txt>`
+into an empty directory on the Docker host, and run all commands in this
+section from that directory. These files exercise a synthetic three-bit
+identity mapping. They are a connectivity check, not a quantum-code experiment.
 
-   For ``--transport=gpu_roce`` the Hololink ring geometry is configured
-   entirely through environment variables (``HOLOLINK_DEVICE``,
-   ``HOLOLINK_PEER_IP``, ``HOLOLINK_REMOTE_QP``, ``HOLOLINK_FRAME_SIZE``,
-   ``HOLOLINK_NUM_PAGES``, ``HOLOLINK_GPU_ID``).  The CLI flags ``--device``,
-   ``--peer-ip``, ``--num-slots``, and ``--slot-size`` are ignored on this
-   path; pass them to the orchestration script instead (see below).
+The configuration selects a CPU lookup-table decoder:
 
-Readiness signals
-^^^^^^^^^^^^^^^^^
+.. literalinclude:: ../../examples/qec/decoding_server/config.yaml
+   :language: yaml
 
-The server writes to stdout once it is ready to accept traffic.  The
-orchestration script and two-process test both wait for these lines:
+The schedule resets decoder 0, sends ``010``, and expects correction ``010``:
+
+.. literalinclude:: ../../examples/qec/decoding_server/schedule.txt
+   :language: text
+
+Start the server in terminal 1 on the Docker host:
+
+.. code-block:: bash
+
+   docker run --rm --name qec-decoding-server \
+     --mount type=bind,src="$PWD",dst=/work,readonly \
+     --workdir /work --entrypoint decoding_server \
+     "$DECODING_SERVER_IMAGE" \
+     --config=/work/config.yaml --transport=udp --port=50000 --timeout=600
+
+Wait for ``QEC_DECODING_SERVER_READY`` and check that ``ring0=50000`` is
+reported. A running container alone is not evidence that the server is ready.
+The timeout is the server's run limit in seconds; increase it for longer runs.
+
+In terminal 2 on the same Docker host, set the same
+``DECODING_SERVER_IMAGE`` value and run:
+
+.. code-block:: bash
+
+   docker run --rm --network container:qec-decoding-server \
+     --mount type=bind,src="$PWD",dst=/work,readonly \
+     --workdir /work --entrypoint playback-emulator \
+     "$DECODING_SERVER_IMAGE" \
+     --schedule=/work/schedule.txt --backend=udp \
+     --udp-endpoint=0:127.0.0.1:50000 --tick=1ms > result.csv
+
+The two containers share a network namespace, so ``127.0.0.1`` reaches the
+server without publishing a host port. The CSV is written on the host by
+shell redirection; the input directory remains read-only in both containers.
+This assumes one decoder and an unused port 50000 in the server's namespace.
+
+Inspect ``result.csv``. The reset and correction read should have status
+``0`` (``OK`` in the protocol). The enqueue is recorded as a one-round stream
+with status ``100`` (completed the requested rounds). The
+``get_corrections`` row should have ``read_completed=1``,
+``correction_bits=010``, and ``correction_mismatch=0``. A mismatch flag of zero
+alone is insufficient: verify that a correction was actually returned.
+The one-second delay before the read makes this a functional check, not a
+latency benchmark. If the read returns ``NOT_READY``, increase the delay and
+rerun the complete schedule.
+
+Stop the server when finished:
+
+.. code-block:: bash
+
+   docker stop qec-decoding-server
+
+Schedules, sources, and sessions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Each schedule line is ``<trigger> <operation> [key=value ...]``.
+``N`` is an absolute tick, ``+N`` is relative to the preceding dispatch, and
+``-`` means dispatch immediately. After switching to relative triggers, keep
+subsequent triggers relative. ``signal=NAME`` marks completion of an operation;
+``after=NAME`` makes another operation wait for that completion. Schedule
+spacing controls when requests are sent, not when the decoder finishes.
+
+Use ``reset``, ``enqueue``, ``stream``, ``enqueue_data``, and
+``get_corrections`` to describe the experiment. ``session=N`` selects the
+decoder ID and defaults to 0. ``enqueue_data`` supplies a source's final
+data-qubit readout; whether it is needed depends on the circuit's measurement
+layout. The generic emulator does not choose that layout for you.
 
 .. list-table::
    :header-rows: 1
    :widths: 25 75
 
-   * - Line
-     - Transport / condition
-   * - ``QEC_DECODING_SERVER_READY port=<P> transport=udp``
-     - UDP transport bound and listening on port ``P``.
-   * - ``QEC_DECODING_SERVER_READY port=<P> transport=cpu_roce roce_ip=<IP>``
-     - CPU RoCE TCP rendezvous listening on port ``P`` (``rendezvous`` mode).
-   * - ``QEC_DECODING_SERVER_READY port=0 transport=cpu_roce qp_config=hsb_fpga``
-     - CPU RoCE HSB FPGA mode: QP / RKey / Buffer Addr already printed above.
-   * - ``QEC_DECODING_SERVER_READY gpu_roce``
-     - GPU RoCE: device-graph scheduler launched; QP / RKey / Buffer Addr
-       printed by ``GpuRoceTransceiver`` before this line.
+   * - Input source
+     - Use
+   * - Inline bits, ``source=0b010``
+     - Small deterministic checks such as the example above.
+   * - Static source, ``--source=ID:FILE``
+     - Recorded measurement groups, one ``0``/``1`` string per line.
+   * - Stim source, ``--stim-source=ID:...``
+     - Generated memory-experiment measurements. Requires Stim support in
+       the installed tool; see its ``--help`` for the accepted parameters.
+   * - Python CUDA-Q memory source
+     - Measurements generated from a CUDA-Q memory experiment in an SDK
+       environment. Requires Python bindings outside the runtime image.
 
-At shutdown the server also emits:
+Select ``--backend=udp`` to exercise this server. ``inproc`` runs the decoder
+inside the emulator and bypasses the server; ``null`` measures emulator
+overhead without decoding. ``cpu_roce`` exercises an RDMA connection and needs
+the RDMA device, local IP, endpoint, and ring geometry to match the server.
+The Python entry point is ``cudaq_qec.playback.run`` in an SDK environment;
+it can use ``udp_endpoints={0: "host:port"}`` to target the server. The
+packaged CLI avoids that Python dependency.
 
-.. code-block:: text
+For additional source and session settings, inspect
+``playback-emulator --help`` from the selected package.
 
-   QEC_DECODING_SERVER_DISPATCHED count=<N>
-   QEC_DECODING_SERVER_MAX_CONCURRENT_DECODERS count=<M>
+.. TODO: Link the dedicated playback reference when PR #850 (issue #835)
+   lands; keep the full schedule grammar there rather than duplicating it.
 
-UDP (development / CI)
-^^^^^^^^^^^^^^^^^^^^^^^
+.. _decoding-server-color-code:
 
-.. code-block:: bash
+Playback with the color-code AI decoder
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-   ./build/bin/decoding_server \
-     --config=decoding_server_config.yaml \
-     --transport=udp \
-     --timeout=60
+The :doc:`color-code example <color_code_demo>` samples superdense memory
+circuits with Stim and compares two decoder configurations using the same
+measurements:
 
-The server prints its ephemeral port on stdout.  The two-process test
-``test_decoding_server_core`` uses this mode; no NIC is required.
+* ``chromobius``: a color-code decoder running on the CPU.
+* ``trt_decoder``: the published Ising-Decoder-ColorCode-1-Fast AI predecoder
+  running through TensorRT, followed by Chromobius on the residual detectors.
 
-CPU RoCE with HSB FPGA / emulator
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Use the published color-code model, not a surface-code model. The circuit,
+distance, measurement-to-detector mapping, observable support, and exported
+model must agree. Model preparation belongs in an SDK environment with the
+Python dependencies and model access described in :doc:`color_code_demo`.
+The server container needs only the resulting artifacts and decoder runtime.
 
-The ``hsb_fpga`` QP-exchange method is used when pairing with real FPGA
-hardware or the software HSB emulator.  The server prints the canonical bridge
-handshake (``QP Number`` / ``RKey`` / ``Buffer Addr``) and the orchestration
-script relays these to the playback tool.
-
-.. code-block:: bash
-
-   LD_LIBRARY_PATH=/path/to/cudaq-realtime/build/lib:$LD_LIBRARY_PATH \
-   ./build/bin/decoding_server \
-     --config=config.yaml \
-     --transport=cpu_roce \
-     --qp_config=hsb_fpga \
-     --device=mlx5_0 \
-     --peer-ip=10.0.0.2 \
-     --remote-qp=0x2 \
-     --num-slots=64 \
-     --slot-size=384 \
-     --frame-size=64 \
-     --timeout=60
-
-GPU RoCE (device-graph scheduler)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The gpu_roce path wires the Hololink DOCA ring directly to the CUDAQ
-device-graph scheduler.  Configure the ring geometry and GPU via environment
-variables and pass ``--transport=gpu_roce`` with the YAML config.  The YAML
-**must** include ``transport: gpu_roce`` and a matching ``cuda_device_id`` for
-each decoder entry.
+In that SDK environment, create a scratch directory and run the example from
+this checkout, replacing ``/path/to/cudaq-qec`` with its actual location:
 
 .. code-block:: bash
 
-   CUDA_MODULE_LOADING=EAGER \
-   LD_LIBRARY_PATH=/path/to/cudaq-realtime/build/lib:./build/lib:$LD_LIBRARY_PATH \
-   HOLOLINK_DEVICE=mlx5_0 \
-   HOLOLINK_PEER_IP=10.0.0.2 \
-   HOLOLINK_REMOTE_QP=0xABCD \
-   HOLOLINK_FRAME_SIZE=512 \
-   HOLOLINK_NUM_PAGES=128 \
-   HOLOLINK_GPU_ID=2 \
-   ./build/bin/decoding_server \
-     --config=config_gpu_roce.yaml \
-     --transport=gpu_roce \
-     --timeout=60
+   mkdir -p color-code-package
+   cd color-code-package
+   python3 /path/to/cudaq-qec/docs/sphinx/examples/qec/color_code_demo/color_code_demo.py \
+     --prepare-only --distances 5 --shots 100 --seed 1234
 
-Environment variables for gpu_roce
-"""""""""""""""""""""""""""""""""""
+This downloads the pinned public model and Ising source if needed, exports
+``pre_d5.onnx``, and writes ``dem_d5.txt``, ``schedule_d5.txt``,
+``config_chromobius_d5.yaml``, and ``config_trt_decoder_d5.yaml``.
+It does not start a local server or require a locally installed server binary.
+Copy these five files together into a directory on the Docker host. All paths
+inside the YAML are relative to that directory.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 30 70
-
-   * - Variable
-     - Description
-   * - ``HOLOLINK_DEVICE``
-     - ConnectX IB device name (e.g. ``mlx5_0``).
-   * - ``HOLOLINK_PEER_IP``
-     - FPGA or emulator data-plane IPv4 address.
-   * - ``HOLOLINK_REMOTE_QP``
-     - Peer QP number in hex or decimal.
-   * - ``HOLOLINK_FRAME_SIZE``
-     - Ring slot stride in bytes.  Must be a multiple of 128.
-   * - ``HOLOLINK_NUM_PAGES``
-     - Server-side DOCA ring depth.  See GB200 note below.
-   * - ``HOLOLINK_GPU_ID``
-     - GPU device index.  Must match ``cuda_device_id`` in the YAML, or be
-       the only GPU specifier set.
-   * - ``CUDA_MODULE_LOADING``
-     - Set to ``EAGER`` to avoid lazy-load stalls inside the persistent
-       scheduler kernel.
-
-GB200 / aarch64 page-size alignment
-"""""""""""""""""""""""""""""""""""""
-
-On GB200 (and other aarch64 kernels with 64 KiB host pages), DOCA rejects GPU
-ring allocations whose total size is not host-page aligned.  With the FPGA/HSB
-default slot size (512 bytes) and ring depth 64, the allocation is
-``512 x 64 = 32768`` bytes = 32 KiB, which is below the 64 KiB page
-boundary and fails.
-
-The fix: keep ``HOLOLINK_FRAME_SIZE`` and the FPGA/playback ring depth (64)
-unchanged, and grow only ``HOLOLINK_NUM_PAGES`` until
-``HOLOLINK_FRAME_SIZE x HOLOLINK_NUM_PAGES`` is a multiple of the host page
-size.  The orchestration script does this automatically when
-``--gpu-roce-num-pages auto`` (the default) is passed:
+From that directory, start the CPU baseline in terminal 1:
 
 .. code-block:: bash
 
-   # Manual equivalent for 512-byte pages on a 64 KiB-page kernel:
-   # 512 x 128 = 65536 bytes = 64 KiB -> aligned
-   HOLOLINK_NUM_PAGES=128
+   docker run --rm --name qec-decoding-server \
+     --mount type=bind,src="$PWD",dst=/work,readonly \
+     --workdir /work --entrypoint decoding_server \
+     "$DECODING_SERVER_IMAGE" \
+     --config=/work/config_chromobius_d5.yaml \
+     --transport=udp --port=50000 --timeout=600
 
-The FPGA/emulator ring is always ``NUM_SLOTS=64``; only the server-side DOCA
-allocation grows.
-
-Orchestration Script
---------------------
-
-``hsb_fpga_decoding_server_test.sh`` is the standard way to run end-to-end
-tests against the decoding server with real FPGA hardware or the HSB software
-emulator.  It handles building all tools, configuring the network, generating
-test data, launching the server, running syndrome playback, and verifying
-corrections.
-
-.. code-block:: text
-
-   hsb_fpga_decoding_server_test.sh [options]
-
-Modes
-^^^^^
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 80
-
-   * - Flag
-     - Description
-   * - ``--emulate``
-     - Three-tool mode: HSB emulator + server + playback.  No real FPGA needed.
-   * - *(default)*
-     - Two-tool mode: server + playback against a real FPGA.
-
-Actions
-^^^^^^^
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 80
-
-   * - Flag
-     - Description
-   * - ``--build``
-     - Build all required tools before running.
-   * - ``--setup-network``
-     - Configure ConnectX interfaces (run once per boot).
-   * - ``--no-run``
-     - Build only; skip the test run.
-
-Decoder options
-^^^^^^^^^^^^^^^
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 75
-
-   * - Flag
-     - Description
-   * - ``--decoder NAME``
-     - Decoder profile: ``pymatching`` (default -> ``cpu_roce``) or
-       ``nv-qldpc-decoder`` (Relay BP -> ``gpu_roce``).
-   * - ``--transport T``
-     - Override transport: ``cpu_roce`` or ``gpu_roce``.  Default is derived
-       from the decoder profile.
-   * - ``--config PATH``
-     - Use a pre-made YAML config (skips auto-generation).
-   * - ``--syndromes PATH``
-     - Use a pre-made syndromes file (skips auto-generation; must pair with
-       ``--config``).
-   * - ``--data-dir DIR``
-     - Use ``DIR/config_<decoder>.yml`` + ``DIR/syndromes_<decoder>.txt``.
-
-Data-generation options
-^^^^^^^^^^^^^^^^^^^^^^^
-
-When no ``--config`` / ``--syndromes`` / ``--data-dir`` is given, the script
-generates test data using the ``surface_code-4-yaml`` binary:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 20 55
-
-   * - Flag
-     - Default
-     - Description
-   * - ``--distance N``
-     - 3
-     - Surface-code distance.
-   * - ``--num-rounds N``
-     - 4
-     - Measurement rounds per shot.
-   * - ``--p-spam F``
-     - 0.01
-     - SPAM error probability.
-   * - ``--gen-shots N``
-     - 100
-     - Number of shots to generate.
-
-Run options
-^^^^^^^^^^^
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 15 60
-
-   * - Flag
-     - Default
-     - Description
-   * - ``--gpu N``
-     - 0
-     - GPU device index for ``gpu_roce``.  Injected into ``cuda_device_id``
-       in the generated YAML config.
-   * - ``--gpu-roce-num-pages N``
-     - ``auto``
-     - Server-side gpu_roce ring depth.  ``auto`` grows the depth to satisfy
-       host-page alignment (GB200 fix); FPGA/playback ring remains 64.
-   * - ``--page-size N``
-     - 384
-     - Ring slot stride bytes (both FPGA/playback ring and server).
-   * - ``--timeout N``
-     - 60
-     - Server timeout in seconds.
-   * - ``--num-shots N``
-     - all
-     - Limit number of syndrome shots.
-   * - ``--spacing N``
-     - 10
-     - Inter-shot spacing in microseconds (FPGA mode only).
-   * - ``--no-verify``
-     - *(verify)*
-     - Skip correction verification.
-   * - ``--frame-size N``
-     - 64
-     - Server TX SGE bytes (``cpu_roce`` only).
-   * - ``--control-port N``
-     - 8193
-     - UDP control port for the emulator.
-
-Network options
-^^^^^^^^^^^^^^^
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 20 55
-
-   * - Flag
-     - Default
-     - Description
-   * - ``--device DEV``
-     - auto-detect
-     - ConnectX IB device name.
-   * - ``--bridge-ip ADDR``
-     - ``10.0.0.1``
-     - Server-side NIC IP.
-   * - ``--emulator-ip ADDR``
-     - ``10.0.0.2``
-     - Emulator NIC IP (emulate mode).
-   * - ``--fpga-ip ADDR``
-     - ``192.168.0.2``
-     - FPGA IP (non-emulate mode).
-   * - ``--mtu N``
-     - 4096
-     - MTU size.
-
-Build options
-^^^^^^^^^^^^^
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 45 25
-
-   * - Flag
-     - Description
-     - Default
-   * - ``--hsb-dir DIR``
-     - holoscan-sensor-bridge source directory.
-     - ``/workspaces/holoscan-sensor-bridge``
-   * - ``--cuda-quantum-dir DIR``
-     - cuda-quantum source directory (must match the ref in ``.cudaq_version``).
-     - ``/workspaces/cuda-quantum``
-   * - ``--cudaqx-dir DIR``
-     - cudaqx source directory.
-     - ``/workspaces/cudaqx``
-   * - ``--proprietary-archive PATH``
-     - Path to ``libcudaq-qec-realtime-cudevice-proprietary.a``.
-     - cuda-qx build tree
-   * - ``--nv-qldpc-plugin PATH``
-     - Path to ``libcudaq-qec-nv-qldpc-decoder.so`` (symlinked into
-       ``build/lib/decoder-plugins``).
-     - cuda-qx build tree
-   * - ``--jobs N``
-     - Parallel build jobs.
-     - ``nproc``
-
-Quick-start examples
-^^^^^^^^^^^^^^^^^^^^
-
-CPU RoCE emulated run (pymatching, no FPGA):
+After readiness, replay in terminal 2 using the same image value and directory:
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/hsb_fpga_decoding_server_test.sh \
-     --emulate --build --setup-network
+   docker run --rm --network container:qec-decoding-server \
+     --mount type=bind,src="$PWD",dst=/work,readonly \
+     --workdir /work --entrypoint playback-emulator \
+     "$DECODING_SERVER_IMAGE" \
+     --schedule=/work/schedule_d5.txt --backend=udp \
+     --udp-endpoint=0:127.0.0.1:50000 --tick=1us > chromobius.csv
+   docker stop qec-decoding-server
 
-GPU RoCE emulated run (Relay BP / nv-qldpc-decoder, no FPGA):
-
-.. code-block:: bash
-
-   ./libs/qec/unittests/utils/hsb_fpga_decoding_server_test.sh \
-     --emulate --build --setup-network \
-     --decoder nv-qldpc-decoder \
-     --gpu 2
-
-Real FPGA run (cpu_roce, pymatching):
+Next, start the AI configuration in terminal 1. This needs a package with
+``trt_decoder`` and a GPU:
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/hsb_fpga_decoding_server_test.sh \
-     --setup-network \
-     --device mlx5_0 \
-     --bridge-ip 192.168.0.1 \
-     --fpga-ip 192.168.0.2 \
-     --spacing 10
+   docker run --rm --name qec-decoding-server --gpus all \
+     --mount type=bind,src="$PWD",dst=/work \
+     --workdir /work --entrypoint decoding_server \
+     "$DECODING_SERVER_IMAGE" \
+     --config=/work/config_trt_decoder_d5.yaml \
+     --transport=udp --port=50000 --timeout=600
 
-Ring buffer depth
-^^^^^^^^^^^^^^^^^
+The AI configuration loads ONNX and builds ``engine_d5.trt`` on the server's
+GPU at initialization, so this mount is writable. Wait for readiness; engine
+construction can take substantially longer than the CPU baseline. Replay
+the same schedule from terminal 2 with the previous playback command, changing
+the output filename to ``ising.csv``, then stop the server.
 
-The FPGA/playback ring depth is fixed at **64** (matching the HSB
-``WQE_NUM = 64`` work-queue depth).  A ring deeper than ``WQE_NUM`` causes one
-transceiver thread to service two ring slots at the same absolute positions
-(``t`` and ``t + 64``), which produces rare duplicated-and-dropped frame pairs.
-The server enforces the cap automatically for ``--qp_config=hsb_fpga``.
+For each run, require 100 completed ``get_corrections`` rows with status
+``0`` (``OK``). Here the schedule's expected bits are Stim's true observable flips:
+a correction mismatch represents a logical decoding error and can occur in
+a valid run. Compare the mismatch fraction over completed shots to assess
+logical error rate. Use the full :doc:`color_code_demo` for the per-round
+conversion and uncertainty treatment; 100 shots is a connectivity check,
+not an accuracy study. Playback timings include emulator and transport work
+and should not be presented as standalone neural-network inference latency.
 
-For ``gpu_roce``, only the server-side DOCA ring may be deeper when host-page
-alignment requires it (``--gpu-roce-num-pages auto``); the FPGA ring remains
-at 64.
+CUDA-Q examples: surface-code programs
+--------------------------------------
+
+A CUDA-Q application is another client of the same packaged server. The
+:doc:`surface-code example <realtime_decoding_demo>` provides a generator
+that characterizes the circuit and a realtime-lowered program that sends
+measurements and receives corrections while the circuit executes.
+
+Build only those client programs in a compatible CUDA-Q QEC SDK environment,
+following that example's ``Building the example`` section. The runtime image
+cannot compile them. Keep the server in Docker; the following sequence uses
+the existing example binaries directly instead of its orchestration script,
+which launches a server from a local SDK installation.
+
+In the SDK environment, from a directory writable on the Docker host:
+
+.. code-block:: bash
+
+   # Point this at the example build directory from realtime_decoding_demo.
+   export EXAMPLE_BUILD_DIR=/path/to/realtime_decoding_demo/build
+   "$EXAMPLE_BUILD_DIR/surface_code_realtime_decoding" \
+     --distance 3 --num_rounds 3 --num_shots 100 \
+     --decoder_type pymatching --save_dem "$PWD/surface.yaml"
+
+On the Docker host, from the directory containing ``surface.yaml``, start
+the server in terminal 1. This Linux example uses host networking so that
+the client's loopback address can reach it:
+
+.. code-block:: bash
+
+   docker run --rm --name qec-decoding-server --network host \
+     --mount type=bind,src="$PWD",dst=/work,readonly \
+     --workdir /work --entrypoint decoding_server \
+     "$DECODING_SERVER_IMAGE" \
+     --config=/work/surface.yaml --transport=udp --port=50000 --timeout=600
+
+After readiness, run the client in terminal 2 in the SDK environment, setting
+the same ``EXAMPLE_BUILD_DIR`` value and using the directory containing
+``surface.yaml``:
+
+.. code-block:: bash
+
+   QEC_DECODING_SERVER_PORT=50000 \
+     "$EXAMPLE_BUILD_DIR/surface_code_realtime_decoding-cqr" \
+     --distance 3 --num_rounds 3 --num_shots 100 \
+     --decoder_type pymatching --load_dem "$PWD/surface.yaml"
+
+The SDK process must share the Docker host's network namespace. If the SDK
+runs in another Linux container, use host networking for that client container
+as well. This example's UDP client hardcodes ``127.0.0.1``; it is not a
+remote-host example. Confirm that the server reports dispatched requests at
+shutdown and the application completes its shots. The application's local
+``CQR service dispatch count`` should be zero because decoding occurred in
+the server. Stop the server with ``docker stop qec-decoding-server``.
+
+Using different decoders
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Regenerate ``surface.yaml`` with the desired ``--decoder_type`` and use the
+same option when running the client. Stop the previous server and launch a
+new one with the regenerated configuration. Decoder choice does not require
+rebuilding the server, but may require a different model or error-model
+representation; changing only the YAML ``type`` is not generally sufficient.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 25 50
+
+   * - Decoder
+     - Server resources
+     - Example and configuration
+   * - ``pymatching``
+     - CPU
+     - Surface-code example above; generates a decomposed DEM.
+   * - ``multi_error_lut``
+     - CPU
+     - Same client example with that decoder type. Start with distance 3;
+       lookup-table size grows with code size and configured error depth.
+   * - ``nv-qldpc-decoder``
+     - GPU and supplied NVIDIA plugin
+     - Same client example with that decoder type and ``--gpus all`` on
+       the server container. Host dispatch can still invoke GPU decoding.
+   * - ``trt_decoder`` with Ising + PyMatching
+     - GPU, TensorRT, and model artifacts
+     - Use the separate ``surface_code_ising_realtime_decoding`` sources
+       and artifact preparation in :doc:`realtime_decoding_demo`. Their
+       measurement layout matches the surface-code Ising model.
+
+For NVIDIA Fusion's streaming MWPM configuration, see
+:doc:`/api/qec/nv_fusion_decoder_api`. It is a distinct decoder requiring
+the matching plugin and configuration; the surface-code client above does
+not expose it as a ``--decoder_type`` option.
+
+Connect a third-party runtime
+-----------------------------
+
+The runtime integration has two contracts: decoder messages and the transport
+that delivers them. Sending arbitrary measurement arrays to an IP address
+does not satisfy either contract.
+
+**Decoder messages.** Implement ``reset_decoder``, ``enqueue_syndromes``, and
+``get_corrections`` using the
+`Decoding Server Message Format <https://github.com/NVIDIA/cudaq-qec/blob/main/libs/qec/tools/decoding-server/MESSAGE_FORMAT.md>`__
+and the matching package version of the
+`CUDA-Q Realtime message protocol <https://github.com/NVIDIA/cuda-quantum/blob/main/realtime/docs/cudaq_realtime_message_protocol.md>`__.
+The protocol defines framing, function identifiers, byte order, packed bits,
+request correlation, and status codes. The YAML decoder IDs, incoming
+measurement count and order, and returned observable count must agree.
+Handle ``NOT_READY`` without treating it as a correction; diagnose malformed
+requests or decoder failures before continuing the experiment. A full
+``reset_decoder`` clears shot state; the ``reset`` argument on
+``get_corrections`` only clears accumulated correction bits after reading.
+
+**Transport.** The server loads a provider library. UDP and CPU RoCE can be
+selected on the command line for host-only configurations that do not name a
+provider in YAML. Configurations using GPU RoCE or device-graph dispatch must
+put the provider and its arguments in the YAML transport section. A conflicting
+command-line provider is rejected. A custom provider must implement the
+`CUDA-Q Realtime bridge interface <https://github.com/NVIDIA/cuda-quantum/blob/main/realtime/include/cudaq/realtime/daemon/bridge/bridge_interface.h>`__
+compatible with the package and have its library and runtime dependencies
+available inside the container.
+
+For multiple decoders, read every ``ring<ID>=<endpoint>`` from the readiness
+line and route each decoder to its own ring. Do not assume that a single UDP
+port serves every decoder. CPU RoCE readiness ports are TCP rendezvous
+endpoints, rather than UDP data ports. Ring slot counts and sizes must agree
+between the provider and runtime. RDMA deployments also need the appropriate
+host devices, network configuration, and GPU/NIC topology exposed to the
+container; use the package's deployment instructions for that hardware.
+
+Verify your integration first with known measurements and expected observable
+flips, then with live measurements from the QPU. Record end-to-end latency,
+correctness, and behavior under the experiment's sustained request rate before
+relying on the path for feedback.
 
 Troubleshooting
 ---------------
 
-``ERROR: gpu_roce startup failed: GPU RoCE support is not linked``
-   The server binary was compiled with ``QEC_HAVE_GPU_ROCE_TRANSPORT``
-   (``CUDAQ_GPU_ROCE_AVAILABLE`` was true) but the
-   ``cudaq-qec-decoding-server-gpuroce`` component or the proprietary
-   cudevice archive was not linked.  Rebuild with
-   ``-DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE`` pointing to the
-   ``.a`` file.
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
 
-``DOCA ring allocation failed`` / ``Cannot allocate memory``
-   On GB200 (64 KiB host pages) the ring total ``HOLOLINK_FRAME_SIZE x
-   HOLOLINK_NUM_PAGES`` must be a multiple of 65536.  Use
-   ``--gpu-roce-num-pages auto`` (orchestration script) or compute the
-   aligned depth manually.
+   * - Symptom
+     - Check
+   * - Image cannot be pulled
+     - Confirm the supplied registry, immutable tag or digest, access, and
+       architecture. The dedicated package is separate from the general
+       CUDA-Q QEC image.
+   * - Container runs but no readiness line appears
+     - Read the server output for configuration, plugin, model, or transport
+       errors. Use ``--entrypoint decoding_server``; the package's default
+       entry point is a shell. Allow for first-time TensorRT engine creation.
+   * - Playback times out or produces no correction
+     - Confirm readiness, decoder ID and ring endpoint, and network namespace.
+       Loopback in an unrelated container cannot reach the server. Check the
+       returned status and completed-read fields, not just the exit code.
+   * - ``NOT_READY``
+     - Check the complete measurement layout, final readout, and decoder
+       completion. Schedule time is not a completion barrier for decoding.
+   * - Invalid decoder or malformed request
+     - Match IDs, message format, packed-bit counts, and observable return
+       size to the package version and YAML configuration.
+   * - Model file not found or TensorRT engine fails to load
+     - Check paths inside the container, working directory, GPU visibility,
+       plugin availability, and TensorRT compatibility. Rebuild engines on
+       the deployment GPU/runtime when required; do not assume portability.
+   * - SDK tools or Python imports are missing
+     - Run client compilation and model preparation in the SDK environment.
+       Use the playback CLI to drive the runtime-only package.
 
-``cuda_device_id`` / ``HOLOLINK_GPU_ID`` mismatch
-   The server aborts if both are set to different values.  Set only one, or
-   ensure both agree.
+See also
+--------
 
-``QEC_DECODING_SERVER_READY gpu_roce`` never appears
-   Check the server log for Hololink bring-up failures (device name, peer IP,
-   QP number).  Ensure the ConnectX interface has the expected IP and is in
-   RoCE v2 mode (``rdma link show``).
-
-``cudaqx_qec_realtime_dispatch_populate_*_device_entry not found``
-   The proprietary cudevice archive was not whole-archive linked into the
-   binary.  The dlsym lookup for the populate shim failed.  Verify the build
-   includes ``$<LINK_LIBRARY:WHOLE_ARCHIVE,cudaq-qec-realtime-cudevice-proprietary>``
-   and ``--export-dynamic``.
-
-Decoder worker thread stuck / ``NOT_READY`` responses
-   The decoder's ``enqueue_syndrome`` did not trigger a decode (syndrome volume
-   not yet complete).  Verify the syndrome count per round matches
-   ``get_num_msyn_per_decode()`` for the configured decoder window.
-
-ILA verification produces non-deterministic or flaky results
-   Earlier versions of the orchestration script waited for ILA data to
-   *stabilize* (no new samples for a timeout interval), which was racy under
-   variable FPGA timing.  The current script waits for the **expected sample
-   count** (``num_shots x frames_per_shot``) to appear in the ILA buffer
-   before reading the capture.  If you see intermittent verification
-   mismatches when using a custom ILA integration, ensure your wait logic
-   polls on the sample count rather than a stabilization heuristic.
-
-Multiple interfaces showing the same IP
-   Remove the duplicate before starting the server:
-   ``ip addr del <IP>/24 dev <other-iface>``.  A duplicate causes RDMA packet
-   routing failures that are silent from the server's perspective.
+* :doc:`/components/qec/realtime_decoding` — concepts and configuration.
+* :doc:`realtime_decoding_demo` — surface-code and FPGA client examples.
+* :doc:`color_code_demo` — color-code model preparation and accuracy study.
+* :doc:`/components/qec/decoders` — available decoder implementations.

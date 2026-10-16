@@ -58,6 +58,13 @@ Software
 Running
 -------
 
+To prepare artifacts for the prebuilt Docker server without starting a local
+decoder or server, use ``--prepare-only``. This writes a DEM, ONNX model,
+schedule, and separate Chromobius and TensorRT server configurations for each
+distance. It does not build TensorRT engines or produce benchmark results.
+See :ref:`decoding-server-color-code` for the preparation command and the
+container launch sequence.
+
 From any scratch directory, with the CUDA-Q QEC Python environment set up:
 
 .. code-block:: bash
