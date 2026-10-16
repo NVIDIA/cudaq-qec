@@ -929,6 +929,51 @@ TEST(HeterogeneousMapTest, MoveAssignmentOperator) {
   EXPECT_EQ(source_map.size(), 0);
 }
 
+TEST(HeterogeneousMapTest, InsertMoveVector) {
+  cudaqx::heterogeneous_map map;
+  std::vector<double> data = {1.0, 2.0, 3.0, 4.0};
+  map.insert("vec", std::move(data));
+
+  EXPECT_TRUE(data.empty()); // source was moved from
+  auto retrieved = map.get<std::vector<double>>("vec");
+  EXPECT_EQ(retrieved.size(), 4u);
+  EXPECT_DOUBLE_EQ(retrieved[0], 1.0);
+  EXPECT_DOUBLE_EQ(retrieved[3], 4.0);
+}
+
+TEST(HeterogeneousMapTest, InsertMoveLargePayload) {
+  cudaqx::heterogeneous_map map;
+  std::vector<std::vector<float>> llr_history(100,
+                                              std::vector<float>(200, 0.5f));
+  map.insert("llr_history", std::move(llr_history));
+
+  EXPECT_TRUE(llr_history.empty()); // outer vector was moved from
+  auto stored = map.get<std::vector<std::vector<float>>>("llr_history");
+  EXPECT_EQ(stored.size(), 100u);
+  EXPECT_EQ(stored[0].size(), 200u);
+  EXPECT_FLOAT_EQ(stored[0][0], 0.5f);
+}
+
+TEST(HeterogeneousMapTest, InsertMoveOverwrites) {
+  cudaqx::heterogeneous_map map;
+  map.insert("key", std::vector<int>{1, 2, 3});
+  map.insert("key", std::vector<int>{10, 20});
+
+  auto v = map.get<std::vector<int>>("key");
+  EXPECT_EQ(v.size(), 2u);
+  EXPECT_EQ(v[0], 10);
+  EXPECT_EQ(v[1], 20);
+}
+
+TEST(HeterogeneousMapTest, InsertLvalueNotMoved) {
+  cudaqx::heterogeneous_map map;
+  std::vector<int> src = {7, 8, 9};
+  map.insert("vec", src); // lvalue — must go through copy overload
+
+  EXPECT_EQ(src.size(), 3u); // source intact
+  EXPECT_EQ(map.get<std::vector<int>>("vec"), src);
+}
+
 TEST(GraphTester, AddEdge) {
   cudaqx::graph g;
   g.add_edge(1, 2, 1.5);

@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath('@CMAKE_BINARY_DIR@/python'))
 
 # -- Project information -----------------------------------------------------
 
-project = 'NVIDIA CUDA-QX'
+project = 'NVIDIA CUDA-Q QEC'
 copyright = '2025, NVIDIA Corporation & Affiliates'
 author = 'NVIDIA Corporation & Affiliates'
 
@@ -93,7 +93,26 @@ master_doc = 'index'
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ['_templates']
+# Fragment files pulled in via ``.. include::`` must not also be processed as
+# standalone documents — doing so causes duplicate C++ / Python domain
+# declarations in the Sphinx domain registry.  Example-directory READMEs are
+# for the shipped example tree (rendered on GitHub), not standalone doc pages
+# -- without the exclusion they are ingested via the '.md' source suffix and
+# warn as toctree orphans.
+exclude_patterns = [
+    '_templates',
+    'examples/**/README.md',
+    'api/qec/nv_qldpc_decoder_api.rst',
+    'api/qec/nv_fusion_decoder_api.rst',
+    'api/qec/sliding_window_api.rst',
+    'api/qec/trt_decoder_api.rst',
+    'api/qec/tensor_network_decoder_api.rst',
+    'api/qec/pymatching_api.rst',
+    'api/qec/chromobius_api.rst',
+    'api/qec/python_realtime_decoding_api.rst',
+    'api/qec/cpp_realtime_decoding_api.rst',
+    'api/qec/realtime_pipeline_api.rst',
+]
 
 # The reST default role (used for this markup: `text`) to use for all documents.
 default_role = 'code'  # NOTE: the following may be a better choice to error on the side of flagging anything that is referenced but but not declared
@@ -118,6 +137,7 @@ html_theme = 'sphinx_rtd_theme'
 # documentation.
 html_theme_options = {
     "collapse_navigation": False,
+    "navigation_depth": 4,
     "sticky_navigation": False,
     "prev_next_buttons_location": "both",
     "style_nav_header_background":
@@ -125,6 +145,10 @@ html_theme_options = {
 }
 
 html_css_files = ['@SPHINX_SOURCE@/_static/cudaq_override.css']
+
+# Adds a version drop-down to the sidebar, populated from the versions.json
+# manifest that the docs deployment maintains at the root of the docs site.
+html_js_files = ['version-switcher.js']
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -156,6 +180,34 @@ def process_docstring(app, what, name, obj, options, lines):
     for i, line in enumerate(lines):
         lines[i] = fix_string(line)
 
+def _fixup_class_modules():
+    # Types bound in the qecrt nanobind submodule have __module__ set to the
+    # internal extension path.  Autodoc treats any class whose __module__ doesn't
+    # match the documenting module as an alias and emits "alias of <internal path>"
+    # instead of real documentation; stringify_annotation() also uses __module__ to
+    # build type-annotation strings in function signatures.  Fix up every public
+    # type in cudaq_qec whose module still points at the internal path so that
+    # both autoclass and autofunction produce clean output automatically.
+    try:
+        import cudaq_qec
+        _internal_prefix = 'cudaq_qec._pycudaqx'
+        for _name in dir(cudaq_qec):
+            if _name.startswith('_'):
+                continue
+            _obj = getattr(cudaq_qec, _name, None)
+            if isinstance(_obj, type) and \
+                    getattr(_obj, '__module__', '').startswith(_internal_prefix):
+                try:
+                    _obj.__module__ = 'cudaq_qec'
+                except (AttributeError, TypeError):
+                    pass
+    except ImportError:
+        pass
+
+_fixup_class_modules()
+del _fixup_class_modules
+
+
 def setup(app):
     app.connect('autodoc-process-signature', process_signature)
     app.connect('autodoc-process-docstring', process_docstring)
@@ -178,17 +230,51 @@ intersphinx_mapping = {
     'cudaq': ('https://nvidia.github.io/cuda-quantum/latest', None)
 }
 
-redirects = {"versions": "../latest/releases.html"}
+_ALGORITHMS_DOCS = "https://nvidia.github.io/cudaq-algorithms/"
+
+redirects = {
+    "versions": "../latest/releases.html",
+    "components/qec/introduction": "index.html",
+    "examples_rst/qec/code_capacity_noise": "modeling_noise.html",
+    "examples_rst/qec/circuit_level_noise": "modeling_noise.html",
+    "examples_rst/qec/stim_dem_decoder": "decoders.html",
+    "examples_rst/qec/dem_sampling": "decoders.html",
+    "examples_rst/qec/nv_qldpc_gamma_ensemble_user_guide": "../../performance/nv_qldpc_gamma_ensemble_user_guide.html",
+    # CUDA-Q Solvers was removed from this repository after the 0.6.0 release. Point the
+    # previously published Solvers pages at CUDA-Q Algorithms, which supersedes
+    # it, so existing links and search results do not 404.
+    "components/solvers/introduction": _ALGORITHMS_DOCS,
+    "examples_rst/solvers/examples": _ALGORITHMS_DOCS,
+    "examples_rst/solvers/adapt": _ALGORITHMS_DOCS,
+    "examples_rst/solvers/vqe": _ALGORITHMS_DOCS,
+    "examples_rst/solvers/qaoa": _ALGORITHMS_DOCS,
+    "examples_rst/solvers/gqe": _ALGORITHMS_DOCS,
+    "examples_rst/solvers/molecular_hamiltonians": _ALGORITHMS_DOCS,
+    "api/solvers/cpp_api": _ALGORITHMS_DOCS,
+    "api/solvers/python_api": _ALGORITHMS_DOCS,
+}
 
 nitpick_ignore = [
     ('cpp:identifier', 'pid_t'),
     ('cpp:identifier', 'uint8_t'),
+    ('cpp:identifier', 'uint32_t'),
+    ('cpp:identifier', 'int64_t'),
+    ('cpp:identifier', 'index_type'),
+    ('ref', 'graph__resources_8h'),
+    ('ref', 'decoder__config__schema_8h'),
+    ('cpp:identifier', 'cudaq::pauli_word'),
+    ('cpp:identifier', 'cudaGraphExec_t'),
+    ('cpp:identifier', 'cudaStream_t'),
+    ('cpp:identifier', 'SIZE_MAX'),
+    ('cpp:identifier', 'uint64_t'),
     ('cpp:identifier', 'details::tensor_impl<Scalar>::scalar_type'),
     ('cpp:identifier', 'cudaqx'),
     ('cpp:identifier', 'size_t'),
     ('cpp:identifier', 'details'),
     ('cpp:identifier', 'spin_op'),
     ('cpp:identifier', 'heterogeneous_map'),
+    ('cpp:identifier', 'is_bounded_char_array<std::remove_cv_t<T>>'),
+    ('cpp:identifier', 'is_bounded_char_array<std::remove_cv_t<T>>::value'),
     ('cpp:identifier', 'cudaq::qkernel<void(cudaq::qvector<>&)>'),
     ('cpp:identifier', 'cudaq::qkernel<void(patch)>'),
     ('cpp:identifier', 'cudaq::qkernel<void(patch, patch)>'),
@@ -198,10 +284,30 @@ nitpick_ignore = [
     ('cpp:identifier', 'cudaq::qvector<>'),
     ('cpp:identifier', 'cudaq::qview<>'),
     ('cpp:identifier', 'cudaq::measure_result'),
+    ('cpp:identifier', 'cudaq::M2DSparseMatrix'),
     ('py:class', 'SpinOperator'),
+    ('py:class', 'cudaq.SpinOperator'),
+    ('py:class', 'cudaq::sum_op<cudaq::spin_handler>'),
+    ('py:class', 'list[cudaq::sum_op<cudaq::spin_handler>]'),
+    ('py:class', 'tuple[float, list[float], list[cudaq::sum_op<cudaq::spin_handler>]]'),
+    ('py:class', 'pauli_word'),
+    ('py:class', 'PauliWord'),
     ('py:class', 'numpy.int32'),
     ('py:class', 'numpy.uint8'),
-    ('py:class', 'cudaq.mlir._mlir_libs._quakeDialects.cudaq_runtime.qview')
+    ('py:class', 'cudaq.mlir._mlir_libs._quakeDialects.cudaq_runtime.qview'),
+    ('py:class', 'cudaq_qec.surface_role'),
+    ('py:class', 'cudaq_qec.operation'),
+    ('py:class', 'sc_orientation'),
+    ('py:class', 'vec2d'),
+]
+
+# Suppress cross-reference warnings for types whose fully-qualified path still
+# contains the internal pybind11 module name.  This happens when Sphinx
+# extracts the cross-reference from the raw nanobind-generated signature before
+# the process_docstring / process_signature hooks have a chance to strip the
+# prefix via doc_replacements.
+nitpick_ignore_regex = [
+    ('py:class', r'cudaq_qec\._pycudaqx_qec_the_suffix_matters_cudaq_qec\..*'),
 ]
 
 napoleon_google_docstring = True

@@ -139,20 +139,77 @@ def parse_decoder_log(decoder_log_file, log_detectors_sparse, log_errors_sparse,
 
 # ---------------------------------------------------------------------------- #
 # Parse the decoder config file and create the decoders from it.
-def parse_decoder_config(config_file, decoders, O_per_decoder):
+def decoder_outputs_from_log(log_result_types, decoder_id_list):
+    """Return the one fixed output basis observed for each decoder id."""
+    outputs = {}
+    for decoder_id, result_types in zip(decoder_id_list, log_result_types):
+        if result_types == {"errs"}:
+            output = "errors"
+        elif result_types == {"obs"}:
+            output = "observables"
+        else:
+            raise RuntimeError(
+                f"unsupported ResultType set {sorted(result_types)} for "
+                f"decoder {decoder_id}")
+
+        previous = outputs.setdefault(decoder_id, output)
+        if previous != output:
+            raise RuntimeError(
+                f"decoder {decoder_id} logged both {previous} and {output} "
+                "results; a decoder instance must have one fixed output basis")
+    return outputs
+
+
+def normalize_error_rate_args(decoder, decoder_id):
+    """Promote the one accepted legacy rate vector into factory kwargs."""
+    locations = []
+
+    if 'error_rate_vec' in decoder:
+        locations.append(('error_rate_vec', decoder['error_rate_vec']))
+
+    def strip_nested_rates(mapping, path):
+        normalized = {}
+        for key, value in mapping.items():
+            key_path = f'{path}.{key}'
+            if key == 'error_rate_vec':
+                locations.append((key_path, value))
+            elif isinstance(value, dict):
+                normalized[key] = strip_nested_rates(value, key_path)
+            else:
+                normalized[key] = value
+        return normalized
+
+    decoder_custom_args = strip_nested_rates(
+        decoder.get('decoder_custom_args', {}), 'decoder_custom_args')
+    if len(locations) > 1:
+        paths = " and ".join(f"'{path}'" for path, _ in locations)
+        raise RuntimeError(
+            f"decoder {decoder_id} supplies error_rate_vec more than once at "
+            f"{paths}; supply it in exactly one location")
+    if locations:
+        decoder_custom_args['error_rate_vec'] = locations[0][1]
+    return decoder_custom_args
+
+
+def parse_decoder_config(config_file, decoders, O_per_decoder,
+                         output_per_decoder):
     print(f'Creating decoders from config file {args.config}...')
     with open(config_file, 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
-        for decoder_id, decoder in enumerate(config['decoders']):
+        for config_index, decoder in enumerate(config['decoders']):
             # Loop through each decoder in the config.
-            num_rows = decoder['syndrome_size']
-            num_cols = decoder['block_size']
-            num_observables = decoder['O_sparse'].count(-1)
-            # Form H
-            H = sparse_to_dense(decoder['H_sparse'], num_rows, num_cols)
-            O = sparse_to_dense(decoder['O_sparse'], num_observables, num_cols)
-            O_per_decoder.append(O)
-            decoder_custom_args = decoder['decoder_custom_args']
+            decoder_id = decoder.get('id', config_index)
+            decoder_custom_args = normalize_error_rate_args(decoder, decoder_id)
+
+            # Chunk-form YAML deliberately omits the flat matrix fields. Use
+            # the same bound expansion routine as the realtime construction
+            # path so replay sees the identical closed model and priors.
+            expanded_chunks = None
+            if decoder.get(
+                    'dem_chunks') is not None and not decoder.get('H_sparse'):
+                expanded_chunks = qec.decoder_config.from_yaml_str(
+                    yaml.safe_dump(decoder))
+                qec.expand_dem_chunks(expanded_chunks)
 
             # Change these to primitive types. This is annoying to have to do, but I
             # don't know of a better way to do this.
@@ -169,11 +226,59 @@ def parse_decoder_config(config_file, decoders, O_per_decoder):
                     decoder_custom_args[key] = float(value)
                 elif type(value) == bool:
                     decoder_custom_args[key] = bool(value)
+            output = output_per_decoder.get(decoder_id, "observables")
+            stim_dem_path = decoder.get('stim_dem_path', '')
+            if stim_dem_path:
+                if (decoder.get('H_sparse') or decoder.get('O_sparse') or
+                        'error_rate_vec' in decoder_custom_args):
+                    raise RuntimeError(
+                        f"decoder {decoder_id} supplies stim_dem_path together "
+                        "with H_sparse, O_sparse, or error_rate_vec; supply "
+                        "exactly one model source")
+                if not os.path.isabs(stim_dem_path):
+                    stim_dem_path = os.path.join(
+                        os.path.dirname(os.path.abspath(config_file)),
+                        stim_dem_path)
+                with open(stim_dem_path, 'r') as dem_file:
+                    dem_text = dem_file.read()
+                dem = qec.dem_from_stim_text(dem_text)
+                O = numpy.asarray(dem.observables_flips_matrix,
+                                  dtype=numpy.uint8)
+                decoder_instance = qec.get_decoder(decoder['type'],
+                                                   dem_text,
+                                                   output=output,
+                                                   **decoder_custom_args)
+            else:
+                if expanded_chunks is None:
+                    num_rows = decoder['syndrome_size']
+                    num_cols = decoder['block_size']
+                    H_sparse = decoder['H_sparse']
+                    O_sparse = decoder['O_sparse']
+                else:
+                    num_rows = expanded_chunks.syndrome_size
+                    num_cols = expanded_chunks.block_size
+                    H_sparse = expanded_chunks.H_sparse
+                    O_sparse = expanded_chunks.O_sparse
+                    if "error_rate_vec" not in decoder_custom_args:
+                        decoder_custom_args["error_rate_vec"] = numpy.array(
+                            expanded_chunks.error_rate_vec, dtype=numpy.float64)
+                num_observables = O_sparse.count(-1)
+                H = sparse_to_dense(H_sparse, num_rows, num_cols)
+                O = sparse_to_dense(O_sparse, num_observables, num_cols)
+                decoder_instance = qec.get_decoder(decoder['type'],
+                                                   H,
+                                                   O=O,
+                                                   output=output,
+                                                   **decoder_custom_args)
+
             # Replaying an obs-frame decoder reconstructs the full composite
             # decoder here, so trt_decoder replay needs TensorRT, a GPU, and
             # the referenced ONNX/engine artifacts. LUT replay is lighter.
-            decoders.append(
-                qec.get_decoder(decoder['type'], H, **decoder_custom_args))
+            # The online realtime path fixes every decoder's result basis at
+            # construction. Reconstruct that same basis explicitly: O is
+            # model data and no longer acts as an output-selection switch.
+            decoders[decoder_id] = decoder_instance
+            O_per_decoder[decoder_id] = O
             print(f"Decoder {decoder_id} created.")
 
 
@@ -211,20 +316,20 @@ log_observables_dense = []  # Observable flips seen in the log file.
 replay_observables_dense = []  # Observable flips calculated in the replay.
 log_result_types = []  # ResultType tokens seen in each log decode call.
 
-decoders = []
-O_per_decoder = []
+decoders = {}
+O_per_decoder = {}
 
 parse_decoder_log(args.decoder_log, log_detectors_sparse, log_errors_sparse,
                   log_observables_sparse, log_observables_dense,
                   log_result_types, decoder_id_list)
-parse_decoder_config(args.config, decoders, O_per_decoder)
+output_per_decoder = decoder_outputs_from_log(log_result_types, decoder_id_list)
+parse_decoder_config(args.config, decoders, O_per_decoder, output_per_decoder)
 
 # Basic error checking
-max_decoder_id = max(decoder_id_list)
-if len(decoders) < max_decoder_id + 1:
-    print(
-        f"Error: Decoder list is too short. Expected {max_decoder_id + 1} decoders, but only {len(decoders)} decoders were created."
-    )
+missing_decoder_ids = sorted(set(decoder_id_list) - decoders.keys())
+if missing_decoder_ids:
+    print(f"Error: no decoder config for logged decoder ids "
+          f"{missing_decoder_ids}.")
     exit(1)
 
 # ---------------------------------------------------------------------------- #

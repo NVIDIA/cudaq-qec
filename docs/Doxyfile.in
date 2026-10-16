@@ -2,7 +2,7 @@
 # Project related configuration options
 #---------------------------------------------------------------------------
 
-PROJECT_NAME           = "CUDA-QX"
+PROJECT_NAME           = "CUDA-Q QEC"
 INPUT                  = @DOXYGEN_INPUT@
 FILE_PATTERNS          = *.h \
                          *.hpp
@@ -21,6 +21,12 @@ EXTRACT_PRIVATE        = YES
 EXTRACT_STATIC         = YES
 
 #---------------------------------------------------------------------------
+# Configuration options related to warning and progress messages
+#---------------------------------------------------------------------------
+
+WARN_AS_ERROR          = FAIL_ON_WARNINGS
+
+#---------------------------------------------------------------------------
 # Configuration options related to the preprocessor
 #---------------------------------------------------------------------------
 
@@ -28,7 +34,9 @@ ENABLE_PREPROCESSING   = YES
 MACRO_EXPANSION        = YES
 EXPAND_ONLY_PREDEF     = YES
 PREDEFINED             = "__qpu__=" \
-                         "__attribute__(x)="
+                         "__attribute__(x)=" \
+                         "CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(TYPE,...)=" \
+                         "CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION_WITH_NAME(TYPE,NAME,...)="
 
 #---------------------------------------------------------------------------
 # Configuration options related to the HTML output

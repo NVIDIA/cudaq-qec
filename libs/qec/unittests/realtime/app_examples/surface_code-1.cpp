@@ -7,22 +7,52 @@
  ******************************************************************************/
 
 // For full test script: surface_code-1-test.sh
+//
+// This demo drives a surface-code memory experiment with realtime decoding:
+//
+//   * The detector error model and measurement-to-detector map are obtained
+//     from `decoder_context_from_memory_circuit`.
+//   * The QPU kernel loops over logical qubits, calling a per-logical
+//     `memory_circuit` kernel that preps the state, streams every round's
+//     syndrome plus the final data readout to that logical's decoder, and
+//     returns the data measurements.
+//   * Circuit-level two-qubit depolarizing noise on the stabilizer-extraction
+//     CNOTs is used for both characterization and simulation.
+//
+// The same source runs on the local (Stim) target and, compiled with
+// `--target quantinuum --emulate`, on the Quantinuum QIR emulator: in both
+// cases the syndromes are generated on the QPU and decoded live through the
+// realtime decoding API.
+//
+// The host-side flow (see demo_circuit_host): configure the decoders
+// (setup_decoders), then take one of two paths --
+//   * --load_syndrome : replay_syndrome_file feeds a captured file to the
+//     decoders and verifies the corrections (no circuit is run);
+//   * otherwise       : run_experiment runs the shots, reports the logical
+//     error rate, and optionally captures the syndrome stream
+//     (--save_syndrome).
 
 #include "cudaq.h"
 #include "cudaq/qec/code.h"
-#include "cudaq/qec/codes/surface_code.h"
 #include "cudaq/qec/decoder.h"
+#include "cudaq/qec/decoder_config_schema.h"
+#include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/experiments.h"
+#include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/noise_model.h"
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/realtime/decoding.h"
 #include "cudaq/qec/realtime/decoding_config.h"
-#include <common/CustomOp.h>
-#include <common/ExecutionContext.h>
-#include <common/NoiseModel.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
+#include <numeric>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
+#include <tuple>
 
 #ifdef QEC_APP_CQR
 // cqr build variant: this same application compiled with -frealtime-lowering
@@ -31,7 +61,9 @@
 // of resolving to the in-process trampolines. The decoding is served either by
 // the in-process decoding-server-cqr service
 // (CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch) or by a standalone
-// decoding_server (QEC_DECODING_SERVER_PORT=<port>). The wire to the
+// decoding_server (QEC_DECODING_SERVER_PORT=<port>; with --num_logical N > 1
+// the server opens one ring per decoder, so ring i's port must additionally
+// be supplied as QEC_DECODING_SERVER_PORT_<i>). The wire to the
 // server defaults to udp loopback; set QEC_DECODING_SERVER_TRANSPORT=cpu_roce
 // to use the CPU RoCE RDMA channel instead (works over SoftRoCE/rdma_rxe; the
 // RDMA topology comes from the same CUDAQ_CPU_ROCE_TEST_* env vars as CUDA-Q's
@@ -48,13 +80,17 @@ std::string env_or(const char *name, const std::string &fallback) {
   return (value && *value) ? std::string(value) : fallback;
 }
 
-void initialize_realtime_channel(const char *prog) {
+void initialize_realtime_channel(const char *prog, int num_logical) {
   std::vector<std::string> args = {prog};
   if (const char *port = std::getenv("QEC_DECODING_SERVER_PORT");
       port && *port) {
     const std::string transport =
         env_or("QEC_DECODING_SERVER_TRANSPORT", "udp");
     if (transport == "cpu_roce") {
+      if (num_logical > 1)
+        throw std::runtime_error(
+            "--num_logical > 1 over cpu_roce is not supported by this "
+            "example (only the udp channel wires per-decoder rings here)");
       // The RDMA ring geometry (slots x slot-size) is part of the cpu_roce
       // wire contract: the channel writes requests directly into the server's
       // rings, so these must match decoding_server's --num-slots /
@@ -73,7 +109,31 @@ void initialize_realtime_channel(const char *prog) {
       args.push_back("--cudaq-device-call=udp");
       args.push_back("udp-host=127.0.0.1");
       args.push_back(std::string("udp-port=") + port);
+      // A one-ring-per-decoder server publishes one endpoint per decoder
+      // (READY line: `... ring0=<p0> ring1=<p1> ...`). Wire logical qubit
+      // i's device_call session to its own ring via device-scoped channel
+      // args (QEC_DECODING_SERVER_PORT_<i> -> udp-port.<i>=), the same
+      // convention as surface_code-4-yaml.
+      for (int device = 1; device < num_logical; ++device) {
+        const std::string name =
+            "QEC_DECODING_SERVER_PORT_" + std::to_string(device);
+        const char *scoped = std::getenv(name.c_str());
+        if (!scoped || !*scoped)
+          throw std::runtime_error(
+              name + " is required: with --num_logical " +
+              std::to_string(num_logical) +
+              " the decoding server serves each decoder on its own ring; "
+              "set " +
+              name + " to the ring" + std::to_string(device) +
+              "= port from the server's QEC_DECODING_SERVER_READY line");
+        args.push_back("udp-port." + std::to_string(device) + "=" + scoped);
+      }
     }
+  } else if (!std::getenv("CUDAQ_DEVICE_CALL_CHANNEL")) {
+    throw std::runtime_error(
+        "no realtime channel configured: set QEC_DECODING_SERVER_PORT=<port> "
+        "to decode via a standalone decoding_server (two-process), or "
+        "CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch to decode in-process");
   }
   std::vector<char *> argv;
   for (auto &arg : args)
@@ -90,1087 +150,1171 @@ namespace cudaq::qec::decoding::host {
 void _set_syndrome_capture_callback(void (*callback)(const uint8_t *, size_t));
 }
 
-// Global syndrome capture state for --save_syndrome option
-static std::ofstream g_syndrome_output_file;
-static std::mutex g_syndrome_file_mutex;
-static int g_syndrome_count = 0;
-static int g_syndromes_per_shot = 0;
+namespace {
 
-// Whether or not to put calls to debug functions in the QIR program. You cannot
-// set this to 1 if you are submitting to hardware.
-#ifndef PER_SHOT_DEBUG
-#define PER_SHOT_DEBUG 0
-#endif
+// Command-line options, parsed in main() and threaded through as a bundle.
+struct run_options {
+  int distance = 5;
+  int num_shots = 10;
+  double p_cnot = 0.001; // two-qubit depolarizing rate on the CNOTs
+  int num_logical = 1;
+  int num_rounds = -1; // defaults to distance
+  int seed = 42;       // simulator seed; < 0 leaves the simulator unseeded
+  std::string decoder_type = "multi_error_lut";
+  int sw_window_size =
+      -1; // sliding_window size in rounds; defaults to distance
+  int sw_step_size = 1;
+  std::string sw_inner_decoder = "multi_error_lut";
+  bool sw_inner_decoder_set = false;
+  std::vector<std::string> decoder_params; // --param key=value overrides
+  bool save_dem = false;
+  bool load_dem = false;
+  bool dem_chunks = false; // describe the DEM one round at a time
+  std::string dem_filename;
+  bool save_syndrome = false;
+  bool load_syndrome = false;
+  std::string syndrome_filename;
+};
 
-// Uncomment this to manually inject errors.
-// #define MANUALLY_INJECT_ERRORS
+// The per-experiment inputs derived once from the code + options: register
+// sizes, the stabilizer support vectors, and the logical observable. The
+// syndrome stream is, per logical qubit, `num_rounds` interior groups of
+// `num_ancx + num_ancz` bits followed by one data group of `num_data` bits.
+struct experiment {
+  std::size_t num_data = 0, num_ancx = 0, num_ancz = 0;
+  std::size_t num_rounds = 0, num_logical = 0, num_obs = 0;
+  std::vector<std::size_t> x_vec, z_vec, obs_flat;
+};
 
-void save_dem_to_file(const cudaq::qec::detector_error_model &dem,
-                      std::string dem_filename, uint64_t numSyndromesPerRound,
-                      uint64_t numLogical, const std::string &decoder_type,
-                      int sw_window_size, int sw_step_size, bool use_relay_bp) {
-  cudaq::qec::decoding::config::multi_decoder_config multi_config;
-  for (uint64_t i = 0; i < numLogical; i++) {
-    // We actually send 1 additional round in this example, so add 1.
-    auto numRounds = dem.num_detectors() / numSyndromesPerRound + 1;
-    cudaq::qec::decoding::config::decoder_config config;
-    config.id = i;
-    config.type = decoder_type; // Use parameter instead of hardcoded
-    config.block_size = dem.num_error_mechanisms();
-    config.syndrome_size = dem.num_detectors();
-    config.H_sparse = cudaq::qec::pcm_to_sparse_vec(dem.detector_error_matrix);
-    config.O_sparse =
-        cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix);
-    config.D_sparse = cudaq::qec::generate_timelike_sparse_detector_matrix(
-        numSyndromesPerRound, numRounds, /*include_first_round=*/false);
+// --save_syndrome capture state. The library callback is a bare
+// `void(*)(const uint8_t *, size_t)` with no user-data pointer, so the
+// captureless callback below reaches this through a global.
+struct syndrome_capture_state {
+  std::ofstream file;
+  std::mutex mutex;
+  int count = 0;
+  int syndromes_per_shot = 0; // groups written per shot
+};
+syndrome_capture_state g_capture;
 
-    if (decoder_type == "nv-qldpc-decoder") {
-      config.decoder_custom_args =
-          cudaq::qec::decoding::config::nv_qldpc_decoder_config();
-      auto &nv_config =
-          std::get<cudaq::qec::decoding::config::nv_qldpc_decoder_config>(
-              config.decoder_custom_args);
+} // namespace
 
-      // Basic settings
-      nv_config.use_sparsity = true;
-      nv_config.error_rate_vec = dem.error_rates;
-      nv_config.max_iterations = 50;
-
-      if (use_relay_bp) {
-        nv_config.bp_method = 3;   // min-sum+dmem (required for relay)
-        nv_config.composition = 1; // Enable sequential relay
-        nv_config.gamma0 = 0.0;    // Initial gamma value
-        nv_config.clip_value = 200.0;
-        nv_config.repeatable = true;
-        nv_config.srelay_config =
-            cudaq::qec::decoding::config::srelay_bp_config();
-        nv_config.srelay_config->pre_iter = 5;
-        nv_config.srelay_config->num_sets = 10;
-        nv_config.srelay_config->stopping_criterion = "All";
-        nv_config.srelay_config->stop_nconv = 1;
-        nv_config.gamma_dist = {0.1, 0.2};
-      } else {
-        // OSD post-processor
-        nv_config.use_osd = true;
-        nv_config.osd_order = 60;
-        nv_config.osd_method = 3;
+// Return the custom-args map for a named decoder given the DEM error rates,
+// with any --param key=value overrides applied on top. The registered decoder
+// schema drives type coercion for each override.
+static cudaqx::heterogeneous_map
+decoder_args(const std::string &type,
+             const std::vector<std::string> &params = {}) {
+  cudaqx::heterogeneous_map args;
+  if (type == "nv-qldpc-decoder") {
+    args.insert("use_sparsity", true);
+    args.insert("max_iterations", 50);
+    args.insert("bp_method", 3);   // min-sum + dmem (required for relay)
+    args.insert("composition", 1); // sequential relay
+    args.insert("gamma0", 0.0);
+    args.insert("clip_value", 200.0);
+    args.insert("repeatable", true);
+    cudaqx::heterogeneous_map srelay_args;
+    srelay_args.insert("pre_iter", std::size_t{5});
+    srelay_args.insert("num_sets", std::size_t{10});
+    srelay_args.insert("stopping_criterion", "All");
+    srelay_args.insert("stop_nconv", std::size_t{1});
+    args.insert("srelay_config", srelay_args);
+    args.insert("gamma_dist", std::vector<double>{0.1, 0.2});
+  } else if (type == "pymatching") {
+    args.insert("merge_strategy", "smallest_weight");
+  } else if (type == "multi_error_lut") {
+    args.insert("lut_error_depth", 2);
+  } else {
+    throw std::runtime_error("Unknown decoder type: " + type);
+  }
+  if (params.empty())
+    return args;
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto *schema = cfg::find_decoder_schema(type);
+  if (!schema)
+    throw std::runtime_error("No parameter schema registered for decoder '" +
+                             type + "'; --param overrides unavailable");
+  for (const auto &kv : params) {
+    const auto eq = kv.find('=');
+    if (eq == std::string::npos)
+      throw std::runtime_error("--param requires key=value format: " + kv);
+    const std::string key = kv.substr(0, eq);
+    const std::string val = kv.substr(eq + 1);
+    const cfg::param_spec *spec = nullptr;
+    for (const auto &p : schema->params)
+      if (p.key == key) {
+        spec = &p;
+        break;
       }
-    } else if (decoder_type == "multi_error_lut") {
-      // Original multi_error_lut configuration
-      cudaq::qec::decoding::config::multi_error_lut_config lut_config;
-      lut_config.lut_error_depth = 2;
-      config.decoder_custom_args = lut_config;
-    } else if (decoder_type == "sliding_window") {
-      // Sliding window configuration
-      cudaq::qec::decoding::config::sliding_window_config sw_config;
-      sw_config.window_size = sw_window_size;
-      sw_config.step_size = sw_step_size;
-      sw_config.num_syndromes_per_round = numSyndromesPerRound;
-      sw_config.straddle_start_round = false;
-      sw_config.straddle_end_round = true;
-      sw_config.inner_decoder_name = "multi_error_lut";
-      sw_config.error_rate_vec = dem.error_rates; // Required by sliding_window
-
-      // Configure inner multi_error_lut decoder
-      cudaq::qec::decoding::config::multi_error_lut_config lut_config;
-      lut_config.lut_error_depth = 2;
-      sw_config.multi_error_lut_params = lut_config;
-      config.decoder_custom_args = sw_config;
+    if (!spec)
+      throw std::runtime_error("Unknown parameter '" + key + "' for decoder '" +
+                               type + "'");
+    // Parse s with fn, reject trailing garbage, rethrow anything as a
+    // user-friendly message naming the key. `throw 0` is the trailing-garbage
+    // sentinel; both it and parser exceptions are caught by catch(...).
+    auto coerce = [&](const std::string &s, auto fn) {
+      try {
+        std::size_t n;
+        auto v = fn(s, &n);
+        if (n != s.size())
+          throw 0;
+        return v;
+      } catch (...) {
+        throw std::runtime_error("--param '" + key + "': invalid value '" +
+                                 val + "'");
+      }
+    };
+    switch (spec->kind) {
+    case cfg::param_kind::f64:
+      args.insert(
+          key, coerce(val, [](auto &s, auto *p) { return std::stod(s, p); }));
+      break;
+    case cfg::param_kind::int32:
+      args.insert(
+          key, coerce(val, [](auto &s, auto *p) { return std::stoi(s, p); }));
+      break;
+    case cfg::param_kind::uint64:
+      args.insert(key, (std::size_t)coerce(val, [](auto &s, auto *p) {
+                    return std::stoull(s, p);
+                  }));
+      break;
+    case cfg::param_kind::boolean:
+      if (val != "true" && val != "false" && val != "1" && val != "0")
+        throw std::runtime_error("--param '" + key + "': invalid value '" +
+                                 val + "'");
+      args.insert(key, val == "true" || val == "1");
+      break;
+    case cfg::param_kind::string:
+      args.insert(key, val);
+      break;
+    case cfg::param_kind::f64_vec: {
+      std::vector<double> vec;
+      std::istringstream ss(val);
+      std::string tok;
+      while (std::getline(ss, tok, ','))
+        vec.push_back(
+            coerce(tok, [](auto &s, auto *p) { return std::stod(s, p); }));
+      args.insert(key, vec);
+      break;
     }
-
-    multi_config.decoders.push_back(config);
-  }
-  std::string config_str = multi_config.to_yaml_str(200);
-  std::ofstream config_file(dem_filename);
-  config_file << config_str;
-  config_file.close();
-  printf("Saved %s config to file: %s\n", decoder_type.c_str(),
-         dem_filename.c_str());
-  return;
-}
-
-void load_dem_from_file(const std::string &dem_filename,
-                        cudaq::qec::detector_error_model &dem,
-                        uint64_t numLogical) {
-  printf("load_dem_from_file: Loading dem from file: %s\n",
-         dem_filename.c_str());
-  // Read dem_filename into a std::string
-  std::ifstream dem_file(dem_filename);
-  std::string dem_str((std::istreambuf_iterator<char>(dem_file)),
-                      std::istreambuf_iterator<char>());
-  auto config =
-      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
-          dem_str);
-  if (numLogical != config.decoders.size()) {
-    printf("ERROR: numLogical [%ld] != config.decoders.size() [%ld]\n",
-           numLogical, config.decoders.size());
-    exit(1);
-  }
-  auto decoder_config = config.decoders[0];
-
-  if (decoder_config.type == "sliding_window") {
-    auto sw_config =
-        std::get<cudaq::qec::decoding::config::sliding_window_config>(
-            decoder_config.decoder_custom_args);
-    // Extract from top-level error_rate_vec (required for sliding_window)
-    if (!sw_config.error_rate_vec.empty()) {
-      dem.error_rates = sw_config.error_rate_vec;
+    default:
+      throw std::runtime_error("--param: unsupported type for '" + key + "'");
     }
   }
-
-  dem.detector_error_matrix = cudaq::qec::pcm_from_sparse_vec(
-      decoder_config.H_sparse, decoder_config.syndrome_size,
-      decoder_config.block_size);
-  // Count how many rows there are in the O_sparse by counting the number of
-  // -1s.
-  size_t num_observables = std::count(decoder_config.O_sparse.begin(),
-                                      decoder_config.O_sparse.end(), -1);
-  dem.observables_flips_matrix = cudaq::qec::pcm_from_sparse_vec(
-      decoder_config.O_sparse, num_observables, decoder_config.block_size);
-  printf("Loaded %s config from file: %s\n", decoder_config.type.c_str(),
-         dem_filename.c_str());
-
-  // Now configure the decoders (works for both types)
-  cudaq::qec::decoding::config::configure_decoders(config);
+  return args;
 }
 
-std::vector<size_t> get_stab_cnot_schedule(char stab_type, int distance) {
-  cudaq::qec::surface_code::stabilizer_grid grid(distance);
-  if (stab_type != 'X' && stab_type != 'Z') {
+// Split the characterized model into one DEM chunk per measurement round, so a
+// single config serves any number of rounds. Round r's chunk holds the
+// detectors whose latest measurement lies in round r, and the faults whose
+// first detector lies there; a fault must reach no further than the next
+// round's detectors, and a detector no further back than the previous round's
+// measurements. The rounds equal to the middle one are the repeating bulk.
+static cudaq::qec::dem_chunks_spec
+build_dem_chunks(const cudaq::qec::decoder_inputs &inputs,
+                 std::size_t num_rounds, std::size_t num_syndromes_per_round,
+                 std::size_t num_data) {
+  using namespace cudaq::qec;
+  const auto rows_of = [](const std::vector<std::int64_t> &flat) {
+    std::vector<std::vector<std::int64_t>> rows(1);
+    for (const auto value : flat)
+      if (value < 0)
+        rows.emplace_back();
+      else
+        rows.back().push_back(value);
+    rows.pop_back();
+    return rows;
+  };
+  const std::size_t S = num_syndromes_per_round, R = num_rounds + 1;
+  const auto count = [&](std::size_t r) {
+    return r < num_rounds ? S : num_data;
+  };
+  const auto round_of = [&](std::int64_t m) {
+    return std::min(static_cast<std::size_t>(m) / S, num_rounds);
+  };
+
+  // Detector rounds, local indices, and D rows in round-local measurements:
+  // the previous round's first, then the detector's own round's.
+  const auto d_rows = rows_of(d_sparse(inputs.m2d));
+  std::vector<std::size_t> det_round(d_rows.size()), local(d_rows.size());
+  std::vector<std::size_t> width(R + 1, 0);
+  std::vector<std::vector<std::int64_t>> d_local(R);
+  for (std::size_t k = 0; k < d_rows.size(); ++k) {
+    if (d_rows[k].empty())
+      throw std::runtime_error("--dem_chunks: detector " + std::to_string(k) +
+                               " reads no measurement");
+    std::size_t r = 0;
+    for (const auto m : d_rows[k])
+      r = std::max(r, round_of(m));
+    det_round[k] = r;
+    local[k] = width[r]++;
+    for (const auto m : d_rows[k]) {
+      const std::size_t at = round_of(m);
+      const auto offset = static_cast<std::int64_t>(at * S);
+      if (at + 1 == r)
+        d_local[r].push_back(m - offset);
+      else if (at == r)
+        d_local[r].push_back(
+            m - offset + static_cast<std::int64_t>(r > 0 ? count(r - 1) : 0));
+      else
+        throw std::runtime_error("--dem_chunks: detector " + std::to_string(k) +
+                                 " reads a measurement more than one round "
+                                 "before its last");
+    }
+    d_local[r].push_back(-1);
+  }
+
+  // Round-major numbering makes a column's lowest detector index its earliest
+  // round, and makes the closed chunks renumber detectors as this DEM does.
+  if (!std::is_sorted(det_round.begin(), det_round.end()))
     throw std::runtime_error(
-        "get_stab_cnot_schedule: Invalid stabilizer type. Must be 'X' or 'Z'.");
+        "--dem_chunks needs detectors numbered round by round");
+
+  struct fault {
+    double p = 0.0;
+    std::vector<std::int64_t> rows, next_rows;
+    std::uint64_t obs = 0;
+    auto key() const { return std::tie(rows, next_rows, obs); }
+  };
+  const auto &dem = inputs.dem;
+  const std::size_t num_columns = dem.num_error_mechanisms();
+  std::vector<std::vector<std::size_t>> columns(num_columns);
+  const auto h_rows = rows_of(pcm_to_sparse_vec(dem.detector_error_matrix));
+  for (std::size_t det = 0; det < h_rows.size(); ++det)
+    for (const auto col : h_rows[det])
+      columns[col].push_back(det);
+  std::vector<std::uint64_t> column_obs(num_columns, 0);
+  const auto o_rows = rows_of(pcm_to_sparse_vec(dem.observables_flips_matrix));
+  if (o_rows.size() > 64)
+    throw std::runtime_error("--dem_chunks supports at most 64 observables");
+  for (std::size_t o = 0; o < o_rows.size(); ++o)
+    for (const auto col : o_rows[o])
+      column_obs[col] |= std::uint64_t{1} << o;
+
+  std::vector<std::vector<fault>> rounds(R);
+  for (std::size_t col = 0; col < num_columns; ++col) {
+    if (columns[col].empty())
+      throw std::runtime_error("--dem_chunks needs every column to flip a "
+                               "detector");
+    const std::size_t r = det_round[columns[col].front()];
+    fault f;
+    f.p = dem.error_rates[col];
+    f.obs = column_obs[col];
+    for (const auto det : columns[col]) {
+      const std::size_t at = det_round[det];
+      // Both directions: an earlier round would land on the outgoing seam,
+      // which is the wrong boundary rather than a wider one.
+      if (at != r && at != r + 1)
+        throw std::runtime_error("--dem_chunks needs every column within two "
+                                 "consecutive rounds");
+      (at == r ? f.rows : f.next_rows)
+          .push_back(static_cast<std::int64_t>(local[det]));
+    }
+    rounds[r].push_back(std::move(f));
   }
-  // First get the stabilizers
-  auto stabs = grid.get_spin_op_stabilizers();
-  cudaq::qec::sortStabilizerOps(stabs);
-  std::size_t stab_idx = 0;
-  std::vector<size_t> cnot_schedule;
-  for (const auto &stab : stabs) {
-    auto stab_word = stab.get_pauli_word(distance * distance);
-    if (stab_word.find(stab_type) == std::string::npos)
-      continue; // None of the desired stabilizers in this row
-    for (std::size_t d = 0; d < stab_word.size(); ++d) {
-      if (stab_word[d] == stab_type) {
-        cnot_schedule.push_back(stab_idx);
-        cnot_schedule.push_back(d);
+  for (std::size_t r = 0; r < R; ++r) {
+    auto &faults = rounds[r];
+    std::sort(faults.begin(), faults.end(),
+              [](const fault &a, const fault &b) { return a.key() < b.key(); });
+    std::vector<fault> merged;
+    for (auto &f : faults) {
+      if (!merged.empty() && merged.back().key() == f.key()) {
+        double &p = merged.back().p;
+        p = p * (1 - f.p) + f.p * (1 - p);
+      } else {
+        merged.push_back(std::move(f));
       }
     }
-    stab_idx++;
+    // Every fault here starts in round r, so ordering the round's columns as
+    // pcm_is_sorted() would, with the next round's rows one block later,
+    // leaves the closed model sorted, as sliding_window requires.
+    const auto block = static_cast<std::uint32_t>(
+        std::max<std::size_t>({width[r], width[r + 1], 1}));
+    std::vector<std::vector<std::uint32_t>> local_rows;
+    for (const auto &f : merged) {
+      auto &rows = local_rows.emplace_back(f.rows.begin(), f.rows.end());
+      for (const auto row : f.next_rows)
+        rows.push_back(block + static_cast<std::uint32_t>(row));
+    }
+    faults.clear();
+    for (const auto i : get_sorted_pcm_column_indices(local_rows, block))
+      faults.push_back(std::move(merged[i]));
   }
-  return cnot_schedule;
+
+  const auto same = [&](std::size_t a, std::size_t b) {
+    if (width[a] != width[b] || width[a + 1] != width[b + 1] ||
+        count(a) != count(b) || (a > 0) != (b > 0) ||
+        (a > 0 && count(a - 1) != count(b - 1)) || d_local[a] != d_local[b] ||
+        rounds[a].size() != rounds[b].size())
+      return false;
+    for (std::size_t i = 0; i < rounds[a].size(); ++i) {
+      const fault &x = rounds[a][i], &y = rounds[b][i];
+      if (x.key() != y.key() || std::abs(x.p - y.p) > 1e-9 * std::max(x.p, y.p))
+        return false;
+    }
+    return true;
+  };
+  const std::size_t middle = R / 2;
+  std::size_t bulk_first = middle, bulk_last = middle;
+  while (bulk_first > 0 && same(bulk_first - 1, middle))
+    --bulk_first;
+  while (bulk_last + 1 < R && same(bulk_last + 1, middle))
+    ++bulk_last;
+  if (bulk_last == bulk_first)
+    throw std::runtime_error("--dem_chunks found no repeating round in " +
+                             std::to_string(num_rounds) +
+                             " rounds; raise --num_rounds");
+
+  const auto chunk_of = [&](std::size_t r) {
+    const auto &faults = rounds[r];
+    const auto seam_rows = [&](std::size_t rows, bool next) {
+      std::vector<std::vector<std::int64_t>> by_row(rows);
+      for (std::size_t i = 0; i < faults.size(); ++i)
+        for (const auto row : next ? faults[i].next_rows : faults[i].rows)
+          by_row[row].push_back(static_cast<std::int64_t>(i));
+      std::vector<std::int64_t> sparse;
+      for (const auto &row : by_row) {
+        sparse.insert(sparse.end(), row.begin(), row.end());
+        sparse.push_back(-1);
+      }
+      return sparse;
+    };
+    dem_chunk_spec spec;
+    spec.num_faults = faults.size();
+    for (const auto &f : faults)
+      spec.error_rates.push_back(f.p);
+    spec.seam_specs.push_back(
+        {seam_name::prev_round, {seam_rows(width[r], false), {}}});
+    if (r + 1 < R)
+      spec.seam_specs.push_back(
+          {seam_name::next_round, {seam_rows(width[r + 1], true), {}}});
+    for (std::size_t o = 0; o < o_rows.size(); ++o) {
+      for (std::size_t i = 0; i < faults.size(); ++i)
+        if (faults[i].obs >> o & 1)
+          spec.O_sparse.push_back(static_cast<std::int64_t>(i));
+      spec.O_sparse.push_back(-1);
+    }
+    spec.D_sparse = d_local[r];
+    if (count(r) != S)
+      spec.num_measurements = count(r);
+    return spec;
+  };
+
+  dem_chunks_spec spec;
+  spec.seam = {seam_name::next_round, seam_name::prev_round};
+  spec.num_rounds = R;
+  spec.measurements_per_round = S;
+  std::vector<phase_id> chain;
+  const auto add_phase = [&](const std::string &name, std::size_t r) {
+    const phase_id id = phase_id::from_name(name);
+    spec.phases.push_back({id, chunk_of(r)});
+    chain.push_back(id);
+  };
+  for (std::size_t r = 0; r < bulk_first; ++r)
+    add_phase("before" + std::to_string(r), r);
+  add_phase("bulk", middle);
+  for (std::size_t r = bulk_last + 1; r < R; ++r)
+    add_phase("after" + std::to_string(r - bulk_last - 1), r);
+  for (std::size_t i = 0; i + 1 < chain.size(); ++i)
+    spec.connections.push_back({chain[i], chain[i + 1]});
+  spec.connections.push_back({chain[bulk_first], chain[bulk_first]});
+  printf("DEM chunks: %zu rounds before the repeating round, %zu after\n",
+         bulk_first, R - 1 - bulk_last);
+  return spec;
 }
 
-void debug_print_syndromes(int64_t syndrome_x_int, int64_t syndrome_z_int) {
-  printf("syndrome_x_int: %ld, syndrome_z_int: %ld\n", syndrome_x_int,
-         syndrome_z_int);
-}
+// Build one decoder config per logical qubit from the decoder_inputs produced
+// by `decoder_context_from_memory_circuit(...).full_component()`. All decoders
+// share the same DEM (`H_sparse`), observables (`O_sparse`) and
+// measurement-to-detector map (`D_sparse`); only the decoder type/parameters
+// differ. Per-decoder args use the declarative `heterogeneous_map` schema
+// (`decoder_custom_args`) validated by `multi_decoder_config`. Given
+// `chunks`, the decoders carry them in place of the flat model.
+static cudaq::qec::decoding::config::multi_decoder_config
+build_multi_decoder_config(
+    const cudaq::qec::decoder_inputs &inputs,
+    std::size_t num_syndromes_per_round, std::size_t num_boundary_syndromes,
+    const std::optional<cudaq::qec::dem_chunks_spec> &chunks,
+    const run_options &opts) {
+  namespace config = cudaq::qec::decoding::config;
+  const auto &dem = inputs.dem;
+  const auto d_sparse = cudaq::qec::d_sparse(inputs.m2d);
 
-void debug_print_applying_correction(int64_t correction) {
-  printf("Applying correction: %ld\n", correction);
-}
+  config::multi_decoder_config multi_config;
+  for (int i = 0; i < opts.num_logical; i++) {
+    config::decoder_config dc;
+    dc.id = i;
+    if (chunks) {
+      dc.dem_chunks = chunks;
+    } else {
+      dc.block_size = dem.num_error_mechanisms();
+      dc.syndrome_size = dem.num_detectors();
+      dc.H_sparse = cudaq::qec::pcm_to_sparse_vec(dem.detector_error_matrix);
+      dc.O_sparse = cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix);
+      dc.D_sparse = d_sparse;
+      dc.error_rate_vec = dem.error_rates;
+    }
 
-void debug_start_shot() { printf("Starting shot\n"); }
+    if (opts.decoder_type == "sliding_window") {
+      dc.type = "sliding_window";
+      cudaqx::heterogeneous_map sw_args;
+      sw_args.insert("window_size", opts.sw_window_size);
+      sw_args.insert("step_size", opts.sw_step_size);
+      sw_args.insert("num_syndromes_per_round", num_syndromes_per_round);
+      sw_args.insert("num_boundary_syndromes", num_boundary_syndromes);
+      sw_args.insert("straddle_start_round", false);
+      sw_args.insert("straddle_end_round", true);
+      sw_args.insert("inner_decoder_name", opts.sw_inner_decoder);
+      sw_args.insert("inner_decoder_params",
+                     decoder_args(opts.sw_inner_decoder, opts.decoder_params));
+      dc.decoder_custom_args = sw_args;
+    } else {
+      dc.type = opts.decoder_type;
+      dc.decoder_custom_args =
+          decoder_args(opts.decoder_type, opts.decoder_params);
+    }
+
+    multi_config.decoders.push_back(dc);
+  }
+  return multi_config;
+}
 
 namespace cudaq::qec::qpu {
 
-// Transversal CNOT gate
-__qpu__ void logical_cnot(cudaq::qview<> ctrl_data, cudaq::qview<> tgt_data) {
-  for (std::size_t i = 0; i < ctrl_data.size(); i++) {
-    cudaq::x<cudaq::ctrl>(ctrl_data[i], tgt_data[i]);
-  }
-}
-__qpu__ void spam_error(cudaq::qec::patch logicalQubit, double p_spam_data,
-                        double p_spam_ancx, double p_spam_ancz) {
-  for (std::size_t i = 0; i < logicalQubit.data.size(); i++) {
-    cudaq::apply_noise<cudaq::depolarization1>(p_spam_data,
-                                               logicalQubit.data[i]);
-  }
-  for (std::size_t i = 0; i < logicalQubit.ancx.size(); i++) {
-    cudaq::apply_noise<cudaq::depolarization1>(p_spam_ancx,
-                                               logicalQubit.ancx[i]);
-  }
-  for (std::size_t i = 0; i < logicalQubit.ancz.size(); i++) {
-    cudaq::apply_noise<cudaq::depolarization1>(p_spam_ancz,
-                                               logicalQubit.ancz[i]);
-  }
-}
-
-__qpu__ std::vector<cudaq::measure_result>
-se_z_ft(cudaq::qec::patch logicalQubit,
-        const std::vector<std::size_t> &cnot_sched) {
-  for (std::size_t i = 0; i < cnot_sched.size(); i += 2) {
-    cudaq::x<cudaq::ctrl>(logicalQubit.data[cnot_sched[i + 1]],
-                          logicalQubit.ancz[cnot_sched[i]]);
-  }
-  auto results = mz(logicalQubit.ancz);
-  for (std::size_t i = 0; i < logicalQubit.ancz.size(); i++)
-    reset(logicalQubit.ancz[i]);
-  return results;
-}
-
-__qpu__ std::vector<cudaq::measure_result>
-se_x_ft(cudaq::qec::patch logicalQubit,
-        const std::vector<std::size_t> &cnot_sched) {
-  h(logicalQubit.ancx);
-  for (std::size_t i = 0; i < cnot_sched.size(); i += 2) {
-    cudaq::x<cudaq::ctrl>(logicalQubit.ancx[cnot_sched[i]],
-                          logicalQubit.data[cnot_sched[i + 1]]);
-  }
-  h(logicalQubit.ancx);
-  auto results = mz(logicalQubit.ancx);
-  for (std::size_t i = 0; i < logicalQubit.ancx.size(); i++)
-    reset(logicalQubit.ancx[i]);
-  return results;
-}
-
-__qpu__ void custom_memory_circuit_stabs(
+// Per-logical memory circuit kernel. Preps the logical qubit, streams
+// `num_rounds` syndrome groups plus the final data readout to the decoder, and
+// returns that final data measurement. The decoder computes detectors from the
+// measurement-to-detector map (D_sparse).
+__qpu__ std::vector<cudaq::measure_result> memory_circuit(
     cudaq::qview<> data, cudaq::qview<> xstab_anc, cudaq::qview<> zstab_anc,
-    std::size_t numRounds, const std::vector<std::size_t> &cnot_schedX_flat,
-    const std::vector<std::size_t> &cnot_schedZ_flat, bool enqueue_syndromes,
-    bool do_errors_after_non_last_rounds, double p_spam, int logical_qubit_idx,
-    int decoder_window) {
-  // Create the logical patch
+    const cudaq::qec::code::stabilizer_round &stab_round,
+    const cudaq::qec::code::one_qubit_encoding &state_prep,
+    std::size_t num_rounds, const std::vector<std::size_t> &x_stabilizers,
+    const std::vector<std::size_t> &z_stabilizers, std::int64_t decoder_id) {
   patch logical(data, xstab_anc, zstab_anc);
-  std::vector<cudaq::measure_result> combined_syndrome(xstab_anc.size() +
-                                                       zstab_anc.size());
+  state_prep(logical);
 
-  // Handle the stabilizer lock-in round (numRounds == 1)
-  if (numRounds == 1) {
-    auto syndrome_z = se_z_ft(logical, cnot_schedZ_flat);
-    auto syndrome_x = se_x_ft(logical, cnot_schedX_flat);
-    int i = 0;
-    for (auto s : syndrome_z)
-      combined_syndrome[i++] = s;
-    for (auto s : syndrome_x)
-      combined_syndrome[i++] = s;
-    if (enqueue_syndromes) {
-      cudaq::qec::decoding::enqueue_syndromes(
-          /*decoder_id=*/logical_qubit_idx, combined_syndrome);
-    }
-    return;
+  // Lock-in round (round 0)
+  auto syndrome = stab_round(logical, x_stabilizers, z_stabilizers);
+  cudaq::qec::decoding::enqueue_syndromes(decoder_id, syndrome);
+
+  // Rounds 1..num_rounds-1: stream raw syndromes
+  for (std::size_t r = 1; r < num_rounds; r++) {
+    auto s = stab_round(logical, x_stabilizers, z_stabilizers);
+    cudaq::qec::decoding::enqueue_syndromes(decoder_id, s);
   }
 
-  // Process rounds window by window for the main measurement rounds
-  // This is a plain stationary window implementation. Not a sliding window
-  // implementation!
-  for (std::size_t window_idx = 0; window_idx < numRounds / decoder_window;
-       window_idx++) {
-    // For window_idx > 0, enqueue the last syndrome from previous window first
-    if (window_idx > 0 && enqueue_syndromes) {
-      cudaq::qec::decoding::enqueue_syndromes(
-          /*decoder_id=*/logical_qubit_idx, combined_syndrome);
-    }
-
-    // Process the current window rounds
-    for (std::size_t round = window_idx * decoder_window;
-         round < (window_idx + 1) * decoder_window; round++) {
-      auto syndrome_z = se_z_ft(logical, cnot_schedZ_flat);
-      auto syndrome_x = se_x_ft(logical, cnot_schedX_flat);
-      int i = 0;
-      for (auto s : syndrome_z)
-        combined_syndrome[i++] = s;
-      for (auto s : syndrome_x)
-        combined_syndrome[i++] = s;
-      if (enqueue_syndromes) {
-        cudaq::qec::decoding::enqueue_syndromes(
-            /*decoder_id=*/logical_qubit_idx, combined_syndrome);
-      }
-#if PER_SHOT_DEBUG
-      debug_print_syndromes(syndrome_x_int, syndrome_z_int);
-#endif
-      if (do_errors_after_non_last_rounds &&
-          round < (window_idx + 1) * decoder_window - 1) {
-        // spam_error(logical, p_spam, p_spam, p_spam);
-        spam_error(logical, p_spam, 0.0, 0.0);
-        // Uncomment the following to force a single error that should likely be
-        // correctable.
-#if MANUALLY_INJECT_ERRORS
-        if (round == 0) {
-          // Inject a single error
-          cudaq::x(logical.data[3]);
-        }
-#endif
-      }
-    }
-  }
+  // Final data readout
+  auto data_meas = mz(data);
+  cudaq::qec::decoding::enqueue_syndromes(decoder_id, data_meas);
+  return data_meas;
 }
 
-__qpu__ std::int64_t
-demo_circuit_qpu(bool allow_device_calls,
-                 const cudaq::qec::code::one_qubit_encoding &statePrep,
-                 std::size_t numData, std::size_t numAncx, std::size_t numAncz,
-                 std::size_t numRounds, std::size_t numLogical,
-                 const std::vector<std::size_t> &cnot_schedX_flat,
-                 const std::vector<std::size_t> &cnot_schedZ_flat,
-                 double p_spam, bool apply_corrections, int decoder_window) {
-#if PER_SHOT_DEBUG
-  debug_start_shot();
-#endif
+// Shot kernel: run an independent surface-code memory experiment on each of
+// `num_logical` logical qubits and return, per logical qubit, its logical
+// observable value updated by the decoder's correction
+//
+// Return layout: the low 32 bits hold, per logical qubit,
+// bit i = logical qubit i's corrected observable (so num_logical <= 32); the
+// high 32 bits hold how many corrections the decoders applied this shot.
+__qpu__ std::int64_t demo_circuit_qpu(
+    const cudaq::qec::code::stabilizer_round &stab_round,
+    const cudaq::qec::code::one_qubit_encoding &state_prep,
+    std::size_t num_data, std::size_t num_ancx, std::size_t num_ancz,
+    std::size_t num_rounds, std::size_t num_logical,
+    const std::vector<std::size_t> &x_stabilizers,
+    const std::vector<std::size_t> &z_stabilizers,
+    const std::vector<std::size_t> &obs_matrix_flat,
+    std::size_t num_observables, const std::vector<std::int64_t> &decoder_ids) {
+  cudaq::qvector data(num_logical * num_data),
+      xstab_anc(num_logical * num_ancx), zstab_anc(num_logical * num_ancz);
+
+  for (std::size_t i = 0; i < num_logical; i++)
+    cudaq::qec::decoding::reset_decoder(decoder_ids[i]);
+
   std::uint64_t num_corrections = 0;
-
-  // Reset the decoder
-  if (allow_device_calls) {
-    for (int i = 0; i < numLogical; i++) {
-      cudaq::qec::decoding::reset_decoder(/*decoder_id=*/i);
-    }
-  }
-
-  // Allocate the data and ancilla qubits
-  cudaq::qvector data(numLogical * numData), xstab_anc(numLogical * numAncx),
-      zstab_anc(numLogical * numAncz);
-
-  // Call state prep
-  for (int i = 0; i < numLogical; i++) {
-    auto subData = data.slice(i * numData, numData);
-    auto subXstab_anc = xstab_anc.slice(i * numAncx, numAncx);
-    auto subZstab_anc = zstab_anc.slice(i * numAncz, numAncz);
-    patch logical(subData, subXstab_anc, subZstab_anc);
-    statePrep(logical);
-  }
-
-  // Do 1 stabilizer round to lock in the stabilizers
-  {
-    for (int i = 0; i < numLogical; i++) {
-      auto subData = data.slice(i * numData, numData);
-      auto subXstab_anc = xstab_anc.slice(i * numAncx, numAncx);
-      auto subZstab_anc = zstab_anc.slice(i * numAncz, numAncz);
-
-      custom_memory_circuit_stabs(
-          subData, subXstab_anc, subZstab_anc,
-          /*numRounds=*/1, cnot_schedX_flat, cnot_schedZ_flat,
-          /*enqueue_syndromes=*/allow_device_calls,
-          /*do_errors_after_non_last_rounds=*/false, p_spam, i, decoder_window);
-    }
-  }
-
-  // Inject errors
-  for (int i = 0; i < numLogical; i++) {
-    auto subData = data.slice(i * numData, numData);
-    auto subXstab_anc = xstab_anc.slice(i * numAncx, numAncx);
-    auto subZstab_anc = zstab_anc.slice(i * numAncz, numAncz);
-    patch logical(subData, subXstab_anc, subZstab_anc);
-    spam_error(logical, /*p_spam_data=*/p_spam, /*p_spam_ancx=*/0.0,
-               /*p_spam_ancz=*/0.0);
-  }
-
-  // Do stabilizer rounds
-  for (int i = 0; i < numLogical; i++) {
-    auto subData = data.slice(i * numData, numData);
-    auto subXstab_anc = xstab_anc.slice(i * numAncx, numAncx);
-    auto subZstab_anc = zstab_anc.slice(i * numAncz, numAncz);
-
-    custom_memory_circuit_stabs(
-        subData, subXstab_anc, subZstab_anc, numRounds, cnot_schedX_flat,
-        cnot_schedZ_flat, /*enqueue_syndromes=*/allow_device_calls,
-        /*do_errors_after_non_last_rounds=*/true, p_spam, i, decoder_window);
-  }
-
-  // Only apply corrections after processing all windows
-  if (allow_device_calls && apply_corrections) {
-    for (int i = 0; i < numLogical; i++) {
-      auto subData = data.slice(i * numData, numData);
-      auto subXstab_anc = xstab_anc.slice(i * numAncx, numAncx);
-      auto subZstab_anc = zstab_anc.slice(i * numAncz, numAncz);
-      auto correction_result = cudaq::qec::decoding::get_corrections(
-          /*decoder_id=*/i, /*return_size=*/1, /*reset=*/false);
-      if (correction_result[0] != 0) {
-        num_corrections++;
-        // Transversal correction
-        cudaq::x(subData);
-#if PER_SHOT_DEBUG
-        debug_print_applying_correction(correction_result);
-#endif
-      }
-    }
-  }
-
-  // Note: this only works up to 64 bits, so a single logical qubit with
-  // distance 7.
   std::uint64_t ret = 0;
-  for (int i = 0; i < numLogical; i++) {
-    if (i > 0)
-      ret <<= numData;
-    auto subData = data.slice(i * numData, numData);
-    auto subMeas = mz(subData);
-    ret |= cudaq::to_integer(cudaq::to_bools(subMeas));
+  for (std::size_t i = 0; i < num_logical; i++) {
+    // Stream this logical's rounds + data readout to its decoder, keeping the
+    // single data measurement it returns.
+    auto data_meas = memory_circuit(
+        data.slice(i * num_data, num_data),
+        xstab_anc.slice(i * num_ancx, num_ancx),
+        zstab_anc.slice(i * num_ancz, num_ancz), stab_round, state_prep,
+        num_rounds, x_stabilizers, z_stabilizers, decoder_ids[i]);
+
+    // Raw logical observable (row 0 of the observable matrix) from that
+    // readout.
+    bool obs = false;
+    for (std::size_t q = 0; q < num_data; q++)
+      if (obs_matrix_flat[q] != 0 && data_meas[q])
+        obs = !obs;
+
+    // Update it by the decoder's predicted observable flip.
+    auto correction = cudaq::qec::decoding::get_corrections(
+        static_cast<std::uint64_t>(decoder_ids[i]), num_observables,
+        /*reset=*/false);
+    if (correction[0]) {
+      obs = !obs;
+      num_corrections++;
+    }
+
+    if (obs)
+      ret |= std::uint64_t{1} << i;
   }
-  // The remaining bits are allocated to the number of corrections.
-  ret |= num_corrections << (numData * numLogical);
+  // Corrections in the high 32 bits
+  ret |= num_corrections << 32;
   return ret;
 }
 } // namespace cudaq::qec::qpu
 
-void demo_circuit_host(const cudaq::qec::code &code, int distance,
-                       double p_spam, cudaq::qec::operation statePrep,
-                       std::size_t numShots, std::size_t numRounds,
-                       std::size_t numLogical, std::string dem_filename,
-                       bool save_dem, bool load_dem, int decoder_window,
-                       const std::string &decoder_type, int sw_window_size,
-                       int sw_step_size, bool save_syndrome = false,
-                       bool load_syndrome = false,
-                       std::string syndrome_filename = "",
-                       bool use_relay_bp = false) {
-  if (!code.contains_operation(statePrep))
-    throw std::runtime_error(
-        "sample_memory_circuit_error - requested state prep kernel not found.");
+namespace {
 
-  auto &prep =
-      code.get_operation<cudaq::qec::code::one_qubit_encoding>(statePrep);
+// Gather the experiment inputs (register sizes, stabilizer supports, logical
+// observable) from the code once.
+experiment make_experiment(const cudaq::qec::code &code,
+                           cudaq::qec::operation state_prep,
+                           const run_options &opts) {
+  experiment exp;
+  exp.num_data = code.get_num_data_qubits();
+  exp.num_ancx = code.get_num_ancilla_x_qubits();
+  exp.num_ancz = code.get_num_ancilla_z_qubits();
+  exp.num_rounds = static_cast<std::size_t>(opts.num_rounds);
+  exp.num_logical = static_cast<std::size_t>(opts.num_logical);
 
-  if (!code.contains_operation(cudaq::qec::operation::stabilizer_round))
-    throw std::runtime_error("demo_circuit_host error - no stabilizer "
-                             "round kernel for this code.");
+  auto schedule_x = code.get_stabilizer_schedule_x();
+  auto schedule_z = code.get_stabilizer_schedule_z();
+  exp.x_vec.assign(schedule_x.data(), schedule_x.data() + schedule_x.size());
+  exp.z_vec.assign(schedule_z.data(), schedule_z.data() + schedule_z.size());
 
-  auto &stabRound = code.get_operation<cudaq::qec::code::stabilizer_round>(
-      cudaq::qec::operation::stabilizer_round);
+  const bool is_z_prep = state_prep == cudaq::qec::operation::prep0 ||
+                         state_prep == cudaq::qec::operation::prep1;
+  auto obs_matrix =
+      is_z_prep ? code.get_observables_z() : code.get_observables_x();
+  exp.num_obs = obs_matrix.shape()[0];
+  exp.obs_flat.assign(obs_matrix.data(), obs_matrix.data() + obs_matrix.size());
+  return exp;
+}
 
-  auto numData = code.get_num_data_qubits();
-  auto numAncx = code.get_num_ancilla_x_qubits();
-  auto numAncz = code.get_num_ancilla_z_qubits();
+// Configure the decoders for the run. Returns true if they are ready and the
+// caller should proceed to run shots; false if the run is complete (--save_dem
+// wrote the config and exited) or a file could not be opened.
+//
+// --load_dem and --save_dem are the two ends of the same YAML round-trip a
+// standalone decoding_server uses:
+//   --load_dem <file> : read a saved config (the decoders may live in a
+//                       separate decoding_server fed the same YAML).
+//   --save_dem <file> : characterize the DEM, write the config YAML, and exit.
+//   (default)         : characterize and configure the decoders in-process.
+bool setup_decoders(const cudaq::qec::code &code,
+                    cudaq::qec::operation state_prep, const run_options &opts,
+                    cudaq::noise_model &noise) {
+  namespace config = cudaq::qec::decoding::config;
 
-  auto cnot_schedX_flat = get_stab_cnot_schedule('X', distance);
-  auto cnot_schedZ_flat = get_stab_cnot_schedule('Z', distance);
+  if (opts.load_dem) {
+    std::ifstream config_file(opts.dem_filename);
+    if (!config_file)
+      throw std::runtime_error("Could not open dem config file: " +
+                               opts.dem_filename);
+    std::stringstream config_text;
+    config_text << config_file.rdbuf();
+    auto cfg = config::multi_decoder_config::from_yaml_str(config_text.str());
 
-  printf("cnot_schedX_flat: ");
-  // Put a comma in between each pair of elements
-  for (std::size_t i = 0; i < cnot_schedX_flat.size(); i += 2)
-    printf("%lu %lu, ", cnot_schedX_flat[i], cnot_schedX_flat[i + 1]);
-  printf("\n");
-  printf("cnot_schedZ_flat: ");
-  for (std::size_t i = 0; i < cnot_schedZ_flat.size(); i += 2)
-    printf("%lu %lu, ", cnot_schedZ_flat[i], cnot_schedZ_flat[i + 1]);
-  printf("\n");
-
-  cudaq::noise_model noise;
-
-  // First get the MSM
-  cudaq::qec::detector_error_model dem;
-  if (load_dem) {
-    load_dem_from_file(dem_filename, dem, numLogical);
-  } else {
-    if (p_spam == 0.0) {
-      printf("p_spam is 0.0, cannot get the MSM\n");
-      exit(0);
-    }
-    cudaq::ExecutionContext ctx_msm_size("msm_size");
-    ctx_msm_size.noiseModel = &noise;
-    auto &platform = cudaq::get_platform();
-    platform.with_execution_context(ctx_msm_size, [&] {
-      // Always use numLogical = 1 for the MSM
-      cudaq::qec::qpu::demo_circuit_qpu(
-          /*allow_device_calls=*/false, prep, numData, numAncx, numAncz,
-          decoder_window, // Use decoder_window instead of numRounds for DEM
-                          // generation
-          /*numLogical=*/1, cnot_schedX_flat, cnot_schedZ_flat, p_spam,
-          /*apply_corrections=*/false, decoder_window);
-    });
-    if (!ctx_msm_size.msm_dimensions.has_value()) {
-      throw std::runtime_error("No MSM dimensions found");
-    }
-    if (ctx_msm_size.msm_dimensions.value().second == 0) {
-      throw std::runtime_error("No MSM dimensions found");
-    }
-    cudaq::ExecutionContext ctx_msm("msm");
-    ctx_msm.noiseModel = &noise;
-    ctx_msm.msm_dimensions = ctx_msm_size.msm_dimensions;
-    platform.with_execution_context(ctx_msm, [&] {
-      // Always use numLogical = 1 for the MSM
-      cudaq::qec::qpu::demo_circuit_qpu(
-          /*allow_device_calls=*/false, prep, numData, numAncx, numAncz,
-          decoder_window, // Use decoder_window instead of numRounds for DEM
-                          // generation
-          /*numLogical=*/1, cnot_schedX_flat, cnot_schedZ_flat, p_spam,
-          /*apply_corrections=*/false, decoder_window);
-    });
-
-    auto msm_as_strings = ctx_msm.result.sequential_data();
-    printf("MSM Dimensions: %ld measurements x %ld error mechanisms\n",
-           ctx_msm.msm_dimensions.value().first,
-           ctx_msm.msm_dimensions.value().second);
-    for (std::size_t i = 0; i < ctx_msm.msm_dimensions.value().first; i++) {
-      for (std::size_t j = 0; j < ctx_msm.msm_dimensions.value().second; j++) {
-        printf("%c", msm_as_strings[j][i] == '1' ? '1' : '.');
-      }
-      printf("\n");
-    }
-    // Populate error rates and error IDs
-    dem.error_rates = std::move(ctx_msm.msm_probabilities.value());
-    dem.error_ids = std::move(ctx_msm.msm_prob_err_id.value());
-
-    cudaqx::tensor<uint8_t> mzTable(msm_as_strings);
-    mzTable = mzTable.transpose();
-    printf("mzTable:\n");
-    mzTable.dump_bits();
-    // Subtract the number of data qubits to get the number of syndrome
-    // measurements.
-    std::size_t totalNumSyndromes = mzTable.shape()[0] - distance * distance;
-    std::size_t numNoiseMechs = mzTable.shape()[1];
-    std::size_t numSyndromesPerRound = distance * distance - 1;
-    if (totalNumSyndromes % numSyndromesPerRound != 0) {
-      throw std::runtime_error("Num syndromes per round is not a divisor of "
-                               "the number of syndrome measurements");
-    }
-    std::size_t numRoundsOfSyndromData =
-        totalNumSyndromes / numSyndromesPerRound;
-    if (numRoundsOfSyndromData !=
-        decoder_window + 1) { // Use decoder_window instead of numRounds
-      throw std::runtime_error("Num rounds of syndrome data [" +
-                               std::to_string(numRoundsOfSyndromData) +
-                               "] is not equal to the decoder_window + 1[" +
-                               std::to_string(decoder_window + 1) + "]");
-    }
-    dem.detector_error_matrix = cudaqx::tensor<uint8_t>(
-        {decoder_window * numSyndromesPerRound,
-         numNoiseMechs}); // Use decoder_window instead of numRounds
-    // There should be (decoder_window + 1) rounds of data in MSM.
-    // TODO: [feature] Good candidate. Auto-generating the detector error
-    // matrix. Currently, we need to manually construct the detector error
-    // matrix by copying the measurements from the MSM.
-    for (std::size_t round = 0; round < decoder_window;
-         round++) { // Use decoder_window instead of numRounds
-      for (std::size_t syndrome = 0; syndrome < numSyndromesPerRound;
-           syndrome++) {
-        for (std::size_t noise_mech = 0; noise_mech < numNoiseMechs;
-             noise_mech++) {
-          dem.detector_error_matrix.at(
-              {round * numSyndromesPerRound + syndrome, noise_mech}) =
-              mzTable.at(
-                  {(round + 0) * numSyndromesPerRound + syndrome, noise_mech}) ^
-              mzTable.at(
-                  {(round + 1) * numSyndromesPerRound + syndrome, noise_mech});
-        }
-      }
-    }
-    auto first_data_row =
-        (decoder_window + 1) *
-        numSyndromesPerRound; // Use decoder_window instead of numRounds
-    cudaqx::tensor<uint8_t> msm_obs(
-        {mzTable.shape()[0] - first_data_row, numNoiseMechs});
-    for (std::size_t row = first_data_row; row < mzTable.shape()[0]; row++)
-      for (std::size_t col = 0; col < numNoiseMechs; col++)
-        msm_obs.at({row - first_data_row, col}) = mzTable.at({row, col});
-
-    // Populate dem.observables_flips_matrix by converting the physical data
-    // qubit measurements to logical observables.
-    auto obs_matrix = code.get_observables_z();
-    printf("obs_matrix:\n");
-    obs_matrix.dump_bits();
-    dem.observables_flips_matrix = obs_matrix.dot(msm_obs) % 2;
-    printf("numSyndromesPerRound: %ld\n", numSyndromesPerRound);
-    dem.canonicalize_for_rounds(numSyndromesPerRound,
-                                /*remove_zero_syndrome_errors=*/true);
-
-    printf("dem.detector_error_matrix:\n");
-    dem.detector_error_matrix.dump_bits();
-    printf("dem.observables_flips_matrix:\n");
-    dem.observables_flips_matrix.dump_bits();
-
-    if (save_dem) {
-      save_dem_to_file(dem, dem_filename, numSyndromesPerRound, numLogical,
-                       decoder_type, sw_window_size, sw_step_size,
-                       use_relay_bp);
-      return;
-    }
-  }
-
-  size_t numSyndromesPerRound = distance * distance - 1;
-  if (dem.detector_error_matrix.shape()[0] % numSyndromesPerRound != 0) {
-    throw std::runtime_error("Num syndromes per round is not a divisor of "
-                             "the number of syndrome measurements");
-  }
-  size_t numRoundsOfSyndromData =
-      dem.detector_error_matrix.shape()[0] / numSyndromesPerRound;
-
-  if (numRoundsOfSyndromData != decoder_window) {
-    throw std::runtime_error("Num rounds of syndrome data [" +
-                             std::to_string(numRoundsOfSyndromData) +
-                             "] is not equal to the decoder_window [" +
-                             std::to_string(decoder_window) + "]");
-  }
-
-  // Setup syndrome capture if requested (--save_syndrome option)
-  if (save_syndrome) {
-    if (syndrome_filename.empty()) {
-      printf("Error: --save_syndrome requires a filename argument\n");
-      return;
-    }
-
-    g_syndrome_output_file.open(syndrome_filename,
-                                std::ios::out | std::ios::trunc);
-    if (!g_syndrome_output_file) {
-      printf("Error: Could not open syndrome file for writing: %s\n",
-             syndrome_filename.c_str());
-      return;
-    }
-
-    // Calculate syndromes per shot
-    g_syndromes_per_shot = numRounds / decoder_window + numRounds;
-    g_syndrome_count = 0;
-
-    printf("Syndrome capture enabled: saving to %s\n",
-           syndrome_filename.c_str());
-    printf("Will capture %d syndromes per shot (%ld rounds with %d window "
-           "size)\n",
-           g_syndromes_per_shot, numRounds, decoder_window);
-
-    // Write metadata to file header
-    g_syndrome_output_file << "NUM_DATA " << numData << "\n";
-    g_syndrome_output_file << "NUM_LOGICAL " << numLogical << "\n";
-    g_syndrome_output_file.flush();
-
-    // Register capture callback with decoder library
-    cudaq::qec::decoding::host::_set_syndrome_capture_callback(
-        [](const uint8_t *data, size_t len) {
-          std::lock_guard<std::mutex> lock(g_syndrome_file_mutex);
-          if (!g_syndrome_output_file.is_open())
-            return;
-
-          // Write shot boundary marker at the start of each shot
-          if (g_syndrome_count % g_syndromes_per_shot == 0) {
-            int shot_num = g_syndrome_count / g_syndromes_per_shot;
-            g_syndrome_output_file << "SHOT_START " << shot_num << "\n";
-          }
-
-          g_syndrome_output_file << "ROUND_START " << g_syndrome_count << "\n";
-
-          // Unpack syndrome data - each byte contains 8 bits (packed format)
-          for (size_t i = 0; i < len; i++) {
-            uint8_t byte = data[i];
-            // Extract 8 bits from each byte (MSB first for readability)
-            for (int bit_idx = 7; bit_idx >= 0; bit_idx--) {
-              int bit = (byte >> bit_idx) & 1;
-              g_syndrome_output_file << bit << "\n";
-            }
-          }
-          g_syndrome_output_file.flush();
-
-          g_syndrome_count++;
-        });
-
-    // Set RNG seed for deterministic results
-    cudaq::set_random_seed(42);
-    printf("Set RNG seed to 42 for deterministic syndrome generation\n");
-  }
-
-  // Either run quantum simulation OR replay syndromes from file
-  std::vector<std::int64_t> run_result;
-
-  if (load_syndrome) {
-    // Syndrome replay mode
-    if (syndrome_filename.empty()) {
-      printf("Error: --load_syndrome requires a filename argument\n");
-      return;
-    }
-
-    printf("\n=== Syndrome Replay Mode ===\n");
-    printf("Loading syndromes from: %s\n", syndrome_filename.c_str());
-
-    std::ifstream syndrome_file(syndrome_filename);
-    if (!syndrome_file) {
-      printf("Error: Could not open syndrome file: %s\n",
-             syndrome_filename.c_str());
-      return;
-    }
-
-    // Read header and syndrome data
-    std::size_t file_numData = 0;
-    std::size_t file_numLogical = 0;
-    std::vector<uint8_t> saved_corrections;
-    std::vector<std::vector<uint8_t>> saved_syndromes;
-    std::string line;
-
-    bool reading_syndromes = false;
-    while (std::getline(syndrome_file, line)) {
-      if (line.find("NUM_DATA") == 0) {
-        std::istringstream iss(line);
-        std::string tag;
-        iss >> tag >> file_numData;
-      } else if (line.find("NUM_LOGICAL") == 0) {
-        std::istringstream iss(line);
-        std::string tag;
-        iss >> tag >> file_numLogical;
-      } else if (line.find("CORRECTIONS_START") == 0) {
-        while (std::getline(syndrome_file, line)) {
-          if (line.find("CORRECTIONS_END") == 0) {
-            break;
-          }
-          uint8_t correction_bit = static_cast<uint8_t>(std::stoi(line));
-          saved_corrections.push_back(correction_bit);
-        }
-        printf("Read %zu saved corrections\n", saved_corrections.size());
-        break;
-      } else if (line.find("SHOT_START") == 0) {
-        saved_syndromes.emplace_back();
-        reading_syndromes = true;
-      } else if (line.find("ROUND_START") == 0) {
+    // A chunk config serves any length: one chunk per syndrome round plus the
+    // data readout.
+    for (auto &dc : cfg.decoders) {
+      if (!dc.dem_chunks || !dc.H_sparse.empty())
         continue;
-      } else if (reading_syndromes) {
-        try {
-          int bit = std::stoi(line);
-          saved_syndromes.back().push_back(static_cast<uint8_t>(bit));
-        } catch (...) {
-          break;
-        }
-      }
+      const auto minimum = dc.dem_chunks->minimum_rounds() - 1;
+      if (static_cast<std::uint64_t>(opts.num_rounds) < minimum)
+        throw std::runtime_error("Loaded DEM chunks need --num_rounds >= " +
+                                 std::to_string(minimum));
+      dc.dem_chunks->num_rounds = opts.num_rounds + 1;
     }
 
-    printf("Read %zu shots with syndromes\n", saved_syndromes.size());
+    // Cross-check the saved syndrome_size against the current code geometry.
+    if (!cfg.decoders.empty()) {
+      const bool is_z_prep = state_prep == cudaq::qec::operation::prep0 ||
+                             state_prep == cudaq::qec::operation::prep1;
+      const std::size_t num_ancx = code.get_num_ancilla_x_qubits();
+      const std::size_t num_ancz = code.get_num_ancilla_z_qubits();
+      const std::size_t num_boundary = is_z_prep ? num_ancz : num_ancx;
+      auto checked = cfg.decoders[0];
+      config::expand_dem_chunks(checked);
+      const std::size_t expected_syndromes =
+          2 * num_boundary + (opts.num_rounds - 1) * (num_ancx + num_ancz);
+      if (checked.syndrome_size != expected_syndromes)
+        throw std::runtime_error(
+            "Loaded DEM syndrome_size (" +
+            std::to_string(checked.syndrome_size) +
+            ") does not match current geometry (" +
+            std::to_string(expected_syndromes) +
+            " = 2*num_boundary + (num_rounds-1)*num_stabilizers); "
+            "check --distance and --num_rounds");
 
-    // Validate metadata
-    if (file_numData != numData || file_numLogical != numLogical) {
-      printf("Error: File parameters (numData=%zu, numLogical=%zu) don't match "
-             "current (numData=%zu, numLogical=%zu)\n",
-             file_numData, file_numLogical, numData, numLogical);
-      return;
+      // also cross-check the raw-measurement span: the largest measurement
+      // index in D_sparse, plus one.
+      const auto &D = checked.D_sparse;
+      if (D.empty())
+        throw std::runtime_error("Loaded DEM has empty D_sparse");
+      // A chunk config declares its per-round counts, and a round's trailing
+      // measurements may be read by no detector; the largest index in D then
+      // falls short of the stream the decoder is fed.
+      const auto declared =
+          checked.dem_chunks
+              ? cudaq::qec::dem_chunks_measurement_count(*checked.dem_chunks)
+              : std::nullopt;
+      const std::size_t loaded_measurements =
+          declared ? static_cast<std::size_t>(*declared)
+                   : static_cast<std::size_t>(
+                         *std::max_element(D.begin(), D.end()) + 1);
+      const std::size_t expected_measurements =
+          opts.num_rounds * (num_ancx + num_ancz) + code.get_num_data_qubits();
+      if (loaded_measurements != expected_measurements)
+        throw std::runtime_error("Loaded DEM measurement span (" +
+                                 std::to_string(loaded_measurements) +
+                                 ") does not match current geometry (" +
+                                 std::to_string(expected_measurements) +
+                                 " = num_rounds*num_stabilizers + num_data); "
+                                 "check --distance and --num_rounds");
     }
 
-    syndrome_file.close();
+    config::configure_decoders(cfg);
+    printf("Loaded decoder config from %s (%zu decoders)\n",
+           opts.dem_filename.c_str(), cfg.decoders.size());
+    return true;
+  }
 
-    // Process saved syndromes through decoder
-    printf("Feeding %zu shots of saved syndromes to decoder...\n",
-           saved_syndromes.size());
+  // Characterize the DEM and build the decoder configuration. full_component()
+  // canonicalizes both stabilizer types (boundary-aware) into decoder_inputs.
+  const std::string &leaf_decoder = opts.decoder_type == "sliding_window"
+                                        ? opts.sw_inner_decoder
+                                        : opts.decoder_type;
+  const bool decompose_errors = (leaf_decoder == "pymatching");
+  auto ctx = cudaq::qec::decoder_context_from_memory_circuit(
+      code, state_prep, opts.num_rounds, noise, decompose_errors);
+  const auto inputs = ctx.full_component();
+  printf("DEM: %ld detectors x %ld error mechanisms\n",
+         inputs.dem.num_detectors(), inputs.dem.num_error_mechanisms());
 
-    int corrections_matched = 0;
-    int corrections_mismatched = 0;
+  const bool is_z_prep = state_prep == cudaq::qec::operation::prep0 ||
+                         state_prep == cudaq::qec::operation::prep1;
+  const std::size_t num_x_stabilizers = code.get_num_ancilla_x_qubits();
+  const std::size_t num_z_stabilizers = code.get_num_ancilla_z_qubits();
+  const std::size_t num_syndromes_per_round =
+      num_x_stabilizers + num_z_stabilizers;
+  const std::size_t num_boundary_syndromes =
+      is_z_prep ? num_z_stabilizers : num_x_stabilizers;
+  std::optional<cudaq::qec::dem_chunks_spec> chunks;
+  if (opts.dem_chunks)
+    chunks = build_dem_chunks(inputs, opts.num_rounds, num_syndromes_per_round,
+                              code.get_num_data_qubits());
+  auto cfg = build_multi_decoder_config(inputs, num_syndromes_per_round,
+                                        num_boundary_syndromes, chunks, opts);
 
-    for (size_t shot_idx = 0; shot_idx < saved_syndromes.size(); shot_idx++) {
-      // Reset decoder for new shot
-      for (size_t logical_idx = 0; logical_idx < numLogical; logical_idx++) {
-        cudaq::qec::decoding::reset_decoder(logical_idx);
-      }
+  if (opts.save_dem) {
+    // Serialize the config to YAML -- the inverse of the decoding server's
+    // multi_decoder_config::from_yaml_str -- and exit; no shots are run.
+    std::ofstream(opts.dem_filename) << cfg.to_yaml_str(200);
+    printf("Saved decoder config to %s\n", opts.dem_filename.c_str());
+    return false;
+  }
 
-      // Feed syndromes to decoder incrementally (round by round)
-      size_t syndrome_bits_per_round = numAncx + numAncz;
-      const auto &all_syndromes = saved_syndromes[shot_idx];
+  config::configure_decoders(cfg);
+  return true;
+}
 
-      for (size_t start_idx = 0; start_idx < all_syndromes.size();
-           start_idx += syndrome_bits_per_round) {
-        size_t end_idx =
-            std::min(start_idx + syndrome_bits_per_round, all_syndromes.size());
+// --save_syndrome: register a callback that tees every syndrome the decoder
+// receives during the live run into `filename`, so it can be replayed offline.
+void begin_syndrome_capture(const std::string &filename,
+                            const experiment &exp) {
+  g_capture.file.open(filename, std::ios::out | std::ios::trunc);
+  if (!g_capture.file)
+    throw std::runtime_error("Could not open syndrome file for writing: " +
+                             filename);
+  g_capture.count = 0;
+  g_capture.syndromes_per_shot =
+      static_cast<int>(exp.num_logical * (exp.num_rounds + 1));
 
-        // Replay path: raw syndrome bits read from a saved file. Use the
-        // test-only `enqueue_syndromes_test` API since these bits have no
-        // measurement-event identity to preserve and the production
-        // `enqueue_syndromes(vector<measure_result>&)` is the wrong shape.
-        std::vector<bool> syndrome_round;
-        for (size_t i = start_idx; i < end_idx; i++) {
-          syndrome_round.push_back(static_cast<bool>(all_syndromes[i]));
-        }
+  printf("Syndrome capture enabled: saving to %s\n", filename.c_str());
+  g_capture.file << "NUM_DATA " << exp.num_data << "\n";
+  g_capture.file << "NUM_LOGICAL " << exp.num_logical << "\n";
+  g_capture.file.flush();
 
-        // Enqueue this round for all logical qubits
-        for (size_t logical_idx = 0; logical_idx < numLogical; logical_idx++) {
-          cudaq::qec::decoding::enqueue_syndromes_test(logical_idx,
-                                                       syndrome_round);
-        }
-      }
+  cudaq::qec::decoding::host::_set_syndrome_capture_callback(
+      [](const uint8_t *data, size_t len) {
+        std::lock_guard<std::mutex> lock(g_capture.mutex);
+        if (!g_capture.file.is_open())
+          return;
 
-      // Get logical corrections from decoder
-      uint8_t correction_bit = 0;
-      for (size_t logical_idx = 0; logical_idx < numLogical; logical_idx++) {
-        auto corrections =
-            cudaq::qec::decoding::get_corrections(logical_idx, 1, false);
-        if (!corrections.empty() && corrections[0]) {
-          correction_bit = 1;
-        }
-      }
+        if (g_capture.count % g_capture.syndromes_per_shot == 0)
+          g_capture.file << "SHOT_START "
+                         << (g_capture.count / g_capture.syndromes_per_shot)
+                         << "\n";
+        g_capture.file << "ROUND_START " << g_capture.count << "\n";
 
-      // Compare with saved correction if available
-      if (shot_idx < saved_corrections.size()) {
-        if (correction_bit == saved_corrections[shot_idx]) {
-          corrections_matched++;
-        } else {
-          corrections_mismatched++;
-          if (corrections_mismatched <= 10) {
-            printf("  Shot %zu: mismatch! Replayed=%u, Saved=%u\n", shot_idx,
-                   correction_bit, saved_corrections[shot_idx]);
-          }
-        }
-      }
-    }
+        // Unpack each byte MSB-first, one bit per line.
+        for (size_t i = 0; i < len; i++)
+          for (int bit_idx = 7; bit_idx >= 0; bit_idx--)
+            g_capture.file << ((data[i] >> bit_idx) & 1) << "\n";
+        g_capture.file.flush();
+        g_capture.count++;
+      });
+}
 
-    printf("Replay complete: %zu shots processed\n", saved_syndromes.size());
-    if (!saved_corrections.empty()) {
-      printf("Correction verification: %d matched, %d mismatched\n",
-             corrections_matched, corrections_mismatched);
-      if (corrections_mismatched == 0) {
-        printf("SUCCESS: All corrections match!\n");
-      }
-    }
+// Append the per-shot corrections so a later --load_syndrome run can verify the
+// replayed corrections against them, then close the capture file.
+void finish_syndrome_capture(const std::vector<std::int64_t> &run_result,
+                             const std::string &filename) {
+  if (!g_capture.file.is_open())
     return;
+  cudaq::qec::decoding::host::_set_syndrome_capture_callback(nullptr);
+  g_capture.file << "CORRECTIONS_START\n";
+  for (auto shot : run_result)
+    g_capture.file << ((shot >> 32) > 0 ? 1 : 0) << "\n";
+  g_capture.file << "CORRECTIONS_END\n";
+  g_capture.file.close();
+  printf("Syndrome data saved to: %s\n", filename.c_str());
+}
 
-  } else {
-    // Normal quantum simulation mode
-    printf("\n=== Quantum Simulation Mode ===\n");
+// --load_syndrome: replay a captured syndrome file through the decoders (no
+// circuit is run) and check the resulting corrections match the ones saved
+// alongside the syndromes.
+void replay_syndrome_file(const std::string &filename, const experiment &exp) {
+  printf("\n=== Syndrome Replay Mode ===\n");
+  printf("Loading syndromes from: %s\n", filename.c_str());
 
-    // If this is a remote platform (not local sim nor emulation), don't use the
-    // noise model.
-    run_result =
-        cudaq::get_platform().is_remote()
-            ? cudaq::run(numShots, cudaq::qec::qpu::demo_circuit_qpu,
-                         /*allow_device_calls=*/true, prep, numData, numAncx,
-                         numAncz, numRounds, numLogical, cnot_schedX_flat,
-                         cnot_schedZ_flat, p_spam, /*apply_corrections=*/true,
-                         decoder_window)
-            : cudaq::run(numShots, noise, cudaq::qec::qpu::demo_circuit_qpu,
-                         /*allow_device_calls=*/true, prep, numData, numAncx,
-                         numAncz, numRounds, numLogical, cnot_schedX_flat,
-                         cnot_schedZ_flat, p_spam, /*apply_corrections=*/true,
-                         decoder_window);
-  }
-  printf("Result size: %ld\n", run_result.size());
-  std::vector<std::vector<uint8_t>> logical_results;
-  auto obs_matrix = code.get_observables_z();
-  int num_non_zero_values = 0;
-  std::int64_t num_corrections = 0;
-  for (int i = 0; i < run_result.size(); i++) {
-    logical_results.emplace_back();
-    num_corrections += (run_result[i] >> (numData * numLogical));
-    for (int j = 0; j < numLogical; j++) {
-      std::vector<double> result_vec(numData);
-      for (int l = j * numData; l < (j + 1) * numData; l++) {
-        result_vec[l - j * numData] = (run_result[i] & (1ul << l)) ? 1.0 : 0.0;
+  std::ifstream syndrome_file(filename);
+  if (!syndrome_file)
+    throw std::runtime_error("Could not open syndrome file: " + filename);
+
+  // Parse the header, then per shot a list of ROUND_START-delimited groups
+  // (each a byte-aligned, MSB-first bit dump), then the per-shot corrections.
+  std::size_t file_num_data = 0, file_num_logical = 0;
+  std::vector<uint8_t> saved_corrections;
+  std::vector<std::vector<std::vector<bool>>>
+      saved_shots; // shot -> group -> bits
+  std::string line;
+  while (std::getline(syndrome_file, line)) {
+    std::istringstream iss(line);
+    std::string tag;
+    iss >> tag;
+    if (tag == "NUM_DATA") {
+      iss >> file_num_data;
+    } else if (tag == "NUM_LOGICAL") {
+      iss >> file_num_logical;
+    } else if (tag == "SHOT_START") {
+      saved_shots.emplace_back();
+    } else if (tag == "ROUND_START") {
+      if (!saved_shots.empty())
+        saved_shots.back().emplace_back();
+    } else if (tag == "CORRECTIONS_START") {
+      while (std::getline(syndrome_file, line)) {
+        if (line.find("CORRECTIONS_END") == 0)
+          break;
+        saved_corrections.push_back(static_cast<uint8_t>(std::stoi(line)));
       }
-      cudaqx::tensor<uint8_t> result_tensor;
-      cudaq::qec::convert_vec_soft_to_tensor_hard(result_vec, result_tensor);
-      // Calculate the logical observable for each logical qubit
-      uint8_t logical_result = (obs_matrix.dot(result_tensor) % 2).at({0});
-      logical_results.back().push_back(logical_result);
-      if (logical_result != 0)
-        num_non_zero_values++;
+      break;
+    } else if (!tag.empty() && !saved_shots.empty() &&
+               !saved_shots.back().empty()) {
+      // A bit line belonging to the current group.
+      saved_shots.back().back().push_back(std::stoi(tag) != 0);
     }
   }
-  printf("Number of non-zero values measured : %d\n", num_non_zero_values);
-  printf("Number of corrections decoder found: %ld\n", num_corrections);
 
-  // Save corrections to file if syndrome capture was enabled
-  if (save_syndrome && g_syndrome_output_file.is_open()) {
-    // Disable callback to stop capturing
-    cudaq::qec::decoding::host::_set_syndrome_capture_callback(nullptr);
+  if (file_num_data != exp.num_data || file_num_logical != exp.num_logical)
+    throw std::runtime_error(
+        "Syndrome file mismatch: file has num_data=" +
+        std::to_string(file_num_data) +
+        " num_logical=" + std::to_string(file_num_logical) +
+        ", expected num_data=" + std::to_string(exp.num_data) +
+        " num_logical=" + std::to_string(exp.num_logical));
 
-    // Save logical corrections for each shot (for verification during replay)
-    g_syndrome_output_file << "CORRECTIONS_START\n";
-    for (size_t i = 0; i < logical_results.size(); i++) {
-      // For multi-logical, just save whether any correction was applied
-      uint8_t any_correction =
-          (run_result[i] >> (numData * numLogical)) > 0 ? 1 : 0;
-      g_syndrome_output_file << static_cast<int>(any_correction) << "\n";
+  printf("Read %zu shots with syndromes\n", saved_shots.size());
+  printf("Feeding %zu shots of saved syndromes to decoder...\n",
+         saved_shots.size());
+
+  int matched = 0, mismatched = 0;
+  // Per logical qubit the stream is num_rounds interior groups of
+  // (num_ancx + num_ancz) bits, then one data group of num_data bits. Each
+  // stored group is byte-padded, so trim it back to this true width.
+  const std::size_t groups_per_logical = exp.num_rounds + 1;
+  const std::size_t interior_width = exp.num_ancx + exp.num_ancz;
+  for (std::size_t shot = 0; shot < saved_shots.size(); shot++) {
+    for (std::size_t l = 0; l < exp.num_logical; l++)
+      cudaq::qec::decoding::reset_decoder(l);
+
+    // Feed each group to the logical qubit it belongs to.
+    const auto &groups = saved_shots[shot];
+    for (std::size_t g = 0; g < groups.size(); g++) {
+      const std::size_t logical_idx = g / groups_per_logical;
+      if (logical_idx >= exp.num_logical)
+        break;
+      const std::size_t group_in_logical = g % groups_per_logical;
+      const std::size_t width =
+          group_in_logical < exp.num_rounds ? interior_width : exp.num_data;
+      std::vector<bool> bits(groups[g].begin(),
+                             groups[g].begin() +
+                                 std::min(width, groups[g].size()));
+      cudaq::qec::decoding::enqueue_syndromes_test(logical_idx, bits);
     }
-    g_syndrome_output_file << "CORRECTIONS_END\n";
-    g_syndrome_output_file.close();
-    printf("Syndrome data saved to: %s\n", syndrome_filename.c_str());
+
+    uint8_t correction_bit = 0;
+    for (std::size_t l = 0; l < exp.num_logical; l++) {
+      auto corrections = cudaq::qec::decoding::get_corrections(l, 1, false);
+      for (auto c : corrections)
+        if (c)
+          correction_bit = 1;
+    }
+
+    if (shot < saved_corrections.size()) {
+      if (correction_bit == saved_corrections[shot]) {
+        matched++;
+      } else {
+        mismatched++;
+        if (mismatched <= 10)
+          printf("  Shot %zu: mismatch! Replayed=%u, Saved=%u\n", shot,
+                 correction_bit, saved_corrections[shot]);
+      }
+    }
+  }
+
+  printf("Replay complete: %zu shots processed\n", saved_shots.size());
+  if (!saved_corrections.empty()) {
+    printf("Correction verification: %d matched, %d mismatched\n", matched,
+           mismatched);
+    if (mismatched > 0)
+      throw std::runtime_error(
+          "Replay correction mismatch: " + std::to_string(mismatched) + " of " +
+          std::to_string(matched + mismatched) + " shots did not match");
+    printf("SUCCESS: All corrections match!\n");
   }
 }
 
+// Run `num_shots` shots of the experiment. The kernel generates each round's
+// syndrome on the QPU (simulated locally, or emulated on the hardware target)
+// and streams it to the decoder in real time; the logical correction comes
+// back before readout. A remote platform applies its own noise, so the local
+// model is not attached there.
+std::vector<std::int64_t>
+run_shots(std::size_t num_shots, cudaq::noise_model &noise,
+          const cudaq::qec::code::stabilizer_round &stab_round,
+          const cudaq::qec::code::one_qubit_encoding &prep,
+          const experiment &exp, const std::vector<std::int64_t> &decoder_ids) {
+  return cudaq::get_platform().is_remote()
+             ? cudaq::run(num_shots, cudaq::qec::qpu::demo_circuit_qpu,
+                          stab_round, prep, exp.num_data, exp.num_ancx,
+                          exp.num_ancz, exp.num_rounds, exp.num_logical,
+                          exp.x_vec, exp.z_vec, exp.obs_flat, exp.num_obs,
+                          decoder_ids)
+             : cudaq::run(num_shots, noise, cudaq::qec::qpu::demo_circuit_qpu,
+                          stab_round, prep, exp.num_data, exp.num_ancx,
+                          exp.num_ancz, exp.num_rounds, exp.num_logical,
+                          exp.x_vec, exp.z_vec, exp.obs_flat, exp.num_obs,
+                          decoder_ids);
+}
+
+// Decode the per-shot results and print the logical error rate.
+void report_results(const std::vector<std::int64_t> &run_result,
+                    std::size_t num_logical) {
+  printf("Result size: %ld\n", run_result.size());
+  int num_non_zero_values = 0;
+  std::int64_t num_corrections = 0;
+  for (auto shot : run_result) {
+    // High 32 bits: number of corrections the decoder applied this shot.
+    num_corrections += (shot >> 32);
+    // Low 32 bits: each logical qubit's observable, already updated by the
+    // decoder's correction. A set bit is a residual logical error.
+    for (std::size_t j = 0; j < num_logical; j++)
+      if ((shot >> j) & 1)
+        num_non_zero_values++;
+  }
+  printf("Number of non-zero values measured : %d\n", num_non_zero_values);
+  printf("Number of corrections decoder found: %ld\n", num_corrections);
+}
+
+// The live-run path: (optionally) start capturing the syndrome stream, run the
+// shots and report the logical error rate, then (optionally) persist the
+// per-shot corrections for a later --load_syndrome.
+void run_experiment(const cudaq::qec::code &code,
+                    cudaq::qec::operation state_prep, const run_options &opts,
+                    cudaq::noise_model &noise, const experiment &exp,
+                    const std::vector<std::int64_t> &decoder_ids) {
+  if (opts.save_syndrome)
+    begin_syndrome_capture(opts.syndrome_filename, exp);
+
+  auto &prep =
+      code.get_operation<cudaq::qec::code::one_qubit_encoding>(state_prep);
+  auto &stab_round = code.get_operation<cudaq::qec::code::stabilizer_round>(
+      cudaq::qec::operation::stabilizer_round);
+
+  // Seed the simulator so the sampled shots -- and thus the reported logical
+  // error / correction counts (and any captured syndromes) -- are reproducible.
+  if (opts.seed >= 0)
+    cudaq::set_random_seed(static_cast<std::size_t>(opts.seed));
+  auto run_result =
+      run_shots(opts.num_shots, noise, stab_round, prep, exp, decoder_ids);
+  report_results(run_result, exp.num_logical);
+
+  if (opts.save_syndrome)
+    finish_syndrome_capture(run_result, opts.syndrome_filename);
+}
+
+} // namespace
+
+// Host-side driver: configure the decoders, then either replay a saved syndrome
+// file or run the circuit and report the logical error rate.
+void demo_circuit_host(const cudaq::qec::code &code, const run_options &opts) {
+  const auto state_prep = cudaq::qec::operation::prep0;
+
+  // Circuit-level two-qubit depolarizing noise on the stabilizer-extraction
+  // CNOTs, shared by DEM characterization and shot simulation.
+  cudaq::noise_model noise;
+  noise.add_all_qubit_channel("x",
+                              cudaq::qec::two_qubit_depolarization(opts.p_cnot),
+                              /*num_controls=*/1);
+
+  const experiment exp = make_experiment(code, state_prep, opts);
+
+  // Configure the decoders. --save_dem stops here (config written, no shots).
+  if (!setup_decoders(code, state_prep, opts, noise))
+    return;
+
+  // One decoder id per logical qubit, matching config ids 0..num_logical-1.
+  std::vector<std::int64_t> decoder_ids(exp.num_logical);
+  std::iota(decoder_ids.begin(), decoder_ids.end(), 0);
+
+  // Two paths: replay a captured syndrome file, or run the live circuit.
+  if (opts.load_syndrome)
+    replay_syndrome_file(opts.syndrome_filename, exp);
+  else
+    run_experiment(code, state_prep, opts, noise, exp, decoder_ids);
+}
+
 void show_help() {
-  printf("Usage: qec-test4 [options]\n");
+  printf("Usage: surface-code-1 [options]\n");
   printf("Options:\n");
-  printf("  --distance <int>    Distance of the surface code. Default: 5\n");
-  printf("  --num_shots <int>   Number of shots. Default: 10\n");
-  printf(
-      "  --p_spam <double>   SPAM probability. Range[0, 1]. Default: 0.01\n");
-  printf("  --num_logical <int> Number of logical qubits. Default: 1\n");
-  printf("  --num_rounds <int>  Number of measurement rounds. Default: "
+  printf("  --distance <int>      Distance of the surface code. Default: 5\n");
+  printf("  --num_shots <int>     Number of shots. Default: 10\n");
+  printf("  --p_cnot <double>     Two-qubit depolarizing rate on CNOT gates. "
+         "Range[0, 1]. Default: 0.001\n");
+  printf("  --num_logical <int>   Number of logical qubits. Default: 1\n"
+         "      (Two-process runs against a decoding_server serve each\n"
+         "      logical qubit's decoder on its own ring: pass ring 0's port\n"
+         "      as QEC_DECODING_SERVER_PORT and ring i's port as\n"
+         "      QEC_DECODING_SERVER_PORT_<i>, from the server's READY "
+         "line.)\n");
+  printf("  --num_rounds <int>    Number of measurement rounds. Default: "
          "distance\n");
-  printf("  --decoder_window <int>  Number of rounds to use for the decoder "
-         "window. Default: distance\n");
+  printf("  --seed <int>          Simulator seed for reproducible shots; "
+         "negative leaves it unseeded. Default: 42\n");
   printf("  --decoder_type <string> Decoder type: 'multi_error_lut', "
-         "'nv-qldpc-decoder', or 'sliding_window'. Default: multi_error_lut\n");
+         "'nv-qldpc-decoder', 'sliding_window', or 'pymatching'. Default: "
+         "multi_error_lut\n");
   printf("  --sw_window_size <int>  Sliding window size (only for "
-         "sliding_window decoder). Default: decoder_window\n");
+         "sliding_window decoder). Default: distance\n");
   printf("  --sw_step_size <int>    Sliding window step size. Default: 1\n");
-  printf("  --save_dem <string> Save the detector error model to a file.\n");
-  printf("  --load_dem <string> Load the detector error model from a file. "
-         "(Cannot be used with --save_dem)\n");
+  printf("  --sw_inner_decoder <string> Inner decoder for sliding_window. "
+         "Default: multi_error_lut\n");
+  printf(
+      "  --param <key=value> Override a decoder parameter (repeatable). For\n"
+      "      --decoder_type sliding_window the override targets the inner\n"
+      "      decoder; otherwise the outer decoder. Uses the registered\n"
+      "      schema for type coercion. Example: --param lut_error_depth=1\n");
+  printf("  --save_dem <string> Characterize the DEM, write the decoder config "
+         "YAML to a file, and exit (to configure a standalone "
+         "decoding_server).\n");
+  printf("  --load_dem <string> Load the decoder config from a YAML file "
+         "instead of characterizing in-process. A --dem_chunks config "
+         "decodes the --num_rounds given here.\n");
+  printf("  --dem_chunks        Describe the DEM as one chunk per round with a "
+         "repeating bulk, so one config serves any --num_rounds.\n");
   printf("  --save_syndrome <string> Save syndrome data to a file for later "
          "replay.\n");
   printf("  --load_syndrome <string> Load and replay syndrome data from a "
          "file.\n");
-  printf("  --use-relay-bp      For --decoder_type nv-qldpc-decoder: select "
-         "Relay BP instead of the default BP + OSD block.\n");
   printf("  --help              Show this help message\n");
 }
 
 int main(int argc, char **argv) {
-  int num_shots = 10;
-  int distance = 5;
-  double p_spam = 0.01;
-  int num_logical = 1;
-  int num_rounds = -1;     // Will be set to distance if not specified
-  int decoder_window = -1; // Will be set to distance if not specified
-  bool save_dem = false;
-  bool load_dem = false;
-  std::string dem_filename;
+  run_options opts;
 
-  // Decoder type selection
-  std::string decoder_type = "multi_error_lut"; // Default
-  int sw_window_size = -1; // For sliding_window, default to decoder_window
-  int sw_step_size = 1;    // For sliding_window
-
-  // Syndrome save/load options
-  bool save_syndrome = false;
-  bool load_syndrome = false;
-  std::string syndrome_filename;
-  bool use_relay_bp = false;
-
-  // Parse the command line arguments
-  for (int i = 1; i < argc; i++) {
-    std::string arg = argv[i];
-    if (arg == "--distance") {
-      distance = std::stoi(argv[i + 1]);
-      i++;
-    } else if (arg == "--num_shots") {
-      num_shots = std::stoi(argv[i + 1]);
-      i++;
-    } else if (arg == "--p_spam") {
-      p_spam = std::stod(argv[i + 1]);
-      i++;
-    } else if (arg == "--help" || arg == "-h") {
-      show_help();
-      return 0;
-    } else if (arg == "--num_logical") {
-      num_logical = std::stoi(argv[i + 1]);
-      i++;
-    } else if (arg == "--num_rounds") {
-      num_rounds = std::stoi(argv[i + 1]);
-      i++;
-    } else if (arg == "--decoder_window") {
-      decoder_window = std::stoi(argv[i + 1]);
-      i++;
-    } else if (arg == "--decoder_type") {
-      decoder_type = argv[i + 1];
-      i++;
-    } else if (arg == "--sw_window_size") {
-      sw_window_size = std::stoi(argv[i + 1]);
-      i++;
-    } else if (arg == "--sw_step_size") {
-      sw_step_size = std::stoi(argv[i + 1]);
-      i++;
-    } else if (arg == "--save_dem") {
-      save_dem = true;
-      dem_filename = argv[i + 1];
-      i++;
-    } else if (arg == "--load_dem") {
-      load_dem = true;
-      dem_filename = argv[i + 1];
-      i++;
-    } else if (arg == "--save_syndrome") {
-      save_syndrome = true;
-      syndrome_filename = argv[i + 1];
-      i++;
-    } else if (arg == "--load_syndrome") {
-      load_syndrome = true;
-      syndrome_filename = argv[i + 1];
-      i++;
-    } else if (arg == "--use-relay-bp") {
-      use_relay_bp = true;
-    } else {
-      printf("Unknown argument: %s\n", arg.c_str());
-      show_help();
-      return 1;
+  auto val = [&](int i) {
+    if (i + 1 >= argc)
+      throw std::runtime_error(std::string(argv[i]) + " requires a value");
+    return std::string(argv[i + 1]);
+  };
+  try {
+    for (int i = 1; i < argc; i++) {
+      std::string arg = argv[i];
+      if (arg == "--distance") {
+        opts.distance = std::stoi(val(i));
+        i++;
+      } else if (arg == "--num_shots") {
+        opts.num_shots = std::stoi(val(i));
+        i++;
+      } else if (arg == "--p_cnot") {
+        opts.p_cnot = std::stod(val(i));
+        i++;
+      } else if (arg == "--help" || arg == "-h") {
+        show_help();
+        return 0;
+      } else if (arg == "--num_logical") {
+        opts.num_logical = std::stoi(val(i));
+        i++;
+      } else if (arg == "--num_rounds") {
+        opts.num_rounds = std::stoi(val(i));
+        i++;
+      } else if (arg == "--seed") {
+        opts.seed = std::stoi(val(i));
+        i++;
+      } else if (arg == "--decoder_type") {
+        opts.decoder_type = val(i);
+        i++;
+      } else if (arg == "--sw_window_size") {
+        opts.sw_window_size = std::stoi(val(i));
+        i++;
+      } else if (arg == "--sw_step_size") {
+        opts.sw_step_size = std::stoi(val(i));
+        i++;
+      } else if (arg == "--param") {
+        opts.decoder_params.push_back(val(i));
+        i++;
+      } else if (arg == "--sw_inner_decoder") {
+        opts.sw_inner_decoder = val(i);
+        opts.sw_inner_decoder_set = true;
+        i++;
+      } else if (arg == "--save_dem") {
+        opts.save_dem = true;
+        opts.dem_filename = val(i);
+        i++;
+      } else if (arg == "--load_dem") {
+        opts.load_dem = true;
+        opts.dem_filename = val(i);
+        i++;
+      } else if (arg == "--dem_chunks") {
+        opts.dem_chunks = true;
+      } else if (arg == "--save_syndrome") {
+        opts.save_syndrome = true;
+        opts.syndrome_filename = val(i);
+        i++;
+      } else if (arg == "--load_syndrome") {
+        opts.load_syndrome = true;
+        opts.syndrome_filename = val(i);
+        i++;
+      } else {
+        printf("Unknown argument: %s\n", arg.c_str());
+        show_help();
+        return 1;
+      }
     }
-  }
-
-  if (!load_dem && !save_dem && !load_syndrome) {
-    printf("Neither --save_dem nor --load_dem nor --load_syndrome was "
-           "specified. This is not a valid use case for this program.\n");
-    show_help();
+  } catch (const std::exception &e) {
+    printf("Error parsing arguments: %s\n", e.what());
     return 1;
   }
 
-  // Validate syndrome save/load options
-  if (save_syndrome && load_syndrome) {
+  if (opts.save_syndrome && opts.load_syndrome) {
     printf("Error: Cannot use both --save_syndrome and --load_syndrome "
            "together\n");
     return 1;
   }
-  if (save_syndrome && save_dem) {
-    printf("Error: Cannot use --save_syndrome with --save_dem\n");
-    printf("       --save_dem returns early without running simulation.\n");
+
+  if (opts.save_dem && opts.load_dem) {
+    printf("Error: Cannot use both --save_dem and --load_dem together\n");
     return 1;
   }
 
-  // Set defaults if not specified
-  if (num_rounds == -1)
-    num_rounds = distance;
-  if (decoder_window == -1)
-    decoder_window = distance;
-  if (sw_window_size == -1)
-    sw_window_size = decoder_window;
+  // --save_dem only characterizes the DEM and writes the config; it never runs
+  // shots, so it can't be combined with the syndrome capture/replay options.
+  if (opts.save_dem && (opts.save_syndrome || opts.load_syndrome)) {
+    printf("Error: --save_dem cannot be combined with --save_syndrome or "
+           "--load_syndrome\n");
+    return 1;
+  }
 
-  // Validate decoder type
-  if (decoder_type != "multi_error_lut" && decoder_type != "sliding_window" &&
-      decoder_type != "nv-qldpc-decoder") {
+  if (opts.num_rounds == -1)
+    opts.num_rounds = opts.distance;
+  if (opts.sw_window_size == -1)
+    opts.sw_window_size = opts.distance;
+
+  // Leaf decoders: valid as --decoder_type or --sw_inner_decoder.
+  auto is_leaf_decoder = [](const std::string &t) {
+    return t == "multi_error_lut" || t == "nv-qldpc-decoder" ||
+           t == "pymatching";
+  };
+  if (!is_leaf_decoder(opts.decoder_type) &&
+      opts.decoder_type != "sliding_window") {
     printf("Error: --decoder_type must be 'multi_error_lut', "
-           "'nv-qldpc-decoder', or 'sliding_window'\n");
+           "'nv-qldpc-decoder', 'sliding_window', or 'pymatching'\n");
+    return 1;
+  }
+  if (opts.decoder_type == "sliding_window" &&
+      !is_leaf_decoder(opts.sw_inner_decoder)) {
+    printf("Error: --sw_inner_decoder must be 'multi_error_lut', "
+           "'nv-qldpc-decoder', or 'pymatching'\n");
+    return 1;
+  }
+  if (opts.sw_inner_decoder_set && is_leaf_decoder(opts.decoder_type)) {
+    printf("Error: --sw_inner_decoder is only valid with "
+           "--decoder_type sliding_window\n");
     return 1;
   }
 
-  // Validate that num_rounds >= distance
-  if (num_rounds < distance || num_rounds % distance != 0) {
-    printf("Error: num_rounds (%d) must be at least equal to distance (%d) and "
-           "a multiple of distance\n",
-           num_rounds, distance);
-    printf("Measuring fewer rounds than the distance doesn't provide enough "
-           "information for decoding.\n");
+  if (opts.num_rounds < opts.distance) {
+    printf("Error: num_rounds (%d) must be at least equal to distance (%d)\n",
+           opts.num_rounds, opts.distance);
+    return 1;
+  }
+  if (opts.decoder_type == "sliding_window") {
+    if (opts.sw_step_size < 1) {
+      printf("Error: sw_step_size (%d) must be >= 1\n", opts.sw_step_size);
+      return 1;
+    }
+    if (opts.sw_window_size > opts.num_rounds) {
+      printf("Error: sw_window_size (%d) must be <= num_rounds (%d)\n",
+             opts.sw_window_size, opts.num_rounds);
+      return 1;
+    }
+    if (opts.sw_step_size > opts.sw_window_size) {
+      printf("Error: sw_step_size (%d) must be <= sw_window_size (%d)\n",
+             opts.sw_step_size, opts.sw_window_size);
+      return 1;
+    }
+  }
+
+  if (opts.num_logical > 32) {
+    printf("num_logical > 32 is not supported.\n");
     return 1;
   }
 
-  // Validate that decoder_window >= distance
-  if (decoder_window < distance || decoder_window % distance != 0) {
-    printf("Error: decoder_window (%d) must be at least equal to distance (%d) "
-           "and "
-           "a multiple of distance\n",
-           decoder_window, distance);
-    return 1;
-  }
-  // Validate that decoder_window <= num_rounds
-  if (decoder_window > num_rounds) {
-    printf("Error: decoder_window (%d) must be less than or equal to "
-           "num_rounds (%d)\n",
-           decoder_window, num_rounds);
-    return 1;
-  }
-
-  // Validate that num_rounds is a multiple of decoder_window
-  // This ensures each window has exactly decoder_window rounds.
-  // Note: might need to relax this requiement to handle partial windows.
-  if (num_rounds % decoder_window != 0) {
-    printf("Error: num_rounds (%d) must be a multiple of decoder_window (%d)\n",
-           num_rounds, decoder_window);
-    printf("This ensures each window has exactly decoder_window rounds.\n");
-    return 1;
-  }
-
-  if (num_logical * distance * distance >= 64) {
-    printf("num_logical * distance * distance >= 64 is not supported.\n");
-    return 1;
-  }
-
-  printf("Running with p_spam = %f, distance = %d, num_shots = %d, num_rounds "
-         "= %d, decoder_window = %d\n",
-         p_spam, distance, num_shots, num_rounds, decoder_window);
+  printf("Running with p_cnot = %f, distance = %d, num_shots = %d, "
+         "num_rounds = %d\n",
+         opts.p_cnot, opts.distance, opts.num_shots, opts.num_rounds);
   auto code = cudaq::qec::get_code(
-      "surface_code", cudaqx::heterogeneous_map{{"distance", distance}});
+      "surface_code", cudaqx::heterogeneous_map{{"distance", opts.distance}});
 
+  try {
 #ifdef QEC_APP_CQR
-  // The --save_dem pass runs with allow_device_calls=false (MSM contexts
-  // only), so the device_call channel is only needed when shots actually run.
-  if (!save_dem)
-    initialize_realtime_channel(argv[0]);
+    // Bring up the cudaq-realtime device-call channel for the shots' decoding
+    // device_calls. The --save_dem pass only characterizes the DEM (no shots,
+    // no device_calls), so it needs no channel.
+    if (!opts.save_dem)
+      initialize_realtime_channel(argv[0], opts.num_logical);
 #endif
-
-  demo_circuit_host(*code, distance, p_spam, cudaq::qec::operation::prep0,
-                    num_shots, num_rounds, num_logical, dem_filename, save_dem,
-                    load_dem, decoder_window, decoder_type, sw_window_size,
-                    sw_step_size, save_syndrome, load_syndrome,
-                    syndrome_filename, use_relay_bp);
+    demo_circuit_host(*code, opts);
+  } catch (const std::exception &e) {
+    printf("Error: %s\n", e.what());
+    cudaq::qec::decoding::config::finalize_decoders();
+    return 1;
+  }
 
 #ifdef QEC_APP_CQR
-  if (!save_dem) {
+  if (!opts.save_dem) {
     // With CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch this proves the shots'
-    // device_calls crossed the ring to the in-process decoding server (it
-    // stays 0 if they bypassed to a trampoline, or if a udp channel routed
-    // them to an external server instead).
+    // device_calls crossed the ring to the in-process decoding server (it stays
+    // 0 if they bypassed to a trampoline, or a udp channel routed them to an
+    // external server instead).
     printf("CQR service dispatch count: %llu\n",
            static_cast<unsigned long long>(
                cudaqx_qec_device_call_dispatch_count()));
@@ -1178,8 +1322,6 @@ int main(int argc, char **argv) {
   }
 #endif
 
-  // Ensure clean shutdown
   cudaq::qec::decoding::config::finalize_decoders();
-
   return 0;
 }

@@ -46,7 +46,7 @@ jobs:
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu32', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu32', matrix.platform) || 'ubuntu-latest' }}
     container: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
     permissions:
       actions: write
@@ -94,16 +94,6 @@ jobs:
       cache_key_suffix: nightly
     secrets: inherit
 
-  cudaq-main-solvers:
-    name: Solvers against CUDA-Q main
-    needs: [resolve-cudaq-main, build-cudaq-main]
-    uses: ./.github/workflows/lib_solvers.yaml
-    with:
-      cudaq_repo: ${{ needs.resolve-cudaq-main.outputs.repo }}
-      cudaq_ref: ${{ needs.resolve-cudaq-main.outputs.ref }}
-      cache_key_suffix: nightly
-    secrets: inherit
-
   cudaq-main-docs:
     name: Docs against CUDA-Q main
     needs: [resolve-cudaq-main, build-cudaq-main]
@@ -124,6 +114,14 @@ jobs:
       cache_key_suffix: nightly
       cudaq_repo: ${{ needs.resolve-cudaq-main.outputs.repo }}
       cudaq_ref: ${{ needs.resolve-cudaq-main.outputs.ref }}
+      # This workflow runs build_wheels.yaml a second time within the same run
+      # (see the `wheels` job above, which builds against the pinned
+      # .cudaq_version). Without distinct artifact names the two instances
+      # upload artifacts under identical names, and the test jobs then download
+      # whichever instance happened to finish last. That mixes CUDA-QX wheels
+      # built against one CUDA-Q with the libcudaq of another, producing
+      # sporadic `undefined symbol` ImportErrors.
+      artifact_name_suffix: -cudaq-main
     secrets: inherit
 
   cleanup-nightly-cache:
@@ -135,7 +133,6 @@ jobs:
       - build-cudaq-main
       - cudaq-main-all-libs
       - cudaq-main-qec
-      - cudaq-main-solvers
       - cudaq-main-docs
       - cudaq-main-wheels
     runs-on: ubuntu-latest

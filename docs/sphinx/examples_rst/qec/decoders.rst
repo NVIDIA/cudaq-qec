@@ -1,5 +1,5 @@
 Decoders
---------
+========
 
 In quantum error correction, decoders are responsible for interpreting measurement outcomes (syndromes) to identify and correct quantum errors. 
 We measure a set of stabilizers that give us information about what errors might have happened. The pattern of these measurements is called a syndrome, 
@@ -9,34 +9,38 @@ The relationship between errors and syndromes is captured mathematically by the 
 stabilizer measurement, while each column represents a possible error. When we multiply an error pattern by this matrix, we get the syndrome 
 that would result from those errors.
 
-.. note::
-   **scipy.sparse interop** — :func:`cudaq_qec.get_decoder` and
-   :class:`cudaq_qec.Decoder` accept a ``scipy.sparse`` matrix (CSR, CSC,
-   COO, or any other ``scipy.sparse`` format) as the parity-check matrix
-   ``H``.  This is the preferred form for large PCMs because no dense
-   ``rows x cols`` allocation is made — the matrix is normalised to CSR
-   internally.  Dense NumPy ``uint8`` arrays remain supported.
-   ``scipy`` is an optional dependency; if it is not installed, pass a dense
-   NumPy array instead.
+A detector error model (DEM) describes how the errors in a QEC circuit produce the syndrome bits that detect them. The examples below work with DEMs in three ways: the first constructs a decoder directly from raw Stim ``.dem`` text; the second expands a DEM into a multi-round parity check matrix; and the third samples synthetic error and syndrome data from a DEM to exercise a decoder. See :ref:`Detector Error Model <detector_error_model>` for more details.
 
-Detector Error Model
-+++++++++++++++++++++
+.. _stim_dem_text_example:
 
-Here we introduce the `cudaq.qec.detector_error_model` type, which allows us to create a detector error model (DEM) from a QEC circuit and noise model.
+Decoding From Stim DEM Text
++++++++++++++++++++++++++++
 
-The DEM can be generated from a QEC circuit and noise model using functions like `dem_from_memory_circuit()`. For circuit-level noise, the DEM can be put into a 
-canonical form that's organized by measurement rounds, making it suitable for multi-round decoding.
+This example constructs a decoder from raw Stim ``.dem`` text and uses the matching parsed matrix for observable predictions. For what a detector error model is and how the text is parsed, see :ref:`Decoding from Stim DEM Text <decoding_from_stim_dem_text>`.
 
-For a complete example of using the surface code with DEM to generate parity check matrices and perform decoding, see the :doc:`circuit level noise example <circuit_level_noise>`.
+.. tab:: Python
 
-If a Stim detector error model is already available as text, the same decoder
-entry point can consume that text directly. See :doc:`Decoding From Stim DEM Text <stim_dem_decoder>`
-for a C++ and Python example.
+   .. literalinclude:: ../../examples/qec/python/stim_dem_decoder.py
+      :language: python
+      :start-after: [Begin Documentation]
+
+.. tab:: C++
+
+   .. literalinclude:: ../../examples/qec/cpp/stim_dem_decoder.cpp
+      :language: cpp
+      :start-after: [Begin Documentation]
+
+   Compile and run with
+
+   .. code-block:: bash
+
+      nvq++ -lcudaq-qec -lcudaq-qec-decoders stim_dem_decoder.cpp -o stim_dem_decoder
+      ./stim_dem_decoder
 
 Generating a Multi-Round Parity Check Matrix
 ++++++++++++++++++++++++++++++++++++++++++++
 
-Below, we demonstrate how to use CUDA-Q QEC to construct a multi-round parity check matrix for an error correction code under a circuit-level noise model in Python:
+A single-round DEM captures one measurement cycle. Under circuit-level noise, errors accumulate across many rounds, and the DEM expands into a multi-round parity check matrix. The following example constructs one for an error correction code in Python:
 
 .. tab:: Python
 
@@ -58,30 +62,139 @@ This example illustrates how to:
 * Simulate circuit-level noise and collect data  
   Run multiple shots of the memory experiment using ``qec.sample_memory_circuit(...)`` to sample both the data and syndrome measurements from noisy executions. The resulting bitstrings can be used for decoding and performance evaluation of the error correction scheme.
 
-Creating New QEC codes
-++++++++++++++++++++++++++++++++++++++++++++
+.. _dem_sampling_example:
 
-Below, we demonstrate how to use CUDA-Q QEC to define a new QEC code entirely in Python. This powerful feature allows for rapid prototyping and testing of custom error correction schemes.
+DEM Sampling — Monte-Carlo Sampling from Detector Error Models
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+This example samples synthetic error and syndrome data from a detector error model, then walks through the GPU-accelerated and CPU paths and the supported input types. For the sampling model itself, see :ref:`DEM Sampling <dem_sampling>`.
+
+Example
+~~~~~~~
 
 .. tab:: Python
 
-   .. literalinclude:: ../../examples/qec/python/custom_repetition_code_fine_grain_noise.py
+   .. literalinclude:: ../../examples/qec/python/dem_sampling.py
       :language: python
       :start-after: [Begin Documentation]
 
-This example illustrates several key concepts for defining custom codes:
+.. tab:: C++
 
-* **Define a Code Class**: A new code is defined by creating a Python class decorated with ``@qec.code(...)``, which registers it with the CUDA-Q QEC runtime. The class must inherit from ``qec.Code``.
-* **Implement Required Methods**: The class must implement methods that describe the code's structure, such as ``get_num_data_qubits()`` and ``get_num_ancilla_qubits()``.
-* **Define Logical Operations as Kernels**: Quantum operations like state preparation (``prep0``, ``prep1``), logical gates (``x_logical``), and stabilizer measurements (``stabilizer_round``) are implemented as standard CUDA-Q kernels.
-* **Map Operations to Kernels**: The ``operation_encodings`` dictionary links abstract QEC operations (e.g., ``qec.operation.prep0``) to the concrete CUDA-Q kernels that implement them.
-* **Provide Stabilizers and Observables**: The code's stabilizer generators and logical observables must be defined. This is typically done by creating lists of ``cudaq.SpinOperator`` objects representing the Pauli strings for the stabilizers (e.g., "ZZI") and logical operators (e.g., "ZZZ").
-* **Specify Fine-Grained Noise**: This example demonstrates applying noise at a specific point within a kernel. Inside ``stabilizer_round``, ``cudaq.apply_noise`` is called on each data qubit, offering precise control over the noise model, in contrast to applying noise globally to all gates of a certain type.
+   .. literalinclude:: ../../examples/qec/cpp/dem_sampling.cpp
+      :language: cpp
+      :start-after: [Begin Documentation]
 
-Once defined, the custom code can be instantiated with ``qec.get_code()`` and used with all standard CUDA-Q QEC tools, including ``qec.dem_from_memory_circuit()`` and ``qec.sample_memory_circuit()``.
+   Compile and run with
+
+   .. code-block:: bash
+
+      nvq++ -lcudaq-qec dem_sampling.cpp
+      ./a.out
+
+GPU Acceleration
+~~~~~~~~~~~~~~~~
+
+When a CUDA-capable GPU is available, ``dem_sampling`` keeps the sampling and
+syndrome computation on-device, which is significantly faster than per-shot CPU
+sampling, especially for large numbers of shots and sparse error models (low
+probabilities):
+
+1. **Sparse Bernoulli sampling** — Errors are generated directly in compressed
+   sparse row (CSR) format. For low error probabilities the CSR representation
+   is compact, and the sampler skips mechanisms with zero probability entirely
+   rather than evaluating a Bernoulli trial for every mechanism in every shot.
+
+2. **GF(2) sparse-dense matrix multiply** — Syndromes are computed as
+   :math:`\text{errors} \times H^T \pmod{2}` using a sparse-dense multiply
+   over GF(2). The check matrix :math:`H^T` is stored in a bitpacked layout,
+   reducing memory bandwidth by 8x compared to one byte per entry.
+
+3. **On-device packing and unpacking** — :math:`H` is transposed and bitpacked
+   on the GPU in a single kernel. Syndromes are unpacked from the bitpacked
+   result, and the dense error matrix is produced from the CSR representation
+   via a fused zero-and-scatter kernel.
+
+The CPU path uses ``std::bernoulli_distribution`` per mechanism per shot
+followed by a dense dot product for the syndrome.
+
+Input Types and Backend Selection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``backend`` parameter controls where sampling runs:
+
+- ``"auto"`` (default) — try GPU first, fall back to CPU.
+- ``"gpu"`` — require GPU; raise ``RuntimeError`` if unavailable.
+- ``"cpu"`` — always use the CPU path.
+
+The Python binding accepts several input types, each routed through a different
+code path:
+
+1. **NumPy arrays** (most common) — When the GPU is available the bindings
+   automatically allocate device memory, copy inputs host-to-device, run
+   cuStabilizer, and copy results back as NumPy ``uint8`` arrays. With
+   ``backend="cpu"`` the GPU path is skipped entirely. No user action is
+   required beyond passing standard ``uint8`` and ``float64`` arrays.
+
+2. **PyTorch CUDA tensors** — The GPU path reads input device pointers directly
+   via ``data_ptr()`` and writes outputs into ``torch.empty`` tensors on the
+   same device, avoiding any host-device copies. This is the fastest path when
+   inputs are already on the GPU. PyTorch is an optional dependency; install
+   with ``pip install torch``.
+
+3. **PyTorch CPU tensors** — With ``backend="gpu"`` the tensors are
+   automatically moved to CUDA (via ``.to(device)``) before sampling. With
+   ``backend="auto"`` CPU tensors are rejected with an error; convert them to
+   NumPy with ``.numpy()`` first.
+
+The C++ API exposes two namespaces:
+
+- ``cudaq::qec::dem_sampler::cpu::sample_dem`` — takes a ``cudaqx::tensor``
+  check matrix and a ``std::vector<double>`` of probabilities; returns
+  ``(syndromes, errors)`` as tensors.
+- ``cudaq::qec::dem_sampler::gpu::sample_dem`` — takes raw device pointers and
+  writes results into caller-provided device buffers; returns ``false`` if
+  cuStabilizer is not available at runtime.
+
+The ``gpu`` overload works with device pointers that you allocate, populate,
+and free yourself. Guard the call behind a device-count check and fall back to
+the ``cpu`` overload when it returns ``false``:
+
+.. code-block:: cpp
+
+   #include "cudaq/qec/dem_sampling.h"
+   #include <cuda_runtime.h>
+
+   // H: [num_checks x num_mechanisms] uint8, probs: [num_mechanisms] double.
+   uint8_t *d_H, *d_syndromes, *d_errors;
+   double *d_probs;
+   cudaMalloc(&d_H, num_checks * num_mechanisms);
+   cudaMalloc(&d_probs, num_mechanisms * sizeof(double));
+   cudaMalloc(&d_syndromes, num_shots * num_checks);
+   cudaMalloc(&d_errors, num_shots * num_mechanisms);
+   cudaMemcpy(d_H, h_data, num_checks * num_mechanisms, cudaMemcpyHostToDevice);
+   cudaMemcpy(d_probs, prob_data, num_mechanisms * sizeof(double),
+              cudaMemcpyHostToDevice);
+
+   bool ok = cudaq::qec::dem_sampler::gpu::sample_dem(
+       d_H, num_checks, num_mechanisms, d_probs, num_shots, /*seed=*/42,
+       d_syndromes, d_errors);
+   if (!ok) {
+     // cuStabilizer unavailable at runtime — use the cpu overload instead.
+   }
+   // Copy d_syndromes / d_errors back to host, then cudaFree each buffer.
+
+See Also
+~~~~~~~~
+
+- :doc:`/api/qec/python_api` — ``dem_sampling`` Python API reference
+- :doc:`/api/qec/cpp_api` — ``dem_sampler`` C++ API reference
+
+.. _qldpc_decoder_example:
 
 Getting Started with the NVIDIA QLDPC Decoder
 +++++++++++++++++++++++++++++++++++++++++++++
+
+The remaining sections describe the built-in decoders that consume the parity check matrices and detector error models above. Each is selected by name through :func:`cudaq_qec.get_decoder` and targets a different regime, trading off speed, accuracy, and the class of codes it supports. We begin with the most general.
 
 Starting with CUDA-Q QEC v0.2, a GPU-accelerated decoder is included with the
 CUDA-Q QEC library. The library follows the CUDA-Q decoder Python and C++ interfaces
@@ -94,14 +207,7 @@ that can be passed to the constructor.
 Belief Propagation Methods
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``nv-qldpc-decoder`` supports multiple belief propagation (BP) algorithms, each with different trade-offs 
-between accuracy, convergence, and speed:
-
-* **Sum-Product BP** (``bp_method=0``): The standard BP algorithm. Good baseline performance.
-* **Min-Sum BP** (``bp_method=1``): Faster approximation to sum-product. Can be tuned with ``scale_factor``.
-* **Memory-based BP** (``bp_method=2``): Adds uniform memory (``gamma0``) to help escape local minima. Useful when standard BP fails to converge.
-* **Disordered Memory BP** (``bp_method=3``): Uses per-variable memory strengths for better adaptability to code structure.
-* **Sequential Relay BP** (``composition=1``): Advanced method that runs multiple "relay legs" with different gamma configurations. See examples below for configuration.
+The ``nv-qldpc-decoder`` supports several belief-propagation algorithms -- sum-product, min-sum, and memory-based variants, plus Sequential Relay BP -- selected via ``bp_method`` and ``composition``, with optional BP+OSD post-processing. For the complete list of methods, parameters, and defaults, see the ``nv-qldpc-decoder`` entries in the :ref:`C++ <nv_qldpc_decoder_api_cpp>` and :ref:`Python <nv_qldpc_decoder_api_python>` API reference.
 
 Usage Example
 ~~~~~~~~~~~~~
@@ -125,14 +231,17 @@ The example demonstrates:
 
 .. [#f1] [BCGMRY] Sergey Bravyi, Andrew Cross, Jay Gambetta, Dmitri Maslov, Patrick Rall, Theodore Yoder, High-threshold and low-overhead fault-tolerant quantum memory https://arxiv.org/abs/2308.07915
 
+.. _tensor_network_decoder_example:
+
 Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
+Where belief propagation trades exactness for speed, the tensor network decoder computes the exact maximum-likelihood correction — valuable as an accuracy baseline against which the faster decoders can be measured.
 
 Starting with CUDA-Q QEC v0.4.0, a GPU-accelerated Maximum Likelihood Decoder is included with the
 CUDA-Q QEC library. The library follows the CUDA-Q decoder Python interface, namely :class:`cudaq_qec.Decoder`.
 At this time, we only support the Python interface for the decoder, which is
-available at :class:`cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder`.
+available at :ref:`TensorNetworkDecoder <tensor_network_decoder_api_python>`.
 As documented in the API sections :ref:`tensor_network_decoder_api_python`, there are many configuration options
 that can be passed to the constructor. The decoder requires Python 3.11 or higher.
 
@@ -155,6 +264,8 @@ See Also:
 Deploying AI Decoders with TensorRT
 +++++++++++++++++++++++++++++++++++++++++++++++++
 
+The decoders above are algorithmic. CUDA-Q QEC can also deploy a *learned* decoder — a neural network trained on a specific code and noise model.
+
 Starting with CUDA-Q QEC v0.5.0, a GPU-accelerated TensorRT-based decoder is included with the
 CUDA-Q QEC library. The TensorRT decoder (``trt_decoder``) enables users to leverage custom AI
 models for quantum error correction, providing a flexible framework for deploying trained models
@@ -162,15 +273,16 @@ with optimized inference performance on NVIDIA GPUs.
 
 Unlike traditional algorithmic decoders, neural network decoders can be trained on specific error
 models and code structures, potentially achieving superior performance for certain noise regimes.
-The TensorRT decoder supports loading models in ONNX format and provides configurable precision
-modes (fp16, bf16, int8, fp8, tf32) to balance accuracy and inference speed.
+The TensorRT decoder supports loading models in ONNX format. Its strongly typed network preserves
+the data types and quantization encoded in the model; its ``precision`` option controls only the
+TensorRT TF32 build policy.
 
 This tutorial demonstrates the complete workflow for training a simple multi-layer perceptron (MLP)
 to decode surface code syndromes using PyTorch and Stim, exporting the model to ONNX format, and
 deploying it with the TensorRT decoder for accelerated inference.
 
 Overview of the Training-to-Deployment Pipeline
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The workflow consists of three main stages:
 
@@ -186,7 +298,7 @@ The workflow consists of three main stages:
    be loaded by the TensorRT decoder for optimized GPU inference in production QEC workflows.
 
 Training a Neural Network Decoder with PyTorch and Stim
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The following example shows how to generate training data using Stim's built-in surface code
 generator, train an MLP decoder with PyTorch, and export the model to ONNX format.
@@ -197,10 +309,12 @@ For instructions on installing PyTorch, see :ref:`Installing PyTorch <installing
    :start-after: [Begin Documentation]
 
 Using the TensorRT Decoder in CUDA-Q QEC
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Once you have a trained ONNX model, you can load it with the TensorRT decoder for accelerated
-inference. The decoder can be used in both C++ and Python workflows.
+inference. The decoder can be used in both C++ and Python workflows. Keep the ``.dem`` file emitted
+by the training example beside the model: it fixes the detector and observable dimensions and the
+error-mechanism ordering that the model was trained against.
 
 **Loading from ONNX (with automatic TensorRT optimization)**:
 
@@ -211,56 +325,55 @@ inference. The decoder can be used in both C++ and Python workflows.
       import cudaq_qec as qec
       import numpy as np
 
-      # Note: The AI decoder doesn't use the parity check matrix.
-      # A placeholder matrix is provided here to satisfy the API.
-      H = np.array([[1, 0, 0, 1, 0, 1, 1],
-                    [0, 1, 0, 1, 1, 0, 1],
-                    [0, 0, 1, 0, 1, 1, 1]], dtype=np.uint8)
+      with open("surface_code_decoder.dem") as dem_file:
+          dem_text = dem_file.read()
+      dem = qec.dem_from_stim_text(dem_text)
 
-      # Create TensorRT decoder from ONNX model
-      decoder = qec.get_decoder("trt_decoder", H,
-                                onnx_load_path="ai_decoder.onnx")
+      # The training model predicts logical observables, so both the engine
+      # tensor format and the public decoder result are explicit.
+      decoder = qec.get_decoder(
+          "trt_decoder",
+          dem_text,
+          onnx_load_path="surface_code_decoder.onnx",
+          engine_output_format="observables",
+          output="observables")
 
       # Decode a syndrome
-      syndrome = np.array([1.0, 0.0, 1.0], dtype=np.float32)
+      syndrome = np.zeros(dem.num_detectors(), dtype=np.float32)
       result = decoder.decode(syndrome)
-      print(f"Predicted error: {result}")
+      print(f"Predicted observable: {result.result}")
 
 .. tab:: C++
 
    .. code-block:: cpp
 
       #include "cudaq/qec/decoder.h"
-      #include "cuda-qx/core/tensor.h"
       #include "cuda-qx/core/heterogeneous_map.h"
 
+      #include <fstream>
+      #include <iterator>
+      #include <string>
+      #include <utility>
+      #include <vector>
+
       int main() {
-          // Note: The AI decoder doesn't use the parity check matrix.
-          // A placeholder matrix is provided here to satisfy the API.
-          std::vector<std::vector<uint8_t>> H_vec = {
-              {1, 0, 0, 1, 0, 1, 1},
-              {0, 1, 0, 1, 1, 0, 1},
-              {0, 0, 1, 0, 1, 1, 1}
-          };
-          
-          // Convert to tensor
-          cudaqx::tensor<uint8_t> H({3, 7});
-          for (size_t i = 0; i < 3; ++i) {
-              for (size_t j = 0; j < 7; ++j) {
-                  H.at({i, j}) = H_vec[i][j];
-              }
-          }
+          std::ifstream dem_file("surface_code_decoder.dem");
+          std::string dem_text((std::istreambuf_iterator<char>(dem_file)),
+                               std::istreambuf_iterator<char>());
+          auto inputs = cudaq::qec::decoder_init::from_stim_dem(dem_text);
+          const auto syndrome_size = inputs.num_detectors();
 
-          // Create decoder parameters
           cudaqx::heterogeneous_map params;
-          params.insert("onnx_load_path", "ai_decoder.onnx");
-          params.insert("precision", "fp16");
+          params.insert("onnx_load_path", "surface_code_decoder.onnx");
+          params.insert("engine_output_format", std::string("observables"));
 
-          // Create TensorRT decoder
-          auto decoder = cudaq::qec::get_decoder("trt_decoder", H, params);
+          // The training model predicts logical observables, so request that
+          // result basis explicitly.
+          auto decoder = cudaq::qec::get_decoder(
+              "trt_decoder", std::move(inputs),
+              cudaq::qec::decode_result_type::observables, params);
 
-          // Decode syndrome
-          std::vector<cudaq::qec::float_t> syndrome = {1.0, 0.0, 1.0};
+          std::vector<cudaq::qec::float_t> syndrome(syndrome_size, 0.0);
           auto result = decoder->decode(syndrome);
 
           return 0;
@@ -275,11 +388,18 @@ you can load it directly:
 
    .. code-block:: python
 
-      decoder = qec.get_decoder("trt_decoder", H,
-                                engine_load_path="surface_code_decoder.trt")
+      with open("surface_code_decoder.dem") as dem_file:
+          dem_text = dem_file.read()
+
+      decoder = qec.get_decoder(
+          "trt_decoder",
+          dem_text,
+          engine_load_path="surface_code_decoder.trt",
+          engine_output_format="observables",
+          output="observables")
 
 Converting ONNX Models to TensorRT Engines
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 For production deployments where initialization time is critical, you can pre-build a TensorRT
 engine from your ONNX model using the ``trtexec`` command-line tool that comes with TensorRT:
@@ -310,7 +430,7 @@ Pre-built engines offer several advantages:
 
 
 Dependencies and Requirements
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The TensorRT decoder requires:
 
@@ -324,9 +444,67 @@ For training:
 - **Stim**: For quantum circuit simulation and data generation
 
 See Also
-^^^^^^^^
+~~~~~~~~
 
 - :class:`cudaq_qec.Decoder` - Base decoder interface
 - `ONNX <https://onnx.ai/>`_ - Open Neural Network Exchange format
 - `TensorRT Documentation <https://docs.nvidia.com/deeplearning/tensorrt/>`_ - NVIDIA TensorRT
 - `Stim Documentation <https://github.com/quantumlib/Stim>`_ - Fast stabilizer circuit simulator
+
+.. _pymatching_decoder_example:
+
+Matching-Based Decoding with PyMatching
++++++++++++++++++++++++++++++++++++++++
+
+For codes whose errors pair up into a matching graph, a dedicated matching decoder is often the simplest and fastest choice. Starting with CUDA-Q QEC v0.7.0, CUDA-Q QEC bundles a minimum-weight perfect matching (MWPM) decoder built on the
+open-source `PyMatching <https://github.com/oscarhiggott/PyMatching>`_ library,
+suitable for matchable codes such as the surface code. It is selected by name
+through :func:`cudaq_qec.get_decoder` and takes a parity-check matrix whose
+columns each have one or two set entries:
+
+.. tab:: Python
+
+   .. code-block:: python
+
+      import cudaq_qec as qec
+      import numpy as np
+
+      H = np.array([[1, 1, 0],
+                    [0, 1, 1]], dtype=np.uint8)
+
+      dec = qec.get_decoder("pymatching", H,
+                            error_rate_vec=[0.1, 0.1, 0.1],
+                            merge_strategy="smallest_weight")
+      result = dec.decode(syndrome)
+
+Per-error priors are supplied via ``error_rate_vec`` (values in ``(0, 0.5]``),
+and parallel edges are combined according to ``merge_strategy``. See the
+:ref:`PyMatching Decoder API <pymatching_decoder_api_python>` for the full list
+of options.
+
+.. _chromobius_decoder_example:
+
+Color-Code Decoding with Chromobius
++++++++++++++++++++++++++++++++++++
+
+Matching applies to surface-code-like codes; color codes call for a decoder built around their structure. Starting with CUDA-Q QEC v0.7.0, CUDA-Q QEC bundles a color-code decoder built on the open-source
+`Chromobius <https://github.com/quantumlib/chromobius>`_ Möbius decoder. Unlike
+the matrix-based decoders, Chromobius is *detector-error-model native*: it is
+constructed from Stim detector-error-model (DEM) text rather than a
+parity-check matrix, and predicts logical observable flips directly.
+
+.. tab:: Python
+
+   .. code-block:: python
+
+      import cudaq_qec as qec
+
+      with open("color_code.dem") as f:
+          dem_text = f.read()
+
+      dec = qec.get_decoder("chromobius", dem_text)
+      corrections = dec.decode(syndrome)  # predicted observable flips
+
+Constructing Chromobius from a parity-check matrix is rejected with an error.
+See the :ref:`Chromobius Decoder API <chromobius_decoder_api_python>` for the
+available options.

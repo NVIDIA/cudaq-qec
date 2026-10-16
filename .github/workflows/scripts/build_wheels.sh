@@ -139,7 +139,6 @@ export CC=gcc
 export CXX=g++
 export SETUPTOOLS_SCM_PRETEND_VERSION=$wheels_version
 export CUDAQX_QEC_VERSION=$wheels_version
-export CUDAQX_SOLVERS_VERSION=$wheels_version
 
 # ==============================================================================
 # cuStabilizer / cuQuantum SDK location
@@ -191,31 +190,13 @@ $python -m auditwheel -v repair dist/*.whl $CUDAQ_EXCLUDE_LIST \
   --exclude libnvonnxparser.so.10 \
   --exclude libcudaq-qec.so \
   --exclude libcudaq-qec-realtime-decoding.so \
+  --exclude libcudaq-qec-decoders.so \
   ${PLAT_STR}
 
-# ==============================================================================
-# Solvers library
-# ==============================================================================
-
-cd ../solvers
-cp pyproject.toml.cu${cuda_version} pyproject.toml
-
-SKBUILD_CMAKE_ARGS="-DCUDAQ_DIR=$cudaq_prefix/lib/cmake/cudaq"
-if ! $devdeps; then
-  SKBUILD_CMAKE_ARGS+=";-DCMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN=/opt/rh/gcc-toolset-12/root/usr/lib/gcc/${ARCH}-redhat-linux/12/;"
-fi
-SKBUILD_CMAKE_ARGS+=";-DCMAKE_BUILD_TYPE=$build_type" \
-export SKBUILD_CMAKE_ARGS
-$python -m build --wheel
-
-LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$(pwd)/_skbuild/lib" \
-$python -m auditwheel -v repair dist/*.whl $CUDAQ_EXCLUDE_LIST \
-  --exclude libgfortran.so.5 \
-  --exclude libquadmath.so.0 \
-  --exclude libmvec.so.1 \
-  --wheel-dir /wheels \
-  ${PLAT_STR}
-
+# Make sure auditwheel did not graft a duplicate copy of a library we already
+# ship (or any CUDA-Q library). If this fails, add an --exclude above.
+# (cwd is libs/qec)
+$python ../../.github/workflows/scripts/check_grafted_libs.py /wheels/*.whl
 
 echo "Wheel builds are complete: "
 ls -la /wheels

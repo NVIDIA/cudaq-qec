@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -34,7 +35,8 @@ namespace cudaq::qec::realtime::experimental {
 
 __global__ void gateway_input_kernel(void **mailbox_slot_ptr,
                                      void *trt_fixed_input,
-                                     size_t copy_size_bytes) {
+                                     size_t copy_size_bytes,
+                                     size_t payload_capacity_bytes) {
   void *ring_buffer_data = *mailbox_slot_ptr;
   if (ring_buffer_data == nullptr)
     return;
@@ -42,8 +44,11 @@ __global__ void gateway_input_kernel(void **mailbox_slot_ptr,
   const char *src =
       (const char *)ring_buffer_data + sizeof(cudaq::realtime::RPCHeader);
   char *dst = (char *)trt_fixed_input;
+  size_t safe_copy_size = copy_size_bytes < payload_capacity_bytes
+                              ? copy_size_bytes
+                              : payload_capacity_bytes;
 
-  for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < copy_size_bytes;
+  for (size_t i = threadIdx.x + blockIdx.x * blockDim.x; i < safe_copy_size;
        i += blockDim.x * gridDim.x) {
     dst[i] = src[i];
   }
@@ -51,15 +56,19 @@ __global__ void gateway_input_kernel(void **mailbox_slot_ptr,
 
 __global__ void gateway_output_kernel(void **mailbox_slot_ptr,
                                       const void *trt_fixed_output,
-                                      size_t result_size_bytes) {
+                                      size_t result_size_bytes,
+                                      size_t payload_capacity_bytes) {
   void *ring_buffer_data = *mailbox_slot_ptr;
   if (ring_buffer_data == nullptr)
     return;
 
   char *dst = (char *)ring_buffer_data + sizeof(cudaq::realtime::RPCHeader);
   const char *src = (const char *)trt_fixed_output;
+  size_t safe_result_size = result_size_bytes < payload_capacity_bytes
+                                ? result_size_bytes
+                                : payload_capacity_bytes;
 
-  for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < result_size_bytes;
+  for (size_t i = threadIdx.x + blockIdx.x * blockDim.x; i < safe_result_size;
        i += blockDim.x * gridDim.x) {
     dst[i] = src[i];
   }
@@ -73,8 +82,8 @@ __global__ void gateway_output_kernel(void **mailbox_slot_ptr,
 
     auto *response = (cudaq::realtime::RPCResponse *)ring_buffer_data;
     response->magic = cudaq::realtime::RPC_MAGIC_RESPONSE;
-    response->status = 0;
-    response->result_len = static_cast<uint32_t>(result_size_bytes);
+    response->status = (safe_result_size == result_size_bytes) ? 0 : 1;
+    response->result_len = static_cast<uint32_t>(safe_result_size);
     response->request_id = rid;
     response->ptp_timestamp = pts;
     __threadfence_system();
@@ -147,8 +156,10 @@ void ai_decoder_service::Logger::log(Severity severity,
 ai_decoder_service::ai_decoder_service(const std::string &model_path,
                                        void **device_mailbox_slot,
                                        const std::string &engine_save_path,
-                                       network_typing_override typing_override)
-    : device_mailbox_slot_(device_mailbox_slot) {
+                                       network_typing_override typing_override,
+                                       size_t rpc_slot_size_bytes)
+    : device_mailbox_slot_(device_mailbox_slot),
+      rpc_slot_size_bytes_(rpc_slot_size_bytes) {
   std::string ext = model_path.substr(model_path.find_last_of('.'));
   if (ext == ".onnx") {
     build_engine_from_onnx(model_path, engine_save_path, typing_override);
@@ -156,20 +167,25 @@ ai_decoder_service::ai_decoder_service(const std::string &model_path,
     load_engine(model_path);
   }
   setup_bindings();
+  set_default_rpc_slot_size();
   allocate_resources();
 }
 
 ai_decoder_service::ai_decoder_service(void **device_mailbox_slot,
-                                       size_t input_bytes, size_t output_bytes)
+                                       size_t input_bytes, size_t output_bytes,
+                                       size_t rpc_slot_size_bytes)
     : device_mailbox_slot_(device_mailbox_slot), input_size_(input_bytes),
-      output_size_(output_bytes) {
+      output_size_(output_bytes), rpc_slot_size_bytes_(rpc_slot_size_bytes) {
+  set_default_rpc_slot_size();
   allocate_resources();
 }
 
-std::unique_ptr<ai_decoder_service> ai_decoder_service::create_passthrough(
-    void **device_mailbox_slot, size_t input_bytes, size_t output_bytes) {
-  return std::unique_ptr<ai_decoder_service>(
-      new ai_decoder_service(device_mailbox_slot, input_bytes, output_bytes));
+std::unique_ptr<ai_decoder_service>
+ai_decoder_service::create_passthrough(void **device_mailbox_slot,
+                                       size_t input_bytes, size_t output_bytes,
+                                       size_t rpc_slot_size_bytes) {
+  return std::unique_ptr<ai_decoder_service>(new ai_decoder_service(
+      device_mailbox_slot, input_bytes, output_bytes, rpc_slot_size_bytes));
 }
 
 ai_decoder_service::~ai_decoder_service() {
@@ -485,7 +501,39 @@ void ai_decoder_service::allocate_resources() {
   }
 }
 
+void ai_decoder_service::set_rpc_slot_size_bytes(size_t rpc_slot_size_bytes) {
+  rpc_slot_size_bytes_ = rpc_slot_size_bytes;
+  set_default_rpc_slot_size();
+}
+
+void ai_decoder_service::set_default_rpc_slot_size() {
+  if (rpc_slot_size_bytes_ == 0)
+    rpc_slot_size_bytes_ = sizeof(cudaq::realtime::RPCHeader) + input_size_;
+}
+
+void ai_decoder_service::validate_rpc_slot_size() const {
+  const size_t request_frame_size =
+      sizeof(cudaq::realtime::RPCHeader) + input_size_;
+  const size_t response_frame_size =
+      sizeof(cudaq::realtime::RPCResponse) + output_size_;
+
+  if (output_size_ > std::numeric_limits<uint32_t>::max())
+    throw std::length_error(
+        "ai_decoder_service output exceeds RPCResponse::result_len capacity");
+
+  if (rpc_slot_size_bytes_ < request_frame_size) {
+    throw std::length_error(
+        "ai_decoder_service RPC slot is too small for the input payload");
+  }
+  if (rpc_slot_size_bytes_ < response_frame_size) {
+    throw std::length_error(
+        "ai_decoder_service RPC slot is too small for the output payload");
+  }
+}
+
 void ai_decoder_service::capture_graph(cudaStream_t stream) {
+  validate_rpc_slot_size();
+
   for (auto &b : all_bindings_) {
     context_->setTensorAddress(b.name.c_str(), b.d_buffer);
   }
@@ -499,13 +547,19 @@ void ai_decoder_service::capture_graph(cudaStream_t stream) {
   DECODER_CUDA_CHECK(
       cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
 
-  gateway_input_kernel<<<1, 128, 0, stream>>>(device_mailbox_slot_,
-                                              d_trt_input_, input_size_);
+  const size_t input_payload_capacity =
+      rpc_slot_size_bytes_ - sizeof(cudaq::realtime::RPCHeader);
+  const size_t output_payload_capacity =
+      rpc_slot_size_bytes_ - sizeof(cudaq::realtime::RPCResponse);
+
+  gateway_input_kernel<<<1, 128, 0, stream>>>(
+      device_mailbox_slot_, d_trt_input_, input_size_, input_payload_capacity);
   if (!context_->enqueueV3(stream))
     throw std::runtime_error(
         "TRT enqueueV3 failed during graph capture in ai_decoder_service");
   gateway_output_kernel<<<1, 128, 0, stream>>>(device_mailbox_slot_,
-                                               d_trt_output_, output_size_);
+                                               d_trt_output_, output_size_,
+                                               output_payload_capacity);
 
   DECODER_CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
 

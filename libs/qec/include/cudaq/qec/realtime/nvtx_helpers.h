@@ -25,6 +25,7 @@ struct NvtxRange {
   cudaq::qec::realtime::experimental::NvtxRange _nvtx_range_##__LINE__(name)
 #define NVTX_PUSH(name) nvtxRangePushA(name)
 #define NVTX_POP() nvtxRangePop()
+#define NVTX_MARK(name) nvtxMarkA(name)
 
 } // namespace cudaq::qec::realtime::experimental
 #else
@@ -32,5 +33,6 @@ struct NvtxRange {
 #define NVTX_RANGE(name) (void)0
 #define NVTX_PUSH(name) (void)0
 #define NVTX_POP() (void)0
+#define NVTX_MARK(name) (void)0
 
 #endif

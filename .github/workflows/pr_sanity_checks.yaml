@@ -87,7 +87,7 @@ jobs:
           sudo ln -s /usr/bin/clang-format-${LLVM_VERSION} /usr/bin/clang-format
 
       # If the `clang-format` file changes, we require the reformatting of all
-      # files. See https://github.com/NVIDIA/cudaqx/pull/15#discussion_r1868174072
+      # files. See https://github.com/NVIDIA/cudaq-qec/pull/15#discussion_r1868174072
       - name: clang-format all things
         if: needs.check-changes.outputs.check-all-cpp == 'true'
         run: |
@@ -185,6 +185,90 @@ jobs:
           path: yapf-*.patch
           retention-days: 14
 
+  check-license-headers:
+    name: Check license headers
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          set-safe-directory: true
+
+      - name: Determine changed files
+        id: changed-files
+        run: |
+          # We did a shallow clone, and thus we need to make sure to fetch the base
+          # commit.
+          git fetch --recurse-submodules=no origin ${{ github.base_ref }}
+          BASE_SHA=$(git rev-parse origin/${{ github.base_ref }})
+
+          git diff --diff-filter=d --name-only "$BASE_SHA" -- . > changed_files.txt
+
+          if [ -s changed_files.txt ]; then
+            echo "has-files=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-files=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # license-eye only takes a `paths` glob list via its config file, so we
+      # generate a copy of .licenserc.yaml scoped to just this PR's changed
+      # files. This means the check only enforces correct headers on new/
+      # modified files, not on the whole (currently inconsistent) repo.
+      - name: Scope license config to changed files
+        if: steps.changed-files.outputs.has-files == 'true'
+        run: |
+          python3 - <<'PYEOF'
+          with open('.licenserc.yaml') as f:
+              content = f.read()
+          with open('changed_files.txt') as f:
+              files = [line.strip() for line in f if line.strip()]
+
+          paths_yaml = '\n'.join(
+              "    - '{}'".format(f.replace("'", "''")) for f in files
+          )
+          old_block = "  paths:\n    - '**'"
+          new_block = "  paths:\n" + paths_yaml
+          if old_block not in content:
+              raise SystemExit(
+                  "Expected 'paths:' block not found in .licenserc.yaml; "
+                  "update this workflow step if that file's structure changed."
+              )
+          content = content.replace(old_block, new_block, 1)
+
+          with open('.licenserc.pr.yaml', 'w') as f:
+              f.write(content)
+          PYEOF
+
+      - name: Setup Go
+        if: steps.changed-files.outputs.has-files == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Install license-eye
+        if: steps.changed-files.outputs.has-files == 'true'
+        run: go install github.com/apache/skywalking-eyes/cmd/license-eye@v0.8.0
+
+      - name: Run license header check
+        if: steps.changed-files.outputs.has-files == 'true'
+        run: |
+          EXIT_CODE=0
+          "$(go env GOPATH)/bin/license-eye" -c .licenserc.pr.yaml header check || EXIT_CODE=$?
+
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "🟥 License header check failed (see log above)." >> $GITHUB_STEP_SUMMARY
+            echo
+            echo "Each file listed above must carry a header matching this (see .licenserc.yaml):"
+            echo "---"
+            sed -n '/^    content: |/,/^    pattern: |/p' .licenserc.yaml | sed '1d;$d' | sed 's/^      //'
+            echo "---"
+          else
+            echo "🟩 License header check passed" >> $GITHUB_STEP_SUMMARY
+          fi
+          exit $EXIT_CODE
+
   # This job is used for branch protection checks.
   verify:
     name: Sanity check PR
@@ -192,6 +276,7 @@ jobs:
     needs:
       - check-cpp
       - check-python
+      - check-license-headers
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -210,8 +295,9 @@ jobs:
             fi
           }
 
-          check_result "check-cpp"    "${{needs.check-cpp.result}}"
-          check_result "check-python" "${{needs.check-python.result}}"
+          check_result "check-cpp"             "${{needs.check-cpp.result}}"
+          check_result "check-python"          "${{needs.check-python.result}}"
+          check_result "check-license-headers" "${{needs.check-license-headers.result}}"
 
           if [[ "$status" != "success" ]]; then
             exit 1

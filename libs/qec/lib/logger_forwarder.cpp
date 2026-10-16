@@ -265,7 +265,10 @@ private:
       queued_log_record queued_record;
       if (!try_dequeue_one(queued_record)) {
         in_flight_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
-        cv_.notify_all();
+        // Publish the in-flight/queue state under wait_mutex_ before notifying
+        // so flush() cannot miss this wakeup in the window between checking its
+        // predicate and blocking on cv_. See notify after callback below.
+        notify_flush_waiters();
         std::unique_lock<std::mutex> lock(wait_mutex_);
         cv_.wait(lock, [&] {
           return stop_.load(std::memory_order_acquire) || !is_queue_empty();
@@ -297,8 +300,23 @@ private:
       in_flight_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
 
       emit_drop_warning_if_pending();
-      cv_.notify_all();
+      notify_flush_waiters();
     }
+  }
+
+  // Wake flush() waiters without losing the wakeup. The worker mutates the
+  // state flush() inspects (in_flight_callbacks_ and the ring positions) via
+  // atomics that are not held under wait_mutex_. Briefly taking wait_mutex_
+  // before notifying serializes against a flush() thread that has evaluated its
+  // predicate as false but has not yet blocked on cv_: that thread holds
+  // wait_mutex_ across the predicate check and atomically releases it inside
+  // cv_.wait(), so this notify either happens before the check (observed via
+  // the acquire load) or after the waiter is parked (delivered by notify).
+  void notify_flush_waiters() {
+    {
+      std::lock_guard<std::mutex> lock(wait_mutex_);
+    }
+    cv_.notify_all();
   }
 
   std::condition_variable_any cv_;

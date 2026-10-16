@@ -11,117 +11,173 @@
 /// CUDA-Q device_call transport, decoding on the CPU with whatever decoder a
 /// YAML config file selects.
 ///
-/// This is the two-process analogue of the in-process host_dispatch device
-/// call tests, structured exactly like CUDA-Q's cpu_roce_test_daemon: a
-/// cpu_transport transceiver owns the wire and the rings, and
-/// libcudaq-realtime's HOST_CALL host-dispatcher loop is wired straight onto
-/// those rings.  Both the decoder and the transport are configuration, not
-/// code:
+/// Both the decoder and the transport are configuration, not code:
 ///   - decoders come from `--config=<yaml>`
 ///     (multi_decoder_config::from_yaml_str);
-///   - the transport comes from `--transport=udp|cpu_roce`: the UDP ring
-///     transceiver (loopback; runs anywhere) or the CPU RoCE RDMA transceiver
-///     (requires an RDMA NIC; pairs with the caller's
-///     `--cudaq-device-call=cpu_roce` channel and includes the QP/rkey TCP
-///     rendezvous server).
-///   - for cpu_roce, `--qp_config=rendezvous|hsb_fpga` selects how queue pairs
-///     are exchanged.  `rendezvous` (default) is the TCP QP/rkey swap with a
-///     CpuRoceChannel caller.  `hsb_fpga` is the Holoscan-Sensor-Bridge FPGA
-///     method: the peer QP comes from `--remote-qp` (the FPGA data-plane QP,
-///     or the emulator's QP) and this server prints its own QP / RKey /
-///     Buffer Addr in the canonical bridge handshake format
-///     (hololink_bridge_common.h) for the orchestration script to relay to
-///     the playback tool -- which alone programs the FPGA over the Hololink
-///     control plane.  The server itself performs NO control-plane traffic.
+///   - the transport comes from the YAML `transport:` section for every
+///     device_graph decoder. Host-only configurations using other providers
+///     may instead use `--transport=<name|/path/to/lib.so>`. The selected
+///     CUDA-Q realtime bridge PROVIDER is loaded at runtime through the
+///     transport-provider interface (bridge_interface.h). A bare name resolves
+///     to
+///     `libcudaq-realtime-bridge-<name>.so` next to the CUDA-Q realtime
+///     libraries, with '_' in the name mapping to '-' to match the shipped
+///     hyphenated sonames (udp, cpu_roce and gpu_roce ship there); a value
+///     containing '/' is loaded verbatim, which is how a partner drops in
+///     an out-of-tree transport library with NO changes to this server.
+///
+/// This server contains no transport-specific code: it forwards all
+/// unrecognized command-line arguments to the provider's create() (e.g.
+/// --port/--num-slots/--slot-size for udp; --device/--local-ip/--qp_config/
+/// --peer-ip/--remote-qp/--frame-size for cpu_roce), derives the dispatcher
+/// geometry from the provider's ring-geometry query, publishes readiness from
+/// the provider's endpoint-info query, and drives the libcudaq-realtime
+/// dispatcher object (HOST path, HOST_CALL table) over the provider's rings.
 ///
 /// The function table comes from the decoding-server-cqr service plugin
 /// (enqueue_syndromes / get_corrections / reset_decoder) regardless of
 /// transport or decoder.
 ///
-/// Prints `QEC_DECODING_SERVER_READY port=<P> ...` on stdout once listening
-/// (for udp, P is the UDP port; for cpu_roce, P is the TCP rendezvous port and
-/// the line also carries `roce_ip=<IP>`), and
-/// `QEC_DECODING_SERVER_DISPATCHED count=<N>` at shutdown (the two-process
-/// stand-in for the in-process cudaqx_qec_device_call_dispatch_count()
-/// assertion).
+/// Prints `QEC_DECODING_SERVER_READY port=<P0> ...` on stdout once the caller
+/// can start connecting. The rest of the line is the provider's endpoint
+/// description (e.g. `transport=udp` or `transport=cpu_roce roce_ip=<IP>`)
+/// followed by one `ring<id>=<port>` token per decoder ring, so a caller can
+/// route `device_call(decoder_id, ...)` to the right endpoint. At shutdown
+/// each ring reports its traffic as `QEC_DECODING_SERVER_RING decoder=<id>
+/// dispatched=<n>` (the two-process stand-in for the in-process
+/// cudaqx_qec_device_call_dispatch_count() assertion). The standalone
+/// all-device_graph path instead prints only `QEC_DECODING_SERVER_READY
+/// device_graph` and reports execution via the trigger diagnostics.
 ///
 /// Usage:
 ///   decoding_server --config=<decoders.yaml>
-///                           [--transport=udp|cpu_roce] [--port=0]
-///                           [--num-slots=8] [--slot-size=256] [--timeout=60]
-///                           [--device=mlx5_0] [--local-ip=10.0.0.2]
-///                           [--qp_config=rendezvous|hsb_fpga]
-///                           [--peer-ip=ADDR] [--remote-qp=0x2]
-///                           [--frame-size=N]
+///                   [--transport=<name|/path/to/lib.so>] [--timeout=60]
+///                   [--host-loop=threaded|unified]
+///                   [provider args, forwarded verbatim...]
+/// Configurations containing a device_graph decoder must put the provider and
+/// all provider arguments in the YAML transport section.
 ///
 /// NOTE: --slot-size must match the caller channel's slot size (each frame
-/// occupies one full slot stride on both wires).  With --qp_config=hsb_fpga,
-/// --slot-size is the HSB page size (ring slot stride) and --num-slots is
-/// capped at 64 (the HSB WQE depth).
+/// occupies one full slot stride on both wires).
+///
+/// The dispatch SHAPE is a per-decoder property of the YAML (`dispatch:
+/// host|device_graph`): host decoders run through the CQR HOST_CALL
+/// dispatcher below; a device_graph decoder routes the whole server through
+/// the CQR DecodingServer, whose DeviceGraphTransceiver runs the
+/// self-relaunching GPU scheduler over the same kind of runtime-loaded
+/// provider selected and configured by the YAML transport section.
+/// A third knob, server-wide and command-line only, is the host ring's LOOP
+/// shape (`--host-loop=threaded|unified`, default threaded): threaded keeps
+/// the provider's RX/TX pump threads moving frames between the wire and the
+/// ring while a dispatcher thread polls the ring's flags; unified runs CUDA-Q
+/// realtime's single-thread unified loop, in which the dispatcher thread
+/// itself pulls each request through the provider's rx_poll hook, decodes
+/// inline, and pushes the reply through tx_publish. Unified needs the
+/// provider's CPU data plane; by convention a host-ring provider selects it
+/// with `--unified` (udp does), so under --host-loop=unified the server
+/// appends `--unified` to every host ring's provider arguments itself and
+/// probes for the plane before READY. Device_graph rings are unaffected
+/// (their consumer is the GPU scheduler over the provider's ring-buffer,
+/// 3-kernel shape), so mixed configurations are allowed, while a config with
+/// only device_graph decoders has no host ring and rejects the flag. gpu_roce
+/// host rings cannot be driven unified (gpu_roce serves no CPU data plane;
+/// its own `--unified` selects a GPU kernel), and `--unified`/`--forward`
+/// must not appear among a device_graph ring's or a gpu_roce ring's YAML
+/// transport arguments.
 
 #include "cudaq/qec/realtime/decoding_config.h"
 
-#include "cudaq/realtime/device_call_service.h"
+// Ring-consumer C ABI prototypes (weak references below are checked against
+// these at compile time).
+#include "../../lib/realtime/decoding-server-cqr/DeviceGraphRingConsumer.h"
 
-#include "cudaq/realtime/cpu_transport/udp_wrapper.h"
+#include "cudaq/realtime/daemon/bridge/bridge_interface.h"
 #include "cudaq/realtime/daemon/dispatcher/cudaq_realtime.h"
-#include "cudaq/realtime/daemon/dispatcher/dispatch_kernel_launch.h"
-#include "cudaq/realtime/daemon/dispatcher/graph_launch_engine.h"
 
-#ifdef QEC_HAVE_CPU_ROCE_TRANSPORT
-#include "cudaq/realtime/cpu_transport/roce_wrapper.h"
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
-
-#ifdef QEC_HAVE_GPU_ROCE_TRANSPORT
-// DecodingServer.h (and GpuRoceTransceiver.h via DecodingServer.cpp) live in
-// the decoding-server-cqr directory, added to include paths by CMakeLists when
-// CUDAQ_GPU_ROCE_AVAILABLE is true.
+#ifdef QEC_HAVE_DEVICE_GRAPH_DISPATCH
+// DecodingServer.h (and DeviceGraphTransceiver.h via DecodingServer.cpp) live
+// in the decoding-server-cqr directory, added to include paths by CMakeLists
+// when CUDAQ_QEC_DEVICE_GRAPH_AVAILABLE is true.
 #include "DecodingServer.h"
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
-#include <functional>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
+#include <utility>
+#include <vector>
 
-extern "C" void cudaqx_qec_realtime_device_call_service_force_link();
+// The CQR plugin's HOST_CALL function table.  Plain C, deliberately naming no
+// CUDA-Q type: this server is driven by cudaq-realtime alone.
+extern "C" const cudaq_function_entry_t *
+cudaqx_qec_decoding_server_host_call_table(std::uint32_t *count);
+// Opaque graph resources of a decoder hosted by the CQR plugin's registry.
+extern "C" void *cudaqx_qec_decoding_server_graph_resources(std::uint64_t);
+// Device-graph ring-consumer C API (strong definitions live in the
+// cudaq-qec-decoding-server-device-graph component; referenced WEAKLY so a
+// build without the component still links and fails at runtime instead).
+// DeviceGraphRingConsumer.h supplies the canonical prototypes; these
+// redeclarations only add the weak attribute and must match it exactly.
+extern "C" __attribute__((weak)) void *
+cudaqx_qec_make_device_graph_ring_consumer(const void *ring,
+                                           std::size_t num_slots,
+                                           std::size_t slot_size, int gpu_id,
+                                           void *graph_resources);
+extern "C" __attribute__((weak)) void
+cudaqx_qec_device_graph_ring_consumer_shutdown(void *consumer);
+extern "C" __attribute__((weak)) std::uint64_t
+cudaqx_qec_device_graph_ring_consumer_dispatched(void *consumer);
+extern "C" __attribute__((weak)) void
+cudaqx_qec_device_graph_ring_consumer_destroy(void *consumer);
 extern "C" std::uint64_t cudaqx_qec_device_call_dispatch_count();
 extern "C" std::uint64_t cudaqx_qec_decoding_server_max_concurrent();
+extern "C" void cudaqx_qec_decoding_server_print_stats();
 extern "C" void cudaqx_qec_decoding_server_shutdown();
 
 namespace {
 
 namespace config = cudaq::qec::decoding::config;
 
+// How every host-dispatch ring is driven (--host-loop).
+//   threaded: the provider's own RX/TX pump threads move frames between the
+//             wire and the ring, and a libcudaq-realtime dispatcher thread
+//             polls the ring's flags (two cross-thread hand-offs per RPC).
+//   unified:  CUDA-Q realtime's single-thread unified loop -- the dispatcher
+//             thread itself pulls each request through the provider's rx_poll
+//             hook, decodes inline, and pushes the reply through tx_publish;
+//             no pump threads, no flag hand-offs.  Requires a provider that
+//             serves its CPU data plane (the server passes --unified to
+//             select it).
+enum class HostLoop { threaded, unified };
+
+const char *host_loop_name(HostLoop loop) {
+  return loop == HostLoop::unified ? "unified" : "threaded";
+}
+
 struct ServerConfig {
   std::string config_path;
   std::string transport = "udp";
-  std::uint16_t port = 0; // 0 => ephemeral, printed on stdout
-  std::uint32_t num_slots = 8;
-  std::size_t slot_size = 256;
+  bool transport_from_cli = false;
   int timeout_sec = 60;
-  // cpu_roce only:
-  std::string device = "mlx5_0";
-  std::string local_ip = "10.0.0.2";
-  // cpu_roce QP exchange method (see file header).
-  std::string qp_config = "rendezvous";
-  // hsb_fpga only:
-  std::string peer_ip;           // FPGA/emulator data-plane IPv4 (required)
-  std::uint32_t remote_qp = 0x2; // FPGA data-plane QP (emulator QP in emulate)
-  std::size_t frame_size = 0;    // TX SGE bytes; 0 => slot_size
+  // Loop shape for the host-dispatch rings; see HostLoop.  A command-line
+  // choice about how this server drives the provider, not a YAML property
+  // of the deployment.
+  HostLoop host_loop = HostLoop::threaded;
+  // Everything the server itself does not consume, forwarded verbatim to the
+  // provider's create() (providers ignore arguments they don't recognize, so
+  // one command line can carry any provider's options).
+  std::vector<std::string> provider_args;
 };
 
 bool starts_with(const std::string &s, const char *prefix) {
@@ -135,75 +191,66 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
     if (a == "--help" || a == "-h") {
       std::cout << "Usage: " << argv[0]
                 << " --config=<decoders.yaml> "
-                   "[--transport=udp|cpu_roce|gpu_roce] "
-                   "[--port=N] [--num-slots=N] [--slot-size=N] [--timeout=N] "
-                   "[--device=NAME] [--local-ip=ADDR] "
-                   "[--qp_config=rendezvous|hsb_fpga] [--peer-ip=ADDR] "
-                   "[--remote-qp=N] [--frame-size=N]"
+                   "[--transport=<name|/path/to/lib.so>] [--timeout=N] "
+                   "[--host-loop=threaded|unified] "
+                   "[provider args, forwarded verbatim: e.g. --port=N "
+                   "--num-slots=N --slot-size=N --device=NAME "
+                   "--local-ip=ADDR --qp_config=rendezvous|hsb_fpga "
+                   "--peer-ip=ADDR --remote-qp=N --frame-size=N]\n"
+                   "--transport and command-line provider arguments apply "
+                   "only to non-gpu_roce, host-only configurations whose "
+                   "YAML transport section names no provider (a conflict is "
+                   "a startup error). Configurations containing device_graph "
+                   "decoders or using gpu_roce must put the provider and its "
+                   "arguments in YAML.\n"
+                   "--host-loop=unified runs each host ring on CUDA-Q "
+                   "realtime's single-thread unified loop; the server passes "
+                   "--unified to each host ring's provider to select its CPU "
+                   "data plane (do not add it yourself). device_graph rings "
+                   "are unaffected (a config with only device_graph decoders "
+                   "has no host ring and rejects the flag); gpu_roce host "
+                   "rings are not supported in this mode.\n"
+                   "Providers and their args are defined by the installed "
+                   "cudaq-realtime (libcudaq-realtime-bridge-<name>.so, "
+                   "with '_' in <name> mapping to '-'); "
+                   "the names and args above are examples, not an "
+                   "exhaustive list -- the installation is the source of "
+                   "truth."
                 << std::endl;
       return false;
     } else if (starts_with(a, "--config="))
       cfg.config_path = a.substr(9);
-    else if (starts_with(a, "--transport="))
+    else if (starts_with(a, "--transport=")) {
       cfg.transport = a.substr(12);
-    else if (starts_with(a, "--port="))
-      cfg.port = static_cast<std::uint16_t>(std::stoul(a.substr(7)));
-    else if (starts_with(a, "--num-slots="))
-      cfg.num_slots = static_cast<std::uint32_t>(std::stoul(a.substr(12)));
-    else if (starts_with(a, "--slot-size="))
-      cfg.slot_size = std::stoull(a.substr(12));
-    else if (starts_with(a, "--timeout="))
-      cfg.timeout_sec = std::stoi(a.substr(10));
-    else if (starts_with(a, "--device="))
-      cfg.device = a.substr(9);
-    else if (starts_with(a, "--local-ip="))
-      cfg.local_ip = a.substr(11);
-    else if (starts_with(a, "--qp_config="))
-      cfg.qp_config = a.substr(12);
-    else if (starts_with(a, "--peer-ip="))
-      cfg.peer_ip = a.substr(10);
-    else if (starts_with(a, "--remote-qp="))
-      // base 0: accepts both decimal and 0x-prefixed hex (QP numbers are
-      // conventionally printed in hex, e.g. the FPGA's fixed 0x2).
-      cfg.remote_qp =
-          static_cast<std::uint32_t>(std::stoul(a.substr(12), nullptr, 0));
-    else if (starts_with(a, "--frame-size="))
-      cfg.frame_size = std::stoull(a.substr(13));
-    else {
-      std::cerr << "Unknown argument: " << a << " (use --help)" << std::endl;
-      return false;
-    }
+      cfg.transport_from_cli = true;
+    } else if (starts_with(a, "--timeout=")) {
+      try {
+        cfg.timeout_sec = std::stoi(a.substr(10));
+      } catch (const std::exception &) {
+        std::cerr << "ERROR: invalid --timeout value '" << a.substr(10) << "'"
+                  << std::endl;
+        return false;
+      }
+    } else if (starts_with(a, "--host-loop=")) {
+      // Consumed here, BEFORE the forwarding default below: forwarded to the
+      // provider it would be rejected at startup as a stray provider argument
+      // for device_graph and gpu_roce configurations.
+      const std::string value = a.substr(12);
+      if (value == "threaded")
+        cfg.host_loop = HostLoop::threaded;
+      else if (value == "unified")
+        cfg.host_loop = HostLoop::unified;
+      else {
+        std::cerr << "ERROR: invalid --host-loop value '" << value
+                  << "' (expected threaded|unified)" << std::endl;
+        return false;
+      }
+    } else
+      cfg.provider_args.push_back(a);
   }
   if (cfg.config_path.empty()) {
     std::cerr << "ERROR: --config=<decoders.yaml> is required" << std::endl;
     return false;
-  }
-  if (cfg.qp_config != "rendezvous" && cfg.qp_config != "hsb_fpga") {
-    std::cerr << "ERROR: unknown --qp_config=" << cfg.qp_config
-              << " (expected rendezvous or hsb_fpga)" << std::endl;
-    return false;
-  }
-  if (cfg.qp_config == "hsb_fpga") {
-    if (cfg.transport != "cpu_roce") {
-      std::cerr << "ERROR: --qp_config=hsb_fpga requires --transport=cpu_roce"
-                << std::endl;
-      return false;
-    }
-    if (cfg.peer_ip.empty()) {
-      std::cerr << "ERROR: --qp_config=hsb_fpga requires --peer-ip=<FPGA or "
-                   "emulator IPv4>"
-                << std::endl;
-      return false;
-    }
-    // The HSB receive queue is WQE_NUM=64 deep; a deeper ring would alias two
-    // slots per WQE and race RX against TX (same constraint as the Hololink
-    // bridges).
-    constexpr std::uint32_t kHsbWqeNum = 64;
-    if (cfg.num_slots > kHsbWqeNum) {
-      std::cerr << "WARNING: --num-slots=" << cfg.num_slots << " exceeds the "
-                << "HSB WQE depth; clamping to " << kHsbWqeNum << std::endl;
-      cfg.num_slots = kHsbWqeNum;
-    }
   }
   return true;
 }
@@ -211,278 +258,119 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
 std::atomic<int> g_shutdown{0};
 void on_signal(int) { g_shutdown.store(1, std::memory_order_release); }
 
-// Transport-agnostic view of one wired-up transceiver: the four ring
-// addresses the dispatcher consumes, plus a teardown hook. Both transports
-// provide the identical ring contract (see udp_wrapper.h / roce_wrapper.h).
-struct TransportEndpoints {
-  volatile std::uint64_t *rx_flags = nullptr;
-  volatile std::uint64_t *tx_flags = nullptr;
-  std::uint8_t *rx_data = nullptr;
-  std::uint8_t *tx_data = nullptr;
-  std::function<void()> shutdown;
+/// Env-gated /dev/cpu_dma_latency hold: while the fd stays open, the kernel
+/// keeps every CPU out of idle states whose exit latency exceeds the written
+/// target, removing the deep-idle wakeup tail (~90 us outliers at p99) from
+/// served RPCs.  QEC_DECODING_SERVER_CPU_DMA_LATENCY_US = target in
+/// microseconds (0 = shallowest idle only); requires write access to
+/// /dev/cpu_dma_latency (root).  Failure warns and continues -- it is a
+/// latency QoS, not a correctness requirement.  In-process applications hold
+/// the fd themselves; this belongs to the process owner, hence the tool.
+class CpuDmaLatencyHold {
+public:
+  CpuDmaLatencyHold() {
+    const char *env = std::getenv("QEC_DECODING_SERVER_CPU_DMA_LATENCY_US");
+    if (!env || !env[0])
+      return;
+    const int32_t target_us = std::atoi(env);
+    fd_ = ::open("/dev/cpu_dma_latency", O_WRONLY);
+    if (fd_ < 0 || ::write(fd_, &target_us, sizeof(target_us)) !=
+                       static_cast<ssize_t>(sizeof(target_us))) {
+      std::cerr << "WARNING: cannot hold /dev/cpu_dma_latency at " << target_us
+                << " us (need root); deep-idle wakeup outliers remain"
+                << std::endl;
+      if (fd_ >= 0) {
+        ::close(fd_);
+        fd_ = -1;
+      }
+      return;
+    }
+    std::cout << "QEC_DECODING_SERVER_CPU_DMA_LATENCY held at " << target_us
+              << " us" << std::endl;
+  }
+  ~CpuDmaLatencyHold() {
+    if (fd_ >= 0)
+      ::close(fd_);
+  }
+  CpuDmaLatencyHold(const CpuDmaLatencyHold &) = delete;
+  CpuDmaLatencyHold &operator=(const CpuDmaLatencyHold &) = delete;
+
+private:
+  int fd_ = -1;
 };
 
-// Publish the rendezvous endpoint for the test fixture. Emitted once the
-// caller can start connecting (udp: socket bound; cpu_roce: TCP rendezvous
-// listening).
-void print_ready(std::uint16_t port, const std::string &extra) {
-  std::cout << "QEC_DECODING_SERVER_READY port=" << port
-            << (extra.empty() ? "" : " ") << extra << std::endl;
-  std::cout.flush();
-}
-
-bool init_udp_transport(const ServerConfig &cfg, TransportEndpoints &tp) {
-  cpu_udp_transceiver_t xcvr =
-      cpu_udp_create_transceiver(cfg.slot_size, cfg.num_slots);
-  if (!xcvr) {
-    std::cerr << "ERROR: udp transceiver create failed" << std::endl;
-    return false;
-  }
-  if (!cpu_udp_bind(xcvr, cfg.port) || !cpu_udp_start(xcvr)) {
-    std::cerr << "ERROR: udp transceiver bind/start failed" << std::endl;
-    cpu_udp_destroy_transceiver(xcvr);
-    return false;
-  }
-  tp.rx_flags = reinterpret_cast<volatile std::uint64_t *>(
-      cpu_udp_get_rx_ring_flag_addr(xcvr));
-  tp.tx_flags = reinterpret_cast<volatile std::uint64_t *>(
-      cpu_udp_get_tx_ring_flag_addr(xcvr));
-  tp.rx_data =
-      reinterpret_cast<std::uint8_t *>(cpu_udp_get_rx_ring_data_addr(xcvr));
-  tp.tx_data =
-      reinterpret_cast<std::uint8_t *>(cpu_udp_get_tx_ring_data_addr(xcvr));
-  tp.shutdown = [xcvr] {
-    cpu_udp_close(xcvr);
-    cpu_udp_destroy_transceiver(xcvr);
-  };
-  print_ready(cpu_udp_get_port(xcvr), "transport=udp");
-  return true;
-}
-
-#ifdef QEC_HAVE_CPU_ROCE_TRANSPORT
-
-// Must match CpuRoceChannel's RendezvousInfo byte-for-byte (network order).
-struct RendezvousInfo {
-  std::uint32_t qp_number = 0;
-  std::uint32_t rkey = 0;
-  std::uint32_t roce_ipv4 = 0;
-};
-
-bool write_all(int fd, const void *buf, std::size_t len) {
-  const auto *p = static_cast<const std::uint8_t *>(buf);
-  while (len > 0) {
-    const ssize_t n = ::write(fd, p, len);
-    if (n <= 0) {
-      if (n < 0 && errno == EINTR)
-        continue;
-      return false;
-    }
-    p += n;
-    len -= static_cast<std::size_t>(n);
-  }
-  return true;
-}
-
-bool read_all(int fd, void *buf, std::size_t len) {
-  auto *p = static_cast<std::uint8_t *>(buf);
-  while (len > 0) {
-    const ssize_t n = ::read(fd, p, len);
-    if (n <= 0) {
-      if (n < 0 && errno == EINTR)
-        continue;
-      return false;
-    }
-    p += n;
-    len -= static_cast<std::size_t>(n);
-  }
-  return true;
-}
-
-// Service-end CPU RoCE bring-up, mirroring cpu_roce_test_daemon: transceiver
-// setup, TCP rendezvous server (READY printed once listening; blocks in
-// accept until the caller channel connects), QP/rkey swap, connect, monitor
-// thread.  tx_mode=RDMA_SEND: we Send responses; the caller Writes requests.
-bool init_cpu_roce_transport(const ServerConfig &cfg, TransportEndpoints &tp) {
-  cpu_roce_transceiver_t xcvr = cpu_roce_create_transceiver(
-      cfg.device.c_str(), /*ib_port=*/1, /*tx_ibv_qp=*/0u,
-      /*frame_size=*/cfg.slot_size, /*page_size=*/cfg.slot_size, cfg.num_slots,
-      /*peer_ip=*/"0.0.0.0", /*forward=*/0, /*rx_only=*/0, /*tx_only=*/0,
-      /*unified=*/0, CPU_ROCE_TX_MODE_RDMA_SEND, /*peer_rx_base_addr=*/0,
-      /*peer_rx_rkey=*/0);
-  if (!xcvr) {
-    std::cerr << "ERROR: cpu_roce transceiver create failed" << std::endl;
-    return false;
-  }
-  cpu_roce_set_local_ip(xcvr, cfg.local_ip.c_str());
-  if (!cpu_roce_setup(xcvr)) {
-    std::cerr << "ERROR: cpu_roce transceiver setup() failed" << std::endl;
-    cpu_roce_destroy_transceiver(xcvr);
-    return false;
-  }
-
-  // TCP rendezvous server: mirror of CpuRoceChannel::exchangeRendezvous
-  // (server reads the caller's {qp, rkey, ip} first, then replies).
-  const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (listen_fd < 0) {
-    std::cerr << "ERROR: rendezvous socket() failed" << std::endl;
-    cpu_roce_destroy_transceiver(xcvr);
-    return false;
-  }
-  int reuse = 1;
-  ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-  sockaddr_in srv{};
-  srv.sin_family = AF_INET;
-  srv.sin_addr.s_addr = htonl(INADDR_ANY);
-  srv.sin_port = htons(cfg.port);
-  if (::bind(listen_fd, reinterpret_cast<sockaddr *>(&srv), sizeof(srv)) != 0 ||
-      ::listen(listen_fd, 1) != 0) {
-    std::cerr << "ERROR: rendezvous bind/listen failed" << std::endl;
-    ::close(listen_fd);
-    cpu_roce_destroy_transceiver(xcvr);
-    return false;
-  }
-  socklen_t srvlen = sizeof(srv);
-  ::getsockname(listen_fd, reinterpret_cast<sockaddr *>(&srv), &srvlen);
-  print_ready(ntohs(srv.sin_port),
-              "transport=cpu_roce roce_ip=" + cfg.local_ip);
-
-  const int conn_fd = ::accept(listen_fd, nullptr, nullptr);
-  ::close(listen_fd);
-  if (conn_fd < 0) {
-    std::cerr << "ERROR: rendezvous accept() failed" << std::endl;
-    cpu_roce_destroy_transceiver(xcvr);
-    return false;
-  }
-  int one = 1;
-  ::setsockopt(conn_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
-  RendezvousInfo peer{};
-  in_addr local_addr{};
-  ::inet_pton(AF_INET, cfg.local_ip.c_str(), &local_addr);
-  const RendezvousInfo self{htonl(cpu_roce_get_qp_number(xcvr)),
-                            htonl(cpu_roce_get_rkey(xcvr)), local_addr.s_addr};
-  if (!read_all(conn_fd, &peer, sizeof(peer)) ||
-      !write_all(conn_fd, &self, sizeof(self))) {
-    std::cerr << "ERROR: rendezvous exchange failed" << std::endl;
-    ::close(conn_fd);
-    cpu_roce_destroy_transceiver(xcvr);
-    return false;
-  }
-  ::close(conn_fd);
-
-  char peer_ip[INET_ADDRSTRLEN] = {0};
-  in_addr peer_addr{};
-  peer_addr.s_addr = peer.roce_ipv4;
-  ::inet_ntop(AF_INET, &peer_addr, peer_ip, sizeof(peer_ip));
-  // We Send responses (no RDMA Writes to the caller), so no peer rkey needed.
-  if (!cpu_roce_connect(xcvr, ntohl(peer.qp_number), peer_ip,
-                        /*peer_rx_rkey=*/0)) {
-    std::cerr << "ERROR: cpu_roce transceiver connect() failed" << std::endl;
-    cpu_roce_destroy_transceiver(xcvr);
-    return false;
-  }
-
-  auto *monitor = new std::thread([xcvr] { cpu_roce_blocking_monitor(xcvr); });
-
-  tp.rx_flags = reinterpret_cast<volatile std::uint64_t *>(
-      cpu_roce_get_rx_ring_flag_addr(xcvr));
-  tp.tx_flags = reinterpret_cast<volatile std::uint64_t *>(
-      cpu_roce_get_tx_ring_flag_addr(xcvr));
-  tp.rx_data =
-      reinterpret_cast<std::uint8_t *>(cpu_roce_get_rx_ring_data_addr(xcvr));
-  tp.tx_data =
-      reinterpret_cast<std::uint8_t *>(cpu_roce_get_tx_ring_data_addr(xcvr));
-  tp.shutdown = [xcvr, monitor] {
-    cpu_roce_close(xcvr);
-    if (monitor->joinable())
-      monitor->join();
-    delete monitor;
-    cpu_roce_destroy_transceiver(xcvr);
-  };
-  return true;
-}
-
-// CPU RoCE bring-up for the HSB FPGA QP-exchange method, mirroring
-// cuda-quantum's hsb_bridge_cpu.cpp (the proven CPU<->FPGA precedent): the
-// peer QP is a CLI input (the FPGA's fixed data-plane QP, or the emulator's),
-// the transceiver is created one-shot with the peer already known
-// (cpu_roce_start, no TCP rendezvous / no connect step), and this server
-// publishes its own QP / RKey / Buffer Addr on stdout in the canonical bridge
-// handshake format.  The orchestration script scrapes those values and hands
-// them to the playback tool, which alone programs the FPGA SIF over the
-// Hololink control plane (DataChannel::authenticate / configure_roce) -- this
-// server performs NO control-plane traffic.
+// Resolve a --transport value to the provider shared library to load:
+// anything with a '/' is a caller-supplied library path (the partner
+// drop-in); a bare name maps to libcudaq-realtime-bridge-<name>.so next to
+// the CUDA-Q realtime libraries (QEC_BRIDGE_PROVIDER_DIR, baked in by
+// CMake), falling back to the bare soname for the dynamic loader's regular
+// search path.
 //
-// tx_mode=RDMA_SEND: the FPGA/emulator posts receive WQEs for the
-// server->FPGA direction and RDMA-WRITEs requests into our ring, exactly as
-// with hsb_bridge_cpu.
-bool init_cpu_roce_hsb_fpga_transport(const ServerConfig &cfg,
-                                      TransportEndpoints &tp) {
-  const std::size_t frame_size =
-      cfg.frame_size ? cfg.frame_size : cfg.slot_size;
-
-  std::cout << "HSB FPGA QP exchange:\n"
-            << "  Device:     " << cfg.device << "\n"
-            << "  Peer IP:    " << cfg.peer_ip << "\n"
-            << "  Remote QP:  0x" << std::hex << cfg.remote_qp << std::dec
-            << "\n"
-            << "  Slots:      " << cfg.num_slots << "\n"
-            << "  Slot size:  " << cfg.slot_size << " bytes\n"
-            << "  Frame size: " << frame_size << " bytes" << std::endl;
-
-  cpu_roce_transceiver_t xcvr = cpu_roce_create_transceiver(
-      cfg.device.c_str(), /*ib_port=*/1, /*tx_ibv_qp=*/cfg.remote_qp,
-      frame_size, /*page_size=*/cfg.slot_size, cfg.num_slots,
-      cfg.peer_ip.c_str(), /*forward=*/0, /*rx_only=*/0, /*tx_only=*/0,
-      /*unified=*/0, CPU_ROCE_TX_MODE_RDMA_SEND, /*peer_rx_base_addr=*/0,
-      /*peer_rx_rkey=*/0);
-  if (!xcvr) {
-    std::cerr << "ERROR: cpu_roce transceiver create failed" << std::endl;
-    return false;
+// Provider names are snake_case in YAML/CLI (udp, cpu_roce, gpu_roce)
+// while cudaq-realtime ships hyphenated sonames
+// (libcudaq-realtime-bridge-cpu-roce.so, ...-gpu-roce.so), so '_' in a
+// bare name maps to '-'.  The provider dir is probed with the literal
+// spelling as a fallback so an out-of-tree provider whose soname really
+// does contain an underscore keeps resolving.
+std::string resolve_provider_lib(const std::string &transport) {
+  if (transport.find('/') != std::string::npos)
+    return transport;
+  std::string hyphenated = transport;
+  std::replace(hyphenated.begin(), hyphenated.end(), '_', '-');
+  const std::string soname = "libcudaq-realtime-bridge-" + hyphenated + ".so";
+#ifdef QEC_BRIDGE_PROVIDER_DIR
+  const std::string literal = "libcudaq-realtime-bridge-" + transport + ".so";
+  for (const auto &name : {soname, literal}) {
+    const std::string candidate =
+        std::string(QEC_BRIDGE_PROVIDER_DIR) + "/" + name;
+    if (std::ifstream(candidate).good())
+      return candidate;
   }
-  if (!cpu_roce_start(xcvr)) {
-    std::cerr << "ERROR: cpu_roce_start failed" << std::endl;
-    cpu_roce_destroy_transceiver(xcvr);
-    return false;
-  }
-
-  auto *monitor = new std::thread([xcvr] { cpu_roce_blocking_monitor(xcvr); });
-
-  tp.rx_flags = reinterpret_cast<volatile std::uint64_t *>(
-      cpu_roce_get_rx_ring_flag_addr(xcvr));
-  tp.tx_flags = reinterpret_cast<volatile std::uint64_t *>(
-      cpu_roce_get_tx_ring_flag_addr(xcvr));
-  tp.rx_data =
-      reinterpret_cast<std::uint8_t *>(cpu_roce_get_rx_ring_data_addr(xcvr));
-  tp.tx_data =
-      reinterpret_cast<std::uint8_t *>(cpu_roce_get_tx_ring_data_addr(xcvr));
-  tp.shutdown = [xcvr, monitor] {
-    cpu_roce_close(xcvr);
-    if (monitor->joinable())
-      monitor->join();
-    delete monitor;
-    cpu_roce_destroy_transceiver(xcvr);
-  };
-
-  // Canonical bridge handshake.  Format MUST match hololink_bridge_common.h
-  // exactly -- "  KEY: VALUE", single space after the colon -- because the
-  // orchestration script parses it with strict regexes (same contract as
-  // hsb_bridge_cpu.cpp and the Hololink GPU bridges).  Buffer Addr is 0 with
-  // an iova=0 MR registration; the playback tool handles that.
-  std::cout << "\n=== Bridge Ready ===" << std::endl;
-  std::cout << "  QP Number: 0x" << std::hex << cpu_roce_get_qp_number(xcvr)
-            << std::dec << std::endl;
-  std::cout << "  RKey: " << cpu_roce_get_rkey(xcvr) << std::endl;
-  std::cout << "  Buffer Addr: 0x" << std::hex << cpu_roce_get_buffer_addr(xcvr)
-            << std::dec << std::endl;
-  std::cout.flush();
-
-  print_ready(/*port=*/0,
-              "transport=cpu_roce qp_config=hsb_fpga peer_ip=" + cfg.peer_ip);
-  return true;
+#endif
+  return soname;
 }
 
-#endif // QEC_HAVE_CPU_ROCE_TRANSPORT
+bool is_gpu_roce_provider(const std::string &provider) {
+  const auto slash = provider.find_last_of('/');
+  const std::string name =
+      slash == std::string::npos ? provider : provider.substr(slash + 1);
+  return name == "gpu_roce" || name == "gpu-roce" ||
+         name == "libcudaq-realtime-bridge-gpu-roce.so" ||
+         name == "libcudaq-realtime-bridge-gpu_roce.so";
+}
+
+bool is_gpu_argument(const std::string &arg) {
+  return arg == "--gpu" || starts_with(arg, "--gpu=");
+}
+
+// Provider MODE flags (gpu_roce: GPU unified / echo kernel; udp: CPU data
+// plane).  A ring consumed through the provider's RING_BUFFER context (every
+// device_graph ring, every gpu_roce ring) needs the provider's default
+// 3-kernel shape, so these are rejected in such rings' YAML arguments; host
+// rings get --unified from the server under --host-loop=unified.
+bool is_transport_mode_argument(const std::string &arg) {
+  return arg == "--unified" || arg == "--forward";
+}
+
+// Split a provider endpoint-info line into its port and the remaining
+// tokens.
+std::uint16_t split_endpoint_info(const std::string &endpoint_info,
+                                  std::string &rest) {
+  std::uint16_t port = 0;
+  std::istringstream in(endpoint_info);
+  std::string token;
+  while (in >> token) {
+    if (starts_with(token, "port=")) {
+      try {
+        port = static_cast<std::uint16_t>(std::stoul(token.substr(5)));
+      } catch (const std::exception &) {
+        port = 0; // malformed provider endpoint token; keep the rest
+      }
+    } else
+      rest += (rest.empty() ? "" : " ") + token;
+  }
+  return port;
+}
 
 } // namespace
 
@@ -490,6 +378,9 @@ int main(int argc, char **argv) {
   ServerConfig cfg;
   if (!parse_args(argc, argv, cfg))
     return 1;
+
+  // Held for the whole run (env-gated no-op when unset); see the class doc.
+  CpuDmaLatencyHold dma_latency_hold;
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -505,8 +396,15 @@ int main(int argc, char **argv) {
   }
   std::stringstream config_text;
   config_text << config_file.rdbuf();
-  auto decoder_config =
-      config::multi_decoder_config::from_yaml_str(config_text.str());
+  config::multi_decoder_config decoder_config;
+  try {
+    decoder_config =
+        config::multi_decoder_config::from_yaml_str(config_text.str());
+  } catch (const std::exception &e) {
+    std::cerr << "ERROR: failed to parse " << cfg.config_path << ": "
+              << e.what() << std::endl;
+    return 1;
+  }
   if (decoder_config.decoders.empty()) {
     std::cerr << "ERROR: no decoders parsed from " << cfg.config_path
               << std::endl;
@@ -517,28 +415,162 @@ int main(int argc, char **argv) {
   std::cout << "Configured " << decoder_config.decoders.size()
             << " decoder(s); decoder 0 type: "
             << decoder_config.decoders[0].type
-            << "; transport: " << cfg.transport << std::endl;
+            << "; transport: " << cfg.transport
+            << "; host loop: " << host_loop_name(cfg.host_loop) << std::endl;
 
-  // [2a] GPU RoCE takes a completely different path: bypass the CQR
-  // DeviceCallService / HOST_CALL dispatcher and use DecodingServer directly.
-  // Must be checked before force-linking the CQR plugin (which creates a
-  // DecodingServer internally for the HOST_CALL path) to avoid double-init.
-#ifdef QEC_HAVE_GPU_ROCE_TRANSPORT
-  if (cfg.transport == "gpu_roce") {
-    // DecodingServer(config_yaml) reads the YAML, creates GpuRoceTransceiver
-    // (Hololink Sensor Bridge + DOCA), loads decoder sessions, and calls
-    // launch_scheduler() to wire the CUDAQ device-graph scheduler to the
-    // Hololink ring buffers.  The GPU scheduler then handles
+  // The wire's identity lives in the YAML transport section; --transport is
+  // only a fallback default for configs that intentionally leave the wire
+  // unspecified (one YAML reused across wires, selected per launch).  A
+  // config that names a provider cannot be contradicted from the command
+  // line -- that is a configuration error, not a precedence question.
+  const bool yaml_names_provider =
+      !decoder_config.transport.provider.empty() ||
+      !decoder_config.transport.device_graph.provider.empty();
+  if (cfg.transport_from_cli && yaml_names_provider) {
+    std::cerr << "ERROR: --transport=" << cfg.transport
+              << " conflicts with the transport section in " << cfg.config_path
+              << " (the YAML names the provider; drop the CLI flag or remove "
+                 "the provider from the YAML)"
+              << std::endl;
+    return 1;
+  }
+
+  // The dispatch SHAPE comes from the decoder config (dispatch:
+  // host|device_graph); --transport only ever names the wire.  An
+  // all-device_graph config takes the standalone DecodingServer path below
+  // ([2a], the HSB flow); any other mix runs the composed per-decoder ring
+  // loop, where each decoder's ring gets the consumer its dispatch shape
+  // requires (host dispatcher thread, or device-graph scheduler).
+  const bool all_device_graph =
+      std::all_of(decoder_config.decoders.begin(),
+                  decoder_config.decoders.end(), [](const auto &d) {
+                    return d.dispatch == config::DecoderDispatch::device_graph;
+                  });
+  const bool has_device_graph =
+      std::any_of(decoder_config.decoders.begin(),
+                  decoder_config.decoders.end(), [](const auto &d) {
+                    return d.dispatch == config::DecoderDispatch::device_graph;
+                  });
+  const bool has_host = !all_device_graph;
+  const auto resolved_device_graph =
+      decoder_config.transport.resolve_device_graph();
+  const std::string resolved_host_provider =
+      decoder_config.transport.provider.empty()
+          ? cfg.transport
+          : decoder_config.transport.provider;
+  const bool host_uses_gpu_roce =
+      has_host && is_gpu_roce_provider(resolved_host_provider);
+  // device_graph providers own GPU-visible rings and must be reproducible from
+  // the deployment YAML in every server topology. Generic CLI provider
+  // arguments are intentionally rejected rather than guessed to belong to a
+  // host ring in a mixed-dispatch configuration.
+  if (has_device_graph && resolved_device_graph.provider.empty()) {
+    std::cerr << "ERROR: a config containing device_graph dispatch must name "
+                 "its transport provider in the YAML transport section"
+              << std::endl;
+    return 1;
+  }
+  if (host_uses_gpu_roce && decoder_config.transport.provider.empty()) {
+    std::cerr << "ERROR: gpu_roce transport must be selected and configured "
+                 "in the YAML transport section"
+              << std::endl;
+    return 1;
+  }
+  if ((has_device_graph || host_uses_gpu_roce) && !cfg.provider_args.empty()) {
+    std::cerr << "ERROR: provider arguments for device_graph or gpu_roce "
+                 "transport must be set in the YAML transport section"
+              << std::endl;
+    return 1;
+  }
+  const bool device_graph_sets_gpu =
+      has_device_graph &&
+      std::any_of(resolved_device_graph.args.begin(),
+                  resolved_device_graph.args.end(), is_gpu_argument);
+  const bool host_gpu_roce_sets_gpu =
+      host_uses_gpu_roce &&
+      std::any_of(decoder_config.transport.args.begin(),
+                  decoder_config.transport.args.end(), is_gpu_argument);
+  if (device_graph_sets_gpu) {
+    std::cerr << "ERROR: device_graph transport arguments must not set --gpu; "
+                 "set decoder cuda_device_id in YAML instead"
+              << std::endl;
+    return 1;
+  }
+  if (host_gpu_roce_sets_gpu) {
+    std::cerr << "ERROR: gpu_roce transport arguments must not set --gpu; set "
+                 "decoder cuda_device_id in YAML instead"
+              << std::endl;
+    return 1;
+  }
+  // Provider MODE flags (--unified/--forward) select a shape other than the
+  // ring-buffer (3-kernel) one, which is the shape every ring consumed
+  // through the RING_BUFFER context needs: device_graph rings (GPU scheduler)
+  // and gpu_roce host rings.  Rejected up front like --gpu.  gpu_roce serves
+  // no CPU data plane at all, so --host-loop=unified is refused for its host
+  // rings here, before any provider is created.
+  if (has_device_graph && std::any_of(resolved_device_graph.args.begin(),
+                                      resolved_device_graph.args.end(),
+                                      is_transport_mode_argument)) {
+    std::cerr << "ERROR: device_graph transport arguments must not set "
+                 "--unified or --forward: the device-graph consumer requires "
+                 "the provider's ring-buffer (3-kernel) shape (device_graph "
+                 "rings inherit the section-level transport.args; under "
+                 "--host-loop=unified the server passes --unified to host "
+                 "rings itself)"
+              << std::endl;
+    return 1;
+  }
+  if (host_uses_gpu_roce && std::any_of(decoder_config.transport.args.begin(),
+                                        decoder_config.transport.args.end(),
+                                        is_transport_mode_argument)) {
+    std::cerr << "ERROR: gpu_roce transport arguments must not set --unified "
+                 "or --forward: a gpu_roce host ring is consumed through the "
+                 "provider's ring-buffer (3-kernel) shape"
+              << std::endl;
+    return 1;
+  }
+  if (cfg.host_loop == HostLoop::unified && host_uses_gpu_roce) {
+    std::cerr << "ERROR: --host-loop=unified is not supported for gpu_roce "
+                 "host rings: gpu_roce serves no CPU data plane (use "
+                 "--host-loop=threaded)"
+              << std::endl;
+    return 1;
+  }
+  // An all-device_graph config has no host ring for --host-loop to drive
+  // (the standalone [2a] path below never reads it), so the flag is refused
+  // rather than reported as active on the info line.
+  if (cfg.host_loop == HostLoop::unified && all_device_graph) {
+    std::cerr << "ERROR: --host-loop=unified has no host ring to drive: every "
+                 "decoder in this config uses device_graph dispatch (drop the "
+                 "flag)"
+              << std::endl;
+    return 1;
+  }
+
+  // [2a] device_graph dispatch takes a different shape (device-side
+  // scheduler): bypass the CQR DeviceCallService / HOST_CALL dispatcher and
+  // use DecodingServer directly.  Must be checked before force-linking the
+  // CQR plugin (which creates a DecodingServer internally for the HOST_CALL
+  // path) to avoid double-init.
+#ifdef QEC_HAVE_DEVICE_GRAPH_DISPATCH
+  if (all_device_graph) {
+    // DecodingServer(config_yaml) reads the YAML, creates the
+    // DeviceGraphTransceiver from the YAML transport section, loads decoder
+    // sessions, and calls launch_scheduler() to wire the CUDA-Q device-graph
+    // scheduler to the provider's GPU rings. The GPU scheduler then handles
     // RX→dispatch→decode→TX autonomously; this thread just waits for signal.
     //
-    // Construction throws when the GPU RoCE component is not linked into
-    // this binary (built against HSB/DOCA headers but without the
-    // proprietary cudevice archive) or when Hololink bring-up fails.
+    // Construction throws when the device-graph component is not linked into
+    // this binary (no proprietary cudevice archive) or when provider
+    // bring-up fails.
+    //
+    // The standalone device-graph transport has no CLI or environment
+    // fallback: the deployment YAML is its single source of truth.
     try {
       cudaq::qec::decoding_server::DecodingServer server(cfg.config_path);
       // QP/rkey/buf already printed to stdout by launch_scheduler() so the
       // orchestration script can grep them before the READY line.
-      std::cout << "QEC_DECODING_SERVER_READY gpu_roce" << std::endl;
+      std::cout << "QEC_DECODING_SERVER_READY device_graph" << std::endl;
       std::cout.flush();
       std::thread server_thread([&server] { server.run(); });
       const auto start_time_gr = std::chrono::steady_clock::now();
@@ -554,116 +586,423 @@ int main(int argc, char **argv) {
       server.stop();
       server_thread.join();
     } catch (const std::exception &e) {
-      std::cerr << "ERROR: gpu_roce startup failed: " << e.what() << std::endl;
+      std::cerr << "ERROR: device_graph startup failed: " << e.what()
+                << std::endl;
       return 1;
     }
     return 0;
   }
+#else
+  if (all_device_graph) {
+    std::cerr << "ERROR: this server was built without device_graph dispatch "
+                 "support (CUDA-Q realtime bridge API or "
+                 "cudaq-realtime-dispatch not found at build time)"
+              << std::endl;
+    return 1;
+  }
 #endif
 
   // [2] Pull the QEC HOST_CALL function table from the decoding-server-cqr
-  // service plugin -- the same table the in-process host_dispatch test uses.
-  cudaqx_qec_realtime_device_call_service_force_link();
-  auto pluginInfo = cudaqGetDeviceCallServicePluginInfo();
-  if (!pluginInfo.getService) {
-    std::cerr << "ERROR: QEC device_call service plugin missing" << std::endl;
-    return 1;
-  }
-  auto *service = pluginInfo.getService();
-  if (!service) {
-    std::cerr << "ERROR: QEC device_call service create failed" << std::endl;
-    return 1;
-  }
-  // The session owns the function table; keep it alive for the server's
-  // lifetime (the dispatcher loop below reads table.entries in place).
-  // Creating it also starts the DecodingServer (decoder construction + one
-  // worker thread per decoder) -- before the READY line below, so slow
-  // decoder initialization never races the first client request.
-  std::unique_ptr<cudaq::realtime::DeviceCallServiceSession> session;
-  try {
-    session = service->createDispatchSession(
-        cudaq::realtime::DeviceCallDispatchMode::Host);
-  } catch (const std::exception &e) {
-    std::cerr << "ERROR: decoding-server startup failed: " << e.what()
+  // library -- the same table, built the same way, that the in-process
+  // host_dispatch users get.  They reach it through CUDA-Q's
+  // DeviceCallService discovery ABI; an external server needs the entries,
+  // not the discovery, so it calls the accessor directly and stays free of
+  // CUDA-Q.  The entries have process lifetime, so there is no session object
+  // to keep alive here.
+  //
+  // Building the table also starts the DecodingServer (decoder construction +
+  // one worker thread per decoder) -- before the READY line below, so slow
+  // decoder initialization never races the first client request.  A null
+  // return means that failed; the accessor has already reported why.
+  std::uint32_t entry_count = 0;
+  const cudaq_function_entry_t *entries =
+      cudaqx_qec_decoding_server_host_call_table(&entry_count);
+  if (!entries || entry_count == 0) {
+    std::cerr << "ERROR: decoding-server startup failed: QEC host dispatch "
+                 "table unavailable"
               << std::endl;
-    return 1;
-  }
-  if (!session) {
-    std::cerr << "ERROR: QEC device_call service does not support host "
-                 "dispatch"
-              << std::endl;
-    return 1;
-  }
-  const auto &table = session->dispatchTable();
-  if (!table.entries || table.count == 0) {
-    std::cerr << "ERROR: QEC host dispatch table unavailable" << std::endl;
     return 1;
   }
 
-  // [3] Bring up the selected transport (prints the READY line once the
-  // caller can start connecting).
-  TransportEndpoints tp;
-  if (cfg.transport == "udp") {
-    if (!init_udp_transport(cfg, tp))
+  // [3] Load the transport provider and bring up ONE RING PER DECODER: each
+  // decoder in the YAML gets its own provider instance (own endpoint), its
+  // own ring buffer, and its own dispatcher -- the two-process form of the
+  // one-ring-per-decoder topology (callers route with device_id ==
+  // decoder_id and per-device endpoint args, e.g. udp-port.<id>=<port>).
+  //
+  // create() takes each transport instance to the point where its endpoint
+  // identity is known (bound port / QP), so readiness for ALL rings is
+  // published in one line before any connect() -- which, for rendezvous-
+  // style transports, BLOCKS until the caller dials in.
+  const std::string default_provider = decoder_config.transport.provider.empty()
+                                           ? cfg.transport
+                                           : decoder_config.transport.provider;
+
+  struct DecoderRing {
+    std::int64_t decoder_id = 0;
+    bool device_graph = false;
+    int gpu_id = 0;
+    cudaq_realtime_bridge_handle_t bridge = nullptr;
+    std::uint32_t num_slots = 0;
+    std::uint32_t slot_size = 0;
+    std::uint16_t port = 0;
+    std::string endpoint_rest; // endpoint info minus the port token
+    int shutdown_flag = 0;
+    std::uint64_t dispatched = 0;
+    cudaq_dispatcher_t *dispatcher = nullptr; // host consumer
+    void *dg_consumer = nullptr;              // device-graph consumer
+    // The provider's CPU data plane for --host-loop=unified (host rings
+    // only), filled by the probe in [3].  cudaq_dispatcher_set_cpu_dataplane
+    // STORES this member's address, not a copy, so it lives in the ring: the
+    // rings vector is sized once and never resized, which keeps the address
+    // stable for the dispatcher's lifetime.
+    cudaq_cpu_dataplane_t dataplane{};
+  };
+  // Sized once up front: set_control hands the dispatcher pointers into
+  // these elements, so their addresses must not move.
+  std::vector<DecoderRing> rings(decoder_config.decoders.size());
+
+  cudaq_dispatch_manager_t *manager = nullptr;
+  const auto teardown_rings = [&]() {
+    for (auto &ring : rings) {
+      if (ring.dispatcher) {
+        cudaq_dispatcher_stop(ring.dispatcher);
+        cudaq_dispatcher_destroy(ring.dispatcher);
+        ring.dispatcher = nullptr;
+      }
+      if (ring.dg_consumer) {
+        // Consumer before bridge: the scheduler polls the provider's rings.
+        cudaqx_qec_device_graph_ring_consumer_shutdown(ring.dg_consumer);
+        ring.dispatched =
+            cudaqx_qec_device_graph_ring_consumer_dispatched(ring.dg_consumer);
+        cudaqx_qec_device_graph_ring_consumer_destroy(ring.dg_consumer);
+        ring.dg_consumer = nullptr;
+      }
+      if (ring.bridge) {
+        cudaq_bridge_disconnect(ring.bridge);
+        cudaq_bridge_destroy(ring.bridge);
+        ring.bridge = nullptr;
+      }
+    }
+    if (manager) {
+      cudaq_dispatch_manager_destroy(manager);
+      manager = nullptr;
+    }
+  };
+
+  for (std::size_t i = 0; i < rings.size(); ++i) {
+    auto &ring = rings[i];
+    const auto &dc = decoder_config.decoders[i];
+    ring.decoder_id = dc.id;
+    ring.device_graph = (dc.dispatch == config::DecoderDispatch::device_graph);
+    ring.gpu_id = dc.cuda_device_id.value_or(0);
+
+    // The wire is deployment config, resolved from the YAML's top-level
+    // `transport:` section (never from decoder entries).  Per-ring
+    // resolution: the section's dispatch-shape override (device_graph rings)
+    // > the section's provider/args. Host-only configurations may fall back
+    // to --transport when the YAML names no provider; device_graph rings are
+    // validated above to be fully YAML-configured.
+    // Every provider name/path resolves the same way --transport does; the
+    // bridge loader caches libraries per name, so different rings may load
+    // different provider libraries in one process.
+    const auto &transport_section = decoder_config.transport;
+    std::string ring_provider_name = default_provider;
+    std::vector<std::string> ring_extra_args;
+    if (ring.device_graph) {
+      const auto resolved = transport_section.resolve_device_graph();
+      ring_provider_name = resolved.provider;
+      ring_extra_args = std::move(resolved.args);
+    } else
+      ring_extra_args = transport_section.args;
+    const bool ring_uses_gpu_roce = is_gpu_roce_provider(ring_provider_name);
+    const std::string ring_lib = resolve_provider_lib(ring_provider_name);
+    // Provider parsers follow the C argv convention and start at argv[1].
+    // Keep the strings alive until create() returns, add a program-name
+    // placeholder, and only then form the char-pointer view. For a gpu_roce
+    // ring, cuda_device_id is the sole GPU-placement setting.
+    std::vector<std::string> ring_args{"decoding-server-transport"};
+    if (!ring.device_graph) {
+      ring_args.insert(ring_args.end(), cfg.provider_args.begin(),
+                       cfg.provider_args.end());
+    }
+    ring_args.insert(ring_args.end(), ring_extra_args.begin(),
+                     ring_extra_args.end());
+    // --host-loop=unified: by convention a host-ring provider selects its CPU
+    // data plane with --unified (udp does), so the server appends it here
+    // rather than making every launcher spell it.  A provider without the
+    // plane ignores the flag and fails the probe below.  An explicit copy in
+    // the forwarded arguments is harmless but redundant; say so once.
+    if (!ring.device_graph && cfg.host_loop == HostLoop::unified) {
+      const bool already_unified =
+          std::any_of(ring_args.begin() + 1, ring_args.end(),
+                      [](const std::string &a) { return a == "--unified"; });
+      if (already_unified) {
+        if (i == 0)
+          std::cout << "note: --unified is implied by --host-loop=unified; "
+                       "the explicit provider argument is redundant"
+                    << std::endl;
+      } else
+        ring_args.push_back("--unified");
+    }
+    if (ring.device_graph || ring_uses_gpu_roce)
+      ring_args.push_back("--gpu=" + std::to_string(ring.gpu_id));
+
+    std::vector<char *> ring_argv;
+    ring_argv.reserve(ring_args.size());
+    for (auto &a : ring_args)
+      ring_argv.push_back(a.data());
+
+    if (cudaq_bridge_create_from_library(&ring.bridge, ring_lib.c_str(),
+                                         static_cast<int>(ring_argv.size()),
+                                         ring_argv.data()) != CUDAQ_OK) {
+      std::cerr << "ERROR: failed to load/create transport provider '"
+                << ring_lib << "' for decoder " << ring.decoder_id << std::endl;
+      // A later ring failing where an earlier one succeeded is the signature
+      // of endpoint args that cannot be shared: every ring receives the same
+      // provider args, so an explicit --port=N binds ring 0 and collides on
+      // every ring after it.
+      const auto is_explicit_port = [](const std::string &a) {
+        return starts_with(a, "--port=") && a != "--port=0";
+      };
+      if (i > 0 && (std::any_of(cfg.provider_args.begin(),
+                                cfg.provider_args.end(), is_explicit_port) ||
+                    std::any_of(ring_extra_args.begin(), ring_extra_args.end(),
+                                is_explicit_port)))
+        std::cerr << "note: all " << rings.size()
+                  << " rings receive the same provider args; an explicit "
+                     "--port=N cannot be shared across rings -- use --port=0 "
+                     "and read each ring's port from the "
+                     "QEC_DECODING_SERVER_READY line"
+                  << std::endl;
+      if (cfg.host_loop == HostLoop::unified && !ring.device_graph)
+        std::cerr << "note: --host-loop=unified passed --unified to this "
+                     "provider; a provider that rejects unknown arguments "
+                     "cannot be driven unified (use --host-loop=threaded)"
+                  << std::endl;
+      teardown_rings();
       return 1;
-  } else if (cfg.transport == "cpu_roce") {
-#ifdef QEC_HAVE_CPU_ROCE_TRANSPORT
-    if (cfg.qp_config == "hsb_fpga") {
-      if (!init_cpu_roce_hsb_fpga_transport(cfg, tp))
+    }
+    // Dispatcher geometry comes from the provider, not from re-parsed CLI.
+    if (cudaq_bridge_get_ring_geometry(ring.bridge, &ring.num_slots,
+                                       &ring.slot_size) != CUDAQ_OK) {
+      std::cerr << "ERROR: transport provider does not report ring geometry "
+                   "(bridge interface v2 required)"
+                << std::endl;
+      teardown_rings();
+      return 1;
+    }
+    // --host-loop=unified: probe the provider's CPU data plane NOW, before
+    // READY and before connect(), so a provider that does not serve the
+    // unified shape (get_cpu_dataplane left NULL, or one that ignores the
+    // --unified the server passed) fails fast and visibly instead of after a
+    // client has been told to dial in.  The struct is handed to the
+    // dispatcher at [4]; set_cpu_dataplane keeps its address.  The unified
+    // loop dereferences the ring's host views and slot strides without
+    // checking them (validate_dispatcher only checks the threaded shape), so
+    // a plane returned with those unpopulated is rejected here as well.
+    if (cfg.host_loop == HostLoop::unified && !ring.device_graph) {
+      const cudaq_status_t status =
+          cudaq_bridge_get_cpu_dataplane(ring.bridge, &ring.dataplane);
+      if (status == CUDAQ_ERR_UNSUPPORTED) {
+        std::cerr << "ERROR: --host-loop=unified: transport provider '"
+                  << ring_lib
+                  << "' does not serve the unified CPU data plane (decoder "
+                  << ring.decoder_id
+                  << "; the server passed --unified, so this provider either "
+                     "predates the unified data plane or has none; use "
+                     "--host-loop=threaded)"
+                  << std::endl;
+        teardown_rings();
         return 1;
-    } else if (!init_cpu_roce_transport(cfg, tp))
-      return 1;
-#else
-    std::cerr << "ERROR: this server was built without cpu_roce transport "
-                 "support (libcudaq-realtime-cpu-roce-transport not found)"
-              << std::endl;
-    return 1;
-#endif
-  } else if (cfg.transport == "gpu_roce") {
-    // gpu_roce is handled before the CQR plugin force-link above ([2a]).
-    // Reaching here means QEC_HAVE_GPU_ROCE_TRANSPORT was not defined at
-    // build time (the server was not built with GPU RoCE support).
-    std::cerr << "ERROR: this server was built without gpu_roce transport "
-                 "support (rebuild with HOLOSCAN_SENSOR_BRIDGE_BUILD_DIR, "
-                 "DOCA, and CUDA)"
-              << std::endl;
-    return 1;
-  } else {
-    std::cerr << "ERROR: unknown --transport=" << cfg.transport
-              << " (expected udp, cpu_roce, or gpu_roce)" << std::endl;
+      }
+      if (status != CUDAQ_OK || !ring.dataplane.rx_poll ||
+          !ring.dataplane.tx_publish || !ring.dataplane.ring.rx_data_host ||
+          !ring.dataplane.ring.tx_data_host ||
+          ring.dataplane.ring.rx_stride_sz == 0 ||
+          ring.dataplane.ring.tx_stride_sz == 0) {
+        std::cerr << "ERROR: --host-loop=unified: transport provider '"
+                  << ring_lib
+                  << "' returned an incomplete CPU data plane (decoder "
+                  << ring.decoder_id << ")" << std::endl;
+        teardown_rings();
+        return 1;
+      }
+    }
+    char endpoint_info[512] = {0};
+    if (cudaq_bridge_get_endpoint_info(ring.bridge, endpoint_info,
+                                       sizeof(endpoint_info)) != CUDAQ_OK)
+      std::snprintf(endpoint_info, sizeof(endpoint_info), "transport=%s",
+                    ring_provider_name.c_str());
+    ring.port = split_endpoint_info(endpoint_info, ring.endpoint_rest);
+  }
+
+  // One READY line for all rings.  The leading `port=` token belongs to
+  // the FIRST decoder listed in the YAML (existing single-ring consumers
+  // sscanf it right after the prefix); each
+  // ring additionally publishes `ring<decoder_id>=<port>` for per-device
+  // endpoint wiring on the caller.
+  {
+    std::ostringstream ready;
+    ready << "QEC_DECODING_SERVER_READY port=" << rings[0].port;
+    if (!rings[0].endpoint_rest.empty())
+      ready << ' ' << rings[0].endpoint_rest;
+    for (const auto &ring : rings)
+      ready << " ring" << ring.decoder_id << '=' << ring.port;
+    std::cout << ready.str() << std::endl;
+    std::cout.flush();
+  }
+
+  // [4] Per ring: connect, adopt the ring context, and drive a
+  // libcudaq-realtime dispatcher object over it.  The dispatch table is
+  // HOST_CALL-only and SHARED by every ring (handlers route by the
+  // payload's decoder_id; a decoder's ring simply only ever carries its own
+  // id).
+  cudaq_function_table_t function_table{};
+  function_table.entries = const_cast<cudaq_function_entry_t *>(entries);
+  function_table.count = entry_count;
+
+  if (cudaq_dispatch_manager_create(&manager) != CUDAQ_OK) {
+    std::cerr << "ERROR: dispatch manager create failed" << std::endl;
+    teardown_rings();
     return 1;
   }
 
-  // [4] Wire the libcudaq-realtime host dispatcher to the transceiver rings,
-  // exactly as cpu_roce_test_daemon does. Everything from here down is
-  // transport-independent.
-  // The dispatch table is HOST_CALL-only, so the ring loop runs the inline
-  // HOST_CALL path with no GRAPH_LAUNCH engine (engine == nullptr). Mirrors the
-  // HOST_CALL-only branch in qec_realtime_session.cpp.
-  int dispatcher_shutdown = 0;
-  std::uint64_t packets_dispatched = 0;
-  cudaq_ringbuffer_t ringbuffer{};
-  ringbuffer.rx_flags_host = tp.rx_flags;
-  ringbuffer.tx_flags_host = tp.tx_flags;
-  ringbuffer.rx_data_host = tp.rx_data;
-  ringbuffer.tx_data_host = tp.tx_data;
-  ringbuffer.rx_stride_sz = cfg.slot_size;
-  ringbuffer.tx_stride_sz = cfg.slot_size;
-  cudaq_dispatcher_config_t dispatch_config{};
-  dispatch_config.num_slots = cfg.num_slots;
-  dispatch_config.slot_size = static_cast<std::uint32_t>(cfg.slot_size);
-  dispatch_config.dispatch_path = CUDAQ_DISPATCH_PATH_HOST;
-  dispatch_config.dispatch_mode = CUDAQ_DISPATCH_HOST_CALL;
-  dispatch_config.skip_tx_markers = 1;
-  cudaq_function_table_t function_table{};
-  function_table.entries = table.entries;
-  function_table.count = table.count;
+  // The ring-buffer context is what the flag-polling consumers adopt (the
+  // threaded host dispatcher and the device-graph scheduler).  A provider
+  // started in its unified mode serves rx_poll/tx_publish instead and refuses
+  // this query, hence the hint, which applies to host rings.  A device_graph
+  // ring's mode flags are rejected at startup, so reaching this there means
+  // the provider serves no RING_BUFFER context at all.
+  const auto fetch_ringbuffer = [&](const DecoderRing &ring,
+                                    cudaq_ringbuffer_t &ringbuffer) {
+    if (cudaq_bridge_get_transport_context(ring.bridge, RING_BUFFER,
+                                           &ringbuffer) != CUDAQ_OK) {
+      std::cerr << "ERROR: transport provider has no ring-buffer context "
+                   "(decoder "
+                << ring.decoder_id << ")";
+      if (ring.device_graph)
+        std::cerr << ": the device-graph consumer requires the provider's "
+                     "ring-buffer context in its default (3-kernel) shape";
+      else
+        std::cerr << " (if the provider was started in its unified mode, pass "
+                     "--host-loop=unified)";
+      std::cerr << std::endl;
+      return false;
+    }
+    return true;
+  };
 
-  std::thread dispatcher_thread([&]() {
-    cudaq_host_ring_dispatch_loop(
-        &ringbuffer, &function_table, &dispatch_config,
-        /*engine=*/nullptr, &dispatcher_shutdown, &packets_dispatched);
-  });
+  for (auto &ring : rings) {
+    if (cudaq_bridge_connect(ring.bridge) != CUDAQ_OK) {
+      std::cerr << "ERROR: transport provider connect() failed (decoder "
+                << ring.decoder_id << ")" << std::endl;
+      teardown_rings();
+      return 1;
+    }
+
+    if (ring.device_graph) {
+      // Attach the device-graph scheduler as this ring's consumer: RX ->
+      // dispatch -> decode -> TX runs on the GPU over the provider's
+      // (GPU-pollable) rings.  The decoder's captured decode graph comes
+      // from the CQR plugin's registry (built at [2], before READY).
+      cudaq_ringbuffer_t ringbuffer{};
+      if (!fetch_ringbuffer(ring, ringbuffer)) {
+        teardown_rings();
+        return 1;
+      }
+      if (!cudaqx_qec_make_device_graph_ring_consumer) {
+        std::cerr << "ERROR: decoder " << ring.decoder_id
+                  << " requests device_graph dispatch but the device-graph "
+                     "component is not linked into this binary (set "
+                     "CUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE)"
+                  << std::endl;
+        teardown_rings();
+        return 1;
+      }
+      void *graph_resources = cudaqx_qec_decoding_server_graph_resources(
+          static_cast<std::uint64_t>(ring.decoder_id));
+      if (!graph_resources) {
+        std::cerr << "ERROR: decoder " << ring.decoder_id
+                  << " requests device_graph dispatch but did not capture a "
+                     "decode graph (decoder must support graph dispatch)"
+                  << std::endl;
+        teardown_rings();
+        return 1;
+      }
+      ring.dg_consumer = cudaqx_qec_make_device_graph_ring_consumer(
+          &ringbuffer, ring.num_slots, ring.slot_size, ring.gpu_id,
+          graph_resources);
+      if (!ring.dg_consumer) {
+        std::cerr << "ERROR: device-graph scheduler launch failed (decoder "
+                  << ring.decoder_id << "; see log above)" << std::endl;
+        teardown_rings();
+        return 1;
+      }
+      if (cudaq_bridge_launch(ring.bridge) != CUDAQ_OK) {
+        std::cerr << "ERROR: transport provider launch() failed (decoder "
+                  << ring.decoder_id << ")" << std::endl;
+        teardown_rings();
+        return 1;
+      }
+      continue;
+    }
+
+    // Host ring: a libcudaq-realtime dispatcher in the shape --host-loop
+    // selected.  threaded (CUDAQ_KERNEL_REGULAR) polls the provider's ring
+    // flags from its own thread while the provider's pump threads own the
+    // wire; the in-flight TX sentinel must not be written there because the
+    // TX pump treats any non-zero flag as a slot address.  unified
+    // (CUDAQ_KERNEL_UNIFIED) runs cudaq_host_unified_loop, which needs that
+    // sentinel, so the markers stay on.
+    const bool unified = cfg.host_loop == HostLoop::unified;
+    cudaq_dispatcher_config_t dispatch_config{};
+    dispatch_config.num_slots = ring.num_slots;
+    dispatch_config.slot_size = ring.slot_size;
+    dispatch_config.dispatch_path = CUDAQ_DISPATCH_PATH_HOST;
+    dispatch_config.dispatch_mode = CUDAQ_DISPATCH_HOST_CALL;
+    dispatch_config.kernel_type =
+        unified ? CUDAQ_KERNEL_UNIFIED : CUDAQ_KERNEL_REGULAR;
+    dispatch_config.skip_tx_markers = unified ? 0 : 1;
+
+    // The shape also selects how the dispatcher reaches the wire.  threaded
+    // adopts the provider's ring-buffer context.  unified takes the CPU data
+    // plane probed at [3] instead: its loop drives rx_poll/tx_publish itself,
+    // never reads rx_flags, and needs no ring-buffer context (a unified
+    // provider refuses that query).  set_cpu_dataplane STORES the pointer, so
+    // it points into the rings vector, not at a local.
+    cudaq_ringbuffer_t ringbuffer{};
+    if (!unified && !fetch_ringbuffer(ring, ringbuffer)) {
+      teardown_rings();
+      return 1;
+    }
+    if (cudaq_dispatcher_create(manager, &dispatch_config, &ring.dispatcher) !=
+            CUDAQ_OK ||
+        (unified ? cudaq_dispatcher_set_cpu_dataplane(ring.dispatcher,
+                                                      &ring.dataplane)
+                 : cudaq_dispatcher_set_ringbuffer(ring.dispatcher,
+                                                   &ringbuffer)) != CUDAQ_OK ||
+        cudaq_dispatcher_set_function_table(ring.dispatcher, &function_table) !=
+            CUDAQ_OK ||
+        cudaq_dispatcher_set_control(ring.dispatcher, &ring.shutdown_flag,
+                                     &ring.dispatched) != CUDAQ_OK ||
+        cudaq_dispatcher_start(ring.dispatcher) != CUDAQ_OK) {
+      std::cerr << "ERROR: dispatcher bring-up failed (decoder "
+                << ring.decoder_id << ")" << std::endl;
+      teardown_rings();
+      return 1;
+    }
+
+    // Start the provider's I/O loop last, once the dispatcher is polling.
+    // Called for both shapes: under unified the loop is the server's own and
+    // a unified provider has nothing to start here, which is harmless.
+    if (cudaq_bridge_launch(ring.bridge) != CUDAQ_OK) {
+      std::cerr << "ERROR: transport provider launch() failed (decoder "
+                << ring.decoder_id << ")" << std::endl;
+      teardown_rings();
+      return 1;
+    }
+  }
 
   // [5] Run until signalled or timed out.
   const auto start_time = std::chrono::steady_clock::now();
@@ -676,18 +1015,24 @@ int main(int argc, char **argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
-  // [6] Orderly shutdown.  The dispatch loop polls the flag as volatile, not
-  // atomically; publish the store the same way qec_realtime_session.cpp does.
-  __atomic_store_n(&dispatcher_shutdown, 1, __ATOMIC_RELEASE);
-  __sync_synchronize();
-  if (dispatcher_thread.joinable())
-    dispatcher_thread.join();
-  if (tp.shutdown)
-    tp.shutdown();
-  // Stop the DecodingServer receive loop and join its thread before the
-  // process exits (a still-joinable static thread would std::terminate).
+  // [6] Orderly shutdown: stop each dispatcher (sets its shutdown flag and
+  // joins its loop thread) and its transport, then the DecodingServer
+  // receive loop (a still-joinable static thread would std::terminate).
+  // NOTE: the dispatcher flushes its stats counter when its loop exits, so
+  // the per-ring counts are only valid AFTER teardown (dispatcher_stop joins
+  // the loop thread).  teardown_rings leaves ring.dispatched intact.
+  teardown_rings();
+  // The counters are atomics and the per-shot get_corrections cadence means
+  // they are settled by the time a client-driven run reaches shutdown; print
+  // before cudaqx_qec_decoding_server_shutdown() releases the sessions.
+  if (const char *stats = std::getenv("QEC_DECODING_SERVER_STATS");
+      stats && stats[0] != '\0')
+    cudaqx_qec_decoding_server_print_stats();
   cudaqx_qec_decoding_server_shutdown();
 
+  for (const auto &ring : rings)
+    std::cout << "QEC_DECODING_SERVER_RING decoder=" << ring.decoder_id
+              << " dispatched=" << ring.dispatched << std::endl;
   std::cout << "QEC_DECODING_SERVER_DISPATCHED count="
             << cudaqx_qec_device_call_dispatch_count() << std::endl;
   // Concurrency evidence for multi-logical-qubit tests: high-water mark of

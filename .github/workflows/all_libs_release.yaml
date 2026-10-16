@@ -9,8 +9,8 @@ on:
         default: '0.0.0'
       assets_repo:
         type: string
-        description: Retrieve assets from a draft release from this repo (e.g. NVIDIA/cudaqx)
-        default: 'NVIDIA/cudaqx'
+        description: Retrieve assets from a draft release from this repo (e.g. NVIDIA/cudaq-qec)
+        default: 'NVIDIA/cudaq-qec'
         required: false
       assets_tag:
         type: string
@@ -64,10 +64,8 @@ jobs:
         id: set-release-number
         run: |
           echo "CUDAQX_QEC_VERSION=${{ inputs.release-number }}" >> $GITHUB_ENV
-          echo "CUDAQX_SOLVERS_VERSION=${{ inputs.release-number }}" >> $GITHUB_ENV
           # And output to the GitHub Actions summary.
           echo "Setting CUDAQX_QEC_VERSION=${{ inputs.release-number }}" >> $GITHUB_STEP_SUMMARY
-          echo "Setting CUDAQX_SOLVERS_VERSION=${{ inputs.release-number }}" >> $GITHUB_STEP_SUMMARY
 
       - name: Fetch assets and set QEC_EXTERNAL_DECODERS
         env:
@@ -86,9 +84,14 @@ jobs:
             mkdir -p tmp
             tar -C tmp -xzvf nv-qldpc-decoder-${{ matrix.runner.arch }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_release.tar.gz
             test -f tmp/libcudaq-qec-nv-qldpc-decoder.so
-            test -f tmp/libcudaq-qec-realtime-cudevice-proprietary.a
             echo "QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so" >> $GITHUB_ENV
-            echo "CUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=$(pwd)/tmp/libcudaq-qec-realtime-cudevice-proprietary.a" >> $GITHUB_ENV
+            # The proprietary cudevice archive is optional: it only enables
+            # device_graph dispatch in the decoding_server binary and the
+            # device-graph realtime tests, neither of which ships in the
+            # official release yet.
+            if [[ -f tmp/libcudaq-qec-realtime-cudevice-proprietary.a ]]; then
+              echo "CUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=$(pwd)/tmp/libcudaq-qec-realtime-cudevice-proprietary.a" >> $GITHUB_ENV
+            fi
           fi
         shell: bash
 
@@ -99,7 +102,7 @@ jobs:
           echo "cuda_major=$cuda_major" >> $GITHUB_OUTPUT
 
       # ========================================================================
-      # Build cuda-quantum realtime (base library, no Hololink tools)
+      # Build cuda-quantum realtime (base library, no HSB tools)
       # ========================================================================
 
       - name: Get required CUDAQ version
@@ -108,6 +111,7 @@ jobs:
 
       - name: Build cuda-quantum realtime
         run: |
+          source "$GITHUB_WORKSPACE/scripts/cudaq_realtime_cmake_flags.sh"
           CUDAQ_REPO="${{ steps.get-cudaq-version.outputs.repo }}"
           CUDAQ_REF="${{ steps.get-cudaq-version.outputs.ref }}"
           CUDAQ_REALTIME_ROOT=/tmp/cudaq-realtime
@@ -119,7 +123,9 @@ jobs:
           git sparse-checkout set realtime cmake
           git checkout "$CUDAQ_REF"
           cd realtime && mkdir -p build && cd build
-          cmake -G Ninja -DCMAKE_INSTALL_PREFIX=$CUDAQ_REALTIME_ROOT ..
+          cmake -G Ninja -DCMAKE_INSTALL_PREFIX=$CUDAQ_REALTIME_ROOT \
+            -DCMAKE_CUDA_FLAGS="$(cudaq_realtime_cmake_cuda_flags)" \
+            ..
           ninja && ninja install
           echo "CUDAQ_REALTIME_ROOT=$CUDAQ_REALTIME_ROOT" >> $GITHUB_ENV
         shell: bash
@@ -140,6 +146,19 @@ jobs:
 
       - name: Save build artifacts
         run: |
+          # The decoding server is not shipped in the official release, so
+          # remove its executables (and example configs) as well as the
+          # loadable service-plugin library itself from the install prefix
+          # and the install manifest before zipping. Without removing the
+          # library, the server remained activatable via
+          # CUDAQ_DEVICE_CALL_CHANNEL even with the launcher binary gone.
+          for f in /usr/local/cudaq/bin/decoding_server* \
+                   /usr/local/cudaq/lib/libcudaq-qec-realtime-decoding-server-cqr.so; do
+            [ -e "$f" ] || continue
+            rm -f "$f"
+            sed -i "\#^$f\$#d" \
+              ${{ steps.build.outputs.build-dir }}/install_manifest.txt
+          done
           cmake --build ${{ steps.build.outputs.build-dir }} --target zip_installed_files --parallel
           cd ${{ steps.build.outputs.build-dir }}
           mv installed_files.zip installed_files-${{ matrix.runner.arch }}-cu${{ matrix.cuda_version }}.zip
@@ -169,7 +188,7 @@ jobs:
           # Install the correct torch first.
           cuda_no_dot=$(echo ${{ matrix.cuda_version }} | sed 's/\.//')
           pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}
-          pip install numpy pytest onnxscript cuquantum-cu${{ steps.config.outputs.cuda_major }} lightning ml_collections mpi4py transformers quimb opt_einsum cotengra nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
+          pip install numpy pytest onnxscript cuquantum-cu${{ steps.config.outputs.cuda_major }} lightning ml_collections mpi4py transformers quimb opt_einsum nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
           # The following tests are needed for docs/sphinx/examples/qec/python/tensor_network_decoder.py.
           if [ "$(uname -m)" == "x86_64" ]; then
               # Stim is not currently available on manylinux ARM wheels, so only

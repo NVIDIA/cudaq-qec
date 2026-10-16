@@ -107,43 +107,50 @@ echo "Building MLIR bindings for ${python}" && \
 # Building CUDA-Q
 # ==============================================================================
 
-CUDAQ_PATCH='diff --git a/CMakeLists.txt b/CMakeLists.txt
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -774,8 +774,8 @@ if(CUDAQ_BUILD_TESTS)
- endif()
+# Link the Python bindings against Python3::Module rather than
+# Python3::Python, so the wheel does not hard-link libpython.
+#
+# These are line-local substitutions rather than a `git apply` patch on
+# purpose: a diff also has to match the surrounding context, which drifts
+# independently of the lines we care about.  It broke once already when
+# cuda-quantum dropped `cudaq-py-utils` from the cudaq-pyscf link line
+# (NVIDIA/cuda-quantum "Use shared libcudaqMLIR dependency everywhere",
+# #4928), which sat in the trailing context of the second hunk -- neither
+# -C1 nor --3way recovers from that.  Do NOT use `patch` either, which can
+# hang on a "File to patch" prompt in CI.
+apply_sed() {
+  local file="$1" expr="$2" description="$3"
+  if [ ! -f "$file" ]; then
+    echo "build_cudaq: $file not found; cannot apply '$description'" >&2
+    return 1
+  fi
+  sed -i "$expr" "$file"
+}
 
- if("python" IN_LIST CUDAQ_ENABLE_PROJECTS)
--  find_package(Python 3 COMPONENTS Interpreter Development)
--  find_package(Python3 COMPONENTS Interpreter Development)
-+  find_package(Python 3 COMPONENTS Interpreter Development.Module)
-+  find_package(Python3 COMPONENTS Interpreter Development.Module)
+apply_sed CMakeLists.txt \
+  's/find_package(Python 3 COMPONENTS Interpreter Development)/find_package(Python 3 COMPONENTS Interpreter Development.Module)/;
+   s/find_package(Python3 COMPONENTS Interpreter Development)/find_package(Python3 COMPONENTS Interpreter Development.Module)/' \
+  'Python Development -> Development.Module'
 
-   add_subdirectory(tpls/nanobind)
+apply_sed python/runtime/cudaq/domains/plugins/CMakeLists.txt \
+  's/nanobind-static Python3::Python/nanobind-static Python3::Module/' \
+  'cudaq-pyscf Python3::Python -> Python3::Module'
 
-diff --git a/python/runtime/cudaq/domains/plugins/CMakeLists.txt b/python/runtime/cudaq/domains/plugins/CMakeLists.txt
---- a/python/runtime/cudaq/domains/plugins/CMakeLists.txt
-+++ b/python/runtime/cudaq/domains/plugins/CMakeLists.txt
-@@ -33,7 +33,7 @@ if (SKBUILD)
- else()
-   target_link_libraries(cudaq-pyscf
-     PRIVATE
--      nanobind-static Python3::Python
-+      nanobind-static Python3::Module
-       cudaq-chemistry cudaq-operator cudaq cudaq-py-utils cudaq-platform-default)
- endif()
-'
-
-# Apply the CMake Python-component patch (Development -> Development.Module).
-# Strict apply first (matches the canonical pinned cuda-quantum tree); fall back
-# to a reduced-context apply (-C1) for refs whose surrounding CMake context has
-# shifted -- e.g. after upstream cuda-quantum PR #4698 restructured the
-# python/nanobind block, which the shared-ring branch (NVIDIA/cuda-quantum#4712)
-# carries via its upstream merge.  Both paths are non-interactive; do NOT use
-# `patch`, which can hang on a "File to patch" prompt in CI.
-if ! echo "$CUDAQ_PATCH" | git apply --verbose; then
-  echo "build_cudaq: strict git apply failed; retrying with -C1 (reduced context)" >&2
-  echo "$CUDAQ_PATCH" | git apply --verbose -C1
+# Fail loudly unless the substituted forms are actually present now and the
+# old forms are gone.  Requiring the NEW forms (not just the absence of the
+# old ones) matters: if upstream reshapes these lines, sed matches nothing,
+# the old-form greps also match nothing, and the build would otherwise
+# silently produce a wheel that hard-links libpython.
+plugins_cmake=python/runtime/cudaq/domains/plugins/CMakeLists.txt
+if ! grep -qF 'find_package(Python 3 COMPONENTS Interpreter Development.Module)' CMakeLists.txt ||
+   ! grep -qF 'find_package(Python3 COMPONENTS Interpreter Development.Module)' CMakeLists.txt ||
+   ! grep -qF 'nanobind-static Python3::Module' "$plugins_cmake" ||
+   grep -qF 'COMPONENTS Interpreter Development)' CMakeLists.txt ||
+   grep -qF 'nanobind-static Python3::Python' "$plugins_cmake"; then
+  echo "build_cudaq: Python component substitution did not take effect; the" >&2
+  echo "  cuda-quantum CMake files have changed shape and this script needs" >&2
+  echo "  updating." >&2
+  exit 1
 fi
 
 $python -m venv --system-site-packages .venv

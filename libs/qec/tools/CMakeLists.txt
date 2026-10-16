@@ -6,3 +6,4 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 add_subdirectory(decoding-server)
+add_subdirectory(playback-emulator)

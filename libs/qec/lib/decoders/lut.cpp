@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "cudaq/qec/decoder.h"
+#include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/logger.h"
 #include <algorithm>
 #include <cassert>
@@ -48,9 +49,23 @@ private:
   bool decoding_time = false;
 
 public:
-  multi_error_lut(const cudaq::qec::sparse_binary_matrix &H,
+  multi_error_lut(cudaq::qec::decoder_init inputs,
+                  decoder_output_request request,
                   const cudaqx::heterogeneous_map &params)
-      : decoder(H) {
+      : decoder(std::move(inputs), request) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "lut decoder does not produce auxiliary outputs");
+    // This decoder computes an error frame. Producing observables requires an
+    // observable mapping to project through; reject at construction rather
+    // than on the first decode.
+    if (request.primary == decode_result_type::observables &&
+        !get_inputs().has_observable_model())
+      throw std::invalid_argument(
+          "lut decoder was constructed for observable output but its model "
+          "supplies no observable mapping");
+    const auto &H = get_inputs().detector_error_matrix();
+    error_rate_vec = get_inputs().error_rates();
     if (params.contains("lut_error_depth")) {
       lut_error_depth = params.get<int>("lut_error_depth");
       if (lut_error_depth < 1) {
@@ -60,8 +75,7 @@ public:
         throw std::runtime_error("lut_error_depth must be <= block_size");
       }
     }
-    if (params.contains("error_rate_vec")) {
-      error_rate_vec = params.get<std::vector<double>>("error_rate_vec");
+    if (!error_rate_vec.empty()) {
       if (error_rate_vec.size() != block_size) {
         throw std::runtime_error("error_rate_vec must be of size block_size");
       }
@@ -162,10 +176,23 @@ public:
     }
   }
 
-  virtual decoder_result decode(const std::vector<float_t> &syndrome) {
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
     // This is a simple decoder with trivial results
     auto t0 = std::chrono::high_resolution_clock::now();
-    decoder_result result{false, std::vector<float_t>(block_size, 0.0)};
+    decoder_result result{.result = std::vector<float_t>(block_size, 0.0)};
+
+    // This decoder computes an error frame. Whether that frame is projected is
+    // fixed at construction, so the decision is read from immutable instance
+    // state rather than negotiated per call.
+    const bool project = get_result_type() == decode_result_type::observables;
+    auto finish = [&](decoder_result &r) {
+      if (project) {
+        std::vector<float_t> observables(get_num_observables(), 0.0);
+        project_errors_to_observables(r.result.data(), observables.data(),
+                                      observables.size());
+        r.result = std::move(observables);
+      }
+    };
 
     // Convert syndrome to a string
     std::string syndrome_str(syndrome.size(), '0');
@@ -182,6 +209,7 @@ public:
 
     if (!anyErrors) {
       result.converged = true;
+      finish(result);
       return result;
     }
 
@@ -222,6 +250,7 @@ public:
       }
     }
 
+    finish(result);
     return result;
   }
 
@@ -229,9 +258,13 @@ public:
 
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       multi_error_lut, static std::unique_ptr<decoder> create(
-                           const cudaq::qec::decoder_init &init,
+                           cudaq::qec::decoder_init inputs,
+                           std::optional<decoder_output_request> output,
                            const cudaqx::heterogeneous_map &params) {
-        return cudaq::qec::make_pcm_decoder<multi_error_lut>(init, params);
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<multi_error_lut>(std::move(inputs), request,
+                                                 params);
       })
 };
 
@@ -239,20 +272,42 @@ CUDAQ_EXT_PT_REGISTER_TYPE(multi_error_lut)
 
 class single_error_lut : public multi_error_lut {
 public:
-  single_error_lut(const cudaq::qec::sparse_binary_matrix &H,
+  single_error_lut(cudaq::qec::decoder_init inputs,
+                   decoder_output_request request,
                    const cudaqx::heterogeneous_map &params)
-      : multi_error_lut(H, params) {}
+      : multi_error_lut(std::move(inputs), request, params) {}
 
   virtual ~single_error_lut() {}
 
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       single_error_lut, static std::unique_ptr<decoder> create(
-                            const cudaq::qec::decoder_init &init,
+                            cudaq::qec::decoder_init inputs,
+                            std::optional<decoder_output_request> output,
                             const cudaqx::heterogeneous_map &params) {
-        return cudaq::qec::make_pcm_decoder<single_error_lut>(init, params);
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<single_error_lut>(std::move(inputs), request,
+                                                  params);
       })
 };
 
 CUDAQ_EXT_PT_REGISTER_TYPE(single_error_lut)
+
+// Parameter schemas for the realtime decoding YAML (`decoder_custom_args`),
+// registered alongside the decoders they describe.
+namespace {
+struct lut_schema_registrar {
+  lut_schema_registrar() {
+    using k = decoding::config::param_kind;
+    decoding::config::register_decoder_schema({"single_error_lut", {}});
+    decoding::config::register_decoder_schema(
+        {"multi_error_lut",
+         {
+             {"lut_error_depth", k::int32},
+         }});
+  }
+};
+lut_schema_registrar register_lut_schemas;
+} // namespace
 
 } // namespace cudaq::qec

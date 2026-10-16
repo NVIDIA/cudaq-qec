@@ -352,11 +352,11 @@ if __name__ == "__main__":
     # Full decoding with test data
     print("\n\n### PART 2: Full Decoding Example with Test Data ###\n")
 
-    # See other test data options in https://github.com/NVIDIA/cudaqx/releases/tag/0.2.0
+    # See other test data options in https://github.com/NVIDIA/cudaq-qec/releases/tag/0.2.0
     filename = 'osd_1008_8785_0.001.json'
     bz2filename = filename + '.bz2'
     if not os.path.exists(filename):
-        url = f"https://github.com/NVIDIA/cudaqx/releases/download/0.2.0/{bz2filename}"
+        url = f"https://github.com/NVIDIA/cudaq-qec/releases/download/0.2.0/{bz2filename}"
 
         print(f'Downloading data from {url}')
 

@@ -1,0 +1,142 @@
+name: Build decoding-server image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_name:
+        type: string
+        description: GHCR image name, without a tag
+        default: ghcr.io/nvidia/private/cudaq-decoders
+        required: true
+      image_tag:
+        type: string
+        description: Base tag; defaults to wiring-<run number>, with -cu<version> added
+        required: false
+
+jobs:
+  build:
+    name: Build decoding-server image (${{ matrix.platform }}, CUDA ${{ matrix.cuda_version }})
+    if: ${{ github.repository == 'NVIDIA/cudaq-qec' }}
+    runs-on: linux-${{ matrix.platform }}-cpu8
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64]
+        cuda_version: ['12.6', '13.0']
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up context for buildx
+        run: docker context create builder_context
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          endpoint: builder_context
+          version: v0.19.0
+          driver-opts: |
+            network=host
+            image=moby/buildkit:v0.19.0
+
+      - name: Log in to GitHub CR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push image by digest
+        id: docker-build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/decoding-server/Dockerfile
+          platforms: linux/${{ matrix.platform }}
+          build-args: |
+            CUDA_VERSION=${{ matrix.cuda_version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=${{ inputs.image_name }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.docker-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${IMAGE_DIGEST#sha256:}"
+
+      - name: Upload image digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: decoding-server-digest-cu${{ matrix.cuda_version }}-${{ matrix.platform }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish decoding-server multi-platform image (CUDA ${{ matrix.cuda_version }})
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version: ['12.6', '13.0']
+    steps:
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub CR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Download image digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: decoding-server-digest-cu${{ matrix.cuda_version }}-*
+          merge-multiple: true
+
+      - name: Create and verify multi-platform image
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_TAG: ${{ inputs.image_tag || format('wiring-{0}', github.run_number) }}
+          CUDA_VERSION: ${{ matrix.cuda_version }}
+        run: |
+          set -euo pipefail
+
+          cd /tmp/digests
+          image_ref="${IMAGE_NAME}:${IMAGE_TAG}-cu${CUDA_VERSION}"
+          mapfile -t digests < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [[ "${#digests[@]}" != 2 ]]; then
+            echo "::error::Expected 2 image digests, found ${#digests[@]}"
+            exit 1
+          fi
+
+          refs=()
+          for digest in "${digests[@]}"; do
+            refs+=("${IMAGE_NAME}@sha256:${digest}")
+          done
+
+          docker buildx imagetools create --tag "$image_ref" "${refs[@]}"
+
+          manifest=$(docker buildx imagetools inspect --raw "$image_ref")
+          for architecture in amd64 arm64; do
+            jq -e \
+              --arg architecture "$architecture" \
+              '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $architecture)' \
+              <<< "$manifest" > /dev/null
+          done
+
+          docker buildx imagetools inspect "$image_ref"

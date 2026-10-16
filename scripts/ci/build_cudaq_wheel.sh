@@ -86,34 +86,32 @@ $python -m auditwheel -v repair dist/cuda_quantum*linux_*.whl \
 echo "Building CUDA-Q."
 cd /cuda-quantum
 
-CUDAQ_PATCH='diff --git a/CMakeLists.txt b/CMakeLists.txt
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -774,8 +774,8 @@ if(CUDAQ_BUILD_TESTS)
- endif()
+# Link the Python bindings against Python3::Module rather than
+# Python3::Python, so the wheel does not hard-link libpython.  Line-local
+# substitutions rather than a `git apply` patch, for the reasons documented
+# in .github/workflows/scripts/build_cudaq.sh.
+sed -i \
+  's/find_package(Python 3 COMPONENTS Interpreter Development)/find_package(Python 3 COMPONENTS Interpreter Development.Module)/;
+   s/find_package(Python3 COMPONENTS Interpreter Development)/find_package(Python3 COMPONENTS Interpreter Development.Module)/' \
+  CMakeLists.txt
 
- if("python" IN_LIST CUDAQ_ENABLE_PROJECTS)
--  find_package(Python 3 COMPONENTS Interpreter Development)
--  find_package(Python3 COMPONENTS Interpreter Development)
-+  find_package(Python 3 COMPONENTS Interpreter Development.Module)
-+  find_package(Python3 COMPONENTS Interpreter Development.Module)
+sed -i 's/nanobind-static Python3::Python/nanobind-static Python3::Module/' \
+  python/runtime/cudaq/domains/plugins/CMakeLists.txt
 
-   add_subdirectory(tpls/nanobind)
-
-diff --git a/python/runtime/cudaq/domains/plugins/CMakeLists.txt b/python/runtime/cudaq/domains/plugins/CMakeLists.txt
---- a/python/runtime/cudaq/domains/plugins/CMakeLists.txt
-+++ b/python/runtime/cudaq/domains/plugins/CMakeLists.txt
-@@ -33,7 +33,7 @@ if (SKBUILD)
- else()
-   target_link_libraries(cudaq-pyscf
-     PRIVATE
--      nanobind-static Python3::Python
-+      nanobind-static Python3::Module
-       cudaq-chemistry cudaq-operator cudaq cudaq-py-utils cudaq-platform-default)
- endif()
-'
-
-echo "$CUDAQ_PATCH" | git apply --verbose
+# Require the substituted forms to be present (not just the old forms gone):
+# if upstream reshapes these lines, sed matches nothing and the build would
+# otherwise silently produce a wheel that hard-links libpython.
+plugins_cmake=python/runtime/cudaq/domains/plugins/CMakeLists.txt
+if ! grep -qF 'find_package(Python 3 COMPONENTS Interpreter Development.Module)' CMakeLists.txt ||
+   ! grep -qF 'find_package(Python3 COMPONENTS Interpreter Development.Module)' CMakeLists.txt ||
+   ! grep -qF 'nanobind-static Python3::Module' "$plugins_cmake" ||
+   grep -qF 'COMPONENTS Interpreter Development)' CMakeLists.txt ||
+   grep -qF 'nanobind-static Python3::Python' "$plugins_cmake"; then
+  echo "build_cudaq_wheel: Python component substitution did not take effect;" >&2
+  echo "  the cuda-quantum CMake files have changed shape and this script" >&2
+  echo "  needs updating." >&2
+  exit 1
+fi
 
 $python -m venv --system-site-packages .venv
 source .venv/bin/activate

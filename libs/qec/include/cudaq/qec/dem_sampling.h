@@ -15,8 +15,8 @@
 
 namespace cudaq::qec::dem_sampler {
 
-/// CPU implementation of DEM sampling. This is the existing implementation
-/// that uses std::bernoulli_distribution and tensor dot product.
+// CPU implementation of DEM sampling, using std::bernoulli_distribution and a
+// tensor dot product. The sample_dem overloads below are the public API.
 namespace cpu {
 
 /// @brief Sample measurements from a check matrix (CPU, per-mechanism probs)
@@ -35,19 +35,18 @@ sample_dem(const cudaqx::tensor<uint8_t> &check_matrix, std::size_t numShots,
 
 } // namespace cpu
 
-/// GPU implementation of DEM sampling via cuStabilizer C API.
+// GPU implementation of DEM sampling via the cuStabilizer C API.
+namespace gpu {
+
+/// @brief GPU DEM sampling with caller-provided device pointers.
 ///
-/// The caller provides device pointers. The function composes:
+/// The function composes (all GPU memory is allocated and freed internally
+/// per call):
 ///   1. pack_check_matrix_rowwise (dense uint8 → bitpacked uint32)
 ///   2. custabilizerSampleProbArraySparseCompute (sparse Bernoulli sampling)
 ///   3. custabilizerGF2SparseDenseMatrixMultiply (syndrome = errors * H^T)
 ///   4. unpack_syndromes_gpu (bitpacked uint32 → uint8)
 ///   5. csr_to_dense_fused (CSR errors → dense uint8)
-///
-/// All GPU memory is allocated and freed internally per call.
-namespace gpu {
-
-/// @brief GPU DEM sampling with device pointers
 ///
 /// @param d_check_matrix Device pointer [num_checks × num_error_mechanisms]
 /// @param num_checks Number of checks (rows of H)

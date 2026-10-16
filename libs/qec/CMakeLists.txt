@@ -71,6 +71,54 @@ set(CUDAQ_QEC_BUILD_TRT_DECODER "AUTO" CACHE STRING
 set_property(CACHE CUDAQ_QEC_BUILD_TRT_DECODER
              PROPERTY STRINGS "AUTO" "ON" "OFF")
 
+# Decoders-only build: the decoder interface (libcudaq-qec-decoders.so), the
+# built-in decoders, and the decoder plugins, with no CUDA-Q install and no
+# LLVM/MLIR required. Skips libcudaq-qec.so (codes, experiments, DEM
+# sampling), tools, and unit tests; with CUDAQX_QEC_BINDINGS_PYTHON=ON it
+# builds a decoders-only python module instead of the full cudaq_qec one.
+# A CUDA toolkit is still required (the decoder API links cudart).
+option(CUDAQ_QEC_DECODERS_ONLY
+       "Build only the decoder stack; no CUDA-Q install required."
+       OFF)
+if (CUDAQ_QEC_DECODERS_ONLY AND NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  message(FATAL_ERROR
+    "CUDAQ_QEC_DECODERS_ONLY requires configuring libs/qec as the top-level "
+    "project: cmake -S libs/qec -B <build-dir> -DCUDAQ_QEC_DECODERS_ONLY=ON")
+endif()
+
+# Decoding server in decoders-only mode
+# ==============================================================================
+# The decoding server is driven by cudaq-realtime, which is a separate product
+# from CUDA-Q: libcudaq-realtime.so itself needs nothing but libc, and the
+# server uses none of the CUDA-Q runtime, the simulators, or the caller-side
+# libcudaq-device-call-runtime.  So the server can be built in decoders-only
+# mode whenever cudaq-realtime is present -- gate on finding it, and warn (do
+# not fail) when it is absent, since the decoder stack itself is unaffected.
+if (CUDAQ_QEC_DECODERS_ONLY)
+  set(CUDAQ_REALTIME_ROOT "" CACHE PATH "Prefix to a cudaq-realtime install")
+  find_path(CUDAQ_QEC_REALTIME_PROBE_INCLUDE_DIR
+    NAMES cudaq/realtime/daemon/dispatcher/cudaq_realtime.h
+    HINTS ${CUDAQ_REALTIME_ROOT} ${CUDAQ_INSTALL_DIR} ${CUDAQ_INSTALL_PREFIX}
+    PATH_SUFFIXES include)
+  find_library(CUDAQ_QEC_REALTIME_PROBE_LIBRARY
+    NAMES cudaq-realtime
+    HINTS ${CUDAQ_REALTIME_ROOT} ${CUDAQ_INSTALL_DIR} ${CUDAQ_INSTALL_PREFIX}
+    PATH_SUFFIXES lib)
+  if (CUDAQ_QEC_REALTIME_PROBE_INCLUDE_DIR AND CUDAQ_QEC_REALTIME_PROBE_LIBRARY)
+    set(CUDAQ_QEC_BUILD_DECODING_SERVER ON)
+    message(STATUS
+      "decoders-only: cudaq-realtime found (${CUDAQ_QEC_REALTIME_PROBE_LIBRARY}); "
+      "the decoding server will be built")
+  else()
+    set(CUDAQ_QEC_BUILD_DECODING_SERVER OFF)
+    message(WARNING
+      "decoders-only: cudaq-realtime not found, so the decoding server and the "
+      "realtime decoding libraries will NOT be built (the decoders themselves "
+      "are unaffected).  Set -DCUDAQ_REALTIME_ROOT=/path/to/cudaq-realtime to "
+      "enable them.")
+  endif()
+endif()
+
 # Find and configure LLVM, Clang and MLIR
 # ==============================================================================
 # The user can specify the path to LLVM cmake directory using
@@ -79,6 +127,12 @@ set_property(CACHE CUDAQ_QEC_BUILD_TRT_DECODER
 # using `LLVM_VERSION_MAJOR`, e.g. "-LLVM_VERSION_MAJOR=16".  Note that this
 # version variable is set to the latest LLVM version by default, and setting it
 # to an older version might break the project.
+# Skipped in decoders-only mode: nothing on the decoder path needs LLVM, MLIR,
+# or Clang.  The exception is the LLVM half when the decoding server is being
+# built -- the realtime decoding config parser reads its YAML with llvm::yaml
+# and emits JSON schema with llvm::json, so it needs LLVMSupport (but still no
+# MLIR and no Clang).
+if(NOT CUDAQ_QEC_DECODERS_ONLY OR CUDAQ_QEC_BUILD_DECODING_SERVER)
 if(NOT LLVM_VERSION_MAJOR)
   set(LLVM_VERSION_MAJOR 22)
 endif()
@@ -151,6 +205,10 @@ if(NOT LLVM_DIR)
   endif()
 endif()
 
+endif() # NOT CUDAQ_QEC_DECODERS_ONLY OR CUDAQ_QEC_BUILD_DECODING_SERVER
+
+# MLIR and Clang are only ever needed by the full build.
+if(NOT CUDAQ_QEC_DECODERS_ONLY)
 if(NOT MLIR_DIR)
   set(MLIR_DIR ${LLVM_BINARY_DIR}/lib/cmake/mlir)
 endif()
@@ -191,6 +249,7 @@ include_directories(SYSTEM
 
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
+endif() # NOT CUDAQ_QEC_DECODERS_ONLY
 
 # Check for CUDA Support (ref: cuda-quantum/CMakeLists.txt)
 # ==============================================================================
@@ -243,10 +302,25 @@ endif()
 # ==============================================================================
 
 if (CUDAQX_QEC_STANDALONE_BUILD)
-  cudaqx_import_cudaq_targets()
+  if (CUDAQ_QEC_DECODERS_ONLY)
+    # The only CUDA-Q-provided target the decoder stack consumes is fmt
+    # (normally imported via NVQIRConfig.cmake); fetch the same pinned commit
+    # directly instead of importing the CUDA-Q targets.
+    include(FetchContent)
+    set(FMT_INSTALL OFF CACHE BOOL "Generate the fmt install target." FORCE)
+    FetchContent_Declare(
+      fmt
+      GIT_REPOSITORY https://github.com/fmtlib/fmt
+      GIT_TAG fc8d07cfe54ba9f5019453dfdb112491246ee017
+      EXCLUDE_FROM_ALL
+    )
+    FetchContent_MakeAvailable(fmt)
+  else()
+    cudaqx_import_cudaq_targets()
 
-  if (CUDAQX_QEC_BINDINGS_PYTHON)
-    find_package(CUDAQPythonInterop CONFIG)
+    if (CUDAQX_QEC_BINDINGS_PYTHON)
+      find_package(CUDAQPythonInterop CONFIG)
+    endif()
   endif()
   # FIXME
   add_subdirectory(../core core_build)
@@ -287,13 +361,18 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/lib/version.cpp.in"
 # ==============================================================================
 
 add_subdirectory(lib)
-add_subdirectory(tools)
+add_subdirectory(
+  "${CUDAQX_QEC_SOURCE_DIR}/../../benchmarks/qec"
+  "${CMAKE_CURRENT_BINARY_DIR}/benchmarks")
+if (NOT CUDAQ_QEC_DECODERS_ONLY OR CUDAQ_QEC_BUILD_DECODING_SERVER)
+  add_subdirectory(tools)
+endif()
 
 if (CUDAQX_QEC_BINDINGS_PYTHON)
   add_subdirectory(python)
 endif()
 
-if (CUDAQX_QEC_INCLUDE_TESTS)
+if (CUDAQX_QEC_INCLUDE_TESTS AND NOT CUDAQ_QEC_DECODERS_ONLY)
   add_custom_target(CUDAQXQECUnitTests)
   if (CUDAQX_QEC_STANDALONE_BUILD)
     include(CTest)

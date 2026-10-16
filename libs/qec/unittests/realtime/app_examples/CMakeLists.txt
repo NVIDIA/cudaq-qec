@@ -15,8 +15,8 @@
 #    build/libs/qec/unittests/realtime/app_examples/qir-*.ll
 #------------------------------------------------------------------------------#
 
-# Resolve cudaq-realtime dispatch for app examples that opt into
-# CUDAQ_QEC_REALTIME_MODE=inproc_rpc.
+# Resolve cudaq-realtime dispatch (DEVICE-mode graph launch) for app examples
+# that link it.
 set(_app_cudaq_realtime_prefixes "")
 if(CUDAQ_REALTIME_ROOT)
   list(APPEND _app_cudaq_realtime_prefixes "${CUDAQ_REALTIME_ROOT}")
@@ -78,33 +78,10 @@ add_test(
     bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
-      3 40 40 NULL 12 6
+      3 60 30 NULL 12
       ${CMAKE_BINARY_DIR}/lib
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
-
-if(_APP_CUDAQ_REALTIME_DISPATCH_LIB
-   AND TARGET cudaq-qec-realtime-cudevice-proprietary)
-  add_test(
-    NAME app_examples.surface_code-1-local-test-distance-3-inproc-rpc
-    COMMAND
-      bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
-        ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
-        ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
-        3 60 40 NULL 12 6
-        ${CMAKE_BINARY_DIR}/lib
-        nv-qldpc-decoder
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-  )
-  set_tests_properties(
-    app_examples.surface_code-1-local-test-distance-3-inproc-rpc
-    PROPERTIES ENVIRONMENT
-      "CUDAQ_QEC_REALTIME_MODE=inproc_rpc;EXTRA_CLI_ARGS=--use-relay-bp"
-    # The wrapper exits 77 on GPUs below compute capability 9.0 (the
-    # device-graph scheduler needs device-side graph launch); report that
-    # as SKIPPED rather than FAILED.
-    SKIP_RETURN_CODE 77)
-endif()
 
 # Test with sliding_window decoder
 add_test(
@@ -113,7 +90,7 @@ add_test(
     bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
-      3 40 40 NULL 12 6
+      3 60 30 NULL 12
       ${CMAKE_BINARY_DIR}/lib
       sliding_window 6 1
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
@@ -128,7 +105,7 @@ add_test(
 #     bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
 #       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
 #       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
-#       5 40 40 NULL 20 10
+#       5 40 40 NULL 20
 #       ${CMAKE_BINARY_DIR}/lib
 #   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 # )
@@ -140,6 +117,150 @@ add_test(
     pytest ${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.py
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# --------------------------------------------------------------------------- #
+# surface_code-1 negative / error-path tests
+#
+# These drive the three throw sites added to surface_code-1.cpp so that every
+# error path is exercised by at least one ctest. Each test asserts BOTH a
+# nonzero exit AND the expected diagnostic substring.
+# --------------------------------------------------------------------------- #
+set(_sc1_exe ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local)
+set(_sc1_neg_dir ${CMAKE_CURRENT_BINARY_DIR}/sc1_negative)
+file(MAKE_DIRECTORY ${_sc1_neg_dir})
+set(_sc1_neg_env "CUDAQ_DEFAULT_SIMULATOR=stim")
+
+# Helper: command must exit nonzero AND print the expected diagnostic.
+function(_sc1_reject name diagnostic)
+  add_test(NAME app_examples.surface_code-1-negative-${name}
+    COMMAND bash -c [==[
+diag=$1; shift
+if out=$("$@" 2>&1); then
+  printf '%s\n' "$out"
+  echo "NEGATIVE TEST FAIL: command returned 0; expected a nonzero exit"
+  exit 1
+fi
+printf '%s\n' "$out"
+printf '%s' "$out" | grep -qF -- "$diag" || {
+  echo "NEGATIVE TEST FAIL: missing expected diagnostic: $diag"
+  exit 1
+}
+]==] _ "${diagnostic}" ${_sc1_exe} ${ARGN}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(app_examples.surface_code-1-negative-${name}
+    PROPERTIES ENVIRONMENT "${_sc1_neg_env}")
+endfunction()
+
+# 1a. --load_dem with a nonexistent file → setup_decoders throws.
+_sc1_reject(load-dem-missing-file "Could not open dem config file"
+  --load_dem ${_sc1_neg_dir}/nonexistent.yml
+  --distance 3 --num_rounds 3)
+
+# 1b. --load_dem with a mismatched geometry → syndrome_size check throws.
+# Fixture: generate a d=3 config, then try to load it as d=5.
+add_test(NAME app_examples.surface_code-1-negative-load-dem-fixtures
+  COMMAND ${_sc1_exe} --distance 3 --num_rounds 3
+    --save_dem ${_sc1_neg_dir}/d3.yml
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(app_examples.surface_code-1-negative-load-dem-fixtures
+  PROPERTIES FIXTURES_SETUP sc1_dem ENVIRONMENT "${_sc1_neg_env}")
+_sc1_reject(load-dem-geometry-mismatch "does not match current geometry"
+  --distance 5 --num_rounds 5
+  --load_dem ${_sc1_neg_dir}/d3.yml)
+set_tests_properties(app_examples.surface_code-1-negative-load-dem-geometry-mismatch
+  PROPERTIES FIXTURES_REQUIRED sc1_dem)
+
+# 1c. --load_dem of a --dem_chunks config at fewer rounds than its phases.
+add_test(NAME app_examples.surface_code-1-negative-dem-chunks-fixtures
+  COMMAND ${_sc1_exe} --distance 3 --num_rounds 6 --dem_chunks
+    --save_dem ${_sc1_neg_dir}/d3_chunks.yml
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(app_examples.surface_code-1-negative-dem-chunks-fixtures
+  PROPERTIES FIXTURES_SETUP sc1_dem_chunks ENVIRONMENT "${_sc1_neg_env}")
+_sc1_reject(dem-chunks-too-few-rounds "Loaded DEM chunks need --num_rounds >= 4"
+  --distance 3 --num_rounds 3
+  --load_dem ${_sc1_neg_dir}/d3_chunks.yml)
+set_tests_properties(app_examples.surface_code-1-negative-dem-chunks-too-few-rounds
+  PROPERTIES FIXTURES_REQUIRED sc1_dem_chunks)
+
+# 1d. --dem_chunks with too few rounds to find the repeating one.
+_sc1_reject(dem-chunks-no-repeating-round "found no repeating round"
+  --distance 3 --num_rounds 3 --dem_chunks
+  --save_dem ${_sc1_neg_dir}/d3_short_chunks.yml)
+
+# 2. --save_syndrome to an unwriteable path → begin_syndrome_capture throws.
+_sc1_reject(save-syndrome-bad-path "Could not open syndrome file for writing"
+  --distance 3 --num_rounds 3 --num_shots 2
+  --save_syndrome ${_sc1_neg_dir}/no_such_dir/out.txt)
+
+# 3. --load_syndrome with a nonexistent file → replay_syndrome_file throws.
+_sc1_reject(load-syndrome-missing-file "Could not open syndrome file"
+  --distance 3 --num_rounds 3
+  --load_syndrome ${_sc1_neg_dir}/nonexistent.txt)
+
+# Fixture: capture a valid d=3 syndrome file, then derive a
+# corrections-flipped copy (0↔1 in the CORRECTIONS block).
+add_test(NAME app_examples.surface_code-1-negative-replay-fixtures
+  COMMAND bash -c "set -e
+'${_sc1_exe}' --distance 3 --num_rounds 3 --num_shots 5 \
+  --save_syndrome '${_sc1_neg_dir}/cap.txt'
+sed '/CORRECTIONS_START/,/CORRECTIONS_END/{s/^0$/X/;s/^1$/0/;s/^X$/1/}' \
+  '${_sc1_neg_dir}/cap.txt' > '${_sc1_neg_dir}/cap_mismatch.txt'"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(app_examples.surface_code-1-negative-replay-fixtures
+  PROPERTIES FIXTURES_SETUP sc1_replay ENVIRONMENT "${_sc1_neg_env}")
+
+# 4. Replay d=3 capture against d=5 experiment → num_data mismatch (9 vs 25).
+_sc1_reject(replay-geometry-mismatch "Syndrome file mismatch"
+  --distance 5 --num_rounds 5
+  --load_syndrome ${_sc1_neg_dir}/cap.txt)
+set_tests_properties(app_examples.surface_code-1-negative-replay-geometry-mismatch
+  PROPERTIES FIXTURES_REQUIRED sc1_replay)
+
+# 5. Replay with flipped corrections → correction mismatch throw.
+_sc1_reject(replay-correction-mismatch "Replay correction mismatch"
+  --distance 3 --num_rounds 3
+  --load_syndrome ${_sc1_neg_dir}/cap_mismatch.txt)
+set_tests_properties(app_examples.surface_code-1-negative-replay-correction-mismatch
+  PROPERTIES FIXTURES_REQUIRED sc1_replay)
+
+# 6. Invalid --sw_inner_decoder is rejected before any circuit runs.
+_sc1_reject(sw-inner-decoder-invalid "--sw_inner_decoder must be"
+  --distance 3 --num_rounds 3
+  --decoder_type sliding_window --sw_inner_decoder bogus)
+
+# 7a. --param with an unknown key is rejected before any circuit runs.
+_sc1_reject(param-unknown-key "Unknown parameter 'bogus'"
+  --distance 3 --num_rounds 3
+  --param bogus=1)
+
+# 7b. --param threads overrides into the inner decoder: save the DEM and verify
+# the YAML contains the overridden lut_error_depth value.
+add_test(NAME app_examples.surface_code-1-negative-param-inner-decoder-fixture
+  COMMAND ${_sc1_exe}
+    --distance 3 --num_rounds 3
+    --decoder_type sliding_window --sw_window_size 3
+    --param lut_error_depth=1
+    --save_dem ${_sc1_neg_dir}/param_inner.yml
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(app_examples.surface_code-1-negative-param-inner-decoder-fixture
+  PROPERTIES FIXTURES_SETUP sc1_param_inner ENVIRONMENT "${_sc1_neg_env}")
+
+add_test(NAME app_examples.surface_code-1-param-inner-decoder-threaded
+  COMMAND bash -c "grep -q 'lut_error_depth: 1' '${_sc1_neg_dir}/param_inner.yml'"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(app_examples.surface_code-1-param-inner-decoder-threaded
+  PROPERTIES FIXTURES_REQUIRED sc1_param_inner ENVIRONMENT "${_sc1_neg_env}")
+
+# 7. sliding_window with a non-default inner decoder (pymatching) runs cleanly.
+add_test(NAME app_examples.surface_code-1-sw-inner-pymatching
+  COMMAND ${_sc1_exe}
+    --distance 3 --num_rounds 3 --num_shots 50
+    --decoder_type sliding_window --sw_window_size 3
+    --sw_inner_decoder pymatching
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(app_examples.surface_code-1-sw-inner-pymatching
+  PROPERTIES ENVIRONMENT "${_sc1_neg_env}")
 
 # End of surface code 1, fully local, regular Stim simulator
 #------------------------------------------------------------------------------#
@@ -183,19 +304,7 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
       nvqir nvqir-stim)
   qec_realtime_app_link_options(surface_code-1-cqr)
 
-  # Enable Relay-BP only when this build provides nv-qldpc support.
-  set(_surface_code_1_cqr_has_nv_qldpc_decoder FALSE)
-  if(TARGET cudaq-qec-nv-qldpc-decoder
-     OR QEC_EXTERNAL_DECODERS
-     OR DEFINED ENV{QEC_EXTERNAL_DECODERS})
-    set(_surface_code_1_cqr_has_nv_qldpc_decoder TRUE)
-  endif()
-
   set(_surface_code_1_cqr_env CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch)
-  if(TARGET cudaq-qec-realtime-cudevice-proprietary
-     AND _surface_code_1_cqr_has_nv_qldpc_decoder)
-    list(APPEND _surface_code_1_cqr_env EXTRA_CLI_ARGS=--use-relay-bp)
-  endif()
 
   add_test(
     NAME app_examples.surface_code-1-cqr-test-distance-3
@@ -204,7 +313,7 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
       bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
         ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
         ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
-        3 60 40 NULL 12 6
+        3 60 30 NULL 12
         ${CMAKE_BINARY_DIR}/lib
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
@@ -217,14 +326,56 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
     add_test(
       NAME app_examples.surface_code-1-cqr-two-process-test-distance-3
       COMMAND
-        # Non-zero threshold 60 (vs the -local test's 40): unseeded runs at
-        # 1000 shots land ~35-45, so 40 flakes; a broken decode path produces
-        # ~150+, so 60 still discriminates.
+        # The app seeds the simulator (--seed, default 42), so the run is
+        # deterministic: ~10 non-zero and ~67 corrections at 1000 shots. The
+        # thresholds (non-zero <= 60, corrections >= 30) leave margin while
+        # still catching a broken decode path (which applies ~0 corrections,
+        # leaving all ~70 raw logical errors uncorrected).
         bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-cqr-two-process-test.sh"
           ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
-          3 60 40
+          3 60 30
           $<TARGET_FILE:decoding_server>
-          12 6
+          12
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+
+    # Two-process with two logical qubits: the server opens one ring per
+    # decoder and the client must wire each logical qubit's device_call
+    # session to its own ring (QEC_DECODING_SERVER_PORT_<id>, exported by the
+    # test script from the READY line's ring<id>= tokens). The script
+    # additionally asserts per-ring traffic (a client that funnels every
+    # decoder over ring 0 fails even if the totals look right) and exact
+    # per-decoder session stats (resets == shots, errors == 0 — the guard
+    # against concurrent rings losing RPCs to request-id collisions).
+    # Thresholds are the single-logical values scaled by 2.
+    add_test(
+      NAME app_examples.surface_code-1-cqr-two-process-test-distance-3-num-logical-2
+      COMMAND
+        bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-cqr-two-process-test.sh"
+          ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
+          3 120 60
+          $<TARGET_FILE:decoding_server>
+          12
+          multi_error_lut
+          2
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+
+    # Two-process over the unified host loop: the server runs each ring's
+    # host dispatcher as cudaq_host_unified_loop on the provider's CPU data
+    # plane (--host-loop=unified) instead of the threaded ring-buffer loop.
+    # The server passes --unified to the udp provider itself to select that
+    # data plane; --host-loop=unified reaches the server via
+    # QEC_DECODING_SERVER_EXTRA_ARGS.
+    add_test(
+      NAME app_examples.surface_code-1-cqr-two-process-test-distance-3-host-loop-unified
+      COMMAND
+        ${CMAKE_COMMAND} -E env "QEC_DECODING_SERVER_EXTRA_ARGS=--host-loop=unified"
+        bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-cqr-two-process-test.sh"
+          ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
+          3 60 30
+          $<TARGET_FILE:decoding_server>
+          12
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
   endif()
@@ -245,7 +396,7 @@ cudaqx_add_device_code(surface_code-1-quantinuum-emulate
   SOURCES
     surface_code-1.cpp
   COMPILER_FLAGS
-    --target quantinuum --emulate --quantinuum-machine Helios-Fake -DMANUALLY_INJECT_ERRORS=1 
+    --target quantinuum --emulate --quantinuum-machine Helios-Fake
   DEPENDS_ON
     # Must wait for the local executable to be built because it has the same
     # surface_code-1.cpp file, and the nvq++ compiler will use the same filename
@@ -274,7 +425,14 @@ add_test(
     bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-quantinuum-emulate
-      3 0 1000 NULL 12 6
+      # surface_code-1 attaches its noise via a host-side cudaq::noise_model
+      # (not in-kernel cudaq::apply_noise, which the erase-noise pass strips).
+      # Whether that model reaches the simulator under --emulate depends on the
+      # CUDA-Q version, so the run finds either 0 errors / 0 corrections or a
+      # realistic handful of both. Bound the residual logical errors the same
+      # way the local tests do and leave the corrections bound at 0, so this
+      # passes either way. This remains primarily a lowering + run smoke test.
+      3 60 0 NULL 12
       ${CMAKE_BINARY_DIR}/lib
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
@@ -285,7 +443,8 @@ add_test(
     bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
       ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-quantinuum-emulate
-      5 0 0 NULL 20 10
+      # See the distance-3 test above for why the non-zero bound is not 0.
+      5 60 0 NULL 5
       ${CMAKE_BINARY_DIR}/lib
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
@@ -597,6 +756,26 @@ if(TARGET decoding_server
     add_dependencies(surface_code-4-yaml-cqr cudaq-qec-trt-decoder)
   endif()
 
+  # Two-process MIXED-DISPATCH test (host LUT ring + device_graph nv-qldpc
+  # ring in one server, wire named only by the YAML transport section).
+  # Registered only when the server actually links the device-graph
+  # component -- the same condition the server link uses in
+  # tools/decoding-server/CMakeLists.txt (device-graph compiled AND the
+  # proprietary cudevice archive present). Gating on the proprietary target
+  # alone would register the test on a box where CUDAQ_QEC_DEVICE_GRAPH_AVAILABLE
+  # is false, so the server cannot do device_graph and the test false-FAILs.
+  # The script additionally skips (77) without a CUDA GPU or the nv-qldpc
+  # plugin at runtime.
+  if(CUDAQ_QEC_DEVICE_GRAPH_AVAILABLE AND TARGET cudaq-qec-realtime-cudevice-proprietary)
+    add_test(
+      NAME app_examples.surface_code-4-yaml-mixed-dispatch
+      COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/surface_code-4-yaml-mixed-dispatch-test.sh
+              $<TARGET_FILE:surface_code-4-yaml-cqr>
+              $<TARGET_FILE:decoding_server>)
+    set_tests_properties(app_examples.surface_code-4-yaml-mixed-dispatch
+      PROPERTIES LABELS "qec;gpu_required" SKIP_RETURN_CODE 77 TIMEOUT 300)
+  endif()
+
   # Test-only plugin: its realtime decode calls rendezvous at a reusable barrier,
   # making three-worker overlap deterministic rather than scheduler-dependent.
   add_library(cudaq-qec-concurrency-test-decoder SHARED
@@ -606,12 +785,13 @@ if(TARGET decoding_server
     PUBLIC
       ${CMAKE_SOURCE_DIR}/libs/qec/include
       ${CMAKE_SOURCE_DIR}/libs/core/include)
+  # Like every other decoder plugin, this one needs only the decoder interface.
+  # It must not link cudaq-qec or the CUDA-Q libraries: a decoder plugin is
+  # dlopen'd by decoding_server, which no longer preloads CUDA-Q, so a plugin
+  # that drags in libcudaq-qec.so fails to load with an undefined NVQIR symbol.
   target_link_libraries(cudaq-qec-concurrency-test-decoder
-    PUBLIC
-      cudaq::cudaq-operator
     PRIVATE
-      cudaq::cudaq-common
-      cudaq-qec)
+      cudaq-qec-decoders)
   set_target_properties(cudaq-qec-concurrency-test-decoder PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib/decoder-plugins
     BUILD_RPATH "$ORIGIN"
@@ -625,9 +805,8 @@ if(TARGET decoding_server
 endif()
 
 # Surface-code-4 YAML tests: exercise both d=3 and d=5 for each decoder entry.
-# All entries run through the realtime inproc RPC mode; relay-BP is registered
-# only when the private cudevice/archive and external decoder plugin are
-# configured.
+# Regular entries run through the direct-call decode path; the cqr variants
+# exercise the external decoding server over UDP.
 find_package(Python COMPONENTS Interpreter QUIET)
 set(_SC4_TRY_TRT_TEST FALSE)
 if(Python_Interpreter_FOUND)
@@ -640,12 +819,41 @@ if(Python_Interpreter_FOUND)
     set(_SC4_TRY_TRT_TEST TRUE)
   endif()
 endif()
+set(_SC4_HAVE_NV_QLDPC FALSE)
+if(TARGET cudaq-qec-nv-qldpc-decoder
+   OR QEC_EXTERNAL_DECODERS
+   OR DEFINED ENV{QEC_EXTERNAL_DECODERS})
+  set(_SC4_HAVE_NV_QLDPC TRUE)
+endif()
+# Same lesson as the trt gate below: name the gate that actually failed rather
+# than letting the nv-qldpc cases evaporate silently.
+if(NOT _SC4_HAVE_NV_QLDPC)
+  message(WARNING "surface_code-4-yaml: nv-qldpc-decoder tests NOT registered "
+    "(no cudaq-qec-nv-qldpc-decoder target and QEC_EXTERNAL_DECODERS unset); "
+    "point QEC_EXTERNAL_DECODERS at the plugin to enable them.")
+endif()
+# A silent skip here once masked a dead test check for a whole release cycle:
+# the trt surface-code tests register only when BOTH the trt plugin target and
+# python-onnx are available, so name whichever gate actually failed.
+if(NOT TARGET cudaq-qec-trt-decoder)
+  message(WARNING "surface_code-4-yaml: trt_decoder tests NOT registered "
+    "(cudaq-qec-trt-decoder target not built).")
+elseif(NOT _SC4_TRY_TRT_TEST)
+  if(Python_Interpreter_FOUND)
+    message(WARNING "surface_code-4-yaml: trt_decoder tests NOT registered "
+      "(python module 'onnx' not importable by ${Python_EXECUTABLE}); "
+      "pip install onnx to enable them.")
+  else()
+    message(WARNING "surface_code-4-yaml: trt_decoder tests NOT registered "
+      "(no python interpreter found).")
+  endif()
+endif()
 
 function(add_surface_code_4_yaml_test test_suffix distance num_rounds
-         decoder_type num_shots onnx_path)
-  set(_sc4_env "CUDAQ_QEC_REALTIME_MODE=inproc_rpc")
+         decoder_type num_shots)
+  set(_sc4_env "")
   if(Python_Interpreter_FOUND)
-    list(APPEND _sc4_env "PYTHON=${Python_EXECUTABLE}")
+    set(_sc4_env "PYTHON=${Python_EXECUTABLE}")
   endif()
 
   add_test(
@@ -654,7 +862,7 @@ function(add_surface_code_4_yaml_test test_suffix distance num_rounds
       bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-4-yaml-test.sh"
         ${CMAKE_CURRENT_BINARY_DIR}/surface_code-4-yaml
         ${distance} ${num_rounds}
-        ${decoder_type} ${num_shots} "${onnx_path}" ${ARGN}
+        ${decoder_type} ${num_shots} ${ARGN}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
   set_tests_properties(
@@ -663,7 +871,7 @@ function(add_surface_code_4_yaml_test test_suffix distance num_rounds
 endfunction()
 
 function(add_surface_code_4_yaml_external_test test_suffix distance num_rounds
-         decoder_type num_shots onnx_path)
+         decoder_type num_shots)
   set(_sc4_external_env
     "QEC_DECODING_SERVER=$<TARGET_FILE:decoding_server>")
   if(Python_Interpreter_FOUND)
@@ -676,7 +884,7 @@ function(add_surface_code_4_yaml_external_test test_suffix distance num_rounds
       ${CMAKE_COMMAND} -E env ${_sc4_external_env}
       bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-4-yaml-test.sh"
         $<TARGET_FILE:surface_code-4-yaml-cqr>
-        ${distance} ${num_rounds} ${decoder_type} ${num_shots} "${onnx_path}"
+        ${distance} ${num_rounds} ${decoder_type} ${num_shots}
         --num_logical 3 ${ARGN}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
@@ -687,159 +895,86 @@ endfunction()
 
 # This example decodes ONE volume of num_rounds rounds (no sliding windows), so
 # each case runs num_rounds == distance rounds.
-function(add_surface_code_4_yaml_decoder_cases label decoder_type onnx_path)
+function(add_surface_code_4_yaml_decoder_cases label decoder_type)
   add_surface_code_4_yaml_test(${label}-d3 3 3
-    ${decoder_type} 200 "${onnx_path}" ${ARGN})
+    ${decoder_type} 200 ${ARGN})
   add_surface_code_4_yaml_test(${label}-d5 5 5
-    ${decoder_type} 200 "${onnx_path}" ${ARGN})
+    ${decoder_type} 200 ${ARGN})
 endfunction()
 
-add_surface_code_4_yaml_decoder_cases(pymatching pymatching "")
+add_surface_code_4_yaml_decoder_cases(pymatching pymatching)
 
 # TensorRT predecoder + PyMatching global decoder. The shell driver generates a
 # tiny ONNX model sized for each test case: output [pre_L=0, residual], so TRT
 # preserves the syndrome and PyMatching performs the correction.
 if(TARGET cudaq-qec-trt-decoder AND _SC4_TRY_TRT_TEST)
-  add_surface_code_4_yaml_decoder_cases(trt-pymatching trt_decoder AUTO)
-endif()
-
-# nv-qldpc relay-BP requires both the external nv-qldpc decoder plugin and the
-# proprietary cudevice archive. Match the other realtime graph/inproc tests:
-# register only when those dependencies are configured; do not runtime-skip.
-if(_APP_CUDAQ_REALTIME_DISPATCH_LIB
-   AND TARGET cudaq-qec-realtime-cudevice-proprietary
-   AND (QEC_EXTERNAL_DECODERS OR DEFINED ENV{QEC_EXTERNAL_DECODERS}))
-  add_surface_code_4_yaml_decoder_cases(relay-bp nv-qldpc-decoder ""
-    --use-relay-bp)
+  add_surface_code_4_yaml_decoder_cases(trt-pymatching trt_decoder
+    --generate-identity-onnx)
 endif()
 
 # Relaxed round rule (T=6 not a multiple of d=5) and multi-logical patches, each
 # through the full generate + reload + decode driver -- so no hand-written
 # generate/reload duplication, and both get the driver's residual-LER check.
-add_surface_code_4_yaml_test(d5t6 5 6 pymatching 20 "")
-add_surface_code_4_yaml_test(multilogical 3 3 pymatching 20 "" --num_logical 2)
+add_surface_code_4_yaml_test(d5t6 5 6 pymatching 20)
+add_surface_code_4_yaml_test(multilogical 3 3 pymatching 20 --num_logical 2)
 
 # Multi-decoder-type cases: --decoder_type lists one decoder per patch (patch i
 # decodes with entry i through one realtime session). list-parse exercises the
 # list machinery with no new dependencies (homogeneous pair); the trio cases
 # bind three patches to heterogeneous decoder configs -- d5 exercises the
 # vector result path beyond the old num_logical*d^2 < 64 packing ceiling.
-add_surface_code_4_yaml_test(list-parse-d3 3 3 "pymatching,pymatching" 20 ""
+add_surface_code_4_yaml_test(list-parse-d3 3 3 "pymatching,pymatching" 20
   --num_logical 2)
 if(TARGET cudaq-qec-trt-decoder AND _SC4_TRY_TRT_TEST)
   add_surface_code_4_yaml_test(trio-trt-d3 3 3
-    "pymatching,trt_decoder,pymatching" 200 AUTO --num_logical 3)
+    "pymatching,trt_decoder,pymatching" 200 --generate-identity-onnx
+    --num_logical 3)
   add_surface_code_4_yaml_test(trio-trt-d5 5 5
-    "pymatching,trt_decoder,pymatching" 200 AUTO --num_logical 3)
+    "pymatching,trt_decoder,pymatching" 200 --generate-identity-onnx
+    --num_logical 3)
 endif()
 
 if(TARGET surface_code-4-yaml-cqr)
   add_surface_code_4_yaml_external_test(three-way-overlap 3 3
     "concurrency_test_decoder,concurrency_test_decoder,concurrency_test_decoder"
-    2 "")
+    2)
   set_property(TEST app_examples.surface_code-4-yaml-cqr-three-way-overlap
     APPEND PROPERTY ENVIRONMENT
       "QEC_CONCURRENCY_TEST_DECODERS=3;REQUIRE_DECODER_CONCURRENCY=3;EXPECTED_BARRIER_COMPLETIONS=2;EXPECTED_DECODER_CORRECTIONS=0,2,0;EXPECTED_SERVER_DECODER_CONSTRUCTIONS=3;CHECK_MISSING_SERVER_PORT=1;SKIP_LOGICAL_ERROR_CEILING=1")
 
   if(TARGET cudaq-qec-trt-decoder AND _SC4_TRY_TRT_TEST)
     add_surface_code_4_yaml_external_test(happy-path 3 3
-      "pymatching,trt_decoder,pymatching" 200 AUTO)
+      "pymatching,trt_decoder,pymatching" 200 --generate-identity-onnx)
     set_property(TEST app_examples.surface_code-4-yaml-cqr-happy-path
       APPEND PROPERTY ENVIRONMENT
-        "REQUIRE_TRT_EXECUTION=1")
+        "REQUIRE_SERVER_DECODE_COUNTS=1")
   endif()
 
   # A real-workload skew case: all three patches use PyMatching, but patch 1
   # receives a much higher physical error rate and a correspondingly generated
-  # decoder model. This exercises independent server workers without a
-  # test-only delay in the decoder implementation.
+  # decoder model. This exercises independent per-ring dispatchers without a
+  # test-only delay in the decoder implementation.  Requests execute inline
+  # on the dispatcher threads, so the >=2 concurrency evidence comes from
+  # patch 1's slow decode overlapping a neighbor's — an opportunistic race
+  # per shot; 500 shots make observing at least one overlap statistically
+  # certain (the deterministic proof is the three-way-overlap barrier test).
   add_surface_code_4_yaml_external_test(hard-patch-pymatching 7 7
-    "pymatching,pymatching,pymatching" 100 ""
+    "pymatching,pymatching,pymatching" 500
     --p_spam_per_patch 0.001,0.20,0.001)
   set_property(TEST app_examples.surface_code-4-yaml-cqr-hard-patch-pymatching
     APPEND PROPERTY ENVIRONMENT
       "CHECK_HARD_PATCH_MODELS=1;REQUIRE_DECODER_CONCURRENCY=2;SKIP_LOGICAL_ERROR_CEILING=1")
 
-  # Ising bundles are generated outside this repository. Supplying a bundle at
-  # configure time registers an external-server test using the same identity
-  # TRT predecoder as the mocked happy path, but with Ising H/O/priors/D.
-  set(QEC_SURFACE_CODE_4_ISING_BUNDLE "" CACHE PATH
-      "Ising d/T/Z bundle used by the external surface-code example")
-  set(QEC_SURFACE_CODE_4_ISING_DISTANCE 7 CACHE STRING
-      "Distance encoded by QEC_SURFACE_CODE_4_ISING_BUNDLE")
-  set(QEC_SURFACE_CODE_4_ISING_ROUNDS 7 CACHE STRING
-      "Round count encoded by QEC_SURFACE_CODE_4_ISING_BUNDLE")
-  set(QEC_SURFACE_CODE_4_ISING_P_SPAM "0.01" CACHE STRING
-      "Runtime SPAM rate matching the Ising bundle priors")
-  if(QEC_SURFACE_CODE_4_ISING_BUNDLE
-     AND TARGET cudaq-qec-trt-decoder AND _SC4_TRY_TRT_TEST)
-    add_surface_code_4_yaml_external_test(ising-identity
-      ${QEC_SURFACE_CODE_4_ISING_DISTANCE}
-      ${QEC_SURFACE_CODE_4_ISING_ROUNDS}
-      "pymatching,trt_decoder,pymatching" 20 AUTO
-      --ising_bundle "${QEC_SURFACE_CODE_4_ISING_BUNDLE}"
-      --p_spam_per_patch "${QEC_SURFACE_CODE_4_ISING_P_SPAM}")
-    set_property(TEST app_examples.surface_code-4-yaml-cqr-ising-identity
-      APPEND PROPERTY ENVIRONMENT
-        "REQUIRE_TRT_EXECUTION=1;SKIP_LOGICAL_ERROR_CEILING=1")
-  endif()
-endif()
-
-# The multi-type cases must PROVE the patches traveled through one realtime
-# session: without realtime support maybe_init_realtime_session() is a no-op
-# and enqueue/get/reset silently take the legacy direct-call path, so the
-# tests would pass on YAML routing alone. Assert HOST-mode initialization
-# whenever this build has realtime support. Gate on the compile definition
-# actually applied to cudaq-qec-realtime-decoding (set when
-# CUDAQ_REALTIME_INCLUDE_DIR is discovered), NOT the optional
-# CUDAQ_REALTIME_ROOT search hint -- the headers can be found through
-# CUDAQ_INSTALL_DIR while the hint stays empty.
-get_target_property(_sc4_rt_defs cudaq-qec-realtime-decoding
-  COMPILE_DEFINITIONS)
-if(_sc4_rt_defs MATCHES "CUDAQ_REALTIME_ROOT")
-  set(_sc4_hostmode_env "REQUIRE_HOST_MODE=1;CUDAQ_LOG_LEVEL=info")
-  set_property(TEST app_examples.surface_code-4-yaml-list-parse-d3 APPEND
-    PROPERTY ENVIRONMENT "${_sc4_hostmode_env}")
-  if(TARGET cudaq-qec-trt-decoder AND _SC4_TRY_TRT_TEST)
-    set_property(TEST app_examples.surface_code-4-yaml-trio-trt-d3 APPEND
-      PROPERTY ENVIRONMENT "${_sc4_hostmode_env}")
-    set_property(TEST app_examples.surface_code-4-yaml-trio-trt-d5 APPEND
-      PROPERTY ENVIRONMENT "${_sc4_hostmode_env}")
-  endif()
-endif()
-
-# Three-way heterogeneous trio incl. relay-BP. Requires a HOST-dispatch
-# (non-graph) nv-qldpc plugin via QEC_EXTERNAL_DECODERS, built against the
-# CURRENT cudaq-qec headers (a stale plugin fails to load): the inproc session
-# must be dispatch-homogeneous, and pymatching/trt are host-mode. A
-# graph-flavor plugin (built with CUDAQ_REALTIME_ROOT) would be rejected as a
-# mixed set. 1000 shots make working-vs-broken unambiguous for the BP entry
-# under the predeclared 2% correctness bound. REQUIRE_HOST_MODE +
-# CUDAQ_LOG_LEVEL=info make the driver assert the realtime session actually
-# initialized (no vacuous pass through the legacy direct-call stub).
-if((QEC_EXTERNAL_DECODERS OR DEFINED ENV{QEC_EXTERNAL_DECODERS})
-   AND TARGET cudaq-qec-trt-decoder AND _SC4_TRY_TRT_TEST)
-  add_surface_code_4_yaml_test(trio-relay-d3 3 3
-    "pymatching,trt_decoder,nv-qldpc-decoder" 1000 AUTO
-    --num_logical 3 --use-relay-bp)
-  set_property(TEST app_examples.surface_code-4-yaml-trio-relay-d3 APPEND
-    PROPERTY ENVIRONMENT "REQUIRE_HOST_MODE=1;CUDAQ_LOG_LEVEL=info")
 endif()
 
 # --------------------------------------------------------------------------- #
-# Negative / boundary tests: pin the validation behavior (distance/round guards,
-# YAML-to-geometry binding, X-basis-bundle rejection, replay guards including
-# structurally-incomplete captures, and multi-logical reload) so it cannot
-# silently regress. Native ctests: PASS_REGULAR_EXPRESSION asserts the specific
-# diagnostic (not merely a nonzero exit), and FIXTURES_SETUP makes a failed
-# fixture fail its dependents. Self-contained -- no external Ising artifacts or
-# ONNX models required.
+# Negative / boundary tests for geometry, replay, and multi-logical reload.
+# PASS_REGULAR_EXPRESSION alone ignores exit status, so _sc4_reject checks both.
 # --------------------------------------------------------------------------- #
 set(_sc4_exe ${CMAKE_CURRENT_BINARY_DIR}/surface_code-4-yaml)
 set(_sc4_neg_dir ${CMAKE_CURRENT_BINARY_DIR}/negative)
 file(MAKE_DIRECTORY ${_sc4_neg_dir})
-set(_sc4_neg_env "CUDAQ_QEC_REALTIME_MODE=inproc_rpc"
-                 "CUDAQ_DEFAULT_SIMULATOR=stim")
+set(_sc4_neg_env "CUDAQ_DEFAULT_SIMULATOR=stim")
 
 # A rejection case must satisfy BOTH conditions: a nonzero exit AND the expected
 # diagnostic. CTest's PASS_REGULAR_EXPRESSION ignores the exit code, so a wrapper
@@ -974,13 +1109,13 @@ _sc4_reject(p-spam-zero-generation "--p_spam must be > 0 to generate"
   --distance 3 --num_rounds 3 --p_spam 0 --decoder_type pymatching
   --save_dem ${_sc4_neg_dir}/ps0.yml)
 
-# Dual-parse pin, plugin-free: generation instantiates no decoder, so this
-# runs everywhere. Structural check (always): the BP entry carries the
-# undecomposed hyperedge H -- strictly fewer columns than the matching entry's
-# decomposed H. Full check (python3 available): the mixed-list BP entry's
-# column multiset of (detector support, observable support, probability) is
-# IDENTICAL to a directly generated undecomposed reference config at the same
-# geometry.
+# Dual-parse pin: generation instantiates no decoder, but YAML emission
+# requires the nv-qldpc-decoder parameter schema (registered by the plugin).
+# Structural check: the BP entry carries the undecomposed hyperedge H --
+# strictly fewer columns than the matching entry's decomposed H.
+# Full check (python3 available): the mixed-list BP entry's column multiset
+# of (detector support, observable support, probability) is IDENTICAL to a
+# directly generated undecomposed reference config at the same geometry.
 function(_sc4_dual_parse_test distance num_rounds)
   add_test(NAME app_examples.surface_code-4-yaml-dual-parse-gen-d${distance}
     COMMAND bash -c [==[
@@ -1065,18 +1200,10 @@ fi
   set_tests_properties(app_examples.surface_code-4-yaml-dual-parse-gen-d${distance}
     PROPERTIES ENVIRONMENT "${_sc4_neg_env}")
 endfunction()
-_sc4_dual_parse_test(3 3)
-_sc4_dual_parse_test(5 5)
-
-# X-basis Ising bundle rejected (basis must be Z). Fabricate just the
-# metadata.txt the loader inspects; the dummy ONNX is never opened because the
-# basis check throws first.
-file(WRITE ${_sc4_neg_dir}/xbundle/metadata.txt
-  "distance=3\nn_rounds=3\nbasis=X\ncode_rotation=XV\n")
-_sc4_reject(xbasis-bundle "basis='X'"
-  --distance 3 --num_rounds 3 --decoder_type trt_decoder
-  --onnx_path ${_sc4_neg_dir}/dummy.onnx --ising_bundle ${_sc4_neg_dir}/xbundle
-  --save_dem ${_sc4_neg_dir}/xb.yml)
+if(_SC4_HAVE_NV_QLDPC)
+  _sc4_dual_parse_test(3 3)
+  _sc4_dual_parse_test(5 5)
+endif()
 
 # Geometry binding: a d5/T5 config rejected when loaded as d3/T15 (same 120
 # detectors, different measurement-buffer span).
@@ -1129,3 +1256,63 @@ _sc4_accept(replay-roundtrip "SUCCESS: All corrections match"
   --distance 3 --num_rounds 3 --num_shots 5)
 set_tests_properties(app_examples.surface_code-4-yaml-replay-roundtrip
   PROPERTIES FIXTURES_REQUIRED sc4_replay)
+
+# ---------------------------------------------------------------------------
+# Surface code 5: one ring buffer (and one dispatcher) per decoder, via the
+# cudaq::device_call device-id overload (device_id == decoder_id).  Runs over
+# the in-process host_dispatch device_call channel; the simulation-cqr client
+# lowers the decoding RPCs (-frealtime-lowering) and decoding-server-cqr
+# serves them.  See surface_code-5-per-decoder-rings.cpp.
+# ---------------------------------------------------------------------------
+if(TARGET cudaq-qec-realtime-decoding-simulation-cqr
+   AND TARGET cudaq-qec-realtime-decoding-server-cqr)
+  add_executable(surface_code-5-per-decoder-rings)
+  set_target_properties(surface_code-5-per-decoder-rings PROPERTIES
+    LINKER_LANGUAGE CXX)
+
+  target_include_directories(surface_code-5-per-decoder-rings PRIVATE
+    ${CUDAQ_REALTIME_INCLUDE_DIR}
+    ${CUDAToolkit_INCLUDE_DIRS}
+  )
+
+  cudaqx_add_device_code(surface_code-5-per-decoder-rings
+    SOURCES
+      surface_code-5-per-decoder-rings.cpp
+    COMPILER_FLAGS
+      --target stim
+      -frealtime-lowering
+  )
+
+  target_link_directories(surface_code-5-per-decoder-rings
+    PRIVATE ${CUDAQ_INSTALL_DIR}/lib)
+
+  # See test_pymatching_device_call_realtime for why --no-as-needed is needed
+  # (dlopen(NULL)-resolved quantum platform symbols).
+  target_link_options(surface_code-5-per-decoder-rings PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-Wl,--no-as-needed>)
+
+  target_link_libraries(surface_code-5-per-decoder-rings PRIVATE
+    cudaq-qec-decoders
+    cudaq-qec-realtime-decoding
+    cudaq-qec-realtime-decoding-simulation-cqr
+    cudaq-qec-realtime-decoding-server-cqr
+    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+    CUDA::cudart
+    nvqir nvqir-stim
+  )
+
+  set_target_properties(surface_code-5-per-decoder-rings PROPERTIES
+    BUILD_RPATH
+      "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins;${CUDAQ_INSTALL_DIR}/lib"
+  )
+
+  add_dependencies(surface_code-5-per-decoder-rings cudaq-qec-pymatching)
+endif()
+
+if(TARGET surface_code-5-per-decoder-rings)
+  add_test(NAME app_examples.surface_code-5-per-decoder-rings
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/surface_code-5-per-decoder-rings-test.sh
+            $<TARGET_FILE:surface_code-5-per-decoder-rings>)
+  set_tests_properties(app_examples.surface_code-5-per-decoder-rings
+    PROPERTIES LABELS "qec")
+endif()

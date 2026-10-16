@@ -8,6 +8,7 @@
 
 #include "trt_test_data.h"
 #include "cudaq/qec/decoder.h"
+#include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/trt_decoder_internal.h"
 #include <chrono>
 #include <cmath>
@@ -16,6 +17,7 @@
 #include <gtest/gtest.h>
 #include <optional>
 #include <random>
+#include <unistd.h>
 #include <vector>
 
 #include <cuda_runtime_api.h>
@@ -38,6 +40,17 @@ cudaqx::tensor<uint8_t> make_identity_h(std::size_t n) {
   for (std::size_t i = 0; i < n; ++i)
     H.at({i, i}) = 1;
   return H;
+}
+
+decoder_init
+make_inputs_with_empty_observables(const cudaqx::tensor<uint8_t> &H,
+                                   std::size_t num_observables) {
+  auto sparse_H = sparse_binary_matrix(H);
+  std::vector<std::uint32_t> row_ptrs(num_observables + 1, 0);
+  auto O = sparse_binary_matrix::from_csr(
+      static_cast<std::uint32_t>(num_observables), sparse_H.num_cols(),
+      std::move(row_ptrs), {});
+  return decoder_init(std::move(sparse_H), std::move(O));
 }
 
 std::filesystem::path make_temp_engine_path(const std::string &name) {
@@ -112,6 +125,7 @@ protected:
 TEST_F(TRTDecoderTest, ValidateParameters_ValidONNXPath) {
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", std::string("test_model.onnx"));
+  params.insert("engine_output_format", std::string("errors"));
 
   // Should not throw
   EXPECT_NO_THROW(
@@ -122,6 +136,7 @@ TEST_F(TRTDecoderTest, ValidateParameters_ValidONNXPath) {
 TEST_F(TRTDecoderTest, ValidateParameters_ValidEnginePath) {
   cudaqx::heterogeneous_map params;
   params.insert("engine_load_path", std::string("test_engine.trt"));
+  params.insert("engine_output_format", std::string("errors"));
 
   // Should not throw
   EXPECT_NO_THROW(
@@ -133,6 +148,7 @@ TEST_F(TRTDecoderTest, ValidateParameters_BothPathsProvided) {
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", std::string("test_model.onnx"));
   params.insert("engine_load_path", std::string("test_engine.trt"));
+  params.insert("engine_output_format", std::string("errors"));
 
   // Should throw runtime_error
   EXPECT_THROW(
@@ -153,6 +169,7 @@ TEST_F(TRTDecoderTest, ValidateParameters_EmptyStringPaths) {
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", std::string(""));
   params.insert("engine_load_path", std::string(""));
+  params.insert("engine_output_format", std::string("errors"));
 
   // Should throw runtime_error (empty strings are still considered "provided")
   EXPECT_THROW(
@@ -281,10 +298,13 @@ TEST_F(TRTDecoderTest, ValidateAgainstPyTorchModel) {
   // Create the TRT decoder
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", onnx_path);
+  params.insert("engine_output_format", std::string("observables"));
 
   std::unique_ptr<decoder> trt_decoder;
   try {
-    trt_decoder = decoder::get("trt_decoder", H, params);
+    trt_decoder = decoder::get(
+        "trt_decoder", make_inputs_with_empty_observables(H, num_observables),
+        decode_result_type::observables, params);
   } catch (const std::exception &e) {
     GTEST_SKIP() << "Failed to create TRT decoder: " << e.what();
   }
@@ -374,10 +394,13 @@ TEST_F(TRTDecoderTest, ValidateSingleTestCase) {
   // Create the TRT decoder
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", onnx_path);
+  params.insert("engine_output_format", std::string("observables"));
 
   std::unique_ptr<decoder> trt_decoder;
   try {
-    trt_decoder = decoder::get("trt_decoder", H, params);
+    trt_decoder = decoder::get(
+        "trt_decoder", make_inputs_with_empty_observables(H, NUM_OBSERVABLES),
+        decode_result_type::observables, params);
   } catch (const std::exception &e) {
     GTEST_SKIP() << "Failed to create TRT decoder: " << e.what();
   }
@@ -433,12 +456,15 @@ TEST_F(TRTDecoderTest, PerformanceComparisonCudaGraphVsTraditional) {
   // =========================================================================
   cudaqx::heterogeneous_map params_cuda_graph;
   params_cuda_graph.insert("onnx_load_path", onnx_path);
+  params_cuda_graph.insert("engine_output_format", std::string("observables"));
   params_cuda_graph.insert("precision", "fp16");
   params_cuda_graph.insert("use_cuda_graph", true);
 
   std::unique_ptr<decoder> decoder_cuda_graph;
   try {
-    decoder_cuda_graph = decoder::get("trt_decoder", H, params_cuda_graph);
+    decoder_cuda_graph = decoder::get(
+        "trt_decoder", make_inputs_with_empty_observables(H, NUM_OBSERVABLES),
+        decode_result_type::observables, params_cuda_graph);
   } catch (const std::exception &e) {
     GTEST_SKIP() << "Failed to create CUDA graph decoder: " << e.what();
   }
@@ -448,12 +474,15 @@ TEST_F(TRTDecoderTest, PerformanceComparisonCudaGraphVsTraditional) {
   // =========================================================================
   cudaqx::heterogeneous_map params_traditional;
   params_traditional.insert("onnx_load_path", onnx_path);
+  params_traditional.insert("engine_output_format", std::string("observables"));
   params_traditional.insert("precision", "fp16");
   params_traditional.insert("use_cuda_graph", false);
 
   std::unique_ptr<decoder> decoder_traditional;
   try {
-    decoder_traditional = decoder::get("trt_decoder", H, params_traditional);
+    decoder_traditional = decoder::get(
+        "trt_decoder", make_inputs_with_empty_observables(H, NUM_OBSERVABLES),
+        decode_result_type::observables, params_traditional);
   } catch (const std::exception &e) {
     GTEST_SKIP() << "Failed to create traditional decoder: " << e.what();
   }
@@ -546,19 +575,17 @@ TEST_F(TRTDecoderTest, PerformanceComparisonCudaGraphVsTraditional) {
       << " μs";
 }
 
-TEST_F(TRTDecoderTest, DecodeUninitializedDecoderReturnsUnconvergedBatch) {
-  // A failed constructor leaves the decoder object present but not ready;
-  // decode_batch should return one unconverged empty result per input syndrome.
+TEST_F(TRTDecoderTest, ConstructionFailureThrows) {
+  // A decoder that cannot infer must not exist: initialization failure
+  // propagates out of decoder::get instead of yielding a half-dead object
+  // that reports converged=false forever (converged is a statement about
+  // the solution of a completed decode, never about decoder health).
   cudaqx::heterogeneous_map params;
   params.insert("engine_load_path",
                 std::string("/no/such/cudaq-qec-test.engine"));
-  auto trt_decoder = decoder::get("trt_decoder", make_identity_h(2), params);
-  ASSERT_NE(trt_decoder, nullptr);
-
-  auto results = trt_decoder->decode_batch({{}});
-  ASSERT_EQ(results.size(), 1u);
-  EXPECT_FALSE(results[0].converged);
-  EXPECT_TRUE(results[0].result.empty());
+  params.insert("engine_output_format", std::string("errors"));
+  EXPECT_THROW(decoder::get("trt_decoder", make_identity_h(2), params),
+               std::runtime_error);
 }
 
 TEST_F(TRTDecoderTest, EngineSavePathAndEngineLoadPathRoundTrip) {
@@ -577,6 +604,7 @@ TEST_F(TRTDecoderTest, EngineSavePathAndEngineLoadPathRoundTrip) {
 
   cudaqx::heterogeneous_map build_params;
   build_params.insert("onnx_load_path", onnx_path);
+  build_params.insert("engine_output_format", std::string("observables"));
   build_params.insert("engine_save_path", engine_path.string());
   build_params.insert("memory_workspace", std::size_t{1 << 20});
   build_params.insert("precision", std::string("fp16"));
@@ -584,7 +612,9 @@ TEST_F(TRTDecoderTest, EngineSavePathAndEngineLoadPathRoundTrip) {
 
   std::unique_ptr<decoder> built_decoder;
   try {
-    built_decoder = decoder::get("trt_decoder", H, build_params);
+    built_decoder = decoder::get(
+        "trt_decoder", make_inputs_with_empty_observables(H, NUM_OBSERVABLES),
+        decode_result_type::observables, build_params);
   } catch (const std::exception &e) {
     GTEST_SKIP() << "Failed to build TRT decoder: " << e.what();
   }
@@ -592,10 +622,13 @@ TEST_F(TRTDecoderTest, EngineSavePathAndEngineLoadPathRoundTrip) {
 
   cudaqx::heterogeneous_map load_params;
   load_params.insert("engine_load_path", engine_path.string());
+  load_params.insert("engine_output_format", std::string("observables"));
   load_params.insert("use_cuda_graph", false);
   std::unique_ptr<decoder> loaded_decoder;
   try {
-    loaded_decoder = decoder::get("trt_decoder", H, load_params);
+    loaded_decoder = decoder::get(
+        "trt_decoder", make_inputs_with_empty_observables(H, NUM_OBSERVABLES),
+        decode_result_type::observables, load_params);
   } catch (const std::exception &e) {
     GTEST_SKIP() << "Failed to load TRT decoder: " << e.what();
   }
@@ -622,6 +655,7 @@ TEST_F(TRTDecoderTest, DynamicBatchIdentityModelUsesOptimizationProfile) {
 
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("errors"));
   params.insert("batch_size", std::size_t{2});
   params.insert("use_cuda_graph", true);
   params.insert("memory_workspace", std::size_t{1 << 20});
@@ -656,6 +690,7 @@ TEST_F(TRTDecoderTest, Uint8IdentityModelBinarizesInputAndOutput) {
 
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("errors"));
   params.insert("use_cuda_graph", false);
 
   std::unique_ptr<decoder> trt_decoder;
@@ -684,6 +719,7 @@ TEST_F(TRTDecoderTest, MixedDtypeCopiesOutput) {
 
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("errors"));
   params.insert("use_cuda_graph", false);
 
   std::unique_ptr<decoder> trt_decoder;
@@ -706,9 +742,7 @@ TEST_F(TRTDecoderTest, MixedDtypeCopiesOutput) {
   EXPECT_FLOAT_EQ(result.result[2], 1.0);
 }
 
-TEST_F(TRTDecoderTest, BatchFailureKeepsResultCount) {
-  // A post-initialisation failure in decode_batch should preserve one result
-  // per input syndrome so decode() never indexes an empty result vector.
+TEST_F(TRTDecoderTest, RejectsGlobalDecoderSyndromeMismatchAtConstruction) {
   if (!gpu_available())
     GTEST_SKIP() << "No CUDA GPU available";
   auto onnx_path = get_dynamic_onnx_asset_path();
@@ -717,26 +751,96 @@ TEST_F(TRTDecoderTest, BatchFailureKeepsResultCount) {
 
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format", std::string("residual_detectors"));
   params.insert("batch_size", std::size_t{1});
   params.insert("use_cuda_graph", false);
   params.insert("global_decoder", std::string("single_error_lut"));
   params.insert("global_decoder_params", cudaqx::heterogeneous_map{});
 
-  std::unique_ptr<decoder> trt_decoder;
+  // The engine emits three residual detectors, while make_identity_h(2)
+  // configures a child expecting two. Reject this before any decode call.
+  EXPECT_THROW((void)decoder::get("trt_decoder", make_identity_h(2), params),
+               std::runtime_error);
+}
+
+// Acceptance 4: TensorRT constructs Chromobius as its global child while the
+// authoritative raw DEM survives the derivation. Chromobius refuses to build
+// from matrices alone, so construction succeeding IS the assertion that raw
+// provenance reached the child through TensorRT's input derivation.
+TEST_F(TRTDecoderTest, NestsChromobiusPreservingRawDem) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  if (cudaq::qec::decoding::config::find_decoder_schema("chromobius") ==
+      nullptr)
+    GTEST_SKIP() << "chromobius plugin not built in this configuration";
+  auto onnx_path = get_dynamic_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated dynamic ONNX fixture is unavailable";
+
+  // Two coloured detectors and one observable, so the engine's
+  // [observable, residual detectors] output is three wide, matching the
+  // dynamic fixture the other composite tests use.
+  const auto dem_path =
+      std::filesystem::temp_directory_path() /
+      ("cudaqx_trt_chromobius_" + std::to_string(::getpid()) + ".dem");
+  std::ofstream(dem_path) << "error(0.1) D0 L0\n"
+                             "error(0.1) D0 D1\n"
+                             "error(0.1) D1 L0\n"
+                             "detector(0, 0, 0, 0) D0\n"
+                             "detector(0, 0, 0, 1) D1\n";
+  struct Cleanup {
+    std::filesystem::path path;
+    ~Cleanup() {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+  } cleanup{dem_path};
+
+  std::ifstream dem_file(dem_path);
+  std::string dem_text((std::istreambuf_iterator<char>(dem_file)),
+                       std::istreambuf_iterator<char>());
+  auto inputs = decoder_init::from_stim_dem(dem_text);
+  ASSERT_TRUE(inputs.has_stim_dem());
+  ASSERT_EQ(inputs.num_detectors(), 2u);
+  ASSERT_EQ(inputs.num_observables(), 1u);
+
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format",
+                std::string("observables_and_residual_detectors"));
+  params.insert("batch_size", std::size_t{1});
+  params.insert("use_cuda_graph", false);
+  params.insert("global_decoder", std::string("chromobius"));
+  params.insert("global_decoder_params", cudaqx::heterogeneous_map{});
+
+  std::unique_ptr<decoder> composite;
   try {
-    trt_decoder = decoder::get("trt_decoder", make_identity_h(2), params);
+    composite = decoder::get("trt_decoder", inputs,
+                             decode_result_type::observables, params);
   } catch (const std::exception &e) {
-    GTEST_SKIP() << "Failed to create mismatch TRT decoder: " << e.what();
+    GTEST_SKIP() << "TensorRT engine build unavailable: " << e.what();
   }
+  ASSERT_NE(composite, nullptr);
+  EXPECT_EQ(composite->get_num_observables(), 1u);
 
-  auto results = trt_decoder->decode_batch({{1.0, 0.0, 1.0}});
+  // The engine fixes the input width, as in the other composite tests; a
+  // decode exercises the child on the residual detectors it is handed.
+  auto result = composite->decode({0.0, 0.0, 0.0});
+  EXPECT_EQ(result.result.size(), 1u);
 
-  // The mismatched global decoder forces an exception before any result is
-  // pushed; the fixed path must still return one placeholder for the input.
-  ASSERT_EQ(results.size(), 1u);
-  // The placeholder must be marked failed so callers can distinguish it from a
-  // successful decode without touching out-of-range elements.
-  EXPECT_FALSE(results[0].converged);
+  // The converse, so the case above cannot pass for an unrelated reason: with
+  // the same engine and child but a matrix-only model, there is no DEM to hand
+  // down and construction must fail.
+  cudaqx::tensor<uint8_t> H({2, 3});
+  H.at({0, 0}) = 1;
+  H.at({1, 1}) = 1;
+  cudaqx::tensor<uint8_t> O({1, 3});
+  O.at({0, 0}) = 1;
+  EXPECT_THROW((void)decoder::get("trt_decoder",
+                                  decoder_init(sparse_binary_matrix(H),
+                                               sparse_binary_matrix(O)),
+                                  decode_result_type::observables, params),
+               std::runtime_error);
 }
 
 TEST_F(TRTDecoderTest, CompositeGlobalDecoderCombinesLogicalFrame) {
@@ -755,15 +859,19 @@ TEST_F(TRTDecoderTest, CompositeGlobalDecoderCombinesLogicalFrame) {
 
   cudaqx::heterogeneous_map params;
   params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format",
+                std::string("observables_and_residual_detectors"));
   params.insert("batch_size", std::size_t{2});
   params.insert("use_cuda_graph", false);
   params.insert("global_decoder", std::string("single_error_lut"));
   params.insert("global_decoder_params", cudaqx::heterogeneous_map{});
-  params.insert("O", O);
 
   std::unique_ptr<decoder> trt_decoder;
   try {
-    trt_decoder = decoder::get("trt_decoder", H, params);
+    trt_decoder = decoder::get(
+        "trt_decoder",
+        decoder_init(sparse_binary_matrix(H), sparse_binary_matrix(O)),
+        decode_result_type::observables, params);
   } catch (const std::exception &e) {
     GTEST_SKIP() << "Failed to create composite TRT decoder: " << e.what();
   }
@@ -774,6 +882,148 @@ TEST_F(TRTDecoderTest, CompositeGlobalDecoderCombinesLogicalFrame) {
   ASSERT_EQ(results[1].result.size(), 1u);
   EXPECT_FLOAT_EQ(results[0].result[0], 0.0);
   EXPECT_FLOAT_EQ(results[1].result[0], 1.0);
+}
+
+TEST_F(TRTDecoderTest, RejectsResidualOutputWithoutGlobalDecoderAtTopLevel) {
+  cudaqx::heterogeneous_map params;
+
+  params.insert("onnx_load_path", std::string("unused.onnx"));
+  params.insert("engine_output_format", std::string("residual_detectors"));
+
+  try {
+    (void)decoder::get("trt_decoder", make_identity_h(3), params);
+    FAIL() << "expected standalone residual output without a global decoder "
+              "to be rejected";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("requires global_decoder"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+TEST_F(TRTDecoderTest, RejectsUnsupportedAuxiliaryOutput) {
+  const auto H = sparse_binary_matrix::from_nested_csr(
+      1, 1, std::vector<std::vector<uint32_t>>{{0}});
+  const auto O = sparse_binary_matrix::from_nested_csr(
+      1, 1, std::vector<std::vector<uint32_t>>{{0}});
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", std::string("unused.onnx"));
+  params.insert("engine_output_format", std::string("observables"));
+  constexpr auto unsupported =
+      static_cast<decoder_auxiliary_result_type>(1u << 1);
+
+  try {
+    (void)decoder::get(
+        "trt_decoder", decoder_init(H, O),
+        decoder_output_request{decode_result_type::observables, unsupported},
+        params);
+    FAIL() << "expected unsupported auxiliary output to be rejected";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("unsupported auxiliary"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+TEST_F(TRTDecoderTest, MultiOutputPackedChecksWidth) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  const auto onnx_path = get_dynamic_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated dynamic ONNX fixture is unavailable";
+
+  const auto H = sparse_binary_matrix::from_nested_csr(
+      3, 3, std::vector<std::vector<uint32_t>>{{0}, {1}, {2}});
+  const auto O = sparse_binary_matrix::from_nested_csr(
+      1, 3, std::vector<std::vector<uint32_t>>{{0}});
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format",
+                std::string("observables_and_residual_detectors"));
+  params.insert("batch_size", std::size_t{1});
+  params.insert("use_cuda_graph", false);
+
+  // The identity fixture emits three values, but a packed model over this
+  // input must emit one observable followed by three residual detectors.
+  try {
+    (void)decoder::get("trt_decoder", decoder_init(H, O),
+                       decoder_output_request{
+                           decode_result_type::observables,
+                           decoder_auxiliary_result_type::residual_detectors},
+                       params);
+    FAIL() << "expected packed TRT output width to be rejected";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "must equal num_observables + residual detector count"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+TEST_F(TRTDecoderTest, RejectsPackedOutputWithoutGlobalDecoderAtTopLevel) {
+  const auto H = sparse_binary_matrix::from_nested_csr(
+      3, 3, std::vector<std::vector<uint32_t>>{{0}, {1}, {2}});
+  const auto O = sparse_binary_matrix::from_nested_csr(
+      1, 3, std::vector<std::vector<uint32_t>>{{0}});
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", std::string("unused.onnx"));
+  params.insert("engine_output_format",
+                std::string("observables_and_residual_detectors"));
+  params.insert("batch_size", std::size_t{1});
+  params.insert("use_cuda_graph", false);
+
+  try {
+    (void)decoder::get("trt_decoder", decoder_init(H, O),
+                       decode_result_type::observables, params);
+    FAIL() << "expected top-level packed TRT output without a global decoder "
+              "to be rejected";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("requires global_decoder"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+TEST_F(TRTDecoderTest, CompositeGlobalDecoderReceivesCancellationToken) {
+  // TensorRT inference is not interruptible, but the token handed to
+  // decode()/decode_batch() must reach the global decoder unchanged.
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  auto onnx_path = get_dynamic_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated dynamic ONNX fixture is unavailable";
+
+  cudaqx::tensor<uint8_t> H({2, 1});
+  H.at({0, 0}) = 1;
+  cudaqx::tensor<uint8_t> O({1, 1});
+  O.at({0, 0}) = 1;
+
+  cudaqx::heterogeneous_map params;
+  params.insert("onnx_load_path", *onnx_path);
+  params.insert("engine_output_format",
+                std::string("observables_and_residual_detectors"));
+  params.insert("batch_size", std::size_t{2});
+  params.insert("use_cuda_graph", false);
+  params.insert("global_decoder", std::string("cancellation_probe_decoder"));
+  params.insert("global_decoder_params", cudaqx::heterogeneous_map{});
+
+  std::unique_ptr<decoder> trt_decoder;
+  try {
+    trt_decoder = decoder::get(
+        "trt_decoder",
+        decoder_init(sparse_binary_matrix(H), sparse_binary_matrix(O)),
+        decode_result_type::observables, params);
+  } catch (const std::exception &e) {
+    GTEST_SKIP() << "Failed to create composite TRT decoder: " << e.what();
+  }
+
+  const std::vector<std::vector<cudaq::qec::float_t>> syndromes{
+      {1.0, 1.0, 0.0}, {0.0, 1.0, 0.0}};
+  cancellation_source src;
+  src.request_hard_stop();
+  EXPECT_FALSE(
+      trt_decoder->decode_batch(syndromes, src.get_token()).has_value());
+  EXPECT_FALSE(trt_decoder->decode(syndromes[0], src.get_token()).has_value());
 }
 
 // Note: Constructor tests and parse_precision tests are disabled because they

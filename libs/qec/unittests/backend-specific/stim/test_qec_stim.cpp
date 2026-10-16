@@ -6,8 +6,12 @@
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
+#include <array>
 #include <cmath>
+#include <deque>
 #include <gtest/gtest.h>
+#include <limits>
+#include <random>
 
 #include "cudaq.h"
 #include "cudaq/algorithms/dem.h"
@@ -17,6 +21,7 @@
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/experiments.h"
 #include "cudaq/qec/patch.h"
+#include "cudaq/qec/pcm_utils.h"
 
 TEST(QECCodeTester, checkRepetitionNoiseStim) {
 
@@ -353,6 +358,9 @@ TEST(QECCodeTester, checkTwoQubitBitflipStim) {
 }
 
 TEST(QECCodeTester, checkBitflip) {
+  GTEST_SKIP() << "quantum optimizations cancel the h;h pair and eliminate the "
+                  "qubit; re-enable once NVIDIA/cuda-quantum#5057 lands";
+
   // This circuit should read out |0> when noiseless
   struct null1 {
     void operator()() __qpu__ {
@@ -444,9 +452,10 @@ TEST(QECCodeTester, checkNoisySampleMemoryCircuitAndDecodeStim) {
       }
       printf("syndrome:\n");
       syndrome.dump();
-      auto [converged, v_result, opt] = decoder->decode(syndrome);
+      auto decoded = decoder->decode(syndrome);
       cudaqx::tensor<uint8_t> result_tensor;
-      cudaq::qec::convert_vec_soft_to_tensor_hard(v_result, result_tensor);
+      cudaq::qec::convert_vec_soft_to_tensor_hard(decoded.result,
+                                                  result_tensor);
       printf("decode result:\n");
       result_tensor.dump();
       cudaqx::tensor<uint8_t> decoded_observables =
@@ -538,9 +547,10 @@ TEST(QECCodeTester, checkNoisySampleMemoryCircuitAndDecodeStim) {
         }
         printf("syndrome:\n");
         syndrome.dump();
-        auto [converged, v_result, opt] = decoder->decode(syndrome);
+        auto decoded = decoder->decode(syndrome);
         cudaqx::tensor<uint8_t> result_tensor;
-        cudaq::qec::convert_vec_soft_to_tensor_hard(v_result, result_tensor);
+        cudaq::qec::convert_vec_soft_to_tensor_hard(decoded.result,
+                                                    result_tensor);
 
         printf("decode result:\n");
         result_tensor.dump();
@@ -587,6 +597,209 @@ void check_matrix_bits(const std::string &name,
       data_ptr++;
     }
   }
+}
+
+// End-to-end realtime decode driven by the decoder_context API,
+// built from a full-basis CSS memory circuit. Steane's boundary is
+// inhomogeneous: only the fixed (Z) stabilizers carry boundary detectors while
+// interior rounds carry both types. The measurement
+// window is streamed as the realtime protocol does (numCols ancilla per round,
+// then the final data readout); the sliding accumulation must fire a decode at
+// exactly the right point -- only once the full window has arrived.
+TEST(QECCodeTester, checkRealtimeDecodeFromMemoryCircuit) {
+  auto steane = cudaq::qec::get_code("steane");
+  const std::size_t nRounds = 3;
+  const std::size_t numCols =
+      steane->get_num_ancilla_z_qubits() + steane->get_num_ancilla_x_qubits();
+  const std::size_t numData = steane->get_num_data_qubits();
+  cudaq::noise_model noise;
+  noise.add_all_qubit_channel("x", cudaq::qec::two_qubit_depolarization(0.05),
+                              1);
+
+  auto ctx = cudaq::qec::decoder_context_from_memory_circuit(
+      *steane, cudaq::qec::operation::prep0, nRounds, noise);
+  auto inputs = ctx.full_component();
+  const auto &dem = inputs.dem;
+  const auto D = cudaq::qec::m2d_to_sparse(inputs.m2d);
+  const auto m2d_rows = D.to_nested_csr();
+
+  ASSERT_FALSE(m2d_rows.empty());
+  EXPECT_EQ(m2d_rows.size(), dem.num_detectors());
+  ASSERT_EQ(ctx.num_measurements(), nRounds * numCols + numData);
+
+  // Inhomogeneous boundary: single-measurement boundary detectors coexist with
+  // multi-measurement interior/final ones, so m2d rows are not all one shape.
+  std::size_t minRow = m2d_rows[0].size(), maxRow = m2d_rows[0].size();
+  for (const auto &row : m2d_rows) {
+    minRow = std::min(minRow, row.size());
+    maxRow = std::max(maxRow, row.size());
+  }
+  EXPECT_LT(minRow, maxRow);
+
+  // Circuit analysis produces the model; decoder_init is what a decoder is
+  // built from. Bridging the two here is one expression, and it carries O and
+  // D, so construction configures the realtime path completely. There is no
+  // second step, and nothing to re-supply.
+  auto decoder = cudaq::qec::get_decoder("single_error_lut",
+                                         cudaq::qec::decoder_init(dem, D));
+  ASSERT_EQ(decoder->get_num_msyn_per_decode(), D.num_cols());
+
+  // Stream numCols ancilla per round, then the final data readout. The window
+  // must not decode until that last chunk completes it.
+  for (std::size_t r = 0; r < nRounds; ++r)
+    EXPECT_FALSE(
+        decoder->enqueue_syndrome(std::vector<std::uint8_t>(numCols, 0)))
+        << "decoded early after round " << r;
+  EXPECT_TRUE(decoder->enqueue_syndrome(std::vector<std::uint8_t>(numData, 0)));
+
+  // No errors were injected, so every observable correction is trivially zero.
+  for (std::size_t k = 0; k < decoder->get_num_observables(); ++k)
+    EXPECT_EQ(decoder->get_obs_corrections()[k], 0);
+}
+
+namespace {
+// Records the detector vector the realtime path hands down, so a test can check
+// the measurement-to-detector reduction directly rather than inferring it from
+// a decode result.
+class detector_recording_decoder : public cudaq::qec::decoder {
+public:
+  std::vector<std::vector<uint8_t>> seen;
+
+  using cudaq::qec::decoder::decoder;
+
+  cudaq::qec::decoder_result
+  decode(const std::vector<cudaq::qec::float_t> &syndrome) override {
+    // enqueue_syndrome() converts the detector bits to soft values on the way
+    // in, so undo that with the same threshold to recover what it computed.
+    std::vector<uint8_t> hard;
+    cudaq::qec::convert_vec_soft_to_hard(syndrome, hard);
+    seen.push_back(std::move(hard));
+    return trivial_result();
+  }
+
+private:
+  cudaq::qec::decoder_result trivial_result() {
+    cudaq::qec::decoder_result result;
+    result.converged = true;
+    result.result.assign(block_size, 0.0);
+    return result;
+  }
+};
+} // namespace
+
+// Stream a measurement window a round at a time and require the detector vector
+// enqueue_syndrome() hands to the decoder to match a direct reduction of m2d
+// against the same measurements, over many random records. Steane's boundary
+// layer is narrower than its interior rounds, so the window has non-uniform
+// round widths.
+//
+// Scope: decode() only runs once the window is complete, so this pins the
+// measurement-to-detector reduction and the point at which a decode fires. It
+// does not pin the order in which individual detectors are folded in, which is
+// not observable through decode() -- reducing the whole buffer on the final
+// round yields the same vector.
+TEST(QECCodeTester, checkRealtimeStreamedDetectorReduction) {
+  auto steane = cudaq::qec::get_code("steane");
+  const std::size_t nRounds = 3;
+  const std::size_t numCols =
+      steane->get_num_ancilla_z_qubits() + steane->get_num_ancilla_x_qubits();
+  const std::size_t numData = steane->get_num_data_qubits();
+  cudaq::noise_model noise;
+  noise.add_all_qubit_channel("x", cudaq::qec::two_qubit_depolarization(0.05),
+                              1);
+
+  auto ctx = cudaq::qec::decoder_context_from_memory_circuit(
+      *steane, cudaq::qec::operation::prep0, nRounds, noise);
+  auto [dem, m2d, m2o] = ctx.full_component();
+  const std::size_t numMeas = ctx.num_measurements();
+  ASSERT_EQ(numMeas, nRounds * numCols + numData);
+
+  detector_recording_decoder dec(
+      cudaq::qec::decoder_init(dem, cudaq::qec::m2d_to_sparse(m2d)));
+  ASSERT_EQ(dec.get_num_msyn_per_decode(), numMeas);
+
+  std::mt19937 rng(17);
+  std::size_t total_fired = 0;
+  for (std::size_t shot = 0; shot < 100; shot++) {
+    std::vector<uint8_t> meas(numMeas);
+    for (auto &m : meas)
+      m = rng() & 1;
+
+    std::vector<uint8_t> expected(m2d.rows.size(), 0);
+    for (std::size_t d = 0; d < m2d.rows.size(); d++) {
+      uint8_t v = 0;
+      for (const auto c : m2d.rows[d])
+        v ^= meas[c];
+      expected[d] = v;
+      total_fired += v;
+    }
+
+    dec.reset_decoder();
+    dec.seen.clear();
+    std::size_t off = 0;
+    for (std::size_t r = 0; r < nRounds; r++) {
+      EXPECT_FALSE(dec.enqueue_syndrome(std::vector<uint8_t>(
+          meas.begin() + off, meas.begin() + off + numCols)))
+          << "decoded early after round " << r << " of shot " << shot;
+      off += numCols;
+    }
+    ASSERT_TRUE(dec.enqueue_syndrome(
+        std::vector<uint8_t>(meas.begin() + off, meas.end())));
+    ASSERT_EQ(dec.seen.size(), 1u);
+    EXPECT_EQ(dec.seen.front(), expected) << "shot " << shot;
+  }
+  EXPECT_GT(total_fired, 0u); // guard against an all-zero pass
+}
+
+namespace {
+bool tensors_equal(const cudaqx::tensor<uint8_t> &a,
+                   const cudaqx::tensor<uint8_t> &b) {
+  if (a.shape() != b.shape())
+    return false;
+  for (std::size_t i = 0; i < a.size(); ++i)
+    if (a.data()[i] != b.data()[i])
+      return false;
+  return true;
+}
+} // namespace
+
+// decoder_context_from_memory_circuit returns a decoder_context;
+// canonicalization is deferred until a component method is called. Verify that
+// full_component() matches dem_from_memory_circuit and that x_component() /
+// z_component() reproduce x_/z_dem_from_memory_circuit and partition the
+// detectors.
+TEST(QECCodeTester, checkDecoderContextAndComponents) {
+  auto steane = cudaq::qec::get_code("steane");
+  const auto prep = cudaq::qec::operation::prep0;
+  const std::size_t nRounds = 3;
+  cudaq::noise_model noise;
+  noise.add_all_qubit_channel("x", cudaq::qec::two_qubit_depolarization(0.05),
+                              1);
+  auto ctx = cudaq::qec::decoder_context_from_memory_circuit(*steane, prep,
+                                                             nRounds, noise);
+  auto dem = cudaq::qec::dem_from_memory_circuit(*steane, prep, nRounds, noise);
+  auto z = cudaq::qec::z_dem_from_memory_circuit(*steane, prep, nRounds, noise);
+  auto x = cudaq::qec::x_dem_from_memory_circuit(*steane, prep, nRounds, noise);
+
+  // full_component() matches the plain entry point.
+  auto fc_inputs = ctx.full_component();
+  const auto &fc_dem = fc_inputs.dem;
+  EXPECT_TRUE(
+      tensors_equal(fc_dem.detector_error_matrix, dem.detector_error_matrix));
+
+  // x_component() / z_component() reproduce the per-type DEMs and partition
+  // the detectors without re-running dem_from_kernel.
+  auto zc_inputs = ctx.z_component();
+  auto xc_inputs = ctx.x_component();
+  const auto &zc_dem = zc_inputs.dem;
+  const auto &xc_dem = xc_inputs.dem;
+  EXPECT_TRUE(
+      tensors_equal(zc_dem.detector_error_matrix, z.detector_error_matrix));
+  EXPECT_TRUE(
+      tensors_equal(xc_dem.detector_error_matrix, x.detector_error_matrix));
+  EXPECT_EQ(zc_dem.num_detectors() + xc_dem.num_detectors(),
+            fc_dem.num_detectors());
+  EXPECT_EQ(zc_inputs.m2d.rows.size(), zc_dem.num_detectors());
 }
 
 TEST(QECCodeTester, checkDemFromMemoryCircuit) {
@@ -656,6 +869,89 @@ TEST(QECCodeTester, checkDemFromMemoryCircuit) {
       "............................111"};
   check_matrix_bits("observables_flips_matrix", dem.observables_flips_matrix,
                     expected_observables_flips_matrix_str);
+}
+
+// Shortest undetectable logical error of a graphlike DEM. Detectors are graph
+// nodes (plus one virtual boundary node), each error mechanism with <= 2
+// flipped detectors is an edge labeled with its observable flip, and the
+// effective distance is the shortest boundary-to-boundary walk with an odd
+// number of observable flips (BFS over (node, parity) states). Error
+// mechanisms flipping more than 2 detectors are skipped; that can only
+// overestimate the distance, so the equality assertion below stays sound.
+static std::size_t
+shortest_graphlike_logical_error(const cudaq::qec::detector_error_model &dem) {
+  const std::size_t numDet = dem.num_detectors();
+  const std::size_t numErr = dem.num_error_mechanisms();
+  const std::size_t boundary = numDet;
+  struct Edge {
+    std::size_t to;
+    bool obs;
+  };
+  std::vector<std::vector<Edge>> adj(numDet + 1);
+  for (std::size_t e = 0; e < numErr; ++e) {
+    std::vector<std::size_t> dets;
+    for (std::size_t d = 0; d < numDet && dets.size() <= 2; ++d)
+      if (dem.detector_error_matrix.at({d, e}))
+        dets.push_back(d);
+    if (dets.size() > 2)
+      continue;
+    const bool obs = dem.observables_flips_matrix.at({0, e}) != 0;
+    const std::size_t u = dets.empty() ? boundary : dets[0];
+    const std::size_t v = dets.size() == 2 ? dets[1] : boundary;
+    adj[u].push_back({v, obs});
+    if (u != v)
+      adj[v].push_back({u, obs});
+  }
+  std::vector<std::array<long, 2>> dist(numDet + 1, {-1, -1});
+  std::deque<std::pair<std::size_t, int>> queue;
+  dist[boundary][0] = 0;
+  queue.push_back({boundary, 0});
+  while (!queue.empty()) {
+    auto [u, p] = queue.front();
+    queue.pop_front();
+    for (const auto &edge : adj[u]) {
+      const int np = p ^ (edge.obs ? 1 : 0);
+      if (dist[edge.to][np] < 0) {
+        dist[edge.to][np] = dist[u][p] + 1;
+        queue.push_back({edge.to, np});
+      }
+    }
+  }
+  return dist[boundary][1] < 0 ? std::numeric_limits<std::size_t>::max()
+                               : static_cast<std::size_t>(dist[boundary][1]);
+}
+
+// Under circuit-level (two-qubit gate) noise the surface code only retains
+// its full code distance if the per-plaquette CNOT order steers hook errors
+// perpendicular to the logical operators. A same-order schedule for X and Z
+// plaquettes halves the effective distance of one of the two memory bases.
+TEST(QECCodeTester, checkSurfaceCodeEffectiveDistance) {
+  for (std::size_t distance : {3, 5}) {
+    // Each orientation assigns the two schedule shapes to opposite plaquette
+    // types, so every orientation must retain the full distance in both
+    // memory bases.
+    for (const std::string orientation : {"XV", "XH", "ZV", "ZH"}) {
+      auto code = cudaq::qec::get_code(
+          "surface_code",
+          cudaqx::heterogeneous_map{{"distance", distance},
+                                    {"orientation", orientation}});
+      for (auto prep :
+           {cudaq::qec::operation::prep0, cudaq::qec::operation::prepp}) {
+        cudaq::noise_model noise;
+        noise.add_all_qubit_channel("x",
+                                    cudaq::qec::two_qubit_depolarization(0.001),
+                                    /*num_controls=*/1);
+        auto dem = cudaq::qec::dem_from_memory_circuit(
+            *code, prep, /*numRounds=*/distance, noise,
+            /*decompose_errors=*/true);
+        ASSERT_EQ(dem.num_observables(), 1);
+        EXPECT_EQ(distance, shortest_graphlike_logical_error(dem))
+            << "distance " << distance << " orientation " << orientation
+            << " statePrep "
+            << (prep == cudaq::qec::operation::prep0 ? "prep0" : "prepp");
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -750,10 +1046,9 @@ shor9_dem(std::size_t num_rounds,
 }
 
 // Build sliding_window parameters for a boundary-layout DEM.
-cudaqx::heterogeneous_map
-shor9_sliding_params(std::size_t window_size, std::size_t interior,
-                     std::size_t numBoundary,
-                     const std::vector<double> &error_rates) {
+cudaqx::heterogeneous_map shor9_sliding_params(std::size_t window_size,
+                                               std::size_t interior,
+                                               std::size_t numBoundary) {
   cudaqx::heterogeneous_map inner_params;
   inner_params.insert("dummy_param", 1);
   cudaqx::heterogeneous_map params;
@@ -763,7 +1058,6 @@ shor9_sliding_params(std::size_t window_size, std::size_t interior,
   params.insert("num_boundary_syndromes", numBoundary);
   params.insert("straddle_start_round", false);
   params.insert("straddle_end_round", true);
-  params.insert("error_rate_vec", error_rates);
   params.insert("inner_decoder_name", std::string("single_error_lut"));
   params.insert("inner_decoder_params", inner_params);
   return params;
@@ -912,9 +1206,8 @@ TEST(QECCodeTester, checkSlidingWindowShor9Boundary) {
         cudaq::qec::decoder::get("single_error_lut", dem.detector_error_matrix);
     // A single window spanning all layers -- should match the full decoder.
     auto sw = cudaq::qec::decoder::get(
-        "sliding_window", dem.detector_error_matrix,
-        shor9_sliding_params(num_layers, interior, numBoundary,
-                             dem.error_rates));
+        "sliding_window", cudaq::qec::decoder_init{dem},
+        shor9_sliding_params(num_layers, interior, numBoundary));
 
     expectObservablesMatchFullDecoder(
         dem, *full, [&](const std::vector<cudaq::qec::float_t> &syndrome) {
@@ -956,9 +1249,8 @@ TEST(QECCodeTester, checkSlidingWindowShor9Streaming) {
         cudaq::qec::decoder::get("single_error_lut", dem.detector_error_matrix);
     // A genuinely sliding configuration: window of 2 rounds, stepping by 1.
     auto sw = cudaq::qec::decoder::get(
-        "sliding_window", dem.detector_error_matrix,
-        shor9_sliding_params(/*window_size=*/2, interior, numBoundary,
-                             dem.error_rates));
+        "sliding_window", cudaq::qec::decoder_init{dem},
+        shor9_sliding_params(/*window_size=*/2, interior, numBoundary));
 
     expectObservablesMatchFullDecoder(
         dem, *full, [&](const std::vector<cudaq::qec::float_t> &syndrome) {
@@ -1053,16 +1345,24 @@ TEST(QECCodeTester, checkSlidingWindowRealtimeBoundaryStreaming) {
     params.insert("num_boundary_syndromes", B);
     params.insert("straddle_start_round", false);
     params.insert("straddle_end_round", true);
-    params.insert("error_rate_vec", dem.error_rates);
     params.insert("inner_decoder_name", std::string("single_error_lut"));
     params.insert("inner_decoder_params", cudaqx::heterogeneous_map{});
-    return cudaq::qec::decoder::get("sliding_window", dem.detector_error_matrix,
-                                    params);
+    // O comes from the DEM and D is handed in alongside it, so the model is
+    // complete before the decoder exists.
+    std::uint32_t num_measurements = 0;
+    for (const auto &row : D_sparse)
+      for (auto col : row)
+        num_measurements = std::max(num_measurements, col + 1);
+    return cudaq::qec::decoder::get(
+        "sliding_window",
+        cudaq::qec::decoder_init{
+            dem, cudaq::qec::sparse_binary_matrix::from_nested_csr(
+                     static_cast<std::uint32_t>(D_sparse.size()),
+                     num_measurements, D_sparse)},
+        params);
   };
   auto sw = make_sw();     // realtime streaming
   auto sw_ref = make_sw(); // whole-block reference
-  sw->set_D_sparse(D_sparse);
-  sw->set_O_sparse(O_sparse);
 
   // Raw measurements: numRounds*numCols ancilla, then numData data, per shot.
   const std::size_t nShots = 200;

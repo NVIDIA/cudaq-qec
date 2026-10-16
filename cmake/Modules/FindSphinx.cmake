@@ -1,4 +1,12 @@
-# Unfortunately, there is no "standard way to find sphinx" 
+# ============================================================================ #
+# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
+# All rights reserved.                                                         #
+#                                                                              #
+# This source code and the accompanying materials are made available under     #
+# the terms of the Apache License 2.0 which accompanies this distribution.     #
+# ============================================================================ #
+
+# Unfortunately, there is no "standard way to find sphinx"
 
 find_program(SPHINX_EXECUTABLE
   NAMES sphinx-build

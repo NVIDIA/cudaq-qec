@@ -98,6 +98,16 @@ def test_decoder_api():
     assert result.result.shape == (10,)
 
 
+def test_decode_async_temporary_keeps_decoder_alive():
+    # The future must retain this temporary decoder through virtual decode.
+    async_result = qec.get_decoder('example_byod',
+                                   H).decode_async(create_test_syndrome())
+    result = async_result.get()
+
+    # ASSERT: successful output proves the temporary survived until completion.
+    assert result.converged and result.result.shape == (10,)
+
+
 def test_decoder_result_structure():
     decoder = qec.get_decoder('example_byod', H)
     result = decoder.decode(create_test_syndrome())
@@ -195,6 +205,79 @@ def test_python_decoder_batch_preserves_opt_results():
     assert batch_result.opt_results[0]["syndrome_weight"] == 0
     assert batch_result.opt_results[1]["syndrome_weight"] == H.shape[0]
     assert batch_result[1].opt_results["tag"] == "python"
+
+
+def test_batch_opt_results_defaults_to_none():
+    # Decoders that produce no batch-level results must report None rather
+    # than an empty dict, so callers can distinguish "not supported" from
+    # "supported but empty".
+    decoder = qec.get_decoder('example_byod', H)
+    batch_result = decoder.decode_batch(
+        [create_test_syndrome(), create_test_syndrome()])
+    assert hasattr(batch_result, 'batch_opt_results')
+    assert batch_result.batch_opt_results is None
+
+    # Same for a decoder whose per-shot opt_results are populated: the two
+    # channels are independent.
+    empty_result = decoder.decode_batch([])
+    assert empty_result.batch_opt_results is None
+
+
+def test_batch_opt_results_constructor_and_slicing():
+    result = np.zeros((3, 4), dtype=np.float64)
+    converged = np.ones(3, dtype=bool)
+
+    # Omitted -> None, keeping the pre-existing 2- and 3-argument forms valid.
+    assert qec.BatchDecoderResult(result, converged).batch_opt_results is None
+    assert qec.BatchDecoderResult(result, converged,
+                                  None).batch_opt_results is None
+
+    payload = {"counts": np.array([1, 2, 3], dtype=np.int32), "width": 12}
+    batch_result = qec.BatchDecoderResult(result, converged, None, payload)
+    assert batch_result.batch_opt_results["width"] == 12
+    np.testing.assert_array_equal(batch_result.batch_opt_results["counts"],
+                                  [1, 2, 3])
+
+    # Batch-level arrays are indexed by position in the full batch, so a slice
+    # drops them instead of carrying through values that no longer line up
+    # with the sliced rows.
+    assert batch_result[:2].batch_opt_results is None
+
+    # Integer indexing yields a DecoderResult, which has no batch-level
+    # channel at all.
+    assert not hasattr(batch_result[0], 'batch_opt_results')
+
+
+def test_python_decoder_can_return_batch_opt_results():
+
+    @qec.decoder("python_batch_opt_results_byod")
+    class PythonBatchOptResultsDecoder:
+
+        def __init__(self, H, **kwargs):
+            qec.Decoder.__init__(self, H)
+            self.H = H
+
+        def decode(self, syndrome):
+            res = qec.DecoderResult()
+            res.converged = True
+            res.result = np.zeros(self.H.shape[1], dtype=np.float64)
+            return res
+
+        def decode_batch(self, syndromes):
+            n = len(syndromes)
+            return qec.BatchDecoderResult(
+                np.zeros((n, self.H.shape[1]), dtype=np.float64),
+                np.ones(n, dtype=bool),
+                None,
+                {"weights": np.arange(n, dtype=np.float32)},
+            )
+
+    decoder = qec.get_decoder("python_batch_opt_results_byod", H)
+    batch_result = decoder.decode_batch(
+        [np.zeros(H.shape[0]), np.ones(H.shape[0])])
+    weights = batch_result.batch_opt_results["weights"]
+    assert weights.dtype == np.float32
+    np.testing.assert_array_equal(weights, [0.0, 1.0])
 
 
 def test_python_decoder_batch_override_must_return_batch_decoder_result():

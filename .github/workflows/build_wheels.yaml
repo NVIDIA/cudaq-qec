@@ -13,7 +13,7 @@ on:
         - 'Debug'
       version:
         type: string
-        description: Version number to create wheels with (e.g. 0.2.0). Defaults to 0.14.99 if unspecified
+        description: Version number to create wheels with (e.g. 0.2.0). Defaults to 0.16.99 if unspecified
         required: false
       cudaq_wheels:
         type: choice
@@ -25,8 +25,8 @@ on:
         - 'PyPI'
       assets_repo:
         type: string
-        description: Retrieve assets from a draft release from this repo (e.g. NVIDIA/cudaqx)
-        default: 'NVIDIA/cudaqx'
+        description: Retrieve assets from a draft release from this repo (e.g. NVIDIA/cudaq-qec)
+        default: 'NVIDIA/cudaq-qec'
         required: false
       assets_tag:
         type: string
@@ -34,11 +34,15 @@ on:
         required: false
       artifacts_from_run:
         type: string
-        description: Optional argument to take artifacts from a prior run of this workflow; facilitates rerunning a failed workflow without re-building the artifacts.
+        description: GitHub Actions run ID from a prior run of this workflow. Skips wheel builds and reuses that run's CUDA-QX wheels and metapackages, plus its CUDA-Q wheels when using Custom CUDA-Q wheels.
         required: false
       cache_key_suffix:
         type: string
         description: Optional suffix to append to CUDA-Q wheel cache keys.
+        required: false
+      artifact_name_suffix:
+        type: string
+        description: Optional suffix to append to the CUDA-Q wheel, CUDA-QX wheel and metapackage artifact names. Required when more than one instance of this workflow runs within a single parent run, so the instances do not overwrite each other's artifacts. Must match the value used by the run referenced by artifacts_from_run.
         required: false
   workflow_call:
     inputs:
@@ -79,6 +83,11 @@ on:
         type: string
         default: ''
         required: false
+      artifact_name_suffix:
+        type: string
+        description: Optional suffix to append to the CUDA-Q wheel, CUDA-QX wheel and metapackage artifact names. Required when more than one instance of this workflow runs within a single parent run, so the instances do not overwrite each other's artifacts.
+        default: ''
+        required: false
     secrets:
       CUDAQ_ACCESS_TOKEN:
         required: false
@@ -90,9 +99,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  fetch-assets:
+    name: Fetch release assets
+    if: ${{ !inputs.artifacts_from_run && inputs.assets_repo != '' && inputs.assets_tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download -R "${{ inputs.assets_repo }}" "${{ inputs.assets_tag }}"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: '*.tar.gz'
+          if-no-files-found: error
+          retention-days: 1
+
   build-cudaqx-wheels:
     name: Build CUDA-QX wheels
-    if: ${{ !inputs.artifacts_from_run }}
+    needs: fetch-assets
+    if: ${{ !cancelled() && !inputs.artifacts_from_run && (needs.fetch-assets.result == 'success' || needs.fetch-assets.result == 'skipped') }}
     runs-on: linux-${{ matrix.platform }}-cpu8
     # CUDAQ requires a highly specialized environment to build. Thus, it is much
     # easier to rely on their's devdeps images to do the building.
@@ -170,18 +201,12 @@ jobs:
         with:
           set-safe-directory: true
 
-      # Do this early to help validate user inputs (if present)
-      - name: Fetch assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        id: fetch-assets
-        run: |
-          bash .github/workflows/scripts/install_git_cli.sh
-          if [[ -n "${{ inputs.assets_repo }}" ]] && [[ -n "${{ inputs.assets_tag }}" ]]; then
-            # Fetch the assets into this directory
-            gh release download -R "${{ inputs.assets_repo }}" "${{ inputs.assets_tag }}"
-            ls
-          fi
+      - name: Download release assets
+        if: ${{ inputs.assets_repo != '' && inputs.assets_tag != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: .
 
       - name: Get required CUDAQ version
         id: get-cudaq-version
@@ -220,12 +245,12 @@ jobs:
               --build-type ${{ inputs.build_type }} \
               --python-version ${{ matrix.python }} \
               --tensorrt-path /trt_download/TensorRT-${{ steps.config.outputs.tensorrt_version }} \
-              --version ${{ inputs.version || '0.14.99' }}
+              --version ${{ inputs.version || '0.16.99' }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ steps.config.outputs.cuda_major }}
+          name: wheels-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ steps.config.outputs.cuda_major }}${{ inputs.artifact_name_suffix }}
           path: /wheels/**
           retention-days: 14
 
@@ -252,15 +277,15 @@ jobs:
       - name: Build CUDA-QX Meta Packages
         shell: bash
         run: |
-          bash scripts/ci/build_metapackages.sh ${{ inputs.version || '0.14.99' }}
+          bash scripts/ci/build_metapackages.sh ${{ inputs.version || '0.16.99' }}
           find libs -name dist | xargs ls -la
           mkdir -p /metapackages
-          mv libs/{qec,solvers}/python/metapackages/dist/* /metapackages/
+          mv libs/qec/python/metapackages/dist/* /metapackages/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: metapackages
+          name: metapackages${{ inputs.artifact_name_suffix }}
           path: /metapackages/**
           retention-days: 14
 
@@ -276,7 +301,7 @@ jobs:
         cuda_version: ['12.6', '13.0']
     # Use 32 CPUs rather than 8 (above) because we are only spawning one job per
     # platform rather than one job per Python version per platform.
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu32', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu32', matrix.platform) || 'ubuntu-latest' }}
     permissions:
       actions: write
       contents: read
@@ -314,7 +339,7 @@ jobs:
       - name: Upload CUDAQ wheels
         uses: actions/upload-artifact@v4
         with:
-          name: cudaq-wheels-${{ matrix.platform }}-cu${{ steps.config.outputs.cuda_major }}
+          name: cudaq-wheels-${{ matrix.platform }}-cu${{ steps.config.outputs.cuda_major }}${{ inputs.artifact_name_suffix }}
           path: /cudaq-wheels
           retention-days: 14
           if-no-files-found: error
@@ -362,20 +387,14 @@ jobs:
         shell: bash
         run: |
           apt update
-          apt install -y --no-install-recommends libgfortran5 unzip openmpi-bin libopenmpi3
+          apt install -y --no-install-recommends unzip openmpi-bin libopenmpi3
           apt install -y --no-install-recommends ca-certificates
-          # If this is x86_64, then install libquadmath0. This is normally
-          # installed by Ubuntu Python, but the action/setup-python package does
-          # not install it.
-          if [ "$(uname -m)" == "x86_64" ]; then
-            apt install -y --no-install-recommends libquadmath0
-          fi
   
       - name: Download CUDA-Q wheels
         if: ${{ inputs.cudaq_wheels == 'Custom' }}
         uses: actions/download-artifact@v4
         with:
-          name: cudaq-wheels-${{ matrix.platform }}-cu${{ steps.config.outputs.cuda_major }}
+          name: cudaq-wheels-${{ matrix.platform }}-cu${{ steps.config.outputs.cuda_major }}${{ inputs.artifact_name_suffix }}
           path: /cudaq-wheels
           run-id: ${{ steps.config.outputs.run_id_to_use }}
           github-token: ${{ inputs.artifacts_from_run && secrets.WORKFLOW_TOKEN || github.token }}
@@ -383,7 +402,7 @@ jobs:
       - name: Download CUDA-QX Meta Packages
         uses: actions/download-artifact@v4
         with:
-          name: metapackages
+          name: metapackages${{ inputs.artifact_name_suffix }}
           path: /metapackages
           run-id: ${{ steps.config.outputs.run_id_to_use }}
           github-token: ${{ inputs.artifacts_from_run && secrets.WORKFLOW_TOKEN || github.token }}
@@ -391,7 +410,7 @@ jobs:
       - name: Download CUDA-QX wheels
         uses: actions/download-artifact@v4
         with:
-          name: wheels-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ steps.config.outputs.cuda_major }}
+          name: wheels-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ steps.config.outputs.cuda_major }}${{ inputs.artifact_name_suffix }}
           path: /wheels
           run-id: ${{ steps.config.outputs.run_id_to_use }}
           github-token: ${{ inputs.artifacts_from_run && secrets.WORKFLOW_TOKEN || github.token }}
@@ -413,8 +432,8 @@ jobs:
              ${{ matrix.python }} \
              ${{ matrix.platform }} \
              ${{ matrix.cuda_version }} \
-             ${{ inputs.cudaq_wheels == 'Custom' && '0.14.99' || 'SKIP' }} \
-             ${{ inputs.version || '0.14.99' }}
+             ${{ inputs.cudaq_wheels == 'Custom' && '0.16.99' || 'SKIP' }} \
+             ${{ inputs.version || '0.16.99' }}
   
   test-wheels-gpu:
     name: Test CUDA-QX wheels (GPU)
@@ -476,14 +495,8 @@ jobs:
         shell: bash
         run: |
           apt update
-          apt install -y --no-install-recommends libgfortran5 unzip openmpi-bin libopenmpi3
+          apt install -y --no-install-recommends unzip openmpi-bin libopenmpi3
           apt install -y --no-install-recommends ca-certificates
-          # If this is x86_64, then install libquadmath0. This is normally
-          # installed by Ubuntu Python, but the action/setup-python package does
-          # not install it.
-          if [ "$(uname -m)" == "x86_64" ]; then
-            apt install -y --no-install-recommends libquadmath0
-          fi
           #echo 'core.%p' | tee /proc/sys/kernel/core_pattern
           #echo "Running cat /proc/sys/kernel/core_pattern"
           #cat /proc/sys/kernel/core_pattern
@@ -492,7 +505,7 @@ jobs:
         if: ${{ inputs.cudaq_wheels == 'Custom' }}
         uses: actions/download-artifact@v4
         with:
-          name: cudaq-wheels-${{ matrix.runner.arch }}-cu${{ steps.config.outputs.cuda_major }}
+          name: cudaq-wheels-${{ matrix.runner.arch }}-cu${{ steps.config.outputs.cuda_major }}${{ inputs.artifact_name_suffix }}
           path: /cudaq-wheels
           run-id: ${{ steps.config.outputs.run_id_to_use }}
           github-token: ${{ inputs.artifacts_from_run && secrets.WORKFLOW_TOKEN || github.token }}
@@ -500,7 +513,7 @@ jobs:
       - name: Download CUDA-QX Meta Packages
         uses: actions/download-artifact@v4
         with:
-          name: metapackages
+          name: metapackages${{ inputs.artifact_name_suffix }}
           path: /metapackages
           run-id: ${{ steps.config.outputs.run_id_to_use }}
           github-token: ${{ inputs.artifacts_from_run && secrets.WORKFLOW_TOKEN || github.token }}
@@ -508,7 +521,7 @@ jobs:
       - name: Download CUDA-QX wheels
         uses: actions/download-artifact@v4
         with:
-          name: wheels-py${{ matrix.python }}-${{ matrix.runner.arch }}-cu${{ steps.config.outputs.cuda_major }}
+          name: wheels-py${{ matrix.python }}-${{ matrix.runner.arch }}-cu${{ steps.config.outputs.cuda_major }}${{ inputs.artifact_name_suffix }}
           path: /wheels
           run-id: ${{ steps.config.outputs.run_id_to_use }}
           github-token: ${{ inputs.artifacts_from_run && secrets.WORKFLOW_TOKEN || github.token }}
@@ -530,8 +543,8 @@ jobs:
              ${{ matrix.python }} \
              ${{ matrix.runner.arch }} \
              ${{ matrix.cuda_version }} \
-             ${{ inputs.cudaq_wheels == 'Custom' && '0.14.99' || 'SKIP' }} \
-             ${{ inputs.version || '0.14.99' }}
+             ${{ inputs.cudaq_wheels == 'Custom' && '0.16.99' || 'SKIP' }} \
+             ${{ inputs.version || '0.16.99' }}
 
       # - name: Upload any core files
       #   if: success() || failure()

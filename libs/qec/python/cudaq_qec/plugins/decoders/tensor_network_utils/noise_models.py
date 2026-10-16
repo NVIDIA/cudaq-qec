@@ -12,9 +12,6 @@
 error indices of the parent decoder.  The networks are combined with the
 code / logical / syndrome tensor networks inside
 :class:`TensorNetworkDecoder`.
-
-For differentiable noise learning (:class:`NMOptimizer`,
-:func:`make_compiled_step`), see :mod:`.nm_optimizer`.
 """
 from __future__ import annotations
 
@@ -71,14 +68,14 @@ def factorized_noise_model(
 
 def error_pairs_noise_model(
         error_index_pairs: list[tuple[str, str]],
-        error_probabilities: list[np.ndarray],
+        error_probabilities: list[np.ndarray] | np.ndarray,
         tensors_tags: list[str] | None = None) -> TensorNetwork:
     """
     Construct a noise model as a tensor network for correlated error pairs.
 
     Args:
         error_index_pairs (list[tuple[str, str]]): list of pairs of error index names.
-        error_probabilities (list[np.ndarray]): list of 2x2 probability matrices for each error pair.
+        error_probabilities (Union[list[np.ndarray], np.ndarray]): list of 2x2 probability matrices for each error pair, or a numpy array of shape (N, 2, 2) where N is the number of error pairs.
         tensors_tags (list[str] | None, optional): list of tags for each tensor. If None, default tags are used.
 
     Returns:
@@ -87,10 +84,8 @@ def error_pairs_noise_model(
     assert len(error_index_pairs) == len(error_probabilities), \
         "Length of error_index_pairs and error_probabilities must match."
     if isinstance(error_probabilities, np.ndarray):
-        assert (error_probabilities.ndim == 2 and
-                error_probabilities.shape[1] == 2 and
-                error_probabilities.shape[0] == len(error_index_pairs)), \
-            "error_probabilities must be a 2D array with shape (N, 2) where N is the number of error pairs."
+        assert error_probabilities.shape == (len(error_index_pairs), 2, 2), \
+            "error_probabilities must be a 3D array with shape (N, 2, 2) where N is the number of error pairs."
     elif isinstance(error_probabilities, list):
         assert all(isinstance(p, np.ndarray) and p.ndim == 2 and p.shape == (2, 2)
                    for p in error_probabilities), \

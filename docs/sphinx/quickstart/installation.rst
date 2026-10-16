@@ -4,48 +4,46 @@ Installation Guide
 Installation Methods
 --------------------
 
-CUDA-QX provides multiple installation methods to suit your needs:
+CUDA-Q QEC provides multiple installation methods to suit your needs:
 
 pip install
 ^^^^^^^^^^^^
 
-The simplest way to install CUDA-QX is via pip. (If you're on Mac, your only
-option is to use the Docker container as described below.) For pip, you can
-install individual components:
+The simplest way to install CUDA-Q QEC is via pip. (If you're on Mac, your only
+option is to use the Docker container as described below.)
 
 .. code-block:: bash
 
     # Install QEC library
     pip install cudaq-qec
 
-    # Install Solvers library
-    pip install cudaq-solvers
-
-    # Install both libraries
-    pip install cudaq-qec cudaq-solvers
-
-CUDA-QX provides optional pip-installable components:
+CUDA-Q QEC provides optional pip-installable components:
 
 .. code-block:: bash
 
     # Install the Tensor Network Decoder from the QEC library
     pip install cudaq-qec[tensor-network-decoder]
 
-    # Install the GQE algorithm from the Solvers library
-    pip install cudaq-solvers[gqe]
-
 .. note::
 
-    CUDA-Q Solvers will require the presence of :code:`libgfortran`, which is
-    not distributed with the Python wheel, for provided classical optimizers. If
-    :code:`libgfortran` is not installed, you will need to install it via your
-    distribution's package manager. On Debian based systems, you can install
-    this with :code:`apt-get install gfortran`.
+    Looking for CUDA-Q Solvers? It has been removed from this repository and is
+    superseded by **CUDA-Q Algorithms**, which is where development continues:
+
+    .. code-block:: bash
+
+        pip install cudaq-algorithms
+
+    See the `CUDA-Q Algorithms documentation
+    <https://nvidia.github.io/cudaq-algorithms/>`__ for installation
+    instructions, tutorials, and examples, `cudaq-algorithms on PyPI
+    <https://pypi.org/project/cudaq-algorithms/>`__ for the package, and
+    `NVIDIA/cudaq-algorithms on GitHub
+    <https://github.com/NVIDIA/cudaq-algorithms>`__ for the source code.
 
 Docker Container
 ^^^^^^^^^^^^^^^^
 
-CUDA-QX is available as a Docker container with all dependencies pre-installed:
+CUDA-Q QEC is available as a Docker container with all dependencies pre-installed:
 
 1. Pull the container:
 
@@ -66,25 +64,24 @@ CUDA-QX is available as a Docker container with all dependencies pre-installed:
 
 The container includes:
     * CUDA-Q compiler and runtime
-    * CUDA-QX libraries (QEC and Solvers)
+    * CUDA-Q QEC library
     * All required dependencies
     * Example notebooks and tutorials
 
 Building from Source
 ^^^^^^^^^^^^^^^^^^^^
 
-The instructions for building CUDA-QX from source are maintained on our GitHub
-repository: `Building CUDA-QX from Source <https://github.com/NVIDIA/cudaqx/blob/main/Building.md>`__.
+The instructions for building CUDA-Q QEC from source are maintained on our GitHub
+repository: `Building CUDA-Q QEC from Source <https://github.com/NVIDIA/cudaq-qec/blob/main/Building.md>`__.
 
 .. _installing-pytorch:
 
 Installing PyTorch
 ------------------
 
-PyTorch (``torch``) is required for several CUDA-QX features:
+PyTorch (``torch``) is required for several CUDA-Q QEC features:
 
 * **Tensor Network Decoder**: Used by the QEC library for tensor network-based decoding (CPU version of PyTorch is sufficient)
-* **GQE Algorithm**: Used by the Solvers library for the Generative Quantum Eigensolver
 * **Training AI Decoders**: Optionally used for training custom neural network decoders (see :ref:`Deploying AI Decoders with TensorRT <deploying-ai-decoders>`)
 
 PyTorch is automatically installed when you install the optional components:
@@ -93,7 +90,6 @@ PyTorch is automatically installed when you install the optional components:
 
     # Installs PyTorch as a dependency
     pip install cudaq-qec[tensor-network-decoder]
-    pip install cudaq-solvers[gqe]
 
 Alternatively, you can install PyTorch directly. For detailed installation instructions, visit the 
 `PyTorch installation page <https://pytorch.org/get-started/locally/>`_.

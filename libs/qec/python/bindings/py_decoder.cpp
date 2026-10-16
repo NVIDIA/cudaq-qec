@@ -5,11 +5,10 @@
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
-#include "common/ExecutionContext.h"
 #include "cuda-qx/core/kwargs_utils.h"
 #include "cuda-qx/core/library_utils.h"
+#include "sparse_matrix_casters.h"
 #include "type_casters.h"
-#include "cudaq/platform.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/logger.h"
@@ -43,176 +42,21 @@ using namespace cudaqx;
 
 namespace cudaq::qec {
 
-/// Range-checked narrow from std::size_t to sparse_binary_matrix::index_type;
-/// unchecked static_cast would silently truncate 64-bit Python ints.
-static sparse_binary_matrix::index_type
-checked_narrow_to_index_type(std::size_t value, const char *field_name) {
-  if (value > std::numeric_limits<sparse_binary_matrix::index_type>::max())
-    throw std::runtime_error(
-        std::string(field_name) +
-        " exceeds sparse_binary_matrix index_type (uint32_t) range; got " +
-        std::to_string(value));
-  return static_cast<sparse_binary_matrix::index_type>(value);
-}
-
-/// Build sparse_binary_matrix directly from a scipy sparse matrix.
-/// Any scipy sparse format is accepted; it is normalized to CSR internally.
-static sparse_binary_matrix sparse_binary_matrix_from_scipy(nb::object mat) {
-  // Normalize to CSR so that indptr == row_offsets, indices == col_indices.
-  nb::object csr = mat.attr("tocsr")();
-  // Avoid mutating the caller's matrix and clean it up for our internal use.
-  csr = csr.attr("copy")();
-  csr.attr("sum_duplicates")();
-  csr.attr("eliminate_zeros")();
-  csr.attr("sort_indices")();
-  nb::tuple shape_t = nb::cast<nb::tuple>(csr.attr("shape"));
-  auto num_rows = checked_narrow_to_index_type(
-      nb::cast<std::size_t>(shape_t[0]), "num_rows");
-  auto num_cols = checked_narrow_to_index_type(
-      nb::cast<std::size_t>(shape_t[1]), "num_cols");
-
-  // Copy a numpy integer array to vector<uint32_t> using pure C++ dtype
-  // dispatch — handles int32, int64, uint32, uint64 (all common scipy dtypes).
-  auto copy_to_uint32 = [](nb::handle arr_h) {
-    auto arr = nb::cast<nb::ndarray<>>(arr_h);
-    std::vector<sparse_binary_matrix::index_type> out(arr.size());
-    auto dtype = arr.dtype();
-    if (dtype == nb::dtype<int32_t>()) {
-      auto *p = static_cast<const int32_t *>(arr.data());
-      for (size_t i = 0; i < arr.size(); ++i)
-        out[i] = static_cast<sparse_binary_matrix::index_type>(p[i]);
-    } else if (dtype == nb::dtype<int64_t>()) {
-      auto *p = static_cast<const int64_t *>(arr.data());
-      for (size_t i = 0; i < arr.size(); ++i)
-        out[i] = static_cast<sparse_binary_matrix::index_type>(p[i]);
-    } else if (dtype == nb::dtype<uint32_t>()) {
-      std::memcpy(out.data(), arr.data(),
-                  arr.size() * sizeof(sparse_binary_matrix::index_type));
-    } else if (dtype == nb::dtype<uint64_t>()) {
-      auto *p = static_cast<const uint64_t *>(arr.data());
-      for (size_t i = 0; i < arr.size(); ++i)
-        out[i] = static_cast<sparse_binary_matrix::index_type>(p[i]);
-    } else {
-      throw std::runtime_error(
-          "scipy sparse matrix indptr/indices has unsupported dtype; "
-          "expected int32, int64, uint32, or uint64.");
-    }
-    return out;
-  };
-
-  auto ptr = copy_to_uint32(csr.attr("indptr"));
-  auto idx = copy_to_uint32(csr.attr("indices"));
-
-  return sparse_binary_matrix::from_csr(num_rows, num_cols, std::move(ptr),
-                                        std::move(idx));
-}
-
-/// Convert a dense 2-D NumPy uint8 array to sparse_binary_matrix without
-/// any intermediate dense tensor allocation.  Strides are read directly so
-/// both C-contiguous (row-major) and Fortran-contiguous (column-major) arrays
-/// are handled efficiently: the inner loop always traverses contiguous memory.
-static sparse_binary_matrix
-make_sparse_from_dense(const nb::ndarray<nb::numpy, uint8_t> &arr) {
-  if (arr.ndim() != 2)
-    throw std::invalid_argument("H must be a 2-D uint8 array");
-  const std::size_t num_rows = arr.shape(0);
-  const std::size_t num_cols = arr.shape(1);
-  const std::ptrdiff_t rs = arr.stride(0); // bytes per row step
-  const std::ptrdiff_t cs = arr.stride(1); // bytes per col step
-  const uint8_t *base = static_cast<const uint8_t *>(arr.data());
-
-  using index_t = sparse_binary_matrix::index_type;
-  std::vector<index_t> ptr, idx;
-
-  // C-order: inner loop over columns is sequential → build CSR.
-  // F-order: inner loop over rows is sequential → build CSC.
-  if (cs <= rs) {
-    ptr.reserve(num_rows + 1);
-    ptr.push_back(0);
-    for (std::size_t i = 0; i < num_rows; ++i) {
-      for (std::size_t j = 0; j < num_cols; ++j) {
-        if (base[i * rs + j * cs])
-          idx.push_back(static_cast<index_t>(j));
-      }
-      ptr.push_back(static_cast<index_t>(idx.size()));
-    }
-    return sparse_binary_matrix::from_csr(static_cast<index_t>(num_rows),
-                                          static_cast<index_t>(num_cols),
-                                          std::move(ptr), std::move(idx));
-  } else {
-    ptr.reserve(num_cols + 1);
-    ptr.push_back(0);
-    for (std::size_t j = 0; j < num_cols; ++j) {
-      for (std::size_t i = 0; i < num_rows; ++i) {
-        if (base[i * rs + j * cs])
-          idx.push_back(static_cast<index_t>(i));
-      }
-      ptr.push_back(static_cast<index_t>(idx.size()));
-    }
-    return sparse_binary_matrix::from_csc(static_cast<index_t>(num_rows),
-                                          static_cast<index_t>(num_cols),
-                                          std::move(ptr), std::move(idx));
-  }
-}
-
-template <typename T>
-static nb::ndarray<nb::numpy, T> vector_to_numpy_1d(std::vector<T> values) {
-  const size_t logical_size = values.size();
-  auto *owned = new std::vector<T>(std::move(values));
-  if (owned->empty())
-    owned->resize(1);
-  nb::capsule owner(
-      owned, [](void *p) noexcept { delete static_cast<std::vector<T> *>(p); });
-  size_t shape[1] = {logical_size};
-  return nb::ndarray<nb::numpy, T>(owned->data(), 1, shape, owner);
-}
-
-static std::vector<std::int64_t>
-to_int64_vector(const std::vector<sparse_binary_matrix::index_type> &values) {
-  std::vector<std::int64_t> out;
-  out.reserve(values.size());
-  for (auto value : values)
-    out.push_back(static_cast<std::int64_t>(value));
-  return out;
-}
-
-static nb::object
-sparse_binary_matrix_to_scipy_csc(const sparse_binary_matrix &matrix) {
-  auto csc = matrix.to_csc();
-  std::vector<std::uint8_t> data(csc.num_nnz(), 1);
-  auto scipy_sparse = nb::module_::import_("scipy.sparse");
-  return scipy_sparse.attr("csc_matrix")(
-      nb::make_tuple(vector_to_numpy_1d(std::move(data)),
-                     vector_to_numpy_1d(to_int64_vector(csc.indices())),
-                     vector_to_numpy_1d(to_int64_vector(csc.ptr()))),
-      nb::arg("shape") = nb::make_tuple(csc.num_rows(), csc.num_cols()));
-}
-
 class PyDecoder : public decoder {
 public:
   NB_TRAMPOLINE(decoder, 1);
 
   /// @brief Construct from a scipy sparse matrix (CSR, CSC, COO, ...) or a
   ///        dense numpy array of any numeric dtype.
+  ///
+  /// Sparse storage is built directly from either form, so
+  /// qec.Decoder.__init__(self, H) has the same memory behavior as native
+  /// get_decoder(..., H) (no intermediate dense tensor copy).
   PyDecoder(nb::object mat)
-      : decoder([&mat]() -> cudaq::qec::sparse_binary_matrix {
-          // Any scipy sparse format exposes tocsr(); detect via that rather
-          // than indptr/indices, which COO and some other formats lack.
-          if (nb::hasattr(mat, "tocsr"))
-            return sparse_binary_matrix_from_scipy(mat);
-          // Dense numpy array of any dtype: build sparse storage directly so
-          // qec.Decoder.__init__(self, H) has the same memory behavior as
-          // native get_decoder(..., H) (no intermediate dense tensor copy).
-          // copy=False makes astype a no-op when the input is already uint8;
-          // make_sparse_from_dense reads strides directly, so a non-contiguous
-          // uint8 input is also handled without a copy.
-          return make_sparse_from_dense(
-              nb::cast<nb::ndarray<nb::numpy, uint8_t>>(
-                  mat.attr("astype")("uint8", nb::arg("copy") = false)));
-        }()) {}
+      : decoder(decoder_init(sparse_binary_matrix_from_python(mat))) {}
 
   decoder_result decode(const std::vector<float_t> &syndrome) override {
-    NB_OVERRIDE_PURE(decode, syndrome);
+    NB_OVERRIDE_PURE_NAME("decode", decode, syndrome);
   }
 };
 
@@ -263,7 +107,8 @@ struct batch_decoder_result {
   // checked here since nanobind cannot see them.
   batch_decoder_result(nb::ndarray<nb::numpy, float_t, nb::ndim<2>> result_arr,
                        nb::ndarray<nb::numpy, bool, nb::ndim<1>> converged_arr,
-                       nb::object opt_results) {
+                       nb::object opt_results, nb::object batch_opt_results)
+      : batch_opt_results(batch_opt_results) {
     size = converged_arr.shape(0);
     if (result_arr.shape(0) != size)
       throw std::runtime_error(
@@ -296,13 +141,17 @@ struct batch_decoder_result {
   // Trusted internal constructor: callers guarantee shape/dtype invariants.
   // Used by makeBatchDecoderResult and batchSliceToBatchDecoderResult.
   batch_decoder_result(nb::object result, nb::object converged,
-                       nb::list opt_results, std::size_t size)
+                       nb::list opt_results, std::size_t size,
+                       nb::object batch_opt_results = nb::none())
       : result(result), converged(converged), opt_results(opt_results),
-        size(size) {}
+        batch_opt_results(batch_opt_results), size(size) {}
 
   nb::object result;
   nb::object converged;
   nb::list opt_results;
+  // Batch-level results, or None. Describes the batch as a whole, so it is
+  // deliberately not sliced or indexed alongside the per-shot arrays.
+  nb::object batch_opt_results;
   std::size_t size = 0;
 };
 
@@ -348,6 +197,9 @@ batchSliceToBatchDecoderResult(const batch_decoder_result &batch,
   nb::object converged = batch.converged.attr("__getitem__")(slice);
   nb::list opt_results =
       nb::cast<nb::list>(batch.opt_results.attr("__getitem__")(slice));
+  // batch_opt_results is dropped: its arrays are indexed by position in the
+  // full batch, so carrying them onto a slice unchanged would silently
+  // misalign them with the sliced per-shot rows.
   return batch_decoder_result(result, converged, opt_results,
                               nb::len(converged));
 }
@@ -432,30 +284,35 @@ decoderResultsOptResultsToList(const std::vector<decoder_result> &results) {
   return opt_results;
 }
 
-batch_decoder_result
-makeBatchDecoderResult(const std::vector<decoder_result> &results) {
+batch_decoder_result makeBatchDecoderResult(
+    const std::vector<decoder_result> &results,
+    const std::optional<cudaqx::heterogeneous_map> &batch_opt_results) {
   return batch_decoder_result{
       decoderResultsToNumpy(results),
       decoderResultsConvergedToNumpy(results),
       decoderResultsOptResultsToList(results),
       results.size(),
+      batch_opt_results.has_value() ? nb::cast(*batch_opt_results) : nb::none(),
   };
 }
 
-nb::object copyToPyArray(const cudaqx::tensor<uint8_t> &t) {
-  size_t shape[2] = {t.shape()[0], t.shape()[1]};
-  auto arr = nb::ndarray<nb::numpy, uint8_t>(const_cast<uint8_t *>(t.data()), 2,
-                                             shape, nb::none());
-  return nb::cast(arr).attr("copy")();
-}
+} // namespace
 
-nb::object copyToPyArray(const std::vector<double> &v) {
-  size_t shape[1] = {v.size()};
-  auto arr = nb::ndarray<nb::numpy, double>(const_cast<double *>(v.data()), 1,
-                                            shape, nb::none());
-  return nb::cast(arr).attr("copy")();
+namespace {
+/// Read and remove the primary-result basis. Standardized auxiliary-output
+/// requests are reserved for composition infrastructure.
+std::optional<decode_result_type> pop_requested_output(nb::kwargs &options) {
+  if (!options.contains("output"))
+    return std::nullopt;
+  const auto value = nb::cast<std::string>(options["output"]);
+  options.attr("pop")("output");
+  if (value == "errors")
+    return decode_result_type::errors;
+  if (value == "observables")
+    return decode_result_type::observables;
+  throw std::runtime_error(
+      "standalone output must be 'errors' or 'observables'");
 }
-
 } // namespace
 
 void bindDecoder(nb::module_ &mod) {
@@ -561,7 +418,8 @@ void bindDecoder(nb::module_ &mod) {
     constructor to produce one. `result` should be a 2-D NumPy array of the
     configured QEC floating point dtype (float64 in standard wheels);
     `converged` should be a 1-D NumPy bool array; `opt_results` is a list of
-    per-shot dicts or None entries. The constructor coerces `result` and
+    per-shot dicts or None entries; `batch_opt_results` is an optional dict of
+    batch-level results. The constructor coerces `result` and
     `converged` to C-contiguous storage of the expected dtype (via
     `np.ascontiguousarray`), copying when the input doesn't already satisfy
     those invariants. Wrong rank (e.g. 1-D `result`) is rejected with
@@ -593,9 +451,11 @@ void bindDecoder(nb::module_ &mod) {
          incompatible. Avoid in hot loops; prefer pattern 1.
 )pbdoc")
       .def(nb::init<nb::ndarray<nb::numpy, float_t, nb::ndim<2>>,
-                    nb::ndarray<nb::numpy, bool, nb::ndim<1>>, nb::object>(),
+                    nb::ndarray<nb::numpy, bool, nb::ndim<1>>, nb::object,
+                    nb::object>(),
            nb::arg("result"), nb::arg("converged"),
-           nb::arg("opt_results") = nb::none())
+           nb::arg("opt_results") = nb::none(),
+           nb::arg("batch_opt_results") = nb::none())
       .def_prop_ro(
           "result",
           [](const batch_decoder_result &self) { return self.result; },
@@ -616,6 +476,23 @@ void bindDecoder(nb::module_ &mod) {
           [](const batch_decoder_result &self) { return self.opt_results; },
           R"pbdoc(
         A list of per-shot optional result dictionaries, or None entries.
+    )pbdoc")
+      .def_prop_ro(
+          "batch_opt_results",
+          [](const batch_decoder_result &self) {
+            return self.batch_opt_results;
+          },
+          R"pbdoc(
+        A dict of batch-level optional results, or None.
+
+        Unlike `opt_results`, this describes the batch as a whole rather than
+        any single shot: its arrays are indexed by position in the batch. Most
+        decoders produce None here. It is the fast path for data that would
+        otherwise cost one Python dict and several small arrays per shot.
+
+        Because its arrays are indexed by position in the full batch, slicing a
+        BatchDecoderResult drops this field rather than carrying it through
+        misaligned.
     )pbdoc")
       .def(
           "__getitem__",
@@ -695,13 +572,19 @@ void bindDecoder(nb::module_ &mod) {
             nb::gil_scoped_release release;
             return async_decoder_result(dec.decode_async(syndrome));
           },
-          "Asynchronously decode the given syndrome", nb::arg("syndrome"))
+          "Asynchronously decode the given syndrome", nb::arg("syndrome"),
+          // The worker dereferences the decoder, and ~async_decoder_result
+          // joins it before nanobind drops this reference.
+          nb::keep_alive<0, 1>())
       .def(
           "decode_batch",
           [](decoder &decoder,
              const std::vector<std::vector<float_t>> &syndrome) {
-            auto results = decoder.decode_batch(syndrome);
-            return makeBatchDecoderResult(results);
+            // Always the two-argument overload: decoders with no batch-level
+            // results inherit the base implementation and leave it unset.
+            std::optional<cudaqx::heterogeneous_map> batch_opt_results;
+            auto results = decoder.decode_batch(syndrome, batch_opt_results);
+            return makeBatchDecoderResult(results, batch_opt_results);
           },
           "Decode multiple syndromes and return the results",
           nb::arg("syndrome"))
@@ -888,15 +771,22 @@ void bindDecoder(nb::module_ &mod) {
       auto defaults = details::dem_defaults_for_missing_keys(
           [&](const std::string &key) { return options.contains(key); }, dem);
       if (defaults.O)
-        options["O"] = copyToPyArray(*defaults.O);
+        options["O"] = cudaq::python::copyCUDAQXTensorToPyArray(*defaults.O);
       if (defaults.error_rate_vec)
-        options["error_rate_vec"] = copyToPyArray(*defaults.error_rate_vec);
+        options["error_rate_vec"] =
+            vector_to_numpy_1d(*defaults.error_rate_vec);
 
-      nb::object H_obj = copyToPyArray(dem.detector_error_matrix);
+      nb::object H_obj = nb::cast(
+          cudaq::python::copyCUDAQXTensorToPyArray(dem.detector_error_matrix));
       return PyDecoderRegistry::get_decoder(name, H_obj, options);
     }
 
-    return get_decoder(name, decoder_init{dem_text}, hetMapFromKwargs(options));
+    const auto output = pop_requested_output(options);
+    auto inputs = decoder_init::from_stim_dem(dem_text);
+    return output ? get_decoder(name, std::move(inputs), *output,
+                                hetMapFromKwargs(options))
+                  : get_decoder(name, std::move(inputs),
+                                hetMapFromKwargs(options));
   };
 
   qecmod.def(
@@ -913,15 +803,27 @@ void bindDecoder(nb::module_ &mod) {
           return PyDecoderRegistry::get_decoder(name, H, options);
         }
 
-        cudaq::qec::sparse_binary_matrix H_sparse;
+        cudaq::qec::sparse_binary_matrix H_sparse =
+            sparse_binary_matrix_from_python(nb::cast<nb::object>(H));
 
-        // Any scipy sparse format exposes tocsr(); detect via that rather than
-        // indptr/indices, which COO and some other formats do not expose.
-        if (nb::hasattr(H, "tocsr"))
-          H_sparse = sparse_binary_matrix_from_scipy(nb::cast<nb::object>(H));
-        else
-          H_sparse = make_sparse_from_dense(
-              nb::cast<nb::ndarray<nb::numpy, uint8_t>>(H));
+        const auto output = pop_requested_output(options);
+
+        // Absent O means no observable model, not a zero-row one. Fabricating
+        // an empty O here would make an H-only construction look like a
+        // supplied model and defeat the construction-time validation.
+        std::optional<sparse_binary_matrix> O_sparse;
+        if (options.contains("O")) {
+          O_sparse = sparse_binary_matrix_from_python(
+              nb::cast<nb::object>(options["O"]));
+          options.attr("pop")("O");
+        }
+
+        std::vector<double> error_rates;
+        if (options.contains("error_rate_vec")) {
+          error_rates =
+              nb::cast<std::vector<double>>(options["error_rate_vec"]);
+          options.attr("pop")("error_rate_vec");
+        }
 
         if (name == "tensor_network_decoder") {
           throw std::runtime_error(
@@ -930,7 +832,12 @@ void bindDecoder(nb::module_ &mod) {
               "    pip install cudaq-qec[tensor-network-decoder]\n");
         }
 
-        return get_decoder(name, H_sparse, hetMapFromKwargs(options));
+        decoder_init inputs(std::move(H_sparse), std::move(O_sparse),
+                            std::move(error_rates));
+        return output ? get_decoder(name, std::move(inputs), *output,
+                                    hetMapFromKwargs(options))
+                      : get_decoder(name, std::move(inputs),
+                                    hetMapFromKwargs(options));
       },
       R"pbdoc(
         Get a decoder by name.
@@ -946,6 +853,12 @@ void bindDecoder(nb::module_ &mod) {
         - A Stim detector error model string: native C++ decoders receive the
           raw DEM text via ``decoder_init``; Python-registered decoders receive
           the DEM-derived PCM plus ``O`` and ``error_rate_vec`` defaults.
+
+        Native decoders select their result basis with ``output="errors"`` or
+        ``output="observables"``. When omitted, the plugin's documented default
+        applies; PyMatching defaults to errors. Matrix ``O`` and
+        ``error_rate_vec`` keyword adapters are normalized into decoder_init.
+        Supplying ``O`` never selects the output mode.
 
         For Python-registered decoders (``cudaq.qec.decoder`` decorator), ``H``
         is passed through to ``__init__`` unchanged (NumPy array or scipy sparse
@@ -1403,50 +1316,6 @@ void bindDecoder(nb::module_ &mod) {
       R"pbdoc(
         [Internal] Load local simulation realtime decoder library.
       )pbdoc");
-
-  qecmod.def(
-      "compute_msm",
-      [](std::function<void()> kernel, bool verbose = false) {
-        cudaq::ExecutionContext ctx_msm_size("msm_size");
-        auto &platform = cudaq::get_platform();
-        platform.with_execution_context(ctx_msm_size, kernel);
-        if (!ctx_msm_size.msm_dimensions.has_value()) {
-          throw std::runtime_error("No MSM dimensions found");
-        }
-        if (ctx_msm_size.msm_dimensions.value().second == 0) {
-          throw std::runtime_error("No MSM dimensions found");
-        }
-        cudaq::ExecutionContext ctx_msm("msm");
-        ctx_msm.msm_dimensions = ctx_msm_size.msm_dimensions;
-        platform.with_execution_context(ctx_msm, kernel);
-
-        auto msm_as_strings = ctx_msm.result.sequential_data();
-        if (verbose) {
-          printf("MSM Dimensions: %ld measurements x %ld error mechanisms\n",
-                 ctx_msm.msm_dimensions.value().first,
-                 ctx_msm.msm_dimensions.value().second);
-          for (std::size_t i = 0; i < ctx_msm.msm_dimensions.value().first;
-               i++) {
-            for (std::size_t j = 0; j < ctx_msm.msm_dimensions.value().second;
-                 j++) {
-              printf("%c", msm_as_strings[j][i] == '1' ? '1' : '.');
-            }
-            printf("\n");
-          }
-        }
-        return std::make_tuple(msm_as_strings, ctx_msm.msm_dimensions.value(),
-                               ctx_msm.msm_probabilities.value(),
-                               ctx_msm.msm_prob_err_id.value());
-      },
-      "");
-  qecmod.def(
-      "construct_mz_table",
-      [](const std::vector<std::string> &msm_as_strings) {
-        cudaqx::tensor<uint8_t> mzTable(msm_as_strings);
-        mzTable = mzTable.transpose();
-        return cudaq::python::copyCUDAQXTensorToPyArray(mzTable);
-      },
-      "");
 
   qecmod.def(
       "generate_timelike_sparse_detector_matrix",

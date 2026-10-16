@@ -56,9 +56,8 @@ ${python} -m pip install --no-cache-dir pytest
 
 # The following packages are needed for our tests. They are not true
 # dependencies for our delivered package.
-${python} -m pip install openfermion
-${python} -m pip install openfermionpyscf
 ${python} -m pip install onnxscript # for trt decoder tests
+${python} -m pip install matplotlib # for pseudo_threshold.py
 
 FIND_LINKS="--find-links /wheels/ --find-links /metapackages/"
 
@@ -116,25 +115,41 @@ if [ "$package_installed" != "$package_expected" ]; then
   exit 1
 fi
 
-# Solvers library
+# Smoke test the (undocumented) standalone decoders module shipped in the wheel:
+# it is importable as the bare top-level `_qec_decoders_standalone` and must
+# decode without ever pulling in cudaq. Run in a fresh interpreter so the
+# sys.modules check is meaningful.
+#
+# The module links libcudart. Normally `import cudaq` puts the CUDA runtime on
+# the loader path, but this test (and any cudaq-free user) skips cudaq, so
+# provide cudart from the CUDA runtime wheel -- what a cudaq-free user must do.
+# The package name differs by CUDA major (cu12 keeps the -cu12 suffix; cu13+
+# uses the unsuffixed nvidia-cuda-runtime), and installing is best-effort since
+# some images already ship a system cudart.
 # ======================================
-# Test the base solvers library without optional dependencies
-echo "Installing Solvers library without GQE"
-${python} -m pip install ${FIND_LINKS} "cudaq-solvers==${cudaqx_version}"
-${python} -m pytest -v -s libs/solvers/python/tests/ --ignore=libs/solvers/python/tests/test_gqe.py
-
-# Verify that the correct version of cudaq-solvers was installed.
-package_installed=$(python${python_version} -m pip list | grep cudaq-solvers-cu | cut -d ' ' -f1)
-package_expected=cudaq-solvers-cu${cuda_major}
-if [ "$package_installed" != "$package_expected" ]; then
-  echo "::error Expected installation of $package_expected package, but got $package_installed."
-  exit 1
+echo "Smoke testing standalone decoders module (_qec_decoders_standalone)"
+if [ "$cuda_major" = "12" ]; then
+  ${python} -m pip install "nvidia-cuda-runtime-cu12" || true
+else
+  ${python} -m pip install "nvidia-cuda-runtime" || true
 fi
-
-# Test the solvers library with GQE
-echo "Installing Solvers library with GQE"
-${python} -m pip install ${FIND_LINKS} "cudaq-solvers[gqe]==${cudaqx_version}"
-${python} -m pytest -v -s libs/solvers/python/tests/test_gqe.py
+# libcudart's location in the CUDA runtime wheel differs by CUDA major
+# (nvidia/cuda_runtime/lib for cu12, nvidia/cu13/lib for cu13), so discover it
+# rather than hard-coding, and put it on LD_LIBRARY_PATH. Images that already
+# ship a system cudart leave this empty and rely on the default loader path.
+cudart_so=$(${python} -c "import glob, os, nvidia; print(next(iter(glob.glob(os.path.join(list(nvidia.__path__)[0], '**', 'libcudart.so*'), recursive=True)), ''))" 2>/dev/null || true)
+cudart_dir=""
+if [ -n "$cudart_so" ]; then cudart_dir=$(dirname "$cudart_so"); fi
+LD_LIBRARY_PATH="${cudart_dir}${cudart_dir:+:}${LD_LIBRARY_PATH}" ${python} - <<'EOF'
+import sys
+import numpy as np
+import _qec_decoders_standalone as m
+assert "cudaq" not in sys.modules, "importing _qec_decoders_standalone pulled in cudaq"
+H = np.array([[1, 1, 0, 0], [0, 1, 1, 0], [0, 0, 1, 1]], dtype=np.uint8)
+assert m.qecrt.get_decoder("pymatching", H).decode([1, 1, 0]).converged
+assert "cudaq" not in sys.modules, "using the standalone decoder pulled in cudaq"
+print("standalone decoders module OK (no cudaq import)")
+EOF
 
 # Test the libraries with examples
 # ======================================
@@ -146,7 +161,7 @@ if echo $platform | grep -qi "amd64"; then
   ${python} -m pip install stim beliefmatching
 fi
 
-for domain in "solvers" "qec"; do
+for domain in "qec"; do
     echo "Testing ${domain} Python examples with Python ${python_version} ..."
     cd examples/${domain}/python
     shopt -s nullglob # don't throw errors if no Python files exist

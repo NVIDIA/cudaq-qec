@@ -28,8 +28,9 @@
 
 // [Begin Save DEM]
 // Save decoder configuration to YAML file
-void save_dem(const cudaq::qec::detector_error_model &dem,
+void save_dem(const cudaq::qec::decoder_inputs &inputs,
               const std::string &filename) {
+  const auto &dem = inputs.dem;
   // Create decoder config
   cudaq::qec::decoding::config::decoder_config config;
   config.id = 0;
@@ -38,16 +39,16 @@ void save_dem(const cudaq::qec::detector_error_model &dem,
   config.syndrome_size = dem.num_detectors();
   config.H_sparse = cudaq::qec::pcm_to_sparse_vec(dem.detector_error_matrix);
   config.O_sparse = cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix);
+  config.D_sparse = cudaq::qec::d_sparse(inputs.m2d);
 
-  // Calculate numRounds from DEM (we send 1 additional round, so add 1)
-  uint64_t numSyndromesPerRound = 2; // Z0Z1 and Z1Z2
-  auto numRounds = dem.num_detectors() / numSyndromesPerRound + 1;
-  config.D_sparse = cudaq::qec::generate_timelike_sparse_detector_matrix(
-      numSyndromesPerRound, numRounds, false);
-
-  cudaq::qec::decoding::config::multi_error_lut_config lut_config;
-  lut_config.lut_error_depth = 2;
-  config.decoder_custom_args = lut_config;
+  // Decoder parameters are a plain heterogeneous_map; keys are governed by
+  // the parameter schema the decoder registered.
+  cudaqx::heterogeneous_map lut_args;
+  lut_args.insert("lut_error_depth", 2);
+  config.decoder_custom_args = lut_args;
+  // Check the map against the decoder's schema (unknown keys, missing
+  // required keys, decoder-specific constraints) before using the config.
+  config.validate_custom_args();
 
   cudaq::qec::decoding::config::multi_decoder_config multi_config;
   multi_config.decoders.push_back(config);
@@ -115,14 +116,21 @@ __qpu__ int64_t qec_circuit() {
     cudaq::qec::decoding::enqueue_syndromes(0, syndromes);
   }
 
+  // Final data readout
+  std::vector<cudaq::measure_result> data_meas = {mz(data[0]), mz(data[1]),
+                                                  mz(data[2])};
+  cudaq::qec::decoding::enqueue_syndromes(0, data_meas);
+  std::vector<bool> result = cudaq::to_bools(data_meas);
+
   // Get corrections and apply them (single logical observable)
-  auto corrections = cudaq::qec::decoding::get_corrections(0, 1);
+  std::vector<bool> corrections = cudaq::qec::decoding::get_corrections(0, 1);
+  result[0] = static_cast<bool>(result[0]) ^ static_cast<bool>(corrections[0]);
   if (corrections[0]) {
     for (std::size_t i = 0; i < 3; ++i)
       cudaq::x(data[i]);
   }
 
-  return cudaq::to_integer(cudaq::to_bools(mz(data)));
+  return cudaq::to_integer(result);
 }
 // [End QEC Circuit]
 
@@ -136,17 +144,17 @@ int main() {
   cudaq::noise_model noise;
   noise.add_all_qubit_channel("x", cudaq::depolarization2(0.01), 1);
 
-  auto dem = cudaq::qec::z_dem_from_memory_circuit(
+  auto ctx = cudaq::qec::decoder_context_from_memory_circuit(
       *code, cudaq::qec::operation::prep0, 3, noise);
   // [End DEM Generation]
 
-  save_dem(dem, "config.yaml");
+  save_dem(ctx.full_component(), "config.yaml");
 
   // Step 2: Load config and run circuit
   printf("\nStep 2: Running circuit with decoding...\n");
   load_dem("config.yaml");
 
-  cudaq::run(10, qec_circuit);
+  cudaq::run(10, noise, qec_circuit);
   printf("Ran 10 shots\n");
 
   cudaq::qec::decoding::config::finalize_decoders();

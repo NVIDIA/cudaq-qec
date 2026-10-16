@@ -24,11 +24,10 @@
  *   test_trt_decoder_composite [d7|d13|d13_r104|d21|d21_r42|d31]
  *       --data-dir DIR [--max-samples=N] [--onnx-path=FILE]
  *       [--engine-save-path=FILE] [--batch-size=N] [--warmup=N]
- *       [--no-cuda-graph] [--no-raw-diagnostics]
+ *       [--no-cuda-graph]
  *
  *   test_trt_decoder_composite --data-dir DIR --config-yaml FILE
  *       [--decoder-id=N] [--max-samples=N] [--warmup=N]
- *       [--no-raw-diagnostics]
  ******************************************************************************/
 
 #include "predecoder_pipeline_common.h"
@@ -65,7 +64,6 @@ struct DemoConfig {
   int warmup_count = 20;
   size_t batch_size = 1;
   bool use_cuda_graph = true;
-  bool raw_diagnostics = true;
 };
 
 bool starts_with(const std::string &s, const std::string &prefix) {
@@ -119,8 +117,6 @@ void print_usage(const char *argv0) {
          "1)\n"
       << "  --use-cuda-graph=0|1       Enable CUDA graph executor (default 1)\n"
       << "  --no-cuda-graph            Shorthand for --use-cuda-graph=0\n"
-      << "  --no-raw-diagnostics       Skip extra TRT-only pass for predecoder "
-         "stats\n"
       << "\nPipelineConfig overrides are also accepted:\n"
       << "  --distance=N --num-rounds=N --onnx-filename=FILE --label=NAME\n";
 }
@@ -167,8 +163,6 @@ DemoConfig parse_demo_config(int argc, char *argv[]) {
           parse_bool(value_after_equals(arg, "--use-cuda-graph="));
     } else if (arg == "--no-cuda-graph") {
       cfg.use_cuda_graph = false;
-    } else if (arg == "--no-raw-diagnostics") {
-      cfg.raw_diagnostics = false;
     }
   }
   return cfg;
@@ -192,41 +186,6 @@ size_t sparse_vec_rows(const std::vector<int64_t> &sparse) {
   return static_cast<size_t>(std::count(sparse.begin(), sparse.end(), -1));
 }
 
-template <typename T>
-void copy_param_if_present(const cudaqx::heterogeneous_map &src,
-                           cudaqx::heterogeneous_map &dst,
-                           const std::string &key) {
-  if (src.contains(key))
-    dst.insert(key, src.get<T>(key));
-}
-
-bool build_raw_trt_params(const cudaqx::heterogeneous_map &trt_params,
-                          cudaqx::heterogeneous_map &raw_params) {
-  bool has_model_source = false;
-  if (trt_params.contains("engine_load_path")) {
-    raw_params.insert("engine_load_path",
-                      trt_params.get<std::string>("engine_load_path"));
-    has_model_source = true;
-  } else if (trt_params.contains("engine_save_path") &&
-             file_exists(trt_params.get<std::string>("engine_save_path"))) {
-    raw_params.insert("engine_load_path",
-                      trt_params.get<std::string>("engine_save_path"));
-    has_model_source = true;
-  } else if (trt_params.contains("onnx_load_path")) {
-    raw_params.insert("onnx_load_path",
-                      trt_params.get<std::string>("onnx_load_path"));
-    copy_param_if_present<std::string>(trt_params, raw_params,
-                                       "engine_save_path");
-    has_model_source = true;
-  }
-
-  copy_param_if_present<size_t>(trt_params, raw_params, "batch_size");
-  copy_param_if_present<bool>(trt_params, raw_params, "use_cuda_graph");
-  copy_param_if_present<size_t>(trt_params, raw_params, "memory_workspace");
-  copy_param_if_present<std::string>(trt_params, raw_params, "precision");
-  return has_model_source;
-}
-
 std::vector<cudaq::qec::float_t> sample_to_syndrome(const TestData &data,
                                                     int sample_idx) {
   std::vector<cudaq::qec::float_t> syndrome(data.num_detectors);
@@ -234,14 +193,6 @@ std::vector<cudaq::qec::float_t> sample_to_syndrome(const TestData &data,
   for (uint32_t i = 0; i < data.num_detectors; ++i)
     syndrome[i] = static_cast<cudaq::qec::float_t>(sample[i] != 0 ? 1.0 : 0.0);
   return syndrome;
-}
-
-int count_input_nonzero(const TestData &data, int sample_idx) {
-  const int32_t *sample = data.sample(sample_idx);
-  int count = 0;
-  for (uint32_t i = 0; i < data.num_detectors; ++i)
-    count += (sample[i] != 0);
-  return count;
 }
 
 int bit_from_float(cudaq::qec::float_t v) { return v >= 0.5 ? 1 : 0; }
@@ -264,20 +215,8 @@ struct CompositeStats {
   int any_obs_mismatches = 0;
   int ground_truth_ones = 0;
   int result_ones = 0;
-  std::vector<int32_t> first_obs_pred;
   std::vector<double> latencies_us;
   double wall_us = 0.0;
-};
-
-struct RawDiagnostics {
-  bool ran = false;
-  int decoded = 0;
-  int malformed = 0;
-  int predecoder_only_mismatches = 0;
-  int64_t total_input_nonzero = 0;
-  int64_t total_residual_nonzero = 0;
-  int64_t total_pre_l = 0;
-  int64_t total_pymatch_frame = 0;
 };
 
 struct DecoderSetup {
@@ -301,7 +240,6 @@ CompositeStats run_composite_decoder(cudaq::qec::decoder &decoder,
                                      const TestData &test_data, int n_samples,
                                      size_t num_observables) {
   CompositeStats stats;
-  stats.first_obs_pred.assign(n_samples, -1);
   stats.latencies_us.reserve(n_samples);
 
   const size_t check_observables =
@@ -334,7 +272,6 @@ CompositeStats run_composite_decoder(cudaq::qec::decoder &decoder,
       int pred = bit_from_float(result.result[obs]);
       int truth = test_data.observable(i, static_cast<int>(obs));
       if (obs == 0) {
-        stats.first_obs_pred[i] = pred;
         stats.ground_truth_ones += truth != 0;
         stats.result_ones += pred != 0;
         if (pred != truth)
@@ -399,6 +336,8 @@ DecoderSetup create_decoder_from_yaml(const DemoConfig &demo_cfg) {
   setup.H = cudaq::qec::pcm_from_sparse_vec(decoder_config.H_sparse,
                                             decoder_config.syndrome_size,
                                             decoder_config.block_size);
+  auto O = cudaq::qec::pcm_from_sparse_vec(
+      decoder_config.O_sparse, setup.O_rows, decoder_config.block_size);
   setup.trt_params =
       cudaq::qec::decoding::host::prepare_decoder_params(decoder_config);
   if (setup.trt_params.contains("onnx_load_path"))
@@ -411,8 +350,11 @@ DecoderSetup create_decoder_from_yaml(const DemoConfig &demo_cfg) {
     setup.engine_save_path =
         setup.trt_params.get<std::string>("engine_load_path");
 
-  setup.decoder =
-      cudaq::qec::decoder::get(decoder_config.type, setup.H, setup.trt_params);
+  setup.decoder = cudaq::qec::decoder::get(
+      decoder_config.type,
+      cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(setup.H),
+                               cudaq::qec::sparse_binary_matrix(O)),
+      cudaq::qec::decode_result_type::observables, setup.trt_params);
   return setup;
 }
 
@@ -433,14 +375,12 @@ DecoderSetup create_decoder_from_cli(const PipelineConfig &config,
 
   cudaqx::heterogeneous_map pm_params;
   pm_params.insert("merge_strategy", std::string("smallest_weight"));
-  pm_params.insert("O", O);
   if (!stim.priors.empty()) {
     if (stim.priors.size() != stim.H.ncols) {
       throw std::runtime_error(
           "priors.bin has " + std::to_string(stim.priors.size()) +
           " entries, but H has " + std::to_string(stim.H.ncols) + " columns.");
     }
-    pm_params.insert("error_rate_vec", stim.priors);
   }
 
   DecoderSetup setup;
@@ -460,49 +400,18 @@ DecoderSetup create_decoder_from_cli(const PipelineConfig &config,
   setup.trt_params.insert("engine_save_path", engine_save_path);
   setup.trt_params.insert("batch_size", demo_cfg.batch_size);
   setup.trt_params.insert("use_cuda_graph", demo_cfg.use_cuda_graph);
+  setup.trt_params.insert("engine_output_format",
+                          "observables_and_residual_detectors");
   setup.trt_params.insert("global_decoder", std::string("pymatching"));
   setup.trt_params.insert("global_decoder_params", pm_params);
-  setup.trt_params.insert("O", O);
 
-  setup.decoder =
-      cudaq::qec::decoder::get("trt_decoder", setup.H, setup.trt_params);
+  setup.decoder = cudaq::qec::decoder::get(
+      "trt_decoder",
+      cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(H),
+                               cudaq::qec::sparse_binary_matrix(O),
+                               stim.priors),
+      cudaq::qec::decode_result_type::observables, setup.trt_params);
   return setup;
-}
-
-RawDiagnostics run_raw_diagnostics(cudaq::qec::decoder &raw_decoder,
-                                   const TestData &test_data,
-                                   const std::vector<int32_t> &final_pred,
-                                   int n_samples, size_t num_observables,
-                                   size_t residual_detectors) {
-  RawDiagnostics stats;
-  stats.ran = true;
-
-  const size_t expected_output = num_observables + residual_detectors;
-  for (int i = 0; i < n_samples; ++i) {
-    auto syndrome = sample_to_syndrome(test_data, i);
-    auto raw = raw_decoder.decode(syndrome);
-    if (raw.result.size() < expected_output || num_observables == 0) {
-      stats.malformed++;
-      continue;
-    }
-
-    stats.decoded++;
-    stats.total_input_nonzero += count_input_nonzero(test_data, i);
-
-    int pre_l = bit_from_float(raw.result[0]);
-    int truth = test_data.observable(i, 0);
-    if (pre_l != truth)
-      stats.predecoder_only_mismatches++;
-    stats.total_pre_l += pre_l;
-
-    if (i < static_cast<int>(final_pred.size()) && final_pred[i] >= 0)
-      stats.total_pymatch_frame += (final_pred[i] ^ pre_l);
-
-    for (size_t k = 0; k < residual_detectors; ++k)
-      stats.total_residual_nonzero +=
-          bit_from_float(raw.result[num_observables + k]);
-  }
-  return stats;
 }
 
 } // namespace
@@ -601,9 +510,8 @@ int main(int argc, char *argv[]) {
     return 1;
   }
   if (setup.decoder->get_result_type() !=
-      cudaq::qec::decoder::decode_result_type::decode_to_obs) {
-    std::cerr << "ERROR: composite trt_decoder must report decode_to_obs "
-                 "when constructed with O.\n";
+      cudaq::qec::decode_result_type::observables) {
+    std::cerr << "ERROR: composite trt_decoder must use observable output.\n";
     return 1;
   }
 
@@ -644,31 +552,6 @@ int main(int argc, char *argv[]) {
 
   CompositeStats stats =
       run_composite_decoder(*setup.decoder, test_data, n_samples, setup.O_rows);
-
-  RawDiagnostics raw_stats;
-  if (demo_cfg.raw_diagnostics) {
-    cudaqx::heterogeneous_map raw_params;
-    if (!build_raw_trt_params(setup.trt_params, raw_params)) {
-      std::cerr << "[WARN] Raw TRT diagnostics skipped: no raw TRT model "
-                   "source is available.\n";
-    } else {
-      if (setup.trt_params.contains("engine_save_path") &&
-          !file_exists(setup.trt_params.get<std::string>("engine_save_path"))) {
-        std::cerr << "[WARN] Engine file was not found after composite init; "
-                     "raw diagnostics will rebuild from ONNX.\n";
-      }
-
-      try {
-        auto raw_decoder =
-            cudaq::qec::decoder::get("trt_decoder", setup.H, raw_params);
-        raw_stats =
-            run_raw_diagnostics(*raw_decoder, test_data, stats.first_obs_pred,
-                                n_samples, setup.O_rows, setup.H_rows);
-      } catch (const std::exception &e) {
-        std::cerr << "[WARN] Raw TRT diagnostics skipped: " << e.what() << "\n";
-      }
-    }
-  }
 
   int warmup = std::min(demo_cfg.warmup_count,
                         static_cast<int>(stats.latencies_us.size()));
@@ -744,48 +627,6 @@ int main(int argc, char *argv[]) {
             << stats.decoded << "\n";
   std::cout << "    Ground truth ones: " << stats.ground_truth_ones << "/"
             << stats.decoded << "\n";
-
-  if (raw_stats.ran && raw_stats.decoded > 0) {
-    double pred_ler =
-        static_cast<double>(raw_stats.predecoder_only_mismatches) /
-        static_cast<double>(raw_stats.decoded);
-    double avg_input_nz = static_cast<double>(raw_stats.total_input_nonzero) /
-                          static_cast<double>(raw_stats.decoded);
-    double avg_residual_nz =
-        static_cast<double>(raw_stats.total_residual_nonzero) /
-        static_cast<double>(raw_stats.decoded);
-    double input_density = avg_input_nz / test_data.num_detectors;
-    double residual_density = avg_residual_nz / setup.H_rows;
-    double reduction =
-        input_density > 0.0 ? (1.0 - residual_density / input_density) : 0.0;
-
-    std::cout
-        << "  "
-           "---------------------------------------------------------------\n";
-    std::cout << "  Raw TRT diagnostics (" << raw_stats.decoded << " samples, "
-              << raw_stats.malformed << " malformed):\n";
-    std::cout << "    Predecoder-only mismatches: "
-              << raw_stats.predecoder_only_mismatches << "  LER: " << pred_ler
-              << "\n";
-    std::cout << std::setprecision(3);
-    std::cout << "    Avg logical_pred: "
-              << static_cast<double>(raw_stats.total_pre_l) / raw_stats.decoded
-              << "\n";
-    std::cout << "    Avg PyMatching frame flip: "
-              << static_cast<double>(raw_stats.total_pymatch_frame) /
-                     raw_stats.decoded
-              << "\n";
-    std::cout << std::setprecision(1);
-    std::cout << "    Input density:    " << avg_input_nz << " / "
-              << test_data.num_detectors << "  (" << std::setprecision(4)
-              << input_density << ")\n";
-    std::cout << std::setprecision(1);
-    std::cout << "    Residual density: " << avg_residual_nz << " / "
-              << setup.H_rows << "  (" << std::setprecision(4)
-              << residual_density << ")\n";
-    std::cout << std::setprecision(1);
-    std::cout << "    Reduction: " << reduction * 100.0 << "%\n";
-  }
 
   std::cout
       << "================================================================\n";

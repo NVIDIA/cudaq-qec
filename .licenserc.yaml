@@ -1,0 +1,52 @@
+header:
+  license:
+    spdx-id: Apache-2.0
+    copyright-owner: NVIDIA Corporation & Affiliates
+    software-name: CUDA-QX
+
+    content: |
+      Copyright (c) 2026 NVIDIA Corporation & Affiliates.
+      All rights reserved.
+
+      This source code and the accompanying materials are made available under
+      the terms of the Apache License 2.0 which accompanies this distribution.
+
+    pattern: |
+      Apache License 2.0
+
+  paths:
+    - '**'
+
+  paths-ignore:
+    - '**/.*'
+    - '**/.*/**'
+    - '**/*.md'
+    - '**/*.rst'
+    - '**/*.txt'
+    - '**/*.html'
+    - '**/*.yaml'
+    - '**/*.yml'
+    - '**/*.toml'
+    - '**/*.tsv'
+    - '**/*.svg'
+    - '**/*.png'
+    - '**/*.onnx'
+    - '**/LICENSE'
+    - '**/NOTICE'
+    - '**/CITATION.cff'
+    - '**/Doxyfile.in'
+    # Plain-text data formats consumed by Stim/decoder tooling, not source.
+    - '**/*.stim'
+    - '**/*.dem'
+    # Auto-generated data
+    - 'libs/qec/unittests/decoders/trt_decoder/trt_test_data.h'
+    # No actual code, just an explanatory comment (CMake device-link workaround).
+    - 'libs/qec/unittests/utils/cuda_link_stub.cu'
+    # Zero-byte package-init markers, no content to attach a header to.
+    - 'libs/qec/python/cudaq_qec/plugins/decoders/__init__.py'
+    - 'libs/qec/python/cudaq_qec/plugins/decoders/tensor_network_utils/__init__.py'
+    # Symlink to a directory (docs/sphinx/examples) that is separately checked.
+    # license-eye's walker doesn't handle symlink-to-directory.
+    - 'examples'
+
+  license-location-threshold: 80

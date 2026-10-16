@@ -126,48 +126,6 @@ Copyright (c) 2016, Johan Mabille, Sylvain Corlay and Wolf Vollprecht
 Copyright (c) 2016, QuantStack
 ----------------------------------------------------------------
 
-libgfortran - GCC Runtime Library Exception
-<https://github.com/gcc-mirror/gcc/tree/releases/gcc-11.2.0/libgfortran>
-
-License at <https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.2.0/libgfortran/libgfortran.h>
- /* Common declarations for all of libgfortran.
-   Copyright (C) 2002-2021 Free Software Foundation, Inc.
-   Contributed by Paul Brook <paul@nowt.org>, and
-   Andy Vaught <andy@xena.eas.asu.edu>
-This file is part of the GNU Fortran runtime library (libgfortran).
-Libgfortran is free software; you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation; either version 3, or (at your option)
-any later version.
-Libgfortran is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-Under Section 7 of GPL version 3, you are granted additional
-permissions described in the GCC Runtime Library Exception, version
-3.1, as published by the Free Software Foundation.
-You should have received a copy of the GNU General Public License and
-a copy of the GCC Runtime Library Exception along with this program;
-see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
-<http://www.gnu.org/licenses/>
-----------------------------------------------------------------
-
-liblbfgs - MIT License
-<https://github.com/chokkan/liblbfgs>
-
-License at <https://github.com/chokkan/liblbfgs/blob/master/COPYING>
-Copyright (c) 1990 Jorge Nocedal
-Copyright (c) 2007-2010 Naoaki Okazaki
-----------------------------------------------------------------
-
-PRIMA - BSD 3-Clause
-Developed by Zaikun Zhang and contributors based on the works of M.J.D. Powell.
-<https://github.com/libprima/prima>
-
-License at <https://github.com/libprima/prima/blob/main/LICENCE.txt>
- Copyright (c) 2020--2025, Zaikun ZHANG ( <https://www.zhangzk.net> )
-----------------------------------------------------------------
-
 PyMatching - Apache 2.0
 <https://github.com/oscarhiggott/PyMatching>
 

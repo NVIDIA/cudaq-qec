@@ -1,5 +1,0 @@
-include pyproject.toml.cu12
-include pyproject.toml.cu13
-include LICENSE
-include NOTICE
-include CITATION.cff

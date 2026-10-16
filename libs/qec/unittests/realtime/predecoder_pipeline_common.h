@@ -11,7 +11,7 @@
 ///
 /// Used by both the software-only benchmark
 /// (test_realtime_predecoder_w_pymatching.cpp) and the FPGA bridge
-/// (hololink_predecoder_bridge.cpp). These helpers are example and test support
+/// (gpu_roce_predecoder_bridge.cpp). These helpers are example and test support
 /// code rather than part of the stable library API, but documenting them keeps
 /// the benchmark and bridge configuration visible from the generated docs.
 

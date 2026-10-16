@@ -21,8 +21,7 @@ PYENV_VERSION=${PYTHON_VERSION} pyenv exec pip install --user \
 # Install CUDA-Q packages
 PYENV_VERSION=${PYTHON_VERSION} pyenv exec pip install --user matplotlib \
     wheelhouse/cuda_quantum_cu12-0.9.0-${PYTHON_WHEEL_VER}-${PYTHON_WHEEL_VER}-manylinux_2_28_x86_64.whl \
-    wheels-py$(echo ${PYTHON_VERSION} | cut -d'.' -f1,2)-$(dpkg --print-architecture)/cudaq_qec-0.1.0-${PYTHON_WHEEL_VER}-${PYTHON_WHEEL_VER}-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl \
-    wheels-py$(echo ${PYTHON_VERSION} | cut -d'.' -f1,2)-$(dpkg --print-architecture)/cudaq_solvers-0.1.0-${PYTHON_WHEEL_VER}-${PYTHON_WHEEL_VER}-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+    wheels-py$(echo ${PYTHON_VERSION} | cut -d'.' -f1,2)-$(dpkg --print-architecture)/cudaq_qec-0.1.0-${PYTHON_WHEEL_VER}-${PYTHON_WHEEL_VER}-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 
 # Install test dependencies
 PYENV_VERSION=${PYTHON_VERSION} pyenv exec pip install pytest networkx --user

@@ -54,6 +54,24 @@ nb::ndarray<nb::numpy, double> asNumpyFloat64(nb::object obj) {
   return arr;
 }
 
+/// True if either input is a torch CPU tensor (torch importable + a CPU
+/// tensor).
+static bool anyTorchCpuTensor(const nb::object &check_matrix_obj,
+                              const nb::object &error_probs_obj) {
+  nb::object torch_obj;
+  try {
+    torch_obj = nb::module_::import_("torch");
+  } catch (nb::python_error &) {
+    PyErr_Clear();
+    return false;
+  }
+  nb::object Tensor = nb::cast<nb::module_>(torch_obj).attr("Tensor");
+  auto is_cpu = [&](const nb::object &obj) {
+    return nb::isinstance(obj, Tensor) && !nb::cast<bool>(obj.attr("is_cuda"));
+  };
+  return is_cpu(check_matrix_obj) || is_cpu(error_probs_obj);
+}
+
 /// Throw if either input is a torch CPU tensor (no silent numpy conversion).
 void rejectTorchCpuTensors(const nb::object &check_matrix_obj,
                            const nb::object &error_probs_obj) {
@@ -423,12 +441,18 @@ bool tryTorchGpuSampling(nb::object check_matrix_obj,
     return false;
   }
 
-  check_t =
-      check_t.attr("to")("device"_a = device, "dtype"_a = torch.attr("uint8"));
-  probs_t = probs_t.attr("to")("device"_a = device,
-                               "dtype"_a = torch.attr("float64"));
-  check_t = check_t.attr("contiguous")();
-  probs_t = probs_t.attr("contiguous")();
+  try {
+    check_t = check_t.attr("to")("device"_a = device,
+                                 "dtype"_a = torch.attr("uint8"));
+    probs_t = probs_t.attr("to")("device"_a = device,
+                                 "dtype"_a = torch.attr("float64"));
+    check_t = check_t.attr("contiguous")();
+    probs_t = probs_t.attr("contiguous")();
+  } catch (nb::python_error &e) {
+    PyErr_Clear();
+    failure_reason = std::string("failed to move tensors to CUDA: ") + e.what();
+    return false;
+  }
 
   auto check_shape = nb::cast<nb::tuple>(check_t.attr("shape"));
   if (check_shape.size() != 2) {
@@ -549,6 +573,17 @@ void bindDemSampling(nb::module_ &mod) {
             return torch_result;
         }
 
+        // Under backend="gpu", a torch CPU tensor is valid input (it is moved
+        // to CUDA); reaching here means the GPU path failed, so surface the
+        // GPU-unavailable error rather than a misleading CPU-tensor rejection.
+        if (backend_mode == DemSamplingBackend::Gpu &&
+            anyTorchCpuTensor(check_matrix_obj, error_probs_obj)) {
+          throw std::runtime_error(
+              "dem_sampling: GPU backend requested but unavailable. "
+              "torch path: " +
+              torch_gpu_failure_reason);
+        }
+
         rejectTorchCpuTensors(check_matrix_obj, error_probs_obj);
 
         bool inputs_are_cuda_tensors = false;
@@ -621,7 +656,10 @@ void bindDemSampling(nb::module_ &mod) {
         When PyTorch CUDA tensors are provided on the GPU path, outputs are
         returned as PyTorch CUDA tensors. Otherwise, outputs are NumPy arrays.
 
-        PyTorch CPU tensors are not supported. Convert to NumPy first.
+        PyTorch CPU tensors are moved to CUDA automatically under
+        backend="gpu" (raising a GPU-unavailable error if there is no GPU).
+        Under backend="auto" or "cpu" they are rejected; convert to NumPy
+        first.
 
         Args:
             check_matrix: Binary check matrix [num_checks x num_error_mechanisms],

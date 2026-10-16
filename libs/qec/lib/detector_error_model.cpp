@@ -7,8 +7,10 @@
  ******************************************************************************/
 
 #include "cudaq/qec/detector_error_model.h"
+#include "sparse_dem_from_stim_text.h"
 #include "cudaq/qec/logger.h"
 #include "cudaq/qec/pcm_utils.h"
+#include "cudaq/qec/sparse_binary_matrix.h"
 
 #include "stim.h"
 
@@ -21,8 +23,20 @@
 
 namespace cudaq::qec {
 
-detector_error_model dem_from_stim_text(const std::string &dem_text,
-                                        bool use_decomp_suggestions) {
+namespace {
+
+/// What the Stim parse yields before any matrix layout is chosen: per-error
+/// detector and observable hit lists, already GF(2)-reduced and sorted.
+struct parsed_stim_dem {
+  std::size_t num_detectors = 0;
+  std::size_t num_observables = 0;
+  std::vector<std::vector<std::size_t>> detector_hits;
+  std::vector<std::vector<std::size_t>> observable_hits;
+  std::vector<double> error_rates;
+};
+
+parsed_stim_dem parse_stim_dem(const std::string &dem_text,
+                               bool use_decomp_suggestions) {
   auto dem = [&dem_text]() {
     try {
       return stim::DetectorErrorModel(dem_text);
@@ -99,34 +113,139 @@ detector_error_model dem_from_stim_text(const std::string &dem_text,
     ++instruction_index;
   });
 
-  const std::size_t num_cols = detector_hits.size();
-  if (num_cols == 0)
+  if (detector_hits.empty())
     throw std::runtime_error(
         "Stim DEM contains no error mechanisms after flattening");
-  detector_error_model result;
-  result.detector_error_matrix =
-      cudaqx::tensor<uint8_t>({num_detectors, num_cols});
-  result.observables_flips_matrix =
-      cudaqx::tensor<uint8_t>({num_observables, num_cols});
-  result.error_rates = std::move(error_rates);
 
-  for (std::size_t err = 0; err < num_cols; ++err) {
-    for (auto det : detector_hits[err]) {
-      if (det >= num_detectors)
+  parsed_stim_dem parsed;
+  parsed.num_detectors = num_detectors;
+  parsed.num_observables = num_observables;
+  parsed.detector_hits = std::move(detector_hits);
+  parsed.observable_hits = std::move(observable_hits);
+  parsed.error_rates = std::move(error_rates);
+  return parsed;
+}
+
+/// Shared by both projections so an out-of-range id is reported identically
+/// whichever one the caller asked for.
+void validate_hit_ids(const parsed_stim_dem &parsed) {
+  for (const auto &hits : parsed.detector_hits)
+    for (auto det : hits)
+      if (det >= parsed.num_detectors)
         throw std::runtime_error(
             "Stim DEM detector id out of range while extracting H");
-      result.detector_error_matrix.at({det, err}) ^= 1;
-    }
-    for (auto ob : observable_hits[err]) {
-      if (ob >= num_observables)
+  for (const auto &hits : parsed.observable_hits)
+    for (auto ob : hits)
+      if (ob >= parsed.num_observables)
         throw std::runtime_error(
             "Stim DEM observable id out of range while extracting O");
+}
+
+} // namespace
+
+detector_error_model dem_from_stim_text(const std::string &dem_text,
+                                        bool use_decomp_suggestions) {
+  auto parsed = parse_stim_dem(dem_text, use_decomp_suggestions);
+  validate_hit_ids(parsed);
+  const std::size_t num_cols = parsed.detector_hits.size();
+
+  detector_error_model result;
+  result.detector_error_matrix =
+      cudaqx::tensor<uint8_t>({parsed.num_detectors, num_cols});
+  result.observables_flips_matrix =
+      cudaqx::tensor<uint8_t>({parsed.num_observables, num_cols});
+  result.error_rates = std::move(parsed.error_rates);
+
+  for (std::size_t err = 0; err < num_cols; ++err) {
+    for (auto det : parsed.detector_hits[err])
+      result.detector_error_matrix.at({det, err}) ^= 1;
+    for (auto ob : parsed.observable_hits[err])
       result.observables_flips_matrix.at({ob, err}) ^= 1;
-    }
   }
 
   return result;
 }
+
+namespace details {
+
+sparse_dem sparse_dem_from_stim_text(const std::string &dem_text) {
+  auto parsed = parse_stim_dem(dem_text, /*use_decomp_suggestions=*/false);
+  validate_hit_ids(parsed);
+
+  using index_type = sparse_binary_matrix::index_type;
+  const std::size_t num_cols = parsed.detector_hits.size();
+  const auto index_limit =
+      static_cast<std::size_t>(std::numeric_limits<index_type>::max());
+  if (num_cols > index_limit || parsed.num_detectors > index_limit ||
+      parsed.num_observables > index_limit)
+    throw std::runtime_error(
+        "Stim DEM dimensions exceed the sparse matrix index type");
+
+  // Total nonzeros are counted in size_t and checked before anything is sized
+  // or cast. Accumulating a prefix sum directly in index_type would wrap on an
+  // oversized model, under-allocate the index array, and then write past its
+  // end -- memory corruption instead of a clean rejection.
+  auto total_nnz = [](const std::vector<std::vector<std::size_t>> &groups) {
+    std::size_t total = 0;
+    for (const auto &group : groups)
+      total += group.size();
+    return total;
+  };
+  const std::size_t h_nnz = total_nnz(parsed.detector_hits);
+  const std::size_t o_nnz = total_nnz(parsed.observable_hits);
+  if (h_nnz > index_limit || o_nnz > index_limit)
+    throw std::runtime_error(
+        "Stim DEM nonzero count exceeds the sparse matrix index type");
+
+  // Fill the compressed arrays directly. Going through nested per-group vectors
+  // would allocate one small buffer per error mechanism and per observable, and
+  // then copy them all again while flattening.
+
+  // H: a hit list is already the compressed column for its error mechanism.
+  std::vector<index_type> col_ptrs(num_cols + 1, 0);
+  std::size_t h_running = 0;
+  for (std::size_t err = 0; err < num_cols; ++err) {
+    h_running += parsed.detector_hits[err].size();
+    col_ptrs[err + 1] = static_cast<index_type>(h_running);
+  }
+  std::vector<index_type> row_indices(h_nnz);
+  std::size_t written = 0;
+  for (const auto &hits : parsed.detector_hits)
+    for (auto det : hits)
+      row_indices[written++] = static_cast<index_type>(det);
+
+  // O is stored by observable, so count each row first, then scatter. Walking
+  // error mechanisms in order leaves every row's indices ascending.
+  std::vector<std::size_t> observable_counts(parsed.num_observables, 0);
+  for (const auto &hits : parsed.observable_hits)
+    for (auto ob : hits)
+      ++observable_counts[ob];
+  std::vector<index_type> row_ptrs(parsed.num_observables + 1, 0);
+  std::size_t o_running = 0;
+  for (std::size_t ob = 0; ob < parsed.num_observables; ++ob) {
+    o_running += observable_counts[ob];
+    row_ptrs[ob + 1] = static_cast<index_type>(o_running);
+  }
+  std::vector<index_type> col_indices(o_nnz);
+  std::vector<index_type> cursor(row_ptrs.begin(), row_ptrs.end() - 1);
+  for (std::size_t err = 0; err < num_cols; ++err)
+    for (auto ob : parsed.observable_hits[err])
+      col_indices[cursor[ob]++] = static_cast<index_type>(err);
+
+  sparse_dem projection;
+  projection.detector_error_matrix = sparse_binary_matrix::from_csc(
+      static_cast<index_type>(parsed.num_detectors),
+      static_cast<index_type>(num_cols), std::move(col_ptrs),
+      std::move(row_indices));
+  projection.observables_flips_matrix = sparse_binary_matrix::from_csr(
+      static_cast<index_type>(parsed.num_observables),
+      static_cast<index_type>(num_cols), std::move(row_ptrs),
+      std::move(col_indices));
+  projection.error_rates = std::move(parsed.error_rates);
+  return projection;
+}
+
+} // namespace details
 
 std::size_t detector_error_model::num_detectors() const {
   auto shape = detector_error_matrix.shape();

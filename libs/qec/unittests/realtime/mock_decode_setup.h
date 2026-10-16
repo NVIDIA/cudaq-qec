@@ -12,7 +12,7 @@
 /// @brief Host-side helpers for mock decoder setup.
 ///
 /// This header-only file provides shared utilities used by both the
-/// test_realtime_decoding test and the hololink_mock_decoder_bridge tool:
+/// test_realtime_decoding test and the gpu_roce_mock_decoder_bridge tool:
 ///   - Config YAML scalar parsing
 ///   - Syndrome file loading
 ///   - Mock decoder context GPU setup

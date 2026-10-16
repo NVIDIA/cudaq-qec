@@ -58,7 +58,6 @@ docker cp $(pwd) $CONTAINER_NAME:/cuda-qx
 
 echo "Building CUDA-QX wheels in the container..."
 docker exec -it $CONTAINER_NAME /bin/sh -c "$(cat ./scripts/ci/build_qec_wheel.sh)"
-docker exec -it $CONTAINER_NAME /bin/sh -c "$(cat ./scripts/ci/build_solvers_wheel.sh)"
 
 echo "Copying wheels from container..."
 docker cp $CONTAINER_NAME:/wheels/ .

@@ -7,6 +7,12 @@
  ******************************************************************************/
 
 // For full test script: surface_code-2-test.sh
+//
+// Surface-code memory experiment (prep0, Z basis) with a single realtime
+// decoder per logical qubit. Unique to this example: the DEM is characterized
+// from in-kernel SPAM noise (`spam_error` on the data qubits) via
+// `cudaq::dem_from_kernel`, so one kernel and noise model drive both
+// characterization and the decoded shots.
 
 #include "cudaq.h"
 #include "cudaq/qec/code.h"
@@ -17,8 +23,8 @@
 #include "cudaq/qec/realtime/decoding.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include <common/CustomOp.h>
-#include <common/ExecutionContext.h>
 #include <common/NoiseModel.h>
+#include <cudaq/algorithms/dem.h>
 #include <fstream>
 
 // Whether or not to put calls to debug functions in the QIR program. You cannot
@@ -45,9 +51,9 @@ void save_dem_to_file(const cudaq::qec::detector_error_model &dem,
     config.O_sparse =
         cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix);
     config.D_sparse = std::vector<int64_t>(det_mat);
-    cudaq::qec::decoding::config::multi_error_lut_config lut_config;
-    lut_config.lut_error_depth = 2;
-    config.decoder_custom_args = lut_config;
+    cudaqx::heterogeneous_map lut_args;
+    lut_args.insert("lut_error_depth", 2);
+    config.decoder_custom_args = lut_args;
     multi_config.decoders.push_back(config);
   }
   std::string config_str = multi_config.to_yaml_str(200);
@@ -76,9 +82,6 @@ void load_dem_from_file(const std::string &dem_filename,
     exit(1);
   }
   auto decoder_config = config.decoders[0];
-  auto multi_error_lut_config =
-      std::get<cudaq::qec::decoding::config::multi_error_lut_config>(
-          decoder_config.decoder_custom_args);
   dem.detector_error_matrix = cudaq::qec::pcm_from_sparse_vec(
       decoder_config.H_sparse, decoder_config.syndrome_size,
       decoder_config.block_size);
@@ -100,24 +103,12 @@ std::vector<size_t> get_stab_cnot_schedule(char stab_type, int distance) {
     throw std::runtime_error(
         "get_stab_cnot_schedule: Invalid stabilizer type. Must be 'X' or 'Z'.");
   }
-  // First get the stabilizers
-  auto stabs = grid.get_spin_op_stabilizers();
-  cudaq::qec::sortStabilizerOps(stabs);
-  std::size_t stab_idx = 0;
-  std::vector<size_t> cnot_schedule;
-  for (const auto &stab : stabs) {
-    auto stab_word = stab.get_pauli_word(distance * distance);
-    if (stab_word.find(stab_type) == std::string::npos)
-      continue; // None of the desired stabilizers in this row
-    for (std::size_t d = 0; d < stab_word.size(); ++d) {
-      if (stab_word[d] == stab_type) {
-        cnot_schedule.push_back(stab_idx);
-        cnot_schedule.push_back(d);
-      }
-    }
-    stab_idx++;
-  }
-  return cnot_schedule;
+  // CNOT pairs ordered by timestep within each stabilizer, so that mid-round
+  // ancilla (hook) errors land perpendicular to the logical operators.
+  // Stabilizer indices match the sorted parity-matrix rows and hence the
+  // ancilla indexing.
+  return stab_type == 'X' ? grid.get_cnot_schedule_pairs_x()
+                          : grid.get_cnot_schedule_pairs_z();
 }
 
 void debug_print_syndromes(int64_t syndrome_x_int, int64_t syndrome_z_int) {
@@ -183,19 +174,39 @@ se_x_ft(cudaq::qec::patch logicalQubit,
   return results;
 }
 
-__qpu__ void custom_memory_circuit_stabs(
+// Runs the stabilizer measurement rounds and returns the last round's
+// combined syndrome so the caller can chain it into a later call. Every round
+// declares detectors: cross-round pairs against the previous round in the same
+// [Z..., X...] order the syndromes are enqueued or, when there is no reference
+// round yet (the lock-in round after prep0), one single-measurement detector
+// per Z-stabilizer, which is deterministic in the prepared basis. prev_syndrome
+// supplies the reference round (pass an empty vector for none). These detector
+// annotations compile to no-ops on the live decoding path, so they are always
+// emitted rather than gated by a flag.
+__qpu__ std::vector<cudaq::measure_result> custom_memory_circuit_stabs(
     cudaq::qview<> data, cudaq::qview<> xstab_anc, cudaq::qview<> zstab_anc,
     std::size_t numRounds, const std::vector<std::size_t> &cnot_schedX_flat,
     const std::vector<std::size_t> &cnot_schedZ_flat, bool enqueue_syndromes,
-    bool do_errors_after_non_last_rounds, double p_spam,
-    int logical_qubit_idx) {
+    bool do_errors_after_non_last_rounds, double p_spam, int logical_qubit_idx,
+    const std::vector<cudaq::measure_result> &prev_syndrome) {
   // Create the logical patch
   patch logical(data, xstab_anc, zstab_anc);
-  std::vector<cudaq::measure_result> combined_syndrome(xstab_anc.size() +
-                                                       zstab_anc.size());
+
+  // Local copy of the reference syndrome (kernel vector parameters are
+  // read-only, and the round loop below reassigns this as it advances). The
+  // local is always full-size so the reassignment never changes its length;
+  // have_prev says whether it currently holds a valid reference round.
+  bool have_prev = prev_syndrome.size() == xstab_anc.size() + zstab_anc.size();
+  std::vector<cudaq::measure_result> prev(xstab_anc.size() + zstab_anc.size());
+  if (have_prev) {
+    for (std::size_t k = 0; k < prev.size(); ++k)
+      prev[k] = prev_syndrome[k];
+  }
 
   // Generate syndrome data
   for (std::size_t round = 0; round < numRounds; round++) {
+    std::vector<cudaq::measure_result> combined_syndrome(xstab_anc.size() +
+                                                         zstab_anc.size());
     auto syndrome_z = se_z_ft(logical, cnot_schedZ_flat);
     auto syndrome_x = se_x_ft(logical, cnot_schedX_flat);
     int i = 0;
@@ -207,9 +218,17 @@ __qpu__ void custom_memory_circuit_stabs(
       cudaq::qec::decoding::enqueue_syndromes(
           /*decoder_id=*/logical_qubit_idx, combined_syndrome);
     }
-#if PER_SHOT_DEBUG
-    debug_print_syndromes(syndrome_x_int, syndrome_z_int);
-#endif
+    if (have_prev) {
+      cudaq::detectors(prev, combined_syndrome);
+    } else {
+      // In this Z-basis (prep0) example the Z stabilizers measured by the
+      // very first round are deterministic, so they are detectors on their
+      // own; the X stabilizers only project a random frame.
+      for (std::size_t k = 0; k < zstab_anc.size(); ++k)
+        cudaq::detector(combined_syndrome[k]);
+    }
+    prev = combined_syndrome;
+    have_prev = true;
     if (do_errors_after_non_last_rounds && round < numRounds - 1) {
       // spam_error(logical, p_spam, p_spam, p_spam);
       spam_error(logical, p_spam, 0.0, 0.0);
@@ -223,16 +242,23 @@ __qpu__ void custom_memory_circuit_stabs(
 #endif
     }
   }
+  return prev;
 }
 
-__qpu__ std::int64_t
-demo_circuit_qpu(bool allow_device_calls,
-                 const cudaq::qec::code::one_qubit_encoding &statePrep,
-                 std::size_t numData, std::size_t numAncx, std::size_t numAncz,
-                 std::size_t numRounds, std::size_t numLogical,
-                 const std::vector<std::size_t> &cnot_schedX_flat,
-                 const std::vector<std::size_t> &cnot_schedZ_flat,
-                 double p_spam, bool apply_corrections) {
+// The kernel annotates itself for DEM generation via cudaq::dem_from_kernel:
+// the lock-in round declares the deterministic Z-stabilizer singles, every
+// later round declares cross-round detectors against the previous round, and
+// the Z logical observable is declared over the final data measurements at
+// z_obs_indices. These annotations are no-ops on the live decoding path, so
+// they are always emitted (DEM generation still uses numLogical = 1 and
+// allow_device_calls = false).
+__qpu__ std::int64_t demo_circuit_qpu(
+    bool allow_device_calls,
+    const cudaq::qec::code::one_qubit_encoding &statePrep, std::size_t numData,
+    std::size_t numAncx, std::size_t numAncz, std::size_t numRounds,
+    std::size_t numLogical, const std::vector<std::size_t> &cnot_schedX_flat,
+    const std::vector<std::size_t> &cnot_schedZ_flat, double p_spam,
+    bool apply_corrections, const std::vector<std::size_t> &z_obs_indices) {
 #if PER_SHOT_DEBUG
   debug_start_shot();
 #endif
@@ -258,41 +284,34 @@ demo_circuit_qpu(bool allow_device_calls,
     statePrep(logical);
   }
 
-  // Do 1 stabilizer round to lock in the stabilizers
-  {
-    for (int i = 0; i < numLogical; i++) {
-      auto subData = data.slice(i * numData, numData);
-      auto subXstab_anc = xstab_anc.slice(i * numAncx, numAncx);
-      auto subZstab_anc = zstab_anc.slice(i * numAncz, numAncz);
-
-      custom_memory_circuit_stabs(
-          subData, subXstab_anc, subZstab_anc,
-          /*numRounds=*/1, cnot_schedX_flat, cnot_schedZ_flat,
-          /*enqueue_syndromes=*/allow_device_calls,
-          /*do_errors_after_non_last_rounds=*/false, p_spam, i);
-    }
-  }
-
-  // Inject errors
+  // For each logical qubit: lock in the stabilizers, inject SPAM, then run the
+  // measurement rounds. Each qubit's own lock-in syndrome is the reference
+  // round for its first cross-round detectors (DEM generation always uses
+  // numLogical = 1).
   for (int i = 0; i < numLogical; i++) {
     auto subData = data.slice(i * numData, numData);
     auto subXstab_anc = xstab_anc.slice(i * numAncx, numAncx);
     auto subZstab_anc = zstab_anc.slice(i * numAncz, numAncz);
+
+    // Lock-in round (no reference round yet).
+    std::vector<cudaq::measure_result> no_prev(0);
+    auto lockin_syndrome = custom_memory_circuit_stabs(
+        subData, subXstab_anc, subZstab_anc,
+        /*numRounds=*/1, cnot_schedX_flat, cnot_schedZ_flat,
+        /*enqueue_syndromes=*/allow_device_calls,
+        /*do_errors_after_non_last_rounds=*/false, p_spam, i, no_prev);
+
+    // Inject errors.
     patch logical(subData, subXstab_anc, subZstab_anc);
     spam_error(logical, /*p_spam_data=*/p_spam, /*p_spam_ancx=*/0.0,
                /*p_spam_ancz=*/0.0);
-  }
 
-  // Do stabilizer rounds
-  for (int i = 0; i < numLogical; i++) {
-    auto subData = data.slice(i * numData, numData);
-    auto subXstab_anc = xstab_anc.slice(i * numAncx, numAncx);
-    auto subZstab_anc = zstab_anc.slice(i * numAncz, numAncz);
-
-    custom_memory_circuit_stabs(
-        subData, subXstab_anc, subZstab_anc, numRounds, cnot_schedX_flat,
-        cnot_schedZ_flat, /*enqueue_syndromes=*/allow_device_calls,
-        /*do_errors_after_non_last_rounds=*/true, p_spam, i);
+    // Measurement rounds, referenced to this qubit's lock-in syndrome.
+    custom_memory_circuit_stabs(subData, subXstab_anc, subZstab_anc, numRounds,
+                                cnot_schedX_flat, cnot_schedZ_flat,
+                                /*enqueue_syndromes=*/allow_device_calls,
+                                /*do_errors_after_non_last_rounds=*/true,
+                                p_spam, i, lockin_syndrome);
   }
 
   if (allow_device_calls && apply_corrections) {
@@ -321,7 +340,20 @@ demo_circuit_qpu(bool allow_device_calls,
       ret <<= numData;
     auto subData = data.slice(i * numData, numData);
     auto subMeas = mz(subData);
-    ret |= cudaq::to_integer(cudaq::to_bools(subMeas));
+    if (i == 0) {
+      std::vector<cudaq::measure_result> zlog(z_obs_indices.size());
+      for (std::size_t k = 0; k < z_obs_indices.size(); ++k)
+        zlog[k] = subMeas[z_obs_indices[k]];
+      cudaq::logical_observable(zlog, /*observable_index=*/0);
+    }
+    // Pack the measured bits branch-free (bit j = data qubit j, the same
+    // LSB-first order as cudaq::to_integer). Routing the measurement results
+    // through a call (to_bools/to_integer) or a branch would tag this kernel
+    // with qubitMeasurementFeedback, which cudaq::dem_from_kernel rejects.
+    for (std::size_t j = 0; j < subMeas.size(); j++) {
+      std::uint64_t bitval = subMeas[j];
+      ret |= bitval << j;
+    }
   }
   // The remaining bits are allocated to the number of corrections.
   ret |= num_corrections << (numData * numLogical);
@@ -367,132 +399,34 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
 
   cudaq::noise_model noise;
 
-  // First get the MSM
+  // The Z logical observable's data-qubit support (row 0 of the Z observables
+  // matrix); demo_circuit_qpu declares the matching logical_observable over
+  // the final data measurements when generating the DEM.
+  auto obs_matrix = code.get_observables_z();
+  std::vector<std::size_t> z_obs_indices;
+  for (std::size_t col = 0; col < obs_matrix.shape()[1]; ++col)
+    if (obs_matrix.at({0, col}))
+      z_obs_indices.push_back(col);
+
+  // First generate (or load) the DEM
   cudaq::qec::detector_error_model dem;
   if (load_dem) {
     load_dem_from_file(dem_filename, dem, numLogical);
   } else {
     if (p_spam == 0.0) {
-      printf("p_spam is 0.0, cannot get the MSM\n");
+      printf("p_spam is 0.0, cannot generate the DEM\n");
       exit(0);
     }
-    cudaq::ExecutionContext ctx_msm_size("msm_size");
-    ctx_msm_size.noiseModel = &noise;
-    auto &platform = cudaq::get_platform();
-    platform.with_execution_context(ctx_msm_size, [&] {
-      // Always use numLogical = 1 for the MSM
-      cudaq::qec::qpu::demo_circuit_qpu(
-          /*allow_device_calls=*/false, prep, numData, numAncx, numAncz,
-          numRounds,
-          /*numLogical=*/1, cnot_schedX_flat, cnot_schedZ_flat, p_spam,
-          /*apply_corrections=*/false);
-    });
-    if (!ctx_msm_size.msm_dimensions.has_value()) {
-      throw std::runtime_error("No MSM dimensions found");
-    }
-    if (ctx_msm_size.msm_dimensions.value().second == 0) {
-      throw std::runtime_error("No MSM dimensions found");
-    }
-    cudaq::ExecutionContext ctx_msm("msm");
-    ctx_msm.noiseModel = &noise;
-    ctx_msm.msm_dimensions = ctx_msm_size.msm_dimensions;
-    platform.with_execution_context(ctx_msm, [&] {
-      // Always use numLogical = 1 for the MSM
-      cudaq::qec::qpu::demo_circuit_qpu(
-          /*allow_device_calls=*/false, prep, numData, numAncx, numAncz,
-          numRounds,
-          /*numLogical=*/1, cnot_schedX_flat, cnot_schedZ_flat, p_spam,
-          /*apply_corrections=*/false);
-    });
-
-    auto msm_as_strings = ctx_msm.result.sequential_data();
-    printf("MSM Dimensions: %ld measurements x %ld error mechanisms\n",
-           ctx_msm.msm_dimensions.value().first,
-           ctx_msm.msm_dimensions.value().second);
-    for (std::size_t i = 0; i < ctx_msm.msm_dimensions.value().first; i++) {
-      for (std::size_t j = 0; j < ctx_msm.msm_dimensions.value().second; j++) {
-        printf("%c", msm_as_strings[j][i] == '1' ? '1' : '.');
-      }
-      printf("\n");
-    }
-    // Populate error rates and error IDs
-    dem.error_rates = std::move(ctx_msm.msm_probabilities.value());
-    dem.error_ids = std::move(ctx_msm.msm_prob_err_id.value());
-
-    cudaqx::tensor<uint8_t> mzTable(msm_as_strings);
-    mzTable = mzTable.transpose();
-    printf("mzTable:\n");
-    mzTable.dump_bits();
-    // Subtract the number of data qubits to get the number of syndrome
-    // measurements.
-    std::size_t totalNumSyndromes = mzTable.shape()[0] - distance * distance;
-    std::size_t numNoiseMechs = mzTable.shape()[1];
+    cudaq::M2DSparseMatrix m2d;
+    cudaq::M2OSparseMatrix m2o;
+    std::string dem_text = cudaq::dem_from_kernel(
+        cudaq::qec::qpu::demo_circuit_qpu, &noise, m2d, m2o,
+        /*allow_device_calls=*/false, prep, numData, numAncx, numAncz,
+        numRounds,
+        /*numLogical=*/1, cnot_schedX_flat, cnot_schedZ_flat, p_spam,
+        /*apply_corrections=*/false, z_obs_indices);
+    dem = cudaq::qec::dem_from_stim_text(dem_text);
     std::size_t numSyndromesPerRound = distance * distance - 1;
-
-    std::size_t numRoundsOfSyndromData =
-        totalNumSyndromes / numSyndromesPerRound;
-    if (numRoundsOfSyndromData != numRounds + 1) {
-      throw std::runtime_error("Num rounds of syndrome data [" +
-                               std::to_string(numRoundsOfSyndromData) +
-                               "] is not equal to the number of rounds + 1[" +
-                               std::to_string(numRounds + 1) + "]");
-    }
-
-    // There should be (numRounds + 1) rounds of data in MSM.
-    // This corresponds to numRounds + measurements during state prep
-    // Not every measurement during stateprep is a detector, but some
-    // may be.
-    // In this Z-basis surface code case, the Z stabs during state prep
-    // are detectors.
-    // Skip the X stabs during the first round.
-    std::size_t numDetectors =
-        numSyndromesPerRound * numRounds + numSyndromesPerRound / 2;
-
-    dem.detector_error_matrix =
-        cudaqx::tensor<uint8_t>({numDetectors, numNoiseMechs});
-    // Grab first half of first "round"
-    std::size_t r0_offset = 0;
-    for (std::size_t syndrome = 0; syndrome < numSyndromesPerRound / 2;
-         syndrome++) {
-      for (std::size_t noise_mech = 0; noise_mech < numNoiseMechs;
-           noise_mech++) {
-        // round 0
-        dem.detector_error_matrix.at({r0_offset, noise_mech}) =
-            mzTable.at({syndrome, noise_mech});
-      }
-      r0_offset += 1;
-    }
-
-    // Grab all of rounds >=1.
-    for (std::size_t round = 0; round < numRounds; round++) {
-      for (std::size_t syndrome = 0; syndrome < numSyndromesPerRound;
-           syndrome++) {
-        for (std::size_t noise_mech = 0; noise_mech < numNoiseMechs;
-             noise_mech++) {
-          dem.detector_error_matrix.at(
-              {round * numSyndromesPerRound + syndrome + r0_offset,
-               noise_mech}) =
-              mzTable.at(
-                  {(round + 0) * numSyndromesPerRound + syndrome, noise_mech}) ^
-              mzTable.at(
-                  {(round + 1) * numSyndromesPerRound + syndrome, noise_mech});
-        }
-      }
-    }
-    auto first_data_row = (numRounds + 1) * numSyndromesPerRound;
-    cudaqx::tensor<uint8_t> msm_obs(
-        {mzTable.shape()[0] - first_data_row, numNoiseMechs});
-    for (std::size_t row = first_data_row; row < mzTable.shape()[0]; row++)
-      for (std::size_t col = 0; col < numNoiseMechs; col++)
-        msm_obs.at({row - first_data_row, col}) = mzTable.at({row, col});
-
-    // Populate dem.observables_flips_matrix by converting the physical data
-    // qubit measurements to logical observables.
-    auto obs_matrix = code.get_observables_z();
-    printf("obs_matrix:\n");
-    obs_matrix.dump_bits();
-    dem.observables_flips_matrix = obs_matrix.dot(msm_obs) % 2;
-    printf("numSyndromesPerRound: %ld\n", numSyndromesPerRound);
     dem.canonicalize_for_rounds(numSyndromesPerRound,
                                 /*remove_zero_syndrome_errors=*/true);
 
@@ -501,25 +435,17 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
     printf("dem.observables_flips_matrix:\n");
     dem.observables_flips_matrix.dump_bits();
 
-    // Prep0 means that first round of Z stabs should be deterministic
-    // These are measured first.
-    std::vector<int64_t> first_round;
-    for (int i = 0; i < numSyndromesPerRound / 2; i++) {
-      first_round.push_back(i);
-      first_round.push_back(-1);
+    // The runtime detector matrix comes straight from the analysis'
+    // measurements-to-detectors map: row d lists the (chronological, and thus
+    // enqueue-ordered) measurement indices whose XOR forms detector d. This
+    // reproduces the round-0 Z-stabilizer singles followed by the timelike
+    // pairs of the declared detectors.
+    std::vector<int64_t> det_mat;
+    for (const auto &row : m2d.rows) {
+      for (auto m : row)
+        det_mat.push_back(static_cast<int64_t>(m));
+      det_mat.push_back(-1);
     }
-
-    // TO DO:
-    // Does numRounds include first round?
-    std::vector<int64_t> det_mat =
-        cudaq::qec::generate_timelike_sparse_detector_matrix(
-            numSyndromesPerRound, numRounds + 1, first_round);
-
-    printf("detector_matrix with first round:\n");
-    for (int i = 0; i < det_mat.size(); i++) {
-      printf("%ld ", det_mat[i]);
-    }
-    printf("\n");
 
     if (save_dem) {
       save_dem_to_file(dem, det_mat, dem_filename, numSyndromesPerRound,
@@ -541,19 +467,21 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
 
   // If this is a remote platform (not local sim nor emulation), don't use the
   // noise model.
+  bool allow_device_calls = true;
   auto run_result =
       cudaq::get_platform().is_remote()
           ? cudaq::run(numShots, cudaq::qec::qpu::demo_circuit_qpu,
-                       /*allow_device_calls=*/true, prep, numData, numAncx,
-                       numAncz, numRounds, numLogical, cnot_schedX_flat,
-                       cnot_schedZ_flat, p_spam, /*apply_corrections=*/true)
+                       allow_device_calls, prep, numData, numAncx, numAncz,
+                       numRounds, numLogical, cnot_schedX_flat,
+                       cnot_schedZ_flat, p_spam, /*apply_corrections=*/true,
+                       z_obs_indices)
           : cudaq::run(numShots, noise, cudaq::qec::qpu::demo_circuit_qpu,
-                       /*allow_device_calls=*/true, prep, numData, numAncx,
-                       numAncz, numRounds, numLogical, cnot_schedX_flat,
-                       cnot_schedZ_flat, p_spam, /*apply_corrections=*/true);
+                       allow_device_calls, prep, numData, numAncx, numAncz,
+                       numRounds, numLogical, cnot_schedX_flat,
+                       cnot_schedZ_flat, p_spam, /*apply_corrections=*/true,
+                       z_obs_indices);
   printf("Result size: %ld\n", run_result.size());
   std::vector<std::vector<uint8_t>> logical_results;
-  auto obs_matrix = code.get_observables_z();
   int num_non_zero_values = 0;
   std::int64_t num_corrections = 0;
   for (int i = 0; i < run_result.size(); i++) {

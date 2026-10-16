@@ -17,6 +17,51 @@ on:
         required: false
 
 jobs:
+  # Prove the decoders-only build environment: build the ubuntu:24.04
+  # build-env image (docker/build_env/cudaqx.decoders.Dockerfile) from scratch,
+  # then build the decoder stack with CUDAQ_QEC_DECODERS_ONLY=ON inside it. This
+  # guards both the decoders-only CMake configuration (no CUDA-Q, no LLVM/MLIR,
+  # no cuStabilizer) and the build-env image itself -- proving the decoders can
+  # be built on a bare ubuntu with only the documented apt dependencies. The
+  # image is a local tag, built and consumed on this runner only; nothing is
+  # pushed. verify_build_env.sh runs the build and all assertions (decoding
+  # server correctly skipped, standalone python decode with no cudaq import, no
+  # CUDA-Q/LLVM linkage, and the opt-in TensorRT decoder plugin).
+  decoders-only-build:
+    name: Decoders-only build (CUDA ${{ matrix.cuda_version }}, TensorRT ${{ matrix.install_tensorrt }}, ${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # One run per platform. amd64 exercises the opt-in TensorRT path
+        # (TensorRT resolves to a +cuda13 build, so pair it with 13.0); arm64
+        # covers the default (no TensorRT, plugin auto-disabled).
+        include:
+          - { platform: amd64, cuda_version: '13.0', install_tensorrt: 'on' }
+          - { platform: arm64, cuda_version: '13.0', install_tensorrt: 'off' }
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          set-safe-directory: true
+
+      - name: Build decoders-only build-env image
+        run: |
+          docker build \
+            -f docker/build_env/cudaqx.decoders.Dockerfile \
+            --build-arg cuda_version=${{ matrix.cuda_version }} \
+            --build-arg install_tensorrt=${{ matrix.install_tensorrt }} \
+            -t cudaqx-decoders-build:ci .
+
+      - name: Build decoders-only stack and verify
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspaces/cudaqx -w /workspaces/cudaqx \
+            cudaqx-decoders-build:ci \
+            bash .github/workflows/scripts/verify_build_env.sh ${{ matrix.install_tensorrt }}
+
   build-and-test:
     name: Build and test
     strategy:
@@ -24,7 +69,7 @@ jobs:
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
     container:
       image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
       # SYS_NICE: the default seccomp profile only admits the NUMA memory-policy
@@ -73,7 +118,7 @@ jobs:
       - name: Install build requirements
         run: |
           apt update
-          apt install -y --no-install-recommends gfortran libblas-dev wget jq
+          apt install -y --no-install-recommends wget jq
 
       - name: Install TensorRT (amd64)
         if: matrix.platform == 'amd64'
@@ -117,7 +162,7 @@ jobs:
           # Install the correct torch first.
           cuda_no_dot=$(echo ${{ matrix.cuda_version }} | sed 's/\.//')
           pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}
-          pip install numpy pytest onnxscript cuquantum-cu${{ steps.config.outputs.cuda_major }} quimb opt_einsum cotengra nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
+          pip install numpy pytest onnxscript cuquantum-cu${{ steps.config.outputs.cuda_major }} quimb opt_einsum nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
           # The following tests are needed for docs/sphinx/examples/qec/python/tensor_network_decoder.py.
           if [ "$(uname -m)" == "x86_64" ]; then
               # Stim is not currently available on manylinux ARM wheels, so only
@@ -134,6 +179,110 @@ jobs:
 
       - name: Run example tests
         run: bash scripts/ci/test_examples.sh qec
+
+      # ========================================================================
+      # Decoders-only build of the decoding server
+      #
+      # The decoders-only job above has no cudaq-realtime and so covers only
+      # the not-found half of the gate. This job has one (the CUDA-Q install
+      # is built with realtime), so use it for the found half: build the
+      # server with CUDAQ_QEC_DECODERS_ONLY=ON and assert the dependency
+      # contract that makes the mode worth having -- cudaq-realtime is a
+      # separate product from CUDA-Q, so no CUDA-Q library may appear in the
+      # binary. Run on one matrix entry only: the check is about link shape,
+      # which does not vary by platform or CUDA version.
+      # ========================================================================
+      - name: Build the decoding server without CUDA-Q
+        if: matrix.platform == 'amd64' && matrix.cuda_version == '13.0'
+        run: |
+          cmake -S libs/qec -B build_decoders_only_server \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCUDAQ_QEC_DECODERS_ONLY=ON \
+            -DCUDAQ_REALTIME_ROOT=/cudaq-install
+          cmake --build build_decoders_only_server --target decoding_server -j$(nproc)
+
+      - name: Check it links no CUDA-Q library, and starts
+        if: matrix.platform == 'amd64' && matrix.cuda_version == '13.0'
+        shell: bash
+        run: |
+          set -o pipefail
+          server=build_decoders_only_server/bin/decoding_server
+          needed=$(readelf -d "$server" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p')
+          echo "$needed"
+          # libcudaq-realtime is the point of the exercise; libcudaq-qec-* are
+          # built right here. Anything else starting with libcudaq is CUDA-Q
+          # leaking back in. Collect into a variable rather than piping into
+          # `grep -q`: that short-circuits, and the pipeline then reports the
+          # upstream status instead of the match, which makes the check
+          # silently vacuous.
+          offenders=$(echo "$needed" | grep '^libcudaq' \
+            | grep -vE '^libcudaq-realtime\.so$|^libcudaq-qec-' || true)
+          if [ -n "$offenders" ]; then
+            echo "ERROR: decoding_server pulled in a CUDA-Q library:"
+            echo "$offenders"
+            exit 1
+          fi
+          cd build_decoders_only_server/bin
+          ./decoding_server --config=decoding_server_config.yaml \
+            --transport=udp --timeout=5 2>&1 | tee server.log
+          grep -q QEC_DECODING_SERVER_READY server.log || {
+            echo "ERROR: server never reported ready"
+            exit 1
+          }
+
+      # ========================================================================
+      # Realtime decoding demo example
+      #
+      # Build the two example binaries against the INSTALLED SDK -- this is what
+      # enforces the installed-headers-only rule: a build-tree-only include
+      # would fail to compile here. Then drive the delivered decoding_server
+      # over UDP loopback with a real pymatching decode (the qpu-kernel source).
+      # No hardware: the FPGA source needs a ConnectX NIC and is not run in CI.
+      # ========================================================================
+      - name: Build & run realtime_decoding_demo (qpu-kernel, UDP loopback)
+        shell: bash
+        run: |
+          export PATH=/cudaq-install/bin:$PATH
+          # Mirror build_qec.sh: it builds+installs cudaq-realtime to
+          # $CUDAQ_REALTIME_ROOT, defaulting to /tmp/cudaq-realtime when unset
+          # (the case for this workflow). Track the same value so this step
+          # stays correct if the job ever sets CUDAQ_REALTIME_ROOT.
+          RT="${CUDAQ_REALTIME_ROOT:-/tmp/cudaq-realtime}"
+          EX=docs/sphinx/examples/qec/realtime_decoding_demo
+          cmake -S "$EX" -B /tmp/rtdemo-build -G Ninja \
+            -DCUDAQ_INSTALL_DIR=/cudaq-install \
+            -DCUDAQX_INSTALL_DIR="$HOME/.cudaqx" \
+            -DCUDAQ_REALTIME_DIR="$RT"
+          cmake --build /tmp/rtdemo-build -j
+          bash "$EX/run_realtime_decoding.sh" \
+            --source qpu-kernel --decoder pymatching \
+            --install-prefix "$HOME/.cudaqx" \
+            --cudaq-prefix /cudaq-install \
+            --realtime-lib-dir "$RT" \
+            --example-build-dir /tmp/rtdemo-build
+
+      # The color-code demo needs the gated Ising model weights, so CI only
+      # checks that it starts.
+      - name: Check color_code_demo starts
+        shell: bash
+        run: |
+          export PYTHONPATH="/cudaq-install:$HOME/.cudaqx"
+          python3 docs/sphinx/examples/qec/color_code_demo/color_code_demo.py --help
+
+      # ========================================================================
+      # SIFL demo example
+      #
+      # Builds the per_round_decoder plugin against the INSTALLED SDK and runs
+      # it on the playback emulator. Stim is only installed on x86_64.
+      # ========================================================================
+      - name: Build & run sifl_demo
+        if: matrix.platform == 'amd64'
+        shell: bash
+        run: |
+          export PATH=/cudaq-install/bin:$PATH
+          export PYTHONPATH="/cudaq-install:$HOME/.cudaqx"
+          bash docs/sphinx/examples/qec/sifl_demo/run_sifl_demo.sh \
+            --shots 10 --cadences 2 50
 
       # ========================================================================
       # Upload build artifacts for GPU tests
@@ -164,7 +313,7 @@ jobs:
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-gpu-a100-latest-1', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-gpu-a100-latest-1', matrix.platform) || 'ubuntu-latest' }}
     container:
       image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
       env:
@@ -228,7 +377,7 @@ jobs:
         run: |
           cuda_no_dot=$(echo ${{ matrix.cuda_version }} | sed 's/\.//')
           pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}
-          pip install numpy pytest cuquantum-cu${{ steps.config.outputs.cuda_major }} quimb opt_einsum cotengra nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0" "custabilizer-cu${{ steps.config.outputs.cuda_major }}>=0.3.0"
+          pip install numpy pytest cuquantum-cu${{ steps.config.outputs.cuda_major }} quimb opt_einsum nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0" "custabilizer-cu${{ steps.config.outputs.cuda_major }}>=0.3.0"
 
       - name: Run GPU C++ tests
         run: |

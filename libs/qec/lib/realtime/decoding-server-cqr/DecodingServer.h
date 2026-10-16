@@ -9,94 +9,81 @@
 #pragma once
 
 #include "ITransceiver.h"
-#include "RpcDispatcher.h"
 #include "SessionRegistry.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 
-#include <atomic>
+#include <condition_variable>
 #include <memory>
-#include <optional>
+#include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace cudaq::qec::decoding_server {
 
-/// Resolve the single GPU a gpu_roce pipeline runs on from the two knobs that
-/// can name it: HOLOLINK_GPU_ID (FPGA/NIC affinity; nullopt when unset) and
-/// the decoder's cuda_device_id (-1 when unpinned). Throws when both are set
-/// and disagree; unset env defers to the pin; neither set -> 0.
-int reconcile_gpu_roce_device(std::optional<int> env_gpu_id, int decoder_pin);
+/// Resolve the CUDA device a decode pipeline runs on from the decoder's
+/// cuda_device_id (-1 when unpinned). An unpinned decoder defaults to device 0.
+int resolve_decode_device(int decoder_pin);
 
-/// Maps function_id → non-owning ITransceiver pointer.
-/// Ownership lives in DecodingServer::owned_transports_.
-using TransportMap = std::unordered_map<uint32_t, ITransceiver *>;
-
-/// Top-level server: owns the registry and dispatcher, holds the
-/// transceiver(s), and runs the blocking receive loop.
+/// Lifecycle shell for the device_graph dispatch path: owns the session
+/// registry and the device-graph transceiver, and wires the decoder's
+/// captured CUDA graph to the on-device scheduler.
+///
+/// Host dispatch does not live here: it is served by the CQR HOST_CALL
+/// plugin (decoding_server_cqr.cpp), which executes each request inline on
+/// the CUDAQ dispatcher thread that delivered it.  After the scheduler
+/// launches, the GPU handles the full RX→dispatch→decode→TX loop
+/// autonomously; run() only parks the calling thread until stop().
 class DecodingServer {
 public:
-  /// Config-driven constructor: reads the transport type from \p config_yaml
-  /// and creates the appropriate transceiver.  Requires CUDAQ_REALTIME for
-  /// RoCE transports; throws std::runtime_error if the adapters are not
-  /// available.  Use the explicit-transceiver constructors for testing with
-  /// LoopbackTransceiver.
+  /// Config-driven constructor: loads the decoder sessions from
+  /// \p config_yaml, creates the device-graph transceiver, and launches the
+  /// on-device scheduler.  Throws for host-dispatch configs (served by the
+  /// CQR plugin) and when the device-graph component is not linked.
   explicit DecodingServer(const std::string &config_yaml);
 
-  /// Single-transceiver constructor: all three RPCs share one transport.
-  DecodingServer(std::unique_ptr<ITransceiver> transport,
-                 const std::string &config_yaml);
+  /// Opaque graph resources of one decoder session
+  /// (decoder::capture_decode_graph()), or nullptr when the decoder does not
+  /// support graph dispatch / the id is unknown.  Used by the decoding_server
+  /// process to wire a device-graph ring consumer to a decoder this server
+  /// hosts.
+  void *graph_resources_for(uint64_t decoder_id) const;
 
-  /// Single-transceiver constructor from an already-parsed config -- the
-  /// in-process path where the application handed the config to
-  /// configure_decoders() rather than pointing at a YAML file.
-  DecodingServer(
-      std::unique_ptr<ITransceiver> transport,
-      const cudaq::qec::decoding::config::multi_decoder_config &config);
+  /// This server's session registry (read-only after construction).
+  const SessionRegistry &registry() const { return registry_; }
 
-  /// Split-transport constructor: each function_id dispatched to its own
-  /// transceiver.  \p owned is moved in; \p function_transport holds raw
-  /// pointers into \p owned.
-  DecodingServer(std::vector<std::unique_ptr<ITransceiver>> owned,
-                 TransportMap function_transport,
-                 const std::string &config_yaml);
-
-  /// Stops the transports and joins all session workers before any member is
-  /// destroyed: workers drain queued items that reply through raw
-  /// ITransceiver pointers into owned_transports_, so they must finish while
-  /// the transports are still alive.
   ~DecodingServer();
 
-  /// Block until stop() is called.
+  /// Block until stop() is called (the GPU scheduler owns the data path).
   void run();
 
-  /// Thread-safe; signals the receive loop to exit after the current frame.
+  /// Thread-safe; releases run() and shuts the transports down.
   void stop();
 
+  /// Print one QEC_DECODING_SERVER_DECODER_STATS line per session to stdout
+  /// (test/diagnostic evidence; callers gate on QEC_DECODING_SERVER_STATS).
+  void print_session_stats() const;
+
 private:
-  void init(const std::string &config_yaml);
-  void register_handlers();
+  /// Create a transceiver for \p dispatch and its resolved YAML transport.
+  /// Throws for host dispatch (served by the CQR plugin) and when the
+  /// device-graph component is not linked.
+  static std::unique_ptr<ITransceiver> make_transport(
+      cudaq::qec::decoding::config::DecoderDispatch dispatch,
+      int pinned_cuda_device,
+      const cudaq::qec::decoding::config::transport_shape_override &transport);
 
-  /// Create a transceiver for \p transport_type.  Throws for RoCE transports
-  /// until CpuRoceTransceiverAdapter / GpuRoceTransceiverAdapter are
-  /// available via CUDAQ_REALTIME.
-  static std::unique_ptr<ITransceiver>
-  make_transport(cudaq::qec::decoding::config::DecoderTransport transport_type,
-                 int pinned_cuda_device);
-
-  // Destruction order matters: the GPU RoCE scheduler (inside
+  // Destruction order matters: the device-graph scheduler (inside
   // owned_transports_) holds a cudaGraphExec_t captured from a session's
   // decoder.  The scheduler must be destroyed (cudaStreamSynchronize +
-  // cudaq_destroy_dispatch_graph) before registry_ releases the decoder and its
-  // graph resources. C++ destroys members in reverse declaration order, so
-  // registry_ must be declared BEFORE owned_transports_.
+  // cudaq_destroy_dispatch_graph) before registry_ releases the decoder and
+  // its graph resources. C++ destroys members in reverse declaration order,
+  // so registry_ must be declared BEFORE owned_transports_.
   SessionRegistry registry_;
-  RpcDispatcher dispatcher_;
-  std::atomic<bool> shutdown_{false};
-  /// Maps function_id → transceiver; used to deduplicate receiver threads.
-  /// Routing within the server is by function_id, not by decoder_id.
-  TransportMap function_transport_;
   std::vector<std::unique_ptr<ITransceiver>> owned_transports_;
+
+  std::mutex stop_mutex_;
+  std::condition_variable stop_cv_;
+  bool shutdown_ = false;
 };
 
 } // namespace cudaq::qec::decoding_server

@@ -49,25 +49,31 @@ __qpu__ void prepm(patch logicalQubit) {
 }
 
 __qpu__ std::vector<cudaq::measure_result>
-stabilizer(patch logicalQubit, const std::vector<std::size_t> &x_stabilizers,
-           const std::vector<std::size_t> &z_stabilizers) {
+stabilizer(patch logicalQubit,
+           const std::vector<std::size_t> &x_stabilizer_schedule,
+           const std::vector<std::size_t> &z_stabilizer_schedule) {
   for (std::size_t i = 0; i < logicalQubit.ancx.size(); i++)
     reset(logicalQubit.ancx[i]);
   for (std::size_t i = 0; i < logicalQubit.ancz.size(); i++)
     reset(logicalQubit.ancz[i]);
 
-  h(logicalQubit.ancx);
-  for (std::size_t xi = 0; xi < logicalQubit.ancx.size(); ++xi)
-    for (std::size_t di = 0; di < logicalQubit.data.size(); ++di)
-      if (x_stabilizers[xi * logicalQubit.data.size() + di] == 1)
-        cudaq::x<cudaq::ctrl>(logicalQubit.ancx[xi], logicalQubit.data[di]);
-  h(logicalQubit.ancx);
+  // The X and Z checks share the timesteps, and the surface-code schedule
+  // always fits in one depth-4 extraction round (see
+  // stabilizer_grid::get_cnot_schedule_x), so num_steps is a constant.
+  const std::size_t num_steps = 4;
 
-  // Now apply z_stabilizer circuit
-  for (size_t zi = 0; zi < logicalQubit.ancz.size(); ++zi)
-    for (size_t di = 0; di < logicalQubit.data.size(); ++di)
-      if (z_stabilizers[zi * logicalQubit.data.size() + di] == 1)
-        cudaq::x<cudaq::ctrl>(logicalQubit.data[di], logicalQubit.ancz[zi]);
+  h(logicalQubit.ancx);
+  for (std::size_t step = 1; step <= num_steps; ++step) {
+    for (std::size_t xi = 0; xi < logicalQubit.ancx.size(); ++xi)
+      for (std::size_t di = 0; di < logicalQubit.data.size(); ++di)
+        if (x_stabilizer_schedule[xi * logicalQubit.data.size() + di] == step)
+          cudaq::x<cudaq::ctrl>(logicalQubit.ancx[xi], logicalQubit.data[di]);
+    for (std::size_t zi = 0; zi < logicalQubit.ancz.size(); ++zi)
+      for (std::size_t di = 0; di < logicalQubit.data.size(); ++di)
+        if (z_stabilizer_schedule[zi * logicalQubit.data.size() + di] == step)
+          cudaq::x<cudaq::ctrl>(logicalQubit.data[di], logicalQubit.ancz[zi]);
+  }
+  h(logicalQubit.ancx);
 
   // S = (S_X, S_Z), (x flip syndromes, z flip syndromes).
   // x flips are triggered by z-stabilizers (ancz)

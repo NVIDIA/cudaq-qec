@@ -103,7 +103,10 @@ public:
   /// @brief Type alias for two qubit quantum kernels
   using two_qubit_encoding = cudaq::qkernel<void(patch, patch)>;
 
-  /// @brief Type alias for stabilizer measurement kernels
+  /// @brief Type alias for stabilizer measurement kernels. The two vector
+  /// arguments are the flattened X and Z stabilizer schedule matrices (see
+  /// get_stabilizer_schedule_x/z()): entry 0 = no support, entry k >= 1 =
+  /// interaction at timestep k.
   using stabilizer_round = cudaq::qkernel<std::vector<cudaq::measure_result>(
       patch, const std::vector<std::size_t> &,
       const std::vector<std::size_t> &)>;
@@ -189,6 +192,26 @@ public:
   /// @return Tensor representing Hz
   cudaqx::tensor<uint8_t> get_parity_z() const;
 
+  /// @brief Get the X-stabilizer schedule matrix passed to the code's
+  /// stabilizer_round kernel. Same shape and support pattern as
+  /// get_parity_x(); entry 0 means no support, entry k >= 1 means the
+  /// ancilla-data interaction executes at timestep k, so a code can encode an
+  /// optimized (e.g. hook-error-aware) gate order.
+  /// @return Tensor of scheduled interactions; the default implementation
+  /// returns get_parity_x() unchanged (every interaction at timestep 1, i.e.
+  /// ascending qubit-index order).
+  virtual cudaqx::tensor<uint8_t> get_stabilizer_schedule_x() const {
+    return get_parity_x();
+  }
+
+  /// @brief Get the Z-stabilizer schedule matrix passed to the code's
+  /// stabilizer_round kernel. See get_stabilizer_schedule_x().
+  /// @return Tensor of scheduled interactions; the default implementation
+  /// returns get_parity_z() unchanged.
+  virtual cudaqx::tensor<uint8_t> get_stabilizer_schedule_z() const {
+    return get_parity_z();
+  }
+
   /// @brief Get Lx stacked on Lz
   /// @return Tensor representing pauli observables
   cudaqx::tensor<uint8_t> get_pauli_observables_matrix() const;
@@ -229,6 +252,7 @@ public:
 
 /// Factory function to create a code instance with specified stabilizers
 /// @param name Name of the code
+/// @param options Optional code-specific configuration parameters
 /// @return Unique pointer to the created code instance
 std::unique_ptr<code> get_code(const std::string &name,
                                const heterogeneous_map options = {});
@@ -236,6 +260,7 @@ std::unique_ptr<code> get_code(const std::string &name,
 /// Factory function to create a code instance with specified stabilizers
 /// @param name Name of the code
 /// @param stab stabilizers
+/// @param options Optional code-specific configuration parameters
 /// @return Unique pointer to the created code instance
 std::unique_ptr<code> get_code(const std::string &name,
                                const std::vector<cudaq::spin_op_term> &stab,

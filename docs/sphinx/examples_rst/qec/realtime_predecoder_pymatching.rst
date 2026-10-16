@@ -17,7 +17,7 @@ syndrome density, and logical error rate statistics.
 The benchmark binary is
 ``test_realtime_predecoder_w_pymatching``, built from
 `libs/qec/unittests/realtime/test_realtime_predecoder_w_pymatching.cpp
-<https://github.com/NVIDIA/cudaqx/blob/main/libs/qec/unittests/realtime/test_realtime_predecoder_w_pymatching.cpp>`_.
+<https://github.com/NVIDIA/cudaq-qec/blob/main/libs/qec/unittests/realtime/test_realtime_predecoder_w_pymatching.cpp>`_.
 
 
 Prerequisites
@@ -56,8 +56,10 @@ Additional inputs:
   engine is built from the ONNX file on first run (this can take 1--2 minutes
   for large models).
 - **Syndrome data directory** containing pre-generated detector samples,
-  observables, and matching graph data (see `Data Directory Layout`_).
+  observables, and matching graph data (see :ref:`Data Directory Layout <sw_data_directory_layout>`).
 
+
+.. _sw_data_directory_layout:
 
 Data Directory Layout
 ---------------------
@@ -103,7 +105,7 @@ Configure and build:
 
 .. code-block:: bash
 
-   cd /path/to/cudaqx
+   cd /path/to/cudaq-qec
 
    cmake -S . -B build \
      -DCMAKE_BUILD_TYPE=Release \
@@ -170,7 +172,7 @@ Named Flags
    * - Flag
      - Description
    * - ``--data-dir <path>``
-     - Path to syndrome data directory (see `Data Directory Layout`_). When
+     - Path to syndrome data directory (see :ref:`Data Directory Layout <sw_data_directory_layout>`). When
        omitted, random syndromes with 1% error rate are generated.
    * - ``--num-gpus <n>``
      - Number of GPUs to use. Currently clamped to 1 (multi-GPU dispatch is
@@ -316,3 +318,10 @@ Printed only when ``--data-dir`` is provided:
    requests, each shot is replayed approximately 6 times. Correctness
    verification still compares against the correct ground truth for each
    replayed shot.
+
+See Also
+--------
+
+* :doc:`Realtime Decoding </components/qec/realtime_decoding>` -- concept and workflow
+* :doc:`Getting Started with Realtime Decoding </examples_rst/qec/getting_started_realtime_decoding>`
+* :ref:`C++ <cpp_realtime_decoding_api>` and :ref:`Python <python_realtime_decoding_api>` realtime decoding API

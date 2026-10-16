@@ -163,7 +163,7 @@ void cudaq_host_dispatcher_loop(const cudaq_host_dispatch_loop_ctx_t *ctx) {
             // NOTE: tx_flags IN_FLIGHT is still written by the dispatcher for the
             // consumer's benefit (so it can distinguish in-flight from completed slots),
             // but the producer does NOT check tx_flags for backpressure — it uses
-            // slot_occupied[] instead (hololink-compatible model).
+            // slot_occupied[] instead (hsb-compatible model).
             tx_flags_host[current_slot].store(CUDAQ_TX_FLAG_IN_FLIGHT, release);
         }
 
@@ -378,7 +378,7 @@ If no `cpu_stage_callback` is registered, the pipeline operates in **GPU-only mo
 
 The `ring_buffer_injector` class (created via `pipeline.create_injector()`) encapsulates the host-side submission logic for testing without FPGA hardware. It provides:
 
-- `try_submit()`: Non-blocking, returns false on backpressure. Checks `slot_occupied[slot]` to determine if the next slot is free — this mirrors the hololink model where the FPGA checks `ring_flag` (mapped to `rx_flags`) rather than a separate tx_flags sentinel.
+- `try_submit()`: Non-blocking, returns false on backpressure. Checks `slot_occupied[slot]` to determine if the next slot is free — this mirrors the hsb model where the FPGA checks `ring_flag` (mapped to `rx_flags`) rather than a separate tx_flags sentinel.
 - `submit()`: Blocking spin-wait until a slot becomes available.
 - `backpressure_stalls()`: Counter of spin iterations during backpressure.
 
@@ -440,9 +440,9 @@ struct RPCHeader {
 #define CUDAQ_RPC_HEADER_SIZE 24u
 ```
 
-### 10.2 Backpressure Model (Hololink-Compatible)
+### 10.2 Backpressure Model (HSB-Compatible)
 
-The producer does **not** check `tx_flags` for backpressure. Instead, it checks a host-side `slot_occupied[]` byte vector — set to 1 by the producer on submission, cleared to 0 by the consumer after harvesting. This mirrors the hololink FPGA model where `ring_flag` (mapped to `rx_flags`) is the sole backpressure mechanism between sender and receiver.
+The producer does **not** check `tx_flags` for backpressure. Instead, it checks a host-side `slot_occupied[]` byte vector — set to 1 by the producer on submission, cleared to 0 by the consumer after harvesting. This mirrors the hsb FPGA model where `ring_flag` (mapped to `rx_flags`) is the sole backpressure mechanism between sender and receiver.
 
 The dispatcher still writes `tx_flags[slot] = CUDAQ_TX_FLAG_IN_FLIGHT` after a successful `cudaGraphLaunch` and before clearing `rx_flags[slot]`. This is used internally by the consumer to distinguish in-flight slots from completed results, but it is **not** part of the producer's backpressure contract.
 
@@ -556,7 +556,7 @@ When generating code from this specification, the LLM **MUST** strictly adhere t
 - [ ] **NO DATA LOSS**: If `idle_mask == 0` (all workers busy), the dispatcher MUST spin on the current slot (`CUDAQ_REALTIME_CPU_RELAX()`). It MUST NOT advance `current_slot` until a worker is allocated and the graph is launched.
 - [ ] **NO RACE CONDITIONS ON TAGS**: `inflight_slot_tags` does not need to be atomic because index `[worker_id]` is exclusively owned by the active flow once the dispatcher clears the bit in `idle_mask`, until the worker thread restores the bit.
 - [ ] **READY FLAG CLAIMING**: The CPU poller MUST claim each completion exactly once using compare_exchange_strong(1, 2) on the ready flag; use relaxed memory order on CAS failure. The worker MUST clear the flag (store 0) in `release_job`.
-- [ ] **BACKPRESSURE MODEL**: The producer (ring_buffer_injector) MUST check `slot_occupied[slot]` for backpressure, NOT `tx_flags`. This mirrors the hololink model where `ring_flag`/`rx_flags` is the sole sender-receiver backpressure mechanism. The dispatcher still writes `tx_flags = IN_FLIGHT` for the consumer's benefit, but the producer does not read `tx_flags`. The consumer uses `poll_tx()` to distinguish in-flight from completed results.
+- [ ] **BACKPRESSURE MODEL**: The producer (ring_buffer_injector) MUST check `slot_occupied[slot]` for backpressure, NOT `tx_flags`. This mirrors the hsb model where `ring_flag`/`rx_flags` is the sole sender-receiver backpressure mechanism. The dispatcher still writes `tx_flags = IN_FLIGHT` for the consumer's benefit, but the producer does not read `tx_flags`. The consumer uses `poll_tx()` to distinguish in-flight from completed results.
 - [ ] **CONSUMER MEMORY ORDERING**: The consumer MUST set `slot_occupied[s] = 0` BEFORE calling `cudaq_host_ringbuffer_clear_slot`, with a `__sync_synchronize()` fence between them, to prevent the producer-consumer race on ARM.
 - [ ] **DMA DATA MOVEMENT**: Use `cudaMemcpyAsync` (DMA engine) for data copies. Input copy is issued via `pre_launch_fn` callback before graph launch at offset `CUDAQ_RPC_HEADER_SIZE` (24 bytes) using `cudaMemcpyHostToDevice` from the pinned ring buffer host pointer. Output copy is captured inside the graph. Do not use SM-based byte-copy kernels for fixed-address transfers.
 - [ ] **NO INPUT KERNEL IN GRAPH**: The captured CUDA graph must NOT contain an input-copy kernel. All input data movement is handled by the `pre_launch_fn` DMA callback issued on the worker stream before `cudaGraphLaunch`.

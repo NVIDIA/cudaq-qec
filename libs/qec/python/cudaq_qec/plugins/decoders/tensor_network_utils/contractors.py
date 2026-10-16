@@ -142,9 +142,6 @@ class ContractorConfig:
                 f"Invalid contractor configuration: "
                 f"{self.contractor_name}, {self.backend}, {self.device}. "
                 f"Allowed configurations are: {self._allowed_configs}.")
-        if self.backend not in self._allowed_backends:
-            raise ValueError(f"Invalid backend: {self.backend}. "
-                             f"Allowed backends are: {self._allowed_backends}.")
         object.__setattr__(
             self, "device_id",
             int(self.device.split(":")[-1]) if "cuda:" in self.device else 0)

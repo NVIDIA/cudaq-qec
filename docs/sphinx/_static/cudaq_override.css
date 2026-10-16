@@ -25,3 +25,9 @@ max-width: 1240px !important;
 code.code span.pre, code.cpp span.pre, code.docutils span.pre{
     color: darkgreen;
 }
+
+/* Render the general index in a single column instead of the theme's multi-column layout */
+table.genindextable td {
+    display: block;
+    width: 100% !important;
+}

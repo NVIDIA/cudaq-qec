@@ -8,12 +8,22 @@ Relay BP Decoding with CUDA-Q Realtime
 
 This guide explains how to build, test, and run the nv-qldpc-decoder Relay BP
 decoder using CUDA-Q's realtime dispatch system.  The decoder is driven by a
-**self-relaunching device-graph scheduler** and can operate in three
+**self-relaunching device-graph scheduler** and can operate in two
 configurations:
 
-- **CI unit test** -- standalone executable, no FPGA or network hardware needed
 - **Emulated end-to-end test** -- software FPGA emulator replaces real hardware
 - **FPGA end-to-end test** -- real FPGA connected via ConnectX RDMA/RoCE
+
+.. tip::
+
+   To run the nv-qldpc Relay BP decoder end-to-end against the delivered
+   ``decoding_server`` -- from either a real FPGA (GPU device-graph path) or a
+   lowered QPU kernel over UDP (GPU host-call path) -- use the
+   :doc:`/examples_rst/qec/realtime_decoding_demo` example with
+   ``--decoder nv-qldpc-decoder --gpu 0``. That example compiles against the
+   installed SDK and resolves the server + playback tool from the install
+   prefix. This page documents the underlying device-graph scheduler and its
+   emulator-based testing.
 
 Decode dispatch architecture
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -59,10 +69,6 @@ Hardware
      - GPU
      - ConnectX NIC
      - FPGA
-   * - CI unit test
-     - Any CUDA-capable GPU
-     - Not required
-     - Not required
    * - Emulated E2E
      - CUDA GPU with GPUDirect RDMA
      - Required (loopback cable)
@@ -88,7 +94,7 @@ Obtaining the proprietary components
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The realtime decode path uses **two** closed-source artifacts that are not
-built from this (cudaqx) repository:
+built from this (cudaq-qec) repository:
 
 - ``libcudaq-qec-nv-qldpc-decoder.so`` -- the Relay BP decoder **plugin**,
   ``dlopen``'d at runtime.  It supplies the device-launchable cooperative
@@ -97,7 +103,7 @@ built from this (cudaqx) repository:
   needed at **build** time.  It contains the ``enqueue_syndromes`` /
   ``get_corrections`` / ``reset_decoder`` ``DEVICE_CALL`` handlers (the device
   functions the scheduler dispatches).  It is linked ``WHOLE_ARCHIVE`` and
-  device-linked into the bridge and the CI test, and is pointed at via the
+  device-linked into the bridge, and is pointed at via the
   ``-DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=<path>`` CMake variable.
   Both artifacts come from the same closed-source decoder package; build the
   ``cudaq-qec-realtime-cudevice-proprietary`` target from the proprietary
@@ -134,13 +140,13 @@ CPU architecture (``amd64`` or ``arm64``) -- no manual override is needed.
 
 The runtime plugin loader searches for decoder plugins in the
 ``decoder-plugins/`` subdirectory next to ``libcudaq-qec.so``.  For a source
-build of cudaqx, that path is ``<cudaqx-build>/lib/decoder-plugins/``:
+build of cudaq-qec, that path is ``<cudaq-qec-build>/lib/decoder-plugins/``:
 
 .. code-block:: bash
 
-   mkdir -p <cudaqx-build>/lib/decoder-plugins
+   mkdir -p <cudaq-qec-build>/lib/decoder-plugins
    cp libcudaq-qec-nv-qldpc-decoder.so \
-      <cudaqx-build>/lib/decoder-plugins/
+      <cudaq-qec-build>/lib/decoder-plugins/
 
 Source Repositories
 ^^^^^^^^^^^^^^^^^^^
@@ -152,8 +158,8 @@ Source Repositories
    * - Repository
      - URL
      - Version
-   * - **cudaqx**
-     - https://github.com/NVIDIA/cudaqx
+   * - **cudaq-qec**
+     - https://github.com/NVIDIA/cudaq-qec
      - ``main`` branch (or your feature branch)
    * - **cuda-quantum** (realtime)
      - https://github.com/NVIDIA/cuda-quantum
@@ -164,7 +170,7 @@ Source Repositories
 
 ``cuda-quantum`` provides ``libcudaq-realtime`` (the dispatch kernel, ring
 buffer management, and the device-graph scheduler).  ``holoscan-sensor-bridge``
-provides the Hololink ``GpuRoceTransceiver`` library for RDMA transport.
+provides the ``GpuRoceTransceiver`` library for RDMA transport.
 
 .. note::
 
@@ -174,31 +180,24 @@ provides the Hololink ``GpuRoceTransceiver`` library for RDMA transport.
    fire-and-forget decode launch, and tail self-relaunch on top of the
    device-side graph dispatch).
 
-.. note::
-
-   ``holoscan-sensor-bridge`` is only needed for the emulated and FPGA
-   end-to-end tests.  The CI unit test requires only ``libcudaq-realtime``.
-
 Repository Layout
 -----------------
 
-Key files within ``cudaqx``:
+Key files within ``cudaq-qec``:
 
 .. code-block:: text
 
    libs/qec/
      unittests/
        realtime/
-         qec_graph_decode_test/
-           test_realtime_qldpc_graph_decoding.cpp   # CI unit test
          qec_roce_decode_test/
            data/
              config_nv_qldpc_relay.yml              # Relay BP decoder config
              syndromes_nv_qldpc_relay.txt           # 100 test syndrome shots
        utils/
-         hololink_qldpc_graph_decoder_bridge.cpp    # Bridge tool (RDMA <-> decoder)
-         hololink_qldpc_graph_decoder_test.sh       # Orchestration script
-         hololink_fpga_syndrome_playback.cpp        # Playback tool (loads syndromes)
+         gpu_roce_qldpc_graph_decoder_bridge.cpp    # Bridge tool (RDMA <-> decoder)
+         gpu_roce_qldpc_graph_decoder_test.sh       # Orchestration script
+         hsb_fpga_syndrome_playback.cpp        # Playback tool (loads syndromes)
 
 The FPGA emulator is in the ``cuda-quantum`` repository:
 
@@ -206,42 +205,12 @@ The FPGA emulator is in the ``cuda-quantum`` repository:
 
    cuda-quantum/realtime/
      unittests/utils/
-       hololink_fpga_emulator.cpp                   # Software FPGA emulator
+       hsb_fpga_emulator.cpp                   # Software FPGA emulator
 
 Building
 --------
 
-CI unit test only (no Hololink tools)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-If you only need to run the CI unit test, you can build without
-``holoscan-sensor-bridge``:
-
-.. code-block:: bash
-
-   # 1. Build libcudaq-realtime
-   git clone https://github.com/NVIDIA/cuda-quantum.git cudaq-realtime-src
-   cd cudaq-realtime-src
-   git checkout releases/v0.15.1
-   cd realtime && mkdir -p build && cd build
-   cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime ..
-   ninja && ninja install
-   cd ../../..
-
-   # 2. Build cudaqx with the nv-qldpc-decoder test.
-   #    CUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE points at the static
-   #    archive with the DEVICE_CALL handlers; it is linked WHOLE_ARCHIVE into
-   #    the test (see "Obtaining the proprietary components").
-   cmake -S cudaqx -B cudaqx/build \
-     -DCMAKE_BUILD_TYPE=Release \
-     -DCUDAQ_DIR=/path/to/cudaq-install/lib/cmake/cudaq/ \
-     -DCUDAQ_REALTIME_ROOT=/tmp/cudaq-realtime \
-     -DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=/path/to/libcudaq-qec-realtime-cudevice-proprietary.a \
-     -DCUDAQX_ENABLE_LIBS="qec" \
-     -DCUDAQX_INCLUDE_TESTS=ON
-   cmake --build cudaqx/build --target test_realtime_qldpc_graph_decoding
-
-Full build (CI test + Hololink bridge/playback tools)
+Build the HSB bridge and playback tools
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 To also build the bridge and playback tools for emulated or FPGA testing:
@@ -285,35 +254,34 @@ To also build the bridge and playback tools for emulated or FPGA testing:
    cmake --build . --target gpu_roce_transceiver hololink_core
    cd ../..
 
-   # 3. Build libcudaq-realtime with Hololink tools enabled
-   #    This produces libcudaq-realtime-bridge-hololink.so (needed by the bridge
+   # 3. Build libcudaq-realtime with HSB tools enabled
+   #    This produces libcudaq-realtime-bridge-gpu-roce.so (needed by the bridge
    #    tool) as well as the FPGA emulator.
    cd cudaq-realtime-src/realtime && mkdir -p build && cd build
    cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime \
-     -DCUDAQ_REALTIME_ENABLE_HOLOLINK_TOOLS=ON \
+     -DCUDAQ_REALTIME_ENABLE_HSB_TOOLS=ON \
      -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=../../holoscan-sensor-bridge \
      -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=../../holoscan-sensor-bridge/build \
      ..
    ninja && ninja install
    cd ../../..
 
-   # 4. Build cudaqx with Hololink tools enabled.
+   # 4. Build cudaq-qec with HSB tools enabled.
    #    CUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE supplies the DEVICE_CALL
    #    handlers (WHOLE_ARCHIVE-linked into the bridge + test).
-   cmake -S cudaqx -B cudaqx/build \
+   cmake -S cudaq-qec -B cudaq-qec/build \
      -DCMAKE_BUILD_TYPE=Release \
      -DCUDAQ_DIR=/path/to/cudaq-install/lib/cmake/cudaq/ \
      -DCUDAQ_REALTIME_ROOT=/tmp/cudaq-realtime \
      -DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=/path/to/libcudaq-qec-realtime-cudevice-proprietary.a \
      -DCUDAQX_ENABLE_LIBS="qec" \
      -DCUDAQX_INCLUDE_TESTS=ON \
-     -DCUDAQX_QEC_ENABLE_HOLOLINK_TOOLS=ON \
+     -DCUDAQX_QEC_ENABLE_HSB_TOOLS=ON \
      -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/path/to/holoscan-sensor-bridge \
      -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/path/to/holoscan-sensor-bridge/build
-   cmake --build cudaqx/build --target \
-     test_realtime_qldpc_graph_decoding \
-     hololink_qldpc_graph_decoder_bridge \
-     hololink_fpga_syndrome_playback
+   cmake --build cudaq-qec/build --target \
+     gpu_roce_qldpc_graph_decoder_bridge \
+     hsb_fpga_syndrome_playback
 
 Using the orchestration script
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -322,96 +290,48 @@ The orchestration script can build everything automatically:
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh \
+   ./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh \
      --build \
      --hsb-dir /path/to/holoscan-sensor-bridge \
      --cuda-quantum-dir /path/to/cuda-quantum \
      --no-run
 
-CI Unit Test
-------------
-
-The CI unit test (``test_realtime_qldpc_graph_decoding``) exercises the full
-device-graph scheduler decode path without any network hardware.  It:
-
-1. Loads the Relay BP config and syndrome data from YAML/text files
-2. Creates the decoder via the ``decoder::get("nv-qldpc-decoder", ...)`` plugin API
-3. Constructs a ``qec_realtime_session``, which captures the decoder's
-   device-launchable cooperative decode graph and starts the device-graph
-   scheduler on a pinned-mapped ring (3 ``DEVICE_CALL`` entries:
-   ``enqueue_syndromes`` / ``get_corrections`` / ``reset_decoder``)
-4. Drives the per-round protocol with ``rpc_producer``: for each shot it sends
-   one ``enqueue_syndromes`` per round, then a ``get_corrections``; the
-   scheduler fires the decode when a window completes and tail self-relaunches
-5. Verifies each shot's correction against the fixture, then a final
-   ``reset_decoder`` + ``get_corrections`` confirms reset
-
-Running
-^^^^^^^
-
-.. code-block:: bash
-
-   cd cudaqx/build
-
-   # The nv-qldpc-decoder plugin must be in <cudaqx-build>/lib/decoder-plugins/
-   # before running -- see "Obtaining the proprietary components" above.
-
-   ./libs/qec/unittests/test_realtime_qldpc_graph_decoding
-
-Expected output:
-
-.. code-block:: text
-
-   [==========] Running 1 test from 1 test suite.
-   [----------] 1 test from GraphDecodeTest
-   [ RUN      ] GraphDecodeTest.DecodesAllSyndromes
-   ...
-   [       OK ] GraphDecodeTest.DecodesAllSyndromes (XXX ms)
-   [==========] 1 test from 1 test suite ran.
-   [  PASSED  ] 1 test.
-
 Surface Code Test (Relay BP)
 ----------------------------
 
-The ``surface_code-1-local`` app example drives the device-graph scheduler
-through the in-process RPC path (``CUDAQ_QEC_REALTIME_MODE=inproc_rpc``) with
-the nv-qldpc-decoder configured for Relay BP (``--use-relay-bp``).  It simulates
-a surface code with ``stim`` and generates syndromes on the fly, so -- unlike
-the fixed-fixture CI unit test -- it can run an arbitrary number of shots.
+The ``surface_code-1-local`` app example runs a surface code memory experiment
+with the nv-qldpc-decoder configured for Relay BP.  It simulates a surface code
+with ``stim`` and generates syndromes on the fly, so it can run an arbitrary
+number of shots.
 
 Build the app example (it links the same plugin + proprietary archive as the
-CI test):
+bridge):
 
 .. code-block:: bash
 
-   cmake --build cudaqx/build --target surface_code-1-local
+   cmake --build cudaq-qec/build --target surface_code-1-local
 
-Run it in two steps -- generate the decoder config (DEM), then run the decode
-loop through the scheduler:
+Run it in two steps -- generate the decoder config (DEM), then run the shots:
 
 .. code-block:: bash
 
-   cd cudaqx/build
+   cd cudaq-qec/build
    export CUDAQ_DEFAULT_SIMULATOR=stim
-   export CUDAQ_QEC_REALTIME_MODE=inproc_rpc
 
    APP=./libs/qec/unittests/realtime/app_examples/surface_code-1-local
 
    # 1. Generate the Relay BP decoder config (DEM) for a distance-3 surface code
-   "$APP" --distance 3 --num_rounds 12 --decoder_window 6 \
-          --decoder_type nv-qldpc-decoder --use-relay-bp \
+   "$APP" --distance 3 --num_rounds 12 \
+          --decoder_type nv-qldpc-decoder \
           --num_shots 1000 --save_dem config.yml
 
-   # 2. Run the decode loop through the device-graph scheduler
-   "$APP" --distance 3 --num_rounds 12 --decoder_window 6 \
-          --decoder_type nv-qldpc-decoder --use-relay-bp \
+   # 2. Run the shots
+   "$APP" --distance 3 --num_rounds 12 \
+          --decoder_type nv-qldpc-decoder \
           --num_shots 1000 --load_dem config.yml
 
 A clean run exits ``0`` and reports a small number of non-zero syndrome
-measurements alongside a larger number of corrections found.  The
-``app_examples`` CTest ``surface_code-1-local-test-distance-3-inproc-rpc``
-wraps this flow (it sets ``CUDAQ_QEC_REALTIME_MODE=inproc_rpc`` and
-``EXTRA_CLI_ARGS=--use-relay-bp``).
+measurements alongside a larger number of corrections found.
 
 Emulated End-to-End Test
 ------------------------
@@ -422,8 +342,8 @@ processes run concurrently:
 1. **Emulator** -- receives syndromes via the UDP control plane, sends them
    to the bridge via RDMA, and captures corrections
 2. **Bridge** -- runs the device-graph scheduler on the GPU directly on the
-   Hololink DOCA ring (the scheduler polls the RX flags written by the
-   Hololink RX kernel and writes responses for the TX kernel), firing the
+   GpuRoceTransceiver DOCA ring (the scheduler polls the RX flags written by the
+   GpuRoceTransceiver RX kernel and writes responses for the TX kernel), firing the
    cooperative Relay BP decode fire-and-forget per completed shot
 3. **Playback** -- loads syndrome data into the emulator's BRAM and triggers
    playback in **per-round** mode (``--per-round``: N ``enqueue_syndromes``
@@ -445,12 +365,12 @@ Requirements
   `cuda-quantum realtime build guide <https://github.com/NVIDIA/cuda-quantum/blob/main/realtime/docs/building.md>`__
 - All three tools built (bridge, playback, emulator)
 
-Running
-^^^^^^^
+Running the Emulated Test
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh \
+   ./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh \
      --emulate \
      --build \
      --setup-network \
@@ -463,7 +383,7 @@ After the initial build and network setup, subsequent runs are faster:
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh --emulate
+   ./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh --emulate
 
 FPGA End-to-End Test
 --------------------
@@ -475,8 +395,8 @@ processes run:
 2. **Playback** -- loads syndromes into the FPGA's BRAM and triggers playback,
    then reads back corrections from the FPGA's capture RAM to verify them
 
-Requirements
-^^^^^^^^^^^^
+FPGA Requirements
+^^^^^^^^^^^^^^^^^
 
 - FPGA programmed with the HSB IP bitfile, connected to a ConnectX NIC via
   direct cable or switch.  Bitfiles for supported FPGA vendors are available
@@ -486,12 +406,12 @@ Requirements
 - FPGA IP and bridge IP on the same subnet
 - ConnectX device name (e.g., ``mlx5_4``, ``mlx5_5``)
 
-Running
-^^^^^^^
+Running the FPGA Test
+^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh \
+   ./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh \
      --build \
      --setup-network \
      --device mlx5_5 \
@@ -577,7 +497,7 @@ Orchestration Script Reference
 
 .. code-block:: text
 
-   hololink_qldpc_graph_decoder_test.sh [options]
+   gpu_roce_qldpc_graph_decoder_test.sh [options]
 
 Modes
 ^^^^^
@@ -627,7 +547,7 @@ Build Options
      - cuda-quantum source directory
    * - ``--cuda-qx-dir DIR``
      - ``/workspaces/cudaqx``
-     - cudaqx source directory
+     - cudaq-qec source directory
    * - ``--jobs N``
      - ``nproc``
      - Parallel build jobs
@@ -695,7 +615,7 @@ Ring buffer depth (``num_pages``)
 
 The ring depth is intentionally **not** a script option and is fixed at
 **64** (both the bridge and playback default to it).  This matches the
-Hololink ``gpu_roce_transceiver`` work-queue depth ``WQE_NUM = 64``: the
+GpuRoceTransceiver work-queue depth ``WQE_NUM = 64``: the
 transceiver posts 64 receive/send WQEs and runs one kernel thread per WQE.
 
 A ring deeper than ``WQE_NUM`` makes a single transceiver thread service more
@@ -710,3 +630,10 @@ The bridge enforces this: if ``--num-pages`` is ever passed with a value above
 ``WQE_NUM``, it clamps to 64 and prints a warning.  Supporting a deeper ring
 would require changing ``WQE_NUM`` (and the per-thread WQE striding) in
 ``holoscan-sensor-bridge``, diverging from the ``2.6.0-EA2`` tag.
+
+See Also
+--------
+
+* :doc:`Realtime Decoding </components/qec/realtime_decoding>` -- concept and workflow
+* :doc:`Getting Started with Realtime Decoding </examples_rst/qec/getting_started_realtime_decoding>`
+* :ref:`C++ <cpp_realtime_decoding_api>` and :ref:`Python <python_realtime_decoding_api>` realtime decoding API

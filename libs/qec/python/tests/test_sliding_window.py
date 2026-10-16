@@ -176,12 +176,13 @@ def test_pymatching_parallel_edges_use_observable_faults():
     with pytest.raises(ValueError, match="Parallel edges not permitted"):
         qec.get_decoder("pymatching", H)
 
-    # ASSERT: providing O with merge_strategy='independent' combines the
-    # parallel edges and yields a converged observable-space decode.
+    # ASSERT: explicitly requesting observables permits independent parallel
+    # edge merging; O is model data and does not select the output mode.
     decoder = qec.get_decoder("pymatching",
                               H,
                               O=O,
                               error_rate_vec=error_rates,
+                              output="observables",
                               merge_strategy="independent")
     result = decoder.decode_batch(np.array([[1]], dtype=np.uint8))
 

@@ -51,6 +51,7 @@ runs:
         to_hash: |
           .github/actions/get-cudaq-build/**
           scripts/build_cudaq_with_realtime.sh
+          scripts/cudaq_realtime_cmake_flags.sh
           .cudaq_version
       run: |
         hash=${{ hashFiles(format('{0}', env.to_hash)) }}

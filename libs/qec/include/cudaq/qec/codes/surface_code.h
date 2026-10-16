@@ -196,6 +196,41 @@ public:
   /// @brief Get the stabilizers as a vector of cudaq::spin_op_terms
   std::vector<cudaq::spin_op_term> get_spin_op_stabilizers() const;
 
+  /// @brief Get the CNOT schedule matrix for the X stabilizers.
+  ///
+  /// @return Tensor with the same shape and support pattern as the X block of
+  /// the parity check matrix (num_x_stabilizers x distance^2). Entry 0 means
+  /// the ancilla does not touch that data qubit; entry k in [1, 4] means the
+  /// ancilla-data CNOT executes at timestep k of the stabilizer round.
+  ///
+  /// @note The per-plaquette CNOT order is chosen per the grid's orientation
+  /// so that mid-round ancilla faults ("hook errors"), which propagate onto
+  /// the data qubits of the remaining CNOTs, land perpendicular to the
+  /// same-type logical operator instead of along it, following the standard
+  /// zigzag schedule of https://arxiv.org/abs/1404.3747. Rows are ordered to
+  /// match the rows of %to_parity_matrix() / %code::get_parity_x().
+  cudaqx::tensor<uint8_t> get_cnot_schedule_x() const;
+
+  /// @brief Get the CNOT schedule matrix for the Z stabilizers.
+  ///
+  /// @return Tensor with the same shape and support pattern as the Z block of
+  /// the parity check matrix (num_z_stabilizers x distance^2). Entry 0 means
+  /// the ancilla does not touch that data qubit; entry k in [1, 4] means the
+  /// data-ancilla CNOT executes at timestep k of the stabilizer round.
+  ///
+  /// @note See get_cnot_schedule_x() for the hook-error rationale and row
+  /// ordering.
+  cudaqx::tensor<uint8_t> get_cnot_schedule_z() const;
+
+  /// @brief Get the X-stabilizer CNOT schedule as a flat list of
+  /// (stabilizer index, data index) pairs, ordered by timestep within each
+  /// stabilizer — the replay format for kernels that take an explicit CNOT
+  /// pair list. Stabilizer indices match the rows of get_cnot_schedule_x().
+  std::vector<std::size_t> get_cnot_schedule_pairs_x() const;
+
+  /// @brief Z-stabilizer counterpart of get_cnot_schedule_pairs_x().
+  std::vector<std::size_t> get_cnot_schedule_pairs_z() const;
+
   /// @brief Get the observables as a vector of cudaq::spin_op_terms
   ///
   /// @return The X logical observable first, followed by the Z logical
@@ -264,12 +299,15 @@ __qpu__ void prepm(patch p);
 ///
 /// @brief Perform stabilizer measurements on a surface_code patch
 /// @param p The patch to measure
-/// @param x_stabilizers Indices of X stabilizers to measure
-/// @param z_stabilizers Indices of Z stabilizers to measure
+/// @param x_stabilizer_schedule Flattened X-stabilizer CNOT schedule matrix
+/// (see stabilizer_grid::get_cnot_schedule_x): entry 0 = no support, entry
+/// k >= 1 = CNOT at timestep k
+/// @param z_stabilizer_schedule Flattened Z-stabilizer CNOT schedule matrix
+/// (see stabilizer_grid::get_cnot_schedule_z)
 /// @return Vector of measurement results
 __qpu__ std::vector<cudaq::measure_result>
-stabilizer(patch p, const std::vector<std::size_t> &x_stabilizers,
-           const std::vector<std::size_t> &z_stabilizers);
+stabilizer(patch p, const std::vector<std::size_t> &x_stabilizer_schedule,
+           const std::vector<std::size_t> &z_stabilizer_schedule);
 
 /// @brief surface_code implementation
 class surface_code : public cudaq::qec::code {
@@ -305,6 +343,14 @@ public:
   /// @brief Constructor for the surface_code
   surface_code(const heterogeneous_map &);
   // Grid constructor would be useful
+
+  /// @brief Get the hook-error-aware X-stabilizer CNOT schedule matrix.
+  /// See stabilizer_grid::get_cnot_schedule_x().
+  cudaqx::tensor<uint8_t> get_stabilizer_schedule_x() const override;
+
+  /// @brief Get the hook-error-aware Z-stabilizer CNOT schedule matrix.
+  /// See stabilizer_grid::get_cnot_schedule_z().
+  cudaqx::tensor<uint8_t> get_stabilizer_schedule_z() const override;
 
   /// @brief Extension creator function for the surface_code
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(

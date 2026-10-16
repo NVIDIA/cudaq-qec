@@ -31,15 +31,15 @@ ARG cuda_version
 USER root
 
 # Update the copyright notification:
-RUN echo -e "This container also includes CUDA-Q QEC and CUDA-Q Solvers.\n"\
+RUN echo -e "This container also includes CUDA-Q QEC.\n"\
 "Use of this container implies consent to the NVIDIA Software License agreement at\n"\
 "https://github.com/NVIDIA/cudaqx/blob/main/libs/qec/LICENSE\n" >> "$CUDA_QUANTUM_PATH/Copyright.txt"
 
 # Determine the appropriate zip file
 COPY installed_files-${TARGETARCH}-cu${cuda_version}.zip /tmp/
 
-# Overlay installed files (and install gfortran)
-RUN apt-get update && apt-get install -y unzip gfortran && \
+# Overlay installed files
+RUN apt-get update && apt-get install -y unzip && \
     unzip /tmp/installed_files-${TARGETARCH}-cu${cuda_version}.zip -d /opt/nvidia/cudaq && \
     rm /tmp/installed_files-${TARGETARCH}-cu${cuda_version}.zip && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -47,7 +47,6 @@ RUN apt-get update && apt-get install -y unzip gfortran && \
 # Copy CUDA-QX examples and tests
 COPY docs/sphinx/examples /home/cudaq/cudaqx-examples
 COPY libs/qec/python/tests /home/cudaq/cudaqx_pytests/qec
-COPY libs/solvers/python/tests /home/cudaq/cudaqx_pytests/solvers
 
 # Bake in CUDA-Q import check helper (used by QA validation scripts)
 RUN mkdir -p /home/cudaq/cudaqx-scripts/validation
@@ -59,12 +58,6 @@ RUN chown -R cudaq:cudaq /home/cudaq/cudaqx-scripts
 RUN chown -R cudaq /home/cudaq && chgrp -R cudaq /home/cudaq
 
 USER cudaq
-
-# Needed for true operation
-RUN python3 -m pip install --user fastapi uvicorn pyscf networkx
-
-# Needed for testing
-RUN python3 -m pip install --user openfermion openfermionpyscf
 
 WORKDIR /home/cudaq
 ENTRYPOINT ["bash", "-l"]

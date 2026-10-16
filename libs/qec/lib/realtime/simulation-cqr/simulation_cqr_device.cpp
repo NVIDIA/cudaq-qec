@@ -68,8 +68,12 @@ enqueue_syndromes(std::uint64_t decoder_id,
   std::vector<bool> bits(num_bits);
   for (std::size_t i = 0; i < num_bits; ++i)
     bits[i] = syndromes[i];
-  cudaq::device_call(::enqueue_syndromes, decoder_id, tag, kSyndromeMappingId,
-                     bits);
+  // device_id == decoder_id: each decoder gets its own device_call session,
+  // i.e. its own ring buffer and its own dispatcher (the runtime keys
+  // sessions, rings, and channels by device id).  The payload still carries
+  // decoder_id as a cross-check for fan-in topologies.
+  cudaq::device_call(decoder_id, ::enqueue_syndromes, decoder_id, tag,
+                     kSyndromeMappingId, bits);
 }
 
 __qpu__ void enqueue_syndromes_test(std::uint64_t decoder_id,
@@ -78,8 +82,8 @@ __qpu__ void enqueue_syndromes_test(std::uint64_t decoder_id,
   constexpr std::uint64_t kSyndromeMappingId = 0;
   // syndromes is already a std::vector<bool>; the lowering bit-packs it and
   // serializes its length as the element-count prefix (== num_syndromes).
-  cudaq::device_call(::enqueue_syndromes, decoder_id, tag, kSyndromeMappingId,
-                     syndromes);
+  cudaq::device_call(decoder_id, ::enqueue_syndromes, decoder_id, tag,
+                     kSyndromeMappingId, syndromes);
 }
 
 __qpu__ std::vector<bool> get_corrections(std::uint64_t decoder_id,
@@ -92,12 +96,12 @@ __qpu__ std::vector<bool> get_corrections(std::uint64_t decoder_id,
   // simulation_device.cpp).  reset is a trailing bool, so the request payload
   // is 17 bytes with no trailing padding.
   std::vector<bool> result(return_size);
-  cudaq::device_call(::get_corrections, decoder_id, result, reset);
+  cudaq::device_call(decoder_id, ::get_corrections, decoder_id, result, reset);
   return result;
 }
 
 __qpu__ void reset_decoder(std::uint64_t decoder_id) {
-  cudaq::device_call(::reset_decoder, decoder_id);
+  cudaq::device_call(decoder_id, ::reset_decoder, decoder_id);
 }
 
 } // namespace cudaq::qec::decoding

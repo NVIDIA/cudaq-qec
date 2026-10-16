@@ -284,19 +284,25 @@ int main(int argc, char *argv[]) {
     std::cout << "[Setup] H tensor: [" << H_full.shape()[0] << " x "
               << H_full.shape()[1] << "]\n";
 
-    if (!stim.priors.empty() && stim.priors.size() == stim.H.ncols)
-      pm_params.insert("error_rate_vec", stim.priors);
-
+    auto O = cudaq::qec::sparse_binary_matrix::from_csr(
+        0, stim.H.ncols, std::vector<std::uint32_t>{0}, {});
     if (stim.O.loaded()) {
       obs_row = stim.O.row_dense(0);
-      pm_params.insert("O", stim.O.to_dense());
+      O = cudaq::qec::sparse_binary_matrix(stim.O.to_dense());
     }
+    auto rates = !stim.priors.empty() && stim.priors.size() == stim.H.ncols
+                     ? stim.priors
+                     : std::vector<double>{};
+    auto inputs =
+        cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(H_full),
+                                 std::move(O), std::move(rates));
 
     std::cout << "[Setup] Creating " << config.num_decode_workers
               << " PyMatching decoders (full H)...\n";
     for (int i = 0; i < config.num_decode_workers; ++i)
-      decoder_ctx.decoders.push_back(
-          cudaq::qec::decoder::get("pymatching", H_full, pm_params));
+      decoder_ctx.decoders.push_back(cudaq::qec::decoder::get(
+          "pymatching", inputs, cudaq::qec::decode_result_type::errors,
+          pm_params));
   } else {
     // Fallback: per-slice decode with CUDA-Q surface code H_z
     std::cout << "[Setup] Creating PyMatching decoder (d=" << config.distance

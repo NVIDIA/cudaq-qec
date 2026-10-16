@@ -23,6 +23,9 @@ set -euo pipefail
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$script_dir/cudaq_realtime_cmake_flags.sh"
+
 BUILD_TYPE=${1:-"Release"}
 CC=${2:-${CC:-"gcc"}}
 CXX=${3:-${CXX:-"g++"}}
@@ -39,9 +42,10 @@ log "Building cudaq-realtime from $CUDAQ_SRC/realtime"
 cmake -G Ninja -S "$CUDAQ_SRC/realtime" -B "$CUDAQ_SRC/realtime/build" \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
   -DCMAKE_INSTALL_PREFIX="$CUDAQ_INSTALL_PREFIX" \
+  -DCMAKE_CUDA_FLAGS="$(cudaq_realtime_cmake_cuda_flags)" \
   -DCUDAQ_REALTIME_BUILD_TESTS=OFF \
   -DCUDAQ_REALTIME_BUILD_EXAMPLES=OFF \
-  -DCUDAQ_REALTIME_ENABLE_HOLOLINK_TOOLS=OFF
+  -DCUDAQ_REALTIME_ENABLE_HSB_TOOLS=OFF
 cmake --build "$CUDAQ_SRC/realtime/build" --target install --parallel
 
 log "Building CUDA-Q with realtime support"

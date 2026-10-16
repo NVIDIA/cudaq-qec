@@ -64,9 +64,3 @@ Pipeline
 
 .. doxygenclass:: cudaq::qec::realtime::experimental::realtime_pipeline
    :members:
-
-.. doxygenstruct:: cudaq::qec::realtime::experimental::realtime_pipeline::Stats
-   :members:
-
-.. doxygenstruct:: cudaq::qec::realtime::experimental::realtime_pipeline::ring_buffer_bases
-   :members:

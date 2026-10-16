@@ -44,6 +44,12 @@ target_link_libraries(cudaq-qec-realtime-decoding-simulation-cqr
     cudaq-qec-realtime-decoding
   PRIVATE
     cudaq::cudaq-common
+    # This is the caller (QPU) side: the nvq++-lowered device_calls here
+    # reference __cudaq_device_call_{acquire,dispatch,safely_release}_
+    # realtime_frame, which live in libcudaq-device-call-runtime.  Link it
+    # directly rather than inheriting it from the decoding-server CQR plugin,
+    # which is the service side and no longer depends on the caller runtime.
+    ${CUDAQ_DEVICE_CALL_RUNTIME_LIBRARY}
 )
 
 set_target_properties(cudaq-qec-realtime-decoding-simulation-cqr PROPERTIES

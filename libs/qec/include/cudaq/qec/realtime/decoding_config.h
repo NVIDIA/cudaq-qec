@@ -9,246 +9,152 @@
 #pragma once
 
 #include "cuda-qx/core/heterogeneous_map.h"
+#include "cudaq/qec/extended_dem.h"
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
-#include <variant>
 #include <vector>
 
 namespace cudaq::qec::decoding::config {
 
-struct srelay_bp_config {
-  std::optional<std::size_t> pre_iter;
-  std::optional<std::size_t> num_sets;
-  std::optional<std::string> stopping_criterion;
-  std::optional<std::size_t> stop_nconv;
+/// Dispatch shape for a decoder session -- HOW its RPCs are executed, not
+/// which wire the bytes arrive on (the wire is a server-level transport
+/// provider, selected independently).
+/// host:         requests are dispatched on the CPU (HOST_CALL); works with
+///               any transport provider (dev, CI, no GPU required).
+/// device_graph: requests are dispatched on the GPU by the self-relaunching
+///               device-graph scheduler (DeviceGraphTransceiver); requires a
+///               decoder with a captured decode graph and a provider whose
+///               rings are GPU-visible (e.g. GpuRoceTransceiver/DOCA).
+/// YAML key: `dispatch: host|device_graph`.
+enum class DecoderDispatch { host, device_graph };
 
-  bool operator==(const srelay_bp_config &) const = default;
+/// @brief Decoder-specific constructor arguments, stored as a
+/// `cudaqx::heterogeneous_map` -- the form every decoder's constructor
+/// consumes. YAML conversion and key validation are driven by the parameter
+/// schema the decoder registered (see cudaq/qec/decoder_config_schema.h), so
+/// out-of-tree decoders participate without any framework changes. The
+/// framework-owned `error_rate_vec` model input is also accepted here as a
+/// legacy YAML alias, but is removed before plugin construction.
+class decoder_custom_args_t {
+public:
+  decoder_custom_args_t() = default;
+  decoder_custom_args_t(const cudaqx::heterogeneous_map &m) : map_(m) {}
 
-  __attribute__((visibility("default"))) cudaqx::heterogeneous_map
-  to_heterogeneous_map() const;
+  decoder_custom_args_t &operator=(const cudaqx::heterogeneous_map &m) {
+    map_ = m;
+    return *this;
+  }
 
-  __attribute__((visibility("default"))) static srelay_bp_config
-  from_heterogeneous_map(const cudaqx::heterogeneous_map &map);
+  cudaqx::heterogeneous_map &map() { return map_; }
+  const cudaqx::heterogeneous_map &map() const { return map_; }
+  bool empty() const { return map_.empty(); }
+
+  /// Deep equality over the canonical custom-args value kinds.
+  __attribute__((visibility("default"))) bool
+  operator==(const decoder_custom_args_t &other) const;
+
+private:
+  cudaqx::heterogeneous_map map_;
 };
-
-struct nv_qldpc_decoder_config {
-  std::optional<bool> use_sparsity;
-  std::optional<double> error_rate;
-  std::optional<std::vector<double>> error_rate_vec;
-  std::optional<int> max_iterations;
-  std::optional<int> n_threads;
-  std::optional<bool> use_osd;
-  std::optional<int> osd_method;
-  std::optional<int> osd_order;
-  std::optional<int> bp_batch_size;
-  std::optional<int> osd_batch_size;
-  std::optional<int> iter_per_check;
-  std::optional<double> clip_value;
-  std::optional<int> bp_method;
-  std::optional<double> scale_factor;
-  std::optional<std::string> proc_float;
-  std::optional<double> gamma0;
-  std::optional<std::vector<double>> gamma_dist;
-  std::optional<std::vector<std::vector<double>>> explicit_gammas;
-  std::optional<srelay_bp_config> srelay_config;
-  std::optional<int> bp_seed;
-  std::optional<int> composition;
-  // When set with a positive clip_value, forces the plugin's fixed-point
-  // arithmetic path so corrections are reproducible across runs and across
-  // hardware revisions. Required for the dispatcher-contract test which
-  // compares decoded corrections against a recorded fixture byte-by-byte.
-  std::optional<bool> repeatable;
-
-  bool operator==(const nv_qldpc_decoder_config &) const = default;
-  // opt_results is currently not supported for real-time decoding.
-
-  __attribute__((visibility("default"))) cudaqx::heterogeneous_map
-  to_heterogeneous_map() const;
-
-  __attribute__((visibility("default"))) static nv_qldpc_decoder_config
-  from_heterogeneous_map(const cudaqx::heterogeneous_map &map);
-};
-
-struct multi_error_lut_config {
-  std::optional<int> lut_error_depth;
-  // error_rate_vec is currently not supported for real-time decoding.
-  // opt_results is currently not supported for real-time decoding.
-
-  bool operator==(const multi_error_lut_config &) const = default;
-
-  __attribute__((visibility("default"))) cudaqx::heterogeneous_map
-  to_heterogeneous_map() const;
-
-  __attribute__((visibility("default"))) static multi_error_lut_config
-  from_heterogeneous_map(const cudaqx::heterogeneous_map &map);
-};
-
-struct single_error_lut_config {
-  bool operator==(const single_error_lut_config &) const = default;
-
-  __attribute__((visibility("default"))) cudaqx::heterogeneous_map
-  to_heterogeneous_map() const;
-
-  __attribute__((visibility("default"))) static single_error_lut_config
-  from_heterogeneous_map(const cudaqx::heterogeneous_map &map);
-};
-
-struct pymatching_config {
-  std::optional<std::vector<double>> error_rate_vec;
-  std::optional<std::string> merge_strategy;
-
-  bool operator==(const pymatching_config &) const = default;
-
-  __attribute__((visibility("default"))) cudaqx::heterogeneous_map
-  to_heterogeneous_map() const;
-
-  __attribute__((visibility("default"))) static pymatching_config
-  from_heterogeneous_map(const cudaqx::heterogeneous_map &map);
-};
-
-struct chromobius_config {
-  std::optional<bool> drop_mobius_errors_involving_remnant_errors;
-  std::optional<bool> ignore_decomposition_failures;
-  std::optional<bool> include_coords_in_mobius_dem;
-  std::optional<bool> return_weight;
-  std::optional<bool> write_mobius_match_to_stderr;
-
-  bool operator==(const chromobius_config &) const = default;
-
-  __attribute__((visibility("default"))) cudaqx::heterogeneous_map
-  to_heterogeneous_map() const;
-
-  __attribute__((visibility("default"))) static chromobius_config
-  from_heterogeneous_map(const cudaqx::heterogeneous_map &map);
-};
-
-using global_decoder_config =
-    std::variant<std::monostate, pymatching_config, chromobius_config>;
-
-struct trt_decoder_config {
-  std::optional<std::string> onnx_load_path;
-  std::optional<std::string> engine_load_path;
-  std::optional<std::string> engine_save_path;
-  std::optional<std::string> precision;
-  std::optional<std::size_t> memory_workspace;
-  std::optional<std::size_t> batch_size;
-  std::optional<bool> use_cuda_graph;
-  std::optional<std::string> global_decoder;
-  global_decoder_config global_decoder_params;
-
-  bool operator==(const trt_decoder_config &) const = default;
-
-  __attribute__((visibility("default"))) cudaqx::heterogeneous_map
-  to_heterogeneous_map() const;
-
-  __attribute__((visibility("default"))) static trt_decoder_config
-  from_heterogeneous_map(const cudaqx::heterogeneous_map &map);
-};
-
-struct sliding_window_config {
-  std::optional<std::size_t> window_size;
-  std::optional<std::size_t> step_size;
-  std::optional<std::size_t> num_syndromes_per_round;
-  std::optional<std::size_t> num_boundary_syndromes;
-  std::optional<bool> straddle_start_round;
-  std::optional<bool> straddle_end_round;
-  std::vector<double> error_rate_vec;
-  std::string inner_decoder_name;
-
-  // Concrete inner decoder configurations (only one should be set based on
-  // inner_decoder_name)
-  std::optional<single_error_lut_config> single_error_lut_params;
-  std::optional<multi_error_lut_config> multi_error_lut_params;
-  std::optional<nv_qldpc_decoder_config> nv_qldpc_decoder_params;
-
-  bool operator==(const sliding_window_config &) const = default;
-
-  __attribute__((visibility("default"))) cudaqx::heterogeneous_map
-  to_heterogeneous_map() const;
-
-  __attribute__((visibility("default"))) static sliding_window_config
-  from_heterogeneous_map(const cudaqx::heterogeneous_map &map);
-};
-
-/// Transport type for a decoder session.
-/// cpu_roce: CpuRoceTransceiver / SoftRoCE (dev, CI, no GPU required)
-/// gpu_roce: GpuRoceTransceiver / DOCA (production, real ConnectX)
-enum class DecoderTransport { cpu_roce, gpu_roce };
 
 /// @brief Configuration structure for decoder options.
 struct decoder_config {
   int64_t id = 0;
   std::string type;
-  /// Transport used to receive syndromes and send corrections for this decoder.
-  /// Defaults to cpu_roce.  Set to gpu_roce for decoders where syndrome bits
-  /// are DMA'd directly to GPU VRAM (e.g. nv_qldpc_decoder with RelayBP).
-  DecoderTransport transport = DecoderTransport::cpu_roce;
+  /// Dispatch shape for this decoder's RPCs.  Defaults to host.  Set to
+  /// device_graph for decoders where syndrome bits are DMA'd directly to GPU
+  /// VRAM and decoded by a captured CUDA graph (e.g. nv_qldpc_decoder with
+  /// RelayBP).
+  DecoderDispatch dispatch = DecoderDispatch::host;
   /// CUDA device this decoder is pinned to at construction (see the
   /// "cuda_device_id" decoder parameter). Placement knob common to any
   /// GPU-accelerated decoder, hence at this level rather than inside the
   /// per-decoder custom args. Unset = unpinned.
   std::optional<int> cuda_device_id;
+  /// The fields below describe the DEM three alternative ways, and exactly
+  /// one of them applies:
+  ///
+  ///   - Flat form: H_sparse plus block_size, syndrome_size, O_sparse,
+  ///     D_sparse and optional error_rate_vec, all sized for the whole
+  ///     experiment.
+  ///   - Chunk form: dem_chunks (which carries phases, connections, seam, and
+  ///     num_rounds internally). The flat fields are derived by expanding the
+  ///     phases, and must be omitted.
+  ///   - DEM form: stim_dem_path, the Stim model text itself. The decoder
+  ///     derives its dimensions, observable mapping and error rates from it.
+  ///     H_sparse, O_sparse and error_rate_vec must be omitted; D_sparse is
+  ///     still required, while block_size and syndrome_size are optional
+  ///     checked assertions.
+  ///
+  /// Throughout a configuration, a `*_path` key names a file and a key without
+  /// the suffix carries its contents inline: `stim_dem_path` is read from disk,
+  /// while a node's `stim_dem` is the model text itself.
+  ///
+  /// Chunk form stays authoritative: decoder construction hands the chunks to
+  /// the decoder, alone for one that declared it reads chunks natively
+  /// (decoder_init::from_dem_chunks(); see
+  /// register_decoder_native_model_source()) and with their closed model for
+  /// any other (decoder_init::from_dem_chunks_closed()). expand_dem_chunks()
+  /// is the explicit derivation of the equivalent flat form. DEM form stays
+  /// authoritative: the model text is what the decoder is built from.
   uint64_t block_size = 0;
   uint64_t syndrome_size = 0;
+  /// Path to an authoritative Stim detector error model. Relative paths are
+  /// resolved against the configuration file's directory, or the process
+  /// working directory for a programmatic or raw-string configuration.
+  std::string stim_dem_path;
   std::vector<std::int64_t> H_sparse;
   std::vector<std::int64_t> O_sparse;
+  /// Maps raw measurements to detectors. Orthogonal to the model source and
+  /// required by both.
   std::vector<std::int64_t> D_sparse;
-  std::variant<single_error_lut_config, multi_error_lut_config,
-               nv_qldpc_decoder_config, sliding_window_config,
-               trt_decoder_config, pymatching_config>
-      decoder_custom_args;
+  /// Error probability per H column. Input YAML also accepts the established
+  /// `decoder_custom_args.error_rate_vec` spelling, and emitted YAML uses that
+  /// spelling to preserve the researcher-facing wire format.
+  std::vector<double> error_rate_vec;
+  /// Optional per-phase DEM for a streaming, repeated-round decomposition.
+  /// H_sparse above describes the whole experiment as one flat matrix; these
+  /// phases describe one round each so the round count can be chosen at run
+  /// time. num_rounds lives inside dem_chunks_spec. See
+  /// cudaq::qec::dem_chunks_from_spec() for expansion to a chunk sequence.
+  ///
+  /// A configuration that also has a nonempty H_sparse is flat, and that
+  /// matrix is the one decoders are built from. Form selection keys off
+  /// H_sparse.empty(). Nonempty H_sparse is exactly the state
+  /// expand_dem_chunks() leaves behind, allowing round-trip through YAML.
+  std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
+  decoder_custom_args_t decoder_custom_args;
 
   bool operator==(const decoder_config &) const = default;
 
+  /// Return the parameter map a decoder's constructor should receive: the
+  /// stored custom args with the legacy error-rate alias removed and
+  /// schema-declared defaults materialized (see materialize_default_args in
+  /// cudaq/qec/decoder_config_schema.h) when a schema is registered for
+  /// `type`, so programmatically built configs get the same normalization the
+  /// YAML parse path applies.
   __attribute__((visibility("default"))) cudaqx::heterogeneous_map
-  decoder_custom_args_to_heterogeneous_map() const {
-    if (std::holds_alternative<single_error_lut_config>(decoder_custom_args)) {
-      return std::get<single_error_lut_config>(decoder_custom_args)
-          .to_heterogeneous_map();
-    } else if (std::holds_alternative<multi_error_lut_config>(
-                   decoder_custom_args)) {
-      return std::get<multi_error_lut_config>(decoder_custom_args)
-          .to_heterogeneous_map();
-    } else if (std::holds_alternative<nv_qldpc_decoder_config>(
-                   decoder_custom_args)) {
-      return std::get<nv_qldpc_decoder_config>(decoder_custom_args)
-          .to_heterogeneous_map();
-    } else if (std::holds_alternative<sliding_window_config>(
-                   decoder_custom_args)) {
-      return std::get<sliding_window_config>(decoder_custom_args)
-          .to_heterogeneous_map();
-    } else if (std::holds_alternative<trt_decoder_config>(
-                   decoder_custom_args)) {
-      return std::get<trt_decoder_config>(decoder_custom_args)
-          .to_heterogeneous_map();
-    } else if (std::holds_alternative<pymatching_config>(decoder_custom_args)) {
-      return std::get<pymatching_config>(decoder_custom_args)
-          .to_heterogeneous_map();
-    }
-    return cudaqx::heterogeneous_map();
-  }
+  decoder_custom_args_to_heterogeneous_map() const;
 
-  __attribute__((visibility("default"))) void
-  set_decoder_custom_args_from_heterogeneous_map(
-      const cudaqx::heterogeneous_map &map) {
-    if (type == "single_error_lut") {
-      decoder_custom_args =
-          single_error_lut_config::from_heterogeneous_map(map);
-    } else if (type == "multi_error_lut") {
-      decoder_custom_args = multi_error_lut_config::from_heterogeneous_map(map);
-    } else if (type == "nv-qldpc-decoder") {
-      decoder_custom_args =
-          nv_qldpc_decoder_config::from_heterogeneous_map(map);
-    } else if (type == "sliding_window") {
-      decoder_custom_args = sliding_window_config::from_heterogeneous_map(map);
-    } else if (type == "trt_decoder") {
-      decoder_custom_args = trt_decoder_config::from_heterogeneous_map(map);
-    } else if (type == "pymatching") {
-      decoder_custom_args = pymatching_config::from_heterogeneous_map(map);
-    }
-  }
+  /// Return the model error rates from either the canonical C++ field or the
+  /// legacy `decoder_custom_args.error_rate_vec` YAML spelling. The legacy
+  /// key is configuration compatibility data and is never included in the
+  /// parameter map handed to a decoder plugin.
+  ///
+  /// @throws std::runtime_error if rates are supplied in both locations, or
+  ///         more than once in nested decoder custom arguments.
+  __attribute__((visibility("default"))) std::vector<double>
+  effective_error_rate_vec() const;
+
+  /// Validate `decoder_custom_args` against the parameter schema registered
+  /// for `type`: unknown keys, missing required keys, and the schema's own
+  /// validate hook (if any). Throws std::runtime_error on the first
+  /// violation. YAML parsing applies the same checks automatically; call this
+  /// to vet a configuration built programmatically before using it.
+  __attribute__((visibility("default"))) void validate_custom_args() const;
 
   __attribute__((visibility("default"))) std::string
   to_yaml_str(int column_wrap = 80);
@@ -256,17 +162,112 @@ struct decoder_config {
   from_yaml_str(const std::string &yaml_str);
 };
 
+/// Transport override applied to the rings of one dispatch shape (see the
+/// `device_graph` member of `transport_config`).
+struct transport_shape_override {
+  /// Provider name (e.g. udp, cpu_roce, gpu_roce) or /path/to/lib.so.
+  /// A bare name resolves to the CUDA-Q realtime provider library whose
+  /// soname is "libcudaq-realtime-bridge-" + name + ".so", with '_' in the
+  /// name mapping to '-' to match the shipped hyphenated sonames (so
+  /// gpu_roce loads libcudaq-realtime-bridge-gpu-roce.so).
+  /// Empty = inherit the section default.
+  std::string provider;
+  /// Extra provider arguments appended for this shape's rings.
+  std::vector<std::string> args;
+
+  bool operator==(const transport_shape_override &) const = default;
+};
+
+/// Server-level transport section: the WIRE is deployment configuration and
+/// lives OUTSIDE the decoders list.  Transports differ between rings only by
+/// dispatch shape (a device_graph ring must be GPU-pollable), so the only
+/// override is shape-keyed -- decoder entries carry no transport
+/// information.
+///
+///   transport:
+///     provider: udp
+///     args: [--slot-size=256]
+///     device_graph:
+///       provider: udp          # "gpu_roce" on an HSB rig
+///       args: [--pinned-rings]
+///
+/// Resolution per ring: shape override (device_graph rings) > this section's
+/// provider/args. The standalone server permits a CLI fallback only for
+/// non-GPU-RoCE, host-only configurations whose YAML names no provider. A
+/// configuration containing device_graph dispatch or using GPU RoCE must
+/// define its provider and arguments in YAML (the deployment file is the
+/// source of truth for GPU-visible rings).
+struct transport_config {
+  std::string provider;
+  std::vector<std::string> args;
+  transport_shape_override device_graph;
+
+  /// Resolve the provider and ordered arguments for a device-graph ring.
+  /// The shape-specific provider overrides the section provider, while its
+  /// arguments are appended to the section arguments.
+  transport_shape_override resolve_device_graph() const {
+    transport_shape_override resolved;
+    resolved.provider =
+        device_graph.provider.empty() ? provider : device_graph.provider;
+    resolved.args = args;
+    resolved.args.insert(resolved.args.end(), device_graph.args.begin(),
+                         device_graph.args.end());
+    return resolved;
+  }
+
+  bool operator==(const transport_config &) const = default;
+};
+
 class multi_decoder_config {
 public:
   std::vector<decoder_config> decoders;
+  /// Optional server-level transport section. The standalone server's CLI
+  /// defaults may fill an empty section only for non-GPU-RoCE, host-only
+  /// configurations.
+  transport_config transport;
 
   bool operator==(const multi_decoder_config &) const = default;
+
+  /// Validate every decoder's custom args (see
+  /// decoder_config::validate_custom_args).
+  __attribute__((visibility("default"))) void validate_custom_args() const;
 
   __attribute__((visibility("default"))) std::string
   to_yaml_str(int column_wrap = 80);
   __attribute__((visibility("default"))) static multi_decoder_config
   from_yaml_str(const std::string_view yaml_str);
 };
+
+/// @brief Rewrite a chunk-form configuration into the equivalent flat form,
+/// filling block_size, syndrome_size, H_sparse, O_sparse, D_sparse and
+/// error_rate_vec from `dem_chunks` expanded `num_rounds` times. Decoder
+/// construction does not need this: it keeps the chunk form (see
+/// decoder_init::from_dem_chunks_closed()).
+///
+/// Does nothing to a configuration that is already flat (one whose `H_sparse`
+/// is nonempty, or which carries no `dem_chunks` at all), so it is safe to
+/// call unconditionally. An empty H_sparse with dem_chunks present is still
+/// treated as chunk form.
+///
+/// @return The closed DEM the flat fields were derived from, so a caller that
+///         also wants its per-fault priors does not have to expand a second
+///         time. Empty when the configuration was already flat.
+/// @throws std::runtime_error if `num_rounds` is missing, or if the phases
+///         cannot be expanded to that many rounds.
+__attribute__((visibility("default")))
+std::optional<cudaq::qec::detector_error_model>
+expand_dem_chunks(decoder_config &config);
+
+/// @brief Generate a JSON Schema (draft 2020-12) document describing valid
+/// `multi_decoder_config` YAML files, so third-party tools (check-jsonschema,
+/// python jsonschema, yaml-language-server, ...) can validate user-provided
+/// configurations offline. The per-decoder `decoder_custom_args` sections are
+/// generated from the parameter schemas registered at call time, so decoder
+/// plugins (in-tree and out-of-tree alike) appear automatically once their
+/// library is loaded. Schema `validate` hooks are arbitrary C++ and are not
+/// representable; a document that passes the JSON Schema may still be
+/// rejected by those hooks when parsed.
+__attribute__((visibility("default"))) std::string decoder_config_json_schema();
 
 /// @brief Configure the decoders (`multi_decoder_config` variant). This
 /// function configures both local decoders, and if running on remote target
@@ -276,6 +277,14 @@ public:
 /// @return 0 on success, non-zero on failure.
 __attribute__((visibility("default"))) int
 configure_decoders(multi_decoder_config &config);
+
+/// @brief Configure the decoders, resolving relative model paths (such as
+/// `stim_dem_path`) against @p base_dir. The overload above uses the process
+/// working directory as it stands when resolution starts.
+/// @return 0 on success, non-zero on failure.
+__attribute__((visibility("default"))) int
+configure_decoders(multi_decoder_config &config,
+                   const std::filesystem::path &base_dir);
 
 /// @brief Configure the decoders from a file. This function configures both
 /// local decoders, and if running on remote target hardware, will submit the

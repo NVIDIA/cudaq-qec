@@ -297,7 +297,7 @@ stateDiagram-v2
 | `CUDAQ_TX_FLAG_ERROR_TAG<<48 \| err` | ERROR — upper 16 bits = `0xDEAD`, lower 32 = cudaError_t |
 | Any other non-zero | READY — value is host pointer to slot data containing result |
 
-**Producer backpressure** uses `slot_occupied[]` (not `tx_flags`), matching the hololink model where `ring_flag`/`rx_flags` is the sole sender-side backpressure mechanism.
+**Producer backpressure** uses `slot_occupied[]` (not `tx_flags`), matching the hsb model where `ring_flag`/`rx_flags` is the sole sender-side backpressure mechanism.
 
 ## 6. CUDA Graph Structure (per Worker)
 
@@ -361,7 +361,7 @@ flowchart TD
     end
 ```
 
-Backpressure uses `slot_occupied[]` (a host-side byte vector set by the producer, cleared by the consumer) rather than `tx_flags`. This matches the hololink FPGA model where the sender checks `ring_flag`/`rx_flags` for slot availability.
+Backpressure uses `slot_occupied[]` (a host-side byte vector set by the producer, cleared by the consumer) rather than `tx_flags`. This matches the hsb FPGA model where the sender checks `ring_flag`/`rx_flags` for slot availability.
 
 **Capacity:** With `num_slots = 16` and `num_workers = 8` (predecoder) + `16` (PyMatching),
 up to 16 syndromes can be in various stages of processing simultaneously. When all 16

@@ -7,7 +7,7 @@ AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)
    from source and is not part of any distributed CUDA-Q QEC binaries.
 
 This guide explains how to build, test, and run the AI predecoder + PyMatching
-pipeline over Hololink RDMA using CUDA-Q's realtime host dispatch system.
+pipeline over GPU RoCE RDMA using CUDA-Q's realtime host dispatch system.
 The pipeline runs a TensorRT-accelerated neural network (the *predecoder*) on
 the GPU to reduce syndrome density, then feeds the residual detectors to a
 pool of PyMatching MWPM decoders on the CPU.  It operates in two
@@ -53,7 +53,7 @@ Software
 - **CUDA-Q SDK**: pre-installed (provides ``libcudaq``, ``libnvqir``, ``nvq++``)
 - **DOCA**: 3.3 or later (for ``gpu_roce_transceiver`` RDMA transport)
 - **PyMatching decoder plugin**: the ``cudaq-qec-pymatching`` shared library
-  (``libcudaq-qec-pymatching.so``).  Built as part of the cudaqx build and
+  (``libcudaq-qec-pymatching.so``).  Built as part of the CUDA-Q QEC build and
   required at runtime.
 - **Predecoder ONNX model** (e.g. ``predecoder_memory_d13_T104_X.onnx``)
   placed under ``libs/qec/lib/realtime/``.  A cached TensorRT ``.engine`` file
@@ -71,8 +71,8 @@ Source Repositories
    * - Repository
      - URL
      - Version
-   * - **cudaqx**
-     - https://github.com/NVIDIA/cudaqx
+   * - **cudaq-qec**
+     - https://github.com/NVIDIA/cudaq-qec
      - ``main`` branch (or your feature branch)
    * - **cuda-quantum** (realtime)
      - https://github.com/NVIDIA/cuda-quantum
@@ -83,31 +83,31 @@ Source Repositories
 
 ``cuda-quantum`` provides ``libcudaq-realtime`` (the host dispatcher, ring
 buffer management, and dispatch kernel).  ``holoscan-sensor-bridge`` provides
-the Hololink ``GpuRoceTransceiver`` library for RDMA transport.
+the ``GpuRoceTransceiver`` library for RDMA transport.
 
 .. note::
 
-   The FPGA emulator (``hololink_fpga_emulator``) is built from the
+   The FPGA emulator (``hsb_fpga_emulator``) is built from the
    ``cuda-quantum`` repository and is only needed for the emulated test.
 
 
 Repository Layout
 -----------------
 
-Key files within ``cudaqx``:
+Key files within ``cudaq-qec``:
 
 .. code-block:: text
 
    libs/qec/
      unittests/
        realtime/
-         hololink_predecoder_bridge.cpp        # Bridge tool (RDMA <-> AI predecoder + PyMatching)
-         hololink_predecoder_test.sh           # Orchestration script
+         gpu_roce_predecoder_bridge.cpp        # Bridge tool (RDMA <-> AI predecoder + PyMatching)
+         gpu_roce_predecoder_test.sh           # Orchestration script
          predecoder_pipeline_common.h          # Pipeline config and shared utilities
          predecoder_pipeline_common.cpp        # Data loading (detectors, H, O, priors)
          test_realtime_predecoder_w_pymatching.cpp  # Software-only benchmark
        utils/
-         hololink_fpga_syndrome_playback.cpp   # Playback tool (loads syndromes into FPGA)
+         hsb_fpga_syndrome_playback.cpp   # Playback tool (loads syndromes into FPGA)
 
 The FPGA emulator is in the ``cuda-quantum`` repository:
 
@@ -115,7 +115,7 @@ The FPGA emulator is in the ``cuda-quantum`` repository:
 
    cuda-quantum/realtime/
      unittests/utils/
-       hololink_fpga_emulator.cpp              # Software FPGA emulator
+       hsb_fpga_emulator.cpp              # Software FPGA emulator
 
 
 Data Directory Layout
@@ -137,7 +137,7 @@ specification.  In summary, it must contain:
 - ``observables.bin`` -- observable ground-truth labels (binary, int32)
 
 The orchestration script automatically converts ``detectors.bin`` to the text
-format that ``hololink_fpga_syndrome_playback`` expects.
+format that ``hsb_fpga_syndrome_playback`` expects.
 
 .. note::
 
@@ -153,7 +153,7 @@ Building
 --------
 
 Building the FPGA demo requires ``holoscan-sensor-bridge`` and
-``libcudaq-realtime`` with Hololink tools enabled.
+``libcudaq-realtime`` with HSB tools enabled.
 
 .. code-block:: bash
 
@@ -193,30 +193,30 @@ Building the FPGA demo requires ``holoscan-sensor-bridge`` and
    cmake --build . --target gpu_roce_transceiver hololink_core
    cd ../..
 
-   # 3. Build libcudaq-realtime with Hololink tools enabled
+   # 3. Build libcudaq-realtime with HSB tools enabled
    cd cudaq-realtime-src/realtime && mkdir -p build && cd build
    cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime \
-     -DCUDAQ_REALTIME_ENABLE_HOLOLINK_TOOLS=ON \
+     -DCUDAQ_REALTIME_ENABLE_HSB_TOOLS=ON \
      -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=../../holoscan-sensor-bridge \
      -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=../../holoscan-sensor-bridge/build \
      ..
    ninja && ninja install
    cd ../../..
 
-   # 4. Build cudaqx with Hololink tools enabled
-   cmake -S cudaqx -B cudaqx/build \
+   # 4. Build cudaq-qec with HSB tools enabled
+   cmake -S cudaq-qec -B cudaq-qec/build \
      -DCMAKE_BUILD_TYPE=Release \
      -DCUDAQ_DIR=/path/to/cudaq-install/lib/cmake/cudaq/ \
      -DCUDAQ_REALTIME_ROOT=/tmp/cudaq-realtime \
      -DCUDAQ_QEC_BUILD_TRT_DECODER=ON \
      -DCUDAQX_ENABLE_LIBS="qec" \
      -DCUDAQX_INCLUDE_TESTS=ON \
-     -DCUDAQX_QEC_ENABLE_HOLOLINK_TOOLS=ON \
+     -DCUDAQX_QEC_ENABLE_HSB_TOOLS=ON \
      -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/path/to/holoscan-sensor-bridge \
      -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/path/to/holoscan-sensor-bridge/build
-   cmake --build cudaqx/build --target \
-     hololink_predecoder_bridge \
-     hololink_fpga_syndrome_playback \
+   cmake --build cudaq-qec/build --target \
+     gpu_roce_predecoder_bridge \
+     hsb_fpga_syndrome_playback \
      cudaq-qec-pymatching
 
 
@@ -228,10 +228,10 @@ processes run concurrently:
 
 1. **Emulator** -- receives syndromes via the UDP control plane, sends them
    to the bridge via RDMA, and captures corrections
-2. **Bridge** (``hololink_predecoder_bridge``) -- receives RDMA data, runs the
+2. **Bridge** (``gpu_roce_predecoder_bridge``) -- receives RDMA data, runs the
    AI predecoder (TensorRT CUDA graph) and PyMatching decode via the
    ``realtime_pipeline``
-3. **Playback** (``hololink_fpga_syndrome_playback``) -- loads syndrome data
+3. **Playback** (``hsb_fpga_syndrome_playback``) -- loads syndrome data
    into the emulator's BRAM and triggers playback
 
 Requirements
@@ -247,11 +247,11 @@ Running
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/realtime/hololink_predecoder_test.sh \
+   ./libs/qec/unittests/realtime/gpu_roce_predecoder_test.sh \
      --emulate \
      --setup-network \
      --cuda-quantum-dir /path/to/cuda-quantum \
-     --cuda-qx-dir /path/to/cudaqx \
+     --cuda-qx-dir /path/to/cudaq-qec \
      --data-dir /path/to/syndrome_data
 
 The ``--setup-network`` flag configures the ConnectX interface with the
@@ -261,10 +261,10 @@ After the initial network setup, subsequent runs are faster:
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/realtime/hololink_predecoder_test.sh \
+   ./libs/qec/unittests/realtime/gpu_roce_predecoder_test.sh \
      --emulate \
      --cuda-quantum-dir /path/to/cuda-quantum \
-     --cuda-qx-dir /path/to/cudaqx \
+     --cuda-qx-dir /path/to/cudaq-qec \
      --data-dir /path/to/syndrome_data
 
 
@@ -274,8 +274,8 @@ FPGA End-to-End Test
 The FPGA test uses a real FPGA connected to the GPU via a ConnectX NIC.  Two
 processes run:
 
-1. **Bridge** (``hololink_predecoder_bridge``) -- same as emulated mode
-2. **Playback** (``hololink_fpga_syndrome_playback``) -- loads syndromes into
+1. **Bridge** (``gpu_roce_predecoder_bridge``) -- same as emulated mode
+2. **Playback** (``hsb_fpga_syndrome_playback``) -- loads syndromes into
    the FPGA's BRAM and triggers RDMA playback to the bridge
 
 Requirements
@@ -291,9 +291,9 @@ Running
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/realtime/hololink_predecoder_test.sh \
+   ./libs/qec/unittests/realtime/gpu_roce_predecoder_test.sh \
      --cuda-quantum-dir /path/to/cuda-quantum \
-     --cuda-qx-dir /path/to/cudaqx \
+     --cuda-qx-dir /path/to/cudaq-qec \
      --data-dir /path/to/syndrome_data \
      --device mlx5_4 \
      --bridge-ip 192.168.0.1 \
@@ -307,7 +307,7 @@ Expected output:
 .. code-block:: text
 
    ========================================
-     Hololink Predecoder + PyMatching Bridge Test
+     GPU RoCE Predecoder + PyMatching Bridge Test
    ========================================
 
        Mode: Real FPGA (2-tool)
@@ -405,7 +405,7 @@ Then rebuild:
 
 .. code-block:: bash
 
-   cmake --build build --target hololink_predecoder_bridge
+   cmake --build build --target gpu_roce_predecoder_bridge
 
 
 Orchestration Script Reference
@@ -413,7 +413,7 @@ Orchestration Script Reference
 
 .. code-block:: text
 
-   hololink_predecoder_test.sh [options]
+   gpu_roce_predecoder_test.sh [options]
 
 Modes
 ^^^^^
@@ -458,7 +458,7 @@ Directory Options
      - cuda-quantum source directory
    * - ``--cuda-qx-dir DIR``
      - ``/workspaces/cudaqx``
-     - cudaqx source directory
+     - cudaq-qec source directory
    * - ``--data-dir DIR``
      - Per-config default
      - Syndrome data directory (expects ``detectors.bin``)
@@ -524,3 +524,9 @@ Run Options
      - ``8193``
      - UDP control port for emulator
 
+See Also
+--------
+
+* :doc:`Realtime Decoding </components/qec/realtime_decoding>` -- concept and workflow
+* :doc:`Getting Started with Realtime Decoding </examples_rst/qec/getting_started_realtime_decoding>`
+* :ref:`C++ <cpp_realtime_decoding_api>` and :ref:`Python <python_realtime_decoding_api>` realtime decoding API

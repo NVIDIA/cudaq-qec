@@ -3,7 +3,7 @@ description: Configure, build, and optionally cache a CUDA-QX library
 
 inputs:
   lib:
-    description: 'Library name to build. (e.g, all, qec or solvers)'
+    description: 'Library name to build. (e.g, all or qec)'
     required: true
   cuda_version:
     description: 'CUDA version to build against. (e.g, 12.6)'

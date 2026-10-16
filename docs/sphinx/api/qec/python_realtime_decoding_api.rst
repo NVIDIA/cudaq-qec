@@ -1,7 +1,4 @@
-.. _python_realtime_decoding_api:
-
-
-The Real-Time Decoding API enables low-latency error correction on quantum hardware by allowing CUDA-Q quantum kernels to interact with decoders during circuit execution. This API is designed for use cases where corrections must be calculated and applied within qubit coherence times.
+The Realtime Decoding API enables low-latency error correction on quantum hardware by allowing CUDA-Q quantum kernels to interact with decoders during circuit execution. This API is designed for use cases where corrections must be calculated and applied within qubit coherence times.
 
 The real-time decoding system supports simulation environments for local testing and hardware integration (e.g., on
 `Quantinuum's Helios QPU
@@ -72,65 +69,96 @@ Configuration API
 
 The configuration API enables setting up decoders before circuit execution. Decoders are configured using YAML files or programmatically constructed configuration objects.
 
-Configuration Types
-^^^^^^^^^^^^^^^^^^^
+Decoder Parameters
+^^^^^^^^^^^^^^^^^^
 
-.. py:class:: cudaq_qec.pymatching_config
+Decoder-specific parameters (``decoder_config.decoder_custom_args``) are
+plain dicts. The set of accepted keys, their types, and which are required
+are defined by the *parameter schema* each decoder registers -- including
+out-of-tree decoder plugins. Use ``cudaq_qec.decoder_param_schema(name)`` to
+inspect a decoder's parameters and ``cudaq_qec.registered_decoder_schemas()``
+to list all decoders with registered schemas.
 
-   Configuration for the PyMatching decoder in the real-time decoding system.
-   Use this with ``decoder_config.type = "pymatching"``.
-   Set ``decoder_config.type`` before passing this object to
-   ``decoder_config.set_decoder_custom_args``.
-   The decoder input matrix must be graphlike: each ``H_sparse`` column can
-   contain only one or two detector entries.
+For example, model error rates may be assigned to the top-level
+``decoder_config.error_rate_vec`` field, while the ``pymatching`` decoder's
+custom ``merge_strategy`` is one of ``"disallow"``, ``"independent"``,
+``"smallest_weight"``, ``"keep_original"``, or ``"replace"``. Emitted YAML
+retains the established spelling under ``decoder_custom_args``. Input YAML
+accepts either location, but rejects a configuration that supplies both:
 
-   **Attributes:**
+.. code-block:: python
 
-   .. py:attribute:: error_rate_vec
-      :type: Optional[List[float]]
+   config.type = "pymatching"
+   config.error_rate_vec = [0.1, 0.1, 0.1]
+   config.decoder_custom_args = {
+       "merge_strategy": "smallest_weight",
+   }
 
-      Per-error prior probabilities. When provided, the length must match the
-      decoder ``block_size`` and each value must be in the range ``(0, 0.5]``.
+The corresponding YAML keeps the error rates in the compatibility location:
 
-   .. py:attribute:: merge_strategy
-      :type: Optional[str]
+.. code-block:: yaml
 
-      PyMatching edge merge strategy. Supported values are ``"disallow"``,
-      ``"independent"``, ``"smallest_weight"``, ``"keep_original"``, and
-      ``"replace"``.
+   decoder_custom_args:
+     error_rate_vec: [0.1, 0.1, 0.1]
+     merge_strategy: smallest_weight
 
-.. py:class:: cudaq_qec.trt_decoder_config
+The ``trt_decoder`` accepts ``onnx_load_path`` or ``engine_load_path``
+(mutually exclusive), required ``engine_output_format`` (``"errors"``,
+``"residual_detectors"``, ``"observables"``, or
+``"observables_and_residual_detectors"``), ``engine_save_path``, ``precision``
+(``"best"``, ``"tf32"``, or ``"noTF32"``; legacy ``"fp16"``, ``"bf16"``,
+``"int8"``, and ``"fp8"`` values are accepted but ignored for strongly typed
+networks),
+``memory_workspace`` (bytes), ``batch_size``, ``use_cuda_graph``, and an
+optional global decoder attached via ``global_decoder`` plus
+``global_decoder_params`` (a nested dict whose keys follow the schema of the
+named global decoder).
 
-   Configuration for TensorRT decoder in real-time decoding system.
+.. py:function:: cudaq_qec.decoder_param_schema(decoder_name)
 
-   **Attributes:**
+   Return the registered parameter schema for a decoder as a list of
+   descriptors (``key``, ``kind``, ``required``, and, for nested sections,
+   ``subschema`` or ``discriminator``), or ``None`` when the decoder has not
+   registered one.
 
-   .. py:attribute:: onnx_load_path
-      :type: Optional[str]
+.. py:function:: cudaq_qec.registered_decoder_schemas()
 
-      Path to ONNX model file. Mutually exclusive with engine_load_path.
+   Names of all decoders (and nested parameter sections) with registered
+   parameter schemas.
 
-   .. py:attribute:: engine_load_path
-      :type: Optional[str]
+.. py:function:: cudaq_qec.decoder_config_json_schema()
 
-      Path to pre-built TensorRT engine file. Mutually exclusive with 
-      onnx_load_path.
+   Return a JSON Schema (draft 2020-12) document, as a string, that
+   validates ``multi_decoder_config`` YAML files. Generated from the decoder
+   parameter schemas registered in this installation (including loaded
+   third-party decoder plugins), for use with standard tools such as
+   ``check-jsonschema``, the python ``jsonschema`` package, or editor YAML
+   language servers. Schema validation hooks are not representable in JSON
+   Schema, so a passing document may still be rejected when parsed.
 
-   .. py:attribute:: engine_save_path
-      :type: Optional[str]
+.. py:method:: decoder_config.validate_custom_args()
 
-      Path to save built TensorRT engine for reuse.
+   Validate ``decoder_custom_args`` against the parameter schema registered
+   for this decoder ``type``: unknown keys, missing required keys, and the
+   schema's own validation hook. Raises ``RuntimeError`` on the first
+   violation. YAML parsing applies the same checks automatically; call this
+   to vet a configuration built programmatically before using it. Also
+   available on ``multi_decoder_config`` to validate every decoder at once.
 
-   .. py:attribute:: precision
-      :type: Optional[str]
+Deprecated Typed Configuration Classes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-      Inference precision mode: "fp16", "bf16", "int8", "fp8", "tf32", 
-      "noTF32", or "best" (default).
-
-   .. py:attribute:: memory_workspace
-      :type: Optional[int]
-
-      Workspace memory size in bytes (default: 1073741824 = 1GB).
+The typed configuration classes from earlier releases
+(``nv_qldpc_decoder_config``, ``trt_decoder_config``, ``pymatching_config``,
+``chromobius_config``, ``multi_error_lut_config``, and the
+``qecrt.config``-level ``single_error_lut_config``, ``sliding_window_config``,
+and ``srelay_bp_config``) remain available as deprecated compatibility shims.
+They emit a ``DeprecationWarning`` on construction and will be removed in a
+future release; existing code that builds one and passes it to
+``decoder_config.set_decoder_custom_args`` (or assigns it to
+``decoder_config.decoder_custom_args``) continues to work unchanged. Note
+that *reading* ``decoder_custom_args`` now always returns a plain dict, never
+a typed object. New code should assign dicts directly, as shown above.
 
 Configuration Functions
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -163,7 +191,7 @@ Configuration Functions
 Helper Functions
 ----------------
 
-Real-time decoding requires converting matrices to sparse format for efficient decoder configuration. The following utility functions are essential:
+Realtime decoding requires converting matrices to sparse format for efficient decoder configuration. The following utility functions are essential:
 
 .. py:function:: cudaq_qec.pcm_to_sparse_vec(pcm)
 
@@ -188,20 +216,23 @@ Real-time decoding requires converting matrices to sparse format for efficient d
    :param num_cols: Number of columns in the output matrix
    :returns: Dense binary matrix as numpy array
 
-.. py:function:: cudaq_qec.generate_timelike_sparse_detector_matrix(num_syndromes_per_round, num_rounds, include_first_round)
+.. py:function:: cudaq_qec.d_sparse(m2d)
 
-   Generate the D_sparse matrix that encodes how detectors relate across syndrome measurement rounds.
+   Flatten a measurement-to-detector map into the ``-1``-terminated sparse vector a
+   realtime decoder config expects for its ``D_sparse``.
 
-   :param num_syndromes_per_round: Number of syndrome measurements per round (typically code distance squared)
-   :param num_rounds: Total number of syndrome measurement rounds
-   :param include_first_round: Boolean (False for standard memory experiments) or list for custom first round
-   :returns: Sparse matrix encoding detector relationships
+   :param m2d: List of lists of measurement indices. ``m2d[d]`` contains the measurement
+               indices whose XOR forms detector ``d``. Obtain this from the second element
+               of the tuple returned by :meth:`DecoderContext.x_component`,
+               :meth:`DecoderContext.z_component`, or :meth:`DecoderContext.full_component`.
+   :returns: ``-1``-terminated sparse vector suitable for ``decoder_config.D_sparse``
 
    **Usage in real-time decoding:**
 
    .. code-block:: python
 
-      config.D_sparse = qec.generate_timelike_sparse_detector_matrix(
-          numSyndromesPerRound, numRounds, False)
+      ctx = qec.decoder_context_from_memory_circuit(code, statePrep, num_rounds, noise)
+      dem, m2d, m2o = ctx.z_component()  # or x_component() / full_component()
+      config.D_sparse = qec.d_sparse(m2d)
 
-See also :ref:`Parity Check Matrix Utilities <python_api:Parity Check Matrix Utilities>` for additional PCM manipulation functions.
+See also :ref:`parity_check_matrix_utilities_python` for additional PCM manipulation functions.

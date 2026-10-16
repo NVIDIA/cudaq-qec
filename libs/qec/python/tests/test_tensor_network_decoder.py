@@ -62,7 +62,7 @@ def test_decoder_init_and_attributes():
         assert decoder.contractor_config.contractor_name == "torch"
         assert decoder.contractor_config.backend == "torch"
         assert decoder.contractor_config.device == "cpu"
-    assert decoder._dtype == "float32"
+    assert decoder._dtype == "float64"
 
 
 def test_decoder_replace_logical_observable():
@@ -158,8 +158,9 @@ def test_decoder_decode_batch():
     assert res.result.shape == (3, 1)
     assert res.converged.shape == (3,)
     assert np.all(res.converged)
-    assert np.all((0.0 <= np.round(res.result[:, 0])) &
-                  (np.round(res.result[:, 0]) <= 1.0))
+    np.testing.assert_allclose(res.result[:, 0], [1.0, 1.0, 0.0],
+                               atol=1e-12,
+                               rtol=1e-12)
 
 
 def test_decoder_set_contractor_invalid():
@@ -583,6 +584,212 @@ def test_invalid_backend():
 def test_invalid_combo():
     with pytest.raises(ValueError):
         ContractorConfig("torch", "numpy", "cpu")
+
+
+# ---------------------------------------------------------------------------
+# Focused tests for _safe_posterior / mass-validation logic, using a mocked
+# contractor so these run without a GPU and without a real contraction.
+# ContractorConfig is a frozen dataclass; its contractor property reads from
+# the class-level _contractors dict, which is the correct mock surface.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_decoder(monkeypatch):
+    """Fixture that returns a factory for decoders with a mocked contractor.
+
+    Usage:
+        decoder = mock_decoder(np.array([m0, m1]))           # single decode
+        decoder = mock_decoder(np.array([[...],...]), rows=N) # batch decode
+    The factory patches ContractorConfig._contractors for the active backend
+    and pre-sets path_single/path_batch so no path optimisation is triggered.
+    """
+
+    def _make(mock_output, rows=None, dtype="float64"):
+        H, logical, noise = make_simple_code()
+        decoder = qec.get_decoder("tensor_network_decoder",
+                                  H,
+                                  logical_obs=logical,
+                                  noise_model=noise,
+                                  dtype=dtype)
+        decoder.path_single = "auto"
+        decoder.path_batch = "auto"
+        if rows is not None:
+            decoder._batch_size = rows
+        name = decoder.contractor_config.contractor_name
+        monkeypatch.setitem(ContractorConfig._contractors, name,
+                            lambda *a, **kw: mock_output)
+        return decoder
+
+    return _make
+
+
+def test_default_dtype_is_float64():
+    H, logical, noise = make_simple_code()
+    decoder = qec.get_decoder("tensor_network_decoder",
+                              H,
+                              logical_obs=logical,
+                              noise_model=noise)
+    assert decoder._dtype == "float64"
+
+
+_BIG = np.finfo(np.float64).max
+
+
+@pytest.mark.parametrize(
+    "masses",
+    [
+        [-0.1, 1.1],  # negative mass
+        [0.0, 0.0],  # zero denominator
+        [float("nan"), 0.5],  # NaN
+        [float("inf"), 0.5],  # infinite mass
+        [_BIG, _BIG],  # finite masses whose sum overflows to inf
+    ])
+def test_decode_invalid_masses_marks_unconverged(mock_decoder, masses):
+    res = mock_decoder(np.array(masses)).decode([0.0, 0.0])
+    assert not res.converged
+    assert res.result[0] == pytest.approx(0.5)
+
+
+def test_decode_valid_masses_converged(mock_decoder):
+    res = mock_decoder(np.array([0.3, 0.7])).decode([0.0, 0.0])
+    assert res.converged
+    assert res.result[0] == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_decode_roundoff_negative_mass_converged(mock_decoder, dtype):
+    eps = np.finfo(np.dtype(dtype)).eps
+    res = mock_decoder(np.array([-eps, 1.0]), dtype=dtype).decode([0.0, 0.0])
+    assert res.converged
+    assert res.result[0] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        [-0.1, 1.1],  # negative mass
+        [float("nan"), 0.5],  # NaN
+        [0.0, 0.0],  # zero denominator
+    ])
+def test_decode_batch_invalid_row_marks_unconverged(mock_decoder, bad_row):
+    mock = np.array([[0.3, 0.7], bad_row])
+    res = mock_decoder(mock, rows=2).decode_batch(np.zeros((2, 2)))
+    assert res.converged[0]
+    assert not res.converged[1]
+    assert res.result[0, 0] == pytest.approx(0.7)
+    assert res.result[1, 0] == pytest.approx(0.5)
+
+
+def test_decode_batch_all_valid_all_converged(mock_decoder):
+    mock = np.array([[0.2, 0.8], [0.6, 0.4], [0.1, 0.9]])
+    res = mock_decoder(mock, rows=3).decode_batch(np.zeros((3, 2)))
+    assert np.all(res.converged)
+    np.testing.assert_allclose(res.result[:, 0], [0.8, 0.4, 0.9])
+
+
+def test_error_pairs_noise_model_ndarray_batch():
+    # Ndarray batch must be (N, 2, 2): one 2x2 joint-probability matrix per pair.
+    error_index_pairs = [('e0', 'e1'), ('e2', 'e3')]
+    error_probabilities = np.array([[[0.9, 0.1], [0.2, 0.8]],
+                                    [[0.7, 0.3], [0.4, 0.6]]])
+    tn = error_pairs_noise_model(error_index_pairs, error_probabilities)
+    assert isinstance(tn, TensorNetwork)
+    assert len(tn.tensors) == 2
+    for i, t in enumerate(tn.tensors):
+        # Each slice is a 2-index tensor, not a length-2 vector.
+        np.testing.assert_array_equal(t.data, error_probabilities[i])
+        assert t.inds == error_index_pairs[i]
+        assert "NOISE" in t.tags
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        np.array([[0.9, 0.1], [0.7, 0.3]]),  # (N, 2): one vector per pair
+        np.ones((2, 2, 3)),  # trailing size is not 2x2
+        np.ones((2, 3, 2)),  # middle size is not 2
+        np.ones((2, 2, 2, 2)),  # extra dimension
+    ])
+def test_error_pairs_noise_model_ndarray_rejects_bad_shapes(bad):
+    # Unusable ndarray ranks/shapes must fail in this helper, not later in Quimb.
+    error_index_pairs = [('e0', 'e1'), ('e2', 'e3')]
+    with pytest.raises(AssertionError, match=r"\(N, 2, 2\)"):
+        error_pairs_noise_model(error_index_pairs, bad)
+
+
+def test_factorized_noise_model_rejects_2d_ndarray():
+    # A 2-D batch whose first axis matches the indices is still the wrong rank.
+    error_indices = ['e0', 'e1', 'e2']
+    bad = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
+    with pytest.raises(AssertionError, match="1D array"):
+        factorized_noise_model(error_indices, bad)
+
+
+def test_factorized_noise_model_rejects_tuple():
+    with pytest.raises(TypeError, match="list or numpy array"):
+        factorized_noise_model(['e0', 'e1'], (0.1, 0.2))
+
+
+def test_error_pairs_noise_model_rejects_tuple():
+    pairs = [('e0', 'e1')]
+    mats = (np.array([[0.9, 0.1], [0.2, 0.8]]),)
+    with pytest.raises(TypeError, match="list or numpy array"):
+        error_pairs_noise_model(pairs, mats)
+
+
+def test_decoder_cpu_fallback_custom_inds_and_tn_noise(monkeypatch):
+    # Without CUDA, construction uses the Torch/CPU contractor; custom check
+    # and error names are stored, and a TensorNetwork noise model is reindexed
+    # onto those error names.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    H, logical, noise = make_simple_code()
+    check_inds = ["chk_a", "chk_b"]
+    error_inds = ["err_x", "err_y", "err_z"]
+    tn = factorized_noise_model(["n0", "n1", "n2"], noise)
+    decoder = qec.get_decoder("tensor_network_decoder",
+                              H,
+                              logical_obs=logical,
+                              noise_model=tn,
+                              check_inds=check_inds,
+                              error_inds=error_inds)
+    assert decoder.contractor_config.contractor_name == "torch"
+    assert decoder.contractor_config.backend == "torch"
+    assert decoder.contractor_config.device == "cpu"
+    assert decoder.check_inds == check_inds
+    assert decoder.error_inds == error_inds
+    assert list(decoder.noise_model.outer_inds()) == error_inds
+
+
+@pytest.mark.parametrize("ind_name, inds, n_got", [
+    ("check_inds", ["s0"], 1),
+    ("check_inds", ["s0", "s1", "s2"], 3),
+    ("error_inds", ["e0", "e1"], 2),
+    ("error_inds", ["e0", "e1", "e2", "e3"], 4),
+])
+def test_decoder_custom_inds_length(ind_name, inds, n_got):
+    H, logical, noise = make_simple_code()
+    n_exp = H.shape[0] if ind_name == "check_inds" else H.shape[1]
+    with pytest.raises(
+            AssertionError,
+            match=rf"{ind_name} must have length {n_exp}, but got {n_got}"):
+        qec.get_decoder("tensor_network_decoder",
+                        H,
+                        logical_obs=logical,
+                        noise_model=noise,
+                        **{ind_name: inds})
+
+
+def test_decoder_noise_tn_open_index_count():
+    # A TensorNetwork noise model must expose one open index per error.
+    H, logical, _ = make_simple_code()
+    tn = factorized_noise_model(["n0", "n1"], [0.1, 0.2])
+    with pytest.raises(AssertionError,
+                       match=r"Noise model has 2 open indices, but expected 3"):
+        qec.get_decoder("tensor_network_decoder",
+                        H,
+                        logical_obs=logical,
+                        noise_model=tn)
 
 
 if __name__ == "__main__":

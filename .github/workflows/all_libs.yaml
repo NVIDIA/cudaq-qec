@@ -24,7 +24,7 @@ jobs:
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
     container: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
     permissions:
       actions: write
@@ -69,7 +69,7 @@ jobs:
       - name: Install build requirements
         run: |
           apt update
-          apt install -y --no-install-recommends gfortran libblas-dev wget
+          apt install -y --no-install-recommends wget
           # custabilizer-cuXX is pulled in transitively by cuquantum-python-cuXX;
           # it provides the headers/library that FindcuStabilizer.cmake locates.
           pip install "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
@@ -119,7 +119,7 @@ jobs:
           # Install the correct torch first.
           cuda_no_dot=$(echo ${{ matrix.cuda_version }} | sed 's/\.//')
           pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}
-          pip install numpy pytest onnxscript cuquantum-cu${{ steps.config.outputs.cuda_major }} lightning ml_collections mpi4py transformers quimb opt_einsum cotengra nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
+          pip install numpy pytest onnxscript cuquantum-cu${{ steps.config.outputs.cuda_major }} lightning ml_collections mpi4py transformers quimb opt_einsum nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
           # The following tests are needed for docs/sphinx/examples/qec/python/tensor_network_decoder.py.
           if [ "$(uname -m)" == "x86_64" ]; then
               # Stim is not currently available on manylinux ARM wheels, so only

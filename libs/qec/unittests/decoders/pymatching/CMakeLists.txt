@@ -29,28 +29,6 @@ target_link_libraries(test_pymatching PRIVATE GTest::gtest_main cudaq-qec-decode
 add_dependencies(CUDAQXQECUnitTests test_pymatching)
 gtest_discover_tests(test_pymatching)
 
-if(CUDAQ_REALTIME_ROOT AND CUDAQ_REALTIME_INCLUDE_DIR)
-  add_executable(test_pymatching_realtime test_pymatching_realtime.cpp)
-  target_include_directories(test_pymatching_realtime PRIVATE
-    ${CUDAQ_REALTIME_INCLUDE_DIR}
-    ${CUDAToolkit_INCLUDE_DIRS}
-    ${CUDAQX_QEC_SOURCE_DIR}/lib/realtime
-  )
-  target_compile_definitions(test_pymatching_realtime PRIVATE
-    CUDAQ_REALTIME_ROOT)
-  target_link_libraries(test_pymatching_realtime PRIVATE
-    GTest::gtest_main
-    cudaq-qec-decoders
-    cudaq-qec-realtime-decoding
-  )
-  set_target_properties(test_pymatching_realtime PROPERTIES
-    BUILD_RPATH "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins"
-  )
-  add_dependencies(test_pymatching_realtime cudaq-qec-pymatching)
-  add_dependencies(CUDAQXQECUnitTests test_pymatching_realtime)
-  gtest_discover_tests(test_pymatching_realtime)
-endif()
-
 if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET cudaq-qec-realtime-decoding-server-cqr)
   add_executable(test_pymatching_device_call_realtime)
   set_target_properties(test_pymatching_device_call_realtime PROPERTIES
@@ -108,9 +86,7 @@ if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET cudaq-qec-realtime-decoding-server-cqr)
   add_dependencies(CUDAQXQECUnitTests test_pymatching_device_call_realtime)
   # CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch routes the device_call over the
   # cudaq-realtime host-dispatch ring to the decoding server, which decodes on
-  # the CPU host. No CUDAQ_QEC_REALTIME_MODE=inproc_rpc: that second,
-  # server-internal decode ring is redundant now that the device_call already
-  # crosses cudaq-realtime here -- the server decodes inline instead.
+  # the CPU host.
   gtest_discover_tests(test_pymatching_device_call_realtime
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     PROPERTIES ENVIRONMENT "CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch")

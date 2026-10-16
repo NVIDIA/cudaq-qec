@@ -17,33 +17,24 @@
 #
 # The example decodes ONE volume of num_rounds rounds (no sliding windows).
 #
-# The driver is decoder-agnostic. For trt_decoder, pass an ONNX path as arg 6
-# or pass AUTO to generate a small [pre_L=0, residual=identity] model sized for
-# the requested distance/num_rounds. Additional app args (for example
-# --use-relay-bp) may follow arg 6.
+# For trt_decoder, select exactly one model source explicitly:
+#   --generate-identity-onnx
+#   --onnx-path <file>
+#   --use-ising [--ising-artifacts-dir <dir>]
+# The Ising path is deliberately opt-in and is not exercised by CI.
 #
-# trt+Ising external-bundle path (NOT exercised by the AUTO ctest, which uses an
-# identity predecoder): to run the example against an Ising d/T/Z predecoder, you
-# need the predecoder bundle (H_csr.bin/O_csr.bin/priors.bin/metadata.txt +
-# D_sparse.txt) and the ONNX model, neither of which ships in this repository.
-# Generate them locally from the Ising decoding project
-# (https://github.com/NVIDIA/Ising-Decoding):
-#   (i)   bundle matrices (writes H_csr.bin/O_csr.bin/priors.bin/metadata.txt
-#         into <bundle>):
-#           python generate_test_data.py --distance D --n-rounds T --basis Z \
-#               --code-rotation XV --output-dir <bundle>
-#   (ii)  D_sparse.txt aligning Ising detectors to the cudaqx live buffer (run
-#         the app once with --save_dem to print cnot_schedX/Z, then translate):
-#           surface_code-4-yaml --save_dem cfg.yml --decoder_type pymatching \
-#               --distance D --num_rounds T > sched.txt
-#           python gen_dsparse_from_memory_circuit.py D T Z XV sched.txt \
-#               <bundle>/D_sparse.txt --ising-repo /path/to/ising/code
-#   (iii) export the ONNX predecoder predecoder_memory_dD_TT_Z.onnx.
-#   (iv)  run the example (pass <bundle> to --ising_bundle):
-#           surface_code-4-yaml --save_dem cfg.yml --decoder_type trt_decoder \
-#               --onnx_path predecoder_memory_dD_TT_Z.onnx \
-#               --ising_bundle <bundle> --distance D --num_rounds T ...
-#           surface_code-4-yaml --yaml cfg.yml --distance D --num_rounds T ...
+# The Ising path is opt-in. To prepare the default d7/T7/Z/XV Fast bundle,
+# accept the gated model terms and authenticate with `hf auth login`:
+#   https://huggingface.co/nvidia/Ising-Decoder-SurfaceCode-1-Fast
+# Then, from this directory, run:
+#   python prepare_ising_artifacts.py --app <path>/surface_code-4-yaml
+#   bash surface_code-4-yaml-test.sh <path>/surface_code-4-yaml 7 7 \
+#       trt_decoder 200 --use-ising
+#
+# The utility installs under
+# ${XDG_CACHE_HOME:-$HOME/.cache}/cudaqx/ising/fast/d7_t7_z_xv. Compatible
+# custom exports may instead use --ising-artifacts-dir; use the utility's
+# d-sparse subcommand to generate their CUDA-QX measurement mapping.
 
 set -euo pipefail
 
@@ -56,8 +47,8 @@ set -euo pipefail
 #                    with one entry per patch (pass --num_logical N in the
 #                    extra args). Optional, defaults to pymatching.
 #  $5 num_shots      Number of shots (optional, defaults to 200)
-#  $6 onnx_path      ONNX path for trt_decoder, or AUTO to generate one
-#  $7... extra args  Extra app args to pass to generation/realtime phases
+#  $6... options     One explicit TRT model-source option, when needed, plus
+#                    extra app args for both generation and realtime phases
 
 if [[ $# -lt 3 ]]; then
   echo "Error: Expected at least 3 arguments (got $#)"
@@ -70,18 +61,88 @@ DISTANCE=$2
 NUM_ROUNDS=$3
 DECODER_TYPE=${4:-pymatching}
 NUM_SHOTS=${5:-200}
-ONNX_PATH=${6:-}
+ONNX_PATH=""
+MODEL_SOURCE=""
+ISING_ARTIFACTS_DIR=""
 EXTRA_APP_ARGS=()
-if [[ $# -ge 7 ]]; then
-  EXTRA_APP_ARGS=("${@:7}")
+
+select_model_source() {
+  local requested=$1
+  if [[ -n "$MODEL_SOURCE" ]]; then
+    echo "Error: model sources are mutually exclusive; already selected '$MODEL_SOURCE', got '$requested'"
+    exit 1
+  fi
+  MODEL_SOURCE=$requested
+}
+
+if [[ $# -ge 5 ]]; then
+  shift 5
+else
+  shift "$#"
+fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --generate-identity-onnx)
+      select_model_source identity
+      shift
+      ;;
+    --onnx-path|--onnx_path)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: $1 requires a value"
+        exit 1
+      fi
+      select_model_source onnx
+      ONNX_PATH=$2
+      shift 2
+      ;;
+    --use-ising)
+      select_model_source ising
+      shift
+      ;;
+    --ising-artifacts-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --ising-artifacts-dir requires a value"
+        exit 1
+      fi
+      ISING_ARTIFACTS_DIR=$2
+      shift 2
+      ;;
+    *)
+      EXTRA_APP_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "$ISING_ARTIFACTS_DIR" && "$MODEL_SOURCE" != "ising" ]]; then
+  echo "Error: --ising-artifacts-dir does not enable Ising; pass --use-ising explicitly"
+  exit 1
+fi
+if [[ ",$DECODER_TYPE," == *",trt_decoder,"* ]]; then
+  if [[ -z "$MODEL_SOURCE" ]]; then
+    echo "Error: trt_decoder requires one model source: --generate-identity-onnx, --onnx-path <file>, or --use-ising"
+    exit 1
+  fi
+elif [[ -n "$MODEL_SOURCE" ]]; then
+  echo "Error: '$MODEL_SOURCE' is a TensorRT model source, but decoder_type has no trt_decoder entry"
+  exit 1
 fi
 
+PYTHON_BIN=${PYTHON:-python3}
+
+# The app defaults to one logical patch. The aggregate result sums residual
+# errors across patches, so retain the per-patch ceiling when --num_logical
+# requests multiple patches.
+NUM_LOGICAL=1
+for ((i = 0; i < ${#EXTRA_APP_ARGS[@]}; i++)); do
+  if [[ "${EXTRA_APP_ARGS[$i]}" == "--num_logical" ]] &&
+    ((i + 1 < ${#EXTRA_APP_ARGS[@]})); then
+    i=$((i + 1))
+    NUM_LOGICAL=${EXTRA_APP_ARGS[$i]}
+  fi
+done
+
 export CUDAQ_DEFAULT_SIMULATOR=stim
-if [[ -n "${QEC_DECODING_SERVER:-}" ]]; then
-  export CUDAQ_QEC_REALTIME_MODE=external_server
-else
-  export CUDAQ_QEC_REALTIME_MODE=${CUDAQ_QEC_REALTIME_MODE:-inproc_rpc}
-fi
 
 P_SPAM=0.01
 
@@ -90,10 +151,11 @@ P_SPAM=0.01
 # d5/T6). A decoder that loads but never corrects reliably exceeds it; any
 # working decoder sits well below it. This is a wiring/correctness check, not
 # a performance target -- it must never be tightened toward a particular
-# decoder's measured rate. Floored at 1 so small shot counts do not truncate
-# the ceiling to 0.
-MAX_NON_ZERO=$((NUM_SHOTS / 50))
-if [[ $MAX_NON_ZERO -lt 1 ]]; then MAX_NON_ZERO=1; fi
+# decoder's measured rate. Floored at 1 per logical patch so small shot counts
+# do not truncate the ceiling to 0, then scaled for the aggregate result.
+MAX_NON_ZERO_PER_LOGICAL=$((NUM_SHOTS / 50))
+if [[ $MAX_NON_ZERO_PER_LOGICAL -lt 1 ]]; then MAX_NON_ZERO_PER_LOGICAL=1; fi
+MAX_NON_ZERO=$((MAX_NON_ZERO_PER_LOGICAL * NUM_LOGICAL))
 
 # Multi-type mode: a comma list binds one decoder type per patch and the
 # per-decoder ceilings below replace the aggregate ceiling (which is
@@ -132,10 +194,9 @@ trap cleanup EXIT
 CONFIG_FILE=$WORKDIR/config.yml
 REALTIME_LOG=$WORKDIR/realtime.log
 
-if [[ ",$DECODER_TYPE," == *",trt_decoder,"* && "$ONNX_PATH" == "AUTO" ]]; then
+if [[ "$MODEL_SOURCE" == "identity" ]]; then
   ONNX_PATH=$WORKDIR/trt_identity_predecoder.onnx
   SYNDROME_SIZE=$(((DISTANCE * DISTANCE - 1) * NUM_ROUNDS))
-  PYTHON_BIN=${PYTHON:-python3}
   "$PYTHON_BIN" - "$ONNX_PATH" "$SYNDROME_SIZE" <<'PY'
 import sys
 
@@ -174,9 +235,17 @@ echo "  distance       = $DISTANCE"
 echo "  num_rounds     = $NUM_ROUNDS"
 echo "  decoder_type   = $DECODER_TYPE"
 echo "  num_shots      = $NUM_SHOTS"
-echo "  realtime mode  = $CUDAQ_QEC_REALTIME_MODE"
+echo "  num_logical    = $NUM_LOGICAL"
 if [[ -n "$ONNX_PATH" ]]; then
   echo "  onnx_path      = $ONNX_PATH"
+fi
+if [[ "$MODEL_SOURCE" == "ising" ]]; then
+  echo "  model source   = Ising"
+  if [[ -n "$ISING_ARTIFACTS_DIR" ]]; then
+    echo "  artifacts dir  = $ISING_ARTIFACTS_DIR"
+  else
+    echo "  artifacts dir  = default CUDA-QX cache"
+  fi
 fi
 if [[ ${#EXTRA_APP_ARGS[@]} -gt 0 ]]; then
   echo "  extra args     = ${EXTRA_APP_ARGS[*]}"
@@ -200,7 +269,12 @@ GEN_ARGS=(
   --save_dem "$CONFIG_FILE"
 )
 if [[ -n "$ONNX_PATH" ]]; then
-  GEN_ARGS+=(--onnx_path "$ONNX_PATH")
+  GEN_ARGS+=(--onnx-path "$ONNX_PATH")
+elif [[ "$MODEL_SOURCE" == "ising" ]]; then
+  GEN_ARGS+=(--use-ising)
+  if [[ -n "$ISING_ARTIFACTS_DIR" ]]; then
+    GEN_ARGS+=(--ising-artifacts-dir "$ISING_ARTIFACTS_DIR")
+  fi
 fi
 if [[ ${#EXTRA_APP_ARGS[@]} -gt 0 ]]; then
   GEN_ARGS+=("${EXTRA_APP_ARGS[@]}")
@@ -235,7 +309,6 @@ fi
 # The hard-patch experiment must carry distinct decoder priors, not merely
 # inject different runtime noise into three identically configured decoders.
 if [[ -n "${CHECK_HARD_PATCH_MODELS:-}" ]]; then
-  PYTHON_BIN=${PYTHON:-python3}
   "$PYTHON_BIN" - "$CONFIG_FILE" <<'PY'
 import re
 import sys
@@ -293,8 +366,8 @@ fi
 # but its CQR build deliberately does not construct local decoders.
 SERVER_PORT=""
 if [[ -n "${QEC_DECODING_SERVER:-}" ]]; then
-  if [[ -n "${REQUIRE_TRT_EXECUTION:-}" ]]; then
-    CUDAQ_QEC_TRT_REPORT_INFERENCE_EXECUTIONS=1 \
+  if [[ -n "${REQUIRE_SERVER_DECODE_COUNTS:-}" ]]; then
+    QEC_DECODING_SERVER_STATS=1 \
       "$QEC_DECODING_SERVER" --config="$CONFIG_FILE" --transport=udp --port=0 \
         --timeout=300 >"$SERVER_LOG" 2>&1 &
   else
@@ -319,6 +392,28 @@ if [[ -n "${QEC_DECODING_SERVER:-}" ]]; then
     exit 1
   fi
   echo "External decoding server ready on UDP port $SERVER_PORT"
+
+  # The server serves each decoder on its own ring and the READY line carries
+  # one ring<id>=<port> token per decoder.  Export ring 1..N-1 as
+  # QEC_DECODING_SERVER_PORT_<id> so the app wires each logical qubit's
+  # device_call session to its decoder's ring (same pattern as the
+  # surface_code-1 two-process driver).  Requests execute inline on the
+  # server's per-ring dispatcher threads, so decoder concurrency requires the
+  # per-decoder-ring topology — a single shared ring serializes decodes.
+  # Every expected ring token is REQUIRED: a missing token would silently
+  # route that decoder over the shared default ring, and the test would no
+  # longer exercise per-ring dispatch.
+  READY_LINE=$(grep -m1 "QEC_DECODING_SERVER_READY" "$SERVER_LOG")
+  for ((id = 1; id < NUM_LOGICAL; id++)); do
+    RING_PORT=$(echo "$READY_LINE" | sed -n "s/.*ring${id}=\([0-9]\+\).*/\1/p")
+    if [[ -z "$RING_PORT" ]]; then
+      echo "FAIL: READY line has no ring${id}= token for decoder ${id}"
+      echo "$READY_LINE"
+      exit 1
+    fi
+    export "QEC_DECODING_SERVER_PORT_${id}=${RING_PORT}"
+    echo "Decoder ${id} ring on port $RING_PORT"
+  done
 fi
 
 # -------------------------------------------------------------------------- #
@@ -505,39 +600,28 @@ if [[ -n "$SERVER_PORT" ]]; then
       return_code=1
     fi
   fi
-  if [[ -n "${REQUIRE_TRT_EXECUTION:-}" ]]; then
-    trt_instances=0
-    for decoder_type_entry in "${DECODER_TYPES[@]}"; do
-      if [[ "$decoder_type_entry" == "trt_decoder" ]]; then
-        trt_instances=$((trt_instances + 1))
+  # Decoder-agnostic execution evidence: the server reports per-session
+  # counters (QEC_DECODING_SERVER_STATS=1); every decoder must have completed
+  # exactly one decode per shot. This replaces the removed trt-internal
+  # QEC_TRT_INFERENCE_EXECUTIONS counter and covers closed-source decoders.
+  if [[ -n "${REQUIRE_SERVER_DECODE_COUNTS:-}" ]]; then
+    stats_lines=$(grep -c '^QEC_DECODING_SERVER_DECODER_STATS ' \
+      "$SERVER_LOG" || true)
+    if [[ "$stats_lines" -ne "${#DECODER_TYPES[@]}" ]]; then
+      echo "FAIL: server reported $stats_lines decoder stats lines; expected ${#DECODER_TYPES[@]}"
+      return_code=1
+    fi
+    for ((i = 0; i < ${#DECODER_TYPES[@]}; i++)); do
+      got_decodes=$(sed -n \
+        "s/^QEC_DECODING_SERVER_DECODER_STATS id=$i decodes=\([0-9][0-9]*\) .*/\1/p" \
+        "$SERVER_LOG" | tail -n1)
+      if [[ "$got_decodes" != "$NUM_SHOTS" ]]; then
+        echo "FAIL: decoder[$i] (${DECODER_TYPES[$i]}) completed '$got_decodes' decodes; expected $NUM_SHOTS"
+        return_code=1
       fi
     done
-    expected_trt_decodes=$((trt_instances * (NUM_SHOTS + 1)))
-    trt_reports=$(grep -c '^QEC_TRT_INFERENCE_EXECUTIONS count=' \
-      "$SERVER_LOG" || true)
-    trt_decodes=$(sed -n \
-      's/^QEC_TRT_INFERENCE_EXECUTIONS count=\([0-9][0-9]*\)$/\1/p' \
-      "$SERVER_LOG" | awk '{sum += $1} END {print sum + 0}')
-    if [[ "$trt_reports" -ne "$trt_instances" ]]; then
-      echo "FAIL: TensorRT reported $trt_reports inference counters; expected $trt_instances"
-      return_code=1
-    fi
-    if [[ "$trt_decodes" -ne "$expected_trt_decodes" ]]; then
-      echo "FAIL: TensorRT decoded $trt_decodes times; expected $expected_trt_decodes"
-      return_code=1
-    fi
   fi
   echo "Server evidence: dispatches=$server_dispatches, max_concurrent=$server_max_concurrent"
-fi
-
-# REQUIRE_HOST_MODE (relay trio ctest): assert the realtime session actually
-# initialized in HOST dispatch mode, so the test cannot pass vacuously through
-# the legacy direct-call path. Needs CUDAQ_LOG_LEVEL=info.
-if [[ -n "${REQUIRE_HOST_MODE:-}" ]]; then
-  if ! grep -q "using HOST dispatch mode" "$REALTIME_LOG"; then
-    echo "FAIL: 'using HOST dispatch mode' not found (realtime session did not initialize; is CUDAQ_LOG_LEVEL=info set?)"
-    return_code=1
-  fi
 fi
 
 echo ""

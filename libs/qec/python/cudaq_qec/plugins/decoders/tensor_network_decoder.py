@@ -22,6 +22,32 @@ from .tensor_network_utils.tensor_network_factory import (
     tensor_network_from_syndrome_batch, tensor_network_from_logical_observable)
 
 
+def _safe_posterior(mass0, mass1, dtype: str) -> tuple[float, bool]:
+    """Validate contraction masses and compute the posterior P(logical flip).
+
+    Tiny negative values within floating-point round-off of zero are normalized
+    to zero. On any materially non-physical input (negative, NaN, infinite, or
+    zero-sum masses), return ``(0.5, False)`` so callers can mark the result
+    unconverged rather than silently propagating a bad value.
+    """
+    m0, m1 = float(mass0), float(mass1)
+    if not np.isfinite(m0) or not np.isfinite(m1):
+        return 0.5, False
+
+    scale = max(abs(m0), abs(m1))
+    tolerance = 64.0 * np.finfo(np.dtype(dtype)).eps * scale
+    if m0 < -tolerance or m1 < -tolerance:
+        return 0.5, False
+
+    # Signed contractions can leave an exact zero a few ULPs below zero.
+    m0 = max(m0, 0.0)
+    m1 = max(m1, 0.0)
+    denom = m0 + m1
+    if not np.isfinite(denom) or denom == 0.0:
+        return 0.5, False
+    return m1 / denom, True
+
+
 @qec.decoder("tensor_network_decoder")
 class TensorNetworkDecoder:
     r"""A general class for tensor network decoders.
@@ -110,7 +136,7 @@ class TensorNetworkDecoder:
         logical_inds: list[str] | None = None,
         logical_tags: list[str] | None = None,
         contract_noise_model: bool = True,
-        dtype: str = "float32",
+        dtype: str = "float64",
         device: str = "cuda",
     ) -> None:
         """Initialize a sparse representation of a tensor network decoder for an arbitrary code
@@ -406,12 +432,11 @@ class TensorNetworkDecoder:
             device_id=self.contractor_config.device_id,
         )
 
+        posterior, valid = _safe_posterior(contraction_value[0],
+                                           contraction_value[1], self._dtype)
         res = qec.DecoderResult()
-        res.converged = True
-        res.result = [
-            float(contraction_value[1] /
-                  (contraction_value[1] + contraction_value[0]))
-        ]
+        res.converged = valid
+        res.result = [posterior]
         return res
 
     def decode_batch(
@@ -463,10 +488,13 @@ class TensorNetworkDecoder:
         )
 
         probabilities = []
+        converged = []
         for r in range(syndrome_batch.shape[0]):
-            probabilities.append(
-                float(contraction_value[r, 1] /
-                      (contraction_value[r, 1] + contraction_value[r, 0])))
+            posterior, valid = _safe_posterior(contraction_value[r, 0],
+                                               contraction_value[r, 1],
+                                               self._dtype)
+            probabilities.append(posterior)
+            converged.append(valid)
 
         # Python `decode_batch` override: construct a BatchDecoderResult
         # directly, bypassing the native decoder aggregation path. This is
@@ -474,7 +502,7 @@ class TensorNetworkDecoder:
         # see its docstring for the supported construction surface.
         return qec.BatchDecoderResult(
             np.asarray(probabilities, dtype=np.float64).reshape((-1, 1)),
-            np.ones(syndrome_batch.shape[0], dtype=bool),
+            np.asarray(converged, dtype=bool),
         )
 
     def optimize_path(

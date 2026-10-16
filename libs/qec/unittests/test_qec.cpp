@@ -22,6 +22,14 @@
 
 namespace {
 
+TEST(DecoderInputsUtilities, DSparseDoesNotRequireDeclaredMeasurementWidth) {
+  cudaq::M2DSparseMatrix m2d;
+  m2d.rows = {{2}, {}, {0, 4}};
+
+  EXPECT_EQ(cudaq::qec::d_sparse(m2d),
+            (std::vector<std::int64_t>{2, -1, -1, 0, 4, -1}));
+}
+
 using cudaq::qec::surface_code::sc_orientation;
 using cudaq::qec::surface_code::stabilizer_grid;
 using cudaq::qec::surface_code::surface_role;
@@ -1268,6 +1276,128 @@ TEST(QECCodeTester, checkStabilizerGrid) {
   }
 }
 
+TEST(SurfaceCodeTester, checkCnotSchedule) {
+  using cudaq::qec::surface_code::stabilizer_grid;
+
+  // Verify a schedule matrix against its parity matrix and the hook-error
+  // requirement: the pair of data qubits touched by the two *last* CNOTs of
+  // every weight-4 plaquette must be perpendicular to the same-type logical.
+  auto check_schedule = [](const cudaqx::tensor<uint8_t> &sched,
+                           const cudaqx::tensor<uint8_t> &parity,
+                           uint32_t distance, bool expect_vertical_hook_pair,
+                           const std::string &label) {
+    ASSERT_EQ(sched.shape(), parity.shape()) << label;
+    const auto num_stabs = sched.shape()[0];
+    const auto num_data = sched.shape()[1];
+    for (std::size_t s = 0; s < num_stabs; ++s) {
+      std::vector<std::size_t> support; // data idx per ascending timestep
+      std::vector<bool> steps_seen(5, false);
+      for (std::size_t d = 0; d < num_data; ++d) {
+        auto step = sched.at({s, d});
+        // Support pattern must match the parity-matrix row exactly (this
+        // also pins the row ordering to the sorted parity rows).
+        EXPECT_EQ(step != 0, parity.at({s, d}) != 0)
+            << label << " row " << s << " col " << d;
+        if (step == 0)
+          continue;
+        ASSERT_LE(step, 4) << label << " row " << s;
+        EXPECT_FALSE(steps_seen[step])
+            << label << " row " << s << " duplicate step";
+        steps_seen[step] = true;
+      }
+      for (uint8_t step = 1; step <= 4; ++step)
+        for (std::size_t d = 0; d < num_data; ++d)
+          if (sched.at({s, d}) == step)
+            support.push_back(d);
+      ASSERT_TRUE(support.size() == 2 || support.size() == 4)
+          << label << " row " << s;
+      if (support.size() == 4) {
+        // Hook errors on the ancilla propagate to the data qubits of the two
+        // remaining CNOTs; that pair must run against the logical direction.
+        auto a = support[2], b = support[3];
+        int row_a = a / distance, col_a = a % distance;
+        int row_b = b / distance, col_b = b % distance;
+        if (expect_vertical_hook_pair) {
+          EXPECT_EQ(col_a, col_b) << label << " row " << s;
+          EXPECT_EQ(1, std::abs(row_a - row_b)) << label << " row " << s;
+        } else {
+          EXPECT_EQ(row_a, row_b) << label << " row " << s;
+          EXPECT_EQ(1, std::abs(col_a - col_b)) << label << " row " << s;
+        }
+      }
+    }
+  };
+
+  for (uint32_t distance : {3u, 5u, 7u}) {
+    for (auto orientation : {sc_orientation::XV, sc_orientation::XH,
+                             sc_orientation::ZV, sc_orientation::ZH}) {
+      stabilizer_grid grid(distance, orientation);
+      auto stabs = grid.get_spin_op_stabilizers();
+      auto parity_x =
+          cudaq::qec::to_parity_matrix(stabs, cudaq::qec::stabilizer_type::X);
+      auto parity_z =
+          cudaq::qec::to_parity_matrix(stabs, cudaq::qec::stabilizer_type::Z);
+      auto sched_x = grid.get_cnot_schedule_x();
+      auto sched_z = grid.get_cnot_schedule_z();
+
+      const std::string label =
+          "d=" + std::to_string(distance) +
+          " orientation=" + std::to_string(static_cast<int>(orientation));
+
+      // XV/ZH place the X logical along the top data row (horizontal), so X
+      // hook pairs must be vertical and Z hook pairs horizontal; XH/ZV swap
+      // the logicals and hence the requirement.
+      const bool x_logical_horizontal = orientation == sc_orientation::XV ||
+                                        orientation == sc_orientation::ZH;
+      check_schedule(sched_x, parity_x, distance,
+                     /*expect_vertical_hook_pair=*/x_logical_horizontal,
+                     label + " X");
+      check_schedule(sched_z, parity_z, distance,
+                     /*expect_vertical_hook_pair=*/!x_logical_horizontal,
+                     label + " Z");
+
+      // The X and Z schedules must also be conflict-free if interleaved: no
+      // data qubit is touched by two CNOTs in the same timestep.
+      const auto num_data = distance * distance;
+      for (uint8_t step = 1; step <= 4; ++step) {
+        std::vector<int> touches(num_data, 0);
+        for (std::size_t s = 0; s < sched_x.shape()[0]; ++s)
+          for (std::size_t d = 0; d < num_data; ++d)
+            if (sched_x.at({s, d}) == step)
+              touches[d]++;
+        for (std::size_t s = 0; s < sched_z.shape()[0]; ++s)
+          for (std::size_t d = 0; d < num_data; ++d)
+            if (sched_z.at({s, d}) == step)
+              touches[d]++;
+        for (std::size_t d = 0; d < num_data; ++d)
+          EXPECT_LE(touches[d], 1)
+              << label << " step " << int(step) << " data " << d;
+      }
+
+      // The surface_code plugin must expose the grid schedule.
+      const std::string orientation_str =
+          orientation == sc_orientation::XV   ? "XV"
+          : orientation == sc_orientation::XH ? "XH"
+          : orientation == sc_orientation::ZV ? "ZV"
+                                              : "ZH";
+      auto code = cudaq::qec::get_code(
+          "surface_code", cudaqx::heterogeneous_map{
+                              {"distance", static_cast<std::size_t>(distance)},
+                              {"orientation", orientation_str}});
+      auto code_sched_x = code->get_stabilizer_schedule_x();
+      ASSERT_EQ(code_sched_x.shape(), sched_x.shape()) << label;
+      for (std::size_t s = 0; s < sched_x.shape()[0]; ++s)
+        for (std::size_t d = 0; d < num_data; ++d)
+          EXPECT_EQ(code_sched_x.at({s, d}), sched_x.at({s, d})) << label;
+      auto code_sched_z = code->get_stabilizer_schedule_z();
+      ASSERT_EQ(code_sched_z.shape(), sched_z.shape()) << label;
+      for (std::size_t s = 0; s < sched_z.shape()[0]; ++s)
+        for (std::size_t d = 0; d < num_data; ++d)
+          EXPECT_EQ(code_sched_z.at({s, d}), sched_z.at({s, d})) << label;
+    }
+  }
+}
+
 TEST(SurfaceCodeTester, checkVec2dOperators) {
   // Test vec2d operators that are used in stabilizer_grid maps
   using cudaq::qec::surface_code::vec2d;
@@ -1818,8 +1948,7 @@ TEST(QECCodeTester, checkVersion) {
 
   std::string fullVersion = cudaq::qec::getFullRepositoryVersion();
   EXPECT_TRUE(fullVersion.find("NVIDIA/cudaqx") != std::string::npos);
-  EXPECT_TRUE(fullVersion.find("CUDAQX_SOLVERS_COMMIT_SHA") ==
-              std::string::npos);
+  EXPECT_TRUE(fullVersion.find("CUDAQX_QEC_COMMIT_SHA") == std::string::npos);
 }
 
 TEST(PCMUtilsTester, checkPCMToSparseString) {

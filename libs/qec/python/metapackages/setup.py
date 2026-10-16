@@ -6,12 +6,6 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-# Maintenance note: this script is used to build the meta-package for both
-# cudaq-qec and cudaq-solvers. It is the same script for both meta-packages, so
-# the scripts/ci/build_metapackages.sh will take the cudaq-qec meta-package as
-# the original source of truth, and it will be copied and the "package_name"
-# will be updated for the cudaq-solvers meta-package.
-
 import ctypes, os, sys
 import importlib.util
 import site, glob

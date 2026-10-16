@@ -63,14 +63,19 @@ def qec_circuit() -> int:
     for _ in range(3):
         syndromes = measure_stabilizers(logical)
         qec.enqueue_syndromes(0, syndromes, 0)
+    # Final data readout
+    data_meas = [mz(data[0]), mz(data[1]), mz(data[2])]
+    qec.enqueue_syndromes(0, data_meas, 0)
+    result = cudaq.to_bools(data_meas)
 
     # Get corrections and apply them (single logical observable)
     corrections = qec.get_corrections(0, 1, False)
+    result[0] ^= corrections[0]
     if corrections[0]:
         for i in range(3):
             x(data[i])
 
-    return cudaq.to_integer(cudaq.to_bools(mz(data)))
+    return cudaq.to_integer(result)
 
 
 # [End QEC Circuit]
@@ -88,7 +93,9 @@ def main():
     noise = cudaq.NoiseModel()
     noise.add_all_qubit_channel("x", cudaq.Depolarization2(0.01), 1)
 
-    dem = qec.z_dem_from_memory_circuit(code, qec.operation.prep0, 3, noise)
+    ctx = qec.decoder_context_from_memory_circuit(code, qec.operation.prep0, 3,
+                                                  noise)
+    dem, m2d, m2o = ctx.full_component()
     # [End DEM Generation]
 
     # [Begin Save DEM]
@@ -101,15 +108,13 @@ def main():
     config.H_sparse = qec.pcm_to_sparse_vec(dem.detector_error_matrix)
     config.O_sparse = qec.pcm_to_sparse_vec(dem.observables_flips_matrix)
 
-    # Calculate numRounds from DEM (we send 1 additional round, so add 1)
-    num_syndromes_per_round = 2  # Z0Z1 and Z1Z2
-    num_rounds = dem.detector_error_matrix.shape[
-        0] // num_syndromes_per_round + 1
-    config.D_sparse = qec.generate_timelike_sparse_detector_matrix(
-        num_syndromes_per_round, num_rounds, False)
-    lut_config = qec.multi_error_lut_config()
-    lut_config.lut_error_depth = 2
-    config.set_decoder_custom_args(lut_config)
+    config.D_sparse = qec.d_sparse(m2d)
+    # Decoder parameters are a plain dict; keys are governed by the parameter
+    # schema the decoder registered (see qec.decoder_param_schema).
+    config.decoder_custom_args = {"lut_error_depth": 2}
+    # Check the dict against the decoder's schema (unknown keys, missing
+    # required keys, decoder-specific constraints) before using the config.
+    config.validate_custom_args()
 
     multi_config = qec.multi_decoder_config()
     multi_config.decoders = [config]
@@ -125,7 +130,7 @@ def main():
     qec.configure_decoders_from_file("config.yaml")
     # [End Load DEM]
 
-    run_result = cudaq.run(qec_circuit, shots_count=10)
+    run_result = cudaq.run(qec_circuit, shots_count=10, noise_model=noise)
     print("Ran 10 shots")
 
     qec.finalize_decoders()

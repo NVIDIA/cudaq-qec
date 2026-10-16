@@ -34,12 +34,7 @@ fi
 
 FILES_TO_COPY=(NOTICE CITATION.cff)
 
-# Copy setup.py file for the qec meta-package to the solvers meta-package directory.
-cp $TOP_DIR/libs/qec/python/metapackages/setup.py $TOP_DIR/libs/solvers/python/metapackages/setup.py
-# Replace the package name in the setup.py file.
-sed -i "s/^package_name = 'cudaq-qec'/package_name = 'cudaq-solvers'/g" $TOP_DIR/libs/solvers/python/metapackages/setup.py
-
-for package in qec solvers; do
+for package in qec; do
   echo "Building $package metapackage..."
   cd $TOP_DIR/libs/$package/python/metapackages
 
@@ -50,13 +45,8 @@ for package in qec solvers; do
   done
 
   rm -f LICENSE
-  if [ $package == "qec" ]; then
-    # Use LICENSE file from qec directory
-    cp $TOP_DIR/libs/qec/LICENSE .
-  else
-    # Use top-level LICENSE file
-    cp $TOP_DIR/LICENSE .
-  fi
+  # Use LICENSE file from qec directory
+  cp $TOP_DIR/libs/qec/LICENSE .
 
   # Create a version.txt file in the metapackage directory.
   echo $VERSION > _version.txt

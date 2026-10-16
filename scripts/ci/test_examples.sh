@@ -17,7 +17,7 @@ echo "Setting PYTHONPATH=$PYTHONPATH"
 CUDAQX_INCLUDE="$HOME/.cudaqx/include"
 CUDAQX_LIB="$HOME/.cudaqx/lib"
 
-LIB=$1  # Accepts "qec", "solvers", or "all"
+LIB=$1  # Accepts "qec" or "all"
 
 echo "Running example tests for $LIB..."
 echo "----------------------------------"
@@ -81,19 +81,6 @@ if [[ "$LIB" == "qec" || "$LIB" == "all" ]]; then
         else
             run_cpp_test "$file" "--target=stim -lcudaq-qec"
         fi
-    done
-fi
-
-if [[ "$LIB" == "solvers" || "$LIB" == "all" ]]; then
-    echo "Running Solvers examples..."
-    echo "---------------------------"
-    
-    for file in examples/solvers/python/*.py; do
-        run_python_test "$file"
-    done
-    
-    for file in examples/solvers/cpp/*.cpp; do
-        run_cpp_test "$file" "-lcudaq-solvers"
     done
 fi
 

@@ -8,6 +8,9 @@
 
 #pragma once
 
+#include "cudaq/qec/decoder.h"
+
+#include <cassert>
 #include <cuda_runtime_api.h>
 #include <stdexcept>
 #include <string>
@@ -28,6 +31,61 @@ inline void set_cuda_device_for_decode(int target) {
     throw std::runtime_error("set_cuda_device_for_decode: cudaSetDevice(" +
                              std::to_string(target) +
                              ") failed: " + cudaGetErrorString(err));
+}
+
+/// Resolve a decoder's device: its cuda_device_id, or 0 when unpinned. For
+/// paths that need a concrete device (graph capture/launch), unlike
+/// set_cuda_device_for_decode() which no-ops on < 0.
+inline int decode_device_for(int cuda_device_id) {
+  return cuda_device_id >= 0 ? cuda_device_id : 0;
+}
+
+/// Pin before dispatch / decode / get_corrections / reset. No-op for an
+/// unpinned decoder (cuda_device_id < 0): a CPU decoder must not be forced onto
+/// a GPU. The sanctioned dispatch pin for every transport.
+inline void pin_decode_device(const cudaq::qec::decoder &dec) {
+  set_cuda_device_for_decode(dec.get_cuda_device_id());
+}
+
+/// Cached pin for dispatcher threads that call decoders inline on the hot
+/// path: the first call per (thread, device) transition pays the CUDA call;
+/// steady-state repeats cost one thread_local compare.  Debug builds
+/// re-verify against cudaGetDevice to catch a foreign cudaSetDevice on the
+/// same thread (the cache assumes none).  No-op for unpinned decoders
+/// (cuda_device_id < 0), same as pin_decode_device().
+inline void pin_decode_device_cached(const cudaq::qec::decoder &dec) {
+  const int target = dec.get_cuda_device_id();
+  if (target < 0)
+    return;
+  thread_local int pinned = -1;
+  if (pinned != target) {
+    set_cuda_device_for_decode(target);
+    pinned = target;
+  }
+#ifndef NDEBUG
+  int current = -1;
+  if (cudaGetDevice(&current) == cudaSuccess)
+    assert(current == target &&
+           "pin_decode_device_cached: a foreign cudaSetDevice moved this "
+           "thread off the decoder's device");
+#endif
+}
+
+/// Capture a decoder's realtime graph, pinned to its device so capture lands on
+/// the GPU every launch uses. Unpinned resolves to device 0 (a graph needs a
+/// concrete device). The only sanctioned caller of capture_decode_graph().
+inline void *capture_graph_pinned(cudaq::qec::decoder &dec,
+                                  int reserved_sms = 0) {
+  const int device = decode_device_for(dec.get_cuda_device_id());
+  set_cuda_device_for_decode(device);
+  void *raw = dec.capture_decode_graph(reserved_sms);
+#ifndef NDEBUG
+  int current = -1;
+  (void)cudaGetDevice(&current);
+  assert(current == device &&
+         "capture_graph_pinned: capture did not land on the decoder's device");
+#endif
+  return raw;
 }
 
 /// RAII: set the calling thread's CUDA device, restore the previous device on

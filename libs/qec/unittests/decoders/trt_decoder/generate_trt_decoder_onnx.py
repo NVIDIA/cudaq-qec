@@ -13,6 +13,10 @@ import os
 import onnx
 from onnx import TensorProto, helper
 
+# These fixtures use no IR 10 features. IR 9 keeps them checkable by the ONNX
+# 1.14 packaged in supported development environments.
+MODEL_IR_VERSION = 9
+
 
 def make_identity_model(output_path, name, elem_type, shape):
     input_info = helper.make_tensor_value_info("input", elem_type, shape)
@@ -21,7 +25,7 @@ def make_identity_model(output_path, name, elem_type, shape):
     graph = helper.make_graph([identity], name, [input_info], [output_info])
     model = helper.make_model(graph,
                               opset_imports=[helper.make_opsetid("", 19)])
-    model.ir_version = 10
+    model.ir_version = MODEL_IR_VERSION
     onnx.checker.check_model(model)
     onnx.save(model, output_path)
 
@@ -33,7 +37,7 @@ def make_cast_model(output_path, name, input_type, output_type, shape):
     graph = helper.make_graph([cast], name, [input_info], [output_info])
     model = helper.make_model(graph,
                               opset_imports=[helper.make_opsetid("", 19)])
-    model.ir_version = 10
+    model.ir_version = MODEL_IR_VERSION
     onnx.checker.check_model(model)
     onnx.save(model, output_path)
 

@@ -109,6 +109,7 @@ std::vector<std::uint32_t> get_sorted_pcm_column_indices(
 
 /// @brief Return a vector of column indices that would sort the PCM columns
 /// in topological order.
+/// @param pcm The PCM to sort.
 /// @param num_syndromes_per_round The number of syndromes per round. (Defaults
 /// to 0, which means that no secondary per-round sorting will occur.)
 std::vector<std::uint32_t>
@@ -178,6 +179,8 @@ reorder_pcm_columns(const sparse_binary_matrix &pcm,
 
 /// @brief Sort the columns of a PCM in topological order.
 /// @param pcm The PCM to sort.
+/// @param num_syndromes_per_round The number of syndromes per round. (Defaults
+/// to 0, which means that no secondary per-round sorting will occur.)
 /// @return A new PCM with the columns sorted in topological order.
 cudaqx::tensor<uint8_t>
 sort_pcm_columns(const cudaqx::tensor<uint8_t> &pcm,
@@ -187,6 +190,8 @@ sort_pcm_columns(const cudaqx::tensor<uint8_t> &pcm,
 /// and combine the probability weight vectors accordingly.
 /// @param pcm The PCM to simplify.
 /// @param weights The probability weight vectors to combine.
+/// @param num_syndromes_per_round The number of syndromes per round. (Defaults
+/// to 0, which means that no secondary per-round sorting will occur.)
 /// @return A new PCM with the columns sorted in topological order, and the
 /// probability weight vectors combined accordingly.
 std::pair<cudaqx::tensor<uint8_t>, std::vector<double>>

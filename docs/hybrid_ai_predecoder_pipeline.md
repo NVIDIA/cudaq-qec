@@ -365,13 +365,19 @@ struct DecoderContext {
 };
 ```
 
-Decoders are constructed at startup from the Stim-derived parity check matrix (`H`) with edge priors:
+Decoders are constructed at startup from immutable Stim-derived model inputs.
+`O` remains available for the manual projection below, while the explicit
+`errors` result type keeps PyMatching's output in the error-frame basis:
 
 ```cpp
 auto H_full = stim_data.H.to_dense();
-pm_params.insert("error_rate_vec", stim_data.priors);
+auto O = cudaq::qec::sparse_binary_matrix(stim_data.O.to_dense());
+auto inputs = cudaq::qec::decoder_init(
+    cudaq::qec::sparse_binary_matrix(H_full), std::move(O), stim_data.priors);
 for (int i = 0; i < num_decode_workers; ++i)
-    decoders.push_back(cudaq::qec::decoder::get("pymatching", H_full, pm_params));
+    decoders.push_back(cudaq::qec::decoder::get(
+        "pymatching", inputs, cudaq::qec::decode_result_type::errors,
+        pm_params));
 ```
 
 #### Observable Projection

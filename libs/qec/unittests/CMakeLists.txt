@@ -34,32 +34,50 @@ find_package(CUDAToolkit REQUIRED)
 # ==============================================================================
 add_compile_options(-Wno-attributes) 
 
-add_executable(test_decoders test_decoders.cpp decoders/sample_decoder.cpp)
+add_executable(test_decoders test_decoders.cpp decoders/sample_decoder.cpp
+  decoders/cancellation_probe_decoder.cpp)
+target_include_directories(test_decoders PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
 target_link_libraries(test_decoders PRIVATE GTest::gtest_main cudaq-qec-decoders libstim CUDA::cudart)
 add_dependencies(CUDAQXQECUnitTests test_decoders)
 gtest_discover_tests(test_decoders)
 
-add_executable(test_decoders_yaml test_decoders_yaml.cpp decoders/sample_decoder.cpp)
-target_include_directories(test_decoders_yaml PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/decoding-server-cqr)
-target_link_libraries(test_decoders_yaml PRIVATE
-  GTest::gtest_main
-  cudaq-qec
-  cudaq-qec-decoding-server
-  cudaq-qec-realtime-decoding
-  cudaq-qec-realtime-decoding-simulation
-  cudaq::cudaq)
-add_dependencies(CUDAQXQECUnitTests test_decoders_yaml)
-gtest_discover_tests(test_decoders_yaml)
+# These two tests need cudaq-qec-decoding-server, which is only built when a
+# realtime-enabled CUDA-Q install is found (see
+# lib/realtime/decoding-server-cqr/CMakeLists.txt).
+if(TARGET cudaq-qec-decoding-server)
+  add_executable(test_decoders_yaml test_decoders_yaml.cpp decoders/sample_decoder.cpp)
+  target_include_directories(test_decoders_yaml PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/decoding-server-cqr)
+  target_link_libraries(test_decoders_yaml PRIVATE
+    GTest::gtest_main
+    cudaq-qec
+    cudaq-qec-decoding-server
+    cudaq-qec-realtime-decoding
+    cudaq-qec-realtime-decoding-simulation
+    cudaq::cudaq)
+  # Chromobius is the DEM-native decoder the raw-DEM model source exists for;
+  # link it when this configuration built it so the acceptance tests can run,
+  # and keep main's feature definition for its conditional cases.
+  if(TARGET cudaq-qec-chromobius)
+    add_dependencies(test_decoders_yaml cudaq-qec-chromobius)
+    target_link_libraries(test_decoders_yaml PRIVATE cudaq-qec-chromobius)
+    target_compile_definitions(test_decoders_yaml PRIVATE CUDAQX_QEC_HAS_CHROMOBIUS)
+  endif()
+  add_dependencies(CUDAQXQECUnitTests test_decoders_yaml)
+  gtest_discover_tests(test_decoders_yaml)
 
-add_executable(test_decoding_server_core test_decoding_server_core.cpp)
-target_link_libraries(test_decoding_server_core PRIVATE
-  GTest::gtest_main
-  cudaq-qec-decoding-server
-  cudaq::cudaq
-  CUDA::cudart)
-add_dependencies(CUDAQXQECUnitTests test_decoding_server_core)
-gtest_discover_tests(test_decoding_server_core)
+  add_executable(test_decoding_server_core test_decoding_server_core.cpp)
+  target_link_libraries(test_decoding_server_core PRIVATE
+    GTest::gtest_main
+    cudaq-qec-decoding-server
+    cudaq::cudaq
+    CUDA::cudart)
+  add_dependencies(CUDAQXQECUnitTests test_decoding_server_core)
+  gtest_discover_tests(test_decoding_server_core)
+else()
+  message(STATUS "Skipping test_decoders_yaml / test_decoding_server_core "
+                 "(cudaq-qec-decoding-server not built)")
+endif()
 
 add_executable(test_qec test_qec.cpp)
 target_link_libraries(test_qec PRIVATE GTest::gtest_main cudaq-qec cudaq::cudaq-stim-target)
@@ -79,6 +97,30 @@ target_link_libraries(test_sparse_binary_matrix PRIVATE GTest::gtest_main
 add_dependencies(CUDAQXQECUnitTests test_sparse_binary_matrix)
 gtest_discover_tests(test_sparse_binary_matrix)
 
+add_executable(test_extended_dem test_extended_dem.cpp)
+target_link_libraries(test_extended_dem PRIVATE GTest::gtest_main
+                                        cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_extended_dem)
+gtest_discover_tests(test_extended_dem)
+
+add_executable(test_dem_construction test_dem_construction.cpp)
+target_link_libraries(test_dem_construction PRIVATE GTest::gtest_main
+                                            cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_dem_construction)
+gtest_discover_tests(test_dem_construction)
+
+add_executable(test_dem_construction_code test_dem_construction_code.cpp)
+target_link_libraries(test_dem_construction_code PRIVATE GTest::gtest_main
+                                                  cudaq-qec
+                                                  cudaq::cudaq-stim-target)
+add_dependencies(CUDAQXQECUnitTests test_dem_construction_code)
+gtest_discover_tests(test_dem_construction_code)
+
+add_executable(test_cancellation test_cancellation.cpp)
+target_link_libraries(test_cancellation PRIVATE GTest::gtest_main cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_cancellation)
+gtest_discover_tests(test_cancellation)
+
 add_executable(test_logger test_logger.cpp)
 target_link_libraries(test_logger PRIVATE GTest::gtest_main cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_logger)
@@ -86,7 +128,8 @@ gtest_discover_tests(test_logger)
 
 # TensorRT decoder test is only built for x86 architectures
 if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(AMD64|amd64)|(^i.86$)")
-  add_executable(test_trt_decoder ./decoders/trt_decoder/test_trt_decoder.cpp)
+  add_executable(test_trt_decoder ./decoders/trt_decoder/test_trt_decoder.cpp
+    ./decoders/cancellation_probe_decoder.cpp)
 
   # Find TensorRT for the test
   find_path(TENSORRT_INCLUDE_DIR NvInfer.h
@@ -120,6 +163,10 @@ if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(A
   )
 
   target_link_libraries(test_trt_decoder PRIVATE GTest::gtest_main cudaq-qec-decoders cudaq-qec-trt-decoder CUDA::cudart ${TENSORRT_LIBRARY})
+  # Chromobius is the DEM-native child the raw-DEM nesting case needs.
+  if(TARGET cudaq-qec-chromobius)
+    target_link_libraries(test_trt_decoder PRIVATE cudaq-qec-chromobius)
+  endif()
 
   find_package(Python COMPONENTS Interpreter QUIET)
   if(Python_Interpreter_FOUND)
@@ -501,87 +548,6 @@ if(CUDAQ_REALTIME_ROOT AND CMAKE_CUDA_COMPILER)
     )
 
     # test_realtime_predecoder_w_pymatching is now in unittests/realtime/
-    # ------------------------------------------------------------------
-    # Realtime QLDPC graph decode CI test (CPU-launched CUDA graph + relay BP)
-    # ------------------------------------------------------------------
-
-    # cudaq-qec-realtime-decoding transitively pulls in cudaq-qec, which
-    # references CUDA-Q quantum runtime symbols. Satisfy them here.
-    find_library(_CUDAQ_LIBRARY NAMES cudaq
-      PATHS ${CUDAQ_INSTALL_PREFIX} $ENV{CUDAQ_INSTALL_PREFIX}
-            ${CUDAQ_DIR}/.. $ENV{CUDAQ_DIR}/..
-      PATH_SUFFIXES lib)
-    find_library(_NVQIR_LIBRARY NAMES nvqir
-      PATHS ${CUDAQ_INSTALL_PREFIX} $ENV{CUDAQ_INSTALL_PREFIX}
-            ${CUDAQ_DIR}/.. $ENV{CUDAQ_DIR}/..
-      PATH_SUFFIXES lib)
-
-    add_executable(test_realtime_qldpc_graph_decoding
-      ${CMAKE_CURRENT_SOURCE_DIR}/realtime/qec_graph_decode_test/test_realtime_qldpc_graph_decoding.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/realtime/qec_graph_decode_test/qldpc_config_loader.cpp
-    )
-
-    set_target_properties(test_realtime_qldpc_graph_decoding PROPERTIES
-      CUDA_SEPARABLE_COMPILATION ON
-      CUDA_RESOLVE_DEVICE_SYMBOLS ON
-      CUDA_STANDARD 17
-      LINKER_LANGUAGE CUDA
-    )
-
-    target_include_directories(test_realtime_qldpc_graph_decoding PRIVATE
-      ${CUDAToolkit_INCLUDE_DIRS}
-      ${CUDAQ_REALTIME_INCLUDE_DIR}
-      ${CMAKE_CURRENT_SOURCE_DIR}/../include
-      ${CMAKE_SOURCE_DIR}/libs/core/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime
-    )
-
-    target_compile_definitions(test_realtime_qldpc_graph_decoding PRIVATE
-      TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/realtime/qec_roce_decode_test/data"
-      CUDAQ_REALTIME_ROOT
-    )
-
-    target_link_libraries(test_realtime_qldpc_graph_decoding PRIVATE
-      GTest::gtest_main
-      CUDA::cudart
-      ${CUDAQ_REALTIME_LIBRARY}
-      ${CUDAQ_REALTIME_DISPATCH_LIBRARY}
-      $<$<BOOL:${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}>:${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}>
-      cudaq-qec-realtime-decoding
-      $<$<TARGET_EXISTS:cudaq-qec-realtime-cudevice-proprietary>:$<LINK_LIBRARY:WHOLE_ARCHIVE,cudaq-qec-realtime-cudevice-proprietary>>
-      $<$<BOOL:${_CUDAQ_LIBRARY}>:${_CUDAQ_LIBRARY}>
-      $<$<BOOL:${_NVQIR_LIBRARY}>:${_NVQIR_LIBRARY}>
-    )
-
-    target_link_options(test_realtime_qldpc_graph_decoding PRIVATE
-      "LINKER:--allow-shlib-undefined"
-      "LINKER:--disable-new-dtags"
-      "LINKER:--export-dynamic"
-    )
-
-    # Resolve CUDAQ SDK lib dir for RPATH (libnvqir, libcudaq)
-    set(_cudaq_sdk_lib_dir "")
-    if(CUDAQ_INSTALL_PREFIX)
-      set(_cudaq_sdk_lib_dir "${CUDAQ_INSTALL_PREFIX}/lib")
-    elseif(CUDAQ_DIR)
-      get_filename_component(_cudaq_sdk_lib_dir "${CUDAQ_DIR}/../../.." ABSOLUTE)
-      set(_cudaq_sdk_lib_dir "${_cudaq_sdk_lib_dir}/lib")
-    endif()
-
-    set_target_properties(test_realtime_qldpc_graph_decoding PROPERTIES
-      BUILD_RPATH "${CUDAQ_REALTIME_LIB_DIR};${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins;${_cudaq_sdk_lib_dir}"
-      INSTALL_RPATH "${CUDAQ_REALTIME_LIB_DIR};${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR};${CMAKE_BINARY_DIR}/lib/decoder-plugins;${_cudaq_sdk_lib_dir}"
-    )
-
-    add_dependencies(CUDAQXQECUnitTests test_realtime_qldpc_graph_decoding)
-
-    if((QEC_EXTERNAL_DECODERS OR DEFINED ENV{QEC_EXTERNAL_DECODERS})
-       AND TARGET cudaq-qec-realtime-cudevice-proprietary)
-      add_test(NAME test_realtime_qldpc_graph_decoding
-        COMMAND test_realtime_qldpc_graph_decoding)
-      set_tests_properties(test_realtime_qldpc_graph_decoding PROPERTIES
-        LABELS "qec")
-    endif()
 
   else()
     message(WARNING "cuda-quantum realtime dependency not found. "
@@ -773,8 +739,9 @@ add_subdirectory(backend-specific)
 add_subdirectory(realtime)
 add_subdirectory(decoders/pymatching)
 add_subdirectory(decoders/chromobius)
+add_subdirectory(playback-emulator)
 
-# Hololink bridge tools (FPGA playback + graph-launched QLDPC bridge)
-if(CUDAQX_QEC_ENABLE_HOLOLINK_TOOLS)
+# HSB rig tools (FPGA playback + graph-launched QLDPC bridge)
+if(CUDAQX_QEC_ENABLE_HSB_TOOLS)
   add_subdirectory(utils)
 endif()

@@ -86,16 +86,18 @@ reusable_decode_barrier &decode_barrier() {
 /// subsequent decode rendezvous with all configured instances before returning.
 class concurrency_test_decoder : public decoder {
 public:
-  concurrency_test_decoder(const sparse_binary_matrix &H,
+  concurrency_test_decoder(decoder_init inputs, decoder_output_request request,
                            const cudaqx::heterogeneous_map &)
-      : decoder(H) {
+      : decoder(std::move(inputs), request) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "concurrency_test_decoder does not produce auxiliary outputs");
     std::cout << "QEC_CONCURRENCY_TEST_DECODER_CONSTRUCTED" << std::endl;
-    set_result_type(decode_result_type::decode_to_obs);
   }
 
   decoder_result decode(const std::vector<float_t> &) override {
-    decoder_result result{true,
-                          std::vector<float_t>(get_num_observables(), 0.0)};
+    decoder_result result{
+        true, std::vector<float_t>(get_num_observables(), 0.0), std::nullopt};
 
     if (initialization_probe_) {
       initialization_probe_ = false;
@@ -114,8 +116,12 @@ public:
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       concurrency_test_decoder,
       static std::unique_ptr<decoder> create(
-          const decoder_init &init, const cudaqx::heterogeneous_map &params) {
-        return make_pcm_decoder<concurrency_test_decoder>(init, params);
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        const auto request = output.value_or(
+            decoder_output_request{decode_result_type::observables});
+        return std::make_unique<concurrency_test_decoder>(std::move(inputs),
+                                                          request, params);
       })
 
 private:

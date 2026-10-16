@@ -6,7 +6,17 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-find_package(LLVM 22.1.4 EXACT REQUIRED CONFIG)
+# The realtime decoding config parser (config.cpp) uses only llvm::yaml,
+# llvm::json and llvm::raw_ostream from LLVMSupport, whose API is stable across
+# LLVM versions.  The top-level qec project already locates LLVM (honoring
+# LLVM_DIR / LLVM_VERSION_MAJOR / LLVM_VERSION_MINOR) before descending here, so
+# reuse that result rather than pinning an exact version -- any LLVM providing
+# the Support component works, e.g. a distro `llvm-dev`, with no NVIDIA LLVM
+# toolchain required.  Only fall back to a fresh lookup if LLVM was not already
+# found (e.g. this directory configured on its own).
+if(NOT LLVM_FOUND)
+  find_package(LLVM REQUIRED CONFIG)
+endif()
 
 # Enable CUDA for device code
 if(CMAKE_CUDA_COMPILER)
@@ -82,23 +92,11 @@ if(CMAKE_CUDA_COMPILER)
       get_filename_component(_CUDAQ_REALTIME_LIB_DIR "${CUDAQ_REALTIME_LIBRARY}" DIRECTORY)
     endif()
 
-    # The host-side dispatch loop (cudaq_host_dispatcher_loop), used by
-    # qec_realtime_session, lives in libcudaq-realtime-host-dispatch -- separate
-    # from libcudaq-realtime.  Locate it so cudaq-qec-realtime-decoding can link
-    # it (mirrors the cudaq-realtime-pipeline target below).
-    cudaq_qec_find_realtime_library(CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY
-      NAMES cudaq-realtime-host-dispatch
-      PATH_SUFFIXES lib
-    )
-    if(CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY)
-      message(STATUS "Found cuda-quantum realtime host dispatch library at ${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}")
-    endif()
-
     # The device-graph dispatch API (cudaq_create_dispatch_graph_regular,
     # cudaq_launch_dispatch_graph, cudaq_destroy_dispatch_graph) lives in
     # libcudaq-realtime-dispatch, separate from libcudaq-realtime.  It is
-    # relocatable device code, and qec_realtime_session resolves it at runtime
-    # via dlsym(RTLD_DEFAULT, ...) from the host executable's absorbed copy --
+    # relocatable device code, resolved at runtime via dlsym(RTLD_DEFAULT, ...)
+    # from the host executable's absorbed copy --
     # it must NOT be linked into cudaq-qec-realtime-decoding.so: a second
     # device-linked copy of the dispatch kernel would live in a different CUDA
     # module than the decoder's DEVICE_CALL handlers (captured from the
@@ -140,6 +138,10 @@ if(CMAKE_CUDA_COMPILER)
                      "QEC lowered device_call host-dispatch service will not be built.")
     endif()
 
+    # Gates the CUDA-Q-facing device_call pieces: the in-process
+    # DeviceCallService shim in decoding-server-cqr and the caller-side
+    # simulation-cqr wrappers.  The decoding server proper needs neither --
+    # it reaches the HOST_CALL table through a plain-C accessor.
     set(CUDAQ_QEC_DEVICE_CALL_SERVICE_AVAILABLE FALSE)
     if(CUDAQ_DEVICE_CALL_INCLUDE_DIR AND CUDAQ_DEVICE_CALL_RUNTIME_LIBRARY)
       set(CUDAQ_QEC_DEVICE_CALL_SERVICE_AVAILABLE TRUE)
@@ -176,10 +178,10 @@ if(CMAKE_CUDA_COMPILER)
       ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     )
     
-    install(TARGETS cudaq-qec-realtime-cudevice
-      COMPONENT qec-lib
-      ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    )
+    # NOTE: cudaq-qec-realtime-cudevice is a STATIC archive consumed only at
+    # link time -- the decoding_server executable (and the realtime tests)
+    # absorb its objects WHOLE_ARCHIVE during their own link.  It is not needed
+    # at runtime, so it is deliberately NOT installed.
   else()
     message(WARNING "cuda-quantum realtime headers not found. "
                     "Device library cudaq-qec-realtime-device will not be built. "
@@ -206,8 +208,6 @@ endif()
 add_library(cudaq-qec-realtime-decoding SHARED
   realtime_decoding.cpp
   config.cpp
-  qec_realtime_session.cpp
-  rpc_producer.cpp
 )
 
 target_compile_options(cudaq-qec-realtime-decoding 
@@ -240,7 +240,6 @@ target_link_libraries(cudaq-qec-realtime-decoding
     LLVMSupport
     CUDA::cudart
     $<$<BOOL:${CUDAQ_REALTIME_LIBRARY}>:${CUDAQ_REALTIME_LIBRARY}>
-    $<$<BOOL:${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}>:${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}>
 )
 
 set_target_properties(cudaq-qec-realtime-decoding PROPERTIES
@@ -251,6 +250,13 @@ if(_CUDAQ_REALTIME_LIB_DIR)
     BUILD_RPATH "${_CUDAQ_REALTIME_LIB_DIR};${CMAKE_BINARY_DIR}/lib"
     INSTALL_RPATH "${_CUDAQ_REALTIME_LIB_DIR};${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}"
   )
+endif()
+
+# In the wheel, libcudaq-qec-decoders.so is installed next to this library and
+# is not grafted by auditwheel, so it must be found via $ORIGIN.
+if(SKBUILD)
+  set_property(TARGET cudaq-qec-realtime-decoding APPEND PROPERTY
+    INSTALL_RPATH "$ORIGIN")
 endif()
 
 
@@ -269,7 +275,7 @@ install(TARGETS cudaq-qec-realtime-decoding
 # ("Split graph launch dispatch from the host ring loop").  Until it is ported
 # to the new graph_launch_engine API, keep this target off by default so CI
 # builds green.  Dependent unit tests (test_realtime_pipeline,
-# test_realtime_predecoder_w_pymatching, hololink bridge) auto-skip when this
+# test_realtime_predecoder_w_pymatching, gpu_roce bridge) auto-skip when this
 # target does not exist.
 # ---------------------------------------------------------------------------
 option(CUDAQX_QEC_ENABLE_REALTIME_PIPELINE
@@ -342,9 +348,18 @@ else()
 endif()
 
 add_subdirectory(decoding-server-cqr)
-add_subdirectory(quantinuum)
-add_subdirectory(simulation)
-if(CUDAQ_QEC_DEVICE_CALL_SERVICE_AVAILABLE)
+# quantinuum/ and simulation/ are QPU-side device wrappers: they compile with
+# nvq++ (cudaqx_add_device_code), so they need a full CUDA-Q install and are
+# not part of a decoders-only build.  The decoding server is the service side
+# and needs neither.
+if(NOT CUDAQ_QEC_DECODERS_ONLY)
+  add_subdirectory(quantinuum)
+  add_subdirectory(simulation)
+endif()
+# simulation-cqr is the caller (QPU) side of the device_call ring: it links
+# cudaq::cudaq-common and the device-call caller runtime, both from CUDA-Q
+# proper, so it is not available in decoders-only builds.
+if(CUDAQ_QEC_DEVICE_CALL_SERVICE_AVAILABLE AND NOT CUDAQ_QEC_DECODERS_ONLY)
   # cudaq-realtime (cqr) host-dispatch: simulated-QPU client that drives the
   # decoding server over cudaq-realtime.
   add_subdirectory(simulation-cqr)

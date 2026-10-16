@@ -66,24 +66,51 @@ __device__ void mock_decoder::decode_impl(
 // DeviceRPCFunction-Compatible Wrapper
 //==============================================================================
 
-__device__ int mock_decode_rpc(const void *input, void *output,
-                               std::uint32_t arg_len,
-                               std::uint32_t max_result_len,
-                               std::uint32_t *result_len) {
+/// Upper bound on the request bytes mock_decode_rpc stages locally so that it
+/// never reads the request after writing the response (see below).
+constexpr std::size_t kMockMaxMeasurementBytes = 1024;
+
+__device__ int mock_decode_rpc(const void *rx_slot, void *tx_slot,
+                               std::size_t slot_size) {
+  using cudaq::realtime::RPCHeader;
+  using cudaq::realtime::RPCResponse;
+
+  // Two-pointer ABI (same form as a HOST_CALL handler, plus a returned
+  // status): the request (RPCHeader + measurements) is in rx_slot and the
+  // corrections go right after the RPCResponse in tx_slot.  The handler owns
+  // response->result_len; the dispatch kernel fills the other header fields
+  // and forces result_len to 0 on a non-zero status.
+  if (slot_size < sizeof(RPCResponse))
+    return -1;
+  const auto *header = static_cast<const RPCHeader *>(rx_slot);
+  const uint8_t *measurements = reinterpret_cast<const uint8_t *>(header + 1);
+  auto *response = static_cast<RPCResponse *>(tx_slot);
+  uint8_t *corrections = reinterpret_cast<uint8_t *>(response + 1);
+  const std::size_t max_result_len = slot_size - sizeof(RPCResponse);
 
   if (g_mock_decoder != nullptr) {
-    const uint8_t *measurements = static_cast<const uint8_t *>(input);
-    uint8_t *corrections = static_cast<uint8_t *>(output);
-
     const auto &ctx = g_mock_decoder->context();
-    g_mock_decoder->decode(measurements, corrections, ctx.num_measurements,
-                           ctx.num_observables);
+    if (ctx.num_observables > max_result_len)
+      return -2; // Error: result does not fit in the TX slot
+    if (ctx.num_measurements > kMockMaxMeasurementBytes)
+      return -3; // Error: request larger than the local staging buffer
 
-    *result_len = static_cast<std::uint32_t>(ctx.num_observables);
+    // On an in-place ring tx_slot aliases rx_slot, so the measurement bytes
+    // and the correction bytes share an address.  decode() zeroes the
+    // corrections before it compares the measurements, so the ABI's
+    // read-the-request-before-writing-the-response rule means staging the
+    // measurements locally first.
+    uint8_t local_measurements[kMockMaxMeasurementBytes];
+    for (std::size_t i = 0; i < ctx.num_measurements; ++i)
+      local_measurements[i] = measurements[i];
+
+    g_mock_decoder->decode(local_measurements, corrections,
+                           ctx.num_measurements, ctx.num_observables);
+
+    response->result_len = static_cast<std::uint32_t>(ctx.num_observables);
     return 0; // Success
   } else {
     // Error: decoder not set
-    *result_len = 0;
     return -1;
   }
 }

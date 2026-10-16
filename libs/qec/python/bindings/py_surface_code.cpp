@@ -7,6 +7,8 @@
  ******************************************************************************/
 
 #include "py_surface_code.h"
+#include "cudaq_type_casters.h"
+#include "type_casters.h"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -134,7 +136,37 @@ void bindSurfaceCode(nb::module_ &mod) {
            "Return the stabilizers as a list of cudaq::spin_op_term")
       .def("get_spin_op_observables", &stabilizer_grid::get_spin_op_observables,
            "Return the logical observables as [X, Z] cudaq::spin_op_term "
-           "entries");
+           "entries")
+      .def(
+          "get_cnot_schedule_x",
+          [](const stabilizer_grid &g) {
+            return cudaq::python::copyCUDAQXTensorToPyArray(
+                g.get_cnot_schedule_x());
+          },
+          "Return the X-stabilizer CNOT schedule matrix as a numpy array "
+          "whose rows match the sorted parity-matrix rows. Entry 0 = no "
+          "support, k >= 1 = CNOT timestep, ordered so that ancilla (hook) "
+          "errors land perpendicular to the logical operators.")
+      .def(
+          "get_cnot_schedule_z",
+          [](const stabilizer_grid &g) {
+            return cudaq::python::copyCUDAQXTensorToPyArray(
+                g.get_cnot_schedule_z());
+          },
+          "Return the Z-stabilizer CNOT schedule matrix as a numpy array "
+          "whose rows match the sorted parity-matrix rows. Entry 0 = no "
+          "support, k >= 1 = CNOT timestep, ordered so that ancilla (hook) "
+          "errors land perpendicular to the logical operators.")
+      .def("get_cnot_schedule_pairs_x",
+           &stabilizer_grid::get_cnot_schedule_pairs_x,
+           "Return the X-stabilizer CNOT schedule as a flat list of "
+           "(stabilizer index, data index) pairs ordered by timestep within "
+           "each stabilizer.")
+      .def("get_cnot_schedule_pairs_z",
+           &stabilizer_grid::get_cnot_schedule_pairs_z,
+           "Return the Z-stabilizer CNOT schedule as a flat list of "
+           "(stabilizer index, data index) pairs ordered by timestep within "
+           "each stabilizer.");
 
   qecmod.def("role_to_str", [](surface_role r) {
     switch (r) {

@@ -1,4 +1,4 @@
-.. class:: cudaq_qec.plugin.decoders.tensor_network_decoder.TensorNetworkDecoder
+.. class:: cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder
 
     A general class for tensor network decoders for quantum error correction codes.
 
@@ -13,11 +13,10 @@
     decoder. Use `pip install cudaq-qec[tensor-network-decoder]` in order to use
     this decoder.
     
-    The Tensor Network Decoder has the same GPU support as the `Quantum Low-Density Parity-Check Decoder <https://nvidia.github.io/cudaqx/components/qec/introduction.html#quantum-low-density-parity-check-decoder>`__.
+    The Tensor Network Decoder has the same GPU support as the :ref:`Quantum Low-Density Parity-Check Decoder <qldpc_decoder>`.
     However, if you are using the V100 GPU (SM70), you will need to pin your
     cuTensor version to 2.2 by running `pip install cutensor_cu12==2.2`. Note
-    that this GPU will not be supported by the Tensor Network Decoder when
-    CUDA-Q 0.5.0 is released.
+    that this GPU is not supported by the Tensor Network Decoder.
 
     .. note::
       It is recommended to create decoders using the `cudaq_qec` plugin API:
@@ -68,7 +67,7 @@
     :param logical_inds: (optional) List of logical index names
     :param logical_tags: (optional) List of logical tags
     :param contract_noise_model: (bool, optional) Whether to contract the noise model at initialization (default: True)
-    :param dtype: (str, optional) Data type for tensors (default: "float32")
+    :param dtype: (str, optional) Data type for tensors (default: "float64")
     :param device: (str, optional) Device for tensor operations ("cpu", "cuda", or "cuda:X", default: "cuda")
 
     **Methods**

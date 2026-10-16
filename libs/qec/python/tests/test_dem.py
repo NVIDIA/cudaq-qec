@@ -295,9 +295,47 @@ def test_decoding_from_surface_code_dem_from_memory_circuit(
     assert nLogicalErrorsWithDecoding < nLogicalErrorsWithoutDecoding
 
 
+def test_pymatching_observable_model_does_not_select_output_basis():
+    H = np.eye(2, dtype=np.uint8)
+    O = np.array([[1, 1]], dtype=np.uint8)
+    rates = np.array([0.1, 0.1])
+    syndrome = np.array([1, 0], dtype=np.uint8)
+
+    error_decoder = qec.get_decoder('pymatching', H, O=O, error_rate_vec=rates)
+    error_result = error_decoder.decode(syndrome)
+    np.testing.assert_array_equal(error_result.result, [1.0, 0.0])
+
+    observable_decoder = qec.get_decoder('pymatching',
+                                         H,
+                                         O=O,
+                                         output='observables',
+                                         error_rate_vec=rates)
+    observable_result = observable_decoder.decode(syndrome)
+    np.testing.assert_array_equal(observable_result.result, [1.0])
+
+    parallel_H = np.array([[1, 1]], dtype=np.uint8)
+    parallel_O = np.array([[1, 0]], dtype=np.uint8)
+    parallel_rates = np.array([0.1, 0.2])
+    with pytest.raises(ValueError):
+        qec.get_decoder('pymatching',
+                        parallel_H,
+                        O=parallel_O,
+                        error_rate_vec=parallel_rates)
+    with pytest.raises(ValueError):
+        qec.get_decoder('pymatching',
+                        parallel_H,
+                        O=parallel_O,
+                        output='errors',
+                        error_rate_vec=parallel_rates)
+    qec.get_decoder('pymatching',
+                    parallel_H,
+                    O=parallel_O,
+                    output='observables',
+                    error_rate_vec=parallel_rates)
+
+
 def test_pymatching_decode_to_observable_surface_code_dem():
-    """Test PyMatching with O (observables) matrix: decoder returns observable
-    flips directly.cpp)."""
+    """Test explicit PyMatching observable output on a surface-code DEM."""
     cudaq.set_random_seed(13)
     code = qec.get_code('surface_code', distance=5)
     Lz = code.get_observables_z()
@@ -320,11 +358,12 @@ def test_pymatching_decode_to_observable_surface_code_dem():
         'pymatching',
         dem.detector_error_matrix,
         O=dem.observables_flips_matrix,
+        output='observables',
         error_rate_vec=np.array(dem.error_rates),
     )
 
     dr = decoder.decode_batch(syndromes)
-    # With decode_to_observables=True, each row is observable flips
+    # Constructed for observable output, so each row is observable flips
     # (length num_observables), not error predictions.
     obs_per_shot = np.asarray(dr.result, dtype=np.float64)
     data_predictions = np.round(obs_per_shot).astype(np.uint8).T
@@ -669,6 +708,7 @@ def test_pymatching_decodes_stim_surface_code_dem():
             'pymatching',
             H,
             O=O,
+            output='observables',
             error_rate_vec=rates,
             merge_strategy='independent',
         )
@@ -676,7 +716,7 @@ def test_pymatching_decodes_stim_surface_code_dem():
         pytest.skip(f'pymatching decoder unavailable in this build: {e}')
 
     dr = decoder.decode_batch(syndromes)
-    # With O provided, the decoder returns predicted observable flips.
+    # Constructed for observable output, so these are observable flips.
     obs_per_shot = np.asarray(dr.result, dtype=np.float64)
     data_predictions = np.round(obs_per_shot).astype(np.uint8).flatten()
 
@@ -740,6 +780,482 @@ def test_sample_memory_circuit_aligned_with_dem(statePrep, sample_fn, dem_fn):
         f"rate ({nLogicalErrorsWithDecoding} vs "
         f"{nLogicalErrorsWithoutDecoding}), suggesting misaligned detector "
         f"order")
+
+
+def test_decoder_context_from_memory_circuit_requires_noise_model():
+    # Like the *_dem_from_memory_circuit bindings, the decoder_context binding
+    # dereferences an optional noise model, so noise=None/omitted must fail.
+    code = qec.get_code('steane')
+    statePrep = qec.operation.prep0
+
+    with pytest.raises(RuntimeError, match="requires a noise model"):
+        qec.decoder_context_from_memory_circuit(code, statePrep, 1)
+
+    with pytest.raises(RuntimeError, match="requires a noise model"):
+        qec.decoder_context_from_memory_circuit(code, statePrep, 1, None)
+
+
+def test_decoder_context_and_components():
+    # decoder_context_from_memory_circuit returns a decoder_context;
+    # canonicalization is deferred until a component method is called.
+    # full_component() matches dem_from_memory_circuit;
+    # x_component() / z_component() reproduce x_/z_dem_from_memory_circuit.
+    code = qec.get_code('steane')
+    prep = qec.operation.prep0
+    nRounds = 3
+    noise = cudaq.NoiseModel()
+    noise.add_all_qubit_channel("x", cudaq.Depolarization2(0.05), 1)
+
+    ctx = qec.decoder_context_from_memory_circuit(code, prep, nRounds, noise)
+    dem = qec.dem_from_memory_circuit(code, prep, nRounds, noise)
+    z = qec.z_dem_from_memory_circuit(code, prep, nRounds, noise)
+    x = qec.x_dem_from_memory_circuit(code, prep, nRounds, noise)
+
+    # full_component() matches the plain entry point.
+    fc_dem, fc_m2d, fc_m2o = ctx.full_component()
+    assert mat_to_str(fc_dem.detector_error_matrix) == mat_to_str(
+        dem.detector_error_matrix)
+
+    # m2d/m2o maps are present and aligned to the DEM (Python binding surface).
+    assert len(fc_m2d) == fc_dem.detector_error_matrix.shape[0]
+    assert len(fc_m2o) == fc_dem.observables_flips_matrix.shape[0]
+    assert ctx.num_measurements > 0
+    assert all(0 <= m < ctx.num_measurements for row in fc_m2d for m in row)
+
+    # x_component() / z_component() reproduce the per-type DEMs and partition
+    # the detectors
+    zc_dem, zc_m2d, zc_m2o = ctx.z_component()
+    xc_dem, xc_m2d, xc_m2o = ctx.x_component()
+    assert mat_to_str(zc_dem.detector_error_matrix) == mat_to_str(
+        z.detector_error_matrix)
+    assert mat_to_str(xc_dem.detector_error_matrix) == mat_to_str(
+        x.detector_error_matrix)
+    assert (zc_dem.detector_error_matrix.shape[0] +
+            xc_dem.detector_error_matrix.shape[0] ==
+            fc_dem.detector_error_matrix.shape[0])
+    assert len(zc_m2d) == zc_dem.detector_error_matrix.shape[0]
+
+
+def test_decoder_context_d_sparse_layout():
+    # qec.d_sparse(m2d) flattens a measurement-to-detector map into the
+    # -1-terminated sparse vector a realtime decoder expects.
+    code = qec.get_code('steane')
+    noise = cudaq.NoiseModel()
+    noise.add_all_qubit_channel("x", cudaq.Depolarization2(0.05), 1)
+    ctx = qec.decoder_context_from_memory_circuit(code, qec.operation.prep0, 3,
+                                                  noise)
+    fc_dem, fc_m2d, fc_m2o = ctx.full_component()
+
+    d_sparse = qec.d_sparse(fc_m2d)
+    # One -1 terminator per detector row.
+    assert d_sparse.count(-1) == len(fc_m2d)
+    # Reconstruct the m2d rows from the flattened form and compare.
+    rebuilt, row = [], []
+    for v in d_sparse:
+        if v == -1:
+            rebuilt.append(row)
+            row = []
+        else:
+            row.append(v)
+    assert rebuilt == [list(r) for r in fc_m2d]
+
+
+def test_d_sparse_does_not_require_explicit_measurement_width():
+    assert qec.d_sparse([[2], [], [0, 4]]) == [2, -1, -1, 0, 4, -1]
+
+
+def test_decoder_context_single_type_code_empty_component():
+    # The repetition code has only Z stabilizers, so its X context has no
+    # detectors. Verify the empty context is self-consistent (no detectors,
+    # empty maps), and the Z context keeps every detector.
+    code = qec.get_code('repetition', distance=3)
+    noise = cudaq.NoiseModel()
+    noise.add_all_qubit_channel("x", cudaq.Depolarization2(0.05), 1)
+    ctx = qec.decoder_context_from_memory_circuit(code, qec.operation.prep0, 3,
+                                                  noise)
+
+    xc_dem, xc_m2d, xc_m2o = ctx.x_component()
+    assert xc_dem.num_detectors() == 0
+    assert len(xc_m2d) == 0
+    assert qec.d_sparse(xc_m2d) == []  # empty m2d -> empty D_sparse
+
+    zc_dem, zc_m2d, zc_m2o = ctx.z_component()
+    fc_dem, fc_m2d, fc_m2o = ctx.full_component()
+    assert zc_dem.num_detectors() == fc_dem.num_detectors()
+    assert len(zc_m2d) == zc_dem.num_detectors()
+
+
+# ---------------------------------------------------------------------------
+# Tests for dem_stitch / dem_stitch_all / dem_close / dem_close_all and the
+# dem_chunks_to_* utility functions exposed via py_extended_dem.cpp.
+# All tests use a rep-3 single-round chunk (d=2 seam rows, 3 faults).
+# ---------------------------------------------------------------------------
+
+
+def _rep3_dem_chunk(px=0.01):
+    code = qec.css_matrices_from_code(qec.get_code("repetition", distance=3))
+    noise = qec.CssNoise()
+    noise.px_per_qubit = [px, px, px]
+    return qec.extended_dem_from_css_matrices(code, noise)
+
+
+def test_dem_stitch_interior_grows():
+    # After one stitch the contracted seam rows become interior (d=2).
+    c = _rep3_dem_chunk()
+    ab = qec.dem_stitch(c, c, qec.seam_name.next_round,
+                        qec.seam_name.prev_round)
+    assert ab.num_interior_rows() == 2
+    assert ab.get_seam(qec.seam_name.prev_round).num_rows() == 2
+    assert ab.num_faults() == 6  # 2 rounds × 3 qubits
+
+
+def test_dem_stitch_error_rates_concatenated():
+    px = 0.01
+    c = _rep3_dem_chunk(px)
+    ab = qec.dem_stitch(c, c, qec.seam_name.next_round,
+                        qec.seam_name.prev_round)
+    assert len(ab.error_rates) == 6
+    assert all(abs(p - px) < 1e-12 for p in ab.error_rates)
+
+
+def test_dem_stitch_all_empty_raises():
+    with pytest.raises(Exception):
+        qec.dem_stitch_all([])
+
+
+def test_dem_stitch_all_single_chunk_identity():
+    c = _rep3_dem_chunk()
+    result = qec.dem_stitch_all([c])
+    assert result.num_interior_rows() == c.num_interior_rows()
+    assert result.num_faults() == c.num_faults()
+
+
+def test_dem_stitch_all_three_chunks_interior():
+    c = _rep3_dem_chunk()
+    abc = qec.dem_stitch_all([c, c, c])
+    # 2 stitches × 2 contracted seam rows each = 4 interior rows
+    assert abc.num_interior_rows() == 4
+    assert abc.num_faults() == 9  # 3 rounds × 3 qubits
+
+
+def test_dem_close_single_chunk_shape():
+    # A single rep-3 chunk has d=2 prev_round seam rows and 3 fault columns.
+    # dem_close emits the prev_round seam rows as detectors and drops next_round.
+    px = 0.01
+    chunk = _rep3_dem_chunk(px)
+    closed = qec.dem_close(chunk)
+    d = chunk.get_seam(qec.seam_name.prev_round).num_rows()
+    assert closed.num_detectors() == d
+    assert closed.num_error_mechanisms() == chunk.num_faults()
+    assert np.allclose(closed.error_rates, chunk.error_rates)
+
+
+def test_dem_close_all_matches_close_stitch_all():
+    # dem_close_all must produce the same DEM as dem_close(dem_stitch_all(...)).
+    T = 4
+    chunks = [_rep3_dem_chunk() for _ in range(T)]
+    via_stitch = qec.dem_close(qec.dem_stitch_all(chunks))
+    via_close_all = qec.dem_close_all(chunks)
+    assert via_close_all.num_detectors() == via_stitch.num_detectors()
+    assert via_close_all.num_error_mechanisms() == \
+        via_stitch.num_error_mechanisms()
+    assert np.array_equal(np.asarray(via_close_all.detector_error_matrix),
+                          np.asarray(via_stitch.detector_error_matrix))
+    assert np.array_equal(np.asarray(via_close_all.observables_flips_matrix),
+                          np.asarray(via_stitch.observables_flips_matrix))
+    assert np.allclose(via_close_all.error_rates, via_stitch.error_rates)
+
+
+def test_dem_close_all_empty_raises():
+    with pytest.raises(Exception):
+        qec.dem_close_all([])
+
+
+def test_dem_chunk_rounds_single():
+    c = _rep3_dem_chunk()
+    assert qec.dem_chunk_rounds(c) == 1
+
+
+def test_dem_chunk_rounds_stitched():
+    c = _rep3_dem_chunk()
+    ab = qec.dem_stitch(c, c, qec.seam_name.next_round,
+                        qec.seam_name.prev_round)
+    assert qec.dem_chunk_rounds(ab) == 2
+
+
+def test_dem_chunks_to_rounds():
+    T = 5
+    chunks = [_rep3_dem_chunk() for _ in range(T)]
+    assert qec.dem_chunks_to_rounds(chunks) == T
+
+
+def test_dem_chunks_to_detector_round_length_and_values():
+    # T chunks of d=2 seam rows → T*d detector entries; entry i belongs to
+    # round i//d.
+    T = 3
+    d = 2
+    chunks = [_rep3_dem_chunk() for _ in range(T)]
+    rounds = qec.dem_chunks_to_detector_round(chunks)
+    assert len(rounds) == T * d
+    for i, r in enumerate(rounds):
+        assert r == i // d, f"detector {i}: expected round {i // d}, got {r}"
+
+
+def test_dem_chunks_to_d_sparse_length():
+    T = 3
+    d = 2
+    chunks = [_rep3_dem_chunk() for _ in range(T)]
+    d_sparse = qec.dem_chunks_to_d_sparse(chunks)
+    # One entry per detector
+    assert len(d_sparse) == T * d
+
+
+def test_dem_chunks_to_o_sparse_length():
+    T = 3
+    chunks = [_rep3_dem_chunk() for _ in range(T)]
+    o_sparse = qec.dem_chunks_to_o_sparse(chunks)
+    # One entry per observable (rep-3 has 1)
+    assert len(o_sparse) == chunks[0].num_observables()
+
+
+# ---------------------------------------------------------------------------
+# Declarative phase specs
+# ---------------------------------------------------------------------------
+
+REP5_CHECKS = 4
+
+
+def _make_phase_entry(name_str, num_faults, H_sparse, O_sparse, error_rates):
+    s = qec.DemChunkSpec()
+    s.num_faults = num_faults
+    s.H_sparse = list(H_sparse)
+    s.O_sparse = list(O_sparse)
+    s.error_rates = list(error_rates)
+    e = qec.PhaseSpecEntry()
+    e.id = qec.SeamId(name_str)
+    e.spec = s
+    return e
+
+
+def _make_connection(from_str, to_str):
+    c = qec.PhaseConnection()
+    c.from_phase = qec.SeamId(from_str)
+    c.to_phase = qec.SeamId(to_str)
+    return c
+
+
+def _rep5_spec(num_rounds=5):
+    """A d=5 repetition code as init / bulk / final phases.
+
+    Fault columns 0..4 are data qubits and 5..8 measurement errors; the final
+    phase measures destructively so it has only the five data columns.
+    Spec-built chunks carry only seam rows (no interior rows).
+    """
+    seam = qec.SeamConnection()
+    seam.from_seam = qec.seam_name.next_round
+    seam.to_seam = qec.seam_name.prev_round
+
+    spec = qec.DemChunksSpec()
+    spec.phases = [
+        _make_phase_entry("init", 9,
+                          [0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1, 3, 4, 8, -1],
+                          [0, -1], [0.02] * 9),
+        _make_phase_entry("bulk", 9,
+                          [0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1, 3, 4, 8, -1],
+                          [0, -1], [0.02] * 9),
+        _make_phase_entry("final", 5, [0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1],
+                          [0, -1], [0.02] * 5),
+    ]
+    spec.connections = [
+        _make_connection("init", "bulk"),
+        _make_connection("bulk", "bulk"),
+        _make_connection("bulk", "final"),
+    ]
+    spec.seam = seam
+    spec.num_rounds = num_rounds
+    return spec
+
+
+def test_dem_chunks_spec_validates():
+    spec = _rep5_spec()
+    spec.validate()
+    assert spec.has_repeating_phase()
+    assert not spec.is_empty()
+    assert qec.DemChunksSpec().is_empty()
+
+
+def test_dem_chunk_spec_round_trips_through_attributes():
+    spec = _rep5_spec()
+    assert spec.get_phase(qec.SeamId("init")).num_faults == 9
+    assert spec.get_phase(qec.SeamId("final")).num_faults == 5
+
+
+def test_dem_chunks_from_spec_expands_to_round_count():
+    for rounds in range(3, 8):
+        spec = _rep5_spec(rounds)
+        chunks = qec.dem_chunks_from_spec(spec)
+        assert len(chunks) == rounds
+        # init has a prev_round seam (initial-state detector band).
+        assert chunks[0].has_seam(qec.seam_name.prev_round)
+        assert chunks[0].get_seam(qec.seam_name.prev_round).num_rows() > 0
+        # final has no outgoing seam.
+        assert not chunks[-1].has_seam(qec.seam_name.next_round)
+        assert qec.dem_chunks_to_rounds(chunks) == rounds
+
+
+def test_dem_chunks_from_spec_closes_to_one_detector_band_per_round():
+    # init's prev_round seam gives the initial-state detector band (round 0 vs
+    # zero), and each inter-chunk boundary gives one more band: rounds total.
+    for rounds in range(3, 8):
+        spec = _rep5_spec(rounds)
+        chunks = qec.dem_chunks_from_spec(spec)
+        dem = qec.dem_close_all(chunks)
+        assert dem.detector_error_matrix.shape[0] == rounds * REP5_CHECKS
+        assert len(qec.dem_chunks_to_d_sparse(chunks)) == rounds * REP5_CHECKS
+
+
+def test_dem_chunk_from_spec_matches_the_phase_it_describes():
+    spec = _rep5_spec()
+    init_spec = spec.get_phase(qec.SeamId("init"))
+    init = qec.dem_chunk_from_spec(init_spec, [qec.seam_name.next_round])
+    assert init.num_faults() == 9
+    assert not init.has_seam(qec.seam_name.prev_round)
+    assert init.has_seam(qec.seam_name.next_round)
+    assert init.get_seam(qec.seam_name.next_round).num_rows() == REP5_CHECKS
+    # Called directly with only next_round: no prev_round seam → 0 rounds.
+    # (dem_chunks_from_spec always adds prev_round; this test calls
+    # dem_chunk_from_spec directly with an explicit seam list.)
+    assert qec.dem_chunk_rounds(init) == 0
+
+
+def test_dem_chunks_spec_rejects_mismatched_error_rate_count():
+    spec = _rep5_spec()
+    for entry in spec.phases:
+        if entry.id == qec.SeamId("init"):
+            entry.spec.error_rates = [0.02] * 8  # wrong count
+    with pytest.raises(Exception):
+        spec.validate()
+
+
+def test_dem_chunks_from_spec_requires_num_rounds_for_repeating_phase():
+    spec = _rep5_spec()
+    spec.num_rounds = None
+    with pytest.raises(Exception):
+        qec.dem_chunks_from_spec(spec)
+
+
+def test_dem_chunks_from_spec_linear_chain_needs_no_num_rounds():
+    # A two-phase linear chain (no self-loop) works without num_rounds.
+    seam = qec.SeamConnection()
+    seam.from_seam = qec.seam_name.next_round
+    seam.to_seam = qec.seam_name.prev_round
+
+    spec = qec.DemChunksSpec()
+    spec.phases = [
+        _make_phase_entry("init", 5, [0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1],
+                          [0, -1], [0.02] * 5),
+        _make_phase_entry("final", 5, [0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1],
+                          [0, -1], [0.02] * 5),
+    ]
+    spec.connections = [_make_connection("init", "final")]
+    spec.seam = seam
+    # num_rounds absent — valid for a linear chain with no self-loop
+    chunks = qec.dem_chunks_from_spec(spec)
+    assert len(chunks) == 2
+
+
+def test_dem_chunks_from_spec_rejects_a_cyclic_connection_graph():
+    # A -> B and B -> A has no terminal phase; walking it used to grow the
+    # phase sequence until the process ran out of memory.
+    seam = qec.SeamConnection()
+    seam.from_seam = qec.seam_name.next_round
+    seam.to_seam = qec.seam_name.prev_round
+
+    spec = qec.DemChunksSpec()
+    spec.phases = [
+        _make_phase_entry("A", 5, [0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1],
+                          [0, -1], [0.02] * 5),
+        _make_phase_entry("B", 5, [0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1],
+                          [0, -1], [0.02] * 5),
+    ]
+    spec.connections = [_make_connection("A", "B"), _make_connection("B", "A")]
+    spec.seam = seam
+
+    with pytest.raises(Exception):
+        spec.phase_sequence()
+    with pytest.raises(Exception):
+        qec.dem_chunks_from_spec(spec)
+
+
+# ---------------------------------------------------------------------------
+# Matrix interop: sparse_binary_matrix has no Python class, so the bindings
+# accept/return NumPy and scipy matrices on its behalf.
+# ---------------------------------------------------------------------------
+
+
+def test_extended_dem_matrices_are_numpy_arrays():
+    c = _rep3_dem_chunk()
+    H, O = c.H, c.O
+
+    assert isinstance(H, np.ndarray)
+    assert isinstance(O, np.ndarray)
+    assert H.dtype == np.uint8
+    assert H.shape == (c.num_rows(), c.num_faults())
+    assert O.shape == (c.num_observables(), c.num_faults())
+
+    # Each access returns an independent copy, so mutating one cannot corrupt
+    # the chunk it came from.
+    H[0, 0] ^= 1
+    assert not np.array_equal(H, c.H)
+
+
+def test_css_codes_matrices_accept_numpy_arrays():
+    hz = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.uint8)
+    lz = np.array([[1, 0, 0]], dtype=np.uint8)
+
+    codes = qec.CssCodes()
+    codes.hz = hz
+    codes.lz = lz
+
+    assert np.array_equal(codes.hz, hz)
+    assert np.array_equal(codes.lz, lz)
+
+    # A hand-built CssCodes has to drive DEM construction, not just read back.
+    noise = qec.CssNoise()
+    noise.px_per_qubit = [0.01, 0.01, 0.01]
+    chunk = qec.extended_dem_from_css_matrices(codes, noise)
+    assert chunk.num_faults() == 3
+    assert chunk.num_observables() == 1
+
+
+def test_css_codes_matrices_accept_scipy_sparse():
+    scipy_sparse = pytest.importorskip("scipy.sparse")
+    hz = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.uint8)
+
+    codes = qec.CssCodes()
+    codes.hz = scipy_sparse.csr_matrix(hz)
+    assert np.array_equal(codes.hz, hz)
+
+
+def test_css_codes_matrices_accept_non_uint8_dtype():
+    hz = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.int32)
+    codes = qec.CssCodes()
+    codes.hz = hz
+    assert np.array_equal(codes.hz, hz.astype(np.uint8))
+
+
+def test_dem_chunks_to_pcm_returns_a_scipy_matrix():
+    scipy_sparse = pytest.importorskip("scipy.sparse")
+    c = _rep3_dem_chunk()
+    pcm = qec.dem_chunks_to_pcm([c, c])
+
+    assert scipy_sparse.issparse(pcm)
+    assert scipy_sparse.isspmatrix_csc(pcm)
+    # Same detector geometry as the closed DEM it is built from.
+    dem = qec.dem_close_all([c, c])
+    assert pcm.shape == dem.detector_error_matrix.shape
+    assert np.array_equal(pcm.toarray().astype(np.uint8),
+                          dem.detector_error_matrix)
 
 
 if __name__ == "__main__":

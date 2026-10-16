@@ -2,17 +2,12 @@
 CUDA-Q QEC by Example
 *************************
 
-Examples that illustrate how to use CUDA-QX for application development are available in C++ and Python.
+Examples that illustrate how to use CUDA-Q QEC for application development are available in C++ and Python.
 
 .. toctree::
    :maxdepth: 1
 
-      Code-Capacity QEC <code_capacity_noise.rst>
-      Circuit-Level QEC <circuit_level_noise.rst>
-      Decoding From Stim DEM Text <stim_dem_decoder.rst>
+      Creating New QEC Codes <creating_qec_codes.rst>
+      Experiments and Noise Modeling <modeling_noise.rst>
       Decoders <decoders.rst>
-      Real-Time Decoding <realtime_decoding.rst>
-      AI Predecoder with CUDA-Q Realtime <realtime_predecoder_pymatching.rst>
-      AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection) <realtime_predecoder_fpga.rst>
-      Relay BP Decoding with CUDA-Q Realtime <realtime_relay_bp.rst>
-      Standalone Decoding Server <decoding_server.rst>
+      Realtime Decoding <realtime_decoding.rst>

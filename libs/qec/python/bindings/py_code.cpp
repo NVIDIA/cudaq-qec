@@ -22,6 +22,7 @@
 #include "cudaq/qec/version.h"
 
 #include "cuda-qx/core/kwargs_utils.h"
+#include "cudaq_type_casters.h"
 #include "type_casters.h"
 
 namespace nb = nanobind;
@@ -151,9 +152,14 @@ public:
         if (!retTyObj.is_none()) {
           nb::object cc =
               nb::module_::import_("cudaq.mlir.dialects").attr("cc");
-          nb::object stdvecTy = cc.attr("StdvecType");
-          if (nb::cast<bool>(stdvecTy.attr("isinstance")(retTyObj))) {
-            nb::object eleTy = stdvecTy.attr("getElementType")(retTyObj);
+          // CUDA-Q renamed cc.StdvecType to cc.SequenceType (cuda-quantum
+          // #5089). Accept either name so this keeps working across both the
+          // pinned CUDA-Q version and main.
+          nb::object seqTy = nb::hasattr(cc, "SequenceType")
+                                 ? cc.attr("SequenceType")
+                                 : cc.attr("StdvecType");
+          if (nb::cast<bool>(seqTy.attr("isinstance")(retTyObj))) {
+            nb::object eleTy = seqTy.attr("getElementType")(retTyObj);
             returnsHandleVector = nb::cast<bool>(
                 cc.attr("MeasureHandleType").attr("isinstance")(eleTy));
           }
@@ -210,6 +216,77 @@ protected:
 
   std::size_t get_num_z_stabilizers() const override {
     return nb::cast<std::size_t>(pyCode.attr("get_num_z_stabilizers")());
+  }
+
+  /// @brief True if the Python class itself defines this method. A plain
+  /// hasattr won't do: the @qec.code decorator makes the class inherit from
+  /// the bound Code class, which exposes same-named read-only getters.
+  bool has_py_override(const char *methodName) const {
+    nb::handle base = nb::type<qec::code>();
+    for (nb::handle cls : nb::cast<nb::tuple>(pyCode.type().attr("__mro__"))) {
+      if (cls.is(base))
+        break;
+      if (nb::cast<bool>(cls.attr("__dict__").attr("__contains__")(methodName)))
+        return true;
+    }
+    return false;
+  }
+
+  /// @brief Convert a Python-provided stabilizer schedule matrix (any 2D
+  /// sequence of integers in [0, 255]) into a tensor, validating it against
+  /// the corresponding parity matrix.
+  cudaqx::tensor<uint8_t>
+  py_stabilizer_schedule(const char *methodName,
+                         const cudaqx::tensor<uint8_t> &parity) const {
+    std::vector<std::vector<uint8_t>> rows;
+    try {
+      rows = nb::cast<std::vector<std::vector<uint8_t>>>(
+          pyCode.attr(methodName)());
+    } catch (...) {
+      throw std::runtime_error(
+          std::string(methodName) +
+          " must return a 2D array/list of integers in [0, 255].");
+    }
+    if (rows.empty()) {
+      if (parity.size() != 0)
+        throw std::runtime_error(std::string(methodName) +
+                                 " shape does not match the parity matrix.");
+      return parity;
+    }
+    const std::size_t num_cols = rows[0].size();
+    if (parity.rank() != 2 || parity.shape()[0] != rows.size() ||
+        parity.shape()[1] != num_cols)
+      throw std::runtime_error(std::string(methodName) +
+                               " shape does not match the parity matrix.");
+    cudaqx::tensor<uint8_t> schedule({rows.size(), num_cols});
+    for (std::size_t r = 0; r < rows.size(); ++r) {
+      if (rows[r].size() != num_cols)
+        throw std::runtime_error(std::string(methodName) +
+                                 " rows must all have the same length.");
+      for (std::size_t c = 0; c < num_cols; ++c) {
+        // A schedule may reorder interactions but not change which data
+        // qubits each stabilizer touches.
+        if ((rows[r][c] != 0) != (parity.at({r, c}) != 0))
+          throw std::runtime_error(
+              std::string(methodName) +
+              " support pattern does not match the parity matrix.");
+        schedule.at({r, c}) = rows[r][c];
+      }
+    }
+    return schedule;
+  }
+
+public:
+  cudaqx::tensor<uint8_t> get_stabilizer_schedule_x() const override {
+    if (!has_py_override("get_stabilizer_schedule_x"))
+      return code::get_stabilizer_schedule_x();
+    return py_stabilizer_schedule("get_stabilizer_schedule_x", get_parity_x());
+  }
+
+  cudaqx::tensor<uint8_t> get_stabilizer_schedule_z() const override {
+    if (!has_py_override("get_stabilizer_schedule_z"))
+      return code::get_stabilizer_schedule_z();
+    return py_stabilizer_schedule("get_stabilizer_schedule_z", get_parity_z());
   }
 };
 
@@ -397,6 +474,26 @@ void bindCode(nb::module_ &mod) {
                                            code.get_num_data_qubits());
           },
           "Get the Z-type parity check matrix of the code")
+      .def(
+          "get_stabilizer_schedule_x",
+          [](code &code) {
+            return copyCodeMatrixToPyArray(code.get_stabilizer_schedule_x(),
+                                           code.get_num_data_qubits());
+          },
+          "Get the X-stabilizer schedule matrix passed to the code's "
+          "stabilizer_round kernel. Entry 0 = no support, entry k >= 1 = "
+          "interaction at timestep k; defaults to the X-type parity check "
+          "matrix (every interaction at timestep 1).")
+      .def(
+          "get_stabilizer_schedule_z",
+          [](code &code) {
+            return copyCodeMatrixToPyArray(code.get_stabilizer_schedule_z(),
+                                           code.get_num_data_qubits());
+          },
+          "Get the Z-stabilizer schedule matrix passed to the code's "
+          "stabilizer_round kernel. Entry 0 = no support, entry k >= 1 = "
+          "interaction at timestep k; defaults to the Z-type parity check "
+          "matrix (every interaction at timestep 1).")
       .def(
           "get_pauli_observables_matrix",
           [](code &code) {
@@ -606,6 +703,76 @@ void bindCode(nb::module_ &mod) {
       nb::arg("code"), nb::arg("op"), nb::arg("numShots"), nb::arg("numRounds"),
       nb::arg("noise") = nb::none());
 
+  nb::class_<decoder_context>(qecmod, "DecoderContext",
+                              R"pbdoc(
+      Lazy handle returned by ``decoder_context_from_memory_circuit``.
+
+      Stores the raw circuit analysis. Each ``*_component`` method canonicalizes
+      exactly the requested stabilizer type and returns a ``(dem, m2d, m2o)``
+      tuple.
+    )pbdoc")
+      .def_prop_ro("num_measurements", &decoder_context::num_measurements,
+                   "Total number of measurements per shot.")
+      .def(
+          "x_component",
+          [](const decoder_context &h) {
+            auto ctx = h.x_component();
+            return nb::make_tuple(ctx.dem, ctx.m2d.rows, ctx.m2o.rows);
+          },
+          R"pbdoc(
+       Canonicalize X-stabilizer detectors; return (dem, m2d, m2o).
+
+       ``dem`` is the canonicalized DetectorErrorModel, ``m2d`` and ``m2o``
+       are lists of lists of measurement indices.
+    )pbdoc")
+      .def(
+          "z_component",
+          [](const decoder_context &h) {
+            auto ctx = h.z_component();
+            return nb::make_tuple(ctx.dem, ctx.m2d.rows, ctx.m2o.rows);
+          },
+          R"pbdoc(
+       Canonicalize Z-stabilizer detectors; return (dem, m2d, m2o).
+
+       ``dem`` is the canonicalized DetectorErrorModel, ``m2d`` and ``m2o``
+       are lists of lists of measurement indices.
+    )pbdoc")
+      .def(
+          "full_component",
+          [](const decoder_context &h) {
+            auto ctx = h.full_component();
+            return nb::make_tuple(ctx.dem, ctx.m2d.rows, ctx.m2o.rows);
+          },
+          R"pbdoc(
+       Canonicalize both stabilizer types with boundary awareness;
+       return (dem, m2d, m2o).
+
+       ``dem`` is the canonicalized DetectorErrorModel, ``m2d`` and ``m2o``
+       are lists of lists of measurement indices.
+    )pbdoc");
+
+  qecmod.def(
+      "d_sparse",
+      [](const std::vector<std::vector<std::size_t>> &rows) {
+        cudaq::M2DSparseMatrix m2d;
+        m2d.rows = rows;
+        return cudaq::qec::d_sparse(m2d);
+      },
+      R"pbdoc(
+       Flatten a measurement-to-detector map into the -1-terminated sparse
+       vector a realtime decoder config expects for its D_sparse.
+
+       ``m2d`` is a list of lists: ``m2d[d]`` contains the measurement indices
+       whose XOR forms detector ``d``. Each detector's indices are emitted in
+       order, followed by -1.
+
+       This is a standalone helper for consumers who hold an m2d map (e.g.,
+       extracted from a ``decoder_inputs`` returned by a component method)
+       and want to build the D_sparse vector without going through a
+       ``DecoderContext``.
+    )pbdoc",
+      nb::arg("m2d"));
+
   qecmod.def(
       "dem_from_memory_circuit",
       [](code &code, operation op, std::size_t numRounds,
@@ -704,6 +871,41 @@ void bindCode(nb::module_ &mod) {
              nb::arg("code"), nb::arg("op"), nb::arg("numRounds"),
              nb::arg("noise") = nb::none(),
              nb::arg("decompose_errors") = false);
+
+  qecmod.def(
+      "decoder_context_from_memory_circuit",
+      [](code &code, operation op, std::size_t numRounds,
+         std::optional<cudaq::noise_model> noise = std::nullopt,
+         bool decompose_errors = false) {
+        if (!noise)
+          throw std::runtime_error(
+              "decoder_context_from_memory_circuit requires a noise model; "
+              "noise=None is not supported.");
+        return decoder_context_from_memory_circuit(code, op, numRounds, *noise,
+                                                   decompose_errors);
+      },
+      R"pbdoc(
+        Run a memory-circuit analysis and return a lazy DecoderContext handle.
+
+        Executes ``dem_from_kernel`` once and stores the raw result.
+        Canonicalization is deferred: call ``x_component()``,
+        ``z_component()``, or ``full_component()`` on the returned handle to
+        canonicalize exactly the stabilizer type needed.
+
+        Args:
+            code: The code to characterize.
+            op: The initial state preparation operation.
+            numRounds: The number of stabilizer measurement rounds.
+            noise: The noise model to apply to the memory circuit.
+            decompose_errors: If True, hyperedge error mechanisms are decomposed
+                into pairs of two-detector edges by Stim before returning.
+
+        Returns:
+            A DecoderContext handle; call a component method to obtain the
+            canonicalized ``(dem, m2d, m2o)`` tuple.
+      )pbdoc",
+      nb::arg("code"), nb::arg("op"), nb::arg("numRounds"),
+      nb::arg("noise") = nb::none(), nb::arg("decompose_errors") = false);
 
   qecmod.def(
       "sample_code_capacity",

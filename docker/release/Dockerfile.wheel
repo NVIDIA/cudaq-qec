@@ -19,7 +19,7 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates vim wget openssh-client gfortran
+    ca-certificates vim wget openssh-client
 
 COPY wheels /root/wheels
 COPY scripts/validation/wheel/validate_wheels.sh /root

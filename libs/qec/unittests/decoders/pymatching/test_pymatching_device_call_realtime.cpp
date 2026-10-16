@@ -60,13 +60,12 @@ config::multi_decoder_config make_config() {
   decoder_config.H_sparse = identity_sparse_matrix;
   decoder_config.O_sparse = identity_sparse_matrix;
   decoder_config.D_sparse = identity_sparse_matrix;
-
-  decoder_config.decoder_custom_args = config::pymatching_config();
-  auto &pymatching_config =
-      std::get<config::pymatching_config>(decoder_config.decoder_custom_args);
-  pymatching_config.error_rate_vec =
+  decoder_config.error_rate_vec =
       std::vector<double>(kBlockSize, kUniformErrorRate);
-  pymatching_config.merge_strategy = "smallest_weight";
+
+  cudaqx::heterogeneous_map pymatching_args;
+  pymatching_args.insert("merge_strategy", "smallest_weight");
+  decoder_config.decoder_custom_args = pymatching_args;
 
   config::multi_decoder_config multi_config;
   multi_config.decoders.push_back(decoder_config);

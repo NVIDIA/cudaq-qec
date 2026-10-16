@@ -18,9 +18,7 @@ jobs:
       build-docs: ${{ steps.filter.outputs.build-docs }}
       build-all: ${{ steps.filter.outputs.build-all }}
       build-qec: ${{ steps.filter.outputs.build-qec }}
-      build-solvers: ${{ steps.filter.outputs.build-solvers }}
       build-examples-qec: ${{ steps.filter.outputs.build-examples-qec }}
-      build-examples-solvers: ${{ steps.filter.outputs.build-examples-solvers }}
       pr-number: ${{ steps.export-pr-info.outputs.pr_number }}
       build-wheels: ${{ steps.filter.outputs.build-wheels }}
     steps:
@@ -68,6 +66,8 @@ jobs:
               - '.github/actions/build-lib/build_qec.sh'
               - '.github/actions/build-lib/setup_custabilizer.sh'
               - '.github/workflows/lib_qec.yaml'
+              - '.github/workflows/scripts/verify_build_env.sh'
+              - 'docker/build_env/cudaqx.decoders.Dockerfile'
               - 'cmake/Modules/**'
               - 'libs/core/**/*.cpp'
               - 'libs/core/**/*.h'
@@ -79,23 +79,8 @@ jobs:
               - 'libs/qec/**/*.in'
               - 'libs/qec/**/*.py'
               - 'libs/qec/**/CMakeLists.txt'
-            build-solvers:
-              - '.github/actions/build-lib/action.yaml'
-              - '.github/actions/build-lib/build_solvers.sh'
-              - '.github/workflows/lib_solvers.yaml'
-              - 'cmake/Modules/**'
-              - 'libs/core/**/*.cpp'
-              - 'libs/core/**/*.h'
-              - 'libs/core/**/CMakeLists.txt'
-              - 'libs/solvers/**/*.cpp'
-              - 'libs/solvers/**/*.h'
-              - 'libs/solvers/**/*.in'
-              - 'libs/solvers/**/*.py'
-              - 'libs/solvers/**/CMakeLists.txt'
             build-examples-qec:
               - 'docs/sphinx/examples/qec/**'
-            build-examples-solvers:
-              - 'docs/sphinx/examples/solvers/**'
             build-wheels:
               - '.github/actions/get-cudaq-wheels/**'
               - '.github/workflows/build_wheels.yaml'
@@ -107,9 +92,6 @@ jobs:
               - 'libs/qec/python/metapackages/MANIFEST.in'
               - 'libs/qec/python/metapackages/pyproject.toml'
               - 'libs/qec/python/metapackages/setup.py'
-              - 'libs/solvers/pyproject.toml.cu*'
-              - 'libs/solvers/python/metapackages/MANIFEST.in'
-              - 'libs/solvers/python/metapackages/pyproject.toml'
               - '.cudaq_version'
 
   build-cudaq:
@@ -121,7 +103,7 @@ jobs:
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu32', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu32', matrix.platform) || 'ubuntu-latest' }}
     container: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
     permissions:
       actions: write
@@ -188,20 +170,6 @@ jobs:
     with:
       cache_key_suffix: pr${{ needs.check-changes.outputs.pr-number }}
 
-  build-solvers:
-    name: Solvers
-    needs: [check-changes, build-cudaq]
-    if: |
-      !failure() && !cancelled() &&
-      (
-        needs.check-changes.outputs.build-solvers == 'true' || 
-        needs.check-changes.outputs.build-cudaq == 'true' ||
-        needs.check-changes.outputs.build-examples-solvers == 'true'
-      )
-    uses: ./.github/workflows/lib_solvers.yaml
-    with:
-      cache_key_suffix: pr${{ needs.check-changes.outputs.pr-number }}
-
   build-wheels:
     name: Wheels
     needs: [check-changes]
@@ -222,9 +190,9 @@ jobs:
     if: ${{ always() }}
     needs:
       - build-cudaq
+      - build-docs
       - build-all
       - build-qec
-      - build-solvers
       - build-wheels
     runs-on: ubuntu-latest
     steps:
@@ -245,9 +213,9 @@ jobs:
           }
 
           check_result "build-cudaq"   "${{needs.build-cudaq.result}}"
+          check_result "build-docs"    "${{needs.build-docs.result}}"
           check_result "build-all"     "${{needs.build-all.result}}"
           check_result "build-qec"     "${{needs.build-qec.result}}"
-          check_result "build-solvers" "${{needs.build-solvers.result}}"
           check_result "build-wheels"  "${{needs.build-wheels.result}}"
 
           if [[ "$status" != "success" ]]; then

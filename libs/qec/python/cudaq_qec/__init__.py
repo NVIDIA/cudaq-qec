@@ -87,6 +87,7 @@ get_decoder = qecrt.get_decoder
 dem_from_stim_text = qecrt.dem_from_stim_text
 DecoderResult = qecrt.DecoderResult
 BatchDecoderResult = qecrt.BatchDecoderResult
+AsyncDecoderResult = qecrt.AsyncDecoderResult
 DetectorErrorModel = qecrt.DetectorErrorModel
 generate_random_bit_flips = qecrt.generate_random_bit_flips
 sample_memory_circuit = qecrt.sample_memory_circuit
@@ -96,6 +97,9 @@ sample_code_capacity = qecrt.sample_code_capacity
 dem_from_memory_circuit = qecrt.dem_from_memory_circuit
 x_dem_from_memory_circuit = qecrt.x_dem_from_memory_circuit
 z_dem_from_memory_circuit = qecrt.z_dem_from_memory_circuit
+decoder_context_from_memory_circuit = qecrt.decoder_context_from_memory_circuit
+DecoderContext = qecrt.DecoderContext
+d_sparse = qecrt.d_sparse
 
 dump_pcm = qecrt.dump_pcm
 generate_random_pcm = qecrt.generate_random_pcm
@@ -107,28 +111,42 @@ shuffle_pcm_columns = qecrt.shuffle_pcm_columns
 simplify_pcm = qecrt.simplify_pcm
 sort_pcm_columns = qecrt.sort_pcm_columns
 pcm_extend_to_n_rounds = qecrt.pcm_extend_to_n_rounds
-compute_msm = qecrt.compute_msm
-construct_mz_table = qecrt.construct_mz_table
 generate_timelike_sparse_detector_matrix = qecrt.generate_timelike_sparse_detector_matrix
 pcm_to_sparse_vec = qecrt.pcm_to_sparse_vec
 
 multi_decoder_config = qecrt.config.multi_decoder_config
 decoder_config = qecrt.config.decoder_config
-nv_qldpc_decoder_config = qecrt.config.nv_qldpc_decoder_config
-multi_error_lut_config = qecrt.config.multi_error_lut_config
-trt_decoder_config = qecrt.config.trt_decoder_config
-pymatching_config = qecrt.config.pymatching_config
-chromobius_config = qecrt.config.chromobius_config
+decoder_dispatch = qecrt.config.decoder_dispatch
+transport_config = qecrt.config.transport_config
+transport_shape_override = qecrt.config.transport_shape_override
 configure_decoders_from_file = qecrt.config.configure_decoders_from_file
 configure_decoders_from_str = qecrt.config.configure_decoders_from_str
 finalize_decoders = qecrt.config.finalize_decoders
 configure_decoders = qecrt.config.configure_decoders
+expand_dem_chunks = qecrt.config.expand_dem_chunks
+decoder_param_schema = qecrt.config.decoder_param_schema
+registered_decoder_schemas = qecrt.config.registered_decoder_schemas
+decoder_config_json_schema = qecrt.config.decoder_config_json_schema
+
+# Deprecated typed decoder-config classes, kept for backward compatibility
+# with the pre-schema API. They warn on construction; new code should assign
+# plain dicts to decoder_config.decoder_custom_args instead.
+from . import _compat
+from ._compat import (nv_qldpc_decoder_config, multi_error_lut_config,
+                      trt_decoder_config, pymatching_config, chromobius_config)
+
+for _compat_cls_name in _compat.__all__:
+    # The classes used to live in the compiled config submodule; keep that
+    # spelling working too (e.g. qec.qecrt.config.sliding_window_config).
+    setattr(qecrt.config, _compat_cls_name, getattr(_compat, _compat_cls_name))
+del _compat_cls_name
 
 stabilizer_grid = qecrt.stabilizer_grid
 role_to_str = qecrt.role_to_str
 sc_orientation = qecrt.sc_orientation
 
 from .dem_sampling import dem_sampling
+from . import relay_solutions
 
 from .plugins import decoders, codes
 import pkgutil, importlib
@@ -150,18 +168,9 @@ for finder, name, ispkg in iter_namespace(codes):
     except (ModuleNotFoundError, ImportError) as e:
         pass
 
-# Surface the TN noise learner at the top level when its optional
-# dependencies (torch, quimb, opt_einsum) are installed; mirrors the
-# silent-skip pattern used by the plugin loaders above.
 try:
-    from .plugins.decoders.tensor_network_utils.nm_optimizer import (
-        NMOptimizer,
-        make_compiled_step,
-    )
-except (ModuleNotFoundError, ImportError):
+    import cudaq
+    from .loader import qec_set_target_callback
+    cudaq.register_set_target_callback(qec_set_target_callback, "cudaq_qec")
+except ImportError:
     pass
-
-import cudaq
-from .loader import qec_set_target_callback
-
-cudaq.register_set_target_callback(qec_set_target_callback, "cudaq_qec")

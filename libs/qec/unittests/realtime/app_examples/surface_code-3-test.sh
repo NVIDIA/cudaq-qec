@@ -54,15 +54,6 @@ $EXE_PATH1 --distance $DISTANCE --num_shots $NUM_SHOTS --save_dem $CONFIG_FILE -
 
 export CUDAQ_DUMP_JIT_IR=${CUDAQ_DUMP_JIT_IR:-0}
 
-# This is a temporary workaround to allow the Quantinuum tests to run with the
-# current compiler. Without this environment variable, one is likely to
-# encounter errors like:
-# invalid instruction found in adaptive QIR profile:   %0 = alloca [8 x i1], align 1
-# Disable once
-# https://gitlab-master.nvidia.com/cuda-quantum/cuda-quantum/-/merge_requests/24
-# is merged.
-# export QIR_ALLOW_ALL_INSTRUCTIONS=1
-
 
 # Use the config file using the second executable.
 echo Running $EXE_PATH2 --distance $DISTANCE --num_shots $NUM_SHOTS --load_dem $CONFIG_FILE

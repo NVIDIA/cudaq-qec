@@ -12,7 +12,7 @@
 /// This test verifies the complete realtime decoding flow using the
 /// cuda-quantum host API and the dispatch kernel linked from
 /// libcudaq-realtime.so:
-/// 1. Hololink-style ring buffer communication (cudaHostAllocMapped)
+/// 1. GpuRoceTransceiver-style ring buffer communication (cudaHostAllocMapped)
 /// 2. Host API wires dispatcher and launches persistent kernel
 /// 3. Mock decoder that returns pre-recorded expected corrections
 /// 4. Data loaded from config_multi_err_lut.yml and syndromes_multi_err_lut.txt
@@ -49,10 +49,10 @@
 namespace {
 
 //==============================================================================
-// Hololink-Style Ring Buffer
+// GpuRoceTransceiver-Style Ring Buffer
 //==============================================================================
 
-/// @brief Allocate Hololink-style ring buffer with mapped memory.
+/// @brief Allocate GpuRoceTransceiver-style ring buffer with mapped memory.
 bool allocate_ring_buffer(std::size_t num_slots, std::size_t slot_size,
                           volatile uint64_t **host_flags_out,
                           volatile uint64_t **device_flags_out,

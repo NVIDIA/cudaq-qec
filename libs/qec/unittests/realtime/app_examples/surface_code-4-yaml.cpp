@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cudaq/algorithms/dem.h>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <vector>
@@ -53,6 +54,17 @@ public:
     std::vector<std::string> args = {program, "--cudaq-device-call=udp",
                                      "udp-host=127.0.0.1",
                                      std::string("udp-port=") + port};
+    // One-ring-per-decoder servers publish per-decoder endpoints; wire each
+    // decoder's device_call session to its own ring via device-scoped
+    // channel args (QEC_DECODING_SERVER_PORT_<id> -> udp-port.<id>=).
+    for (int device = 1; device < 64; ++device) {
+      const std::string name =
+          "QEC_DECODING_SERVER_PORT_" + std::to_string(device);
+      const char *scoped = std::getenv(name.c_str());
+      if (!scoped || scoped[0] == '\0')
+        break;
+      args.push_back("udp-port." + std::to_string(device) + "=" + scoped);
+    }
     std::vector<char *> argv;
     argv.reserve(args.size() + 1);
     for (auto &arg : args)
@@ -94,32 +106,52 @@ static int g_enqueues_per_shot = 0;
 static int g_syndrome_bits_per_round = 0;
 static int g_data_bits = 0;
 
+static std::string default_ising_artifacts_dir() {
+  if (const char *cache = std::getenv("XDG_CACHE_HOME"); cache && cache[0])
+    return std::string(cache) + "/cudaqx/ising/fast/d7_t7_z_xv";
+  if (const char *home = std::getenv("HOME"); home && home[0])
+    return std::string(home) + "/.cache/cudaqx/ising/fast/d7_t7_z_xv";
+  throw std::runtime_error(
+      "--use-ising could not determine the default artifact directory: set "
+      "XDG_CACHE_HOME or HOME, or pass --ising-artifacts-dir <dir>");
+}
+
+static void require_ising_artifact_files(const std::string &directory) {
+  const std::vector<std::string> required = {"model.onnx",   "H_csr.bin",
+                                             "O_csr.bin",    "priors.bin",
+                                             "metadata.txt", "D_sparse.txt"};
+  std::vector<std::string> missing;
+  for (const auto &name : required) {
+    std::ifstream file(directory + "/" + name, std::ios::binary);
+    if (!file || file.peek() == std::ifstream::traits_type::eof())
+      missing.push_back(name);
+  }
+  if (!missing.empty()) {
+    std::string message = "Ising artifact directory '" + directory +
+                          "' is incomplete; missing or empty:";
+    for (const auto &name : missing)
+      message += " " + name;
+    throw std::runtime_error(message);
+  }
+}
+
+static void require_binary_size(const std::string &path, std::uint64_t expected,
+                                const char *kind) {
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file || file.tellg() < 0 ||
+      static_cast<std::uint64_t>(file.tellg()) != expected)
+    throw std::runtime_error("Ising " + std::string(kind) +
+                             " file size does not match header: " + path);
+}
+
 // Uncomment this to manually inject errors.
 // #define MANUALLY_INJECT_ERRORS
 
-// ---------------------------------------------------------------------------
 // Ising-bundle interop (trt+Ising path)
-//
-// The Ising d/T/Z bundle (generate_test_data.py) ships H_csr.bin/O_csr.bin/
-// priors.bin in *Ising detector order*, plus a D_sparse.txt we generate that
-// expresses each Ising detector as a parity over the *cudaqx* live measurement
-// buffer. With these, the trt+Ising config carries Ising's exact H/O/priors and
-// a D_sparse aligned to Ising's detector rows while reading the cudaqx stream.
-//
-// Geometry: cudaqx's surface code at orientation XV is identical to the bundle
-// geometry (Ising code_rotation string "XV" == first_bulk X, rotated_type V,
-// logical_direction XH) under the IDENTITY data and X-ancilla mapping; only the
-// Z-ancillas are permuted (a fixed bijection). D_sparse.txt encodes exactly
-// that: it takes Ising's detector->measurement map and translates each
-// measurement index from Ising's buffer order into cudaqx's buffer order
-// (X-ancilla and data identity, Z-ancilla permuted), so every D row reproduces
-// one of cudaqx's own detector bits, now in Ising's detector order.
-// ---------------------------------------------------------------------------
+// H/O/priors use Ising detector order. D_sparse.txt maps those detector rows to
+// CUDA-QX's live measurement order, whose XV Z-ancilla ordering differs.
 
-// Read a binary-CSR file (rows:u32, cols:u32, nnz:u32, indptr[(rows+1)*i32],
-// indices[nnz*i32]) and return it as a -1-terminated sparse row vector
-// (each row lists its non-zero column indices, terminated by -1) -- exactly the
-// shape pcm_to_sparse_vec produces. Also returns the row/col counts.
+// Convert Ising's binary CSR format to the sparse row format used in YAML.
 static std::vector<std::int64_t>
 read_csr_bin_to_sparse_vec(const std::string &path, std::uint32_t &rows,
                            std::uint32_t &cols) {
@@ -130,6 +162,20 @@ read_csr_bin_to_sparse_vec(const std::string &path, std::uint32_t &rows,
   f.read(reinterpret_cast<char *>(&rows), sizeof(rows));
   f.read(reinterpret_cast<char *>(&cols), sizeof(cols));
   f.read(reinterpret_cast<char *>(&nnz), sizeof(nnz));
+  if (!f)
+    throw std::runtime_error("Truncated Ising CSR header: " + path);
+  constexpr auto maxSignedIndex =
+      static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
+  if (rows == 0 || cols == 0 || rows > maxSignedIndex ||
+      cols > maxSignedIndex || nnz > maxSignedIndex ||
+      static_cast<std::uint64_t>(nnz) > static_cast<std::uint64_t>(rows) * cols)
+    throw std::runtime_error("Invalid Ising CSR dimensions: " + path);
+
+  const std::uint64_t expectedBytes =
+      3 * sizeof(std::uint32_t) +
+      (static_cast<std::uint64_t>(rows) + 1 + nnz) * sizeof(std::int32_t);
+  require_binary_size(path, expectedBytes, "CSR");
+
   std::vector<std::int32_t> indptr(rows + 1), indices(nnz);
   f.read(reinterpret_cast<char *>(indptr.data()),
          static_cast<std::streamsize>(indptr.size() * sizeof(std::int32_t)));
@@ -137,6 +183,15 @@ read_csr_bin_to_sparse_vec(const std::string &path, std::uint32_t &rows,
          static_cast<std::streamsize>(indices.size() * sizeof(std::int32_t)));
   if (!f)
     throw std::runtime_error("Truncated Ising CSR file: " + path);
+  if (indptr.front() != 0 || indptr.back() != static_cast<std::int32_t>(nnz))
+    throw std::runtime_error("Invalid Ising CSR row pointers: " + path);
+  for (std::uint32_t r = 0; r < rows; ++r)
+    if (indptr[r] < 0 || indptr[r] > indptr[r + 1] ||
+        indptr[r + 1] > static_cast<std::int32_t>(nnz))
+      throw std::runtime_error("Invalid Ising CSR row pointers: " + path);
+  for (auto column : indices)
+    if (column < 0 || column >= static_cast<std::int32_t>(cols))
+      throw std::runtime_error("Invalid Ising CSR column index: " + path);
   std::vector<std::int64_t> sparse;
   for (std::uint32_t r = 0; r < rows; ++r) {
     for (std::int32_t k = indptr[r]; k < indptr[r + 1]; ++k)
@@ -146,26 +201,34 @@ read_csr_bin_to_sparse_vec(const std::string &path, std::uint32_t &rows,
   return sparse;
 }
 
-// Read priors.bin (n:u32, n*float64) -> error_rate_vec.
 static std::vector<double> read_priors_bin(const std::string &path) {
   std::ifstream f(path, std::ios::binary);
   if (!f)
     throw std::runtime_error("Could not open Ising priors file: " + path);
   std::uint32_t n = 0;
   f.read(reinterpret_cast<char *>(&n), sizeof(n));
+  if (!f || n == 0)
+    throw std::runtime_error("Invalid Ising priors header: " + path);
+
+  const std::uint64_t expectedBytes =
+      sizeof(std::uint32_t) + static_cast<std::uint64_t>(n) * sizeof(double);
+  require_binary_size(path, expectedBytes, "priors");
+
   std::vector<double> priors(n);
   f.read(reinterpret_cast<char *>(priors.data()),
          static_cast<std::streamsize>(priors.size() * sizeof(double)));
   if (!f)
     throw std::runtime_error("Truncated Ising priors file: " + path);
+  for (double probability : priors)
+    if (!std::isfinite(probability) || probability < 0.0 || probability > 1.0)
+      throw std::runtime_error("Invalid probability in Ising priors file: " +
+                               path);
   return priors;
 }
 
-// Read D_sparse.txt -- a whitespace-separated, -1-terminated sparse detector
-// matrix. One row per Ising detector; entries are cudaqx live-buffer
-// measurement indices (so each row reproduces a cudaqx detector bit, in Ising's
-// detector order). Returns the flat -1-terminated vector and the row count.
+// Read the -1-terminated Ising detector-to-measurement mapping.
 static std::vector<std::int64_t> read_D_sparse_txt(const std::string &path,
+                                                   std::size_t measurementSpan,
                                                    std::size_t &numRows) {
   std::ifstream f(path);
   if (!f)
@@ -173,18 +236,40 @@ static std::vector<std::int64_t> read_D_sparse_txt(const std::string &path,
   std::vector<std::int64_t> D;
   std::int64_t v;
   numRows = 0;
+  std::size_t entriesInRow = 0;
+  std::size_t maxMeasurement = 0;
+  bool haveMeasurement = false;
   while (f >> v) {
+    if (v < -1 || (v >= 0 && static_cast<std::size_t>(v) >= measurementSpan))
+      throw std::runtime_error("Invalid measurement index in Ising D_sparse: " +
+                               path);
     D.push_back(v);
-    if (v == -1)
+    if (v == -1) {
+      if (entriesInRow == 0)
+        throw std::runtime_error("Empty row in Ising D_sparse: " + path);
       ++numRows;
+      entriesInRow = 0;
+    } else {
+      ++entriesInRow;
+      maxMeasurement = std::max(maxMeasurement, static_cast<std::size_t>(v));
+      haveMeasurement = true;
+    }
   }
+  if (!f.eof())
+    throw std::runtime_error("Invalid token in Ising D_sparse: " + path);
+  if (D.empty() || D.back() != -1)
+    throw std::runtime_error("Unterminated row in Ising D_sparse: " + path);
+  const std::size_t mappedSpan = haveMeasurement ? maxMeasurement + 1 : 0;
+  if (mappedSpan != measurementSpan)
+    throw std::runtime_error("Ising D_sparse measurement span (" +
+                             std::to_string(mappedSpan) +
+                             ") != cudaqx measurement-buffer span (" +
+                             std::to_string(measurementSpan) + "): " + path);
   return D;
 }
 
-// Read the Ising bundle's metadata.txt (key=value lines) and enforce that it
-// matches THIS experiment: basis Z, code_rotation XV, and the same distance /
-// n_rounds. This is the semantic guard the dimensional checks cannot provide --
-// so the bundle's basis and orientation match the experiment.
+// Dimensions cannot distinguish basis or orientation, so enforce the bundle's
+// metadata before loading it.
 static void enforce_ising_metadata(const std::string &bundle, int distance,
                                    std::size_t numRounds) {
   std::ifstream f(bundle + "/metadata.txt");
@@ -218,24 +303,7 @@ static void enforce_ising_metadata(const std::string &bundle, int distance,
   require("n_rounds", std::to_string(numRounds));
 }
 
-// Flatten cudaqx's m2d into the -1-terminated sparse detector matrix, in
-// cudaqx detector order (D_sparse[i] == m2d.rows[i]). This is the
-// self-consistent D for the cudaqx-native decoders (pymatching / nv-qldpc),
-// which carry cudaqx's own dem_gen_circuit H/O. It references the same
-// chronological measurement indices the live path enqueues (385 bits for
-// d7/T7), including the final 49 data measurements used by the boundary
-// detectors.
-static std::vector<std::int64_t>
-build_cudaqx_D_sparse(const cudaq::M2DSparseMatrix &m2d) {
-  std::vector<std::int64_t> D;
-  for (const auto &row : m2d.rows) {
-    for (auto meas : row)
-      D.push_back(static_cast<std::int64_t>(meas));
-    D.push_back(-1);
-  }
-  return D;
-}
-
+// Keep each characterized DEM paired with its measurement maps.
 // One decoder entry per patch: entry i (decoder id i) gets decoder_types[i].
 // Entries carry decoder-appropriate representations of one source DEM per
 // patch, allowing each logical patch to use its own physical error rate:
@@ -248,122 +316,122 @@ build_cudaqx_D_sparse(const cudaq::M2DSparseMatrix &m2d) {
 // same measurement span. The error-column representations are intentionally
 // not probabilistically identical.
 void save_dem_to_file(
-    const std::vector<cudaq::qec::detector_error_model> &dems,
-    const std::vector<cudaq::qec::detector_error_model> &dems_bp,
+    const std::vector<cudaq::qec::decoder_init> &matching_inputs,
+    const std::vector<cudaq::qec::decoder_init> &bp_inputs,
     std::string dem_filename, const std::vector<std::string> &decoder_types,
-    bool use_relay_bp, const std::string &onnx_path,
-    const cudaq::M2DSparseMatrix &m2d, const std::string &ising_bundle,
-    int distance, std::size_t numRounds) {
+    bool use_relay_bp, const std::string &onnx_path, bool use_ising,
+    const std::string &ising_artifacts_dir) {
   cudaq::qec::decoding::config::multi_decoder_config multi_config;
   for (uint64_t i = 0; i < decoder_types.size(); i++) {
     const std::string &decoder_type = decoder_types[i];
-    const auto &edem =
-        (decoder_type == "nv-qldpc-decoder") ? dems_bp[i] : dems[i];
+    const auto &inputs = (decoder_type == "nv-qldpc-decoder")
+                             ? bp_inputs[i]
+                             : matching_inputs[i];
     cudaq::qec::decoding::config::decoder_config config;
     config.id = i;
     config.type = decoder_type;
-    config.block_size = edem.num_error_mechanisms();
-    config.syndrome_size = edem.num_detectors();
-    config.H_sparse = cudaq::qec::pcm_to_sparse_vec(edem.detector_error_matrix);
+    config.block_size = inputs.num_error_mechanisms();
+    config.syndrome_size = inputs.num_detectors();
+    config.H_sparse =
+        cudaq::qec::pcm_to_sparse_vec(inputs.detector_error_matrix());
     config.O_sparse =
-        cudaq::qec::pcm_to_sparse_vec(edem.observables_flips_matrix);
-    // Default D == cudaqx's m2d (cudaqx detector order), self-consistent with
-    // the dem_gen_circuit H/O above and with the full 385-bit measurement
-    // stream the live path enqueues. The trt+Ising branch below overrides this
-    // with the Ising-ordered D_sparse.txt to match the Ising H/O.
-    config.D_sparse = build_cudaqx_D_sparse(m2d);
+        cudaq::qec::pcm_to_sparse_vec(inputs.observable_flips_matrix());
+    // Ising replaces this native mapping with its detector ordering below.
+    const auto *D = inputs.measurement_to_detectors();
+    if (!D)
+      throw std::runtime_error("decoder inputs are missing D");
+    config.D_sparse.clear();
+    for (const auto &row : D->to_nested_csr()) {
+      for (const auto measurement : row)
+        config.D_sparse.push_back(static_cast<std::int64_t>(measurement));
+      config.D_sparse.push_back(-1);
+    }
+    config.error_rate_vec = inputs.error_rates();
 
     if (decoder_type == "nv-qldpc-decoder") {
-      config.decoder_custom_args =
-          cudaq::qec::decoding::config::nv_qldpc_decoder_config();
-      auto &nv_config =
-          std::get<cudaq::qec::decoding::config::nv_qldpc_decoder_config>(
-              config.decoder_custom_args);
+      cudaqx::heterogeneous_map nv_args;
 
       // Basic settings
-      nv_config.use_sparsity = true;
-      nv_config.error_rate_vec = edem.error_rates;
-      nv_config.max_iterations = 50;
+      nv_args.insert("use_sparsity", true);
+      nv_args.insert("max_iterations", 50);
 
       if (use_relay_bp) {
-        nv_config.bp_method = 3;   // min-sum+dmem (required for relay)
-        nv_config.composition = 1; // Enable sequential relay
-        nv_config.gamma0 = 0.0;    // Initial gamma value
-        nv_config.clip_value = 200.0;
-        nv_config.repeatable = true;
-        nv_config.srelay_config =
-            cudaq::qec::decoding::config::srelay_bp_config();
-        nv_config.srelay_config->pre_iter = 5;
-        nv_config.srelay_config->num_sets = 10;
-        nv_config.srelay_config->stopping_criterion = "All";
-        nv_config.srelay_config->stop_nconv = 1;
-        nv_config.gamma_dist = {0.1, 0.2};
+        nv_args.insert("bp_method", 3);   // min-sum+dmem (required for relay)
+        nv_args.insert("composition", 1); // Enable sequential relay
+        nv_args.insert("gamma0", 0.0);    // Initial gamma value
+        nv_args.insert("clip_value", 200.0);
+        nv_args.insert("repeatable", true);
+        cudaqx::heterogeneous_map srelay_args;
+        srelay_args.insert("pre_iter", std::size_t{5});
+        srelay_args.insert("num_sets", std::size_t{10});
+        srelay_args.insert("stopping_criterion", "All");
+        srelay_args.insert("stop_nconv", std::size_t{1});
+        nv_args.insert("srelay_config", srelay_args);
+        nv_args.insert("gamma_dist", std::vector<double>{0.1, 0.2});
       } else {
         // OSD post-processor
-        nv_config.use_osd = true;
-        nv_config.osd_order = 60;
-        nv_config.osd_method = 3;
+        nv_args.insert("use_osd", true);
+        nv_args.insert("osd_order", 60);
+        nv_args.insert("osd_method", 3);
       }
+      config.decoder_custom_args = nv_args;
     } else if (decoder_type == "pymatching") {
-      cudaq::qec::decoding::config::pymatching_config pm_config;
-      pm_config.merge_strategy = "smallest_weight";
-      pm_config.error_rate_vec = edem.error_rates;
-      config.decoder_custom_args = pm_config;
+      cudaqx::heterogeneous_map pm_args;
+      pm_args.insert("merge_strategy", "smallest_weight");
+      config.decoder_custom_args = pm_args;
     } else if (decoder_type == "trt_decoder") {
-      cudaq::qec::decoding::config::trt_decoder_config trt_config;
+      cudaqx::heterogeneous_map trt_args;
       // The TensorRT predecoder model is supplied through the saved decoder
       // config so the same ONNX path is used after reload.
-      trt_config.onnx_load_path = onnx_path;
-      trt_config.batch_size = 1;
-      trt_config.use_cuda_graph = true;
-      trt_config.global_decoder = "pymatching";
+      trt_args.insert("onnx_load_path", onnx_path);
+      trt_args.insert("batch_size", std::size_t{1});
+      trt_args.insert("use_cuda_graph", true);
+      trt_args.insert("global_decoder", "pymatching");
+      trt_args.insert("engine_output_format",
+                      "observables_and_residual_detectors");
 
-      cudaq::qec::decoding::config::pymatching_config pm_config;
-      pm_config.merge_strategy = "smallest_weight";
+      cudaqx::heterogeneous_map pm_args;
+      pm_args.insert("merge_strategy", "smallest_weight");
 
-      if (!ising_bundle.empty()) {
-        // Enforce the bundle's semantics match this experiment (basis Z,
-        // code_rotation XV, same d / n_rounds) before trusting its matrices.
-        enforce_ising_metadata(ising_bundle, distance, numRounds);
-        // trt+Ising path: carry the Ising d/T/Z model. H/O/priors come from
-        // the Ising bundle (Ising detector order); D_sparse (D_sparse.txt)
-        // expresses each Ising detector as a parity over the cudaqx live
-        // measurement buffer, so the live stream feeds Ising's detectors in
-        // Ising's row order.
+      if (use_ising) {
+        // Load H/O/priors in Ising detector order and the matching map from the
+        // CUDA-QX live measurement buffer.
         std::uint32_t hRows = 0, hCols = 0, oRows = 0, oCols = 0;
         config.H_sparse = read_csr_bin_to_sparse_vec(
-            ising_bundle + "/H_csr.bin", hRows, hCols);
+            ising_artifacts_dir + "/H_csr.bin", hRows, hCols);
         config.O_sparse = read_csr_bin_to_sparse_vec(
-            ising_bundle + "/O_csr.bin", oRows, oCols);
-        auto priors = read_priors_bin(ising_bundle + "/priors.bin");
+            ising_artifacts_dir + "/O_csr.bin", oRows, oCols);
+        auto priors = read_priors_bin(ising_artifacts_dir + "/priors.bin");
         std::size_t dRows = 0;
-        config.D_sparse =
-            read_D_sparse_txt(ising_bundle + "/D_sparse.txt", dRows);
+        config.D_sparse = read_D_sparse_txt(
+            ising_artifacts_dir + "/D_sparse.txt", D->num_cols(), dRows);
 
-        if (hRows != m2d.rows.size())
+        if (hRows != D->num_rows())
           throw std::runtime_error("Ising H rows (" + std::to_string(hRows) +
                                    ") != cudaqx m2d detectors (" +
-                                   std::to_string(m2d.rows.size()) + ")");
-        if (dRows != m2d.rows.size())
+                                   std::to_string(D->num_rows()) + ")");
+        if (dRows != D->num_rows())
           throw std::runtime_error("D_sparse.txt rows (" +
                                    std::to_string(dRows) +
                                    ") != cudaqx m2d detectors (" +
-                                   std::to_string(m2d.rows.size()) + ")");
+                                   std::to_string(D->num_rows()) + ")");
         if (hCols != oCols || hCols != priors.size())
           throw std::runtime_error("Ising H/O/priors column counts disagree");
+        if (oRows != 1)
+          throw std::runtime_error("Ising O rows (" + std::to_string(oRows) +
+                                   ") != expected one logical observable");
 
         config.syndrome_size = hRows;
         config.block_size = hCols;
-        pm_config.error_rate_vec = priors;
+        config.error_rate_vec = priors;
         printf("trt+Ising: loaded Ising bundle '%s' (H %ux%u, O %u rows, "
                "priors %zu); D_sparse from D_sparse.txt (%zu detectors)\n",
-               ising_bundle.c_str(), hRows, hCols, oRows, priors.size(), dRows);
-      } else {
-        pm_config.error_rate_vec = edem.error_rates;
+               ising_artifacts_dir.c_str(), hRows, hCols, oRows, priors.size(),
+               dRows);
       }
-      trt_config.global_decoder_params = pm_config;
+      trt_args.insert("global_decoder_params", pm_args);
 
-      config.decoder_custom_args = trt_config;
+      config.decoder_custom_args = trt_args;
     }
 
     multi_config.decoders.push_back(config);
@@ -479,36 +547,24 @@ std::vector<size_t> get_stab_cnot_schedule(char stab_type, int distance) {
     throw std::runtime_error(
         "get_stab_cnot_schedule: Invalid stabilizer type. Must be 'X' or 'Z'.");
   }
-  // First get the stabilizers
-  auto stabs = grid.get_spin_op_stabilizers();
-  cudaq::qec::sortStabilizerOps(stabs);
-  std::size_t stab_idx = 0;
-  std::vector<size_t> cnot_schedule;
-  for (const auto &stab : stabs) {
-    auto stab_word = stab.get_pauli_word(distance * distance);
-    if (stab_word.find(stab_type) == std::string::npos)
-      continue; // None of the desired stabilizers in this row
-    for (std::size_t d = 0; d < stab_word.size(); ++d) {
-      if (stab_word[d] == stab_type) {
-        cnot_schedule.push_back(stab_idx);
-        cnot_schedule.push_back(d);
-      }
-    }
-    stab_idx++;
-  }
-  return cnot_schedule;
+  // CNOT pairs ordered by timestep within each stabilizer, so that mid-round
+  // ancilla (hook) errors land perpendicular to the logical operators.
+  // Stabilizer indices match the sorted parity-matrix rows and hence the
+  // ancilla indexing.
+  return stab_type == 'X' ? grid.get_cnot_schedule_pairs_x()
+                          : grid.get_cnot_schedule_pairs_z();
 }
 
 // Per-stabilizer data-qubit supports, ordered to match the ancilla measurement
-// order produced by get_stab_cnot_schedule(stab_type, ...). The s-th returned
-// support is the data-qubit support of the s-th `stab_type`-containing
-// stabilizer in the same sorted spin-op traversal that get_stab_cnot_schedule
-// uses, so support[s] lines up with ancilla[s] in se_{x,z}_ft's measurement
-// vector. This is what the Ising MemoryCircuit boundary detectors pair against
-// (a stabilizer's data support XOR-ed with that stabilizer's last ancilla
-// measurement). Returns a flat vector of data-qubit indices plus per-stabilizer
-// offsets (offsets has size num_stabs+1; support s spans [offsets[s],
-// offsets[s+1])), the same flat+offset pattern as cnot_schedZ_flat.
+// order produced by get_stab_cnot_schedule(stab_type, ...). The supports are
+// derived from the same schedule matrix as the CNOT pairs (row s = ancilla s),
+// so support[s] lines up with ancilla[s] in se_{x,z}_ft's measurement vector
+// by construction rather than via a parallel sort. This is what the Ising
+// MemoryCircuit boundary detectors pair against (a stabilizer's data support
+// XOR-ed with that stabilizer's last ancilla measurement). Returns a flat
+// vector of data-qubit indices plus per-stabilizer offsets (offsets has size
+// num_stabs+1; support s spans [offsets[s], offsets[s+1])), the same
+// flat+offset pattern as cnot_schedZ_flat.
 void get_stab_data_supports(char stab_type, int distance,
                             std::vector<std::size_t> &supports_flat,
                             std::vector<std::size_t> &supports_offsets) {
@@ -518,17 +574,14 @@ void get_stab_data_supports(char stab_type, int distance,
     throw std::runtime_error(
         "get_stab_data_supports: Invalid stabilizer type. Must be 'X' or 'Z'.");
   }
-  auto stabs = grid.get_spin_op_stabilizers();
-  cudaq::qec::sortStabilizerOps(stabs);
+  auto sched = stab_type == 'X' ? grid.get_cnot_schedule_x()
+                                : grid.get_cnot_schedule_z();
   supports_flat.clear();
   supports_offsets.clear();
   supports_offsets.push_back(0);
-  for (const auto &stab : stabs) {
-    auto stab_word = stab.get_pauli_word(distance * distance);
-    if (stab_word.find(stab_type) == std::string::npos)
-      continue; // None of the desired stabilizers in this row
-    for (std::size_t d = 0; d < stab_word.size(); ++d) {
-      if (stab_word[d] == stab_type)
+  for (std::size_t s = 0; s < sched.shape()[0]; ++s) {
+    for (std::size_t d = 0; d < sched.shape()[1]; ++d) {
+      if (sched.at({s, d}) != 0)
         supports_flat.push_back(d);
     }
     supports_offsets.push_back(supports_flat.size());
@@ -810,7 +863,8 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
                        bool save_syndrome = false, bool load_syndrome = false,
                        std::string syndrome_filename = "",
                        bool use_relay_bp = false, std::string onnx_path = "",
-                       std::string ising_bundle = "") {
+                       bool use_ising = false,
+                       std::string ising_artifacts_dir = "") {
   if (!code.contains_operation(statePrep))
     throw std::runtime_error(
         "sample_memory_circuit_error - requested state prep kernel not found.");
@@ -926,11 +980,10 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
         contains_type("pymatching") || contains_type("trt_decoder");
     const bool haveBp = contains_type("nv-qldpc-decoder");
     const bool decompose_errors = haveMatching;
-    cudaq::M2DSparseMatrix m2d;
-    std::vector<cudaq::qec::detector_error_model> patch_dems;
-    std::vector<cudaq::qec::detector_error_model> patch_dems_undecomposed;
-    patch_dems.reserve(numLogical);
-    patch_dems_undecomposed.reserve(numLogical);
+    std::vector<cudaq::qec::decoder_init> matching_inputs;
+    std::vector<cudaq::qec::decoder_init> bp_inputs;
+    matching_inputs.reserve(numLogical);
+    bp_inputs.reserve(numLogical);
     const bool dual_parse = haveMatching && haveBp;
     for (std::size_t patch = 0; patch < numLogical; ++patch) {
       cudaq::M2DSparseMatrix patch_m2d;
@@ -941,34 +994,37 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
           patch_m2o, prep, numData, numAncx, numAncz, pairedRounds,
           cnot_schedX_flat, cnot_schedZ_flat, p_spam_per_patch[patch],
           z_logical_indices, z_supports_flat, z_supports_offsets);
-      if (patch == 0)
-        m2d = patch_m2d;
-      else if (patch_m2d.rows != m2d.rows)
+      const auto patch_D = cudaq::qec::m2d_to_sparse(patch_m2d);
+      if (patch > 0 &&
+          patch_D.to_nested_csr() != matching_inputs.front()
+                                         .measurement_to_detectors()
+                                         ->to_nested_csr())
         throw std::runtime_error(
             "per-patch DEMs produced different measurement mappings");
 
       auto patch_dem = cudaq::qec::dem_from_stim_text(
           dem_text, /*use_decomp_suggestions=*/decompose_errors);
-      patch_dems.push_back(patch_dem);
-      patch_dems_undecomposed.push_back(
+      auto patch_dem_undecomposed =
           dual_parse ? cudaq::qec::dem_from_stim_text(
                            dem_text, /*use_decomp_suggestions=*/false)
-                     : patch_dem);
+                     : patch_dem;
+      matching_inputs.emplace_back(std::move(patch_dem), patch_D);
+      bp_inputs.emplace_back(std::move(patch_dem_undecomposed), patch_D);
     }
-    dem = patch_dems.front();
+    const auto &front = matching_inputs.front();
 
     numSyndromesPerRound = numAncx + numAncz;
     printf("numSyndromesPerRound: %ld\n", numSyndromesPerRound);
 
-    printf("dem.detector_error_matrix:\n");
-    dem.detector_error_matrix.dump_bits();
-    printf("dem.observables_flips_matrix:\n");
-    dem.observables_flips_matrix.dump_bits();
+    printf("H: %u x %u (%u nonzeros)\n",
+           front.detector_error_matrix().num_rows(),
+           front.detector_error_matrix().num_cols(),
+           front.detector_error_matrix().num_nnz());
+    printf("O: %zu observables\n", front.num_observables());
 
     if (save_dem) {
-      save_dem_to_file(patch_dems, patch_dems_undecomposed, dem_filename,
-                       decoder_types, use_relay_bp, onnx_path, m2d,
-                       ising_bundle, distance, numRounds);
+      save_dem_to_file(matching_inputs, bp_inputs, dem_filename, decoder_types,
+                       use_relay_bp, onnx_path, use_ising, ising_artifacts_dir);
       return;
     }
   }
@@ -1375,8 +1431,8 @@ void show_help() {
          "'nv-qldpc-decoder', 'trt_decoder'. One entry per logical patch "
          "(patch i decodes with entry i), or a single entry replicated to "
          "all patches. Default: pymatching\n");
-  printf("  --onnx_path <string>    ONNX model path (required with "
-         "--decoder_type trt_decoder and --save_dem)\n");
+  printf("  --onnx-path <file>  Use this ONNX model for trt_decoder entries "
+         "during --save_dem. Mutually exclusive with --use-ising.\n");
   printf("  --save_dem <string> Generate the DEM + decoder config and save to "
          "a YAML file (generation phase).\n");
   printf(
@@ -1390,12 +1446,14 @@ void show_help() {
   printf("  --use-relay-bp      For nv-qldpc-decoder entries: select Relay BP "
          "instead of the default BP + OSD block. Accepted and ignored with "
          "--yaml (the YAML is authoritative).\n");
-  printf("  --ising_bundle <dir> Ising d/T/Z bundle directory "
-         "(H_csr.bin/O_csr.bin/priors.bin/metadata.txt plus D_sparse.txt; "
-         "generated locally, not shipped -- run without it to print the "
-         "generation recipe). With --save_dem --decoder_type trt_decoder the "
-         "config carries the Ising H/O/priors and an Ising-ordered D_sparse "
-         "over the cudaqx live buffer.\n");
+  printf("  --use-ising        Opt in to an Ising ONNX model and its matching "
+         "decoder artifacts. Requires --save_dem and a trt_decoder entry. "
+         "Without --ising-artifacts-dir, selects the built-in d7/T7/Z/XV "
+         "preset at the CUDA-QX cache path.\n");
+  printf("  --ising-artifacts-dir <dir> Prepared Ising artifact directory "
+         "containing model.onnx, H_csr.bin, O_csr.bin, priors.bin, "
+         "metadata.txt, and D_sparse.txt. Only valid with --use-ising; use "
+         "this for compatible custom d/T exports.\n");
   printf("  --help              Show this help message\n");
 }
 
@@ -1405,10 +1463,12 @@ int main(int argc, char **argv) {
 #endif
   int num_shots = 10;
   int distance = 5;
+  bool distance_explicit = false;
   double p_spam = 0.01;
   std::vector<double> p_spam_per_patch;
   int num_logical = 1;
   int num_rounds = -1; // Will be set to distance if not specified
+  bool num_rounds_explicit = false;
   bool save_dem = false;
   bool load_dem = false;
   std::string dem_filename;
@@ -1419,11 +1479,8 @@ int main(int argc, char **argv) {
   bool decoder_type_explicit = false;
   bool yaml_mode = false;
   std::string onnx_path;
-  // Optional Ising d/T/Z bundle dir (generate_test_data.py output + the
-  // generated D_sparse.txt). When set with --save_dem --decoder_type
-  // trt_decoder, the trt config carries the Ising H/O/priors (Ising
-  // detector order) and an Ising-ordered D_sparse over the cudaqx live buffer.
-  std::string ising_bundle;
+  bool use_ising = false;
+  std::string ising_artifacts_dir;
 
   // Syndrome save/load options
   bool save_syndrome = false;
@@ -1499,6 +1556,7 @@ int main(int argc, char **argv) {
     std::string arg = argv[i];
     if (arg == "--distance") {
       distance = require_int("--distance");
+      distance_explicit = true;
     } else if (arg == "--num_shots") {
       num_shots = require_int("--num_shots");
     } else if (arg == "--p_spam") {
@@ -1512,13 +1570,16 @@ int main(int argc, char **argv) {
       num_logical = require_int("--num_logical");
     } else if (arg == "--num_rounds") {
       num_rounds = require_int("--num_rounds");
+      num_rounds_explicit = true;
     } else if (arg == "--decoder_type") {
       decoder_type = require_value("--decoder_type");
       decoder_type_explicit = true;
     } else if (arg == "--onnx_path" || arg == "--onnx-path") {
-      onnx_path = require_value("--onnx_path");
-    } else if (arg == "--ising_bundle" || arg == "--ising-bundle") {
-      ising_bundle = require_value("--ising_bundle");
+      onnx_path = require_value("--onnx-path");
+    } else if (arg == "--use-ising") {
+      use_ising = true;
+    } else if (arg == "--ising-artifacts-dir") {
+      ising_artifacts_dir = require_value("--ising-artifacts-dir");
     } else if (arg == "--save_dem") {
       save_dem = true;
       dem_filename = require_value("--save_dem");
@@ -1540,6 +1601,34 @@ int main(int argc, char **argv) {
       show_help();
       return 1;
     }
+  }
+
+  const bool use_builtin_ising_artifacts =
+      use_ising && ising_artifacts_dir.empty();
+  if (use_builtin_ising_artifacts) {
+    constexpr int supported_distance = 7;
+    constexpr int supported_rounds = 7;
+    constexpr double supported_p_spam = 0.01;
+    if ((distance_explicit && distance != supported_distance) ||
+        (num_rounds_explicit && num_rounds != supported_rounds) ||
+        p_spam != supported_p_spam) {
+      printf("Error: the built-in Ising example only supports distance=7, "
+             "num_rounds=7, p_spam=0.01, basis=Z, and orientation=XV. To "
+             "use another compatible export, pass --ising-artifacts-dir "
+             "<dir>.\n");
+      return 1;
+    }
+    if (std::any_of(p_spam_per_patch.begin(), p_spam_per_patch.end(),
+                    [](double value) { return value != supported_p_spam; })) {
+      printf("Error: the built-in Ising example only supports "
+             "p_spam_per_patch=0.01. To use another compatible export, pass "
+             "--ising-artifacts-dir <dir>.\n");
+      return 1;
+    }
+    distance = supported_distance;
+    num_rounds = supported_rounds;
+    p_spam = supported_p_spam;
+    ising_artifacts_dir = default_ising_artifacts_dir();
   }
 
   if (!load_dem && !save_dem && !load_syndrome) {
@@ -1681,14 +1770,31 @@ int main(int argc, char **argv) {
            decoder_types.end();
   };
 
-  if (save_dem && has_type("trt_decoder") && onnx_path.empty()) {
-    printf("Error: --onnx_path is required with a trt_decoder entry and "
-           "--save_dem\n");
+  if (use_ising && !onnx_path.empty()) {
+    printf("Error: --use-ising and --onnx-path select different TensorRT "
+           "model sources; choose exactly one.\n");
     return 1;
   }
-  if (save_dem && !onnx_path.empty() && !has_type("trt_decoder"))
-    printf("Warning: --onnx_path is only used by trt_decoder entries; "
-           "ignoring it.\n");
+  if (!ising_artifacts_dir.empty() && !use_ising) {
+    printf("Error: --ising-artifacts-dir does not enable Ising; pass "
+           "--use-ising explicitly.\n");
+    return 1;
+  }
+  if (use_ising && !(save_dem && has_type("trt_decoder"))) {
+    printf("Error: --use-ising requires --save_dem and a trt_decoder entry.\n");
+    return 1;
+  }
+  if (use_ising)
+    onnx_path = ising_artifacts_dir + "/model.onnx";
+  if (save_dem && has_type("trt_decoder") && onnx_path.empty()) {
+    printf("Error: a trt_decoder entry requires exactly one model source: "
+           "--onnx-path <file> or --use-ising.\n");
+    return 1;
+  }
+  if (!onnx_path.empty() && !has_type("trt_decoder")) {
+    printf("Error: --onnx-path is only valid with a trt_decoder entry.\n");
+    return 1;
+  }
 
   // --use-relay-bp configures nv-qldpc-decoder entries at generation. With
   // --yaml it is accepted and ignored (the YAML is authoritative; the test
@@ -1727,39 +1833,16 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // --ising_bundle is only consumed by the trt+Ising generation path
-  // (--save_dem --decoder_type trt_decoder). Warn rather than silently ignore
-  // it on any other path so a stray bundle argument is visible.
-  if (!ising_bundle.empty() && !(save_dem && has_type("trt_decoder"))) {
-    printf("Warning: --ising_bundle is only used with --save_dem and a "
-           "trt_decoder entry; ignoring it on this path.\n");
-  }
-
-  // The trt+Ising path needs an external predecoder bundle that is generated
-  // locally and not shipped with this repository. If the bundle is absent (no
-  // metadata.txt), stop with the exact generation recipe rather than failing
-  // deeper in.
-  if (save_dem && has_type("trt_decoder") && !ising_bundle.empty()) {
-    if (!std::ifstream(ising_bundle + "/metadata.txt")) {
-      printf(
-          "This example's trt+Ising path requires the Ising predecoder bundle, "
-          "which is generated locally and not shipped in this repository.\n"
-          "  '%s/metadata.txt' was not found.\n"
-          "Generate it from the Ising decoding project "
-          "(https://github.com/NVIDIA/Ising-Decoding) into '%s':\n"
-          "  1. python generate_test_data.py --distance %d --n-rounds %d "
-          "--basis Z --code-rotation XV --output-dir %s\n"
-          "  2. surface_code-4-yaml --save_dem cfg.yml --decoder_type "
-          "pymatching --distance %d --num_rounds %d > sched.txt\n"
-          "     python gen_dsparse_from_memory_circuit.py %d %d Z XV sched.txt "
-          "%s/D_sparse.txt --ising-repo /path/to/ising/code\n"
-          "  3. export the ONNX predecoder predecoder_memory_d%d_T%d_Z.onnx "
-          "and "
-          "pass it via --onnx_path.\n"
-          "Then re-run with --ising_bundle %s.\n",
-          ising_bundle.c_str(), ising_bundle.c_str(), distance, num_rounds,
-          ising_bundle.c_str(), distance, num_rounds, distance, num_rounds,
-          ising_bundle.c_str(), distance, num_rounds, ising_bundle.c_str());
+  // Fail before DEM generation if the Ising bundle is incomplete or mismatched.
+  if (use_ising) {
+    try {
+      enforce_ising_metadata(ising_artifacts_dir, distance, num_rounds);
+      require_ising_artifact_files(ising_artifacts_dir);
+    } catch (const std::exception &error) {
+      printf("Error: %s\n", error.what());
+      printf("The Hugging Face repository provides SafeTensors weights, not a "
+             "ready CUDA-QX artifact directory. Run "
+             "prepare_ising_artifacts.py --app <path>/surface_code-4-yaml.\n");
       return 1;
     }
   }
@@ -1770,10 +1853,8 @@ int main(int argc, char **argv) {
   printf("], distance = %d, num_shots = %d, num_rounds = %d\n", distance,
          num_shots, num_rounds);
 
-  // Build the code at code_rotation XV (the predecoder's training orientation),
-  // which sets the geometry and observable basis. The DEM-generation kernel
-  // (dem_gen_circuit) emits the full detector structure -- prep singles +
-  // data-derived boundary detectors, X-then-Z order.
+  // Ising was trained on the XV orientation; custom bundles share this
+  // contract.
   try {
 #ifdef QEC_APP_EXTERNAL_DECODING_SERVER
     if (load_dem)
@@ -1785,11 +1866,11 @@ int main(int argc, char **argv) {
         cudaqx::heterogeneous_map{{"distance", distance},
                                   {"orientation", std::string("XV")}});
 
-    demo_circuit_host(*code, distance, p_spam_per_patch,
-                      cudaq::qec::operation::prep0, num_shots, num_rounds,
-                      num_logical, dem_filename, save_dem, load_dem,
-                      decoder_types, save_syndrome, load_syndrome,
-                      syndrome_filename, use_relay_bp, onnx_path, ising_bundle);
+    demo_circuit_host(
+        *code, distance, p_spam_per_patch, cudaq::qec::operation::prep0,
+        num_shots, num_rounds, num_logical, dem_filename, save_dem, load_dem,
+        decoder_types, save_syndrome, load_syndrome, syndrome_filename,
+        use_relay_bp, onnx_path, use_ising, ising_artifacts_dir);
   } catch (const std::exception &e) {
     // Configuration, channel, and geometry failures surface as a clean error
     // rather than an uncaught-exception abort.

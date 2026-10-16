@@ -11,7 +11,6 @@
 CUDAQX_INSTALL_PREFIX=${CUDAQX_INSTALL_PREFIX:-"$HOME/.cudaqx"}
 DOCS_INSTALL_PREFIX=${DOCS_INSTALL_PREFIX:-"$CUDAQX_INSTALL_PREFIX/docs"}
 export PYTHONPATH="$CUDAQX_INSTALL_PREFIX:${PYTHONPATH}"
-export CUDAQX_DOCS_GEN_IMPORT_CUDAQ=ON 
 
 # Process command line arguments
 force_update=""
@@ -58,7 +57,18 @@ if [ ! -f "$sphinx_conf_in" ]; then
 fi
 
 # Replace placeholders of the form @VAR@ in the template file with their variable values.
-CUDAQ_INSTALL_DIR=${CUDAQ_INSTALL_DIR:-"$HOME/.cudaq"}
+if [ -z "$CUDAQ_INSTALL_DIR" ]; then
+  if [ -d "$HOME/.cudaq" ]; then
+    CUDAQ_INSTALL_DIR="$HOME/.cudaq"
+  elif [ -d "/usr/local/cudaq" ]; then
+    CUDAQ_INSTALL_DIR="/usr/local/cudaq"
+  else
+    echo "Error: CUDAQ not found. Set CUDAQ_INSTALL_DIR to the CUDAQ install prefix." >&2
+    (return 0 2>/dev/null) && return 1 || exit 1
+  fi
+fi
+export LD_LIBRARY_PATH="$CUDAQ_INSTALL_DIR/lib:${LD_LIBRARY_PATH}"
+export PYTHONPATH="$CUDAQ_INSTALL_DIR:${PYTHONPATH}"
 CMAKE_BINARY_DIR="$repo_root/build"
 SPHINX_SOURCE="$repo_root/docs/sphinx"
 
@@ -75,7 +85,7 @@ mkdir -p "${doxygen_output_dir}"
 doxygen_input="$repo_root/docs/Doxyfile.in"
 
 # Get all the headers
-CUDAQX_ALL_LIBS="solvers qec"
+CUDAQX_ALL_LIBS="qec"
 lib_headers=""
 lib_headers="$lib_headers $(find "$repo_root/libs/core/include" -name "*.h")"
 # Add headers from each library
@@ -124,6 +134,31 @@ fi
 
 rm -rf sphinx/_doxygen/
 rm -rf sphinx/_mdgen/
+
+# Verify that none of the following strings appear in the generated HTML.
+# Any match is a documentation bug that must be fixed in the RST or conf.py.in:
+#   MagicMock                    — autodoc targeted a MagicMock symbol in docs-gen mode
+#   "alias of"                   — autoclass on a symbol whose __module__ differs from
+#                                  the documenting module; applies in all build modes
+#   _pycudaqx_qec_the_suffix_*   — internal pybind11 module name that doc_replacements
+#                                  in conf.py.in should have stripped from all output
+#
+# Exit codes: 13 = MagicMock, 14 = "alias of", 15 = internal pybind11 module name.
+invalid_html_checks=(
+    "13|MagicMock|MagicMock references"
+    "14|alias of|'alias of' references"
+    "15|_pycudaqx_qec_the_suffix_matters|internal pybind11 module name"
+)
+
+for check in "${invalid_html_checks[@]}"; do
+    IFS='|' read -r check_exit pattern label <<< "$check"
+    if grep -rql "$pattern" "$sphinx_output_dir" --include="*.html" 2>/dev/null; then
+        echo "ERROR: ${label} found in generated documentation:"
+        grep -rn "$pattern" "$sphinx_output_dir" --include="*.html" | \
+            sed "s|${sphinx_output_dir}/||"
+        docs_exit_code=$check_exit
+    fi
+done
 
 mkdir -p "$DOCS_INSTALL_PREFIX"
 if [ "$docs_exit_code" -eq "0" ]; then

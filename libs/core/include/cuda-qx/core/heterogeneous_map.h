@@ -82,6 +82,20 @@ public:
     }
   }
 
+  /// @brief Insert a key-value pair into the map, moving the value in
+  /// @tparam T The type of the value
+  /// @param key The key
+  /// @param value The value, moved into the map
+  /// @note Only participates in overload resolution for rvalues; lvalues go to
+  /// the copying overload above. Useful for large payloads where the extra
+  /// deep copy is expensive.
+  template <typename T, typename = std::enable_if_t<
+                            !std::is_lvalue_reference_v<T> &&
+                            !is_bounded_char_array<std::remove_cv_t<T>>::value>>
+  void insert(const std::string &key, T &&value) {
+    items.insert_or_assign(key, std::move(value));
+  }
+
   /// @brief Get a value from the map
   /// @tparam T The type of the value to retrieve
   /// @param key The key of the value to retrieve

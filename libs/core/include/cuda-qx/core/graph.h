@@ -40,6 +40,7 @@ public:
 
   /// @brief Add a node to the graph
   /// @param node The node to add
+  /// @param weight Node weight
   void add_node(int node, double weight = 1.0);
 
   /// @brief Check if an edge exists between two nodes

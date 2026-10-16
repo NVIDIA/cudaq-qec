@@ -96,8 +96,9 @@ test_examples() {
     docker exec ${container_name} bash -c "pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}"
     docker exec ${container_name} bash -c "pip install onnxscript"
     # Install other required packages
-    docker exec ${container_name} bash -c "pip install 'lightning>=2.0.0' 'ml_collections>=0.1.0' 'mpi4py>=3.1.0' 'transformers>=4.30.0'"
     docker exec ${container_name} bash -c "pip install 'quimb' 'opt_einsum' 'cuquantum-python-cu${cuda_major}==26.03.1'"
+    # Needed by docs/sphinx/examples/qec/python/pseudo_threshold.py.
+    docker exec ${container_name} bash -c "pip install matplotlib"
     if [ "${CURRENT_ARCH}" == "x86_64" ]; then
         docker exec ${container_name} bash -c "pip install 'stim' 'beliefmatching'"
     fi
@@ -129,19 +130,13 @@ test_examples() {
         echo "Testing with target: ${target}"
 
         # Test Python examples
-        for domain in "solvers" "qec"; do
+        for domain in "qec"; do
             if docker exec ${container_name} bash -c "[ -d /home/cudaq/cudaqx-examples/${domain}/python ] && [ -n \"\$(ls -A /home/cudaq/cudaqx-examples/${domain}/python/*.py 2>/dev/null)\" ]"; then
                 echo "Testing ${domain} Python examples with target ${target}..."
                 if ! docker exec ${container_name} bash -c "cd /home/cudaq/cudaqx-examples/${domain}/python && \
                     for f in *.py; do \
                         echo Testing \$f...; \
-                        if [ \"\$f\" = \"gqe_h2.py\" ]; then \
-                            python3 -c \"from cudaq_solvers.gqe_algorithm.cuda_utils import pytorch_cuda_execution_available; import sys; sys.exit(0 if pytorch_cuda_execution_available() else 1)\" || { echo \"Skipping \$f: PyTorch cannot execute CUDA kernels on this GPU.\"; continue; }; \
-                            python3 \"\$f\" || exit 1; \
-                            python3 \"\$f\" --mpi || exit 1; \
-                        else \
-                            python3 \"\$f\" --target ${target} || exit 1; \
-                        fi; \
+                        python3 \"\$f\" --target ${target} || exit 1; \
                     done"; then
                     echo "Python tests failed for ${domain} with target ${target}"
                     docker stop ${container_name}
@@ -157,7 +152,7 @@ test_examples() {
     for target in "${CPP_TARGETS[@]}"; do
 
         # Test C++ examples
-        for domain in "solvers" "qec"; do
+        for domain in "qec"; do
             if docker exec ${container_name} bash -c "[ -d /home/cudaq/cudaqx-examples/${domain}/cpp ] && [ -n \"\$(ls -A /home/cudaq/cudaqx-examples/${domain}/cpp/*.cpp 2>/dev/null)\" ]"; then
                 echo "Testing ${domain} C++ examples with target ${target}..."
                 if ! docker exec ${container_name} bash -c "cd /home/cudaq/cudaqx-examples/${domain}/cpp && \

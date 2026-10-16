@@ -372,11 +372,13 @@ class TestTRTDecoderParameterValidation(TestTRTDecoderSetup):
         pass
 
     def test_validate_parameters_no_paths_provided(self):
-        """Test that providing no paths creates decoder with warning."""
-        # Decoder is created but logs a warning - it won't be usable for inference
-        # Create the TRT decoder
+        """Providing no model path is an initialization error."""
+        # Initialization failures throw (converged never stands in for
+        # decoder health), so construction without a path raises.
         try:
-            decoder = qec.get_decoder('trt_decoder', self.H)
+            decoder = qec.get_decoder('trt_decoder',
+                                      self.H,
+                                      engine_output_format='errors')
             # If decoder is None or doesn't initialize properly, skip these tests
             if decoder is None:
                 pytest.skip(
@@ -432,12 +434,17 @@ class TestTRTDecoderInference(TestTRTDecoderSetup):
 
         # Create a dummy H matrix (identity matrix for simplicity)
         self.H_inference = np.eye(num_detectors, dtype=np.uint8)
+        self.O_inference = np.zeros((NUM_OBSERVABLES, num_detectors),
+                                    dtype=np.uint8)
 
         # Create the TRT decoder
         self.onnx_path = ONNX_MODEL_PATH
         try:
             self.decoder = qec.get_decoder('trt_decoder',
                                            self.H_inference,
+                                           O=self.O_inference,
+                                           output='observables',
+                                           engine_output_format='observables',
                                            onnx_load_path=self.onnx_path)
             # If decoder is None or doesn't initialize properly, skip these tests
             if self.decoder is None:
@@ -585,6 +592,11 @@ class TestTRTDecoderEdgeCases(TestTRTDecoderSetup):
         try:
             decoder = qec.get_decoder('trt_decoder',
                                       H,
+                                      O=np.zeros(
+                                          (NUM_OBSERVABLES, num_detectors),
+                                          dtype=np.uint8),
+                                      output='observables',
+                                      engine_output_format='observables',
                                       onnx_load_path=ONNX_MODEL_PATH)
         except Exception:
             pytest.skip("Failed to create TRT decoder")
@@ -607,6 +619,11 @@ class TestTRTDecoderEdgeCases(TestTRTDecoderSetup):
         try:
             decoder = qec.get_decoder('trt_decoder',
                                       H,
+                                      O=np.zeros(
+                                          (NUM_OBSERVABLES, num_detectors),
+                                          dtype=np.uint8),
+                                      output='observables',
+                                      engine_output_format='observables',
                                       onnx_load_path=ONNX_MODEL_PATH)
         except Exception:
             pytest.skip("Failed to create TRT decoder")
@@ -640,11 +657,15 @@ class TestTRTDecoderEdgeCases(TestTRTDecoderSetup):
         # Create decoder WITH CUDA graphs (default)
         # =====================================================================
         try:
-            decoder_cuda_graph = qec.get_decoder('trt_decoder',
-                                                 H,
-                                                 onnx_load_path=ONNX_MODEL_PATH,
-                                                 precision='fp16',
-                                                 use_cuda_graph=True)
+            decoder_cuda_graph = qec.get_decoder(
+                'trt_decoder',
+                H,
+                O=np.zeros((NUM_OBSERVABLES, num_detectors), dtype=np.uint8),
+                output='observables',
+                engine_output_format='observables',
+                onnx_load_path=ONNX_MODEL_PATH,
+                precision='fp16',
+                use_cuda_graph=True)
         except Exception as e:
             pytest.skip(f"Failed to create CUDA graph decoder: {e}")
 
@@ -655,6 +676,9 @@ class TestTRTDecoderEdgeCases(TestTRTDecoderSetup):
             decoder_traditional = qec.get_decoder(
                 'trt_decoder',
                 H,
+                O=np.zeros((NUM_OBSERVABLES, num_detectors), dtype=np.uint8),
+                output='observables',
+                engine_output_format='observables',
                 onnx_load_path=ONNX_MODEL_PATH,
                 precision='fp16',
                 use_cuda_graph=False)
@@ -774,6 +798,7 @@ class TestTRTDecoderEdgeCases(TestTRTDecoderSetup):
                 decoder_cuda_graph = qec.get_decoder(
                     'trt_decoder',
                     H,
+                    engine_output_format='errors',
                     engine_load_path=engine_path,
                     use_cuda_graph=True)
             except Exception as e:
@@ -786,6 +811,7 @@ class TestTRTDecoderEdgeCases(TestTRTDecoderSetup):
                 decoder_traditional = qec.get_decoder(
                     'trt_decoder',
                     H,
+                    engine_output_format='errors',
                     engine_load_path=engine_path,
                     use_cuda_graph=False)
             except Exception as e:
@@ -908,6 +934,7 @@ class TestTRTDecoderBatchValidation:
             try:
                 decoder = qec.get_decoder("trt_decoder",
                                           H,
+                                          engine_output_format="errors",
                                           engine_load_path=str(engine_path))
             except Exception as e:
                 pytest.skip(f"Failed to create decoder: {e}")
