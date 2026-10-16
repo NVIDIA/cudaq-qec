@@ -6,7 +6,6 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 # SPDX-License-Identifier: Apache-2.0
-
 """Launcher behavior tests; no registry credentials or GPU are required."""
 
 import contextlib
