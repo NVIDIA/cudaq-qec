@@ -58,6 +58,7 @@ Additional quantum gates can be applied, and only when `get_corrections` is call
 See Also
 ^^^^^^^^
 
+* :doc:`Using the Decoding Server Docker Package </examples_rst/qec/decoding_server>` — deployment, playback, and runtime integration
 * :ref:`Pre-built QEC Decoders <prebuilt_qec_decoders>` — decoders available for realtime use
 * :doc:`Realtime Decoding examples </examples_rst/qec/realtime_decoding>` — runnable end-to-end examples
 * :ref:`realtime_pipeline_api` — Realtime Pipeline C++ API (experimental)

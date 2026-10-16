@@ -24,5 +24,6 @@ The pages below document each of these interfaces in depth — the abstraction, 
    QEC Codes <codes>
    QEC Decoders <decoders>
    Realtime Decoding <realtime_decoding>
+   Decoding Server </examples_rst/qec/decoding_server>
    Experiments and Noise Modeling <numerical_experiments>
    Conventions <conventions>
