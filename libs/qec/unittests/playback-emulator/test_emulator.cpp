@@ -721,6 +721,23 @@ TEST(Timing, ANullBackendGetCorrectionsWithRealWidthStillReportsOk) {
   EXPECT_EQ(result.records[0].correction_count, 8u);
 }
 
+TEST(Timing, OnlyEnqueueDataCarriesTheFinalSyndromeMappingId) {
+  struct MappingSession : blocking_session {
+    std::vector<std::uint64_t> ids;
+    RpcStatus send_sync(const frame &f, std::span<std::uint8_t>,
+                        std::size_t &reply_len) override {
+      cudaq::qec::decoding_server::slot::EnqueueView v;
+      if (cudaq::qec::decoding_server::slot::parse_enqueue(f.bytes, f.size, v))
+        ids.push_back(v.syndrome_mapping_id);
+      reply_len = 0;
+      return RpcStatus::OK;
+    }
+  } s;
+  run_text("0 stream source=0b1010 rounds=2\n1 enqueue_data source=0b1\n", 1000,
+           s, {.final_mapping_id = 3});
+  EXPECT_EQ(s.ids, (std::vector<std::uint64_t>{0, 0, 3}));
+}
+
 // ─── Signals ────────────────────────────────────────────────────────────────
 //
 // Signals: the schedule-level way to say "keep streaming until that round
