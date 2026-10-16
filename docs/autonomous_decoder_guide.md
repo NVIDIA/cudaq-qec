@@ -254,28 +254,50 @@ inline void set_my_decoder(my_decoder* decoder) {
 // RPC Handler for Regular Dispatch
 //==============================================================================
 
-/// @brief RPC-compatible wrapper for dispatch kernel
-__device__ int my_decode_rpc(void* buffer, 
-                             std::uint32_t arg_len,
-                             std::uint32_t max_result_len,
-                             std::uint32_t* result_len) {
-  
-  if (g_my_decoder == nullptr) {
-    *result_len = 0;
-    return -1; // Error: decoder not initialized
-  }
+/// Upper bound on the request bytes staged locally (see the aliasing note).
+constexpr std::size_t kMaxMeasurementBytes = 1024;
 
-  // Input measurements and output corrections share the buffer
-  uint8_t* measurements = static_cast<uint8_t*>(buffer);
-  uint8_t* corrections = static_cast<uint8_t*>(buffer);
+/// @brief RPC-compatible wrapper for the dispatch kernel.
+///
+/// Same two-pointer form as a HOST_CALL handler, plus a returned status: the
+/// request (RPCHeader + measurements) is in rx_slot, the corrections go right
+/// after the RPCResponse in tx_slot, and the handler sets result_len.  The
+/// dispatch kernel fills the other response header fields and forces
+/// result_len to 0 on a non-zero status.
+///
+/// On an in-place ring tx_slot aliases rx_slot, so the handler must read
+/// everything it needs from the request before writing the response.
+__device__ int my_decode_rpc(const void* rx_slot, void* tx_slot,
+                             std::size_t slot_size) {
+  using cudaq::realtime::RPCHeader;
+  using cudaq::realtime::RPCResponse;
+
+  if (slot_size < sizeof(RPCResponse) || g_my_decoder == nullptr)
+    return -1; // Error: bad slot or decoder not initialized
+
+  const auto* header = static_cast<const RPCHeader*>(rx_slot);
+  const uint8_t* measurements = reinterpret_cast<const uint8_t*>(header + 1);
+  auto* response = static_cast<RPCResponse*>(tx_slot);
+  uint8_t* corrections = reinterpret_cast<uint8_t*>(response + 1);
+  const std::size_t max_result_len = slot_size - sizeof(RPCResponse);
 
   const auto& ctx = g_my_decoder->context();
-  
+  if (ctx.num_observables > max_result_len)
+    return -2; // Error: result does not fit in the TX slot
+  if (ctx.num_measurements > kMaxMeasurementBytes)
+    return -3; // Error: request larger than the local staging buffer
+
+  // decode() zeroes the corrections before it reads the measurements, which
+  // on an in-place ring would clobber the request; stage the request first.
+  uint8_t local_measurements[kMaxMeasurementBytes];
+  for (std::size_t i = 0; i < ctx.num_measurements; ++i)
+    local_measurements[i] = measurements[i];
+
   // Call the CRTP decoder interface
-  g_my_decoder->decode(measurements, corrections, 
+  g_my_decoder->decode(local_measurements, corrections,
                        ctx.num_measurements, ctx.num_observables);
 
-  *result_len = static_cast<std::uint32_t>(ctx.num_observables);
+  response->result_len = static_cast<std::uint32_t>(ctx.num_observables);
   return 0; // Success
 }
 
@@ -295,8 +317,8 @@ __global__ void my_decode_graph_kernel(void** buffer_ptr) {
     if (data_buffer == nullptr || g_my_decoder == nullptr) {
       if (data_buffer != nullptr) {
         // Write error response
-        auto* response = static_cast<cudaq::nvqlink::RPCResponse*>(data_buffer);
-        response->magic = cudaq::nvqlink::RPC_MAGIC_RESPONSE;
+        auto* response = static_cast<cudaq::realtime::RPCResponse*>(data_buffer);
+        response->magic = cudaq::realtime::RPC_MAGIC_RESPONSE;
         response->status = -1;
         response->result_len = 0;
       }
@@ -304,7 +326,7 @@ __global__ void my_decode_graph_kernel(void** buffer_ptr) {
     }
 
     // Parse RPC header
-    auto* header = static_cast<cudaq::nvqlink::RPCHeader*>(data_buffer);
+    auto* header = static_cast<cudaq::realtime::RPCHeader*>(data_buffer);
     void* arg_buffer = static_cast<void*>(header + 1);
 
     // Decode
@@ -316,8 +338,8 @@ __global__ void my_decode_graph_kernel(void** buffer_ptr) {
                          ctx.num_measurements, ctx.num_observables);
 
     // Write response
-    auto* response = static_cast<cudaq::nvqlink::RPCResponse*>(data_buffer);
-    response->magic = cudaq::nvqlink::RPC_MAGIC_RESPONSE;
+    auto* response = static_cast<cudaq::realtime::RPCResponse*>(data_buffer);
+    response->magic = cudaq::realtime::RPC_MAGIC_RESPONSE;
     response->status = 0;
     response->result_len = static_cast<std::uint32_t>(ctx.num_observables);
   }
@@ -333,12 +355,12 @@ The function table is initialized in a device kernel to properly capture device 
 ```cpp
 // In your source file (e.g., my_decoder.cu)
 
-#include "cudaq/nvqlink/daemon/dispatcher/cudaq_realtime.h"
-#include "cudaq/nvqlink/daemon/dispatcher/dispatch_kernel_launch.h"
+#include "cudaq/realtime/daemon/dispatcher/cudaq_realtime.h"
+#include "cudaq/realtime/daemon/dispatcher/dispatch_kernel_launch.h"
 
 // Define function ID (use FNV-1a hash of a unique name)
 constexpr std::uint32_t MY_DECODE_FUNCTION_ID = 
-    cudaq::nvqlink::fnv1a_hash("my_decoder");
+    cudaq::realtime::fnv1a_hash("my_decoder");
 
 /// @brief Initialize the device function table with your decoder
 __global__ void init_my_decoder_function_table(cudaq_function_entry_t* entries) {
@@ -599,7 +621,7 @@ The mock decoder demonstrates:
 ## Additional Resources
 
 - **UML Design Document**: `docs/autonomous_decoder_uml.puml`
-- **CUDA-Q Realtime API**: `cuda-quantum/realtime/include/cudaq/nvqlink/daemon/dispatcher/cudaq_realtime.h`
+- **CUDA-Q Realtime API**: `cuda-quantum/realtime/include/cudaq/realtime/daemon/dispatcher/cudaq_realtime.h`
 - **Dispatch Kernel Source**: `cuda-quantum/realtime/lib/daemon/dispatcher/dispatch_kernel.cu`
 
 For questions or issues, consult the CUDA-Q QEC development team.

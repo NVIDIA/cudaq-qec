@@ -109,15 +109,19 @@
 
         - `engine_output_format` (string): Semantic layout of one model output.
           This describes the engine tensor independently of the decoder result
-          basis. Accepted values are:
+          contract. Accepted values are:
 
           - ``"errors"``: one error-frame value per column of ``H``.
           - ``"residual_detectors"``: residual detector values consumed by the
             required ``global_decoder``.
           - ``"observables"``: one value per row of ``O``.
           - ``"observables_and_residual_detectors"``: an observable prefix
-            followed by residual detectors consumed by the required
-            ``global_decoder``.
+            followed by residual detectors. With ``global_decoder``, the
+            residuals are decoded and combined with the observable prefix.
+            Alternatively, a C++ ``decoder_output_request`` may request
+            ``observables`` as the primary result and ``residual_detectors`` as
+            an auxiliary output; the prefix is then returned in ``result`` and
+            the residuals in ``opt_results["residual_detectors"]``.
 
         **Required model source (choose one):**
 
@@ -159,13 +163,18 @@
           the batch. The `decode_batch()` method requires the number of syndromes
           to be an integral multiple of the model's batch size.
 
-        - `global_decoder` (string): Name of an optional second-stage "global"
-          decoder to chain after the TensorRT model (composite decoding). The TRT
-          model acts as a first-stage predecoder whose output is passed to the
-          named global decoder (for example ``"pymatching"`` or ``"chromobius"``).
-          When omitted, the TRT model's output is returned directly. See
-          :ref:`the real-time decoding API <python_realtime_decoding_api>` for
-          configuring composite decoding from YAML. Introduced in 0.7.0.
+        - `global_decoder` (string): Name of a second-stage "global" decoder to
+          chain after the TensorRT model (composite decoding). It is required
+          for ``"residual_detectors"``. For
+          ``"observables_and_residual_detectors"``, it is required unless the
+          output contract requests observable primary output and the
+          ``residual_detectors`` auxiliary output. The TRT model acts as a
+          first-stage predecoder whose residual output is passed to the named
+          global decoder (for example ``"pymatching"`` or ``"chromobius"``).
+          It may be omitted for output formats that need no second stage. See
+          :ref:`the real-time decoding API
+          <python_realtime_decoding_api>` for configuring composite decoding
+          from YAML. Introduced in 0.7.0.
           A cancellation token passed to :code:`decode` or :code:`decode_batch`
           reaches only this global decoder; TensorRT inference itself is not
           interruptible.

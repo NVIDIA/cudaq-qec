@@ -9,7 +9,23 @@
 // It is expected that one would preload this .so file before loading the
 // libcudaq-qec-realtime-decoding-quantinuum.so in that environment.
 extern "C" {
-__attribute__((visibility("default"))) void __quantum__qis__x__ctl() {}
-__attribute__((visibility("default"))) void __quantum__qis__y__ctl() {}
-__attribute__((visibility("default"))) void __quantum__qis__z__ctl() {}
+__attribute__((visibility("default"))) void __cudaq_deviceCodeHolderAdd() {}
+__attribute__((visibility("default"))) void __cudaq_registerLinkableKernel() {}
+__attribute__((visibility("default"))) void __cudaq_registerRunnableKernel() {}
+__attribute__((visibility("default"))) void cudaqRegisterArgsCreator() {}
+__attribute__((visibility("default"))) void cudaqRegisterKernelName() {}
 }
+
+// nvq++ always defines CUDAQ_DISABLE_YAML_TARGET_CONFIG, so every kernel
+// translation unit gets a static initializer for the inline global in
+// cudaq/host_config.h whose constructor lives in libcudaq.so. It only turns
+// off YAML target config parsing, which the GPU Server never does.
+namespace cudaq::detail {
+class YamlTargetConfigDisabler {
+public:
+  YamlTargetConfigDisabler();
+};
+
+__attribute__((visibility("default")))
+YamlTargetConfigDisabler::YamlTargetConfigDisabler() {}
+} // namespace cudaq::detail

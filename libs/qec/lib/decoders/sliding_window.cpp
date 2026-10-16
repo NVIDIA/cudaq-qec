@@ -120,15 +120,23 @@ void sliding_window::initialize_window(std::size_t batch_size) {
 sliding_window::sliding_window(cudaq::qec::decoder_init inputs,
                                decode_result_type requested_output,
                                const cudaqx::heterogeneous_map &params)
+    : sliding_window(std::move(inputs),
+                     decoder_output_request{requested_output}, params) {}
+
+sliding_window::sliding_window(cudaq::qec::decoder_init inputs,
+                               decoder_output_request request,
+                               const cudaqx::heterogeneous_map &params)
     // Canonical CSC is the steady-state contract for decode_window's column
     // slices and for validate_inputs's per-column .front()/.back() reads.
-    : decoder(canonicalize_sliding_window_inputs(std::move(inputs)),
-              requested_output),
+    : decoder(canonicalize_sliding_window_inputs(std::move(inputs)), request),
       H(get_inputs().detector_error_matrix()) {
+  if (request.has_auxiliary_outputs())
+    throw std::invalid_argument(
+        "sliding_window does not produce auxiliary outputs");
   // This decoder composes an error frame from its windows. Producing
   // observables requires an observable mapping to project through; reject at
   // construction rather than on the first decode.
-  if (requested_output == decode_result_type::observables &&
+  if (request.primary == decode_result_type::observables &&
       !get_inputs().has_observable_model())
     throw std::invalid_argument(
         "sliding_window was constructed for observable output but its model "
@@ -174,8 +182,13 @@ sliding_window::sliding_window(cudaq::qec::decoder_init inputs,
   std::vector<std::size_t> detector_layer_offsets(num_detector_layers + 1);
   for (std::size_t r = 0; r <= num_detector_layers; ++r)
     detector_layer_offsets[r] = get_layer_offset(r);
-  initialize_streaming_layout(num_syndromes_per_round,
-                              std::move(detector_layer_offsets));
+  // A model with no observable mapping cannot stream an error frame, which the
+  // base class rejects at this call. It can still decode whole syndromes, so
+  // leave streaming unconfigured for it rather than refusing to construct.
+  if (request.primary == decode_result_type::observables ||
+      get_inputs().has_observable_model())
+    initialize_streaming_layout(num_syndromes_per_round,
+                                std::move(detector_layer_offsets));
 
   // Build the per-window inner decoders from the real (unpadded) sub-PCMs. The
   // boundary-aware round layout is handled by get_pcm_for_rounds.

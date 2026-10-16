@@ -165,6 +165,24 @@ _sc1_reject(load-dem-geometry-mismatch "does not match current geometry"
 set_tests_properties(app_examples.surface_code-1-negative-load-dem-geometry-mismatch
   PROPERTIES FIXTURES_REQUIRED sc1_dem)
 
+# 1c. --load_dem of a --dem_chunks config at fewer rounds than its phases.
+add_test(NAME app_examples.surface_code-1-negative-dem-chunks-fixtures
+  COMMAND ${_sc1_exe} --distance 3 --num_rounds 6 --dem_chunks
+    --save_dem ${_sc1_neg_dir}/d3_chunks.yml
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(app_examples.surface_code-1-negative-dem-chunks-fixtures
+  PROPERTIES FIXTURES_SETUP sc1_dem_chunks ENVIRONMENT "${_sc1_neg_env}")
+_sc1_reject(dem-chunks-too-few-rounds "Loaded DEM chunks need --num_rounds >= 4"
+  --distance 3 --num_rounds 3
+  --load_dem ${_sc1_neg_dir}/d3_chunks.yml)
+set_tests_properties(app_examples.surface_code-1-negative-dem-chunks-too-few-rounds
+  PROPERTIES FIXTURES_REQUIRED sc1_dem_chunks)
+
+# 1d. --dem_chunks with too few rounds to find the repeating one.
+_sc1_reject(dem-chunks-no-repeating-round "found no repeating round"
+  --distance 3 --num_rounds 3 --dem_chunks
+  --save_dem ${_sc1_neg_dir}/d3_short_chunks.yml)
+
 # 2. --save_syndrome to an unwriteable path → begin_syndrome_capture throws.
 _sc1_reject(save-syndrome-bad-path "Could not open syndrome file for writing"
   --distance 3 --num_rounds 3 --num_shots 2
@@ -335,6 +353,24 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
           12
           multi_error_lut
           2
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+
+    # Two-process over the unified host loop: the server runs each ring's
+    # host dispatcher as cudaq_host_unified_loop on the provider's CPU data
+    # plane (--host-loop=unified) instead of the threaded ring-buffer loop.
+    # The server passes --unified to the udp provider itself to select that
+    # data plane; --host-loop=unified reaches the server via
+    # QEC_DECODING_SERVER_EXTRA_ARGS.
+    add_test(
+      NAME app_examples.surface_code-1-cqr-two-process-test-distance-3-host-loop-unified
+      COMMAND
+        ${CMAKE_COMMAND} -E env "QEC_DECODING_SERVER_EXTRA_ARGS=--host-loop=unified"
+        bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-cqr-two-process-test.sh"
+          ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
+          3 60 30
+          $<TARGET_FILE:decoding_server>
+          12
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
   endif()
