@@ -9,8 +9,8 @@
 /// @file py_playback_emulator.cpp
 /// @brief Python binding for the playback emulator. `parse()`/`plan()` and
 /// their supporting machinery stay internal C++-only plumbing (see
-/// emulator.h) -- the Python surface is just `run()`, returning the same
-/// `run_result` the CLI tool gets.
+/// emulator.h) -- the Python surface is just `run()`, returning a `run_result`
+/// whose records are plain dicts keyed like the CLI tool's CSV columns.
 
 #include "py_playback_emulator.h"
 
@@ -21,12 +21,13 @@
 #include "type_casters.h"
 #include "cudaq/qec/code.h"
 
+#include <algorithm>
+
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/string_view.h>
-#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
@@ -37,15 +38,61 @@ namespace cudaq::qec::playback {
 
 namespace {
 
-/// One event's [first, last) bounds into a log the same size as
-/// request_id_log, clamped so a record pointing past the log slices empty.
-std::pair<std::size_t, std::size_t> request_slice(const record &rec,
-                                                  std::size_t log_size) {
-  const auto first = std::min<std::size_t>(rec.request_id_offset, log_size);
-  const auto last =
-      std::min<std::size_t>(first + rec.request_id_count, log_size);
-  return {first, last};
+/// `log[offset, offset + count)`, clamped so a record pointing past the log
+/// slices empty.
+template <typename T>
+std::vector<T> slice(const std::vector<T> &log, std::size_t offset,
+                     std::size_t count) {
+  const auto first = std::min(offset, log.size());
+  const auto last = std::min(first + count, log.size());
+  return {log.begin() + first, log.begin() + last};
 }
+
+/// `log[offset, offset + count)` as a '0'/'1' string, as write_csv() writes it.
+std::string bit_string(const std::vector<std::uint8_t> &log, std::size_t offset,
+                       std::size_t count) {
+  std::string out;
+  for (auto bit : slice(log, offset, count))
+    out.push_back(bit ? '1' : '0');
+  return out;
+}
+
+/// One dict per record, keyed like write_csv()'s columns.
+nb::list records_as_dicts(const run_result &r) {
+  nb::list out;
+  for (const auto &rec : r.records) {
+    const auto first = rec.request_id_offset, count = rec.request_id_count;
+    nb::dict d;
+    d["event_index"] = rec.event_index;
+    d["decoder_id"] = rec.decoder_id;
+    d["op"] = to_string(rec.op);
+    d["deadline_ns"] = rec.deadline_ns;
+    d["call_ns"] = rec.call_ns;
+    d["return_ns"] = rec.return_ns;
+    d["status"] = rec.status;
+    d["rounds_streamed"] = rec.rounds_streamed;
+    d["read_completed"] = rec.read_completed;
+    d["syndrome_bits"] =
+        bit_string(r.syndrome_log, rec.syndrome_offset, rec.syndrome_count);
+    d["correction_bits"] = bit_string(r.correction_log, rec.correction_offset,
+                                      rec.correction_count);
+    d["correction_mismatch"] = rec.correction_mismatch;
+    d["request_ids"] = slice(r.request_id_log, first, count);
+    d["dispatched"] = rec.dispatched;
+    d["request_dispatch_ns"] = slice(r.request_dispatch_ns_log, first, count);
+    d["request_return_ns"] = slice(r.request_return_ns_log, first, count);
+    d["request_status"] = slice(r.request_status_log, first, count);
+    out.append(std::move(d));
+  }
+  return out;
+}
+
+/// The Python `run_result`: the C++ result (for write_csv()) and its records,
+/// converted to dicts once.
+struct py_run_result {
+  run_result result;
+  nb::list records;
+};
 
 /// Maps a state-prep spec string to cudaq::qec::operation, a different
 /// enum from the already-bound playback::operation of the same name.
@@ -79,6 +126,22 @@ std::unique_ptr<syndrome_source> make_source(const nb::dict &spec) {
   if (!spec.contains("type"))
     throw std::invalid_argument("source spec missing required \"type\" key");
   auto type = nb::cast<std::string>(spec["type"]);
+  // An unknown key is an error, matching the CLI's --stim-source.
+  static const std::unordered_map<std::string, std::vector<std::string>> kKeys{
+      {"static", {"rounds"}},
+      {"stim_memory",
+       {"seed", "code", "task", "distance", "rounds",
+        "before_measure_flip_probability", "after_clifford_depolarization",
+        "before_round_data_depolarization", "after_reset_flip_probability"}},
+      {"cudaq_memory", {"code", "state_prep", "max_rounds", "seed", "noise"}}};
+  if (auto it = kKeys.find(type); it != kKeys.end())
+    for (auto [k, v] : spec) {
+      const auto key = nb::cast<std::string>(k);
+      if (key != "type" && std::find(it->second.begin(), it->second.end(),
+                                     key) == it->second.end())
+        throw std::invalid_argument("unknown \"" + type + "\" source key \"" +
+                                    key + "\"");
+    }
   if (type == "static")
     return std::make_unique<static_source>(
         nb::cast<std::vector<std::vector<std::uint8_t>>>(spec["rounds"]));
@@ -87,7 +150,7 @@ std::unique_ptr<syndrome_source> make_source(const nb::dict &spec) {
     // riding along in the same dict is harmless.
     return std::make_unique<stim_memory_source>(
         cudaqx::hetMapFromKwargs(nb::cast<nb::kwargs>(spec)),
-        nb::cast<std::uint64_t>(spec["seed"]));
+        spec.contains("seed") ? nb::cast<std::uint64_t>(spec["seed"]) : 1);
   if (type == "cudaq_memory") {
     cudaq::noise_model noise;
     if (spec.contains("noise"))
@@ -133,7 +196,7 @@ cpu_roce_options make_cpu_roce_options(const std::optional<nb::dict> &spec) {
 /// appear in two. `sources` maps a schedule's source_id to a plain spec dict
 /// (see `make_source`); a fresh syndrome_source is built from each spec for
 /// this run alone.
-run_result run_schedule(
+py_run_result run_schedule(
     const std::string &schedule_text, std::uint64_t tick_ns,
     const std::unordered_map<std::uint32_t, nb::dict> &sources,
     const std::optional<cudaq::qec::decoding::config::multi_decoder_config>
@@ -191,9 +254,15 @@ run_result run_schedule(
   auto sched = parse(schedule_text, known_decoder_ids, tick_ns);
   auto run_plan_ = plan(sched, router, source_router, params);
 
-  // Release the GIL only for run() itself, not the dict-touching setup above.
-  nb::gil_scoped_release release;
-  return run(std::move(run_plan_));
+  // Release the GIL only for run() itself, not the dict-touching code around
+  // it.
+  run_result result;
+  {
+    nb::gil_scoped_release release;
+    result = run(std::move(run_plan_));
+  }
+  nb::list records = records_as_dicts(result);
+  return {std::move(result), std::move(records)};
 }
 
 } // namespace
@@ -204,126 +273,47 @@ void bindPlaybackEmulator(nb::module_ &mod) {
                              "schedule against decoders on a precise, "
                              "hardware-independent timing loop.");
 
-  nb::enum_<operation>(m, "operation")
-      .value("reset", operation::reset)
-      .value("stream", operation::stream)
-      .value("enqueue_data", operation::enqueue_data)
-      .value("get_corrections", operation::get_corrections);
-
-  nb::class_<record>(m, "record")
-      .def_ro("event_index", &record::event_index)
-      .def_ro("decoder_id", &record::decoder_id)
-      .def_ro("op", &record::op)
-      .def_ro("dispatched", &record::dispatched,
-              "True once the dispatch loop actually reached this event; "
-              "false if a hard error aborted the run first, in which case "
-              "every other field is left default.")
-      .def_ro("deadline_ns", &record::deadline_ns)
-      .def_ro("call_ns", &record::call_ns)
-      .def_ro("return_ns", &record::return_ns,
-              "When this event's last reply/ack landed: the one request's "
-              "reply for reset/get_corrections, or the max over a "
-              "stream/enqueue_data's rounds.")
-      .def_prop_ro(
-          "status",
-          [](const record &r) {
-            // The two status spaces are disjoint by value
-            // (RpcStatus 0..6, stream_terminate 100..103), so the
-            // value picks the enum -- not the op, since a dry
-            // source gives even an enqueue a SOURCE_EXHAUSTED.
-            if (r.status == kNoStatus)
-              return "NOT_DISPATCHED";
-            return r.status >= 100
-                       ? to_string(static_cast<stream_terminate>(r.status))
-                       : to_string(static_cast<RpcStatus>(r.status));
-          },
-          "status as a human-readable string: a stream_terminate "
-          "name for stream, an RpcStatus name for every other op, "
-          "or NOT_DISPATCHED for an event an abort pre-empted.")
-      .def_ro("rounds_streamed", &record::rounds_streamed)
-      .def_ro("read_completed", &record::read_completed)
-      .def_ro("syndrome_offset", &record::syndrome_offset)
-      .def_ro("syndrome_count", &record::syndrome_count)
-      .def_ro("correction_offset", &record::correction_offset)
-      .def_ro("correction_count", &record::correction_count)
-      .def_ro("correction_mismatch", &record::correction_mismatch)
-      .def_ro("request_id_offset", &record::request_id_offset)
-      .def_ro("request_id_count", &record::request_id_count,
-              "How many RPCs this event sent: one per round for a stream, one "
-              "for every other op, and zero if it sent nothing. Together with "
-              "request_id_offset this slices run_result.request_id_log and "
-              "the parallel request_dispatch_ns_log/request_return_ns_log/"
-              "request_status_log; run_result.request_ids()/request_timings() "
-              "do the slicing for you.");
-
-  nb::class_<run_result>(m, "run_result")
-      .def_ro("records", &run_result::records)
-      .def_ro("syndrome_log", &run_result::syndrome_log)
-      .def_ro("correction_log", &run_result::correction_log)
-      .def_ro("request_id_log", &run_result::request_id_log)
-      .def_ro("request_dispatch_ns_log", &run_result::request_dispatch_ns_log)
-      .def_ro("request_return_ns_log", &run_result::request_return_ns_log)
-      .def_ro("request_status_log", &run_result::request_status_log)
+  nb::class_<py_run_result>(m, "run_result")
+      .def_ro(
+          "records", &py_run_result::records,
+          "One dict per schedule line, in schedule order, keyed like the "
+          "CSV columns and holding the same values, except that per-request "
+          "values are lists.")
+      .def_prop_ro("warnings",
+                   [](const py_run_result &r) { return r.result.warnings; })
+      .def_prop_ro("t0_ns",
+                   [](const py_run_result &r) { return r.result.t0_ns; })
+      .def_prop_ro("tick_ns",
+                   [](const py_run_result &r) { return r.result.tick_ns; })
       .def(
-          "request_ids",
-          [](const run_result &r, std::size_t event_index) {
-            const auto [first, last] = request_slice(r.records.at(event_index),
-                                                     r.request_id_log.size());
-            return std::vector<std::uint32_t>(r.request_id_log.begin() + first,
-                                              r.request_id_log.begin() + last);
-          },
-          nb::arg("event_index"),
-          "That event's slice of request_id_log: every request_id it put on "
-          "the wire, in send order, for correlating against a server log.")
-      .def(
-          "request_timings",
-          [](const run_result &r, std::size_t event_index) {
-            const auto [first, last] = request_slice(r.records.at(event_index),
-                                                     r.request_id_log.size());
-            std::vector<std::tuple<std::uint32_t, std::uint64_t, std::uint64_t>>
-                out;
-            out.reserve(last - first);
-            for (std::size_t i = first; i < last; ++i)
-              out.emplace_back(r.request_id_log[i],
-                               r.request_dispatch_ns_log[i],
-                               r.request_return_ns_log[i]);
-            return out;
-          },
-          nb::arg("event_index"),
-          "That event's requests as (request_id, dispatch_ns, return_ns) "
-          "tuples, in send order -- dispatch_ns is when the timing thread "
-          "put it on the wire, return_ns is when its reply/ack landed (0 if "
-          "never collected).")
-      .def_ro("warnings", &run_result::warnings)
-      .def_ro("t0_ns", &run_result::t0_ns)
-      .def_ro("tick_ns", &run_result::tick_ns)
-      .def(
-          "write_csv", [](const run_result &r) { return write_csv(r); },
+          "write_csv",
+          [](const py_run_result &r) { return write_csv(r.result); },
           "Serialize this run's records to a CSV string.");
 
-  m.def("run", &run_schedule, nb::arg("schedule"), nb::arg("tick_ns"),
-        nb::arg("sources"), nb::arg("decoders") = nb::none(),
-        nb::arg("udp_endpoints") = nb::none(), nb::arg("udp_timeout_ms") = 200,
-        nb::arg("cpu_roce_endpoints") = nb::none(),
-        nb::arg("cpu_roce_options") = nb::none(),
-        nb::arg("cpu_roce_timeout_ms") = 200,
-        nb::arg("null_decoder_ids") = nb::none(),
-        nb::arg("lead_in_ns") = 20'000'000,
-        "Parse, plan, and run a line-oriented playback schedule. `sources` "
-        "maps a schedule's source_id -> a spec dict tagged by \"type\": "
-        "\"static\" ({\"rounds\": [[...]]}), \"stim_memory\" ({\"seed\": N, "
-        "\"code\", \"task\", \"distance\", \"rounds\" (optional), ...Stim "
-        "noise knobs}), or \"cudaq_memory\" ({\"code\": a qec.Code, "
-        "\"state_prep\": \"prep0\"|..., \"max_rounds\": N, \"seed\": N, "
-        "\"noise\": a cudaq.NoiseModel (optional)}). "
-        "Each of `decoders` (in-process decoders from a "
-        "multi_decoder_config), `udp_endpoints` ({decoder_id: "
-        "\"host:port\"}), `cpu_roce_endpoints` (same, plus `cpu_roce_options` "
-        "= {\"device\", \"local_ip\", \"slots\" (8), \"slot_size\" (256), "
-        "\"connect_timeout_ms\" (5000)}), and `null_decoder_ids` (discards "
-        "everything) names the decoder_ids that backend serves; at least one "
-        "must be given, and backends may be mixed as long as no decoder_id "
-        "appears twice.");
+  m.def(
+      "run", &run_schedule, nb::arg("schedule"), nb::arg("tick_ns") = 1000,
+      nb::arg("sources") = nb::dict(), nb::arg("decoders") = nb::none(),
+      nb::arg("udp_endpoints") = nb::none(), nb::arg("udp_timeout_ms") = 200,
+      nb::arg("cpu_roce_endpoints") = nb::none(),
+      nb::arg("cpu_roce_options") = nb::none(),
+      nb::arg("cpu_roce_timeout_ms") = 200,
+      nb::arg("null_decoder_ids") = nb::none(),
+      nb::arg("lead_in_ns") = 20'000'000,
+      "Parse, plan, and run a line-oriented playback schedule. `sources` "
+      "maps a schedule's source_id -> a spec dict tagged by \"type\": "
+      "\"static\" ({\"rounds\": [[...]]}), \"stim_memory\" ({\"seed\": N (1), "
+      "\"code\", \"task\", \"distance\", \"rounds\" (optional), ...Stim "
+      "noise knobs}), or \"cudaq_memory\" ({\"code\": a qec.Code, "
+      "\"state_prep\": \"prep0\"|..., \"max_rounds\": N, \"seed\": N, "
+      "\"noise\": a cudaq.NoiseModel (optional)}). "
+      "Each of `decoders` (in-process decoders from a "
+      "multi_decoder_config), `udp_endpoints` ({decoder_id: "
+      "\"host:port\"}), `cpu_roce_endpoints` (same, plus `cpu_roce_options` "
+      "= {\"device\", \"local_ip\", \"slots\" (8), \"slot_size\" (256), "
+      "\"connect_timeout_ms\" (5000)}), and `null_decoder_ids` (discards "
+      "everything) names the decoder_ids that backend serves; at least one "
+      "must be given, and backends may be mixed as long as no decoder_id "
+      "appears twice.");
 }
 
 } // namespace cudaq::qec::playback

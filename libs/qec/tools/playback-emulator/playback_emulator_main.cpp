@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -55,7 +56,9 @@ void print_usage() {
          "\n"
          "Required:\n"
          "  --schedule=PATH     playback schedule text, one\n"
-         "                      '<trigger> <op> [key=value...]' per line\n"
+         "                      '<trigger> <op> [key=value...]' per line.\n"
+         "                      See \"Playback Emulator\" in the CUDA-Q QEC\n"
+         "                      docs for the schedule and CSV formats\n"
          "\n"
          "Options:\n"
          "  --config=PATH       multi_decoder_config YAML (decoders\n"
@@ -63,10 +66,14 @@ void print_usage() {
          "                      optional for udp/cpu_roce (which can instead\n"
          "                      derive decoder_ids from their --*-endpoint=)\n"
          "  --tick=DURATION     wall-clock width of one tick (default: 1us)\n"
+         "  --lead-in=DURATION  setup time before the first tick (default: "
+         "20ms)\n"
          "  --backend=NAME      null | inproc | udp | cpu_roce (default: "
          "inproc)\n"
          "  --udp-endpoint=ID:HOST:PORT   repeatable; required for "
          "--backend=udp\n"
+         "  --udp-timeout=DURATION   per-request reply timeout (default: "
+         "200ms)\n"
          "  --cpu-roce-endpoint=ID:HOST:PORT   repeatable; required for\n"
          "                      --backend=cpu_roce (the ring's rendezvous\n"
          "                      from the server's READY line)\n"
@@ -75,6 +82,10 @@ void print_usage() {
          "  --cpu-roce-slots=N, --cpu-roce-slot-size=N   ring geometry\n"
          "                      (default: 8 x 256 B); must match the\n"
          "                      server's --num-slots/--slot-size\n"
+         "  --cpu-roce-timeout=DURATION   per-request reply timeout\n"
+         "                      (default: 200ms)\n"
+         "  --cpu-roce-connect-timeout=DURATION   bound on the connection\n"
+         "                      handshake (default: 5s)\n"
          "  --source=ID:PATH    static_source for source_id ID, one 0/1 bit\n"
          "                      string per round, one round per line in PATH\n"
          "  --stim-source=ID:key=value,...   stim_memory_source for source_id\n"
@@ -94,8 +105,6 @@ std::uint64_t parse_duration_ns(const std::string &s) {
   while (split > 0 && !std::isdigit(static_cast<unsigned char>(s[split - 1])))
     --split;
   const std::uint64_t value = std::stoull(s.substr(0, split));
-  if (value == 0)
-    throw std::runtime_error("duration '" + s + "' must be positive");
   const std::string unit = s.substr(split);
   std::uint64_t scale = 1;
   if (unit.empty() || unit == "ns")
@@ -112,6 +121,16 @@ std::uint64_t parse_duration_ns(const std::string &s) {
   if (__builtin_mul_overflow(value, scale, &ns))
     throw std::runtime_error("duration '" + s + "' overflows nanoseconds");
   return ns;
+}
+
+/// A DURATION for an option the library takes in whole milliseconds.
+std::uint32_t parse_duration_ms(const std::string &s) {
+  const std::uint64_t ns = parse_duration_ns(s);
+  if (ns % 1'000'000 != 0 ||
+      ns / 1'000'000 > std::numeric_limits<std::uint32_t>::max())
+    throw std::runtime_error("duration '" + s +
+                             "' must be a whole number of milliseconds");
+  return static_cast<std::uint32_t>(ns / 1'000'000);
 }
 
 /// Everything one `--stim-source=ID:...` needs besides its source_id: the
@@ -195,6 +214,8 @@ int main(int argc, char **argv) {
   std::string config_path, schedule_path, backend_name = "inproc";
   std::string out_path;
   std::uint64_t tick_ns = 1000;
+  run_params params;
+  std::uint32_t udp_timeout_ms = 200, cpu_roce_timeout_ms = 200;
   std::unordered_map<std::uint64_t, std::string> udp_endpoints;
   std::unordered_map<std::uint64_t, std::string> cpu_roce_endpoints;
   cpu_roce_options roce_opts;
@@ -213,6 +234,14 @@ int main(int argc, char **argv) {
         schedule_path = a.substr(11);
       } else if (starts_with(a, "--tick=")) {
         tick_ns = parse_duration_ns(a.substr(7));
+      } else if (starts_with(a, "--lead-in=")) {
+        params.lead_in_ns = parse_duration_ns(a.substr(10));
+      } else if (starts_with(a, "--udp-timeout=")) {
+        udp_timeout_ms = parse_duration_ms(a.substr(14));
+      } else if (starts_with(a, "--cpu-roce-timeout=")) {
+        cpu_roce_timeout_ms = parse_duration_ms(a.substr(19));
+      } else if (starts_with(a, "--cpu-roce-connect-timeout=")) {
+        roce_opts.connect_timeout_ms = parse_duration_ms(a.substr(27));
       } else if (starts_with(a, "--backend=")) {
         backend_name = a.substr(10);
       } else if (starts_with(a, "--out=")) {
@@ -296,12 +325,14 @@ int main(int argc, char **argv) {
       throw std::runtime_error("unknown --backend='" + backend_name + "'");
     }
     if (!udp_endpoints.empty())
-      adopt_sessions(make_udp_sessions(udp_endpoints), owned_sessions, router);
+      adopt_sessions(make_udp_sessions(udp_endpoints, udp_timeout_ms),
+                     owned_sessions, router);
     if (!cpu_roce_endpoints.empty()) {
       if (roce_opts.device.empty() || roce_opts.local_ip.empty())
         throw std::runtime_error("--cpu-roce-endpoint= requires "
                                  "--cpu-roce-device= and --cpu-roce-local-ip=");
-      adopt_sessions(make_cpu_roce_sessions(cpu_roce_endpoints, roce_opts),
+      adopt_sessions(make_cpu_roce_sessions(cpu_roce_endpoints, roce_opts,
+                                            cpu_roce_timeout_ms),
                      owned_sessions, router);
     }
     if (router.empty())
@@ -330,7 +361,6 @@ int main(int argc, char **argv) {
 
     auto sched = parse(read_file(schedule_path), decoder_ids, tick_ns);
 
-    run_params params;
     auto p = plan(sched, router, sources, params);
     auto result = run(std::move(p));
 
