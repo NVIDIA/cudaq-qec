@@ -7,8 +7,10 @@
 # ============================================================================ #
 #
 # Release image for the CUDA-Q QEC decoding server. The "toolchain" and
-# "builder" stages are discarded; the "runtime" stage ships only compiled
-# binaries and their runtime dependencies.
+# "builder" stages are discarded; the "runtime" stage ships the server,
+# its runtime dependencies, and what a user needs to build and run CUDA-Q
+# programs against it (nvq++ and headers), with worked examples under
+# /root/examples. It carries no toolchain for rebuilding the server itself.
 #
 # CUDA-Q itself is not built here: /opt/nvidia/cudaq comes from the
 # official CUDA-Q container (cudaq_image). Two things are compiled:
@@ -191,7 +193,8 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
     test -x "$CUDAQX_INSTALL_PREFIX/bin/playback-emulator"
 
 # ---------------------------------------------------------------------------
-# Stage: runtime -- the shipped image. No compilers, headers, or sources.
+# Stage: runtime -- the shipped image. nvq++ for user programs; no gcc,
+# nvcc, cmake, or sources.
 # ---------------------------------------------------------------------------
 FROM nvidia/cuda:${cuda_base_image_tag} AS runtime
 ARG TARGETARCH
@@ -201,6 +204,10 @@ ARG CUDA_VERSION
 #   - RDMA userspace, libnl, and the DOCA GPUNetIO runtime (gpu_roce)
 #   - NVRTC (hololink_core JIT)
 #   - libgomp (OpenMP, linked by decoding_server and libcudaq-qec)
+#   - binutils + libc/libstdc++ dev files, so nvq++ can link user programs
+#   - libpython3.12 and libevent: nvq++ links CUDA-Q's pyscf and MPI comm
+#     plugins into every program, which need these (and the OpenMPI
+#     libraries copied below) to load
 #   - TensorRT libs for the trt_decoder plugin, pinned to this CUDA
 #     flavor; skipped on arm64+CUDA 12.x, where trt_decoder is not built
 # The Holoscan SDK is not needed: HSB is linked statically into
@@ -223,7 +230,9 @@ RUN set -e; \
         rdma-core ibverbs-providers \
         cuda-nvrtc-${CUDA_VER_DASH} \
         libnl-3-200 libnl-route-3-200 \
-        libgomp1; \
+        libgomp1 \
+        binutils libc6-dev libstdc++-13-dev \
+        libpython3.12t64 libevent-core-2.1-7t64 libevent-pthreads-2.1-7t64; \
     if [ "$TARGETARCH" != "arm64" ] || [ "$CUDA_MAJOR" != "12" ]; then \
         apt-cache search tensorrt \
             | awk -v v="$CUDA_VERSION" '{print "Package: "$1"\nPin: version *+cuda"v"\nPin-Priority: 1001\n"}' \
@@ -236,15 +245,22 @@ RUN set -e; \
     apt-get purge -y curl; \
     apt-get autoremove -y; \
     apt-get clean; \
-    rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/doca.list /etc/apt/preferences.d/tensorrt-cuda$CUDA_VERSION.pref
+    rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/doca.list /etc/apt/preferences.d/tensorrt-cuda$CUDA_VERSION.pref \
+        /cuda-keyring_1.1-1_all.deb
 
 # The three install trees at the same absolute paths as in the builder
-# stage (decoding_server's RPATH depends on it). From CUDA-Q, copy only what
-# the server can load at runtime: lib/ (whole, so anything dlopen'd by
-# name is present), targets/, license files, and build_info.txt. Supplied
-# decoder plugins live in the cudaqx tree; the cudevice archive is linked
-# into decoding_server.
+# stage (decoding_server's RPATH depends on it). From CUDA-Q: lib/ (whole,
+# so anything dlopen'd by name is present), targets/, bin/ and include/
+# (nvq++ and the headers user programs compile against), license files,
+# and build_info.txt. nvq++ drives the clang/lld install at
+# /usr/local/llvm, copied from the same image. The Python package and
+# sources are not shipped. Supplied decoder plugins live in the cudaqx
+# tree; the cudevice archive is linked into decoding_server.
 COPY --from=cudaq-official /opt/nvidia/cudaq/lib /opt/nvidia/cudaq/lib
+COPY --from=cudaq-official /opt/nvidia/cudaq/bin /opt/nvidia/cudaq/bin
+COPY --from=cudaq-official /opt/nvidia/cudaq/include /opt/nvidia/cudaq/include
+COPY --from=cudaq-official /usr/local/llvm /usr/local/llvm
+COPY --from=cudaq-official /usr/local/openmpi /usr/local/openmpi
 COPY --from=cudaq-official /opt/nvidia/cudaq/targets /opt/nvidia/cudaq/targets
 COPY --from=cudaq-official /opt/nvidia/cudaq/LICENSES /opt/nvidia/cudaq/LICENSES
 COPY --from=cudaq-official \
@@ -262,10 +278,26 @@ COPY --from=builder \
     /usr/local/lib/python3.12/dist-packages/cuquantum/lib/libcustabilizer.so.0 \
     /usr/local/lib/python3.12/dist-packages/cuquantum/lib/libcustabilizer.so.0
 
+# CPLUS_INCLUDE_PATH, LIBRARY_PATH and LD_LIBRARY_PATH let user programs
+# compiled with nvq++ find the QEC and realtime headers and libraries at
+# compile, link and run time without extra flags (the CUDA-Q ones nvq++
+# handles itself).
 ENV CUDAQX_INSTALL_DIR=/opt/nvidia/cudaqx \
     CUDA_QUANTUM_PATH=/opt/nvidia/cudaq \
     CUDAQ_REALTIME_DIR=/opt/nvidia/cudaq-realtime \
-    PATH=/opt/nvidia/cudaqx/bin:${PATH}
+    PATH=/opt/nvidia/cudaqx/bin:/opt/nvidia/cudaq/bin:${PATH} \
+    CPLUS_INCLUDE_PATH=/opt/nvidia/cudaqx/include:/opt/nvidia/cudaq-realtime/include \
+    LIBRARY_PATH=/opt/nvidia/cudaqx/lib:/opt/nvidia/cudaq-realtime/lib \
+    LD_LIBRARY_PATH=/opt/nvidia/cudaqx/lib:/opt/nvidia/cudaqx/lib/decoder-plugins:/opt/nvidia/cudaq-realtime/lib:/opt/nvidia/cudaq/lib:/usr/local/openmpi/lib:${LD_LIBRARY_PATH}
 
-WORKDIR /opt/nvidia/cudaqx/bin
+# Examples: the realtime decoding programs from the test suite, with a
+# build script that compiles them with the shipped nvq++ and a README with
+# run recipes. Sources come from the builder stage's checkout so they
+# match the commit the image was built from.
+COPY --from=builder /workspaces/cudaqx/docker/release/decoding-server-examples/README.md \
+                    /workspaces/cudaqx/docker/release/decoding-server-examples/build.sh \
+                    /workspaces/cudaqx/libs/qec/unittests/realtime/app_examples/surface_code-*.cpp \
+                    /root/examples/
+
+WORKDIR /root
 ENTRYPOINT ["bash", "-l"]
