@@ -22,7 +22,7 @@
 #         BUILD_DIR=<dir> ./build.sh       (default: ./build)
 #
 # The flags below follow libs/qec/unittests/realtime/app_examples/CMakeLists.txt
-# in the cudaqx repository, which builds the same sources in-tree. The QEC and
+# in the cudaq-qec repository, which builds the same sources in-tree. The QEC and
 # cudaq-realtime headers and libraries are found through CPLUS_INCLUDE_PATH,
 # LIBRARY_PATH and LD_LIBRARY_PATH, which the image sets.
 set -euo pipefail

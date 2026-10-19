@@ -2,7 +2,7 @@
 
 This image ships `decoding_server` and everything needed to write, compile and
 run CUDA-Q programs that decode against it. The programs in this directory are
-the realtime-decoding examples from the CUDA-QX test suite, included as a
+the realtime-decoding examples from the CUDA-Q QEC test suite, included as a
 starting point.
 
 ## Layout
@@ -118,7 +118,7 @@ one. In outline:
 
    `hsb_fpga_syndrome_playback --help` lists the remaining options.
 
-Network setup and the full procedure are documented in the CUDA-QX docs under
+Network setup and the full procedure are documented in the CUDA-Q QEC docs under
 the realtime decoding examples.
 
 ## Decoder plugins
