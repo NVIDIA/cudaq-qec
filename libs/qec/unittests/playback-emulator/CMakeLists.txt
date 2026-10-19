@@ -75,3 +75,18 @@ endif()
 
 add_dependencies(CUDAQXQECUnitTests test_playback_emulator)
 gtest_discover_tests(test_playback_emulator)
+
+# CLI regression: a fractional DURATION is rejected rather than truncated
+# (e.g. --tick=1.5ms once ran with a 1ms tick). Flags are parsed before the
+# schedule file is read, so the schedule path need not exist.
+if(TARGET playback-emulator)
+  foreach(_flag tick udp-timeout)
+    add_test(NAME playback_emulator_cli_rejects_fractional_${_flag}
+      COMMAND $<TARGET_FILE:playback-emulator> --schedule=unused.txt
+              --${_flag}=1.5ms)
+    set_tests_properties(playback_emulator_cli_rejects_fractional_${_flag}
+      PROPERTIES LABELS "qec"
+      PASS_REGULAR_EXPRESSION "duration '1\\.5ms' must be a whole number")
+  endforeach()
+  add_dependencies(CUDAQXQECUnitTests playback-emulator)
+endif()

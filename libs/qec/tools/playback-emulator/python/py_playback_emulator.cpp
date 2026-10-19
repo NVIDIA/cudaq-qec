@@ -145,12 +145,17 @@ std::unique_ptr<syndrome_source> make_source(const nb::dict &spec) {
   if (type == "static")
     return std::make_unique<static_source>(
         nb::cast<std::vector<std::vector<std::uint8_t>>>(spec["rounds"]));
-  if (type == "stim_memory")
+  if (type == "stim_memory") {
+    // get() falls back to its default for a wrongly typed "rounds", so cast
+    // it here to reject a fraction instead of ignoring it.
+    if (spec.contains("rounds"))
+      nb::cast<std::size_t>(spec["rounds"]);
     // heterogeneous_map::get() ignores unrelated keys, so "type"/"seed"
     // riding along in the same dict is harmless.
     return std::make_unique<stim_memory_source>(
         cudaqx::hetMapFromKwargs(nb::cast<nb::kwargs>(spec)),
         spec.contains("seed") ? nb::cast<std::uint64_t>(spec["seed"]) : 1);
+  }
   if (type == "cudaq_memory") {
     cudaq::noise_model noise;
     if (spec.contains("noise"))

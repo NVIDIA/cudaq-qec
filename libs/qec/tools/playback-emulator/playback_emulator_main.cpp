@@ -17,6 +17,7 @@
 #include "syndrome_source.h"
 
 #include <algorithm>
+#include <charconv>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -41,13 +42,27 @@ std::string read_file(const std::string &path) {
   return ss.str();
 }
 
+/// All of `s` as a base-10 `T`, so a fraction, sign or trailing text is an
+/// error rather than silently truncated.
+template <typename T>
+T parse_uint(const std::string &s, const std::string &what) {
+  T value{};
+  const auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+  if (s.empty() || ec != std::errc() || end != s.data() + s.size())
+    throw std::runtime_error(what + " must be a whole number that fits in " +
+                             std::to_string(8 * sizeof(T)) + " bits, got '" +
+                             s + "'");
+  return value;
+}
+
 /// Parses an "ID:HOST:PORT" flag value into `endpoints`.
 void add_endpoint(const char *flag, const std::string &v,
                   std::unordered_map<std::uint64_t, std::string> &endpoints) {
   const auto colon = v.find(':');
   if (colon == std::string::npos)
     throw std::runtime_error(std::string(flag) + " expects ID:HOST:PORT");
-  endpoints[std::stoull(v.substr(0, colon))] = v.substr(colon + 1);
+  endpoints[parse_uint<std::uint64_t>(v.substr(0, colon), flag)] =
+      v.substr(colon + 1);
 }
 
 void print_usage() {
@@ -104,7 +119,8 @@ std::uint64_t parse_duration_ns(const std::string &s) {
   std::size_t split = s.size();
   while (split > 0 && !std::isdigit(static_cast<unsigned char>(s[split - 1])))
     --split;
-  const std::uint64_t value = std::stoull(s.substr(0, split));
+  const auto value =
+      parse_uint<std::uint64_t>(s.substr(0, split), "duration '" + s + "'");
   const std::string unit = s.substr(split);
   std::uint64_t scale = 1;
   if (unit.empty() || unit == "ns")
@@ -151,8 +167,8 @@ parse_stim_source(const std::string &v) {
   const auto colon = v.find(':');
   if (colon == std::string::npos)
     throw std::runtime_error("--stim-source expects ID:key=value,...");
-  const std::uint32_t id =
-      static_cast<std::uint32_t>(std::stoul(v.substr(0, colon)));
+  const auto id =
+      parse_uint<std::uint32_t>(v.substr(0, colon), "--stim-source");
 
   stim_source_spec spec;
   std::istringstream iss(v.substr(colon + 1));
@@ -164,11 +180,12 @@ parse_stim_source(const std::string &v) {
     const std::string key = pair.substr(0, eq);
     const std::string val = pair.substr(eq + 1);
     if (key == "seed") {
-      spec.seed = std::stoull(val);
+      spec.seed = parse_uint<std::uint64_t>(val, "--stim-source seed");
     } else if (key == "code" || key == "task") {
       spec.params.insert(key, val);
     } else if (key == "distance" || key == "rounds") {
-      spec.params.insert(key, static_cast<std::size_t>(std::stoul(val)));
+      spec.params.insert(key,
+                         parse_uint<std::size_t>(val, "--stim-source " + key));
     } else if (key == "before_measure_flip_probability" ||
                key == "after_clifford_depolarization" ||
                key == "before_round_data_depolarization" ||
@@ -256,17 +273,17 @@ int main(int argc, char **argv) {
         roce_opts.local_ip = a.substr(20);
       } else if (starts_with(a, "--cpu-roce-slots=")) {
         roce_opts.num_slots =
-            static_cast<std::uint32_t>(std::stoul(a.substr(17)));
+            parse_uint<std::uint32_t>(a.substr(17), "--cpu-roce-slots");
       } else if (starts_with(a, "--cpu-roce-slot-size=")) {
         roce_opts.slot_size =
-            static_cast<std::uint32_t>(std::stoul(a.substr(21)));
+            parse_uint<std::uint32_t>(a.substr(21), "--cpu-roce-slot-size");
       } else if (starts_with(a, "--source=")) {
         const std::string v = a.substr(9);
         const auto colon = v.find(':');
         if (colon == std::string::npos)
           throw std::runtime_error("--source expects ID:PATH");
-        const std::uint32_t id =
-            static_cast<std::uint32_t>(std::stoul(v.substr(0, colon)));
+        const auto id =
+            parse_uint<std::uint32_t>(v.substr(0, colon), "--source");
         source_files[id] = v.substr(colon + 1);
       } else if (starts_with(a, "--stim-source=")) {
         auto [id, spec] = parse_stim_source(a.substr(14));
