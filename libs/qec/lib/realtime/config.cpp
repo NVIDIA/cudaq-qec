@@ -181,7 +181,7 @@ expand_dem_chunks(decoder_config &config) {
   std::vector<std::vector<std::uint32_t>> d_sparse;
   try {
     closed = cudaq::qec::dem_close_all(chunks, from_seam, to_seam);
-    d_sparse = cudaq::qec::dem_chunks_to_d_sparse(chunks, from_seam, to_seam);
+    d_sparse = cudaq::qec::dem_chunks_to_d_sparse(spec);
   } catch (const std::exception &error) {
     throw std::runtime_error("Cannot close dem_chunks for decoder " +
                              std::to_string(config.id) + ": " + error.what());
@@ -461,20 +461,21 @@ struct MappingTraits<cudaq::qec::dem_seam_spec> {
   }
 };
 
-// seam_spec_entry holds a seam_id (hash) and its spec. On input the key
-// is the name string; on output we cannot recover the string from the hash,
-// so the seam_specs sequence form is input-only (the flat form is used for
-// output after expand_dem_chunks() runs).
+// A seam or phase id is written as its name. Reading it back registers the
+// name, so the id keeps it for output.
+static void map_id(IO &io, const char *key, cudaq::qec::seam_id &id) {
+  std::string name = io.outputting() ? id.name() : std::string{};
+  io.mapRequired(key, name);
+  if (!io.outputting())
+    id = cudaq::qec::seam_id::from_name(name);
+}
+
+// seam_spec_entry: {name: string, spec: dem_seam_spec}
 template <>
 struct MappingTraits<cudaq::qec::seam_spec_entry> {
   static void mapping(IO &io, cudaq::qec::seam_spec_entry &entry) {
-    std::string name;
-    io.mapRequired("name", name);
+    map_id(io, "name", entry.id);
     io.mapRequired("spec", entry.spec);
-    if (!io.outputting()) {
-      entry.id = cudaq::qec::seam_id{name.c_str()};
-      cudaq::qec::seam_id::register_name(entry.id, name);
-    }
   }
 };
 
@@ -489,6 +490,8 @@ struct MappingTraits<cudaq::qec::dem_chunk_spec> {
     io.mapOptional("seam_specs", spec.seam_specs);
     io.mapOptional("O_sparse", spec.O_sparse, std::vector<std::int64_t>{});
     io.mapRequired("error_rates", spec.error_rates);
+    io.mapOptional("D_sparse", spec.D_sparse, std::vector<std::int64_t>{});
+    io.mapOptional("num_measurements", spec.num_measurements);
   }
 };
 
@@ -496,15 +499,8 @@ struct MappingTraits<cudaq::qec::dem_chunk_spec> {
 template <>
 struct MappingTraits<cudaq::qec::seam_connection> {
   static void mapping(IO &io, cudaq::qec::seam_connection &conn) {
-    std::string from_str, to_str;
-    io.mapRequired("from", from_str);
-    io.mapRequired("to", to_str);
-    if (!io.outputting()) {
-      conn.from_seam = cudaq::qec::seam_id{from_str.c_str()};
-      conn.to_seam = cudaq::qec::seam_id{to_str.c_str()};
-      cudaq::qec::seam_id::register_name(conn.from_seam, from_str);
-      cudaq::qec::seam_id::register_name(conn.to_seam, to_str);
-    }
+    map_id(io, "from", conn.from_seam);
+    map_id(io, "to", conn.to_seam);
   }
 };
 
@@ -512,15 +508,8 @@ struct MappingTraits<cudaq::qec::seam_connection> {
 template <>
 struct MappingTraits<cudaq::qec::phase_connection> {
   static void mapping(IO &io, cudaq::qec::phase_connection &conn) {
-    std::string from_str, to_str;
-    io.mapRequired("from", from_str);
-    io.mapRequired("to", to_str);
-    if (!io.outputting()) {
-      conn.from_phase = cudaq::qec::phase_id{from_str.c_str()};
-      conn.to_phase = cudaq::qec::phase_id{to_str.c_str()};
-      cudaq::qec::seam_id::register_name(conn.from_phase, from_str);
-      cudaq::qec::seam_id::register_name(conn.to_phase, to_str);
-    }
+    map_id(io, "from", conn.from_phase);
+    map_id(io, "to", conn.to_phase);
   }
 };
 
@@ -528,13 +517,8 @@ struct MappingTraits<cudaq::qec::phase_connection> {
 template <>
 struct MappingTraits<cudaq::qec::phase_spec_entry> {
   static void mapping(IO &io, cudaq::qec::phase_spec_entry &entry) {
-    std::string name;
-    io.mapRequired("name", name);
+    map_id(io, "name", entry.id);
     io.mapRequired("spec", entry.spec);
-    if (!io.outputting()) {
-      entry.id = cudaq::qec::phase_id{name.c_str()};
-      cudaq::qec::seam_id::register_name(entry.id, name);
-    }
   }
 };
 
@@ -556,6 +540,8 @@ struct MappingTraits<cudaq::qec::dem_chunks_spec> {
     io.mapRequired("seam", spec.seam);
     io.mapRequired("connections", spec.connections);
     io.mapOptional("num_rounds", spec.num_rounds);
+    io.mapOptional("measurements_per_round", spec.measurements_per_round);
+    io.mapOptional("phases_supply_D_sparse", spec.phases_supply_D_sparse);
     io.mapRequired("phases", spec.phases);
   }
 };
@@ -1167,6 +1153,9 @@ std::string decoder_config_json_schema() {
                           {"items", llvm::json::Object{{"type", "number"},
                                                        {"minimum", 0},
                                                        {"maximum", 1}}}}},
+      {"D_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
+      {"num_measurements",
+       llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
   };
 
   llvm::json::Object defs{
@@ -1217,6 +1206,10 @@ std::string decoder_config_json_schema() {
                 {"connections", llvm::json::Object{{"type", "array"}}},
                 {"num_rounds",
                  llvm::json::Object{{"type", "integer"}, {"minimum", 2}}},
+                {"measurements_per_round",
+                 llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
+                {"phases_supply_D_sparse",
+                 llvm::json::Object{{"type", "boolean"}}},
                 {"phases", llvm::json::Object{{"type", "array"}}}}},
            // num_rounds is absent from a streaming configuration, whose round
            // count is only known once the experiment runs, so the parser

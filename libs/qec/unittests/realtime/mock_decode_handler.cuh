@@ -88,19 +88,19 @@ inline void set_mock_decoder(mock_decoder *decoder) {
 /// @brief RPC-compatible wrapper for the mock decoder.
 ///
 /// This function matches the DeviceRPCFunction signature expected by the
-/// cuda-quantum dispatch kernel.  The handler reads measurements from the
-/// input buffer and writes corrections directly to the output buffer.
+/// cuda-quantum dispatch kernel: the same two-pointer form as a HOST_CALL
+/// handler, plus a returned status.  The handler reads measurements from the
+/// request in rx_slot, writes corrections directly after the RPCResponse in
+/// tx_slot and sets response->result_len; the dispatch kernel fills the other
+/// response header fields.
 ///
-/// @param input  Input measurements (RX buffer, read-only)
-/// @param output Output corrections (TX buffer, write-only)
-/// @param arg_len Length of input measurement data
-/// @param max_result_len Maximum space available for results
-/// @param result_len Output: actual result length written
+/// @param rx_slot   RPCHeader followed by the measurement bytes (read-only)
+/// @param tx_slot   RPCResponse followed by the result buffer (write-only)
+/// @param slot_size Byte size of each slot; the result capacity is
+///                  slot_size - sizeof(RPCResponse)
 /// @return 0 on success, non-zero on error
-__device__ int mock_decode_rpc(const void *input, void *output,
-                               std::uint32_t arg_len,
-                               std::uint32_t max_result_len,
-                               std::uint32_t *result_len);
+__device__ int mock_decode_rpc(const void *rx_slot, void *tx_slot,
+                               std::size_t slot_size);
 
 /// @brief Get device function pointer for mock_decode_rpc.
 /// @return Device function pointer to mock_decode_rpc

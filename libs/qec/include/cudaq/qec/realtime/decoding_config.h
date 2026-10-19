@@ -89,10 +89,17 @@ struct decoder_config {
   ///     still required, while block_size and syndrome_size are optional
   ///     checked assertions.
   ///
-  /// See expand_dem_chunks() for the chunk-form derivation, which runs at
-  /// decoder construction so the rest of the pipeline only ever sees the flat
-  /// form. DEM form stays authoritative: the model text is what the decoder is
-  /// built from.
+  /// Throughout a configuration, a `*_path` key names a file and a key without
+  /// the suffix carries its contents inline: `stim_dem_path` is read from disk,
+  /// while a node's `stim_dem` is the model text itself.
+  ///
+  /// Chunk form stays authoritative: decoder construction hands the chunks to
+  /// the decoder, alone for one that declared it reads chunks natively
+  /// (decoder_init::from_dem_chunks(); see
+  /// register_decoder_native_model_source()) and with their closed model for
+  /// any other (decoder_init::from_dem_chunks_closed()). expand_dem_chunks()
+  /// is the explicit derivation of the equivalent flat form. DEM form stays
+  /// authoritative: the model text is what the decoder is built from.
   uint64_t block_size = 0;
   uint64_t syndrome_size = 0;
   /// Path to an authoritative Stim detector error model. Relative paths are
@@ -233,8 +240,9 @@ public:
 
 /// @brief Rewrite a chunk-form configuration into the equivalent flat form,
 /// filling block_size, syndrome_size, H_sparse, O_sparse, D_sparse and
-/// error_rate_vec from `dem_chunks` expanded `num_rounds` times. Everything
-/// downstream of this therefore only has to understand the flat form.
+/// error_rate_vec from `dem_chunks` expanded `num_rounds` times. Decoder
+/// construction does not need this: it keeps the chunk form (see
+/// decoder_init::from_dem_chunks_closed()).
 ///
 /// Does nothing to a configuration that is already flat (one whose `H_sparse`
 /// is nonempty, or which carries no `dem_chunks` at all), so it is safe to

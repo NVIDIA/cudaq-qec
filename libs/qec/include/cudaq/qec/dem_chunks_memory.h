@@ -20,6 +20,7 @@
 
 #include "cudaq/qec/extended_dem.h"
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace cudaq::qec {
@@ -46,5 +47,40 @@ std::vector<std::vector<uint32_t>>
 dem_chunks_to_d_sparse(const std::vector<extended_dem> &dem_chunks,
                        seam_id from_seam = seam_name::next_round,
                        seam_id to_seam = seam_name::prev_round);
+
+/// @brief D_sparse for the closed model of a dem_chunks_spec.
+///
+/// When the phases carry D_sparse rows (see dem_chunk_spec::D_sparse), each
+/// chunk's measurements follow the previous chunk's in the stream and every
+/// chunk's rows are rebased onto it, so rounds may differ in width and
+/// detectors need not be adjacent-round differences; each round's size is
+/// dem_chunks_spec::measurements_of() its phase. Otherwise this is the
+/// memory-experiment convention above, validated on a compact chain without
+/// expanding the full-shot fault model.
+/// The returned map still contains one row per configured detector, so its
+/// storage grows with the configured round count. Compact fault-model
+/// preparation does not make the returned D map constant-size.
+///
+/// @throws std::invalid_argument if the spec does not expand, a chunk's rows
+///   do not number its detectors, or an index lies outside the previous and
+///   current rounds' measurements.
+std::vector<std::vector<uint32_t>>
+dem_chunks_to_d_sparse(const dem_chunks_spec &spec);
+
+/// @brief Raw measurements per shot the spec's rounds declare.
+///
+/// The sum of dem_chunks_spec::measurements_of() over phase_sequence(), which
+/// is the width of the measurement stream a decoder is fed and so the column
+/// count of the D built from dem_chunks_to_d_sparse(). It is not recoverable
+/// from those rows: a round's trailing measurements may be referenced by no
+/// detector, and the largest referenced index then falls short of the stream.
+///
+/// @return The declared total, or nullopt when the spec supplies no D_sparse
+///   rows or any phase lacks a count -- in which case the memory convention of
+///   dem_chunks_to_d_sparse() fixes the width itself and every measurement it
+///   lays out is referenced.
+/// @throws std::invalid_argument if the spec does not expand.
+std::optional<std::uint64_t>
+dem_chunks_measurement_count(const dem_chunks_spec &spec);
 
 } // namespace cudaq::qec

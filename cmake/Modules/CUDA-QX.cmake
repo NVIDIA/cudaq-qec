@@ -93,7 +93,7 @@ function(cudaqx_add_device_code LIBRARY_NAME)
   # to tell `cudaq-quake` where to look for the toolchain. (This happens when
   # building wheels inside the manylinux container, for example.)
   if (CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN)
-    set(ARGS_COMPILER_FLAGS "${ARGS_COMPILER_FLAGS} --gcc-install-dir=${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}")
+    list(APPEND ARGS_COMPILER_FLAGS "--gcc-install-dir=${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}")
   endif()
 
   set(prop "$<TARGET_PROPERTY:${LIBRARY_NAME},INCLUDE_DIRECTORIES>")
@@ -211,7 +211,13 @@ function(cudaqx_import_cudaq_targets)
   find_package(CUDAQEnsmallen REQUIRED CONFIG)
   find_package(CUDAQEmDefault REQUIRED CONFIG)
   find_package(CUDAQPlatformDefault REQUIRED CONFIG)
+  find_package(CUDAQMlirRuntime REQUIRED CONFIG)
   find_package(CUDAQPythonInterop CONFIG)
+
+  set(CUDAQTargetCatalog_DIR "${CUDAQ_CMAKE_DIR}/../CUDAQTargetCatalog")
+  if(EXISTS "${CUDAQTargetCatalog_DIR}/CUDAQTargetCatalogConfig.cmake")
+    find_package(CUDAQTargetCatalog REQUIRED CONFIG)
+  endif()
 
   # Import the CUDA-Q library target without loading CUDAQConfig.cmake, which
   # enables the CUDAQ CMake language in current CUDA-Q installs.
