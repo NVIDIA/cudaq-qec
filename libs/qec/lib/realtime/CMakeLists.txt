@@ -252,6 +252,13 @@ if(_CUDAQ_REALTIME_LIB_DIR)
   )
 endif()
 
+# In the wheel, libcudaq-qec-decoders.so is installed next to this library and
+# is not grafted by auditwheel, so it must be found via $ORIGIN.
+if(SKBUILD)
+  set_property(TARGET cudaq-qec-realtime-decoding APPEND PROPERTY
+    INSTALL_RPATH "$ORIGIN")
+endif()
+
 
 install(TARGETS cudaq-qec-realtime-decoding
   COMPONENT qec-lib

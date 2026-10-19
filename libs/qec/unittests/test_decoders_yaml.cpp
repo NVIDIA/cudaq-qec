@@ -10,6 +10,7 @@
 #include "../lib/realtime/realtime_decoding.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
+#include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/logger.h"
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/realtime/decoding_config.h"
@@ -2208,6 +2209,50 @@ decoders:
 )";
 }
 
+// As above, but every phase carries its own D_sparse rows and the final
+// round declares three measurements while its detector reads only one, as a
+// data readout whose trailing bits no detector differences.
+std::string dem_chunks_yaml_with_trailing_measurements() {
+  return R"(
+decoders:
+  - id: 0
+    type: sample_decoder
+    dem_chunks:
+      seam:
+        from: next_round
+        to: prev_round
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      num_rounds: 3
+      measurements_per_round: 1
+      phases:
+        - name: init
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01, 0.01]
+            D_sparse: [0, -1]
+        - name: bulk
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01, 0.01]
+            D_sparse: [0, 1, -1]
+        - name: final
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01, 0.01]
+            D_sparse: [0, 1, -1]
+            num_measurements: 3
+)";
+}
+
 cudaq::qec::decoding::config::decoder_config
 parse_one(const std::string &yaml) {
   auto config =
@@ -2345,6 +2390,194 @@ TEST(DecoderChunkFormTest, ExpandedConfigIsItselfAValidFlatConfig) {
   const auto emitted = wrapper.to_yaml_str(200);
   EXPECT_NE(emitted.find("H_sparse"), std::string::npos);
   EXPECT_NE(emitted.find("dem_chunks"), std::string::npos);
+}
+
+TEST(DecoderChunkFormTest, ChunkFormRoundTripsThroughYAML) {
+  cudaq::qec::decoding::config::multi_decoder_config multi_config;
+  multi_config.decoders.push_back(parse_one(dem_chunks_yaml(5)));
+  const auto emitted = multi_config.to_yaml_str(200);
+  for (const char *name : {"init", "bulk", "final", "prev_round", "next_round"})
+    EXPECT_NE(emitted.find(std::string(" ") + name + "\n"), std::string::npos)
+        << name << " in " << emitted;
+
+  auto round_tripped =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          emitted);
+  EXPECT_EQ(round_tripped, multi_config);
+  EXPECT_EQ(round_tripped.to_yaml_str(200), emitted);
+}
+
+// A spec built in C++ may name its seams and phases with ids never registered.
+// They are written as seam:<hex> and must read back as the same ids.
+TEST(DecoderChunkFormTest, UnregisteredChunkNamesRoundTripThroughYAML) {
+  using cudaq::qec::phase_id;
+  using cudaq::qec::seam_id;
+  auto config = parse_one(dem_chunks_yaml(5));
+  auto &spec = *config.dem_chunks;
+  const seam_id out_seam{"test_unregistered_out_seam"};
+  const phase_id bulk{"test_unregistered_bulk_phase"};
+  ASSERT_EQ(out_seam.name().rfind("seam:", 0), 0u);
+  ASSERT_EQ(bulk.name().rfind("seam:", 0), 0u);
+  for (auto &phase : spec.phases)
+    if (phase.id == cudaq::qec::phase_name::dem_bulk)
+      phase.id = bulk;
+  for (auto &connection : spec.connections) {
+    if (connection.from_phase == cudaq::qec::phase_name::dem_bulk)
+      connection.from_phase = bulk;
+    if (connection.to_phase == cudaq::qec::phase_name::dem_bulk)
+      connection.to_phase = bulk;
+  }
+  spec.seam.from_seam = out_seam;
+
+  cudaq::qec::decoding::config::multi_decoder_config multi_config;
+  multi_config.decoders.push_back(config);
+  const auto emitted = multi_config.to_yaml_str(200);
+  EXPECT_NE(emitted.find(out_seam.name()), std::string::npos) << emitted;
+  EXPECT_NE(emitted.find(bulk.name()), std::string::npos) << emitted;
+
+  auto round_tripped =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          emitted);
+  EXPECT_EQ(round_tripped, multi_config);
+  EXPECT_EQ(round_tripped.to_yaml_str(200), emitted);
+  EXPECT_EQ(out_seam.name().rfind("seam:", 0), 0u)
+      << "reading the placeholder must not register it";
+}
+
+// Per-phase measurement maps: one measurement a round, except a final round
+// reading two bits that both enter its one detector.
+// phases_supply_D_sparse changes how the rows are read, so a config that
+// sets it and is emitted without it comes back meaning something else. The
+// config layer's parse -> emit -> parse identity is what makes the key
+// necessary rather than convenient.
+TEST(DecoderDemChunksYAMLTest, PhasesSupplyDSparseSurvivesAYAMLRoundTrip) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto yaml = dem_chunks_yaml(3);
+  const auto at = yaml.find("      phases:");
+  yaml.insert(at, "      measurements_per_round: 1\n"
+                  "      phases_supply_D_sparse: false\n");
+
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_TRUE(parsed.decoders.at(0).dem_chunks.has_value());
+  const auto &spec = *parsed.decoders.at(0).dem_chunks;
+  ASSERT_TRUE(spec.phases_supply_D_sparse.has_value());
+  EXPECT_FALSE(*spec.phases_supply_D_sparse);
+  EXPECT_FALSE(spec.has_D_sparse());
+
+  const auto emitted = parsed.to_yaml_str(200);
+  EXPECT_NE(emitted.find("phases_supply_D_sparse"), std::string::npos);
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed);
+}
+
+TEST(DecoderDemChunksYAMLTest, PerPhaseMeasurementMapsRoundTripAndExpand) {
+  auto yaml = dem_chunks_yaml(3);
+  const auto add_map = [&](const std::string &phase, const std::string &map) {
+    const auto at = yaml.find("error_rates", yaml.find("name: " + phase));
+    const auto eol = yaml.find('\n', at);
+    yaml.insert(eol + 1, map);
+  };
+  add_map("init", "            D_sparse: [0, -1]\n");
+  add_map("bulk", "            D_sparse: [0, 1, -1]\n");
+  add_map("final", "            num_measurements: 2\n"
+                   "            D_sparse: [0, 1, 2, -1]\n");
+  const auto at = yaml.find("      phases:");
+  yaml.insert(at, "      measurements_per_round: 1\n");
+
+  auto multi =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  const auto emitted = multi.to_yaml_str(200);
+  EXPECT_NE(emitted.find("measurements_per_round"), std::string::npos);
+  EXPECT_NE(emitted.find("num_measurements"), std::string::npos);
+  EXPECT_EQ(cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+                emitted),
+            multi);
+
+  auto config = multi.decoders.at(0);
+  const auto inputs = cudaq::qec::decoding::host::resolve_decoder_init(
+      config, std::filesystem::current_path());
+  ASSERT_TRUE(
+      cudaq::qec::decoding::config::expand_dem_chunks(config).has_value());
+  const std::vector<std::int64_t> want{0, -1, 0, 1, -1, 1, 2, 3, -1};
+  EXPECT_EQ(config.D_sparse, want);
+  ASSERT_NE(inputs.measurement_to_detectors(), nullptr);
+  EXPECT_EQ(inputs.measurement_to_detectors()->num_cols(), 4u);
+}
+
+// The chunk form stays the authoritative source, carrying the closed model
+// expand_dem_chunks() would write for any decoder that reads matrices.
+TEST(ResolveDecoderInputs, ChunkFormCarriesItsClosedModelForAMatrixDecoder) {
+  const auto config = parse_one(dem_chunks_yaml(5));
+  auto flat_config = config;
+  ASSERT_TRUE(
+      cudaq::qec::decoding::config::expand_dem_chunks(flat_config).has_value());
+
+  const auto cwd = std::filesystem::current_path();
+  auto inputs = cudaq::qec::decoding::host::resolve_decoder_init(config, cwd);
+  const auto flat =
+      cudaq::qec::decoding::host::resolve_decoder_init(flat_config, cwd);
+  ASSERT_TRUE(inputs.has_dem_chunks());
+  ASSERT_TRUE(inputs.has_matrices());
+  EXPECT_EQ(inputs.num_detectors(), flat_config.syndrome_size);
+  EXPECT_EQ(inputs.num_error_mechanisms(), flat_config.block_size);
+  ASSERT_NE(inputs.measurement_to_detectors(), nullptr);
+  ASSERT_NE(flat.measurement_to_detectors(), nullptr);
+  EXPECT_EQ(inputs.measurement_to_detectors()->to_nested_csr(),
+            flat.measurement_to_detectors()->to_nested_csr());
+  EXPECT_EQ(inputs.detector_error_matrix().to_nested_csc(),
+            flat.detector_error_matrix().to_nested_csc());
+  EXPECT_EQ(inputs.observable_flips_matrix().to_nested_csr(),
+            flat.observable_flips_matrix().to_nested_csr());
+  EXPECT_EQ(inputs.error_rates(), flat.error_rates());
+
+  auto decoder = cudaq::qec::decoding::host::create_realtime_decoder(
+      config, std::move(inputs));
+  EXPECT_EQ(decoder->get_syndrome_size(), flat_config.syndrome_size);
+  EXPECT_EQ(decoder->get_block_size(), flat_config.block_size);
+}
+
+// The decoder is fed a measurement stream as wide as the rounds declare. The
+// final round's two trailing bits are read by no detector, so a width taken
+// from the largest referenced index would leave the decoder expecting 3
+// measurements per shot where the stream carries 5, mis-framing every shot.
+TEST(ResolveDecoderInputs, ChunkFormDWidthIsTheDeclaredMeasurementCount) {
+  const auto config = parse_one(dem_chunks_yaml_with_trailing_measurements());
+  ASSERT_TRUE(config.dem_chunks.has_value());
+  const auto declared =
+      cudaq::qec::dem_chunks_measurement_count(*config.dem_chunks);
+  ASSERT_TRUE(declared.has_value());
+  EXPECT_EQ(*declared, 5u);
+
+  const auto inputs = cudaq::qec::decoding::host::resolve_decoder_init(
+      config, std::filesystem::current_path());
+  ASSERT_NE(inputs.measurement_to_detectors(), nullptr);
+  EXPECT_EQ(inputs.measurement_to_detectors()->num_cols(), 5u);
+  EXPECT_EQ(inputs.measurement_to_detectors()->num_rows(),
+            inputs.num_detectors());
+}
+
+// A decoder that declared it reads chunks gets them without their closed
+// model, and the same D. The declaration is made against the decoder name,
+// with no schema involved: a chunk-native decoder need not take custom args.
+TEST(ResolveDecoderInputs, ChunkFormLeavesAChunkDecoderWithoutMatrices) {
+  cudaq::qec::register_decoder_native_model_source(
+      "test_chunk_native_decoder",
+      cudaq::qec::decoder_model_source::dem_chunks);
+
+  auto config = parse_one(dem_chunks_yaml(5));
+  const auto cwd = std::filesystem::current_path();
+  const auto closed =
+      cudaq::qec::decoding::host::resolve_decoder_init(config, cwd);
+  config.type = "test_chunk_native_decoder";
+  const auto inputs =
+      cudaq::qec::decoding::host::resolve_decoder_init(config, cwd);
+  ASSERT_TRUE(inputs.has_dem_chunks());
+  EXPECT_FALSE(inputs.has_matrices());
+  EXPECT_TRUE(inputs.has_observable_model());
+  EXPECT_EQ(inputs.num_detectors(), closed.num_detectors());
+  EXPECT_EQ(inputs.num_error_mechanisms(), closed.num_error_mechanisms());
+  ASSERT_NE(inputs.measurement_to_detectors(), nullptr);
+  EXPECT_EQ(inputs.measurement_to_detectors()->to_nested_csr(),
+            closed.measurement_to_detectors()->to_nested_csr());
 }
 
 // A config carrying both forms parses as flat, which is what

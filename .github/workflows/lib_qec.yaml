@@ -261,6 +261,14 @@ jobs:
             --realtime-lib-dir "$RT" \
             --example-build-dir /tmp/rtdemo-build
 
+      # The color-code demo needs the gated Ising model weights, so CI only
+      # checks that it starts.
+      - name: Check color_code_demo starts
+        shell: bash
+        run: |
+          export PYTHONPATH="/cudaq-install:$HOME/.cudaqx"
+          python3 docs/sphinx/examples/qec/color_code_demo/color_code_demo.py --help
+
       # ========================================================================
       # SIFL demo example
       #

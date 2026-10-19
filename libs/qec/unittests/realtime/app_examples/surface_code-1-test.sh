@@ -169,10 +169,53 @@ fi
 
 echo "Syndrome save/load test completed"
 
+# ============================================================================ #
+# Test --dem_chunks: one saved config decodes any --num_rounds
+# ============================================================================ #
+echo ""
+echo "=== Testing --dem_chunks with a variable number of rounds ==="
+
+CHUNKS_FILE=dem_chunks-${FULL_SUFFIX}.yaml
+CHUNKS_NUM_SHOTS=200
+
+# Characterize once, at NUM_ROUNDS.
+$EXE_PATH1 --distance $DISTANCE --num_rounds $NUM_ROUNDS \
+  --decoder_type $DECODER_TYPE --sw_window_size $SW_WINDOW_SIZE \
+  --sw_step_size $SW_STEP_SIZE --dem_chunks --save_dem $CHUNKS_FILE \
+  $EXTRA_CLI_ARGS |& tee dem_chunks-$FULL_SUFFIX.log
+
+if [[ ! -f "$CHUNKS_FILE" ]]; then
+  echo "Error: DEM chunks file was not created"
+  return_code=1
+else
+  # Decode other lengths from the same file; each must match a run whose DEM
+  # was characterized at that length.
+  for rounds in $NUM_ROUNDS $((NUM_ROUNDS + 5)); do
+    counts() {
+      $EXE_PATH1 --distance $DISTANCE --num_shots $CHUNKS_NUM_SHOTS \
+        --num_rounds $rounds --decoder_type $DECODER_TYPE \
+        --sw_window_size $SW_WINDOW_SIZE --sw_step_size $SW_STEP_SIZE \
+        $EXTRA_CLI_ARGS "$@" 2>&1 | tee -a dem_chunks-$FULL_SUFFIX.log |
+        grep -E "Number of (non-zero values measured|corrections decoder found)"
+    }
+    characterized=$(counts || true)
+    loaded=$(counts --load_dem $CHUNKS_FILE || true)
+    if [[ -z "$characterized" || "$characterized" != "$loaded" ]]; then
+      echo "Error: --dem_chunks at num_rounds=$rounds gave '$loaded', expected '$characterized'"
+      return_code=1
+    else
+      echo "--dem_chunks at num_rounds=$rounds matches the characterized DEM"
+    fi
+  done
+fi
+
+echo "DEM chunks test completed"
+
 # Remove the log files, unless an environment variable is set.
 if [[ -z "${KEEP_LOG_FILES}" ]]; then
   rm -f run-$FULL_SUFFIX.log
   rm -f save_syndrome-$FULL_SUFFIX.log load_syndrome-$FULL_SUFFIX.log $SYNDROME_FILE
+  rm -f dem_chunks-$FULL_SUFFIX.log $CHUNKS_FILE
 fi
 
 exit $return_code

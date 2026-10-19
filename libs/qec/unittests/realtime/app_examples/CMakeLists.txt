@@ -170,6 +170,24 @@ _sc1_reject(load-dem-geometry-mismatch "does not match current geometry"
 set_tests_properties(app_examples.surface_code-1-negative-load-dem-geometry-mismatch
   PROPERTIES FIXTURES_REQUIRED sc1_dem)
 
+# 1c. --load_dem of a --dem_chunks config at fewer rounds than its phases.
+add_test(NAME app_examples.surface_code-1-negative-dem-chunks-fixtures
+  COMMAND ${_sc1_exe} --distance 3 --num_rounds 6 --dem_chunks
+    --save_dem ${_sc1_neg_dir}/d3_chunks.yml
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(app_examples.surface_code-1-negative-dem-chunks-fixtures
+  PROPERTIES FIXTURES_SETUP sc1_dem_chunks ENVIRONMENT "${_sc1_neg_env}")
+_sc1_reject(dem-chunks-too-few-rounds "Loaded DEM chunks need --num_rounds >= 4"
+  --distance 3 --num_rounds 3
+  --load_dem ${_sc1_neg_dir}/d3_chunks.yml)
+set_tests_properties(app_examples.surface_code-1-negative-dem-chunks-too-few-rounds
+  PROPERTIES FIXTURES_REQUIRED sc1_dem_chunks)
+
+# 1d. --dem_chunks with too few rounds to find the repeating one.
+_sc1_reject(dem-chunks-no-repeating-round "found no repeating round"
+  --distance 3 --num_rounds 3 --dem_chunks
+  --save_dem ${_sc1_neg_dir}/d3_short_chunks.yml)
+
 # 2. --save_syndrome to an unwriteable path → begin_syndrome_capture throws.
 _sc1_reject(save-syndrome-bad-path "Could not open syndrome file for writing"
   --distance 3 --num_rounds 3 --num_shots 2
