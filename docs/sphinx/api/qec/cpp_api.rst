@@ -200,6 +200,7 @@ Decoder Interfaces
 
 .. doxygenfunction:: cudaq::qec::d_sparse(const cudaq::M2DSparseMatrix &)
 
+.. doxygenenum:: cudaq::qec::round_type
 .. doxygenenum:: cudaq::qec::cancellation_level
 
 .. doxygenclass:: cudaq::qec::cancellation_token
@@ -212,6 +213,84 @@ Decoder Interfaces
     :members:
 
 .. doxygenstruct:: cudaq::qec::decoder_result
+    :members:
+
+Decoding Task Graph
+===================
+
+A ``decoding_task_graph`` is a composable decode pipeline backed by a
+node/edge DAG. Each node is an instance of a registered node kind; query the
+available kinds with ``registered_task_graph_node_kinds()``. Edges route typed
+values between nodes at construction time.
+
+Built-in factories:
+
+- ``from_spec`` / public constructor — single decoder wrapped in a
+  window-accumulation node.
+- ``from_topology`` — any topology of ``task_graph_node_config`` nodes wired
+  by ``task_graph_edge`` edges.
+- ``combine`` — two independent decoders whose logical outcomes are
+  XOR'd; each branch applies its own D matrix.
+
+The graph exposes both a **streaming interface** (``enqueue_syndrome`` /
+``get_obs_corrections``) that accumulates syndrome rounds per window, and
+**one-shot execution** (``run`` / ``run_async``) that processes one full shot.
+``run_batch`` processes a collection; one-shot execution is commonly used for
+offline analysis.
+
+
+I/O types
+---------
+
+.. doxygenstruct:: cudaq::qec::measurement_results
+    :members:
+
+.. doxygenstruct:: cudaq::qec::detection_events
+    :members:
+
+.. doxygenstruct:: cudaq::qec::logical_outcome
+    :members:
+
+.. doxygenstruct:: cudaq::qec::error_pattern
+    :members:
+
+.. doxygenfunction:: cudaq::qec::apply_d_sparse
+.. doxygenfunction:: cudaq::qec::apply_o_sparse
+.. doxygenfunction:: cudaq::qec::xor_logical
+
+Graph
+-----
+
+.. doxygenstruct:: cudaq::qec::task_graph_edge
+    :members:
+
+.. doxygenstruct:: cudaq::qec::task_graph_node_config
+    :members:
+
+.. doxygenstruct:: cudaq::qec::task_graph_ensemble_spec
+    :members:
+
+.. doxygenvariable:: cudaq::qec::default_task_graph_node_kind
+
+.. doxygenfunction:: cudaq::qec::registered_task_graph_node_kinds
+
+.. doxygenclass:: cudaq::qec::edge_value_type
+    :members:
+
+.. doxygenfunction:: cudaq::qec::registered_edge_value_types
+
+.. doxygenenum:: cudaq::qec::task_graph_streaming_status
+
+.. doxygenstruct:: cudaq::qec::task_graph_output_progress
+    :members:
+
+.. doxygenstruct:: cudaq::qec::task_graph_streaming_result
+    :members:
+
+.. doxygenstruct:: cudaq::qec::task_graph_options
+    :members:
+
+.. doxygenclass:: cudaq::qec::decoding_task_graph
     :members:
 
 Built-in Decoders

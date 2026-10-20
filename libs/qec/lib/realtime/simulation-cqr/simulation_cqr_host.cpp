@@ -44,17 +44,15 @@ struct byte_span {
 extern "C" __attribute__((visibility("hidden"))) void
 enqueue_syndromes(std::uint64_t decoder_id, std::uint64_t counter,
                   std::uint64_t syndrome_mapping_id, byte_span syndrome_bits) {
-  // No syndrome mapping table yet: syndrome_mapping_id 0 is the identity
-  // mapping. syndrome_bits is a std::vector<bool> span: `length` is the logical
-  // bit count (== num_syndromes) and `buffer` points at the LSB-first
-  // bit-packed bytes.
-  (void)syndrome_mapping_id;
+  // syndrome_bits is a std::vector<bool> span: `length` is the logical bit
+  // count (== num_syndromes) and `buffer` points at the LSB-first bit-packed
+  // bytes.
   const std::uint64_t num_syndromes = syndrome_bits.length;
   std::vector<std::uint8_t> bits(num_syndromes);
   for (std::uint64_t i = 0; i < num_syndromes; ++i)
     bits[i] = (syndrome_bits.buffer[i / 8] >> (i % 8)) & 1; // LSB-first
-  cudaq::qec::decoding::host::enqueue_syndromes(decoder_id, bits.data(),
-                                                num_syndromes, counter);
+  cudaq::qec::decoding::host::enqueue_syndromes(
+      decoder_id, bits.data(), num_syndromes, counter, syndrome_mapping_id);
 }
 
 extern "C" __attribute__((visibility("hidden"))) void

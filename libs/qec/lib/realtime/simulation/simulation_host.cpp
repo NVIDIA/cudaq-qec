@@ -25,6 +25,14 @@ simulation_enqueue_syndromes(std::uint64_t decoder_id, boolean_span syndromes,
 }
 
 extern "C" __attribute__((visibility("default"))) void
+simulation_enqueue_syndromes_mapped(std::uint64_t decoder_id,
+                                    boolean_span syndromes, std::uint64_t tag,
+                                    std::uint64_t syndrome_mapping_id) {
+  cudaq::qec::decoding::host::enqueue_syndromes(
+      decoder_id, syndromes.buffer, syndromes.length, tag, syndrome_mapping_id);
+}
+
+extern "C" __attribute__((visibility("default"))) void
 simulation_get_corrections(std::uint64_t decoder_id, boolean_span corrections,
                            bool reset) {
   cudaq::qec::decoding::host::get_corrections(decoder_id, corrections.buffer,

@@ -1943,16 +1943,6 @@ TEST(ExtendedDemPhases, MismatchedSeamWidthThrows) {
 // and what is checked here, is the shape of the problem each round poses.
 // ---------------------------------------------------------------------------
 
-// Fault-column offsets of the phase chunks within the closed model, plus a
-// trailing total: chunk i owns columns [offsets[i], offsets[i + 1]).
-std::vector<std::size_t>
-rep5_fault_offsets(const std::vector<extended_dem> &phases) {
-  std::vector<std::size_t> offsets{0};
-  for (const auto &chunk : phases)
-    offsets.push_back(offsets.back() + chunk.num_faults());
-  return offsets;
-}
-
 using dense_block = std::vector<std::vector<uint8_t>>;
 
 dense_block block_of(const cudaqx::tensor<uint8_t> &m, std::size_t row_begin,
@@ -1972,11 +1962,34 @@ dense_block block_of(const cudaqx::tensor<uint8_t> &m, std::size_t row_begin,
 // reach: its own, and its predecessor's.
 dense_block round_band(const std::vector<extended_dem> &phases,
                        std::size_t round) {
-  const auto offsets = rep5_fault_offsets(phases);
+  const auto offsets = dem_chunks_to_fault_offsets(phases);
   const auto closed = dem_close_all(phases);
   return block_of(closed.detector_error_matrix, round * kRep5Checks,
                   (round + 1) * kRep5Checks,
                   offsets[round == 0 ? 0 : round - 1], offsets[round + 1]);
+}
+
+// Offsets must be cumulative rather than a uniform stride: rep-5's boundary
+// phases carry fewer faults than its bulk, and the closed model concatenates
+// whatever each chunk owns.
+TEST(ExtendedDemStreaming, FaultOffsetsAccumulatePerChunkCounts) {
+  const auto phases = rep5_phases(4);
+  const auto offsets = dem_chunks_to_fault_offsets(phases);
+
+  ASSERT_EQ(offsets.size(), phases.size() + 1);
+  EXPECT_EQ(offsets.front(), 0u);
+  for (std::size_t i = 0; i < phases.size(); ++i)
+    EXPECT_EQ(offsets[i + 1] - offsets[i], phases[i].num_faults())
+        << "chunk " << i;
+  EXPECT_EQ(offsets.back(), dem_close_all(phases).num_error_mechanisms());
+
+  // The final phase is narrower than the bulk, so a uniform stride would have
+  // put offsets.back() past the end of the closed model.
+  EXPECT_LT(phases.back().num_faults(), phases[1].num_faults());
+}
+
+TEST(ExtendedDemStreaming, FaultOffsetsOfNoChunksIsJustTheTotal) {
+  EXPECT_EQ(dem_chunks_to_fault_offsets({}), std::vector<std::size_t>{0});
 }
 
 // The locality claim. A round's detectors are supported entirely on two
@@ -1985,7 +1998,7 @@ dense_block round_band(const std::vector<extended_dem> &phases,
 TEST(ExtendedDemStreaming, BandsTouchOnlyTwoAdjacentChunks) {
   for (std::size_t rounds = 2; rounds <= 7; ++rounds) {
     const auto phases = rep5_phases(rounds);
-    const auto offsets = rep5_fault_offsets(phases);
+    const auto offsets = dem_chunks_to_fault_offsets(phases);
     const auto closed = dem_close_all(phases);
     const auto &H = closed.detector_error_matrix;
     ASSERT_EQ(H.shape()[0], rounds * kRep5Checks);
@@ -2081,7 +2094,7 @@ std::vector<extended_dem> step_chunks(const std::vector<extended_dem> &phases,
 TEST(ExtendedDemStreaming, AWindowIsTheExperimentRestrictedToItsOwnChunks) {
   for (std::size_t rounds = 3; rounds <= 8; ++rounds) {
     const auto phases = rep5_phases(rounds);
-    const auto offsets = rep5_fault_offsets(phases);
+    const auto offsets = dem_chunks_to_fault_offsets(phases);
     const auto whole = dem_close_all(phases);
 
     // Steps run 0..R inclusive, the opening and the flush included.
@@ -2122,7 +2135,7 @@ TEST(ExtendedDemStreaming, AWindowIsTheExperimentRestrictedToItsOwnChunks) {
 TEST(ExtendedDemStreaming, AWindowCarriesItsChunksObservables) {
   const std::size_t rounds = 5;
   const auto phases = rep5_phases(rounds);
-  const auto offsets = rep5_fault_offsets(phases);
+  const auto offsets = dem_chunks_to_fault_offsets(phases);
   const auto whole = dem_close_all(phases);
 
   for (std::size_t step = 0; step <= rounds; ++step) {

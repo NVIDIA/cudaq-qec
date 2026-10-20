@@ -10,6 +10,7 @@
 #include "py_decoder.h"
 #include "py_decoding.h"
 #include "py_decoding_config.h"
+#include "py_decoding_task_graph.h"
 #include "py_dem_construction.h"
 #include "py_dem_sampling.h"
 #include "py_extended_dem.h"
@@ -37,6 +38,7 @@ NB_MODULE(_pycudaqx_qec_the_suffix_matters_cudaq_qec, mod) {
   cudaq::qec::surface_code::bindSurfaceCode(mod);
   cudaq::qec::bindDemConstruction(mod);
   cudaq::qec::bindExtendedDem(mod);
+  cudaq::qec::bindDecodingTaskGraph(mod);
 #ifdef CUDAQX_QEC_HAS_CUDAQ_REALTIME
   cudaq::qec::playback::bindPlaybackEmulator(mod);
 #endif

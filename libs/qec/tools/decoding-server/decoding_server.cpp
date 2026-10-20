@@ -412,9 +412,11 @@ int main(int argc, char **argv) {
   }
   ::setenv("CUDAQ_QEC_DECODER_CONFIG", cfg.config_path.c_str(),
            /*overwrite=*/1);
+  // Not `type`: a task_graph entry leaves it empty and names its decoder inside
+  // the block, in either of the block's two forms.
   std::cout << "Configured " << decoder_config.decoders.size()
             << " decoder(s); decoder 0 type: "
-            << decoder_config.decoders[0].type
+            << decoder_config.decoders[0].describe_decoder_type()
             << "; transport: " << cfg.transport
             << "; host loop: " << host_loop_name(cfg.host_loop) << std::endl;
 

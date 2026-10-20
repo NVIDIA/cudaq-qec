@@ -9,6 +9,7 @@
 #pragma once
 
 #include "cuda-qx/core/heterogeneous_map.h"
+#include "cudaq/qec/decoding_task_graph_config.h"
 #include "cudaq/qec/extended_dem.h"
 #include <cstdint>
 #include <filesystem>
@@ -128,14 +129,144 @@ struct decoder_config {
   std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
   decoder_custom_args_t decoder_custom_args;
 
+  /// Decoder task graph topology.  When set, `type` must be absent and either
+  /// `dem_chunks` or the flat matrices supply the DEM.
+  ///
+  /// Two forms, mutually exclusive:
+  ///
+  ///   - Single node, named by `type` and `inner_type`.  `decoder_custom_args`
+  ///     are forwarded to the inner decoder.  `type` is a node kind, in any
+  ///     spelling the registry accepts: "sliding_window" for a window that
+  ///     advances one round per decode, or "single_window" for one window over
+  ///     a fixed round count (which needs that count: `H_sparse` or
+  ///     `dem_chunks.num_rounds`).
+  ///
+  ///   - `nodes` and `edges`, describing an arbitrary topology.  A node names
+  ///     a registered node kind or a decoder plugin (see
+  ///     %registered_task_graph_node_kinds()), carries that kind's parameters
+  ///     inline, and may override the DEM.  `edges` may be omitted for a
+  ///     single node, which is wired `measurements -> node -> output`.
+  struct task_graph_spec {
+    /// A range of DEM fault columns a node owns, `[lo, hi]` inclusive.
+    struct column_range {
+      uint64_t lo = 0, hi = 0;
+      bool operator==(const column_range &) const = default;
+    };
+
+    struct node_spec {
+      std::string id;
+      /// A registered node kind (canonical or aliased spelling), or a decoder
+      /// plugin name, in which case the kind defaults to "sliding_window".
+      std::string type;
+      /// Inner decoder plugin name, when `type` named a node kind.
+      std::string inner_type;
+      /// The inner decoder's constructor arguments, from either the `inner:`
+      /// block or a node-level `decoder_custom_args:`.
+      decoder_custom_args_t decoder_custom_args;
+      /// The node kind's own parameters: window_size, step_size, guards, ...
+      /// Parsed against the schema registered for the resolved kind.
+      decoder_custom_args_t node_params;
+      /// DEM for this node alone; falls back to the entry-level DEM.
+      std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
+      /// This node's own matrices, in the entry-level flat form and the same
+      /// -1-separated row encoding. Use them for a detector map that follows no
+      /// round structure; a node takes these or `dem_chunks`, never both.
+      ///
+      /// `D_sparse` and `O_sparse` are required together. `block_size` and
+      /// `syndrome_size` give `H_sparse` its shape, which sparse rows do not
+      /// carry. `H_sparse` also builds this node's inner decoder, along with
+      /// its `decoder_custom_args`, so a node with its own `D` and `O` needs
+      /// either an `H_sparse` or a `stim_dem`.
+      std::vector<std::int64_t> H_sparse;
+      std::vector<std::int64_t> D_sparse;
+      std::vector<std::int64_t> O_sparse;
+      std::uint64_t block_size = 0;
+      std::uint64_t syndrome_size = 0;
+      /// Stim DEM text to build the inner decoder from, in place of this
+      /// node's H -- the YAML spelling of the string alternative of
+      /// `decoder_init`, for a decoder whose model needs annotations the
+      /// matrices cannot carry. The text is inline, as everywhere else in this
+      /// library: callers pass DEM contents, never a path. The node's own D/O
+      /// still come from its DEM, so the text describes the decoder and the
+      /// chunks describe the window.
+      std::string stim_dem;
+      /// The same model as `stim_dem`, named by file rather than inlined, for
+      /// callers who keep DEMs on disk. Read and folded into `stim_dem` before
+      /// the graph builder runs, so nothing downstream distinguishes the two
+      /// spellings; setting both on one node is an error rather than a
+      /// precedence.
+      std::string stim_dem_path;
+      /// Which DEM columns this node owns, as a label ("local", "boundary") or
+      /// explicit ranges.  Parsed, validated, and emitted; not yet honored at
+      /// construction, which rejects a partitioned node.
+      std::string partition_label;
+      std::vector<column_range> partition_columns;
+
+      /// An ensemble pattern written in place of a node: member subgraphs
+      /// raced against each other, one answer kept (the YAML spelling of
+      /// `cudaq::qec::task_graph_ensemble_spec`). `type` stays empty and the
+      /// node fields above are ignored; the entry is lowered by the builder.
+      struct ensemble_spec {
+        struct member {
+          std::vector<node_spec> nodes;
+          std::vector<cudaq::qec::task_graph_edge> edges;
+          bool operator==(const member &) const = default;
+        };
+        std::vector<member> members;
+        std::string join_strategy;
+        decoder_custom_args_t join_params;
+        bool operator==(const ensemble_spec &) const = default;
+      };
+      std::optional<ensemble_spec> ensemble;
+      bool operator==(const node_spec &) const = default;
+
+      /// The node kind this node builds: `type` resolved to its canonical name
+      /// when it names a registered kind, otherwise the default kind, because
+      /// `type` then named a decoder plugin instead.
+      __attribute__((visibility("default"))) std::string resolved_kind() const;
+
+      /// The inner decoder plugin: `inner_type`, or `type` when that named a
+      /// plugin rather than a node kind. Empty for a kind wrapping no decoder.
+      __attribute__((visibility("default"))) std::string
+      resolved_decoder_type() const;
+    };
+
+    std::string type;       ///< single-node form: node kind
+    std::string inner_type; ///< single-node form: inner decoder registry name
+    /// Construction-time streaming execution policy. Async mode is opt-in.
+    cudaq::qec::task_graph_options options;
+    std::vector<node_spec> nodes;
+    /// The graph's wires, in the same form from_topology() takes, so the
+    /// configuration is the topology rather than a parallel description of it.
+    /// YAML writes an endpoint as `node` or `node.port` and omits the port when
+    /// it is the default one task_graph_edge fills in.
+    std::vector<cudaq::qec::task_graph_edge> edges;
+    bool operator==(const task_graph_spec &) const = default;
+  };
+  std::optional<task_graph_spec> task_graph;
+
   bool operator==(const decoder_config &) const = default;
+
+  /// The decoder type used for schema lookup and custom-args handling.
+  /// Returns task_graph->inner_type when task_graph is set (type must be
+  /// absent in that case), otherwise returns type.
+  __attribute__((visibility("default"))) const std::string &
+  effective_decoder_type() const;
+
+  /// Decoder names shown to a user, which is not always the one schema
+  /// lookup wants: a `nodes`-form graph keeps its decoders on the nodes, so
+  /// effective_decoder_type() is empty there while this joins what the nodes
+  /// name. Falls back to the node kinds for a graph whose nodes take no
+  /// decoder, so a log line always names something.
+  __attribute__((visibility("default"))) std::string
+  describe_decoder_type() const;
 
   /// Return the parameter map a decoder's constructor should receive: the
   /// stored custom args with the legacy error-rate alias removed and
   /// schema-declared defaults materialized (see materialize_default_args in
   /// cudaq/qec/decoder_config_schema.h) when a schema is registered for
-  /// `type`, so programmatically built configs get the same normalization the
-  /// YAML parse path applies.
+  /// the effective decoder type, so programmatically built configs get the
+  /// same normalization the YAML parse path applies.
   __attribute__((visibility("default"))) cudaqx::heterogeneous_map
   decoder_custom_args_to_heterogeneous_map() const;
 
@@ -150,10 +281,10 @@ struct decoder_config {
   effective_error_rate_vec() const;
 
   /// Validate `decoder_custom_args` against the parameter schema registered
-  /// for `type`: unknown keys, missing required keys, and the schema's own
-  /// validate hook (if any). Throws std::runtime_error on the first
-  /// violation. YAML parsing applies the same checks automatically; call this
-  /// to vet a configuration built programmatically before using it.
+  /// for the effective decoder type: unknown keys, missing required keys, and
+  /// the schema's own validate hook (if any). Throws std::runtime_error on
+  /// the first violation. YAML parsing applies the same checks automatically;
+  /// call this to vet a configuration built programmatically before using it.
   __attribute__((visibility("default"))) void validate_custom_args() const;
 
   __attribute__((visibility("default"))) std::string
@@ -218,6 +349,47 @@ struct transport_config {
   bool operator==(const transport_config &) const = default;
 };
 
+/// One row of the server's syndrome mapping table.
+///
+/// A caller names a row per round through the `syndrome_mapping_id` field of
+/// an enqueue request.  The row says what shape that round has, and per
+/// virtual port which round-relative detector indices the port's bits scatter
+/// into.
+///
+/// The shape is what carries end-of-shot: a decoder that decides its length at
+/// run time cannot see the end in the syndrome stream alone, because the last
+/// round's fault set differs from a bulk round's.  Naming a `final` row
+/// conveys it, with nothing added to the wire.
+///
+/// ```yaml
+/// syndrome_mapping:
+///   - id: 0
+///     type: bulk
+///     vps: [[]]      # one virtual port, pass-through
+///   - id: 1
+///     type: final
+///     vps: [[]]
+/// ```
+struct syndrome_mapping_config {
+  /// Row key; the value a caller places in an enqueue request.
+  uint64_t id = 0;
+  /// Round shape: "bulk" (mid-circuit) or "final" (last round of a shot).
+  std::string type = "bulk";
+  /// Per virtual port, the round-relative detector indices that port's bits
+  /// scatter into.  An empty list is the pass-through identity: the fragment
+  /// becomes the round at whatever length it arrived, which is what lets a
+  /// caller batch a whole round into one message.
+  ///
+  /// Defaults to one pass-through port; only that is accepted today, so a row
+  /// need not name it.  See validate().
+  std::vector<std::vector<uint64_t>> vps{{}};
+
+  bool operator==(const syndrome_mapping_config &) const = default;
+
+  /// @brief Throw std::runtime_error if the row is not well formed.
+  __attribute__((visibility("default"))) void validate() const;
+};
+
 class multi_decoder_config {
 public:
   std::vector<decoder_config> decoders;
@@ -225,8 +397,18 @@ public:
   /// defaults may fill an empty section only for non-GPU-RoCE, host-only
   /// configurations.
   transport_config transport;
+  /// Optional syndrome mapping table.  When empty the server installs a single
+  /// pass-through `bulk` row under id 0, which is what every configuration
+  /// written before this section existed gets.
+  std::vector<syndrome_mapping_config> syndrome_mapping;
 
   bool operator==(const multi_decoder_config &) const = default;
+
+  /// @brief Throw std::runtime_error if the syndrome mapping table is
+  /// malformed: an unknown round shape, a duplicate row key, or a row that
+  /// validate() refuses.  Called by %from_yaml_str() and again where the table
+  /// is built, so a programmatically assembled config cannot skip it.
+  __attribute__((visibility("default"))) void validate_syndrome_mapping() const;
 
   /// Validate every decoder's custom args (see
   /// decoder_config::validate_custom_args).

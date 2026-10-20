@@ -187,6 +187,10 @@ run_result run_schedule(
 
   run_params params;
   params.lead_in_ns = lead_in_ns;
+  if (decoders)
+    for (const auto &row : decoders->syndrome_mapping)
+      if (row.type == "final")
+        params.final_mapping_id = static_cast<std::int64_t>(row.id);
 
   auto sched = parse(schedule_text, known_decoder_ids, tick_ns);
   auto run_plan_ = plan(sched, router, source_router, params);

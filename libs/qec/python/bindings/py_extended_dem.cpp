@@ -282,6 +282,10 @@ void bindExtendedDem(nb::module_ &mod) {
            "True when no phases or connections have been set.")
       .def("has_repeating_phase", &dem_chunks_spec::has_repeating_phase,
            "True when any connection is a self-loop.")
+      .def("minimum_rounds", &dem_chunks_spec::minimum_rounds,
+           "Shortest chain the connections admit, visiting a repeating phase\n"
+           "once. This is what a streaming spec expands to when nothing else\n"
+           "pins the round count, and the smallest window it can supply.")
       .def("repeating_phase", &dem_chunks_spec::repeating_phase,
            "Return the PhaseId of the self-connected phase.")
       .def("phase_sequence", &dem_chunks_spec::phase_sequence,

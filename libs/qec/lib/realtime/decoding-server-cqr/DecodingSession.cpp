@@ -9,13 +9,16 @@
 #include "DecodingSession.h"
 #include "HopStats.h"
 #include "../../hardware_guards.h"
+#include "../decode_target.h"
 #include "../realtime_decoding.h"
 #include "cudaq/qec/logger.h"
 #include "cudaq/qec/realtime/decoder_rpc_wire_format.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -24,6 +27,78 @@ namespace cudaq::qec::decoding_server {
 
 using cudaq::qec::decoding::rpc::bit_packed_bytes;
 using cudaq::qec::decoding::rpc::RpcStatus;
+
+namespace {
+/// The session's decode endpoint, whichever kind it holds.  Rebuilt per use
+/// rather than stored, to keep the decode_target detail (and the CUDA affinity
+/// guards it includes) out of DecodingSession.h.  It is two pointers.
+cudaq::qec::detail_dispatch::decode_target target_of(const DecodingSession &s) {
+  if (s.graph)
+    return cudaq::qec::detail_dispatch::decode_target(s.graph.get());
+  return cudaq::qec::detail_dispatch::decode_target(s.dec.get());
+}
+
+/// Reserve SMs so the cooperative decode graph can become co-resident with
+/// everything else occupying the GPU when it is fired device-side: the
+/// persistent dispatch graph itself (1 block) plus any transport kernels. A
+/// cooperative grid sized for ALL SMs deadlocks at grid.sync() the moment
+/// anything else is resident -- the launch silently queues forever.
+/// Overridable for rigs with more coresident kernels (e.g. GpuRoceTransceiver
+/// RX/TX) via QEC_DEVICE_GRAPH_RESERVED_SMS. Shared by both create()
+/// overloads below, since a task graph's captured graph needs the same
+/// reservation a plain decoder's does.
+int reserved_sms_from_env() {
+  int reserved_sms = 1;
+  if (const char *env = std::getenv("QEC_DEVICE_GRAPH_RESERVED_SMS")) {
+    char *end = nullptr;
+    long v = std::strtol(env, &end, 10);
+    // A malformed, zero, or negative override would reinstate the
+    // reserve-all-SMs behavior this fix exists to prevent (atoi silently
+    // yields 0 for junk), so accept only a fully-parsed value >= 1 and keep
+    // the safe floor otherwise.
+    if (end != env && *end == '\0' && v >= 1)
+      reserved_sms = static_cast<int>(v);
+    else
+      cudaq::qec::warn("QEC_DEVICE_GRAPH_RESERVED_SMS='{}' is not a positive "
+                       "integer; keeping reserved_sms=1",
+                       env);
+  }
+  return reserved_sms;
+}
+
+using set_syndrome_mapping_fn =
+    void (*)(const cudaq::qec::decoding::rpc::DeviceSyndromeMappingTable *);
+
+/// Push the document's rows to the DEVICE-mode enqueue handler, which
+/// validates every request's syndrome_mapping_id against them.
+///
+/// The handler's default -- nothing installed -- services id 0 alone, so a
+/// document that declares only the pass-through row needs no install and this
+/// returns without resolving anything.  A document that declares more must not
+/// silently fall back to that default: refusing under DEVICE an id that HOST
+/// accepts is the divergence this install closes.
+///
+/// The caller must have made the session's device current: the installer runs a
+/// kernel, and the table it writes is a __device__ global, so it exists once
+/// per GPU rather than once per process.
+void install_device_syndrome_mapping(const SyndromeMappingTable &rows) {
+  const auto table = device_syndrome_mapping_table(rows);
+  if (!needs_device_syndrome_mapping_install(table))
+    return;
+
+  auto *fn = reinterpret_cast<set_syndrome_mapping_fn>(::dlsym(
+      RTLD_DEFAULT, "cudaqx_qec_realtime_dispatch_set_syndrome_mapping"));
+  if (!fn)
+    throw std::runtime_error(
+        "DecodingSession::create: a device_graph decoder whose configuration "
+        "declares syndrome_mapping rows requires "
+        "cudaqx_qec_realtime_dispatch_set_syndrome_mapping, which was not "
+        "found via dlsym(RTLD_DEFAULT, ...).  The binary must absorb "
+        "libcudaq-qec-realtime-cudevice.a and link with --export-dynamic.");
+
+  fn(&table);
+}
+} // namespace
 using cudaq::realtime::RPCHeader;
 using cudaq::realtime::RPCResponse;
 
@@ -82,7 +157,8 @@ struct SingleCallerGuard {
 
 std::unique_ptr<DecodingSession>
 DecodingSession::create(std::unique_ptr<cudaq::qec::decoder> decoder,
-                        bool capture_graph) {
+                        bool want_device_graph,
+                        SyndromeMappingTable mapping_table) {
   if (!decoder)
     throw std::invalid_argument("DecodingSession requires a decoder");
 
@@ -95,38 +171,71 @@ DecodingSession::create(std::unique_ptr<cudaq::qec::decoder> decoder,
   }
 
   auto s = std::make_unique<DecodingSession>();
+  // An empty map is not the identity row: it would reject id 0, which is the
+  // only id anything sends today.
+  if (!mapping_table.empty())
+    s->mapping_table = std::move(mapping_table);
   s->dec = std::move(decoder);
 
-  if (capture_graph && s->dec->supports_graph_dispatch()) {
-    // Reserve SMs so the cooperative decode graph can become co-resident
-    // with everything else occupying the GPU when it is fired device-side:
-    // the persistent dispatch graph itself (1 block) plus any transport
-    // kernels.  A cooperative grid sized for ALL SMs deadlocks at
-    // grid.sync() the moment anything else is resident -- the launch
-    // silently queues forever.  Overridable for rigs with more coresident
-    // kernels (e.g. GpuRoceTransceiver RX/TX) via
-    // QEC_DEVICE_GRAPH_RESERVED_SMS.
-    int reserved_sms = 1;
-    if (const char *env = std::getenv("QEC_DEVICE_GRAPH_RESERVED_SMS")) {
-      char *end = nullptr;
-      long v = std::strtol(env, &end, 10);
-      // A malformed, zero, or negative override would reinstate the
-      // reserve-all-SMs behavior this fix exists to prevent (atoi silently
-      // yields 0 for junk), so accept only a fully-parsed value >= 1 and keep
-      // the safe floor otherwise.
-      if (end != env && *end == '\0' && v >= 1)
-        reserved_sms = static_cast<int>(v);
-      else
-        cudaq::qec::warn("QEC_DEVICE_GRAPH_RESERVED_SMS='{}' is not a positive "
-                         "integer; keeping reserved_sms=1",
-                         env);
-    }
-    void *gr = cudaq::qec::detail_affinity::capture_graph_pinned(*s->dec,
-                                                                 reserved_sms);
+  if (want_device_graph && s->dec->supports_graph_dispatch()) {
+    void *gr = cudaq::qec::detail_affinity::capture_graph_pinned(
+        *s->dec, reserved_sms_from_env());
     s->graph_resources =
-        GraphResourcesPtr(gr, GraphResourcesDeleter{s->dec.get()});
+        GraphResourcesPtr(gr, GraphResourcesDeleter{s->dec.get(), nullptr});
+    // capture_graph_pinned() restores the previous device, so pin again for
+    // the install kernel.
+    cudaq::qec::detail_affinity::CudaDeviceGuard pin(
+        s->dec->get_cuda_device_id());
+    install_device_syndrome_mapping(s->mapping_table);
   }
 
+  return s;
+}
+
+std::unique_ptr<DecodingSession>
+DecodingSession::create(std::unique_ptr<cudaq::qec::decoding_task_graph> graph,
+                        bool want_device_graph,
+                        SyndromeMappingTable mapping_table) {
+  if (!graph)
+    throw std::invalid_argument("DecodingSession requires a task graph");
+  // Every RPC drives the graph through its streaming API, so a graph that
+  // decodes only full shots can never be served.  Fail bring-up with the
+  // graph's own reason rather than streaming_result()'s logic_error below.
+  if (!graph->supports_streaming())
+    throw std::invalid_argument(
+        "DecodingSession: task graph cannot run on the realtime streaming "
+        "path: " +
+        graph->streaming_incompatibility_reason());
+
+  // Same fail-fast contract as the decoder path above: cuda_device_id()
+  // throws on a node disagreement, and the guard range-checks whatever
+  // device it resolved (no-op if unpinned).
+  {
+    cudaq::qec::detail_affinity::CudaDeviceGuard probe(
+        graph->cuda_device_id().value_or(-1));
+  }
+
+  auto s = std::make_unique<DecodingSession>();
+  if (!mapping_table.empty())
+    s->mapping_table = std::move(mapping_table);
+
+  if (want_device_graph && graph->supports_graph_dispatch()) {
+    // graph->capture_graph() already pins internally (its single node
+    // delegates to capture_graph_pinned() on its own inner decoder -- see
+    // window_node::capture_graph()), so this needs no separate pin call the
+    // way the decoder branch above does.
+    void *gr = graph->capture_graph(reserved_sms_from_env());
+    s->graph_resources =
+        GraphResourcesPtr(gr, GraphResourcesDeleter{nullptr, graph.get()});
+    // The capture restored the previous device, so pin again for the install
+    // kernel.
+    cudaq::qec::detail_affinity::CudaDeviceGuard pin(
+        graph->cuda_device_id().value_or(-1));
+    install_device_syndrome_mapping(s->mapping_table);
+  }
+
+  s->graph_result_ = graph->streaming_result();
+  s->graph = std::move(graph);
   return s;
 }
 
@@ -134,7 +243,8 @@ DecodingSession::create(std::unique_ptr<cudaq::qec::decoder> decoder,
 // Payload-level cores
 // ---------------------------------------------------------------------------
 
-void DecodingSession::enqueue_core(const slot::EnqueueView &req) {
+void DecodingSession::enqueue_core(const slot::EnqueueView &req,
+                                   round_type type) {
   // Once processing has failed, accepting more rounds would make the shot's
   // measurement history unknowable. Only a full reset can establish a clean
   // epoch again.
@@ -152,9 +262,18 @@ void DecodingSession::enqueue_core(const slot::EnqueueView &req) {
     // correction vector must not be reported as the result of that volume.
     shot_state = ShotState::collecting;
 
-    const size_t expected_syndromes = dec->get_num_msyn_per_decode();
-    if (accepted_syndromes > expected_syndromes ||
-        unpack_scratch_.size() > expected_syndromes - accepted_syndromes)
+    const auto target = target_of(*this);
+    // The volume bounds a call, not the round: both kinds of target accept any
+    // chunking of it.  A graph's num_msyn_per_round() is the chunk a caller
+    // should prefer, not a limit -- a window with room takes whatever fits.
+    //
+    // Only a decoder is budgeted.  A graph meters a chunk across its nodes and
+    // fires as their windows fill, so it cannot run past a volume without a
+    // decode resetting the count, and budgeting it would refuse the very
+    // chunking the metering exists to accept.
+    if (const auto budget = target.chunk_limit();
+        budget && (accepted_syndromes > *budget ||
+                   unpack_scratch_.size() > *budget - accepted_syndromes))
       throw std::invalid_argument(
           "Syndrome volume exceeds decoder measurement capacity");
 
@@ -163,13 +282,20 @@ void DecodingSession::enqueue_core(const slot::EnqueueView &req) {
     // scheduler (cudaq_create_dispatch_graph_regular) handles
     // RX→dispatch→decode→TX entirely on the GPU; this code is never reached
     // for device_graph sessions.
-    const bool did_decode =
-        dec->enqueue_syndrome(unpack_scratch_.data(), unpack_scratch_.size());
-
-    if (did_decode) {
-      ++decode_count;
-      accepted_syndromes = 0;
-      shot_state = ShotState::result_ready;
+    const bool did_decode = target.enqueue_syndrome(
+        unpack_scratch_.data(), unpack_scratch_.size(), type);
+    // Async BULK enqueue returns false after queueing. Do not call the blocking
+    // streaming_result() accessor here; get_corrections owns that completion
+    // boundary. Synchronous graphs can only advance when enqueue returned true.
+    if (!target.is_graph() || did_decode || type == round_type::FINAL) {
+      const auto update =
+          target.capture_result_update(did_decode, graph_result_);
+      if (update.operation_completed) {
+        shot_state = ShotState::result_ready;
+        decode_count.fetch_add(update.completed_results,
+                               std::memory_order_relaxed);
+        accepted_syndromes = 0;
+      }
     }
   } catch (const std::exception &e) {
     cudaq::qec::error("DecodingSession::enqueue_core: {}", e.what());
@@ -199,14 +325,28 @@ RpcStatus DecodingSession::get_corrections_core(int64_t return_size_arg,
     return RpcStatus::INTERNAL_ERROR;
 
   try {
+    const auto target = target_of(*this);
     const auto return_size = static_cast<size_t>(return_size_arg);
-    if (return_size != dec->get_num_observables()) {
+    if (return_size != target.num_observables()) {
       ++error_count;
       return RpcStatus::BAD_REQUEST;
     }
+    // Only an aggregate completed since the last snapshot makes a graph ready:
+    // once enqueue has started a new volume, the snapshot is the previous
+    // shot's result, which a decoder session would report as NOT_READY.
+    if (target.is_graph()) {
+      const auto update = target.capture_result_update(false, graph_result_);
+      if (update.operation_completed) {
+        shot_state = ShotState::result_ready;
+        decode_count.fetch_add(update.completed_results,
+                               std::memory_order_relaxed);
+        accepted_syndromes = 0;
+      }
+    }
     if (shot_state != ShotState::result_ready)
       return RpcStatus::NOT_READY;
-    const uint8_t *corrections = dec->get_obs_corrections();
+    const uint8_t *corrections =
+        target.published_corrections(graph_result_.values.data());
     if (!corrections) {
       shot_state = ShotState::failed;
       return RpcStatus::INTERNAL_ERROR;
@@ -232,7 +372,9 @@ RpcStatus DecodingSession::get_corrections_core(int64_t return_size_arg,
       // reported: `out` already owns a copy of the correction bits, and a
       // throw here must produce the single INTERNAL_ERROR status below, not
       // a second response after an already-delivered OK.
-      dec->clear_corrections();
+      target.clear_corrections();
+      graph_result_ =
+          graph ? graph->streaming_result() : task_graph_streaming_result{};
       shot_state = ShotState::collecting;
     }
     out_len = result_len;
@@ -247,8 +389,10 @@ RpcStatus DecodingSession::get_corrections_core(int64_t return_size_arg,
 
 RpcStatus DecodingSession::reset_core() {
   try {
-    dec->reset_decoder();
+    target_of(*this).reset();
     accepted_syndromes = 0;
+    graph_result_ =
+        graph ? graph->streaming_result() : task_graph_streaming_result{};
     shot_state = ShotState::collecting;
     return RpcStatus::OK;
   } catch (const std::exception &e) {
@@ -300,12 +444,13 @@ void DecodingSession::handle_enqueue(const void *rx_slot, void *tx_slot,
   const uint32_t rid = req.header->request_id;
   const uint64_t ptp = req.header->ptp_timestamp;
 
-  // The wire carries a syndrome mapping id (decoder_server_runtime.md), but
-  // the only mapping this server has ever honored is the identity mapping
-  // (id 0).  Reject anything else rather than silently decoding as if the
-  // mapping were identity; non-identity mappings re-enter via the
-  // identity-aware decoder API when they become configurable.
-  if (req.syndrome_mapping_id != 0) {
+  // Resolve the round's shape before anything touches decoder state.  Kept
+  // here rather than in enqueue_core: that returns void, so a failure there
+  // could only surface as INTERNAL_ERROR at the next get_corrections, and a
+  // client that gets a synchronous rejection today would be told its bad
+  // enqueue succeeded.
+  const auto mapping_it = mapping_table.find(req.syndrome_mapping_id);
+  if (mapping_it == mapping_table.end()) {
     cudaq::qec::error(
         "DecodingSession::handle_enqueue: unknown syndrome_mapping_id {}",
         req.syndrome_mapping_id);
@@ -319,9 +464,9 @@ void DecodingSession::handle_enqueue(const void *rx_slot, void *tx_slot,
   {
     BusyScope busy;
     try {
-      cudaq::qec::detail_affinity::pin_decode_device_cached(*dec);
+      target_of(*this).pin_device_cached();
       capture_syndromes(req);
-      enqueue_core(req);
+      enqueue_core(req, mapping_it->second.type);
     } catch (const std::exception &e) {
       // enqueue_core contains its own try/catch; this guards the pin and the
       // capture hook.  Fire-and-forget contract: latch, respond OK below,
@@ -368,7 +513,7 @@ void DecodingSession::handle_get_corrections(const void *rx_slot, void *tx_slot,
   std::size_t out_len = 0;
   RpcStatus status;
   try {
-    cudaq::qec::detail_affinity::pin_decode_device_cached(*dec);
+    target_of(*this).pin_device_cached();
     // The corrections pack straight into the tx slot's payload area; the
     // header (and the magic, last) follow in commit().  result-too-large is
     // detected by the core against the slot capacity — no truncation.
@@ -412,7 +557,7 @@ void DecodingSession::handle_reset(const void *rx_slot, void *tx_slot,
   BusyScope busy;
   RpcStatus status;
   try {
-    cudaq::qec::detail_affinity::pin_decode_device_cached(*dec);
+    target_of(*this).pin_device_cached();
     status = reset_core();
   } catch (const std::exception &e) {
     cudaq::qec::error("DecodingSession::handle_reset: {}", e.what());

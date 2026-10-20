@@ -320,7 +320,8 @@ void save_dem_to_file(
     const std::vector<cudaq::qec::decoder_init> &bp_inputs,
     std::string dem_filename, const std::vector<std::string> &decoder_types,
     bool use_relay_bp, const std::string &onnx_path, bool use_ising,
-    const std::string &ising_artifacts_dir) {
+    [[maybe_unused]] int distance, const std::string &ising_artifacts_dir,
+    bool task_graph, bool parallel_task_graph, bool async_streaming) {
   cudaq::qec::decoding::config::multi_decoder_config multi_config;
   for (uint64_t i = 0; i < decoder_types.size(); i++) {
     const std::string &decoder_type = decoder_types[i];
@@ -329,7 +330,17 @@ void save_dem_to_file(
                              : matching_inputs[i];
     cudaq::qec::decoding::config::decoder_config config;
     config.id = i;
-    config.type = decoder_type;
+    // Ordinary decoders move unchanged into one window over the whole volume.
+    // TensorRT is a predecoder model, so its task-graph form is assembled below
+    // after both its parameters and the downstream PyMatching parameters exist.
+    if (task_graph && !parallel_task_graph && decoder_type != "trt_decoder") {
+      config.task_graph.emplace();
+      config.task_graph->type = "single_window";
+      config.task_graph->inner_type = decoder_type;
+      config.task_graph->options.async_streaming = async_streaming;
+    } else if (!task_graph) {
+      config.type = decoder_type;
+    }
     config.block_size = inputs.num_error_mechanisms();
     config.syndrome_size = inputs.num_detectors();
     config.H_sparse =
@@ -386,7 +397,6 @@ void save_dem_to_file(
       trt_args.insert("onnx_load_path", onnx_path);
       trt_args.insert("batch_size", std::size_t{1});
       trt_args.insert("use_cuda_graph", true);
-      trt_args.insert("global_decoder", "pymatching");
       trt_args.insert("engine_output_format",
                       "observables_and_residual_detectors");
 
@@ -429,9 +439,85 @@ void save_dem_to_file(
                ising_artifacts_dir.c_str(), hRows, hCols, oRows, priors.size(),
                dRows);
       }
-      trt_args.insert("global_decoder_params", pm_args);
+      if (task_graph) {
+        using node_spec = cudaq::qec::decoding::config::decoder_config::
+            task_graph_spec::node_spec;
+        auto &graph = config.task_graph.emplace();
+        graph.options.async_streaming = async_streaming;
 
-      config.decoder_custom_args = trt_args;
+        node_spec pre;
+        pre.id = "pre";
+        pre.type = "predecoder";
+        pre.inner_type = "trt_decoder";
+        pre.decoder_custom_args = trt_args;
+        pre.node_params =
+            cudaqx::heterogeneous_map{{"residual_from", std::string("model")}};
+        graph.nodes.push_back(std::move(pre));
+
+        node_spec global;
+        global.id = "global";
+        global.type = "single_window";
+        global.inner_type = "pymatching";
+        global.decoder_custom_args = pm_args;
+        graph.nodes.push_back(std::move(global));
+
+        node_spec combine;
+        combine.id = "combine";
+        combine.type = "xor";
+        graph.nodes.push_back(std::move(combine));
+
+        graph.edges = {{"measurements", "output", "pre", "input"},
+                       {"pre", "residual", "global", "input"},
+                       {"pre", "pre_L", "combine", "a"},
+                       {"global", "output", "combine", "b"},
+                       {"combine", "output", "output", "input"}};
+      } else {
+        trt_args.insert("global_decoder", "pymatching");
+        trt_args.insert("global_decoder_params", pm_args);
+        config.decoder_custom_args = trt_args;
+      }
+    }
+
+    if (task_graph && parallel_task_graph) {
+      using node_spec = cudaq::qec::decoding::config::decoder_config::
+          task_graph_spec::node_spec;
+      auto &graph = config.task_graph.emplace();
+      graph.options.async_streaming = async_streaming;
+
+      // Two raw-fed windows force a streaming ready frontier of width two.
+      // The right branch decodes the same surface-code syndrome but projects
+      // onto an all-zero observable. XOR therefore preserves the left branch's
+      // real correction while both inner decoders still do their full work.
+      for (const char *id : {"left", "right"}) {
+        node_spec branch;
+        branch.id = id;
+        branch.type = "single_window";
+        branch.inner_type = decoder_type;
+        branch.decoder_custom_args = config.decoder_custom_args;
+        if (branch.id == "right") {
+          branch.H_sparse = config.H_sparse;
+          branch.D_sparse = config.D_sparse;
+          branch.O_sparse.assign(inputs.num_observables(), -1);
+          branch.block_size = config.block_size;
+          branch.syndrome_size = config.syndrome_size;
+        }
+        graph.nodes.push_back(std::move(branch));
+      }
+
+      node_spec combine;
+      combine.id = "combine";
+      combine.type = "xor";
+      graph.nodes.push_back(std::move(combine));
+
+      graph.edges = {{"measurements", "output", "left", "input"},
+                     {"measurements", "output", "right", "input"},
+                     {"left", "output", "combine", "a"},
+                     {"right", "output", "combine", "b"},
+                     {"combine", "output", "output", "input"}};
+      // The explicit nodes now own these parameters. Leaving a second copy at
+      // entry scope would be ambiguous because a nodes-form graph has no one
+      // effective decoder type against which to serialize them.
+      config.decoder_custom_args = cudaqx::heterogeneous_map{};
     }
 
     multi_config.decoders.push_back(config);
@@ -499,7 +585,7 @@ load_decoder_config(const std::string &dem_filename,
           "loaded config decoder ids must be unique and dense in [0, " +
           std::to_string(config.decoders.size()) + "); entry " +
           std::to_string(k) + " has id " + std::to_string(dc.id));
-    decoder_types_out[dc.id] = dc.type;
+    decoder_types_out[dc.id] = dc.describe_decoder_type();
     const size_t nobs = std::count(dc.O_sparse.begin(), dc.O_sparse.end(), -1);
     if (nobs != 1)
       throw std::runtime_error(
@@ -677,13 +763,15 @@ syndrome_round_once(cudaq::qview<> data, cudaq::qview<> xstab_anc,
         /*decoder_id=*/logical_qubit_idx, combined_syndrome, round_counter);
 }
 
-__qpu__ std::vector<std::uint64_t> demo_circuit_qpu(
-    bool allow_device_calls,
-    const cudaq::qec::code::one_qubit_encoding &statePrep, std::size_t numData,
-    std::size_t numAncx, std::size_t numAncz, std::size_t numRounds,
-    std::size_t numLogical, const std::vector<std::size_t> &cnot_schedX_flat,
-    const std::vector<std::size_t> &cnot_schedZ_flat,
-    const std::vector<double> &p_spam_per_patch, bool apply_corrections) {
+__qpu__ std::vector<std::uint64_t>
+demo_circuit_qpu(bool allow_device_calls,
+                 const cudaq::qec::code::one_qubit_encoding &statePrep,
+                 std::size_t numData, std::size_t numAncx, std::size_t numAncz,
+                 std::size_t numRounds, std::size_t numLogical,
+                 const std::vector<std::size_t> &cnot_schedX_flat,
+                 const std::vector<std::size_t> &cnot_schedZ_flat,
+                 const std::vector<double> &p_spam_per_patch,
+                 bool apply_corrections, std::uint64_t final_mapping_id) {
   // ret[i] = patch i's final data bits (numData bits, enforced < 64 in
   // main()); ret[numLogical] = per-patch correction bitmask (bit i set iff
   // decoder i predicted a logical flip).
@@ -756,8 +844,12 @@ __qpu__ std::vector<std::uint64_t> demo_circuit_qpu(
     auto subData = data.slice(i * numData, numData);
     auto subMeas = mz(subData);
     if (allow_device_calls)
-      cudaq::qec::decoding::enqueue_syndromes(/*decoder_id=*/i, subMeas,
-                                              /*round_counter=*/numRounds);
+      // This is the last enqueue of the shot, so it is the round a
+      // `type: final` row describes.  --final_mapping_id names one; 0 is the
+      // pass-through row, which is what enqueue_syndromes sends anyway.
+      cudaq::qec::decoding::enqueue_syndromes_mapped(
+          /*decoder_id=*/i, subMeas,
+          /*round_counter=*/numRounds, final_mapping_id);
     ret[i] = cudaq::to_integer(cudaq::to_bools(subMeas));
   }
 
@@ -854,17 +946,18 @@ dem_gen_circuit(const cudaq::qec::code::one_qubit_encoding &statePrep,
 }
 } // namespace cudaq::qec::qpu
 
-void demo_circuit_host(const cudaq::qec::code &code, int distance,
-                       const std::vector<double> &p_spam_per_patch,
-                       cudaq::qec::operation statePrep, std::size_t numShots,
-                       std::size_t numRounds, std::size_t numLogical,
-                       std::string dem_filename, bool save_dem, bool load_dem,
-                       const std::vector<std::string> &decoder_types,
-                       bool save_syndrome = false, bool load_syndrome = false,
-                       std::string syndrome_filename = "",
-                       bool use_relay_bp = false, std::string onnx_path = "",
-                       bool use_ising = false,
-                       std::string ising_artifacts_dir = "") {
+void demo_circuit_host(
+    const cudaq::qec::code &code, int distance,
+    const std::vector<double> &p_spam_per_patch,
+    cudaq::qec::operation statePrep, std::size_t numShots,
+    std::size_t numRounds, std::size_t numLogical, std::string dem_filename,
+    bool save_dem, bool load_dem, const std::vector<std::string> &decoder_types,
+    bool save_syndrome = false, bool load_syndrome = false,
+    std::string syndrome_filename = "", bool use_relay_bp = false,
+    std::string onnx_path = "", bool use_ising = false,
+    std::string ising_artifacts_dir = "", bool task_graph = false,
+    bool parallel_task_graph = false, bool async_streaming = false,
+    std::uint64_t final_mapping_id = 0) {
   if (!code.contains_operation(statePrep))
     throw std::runtime_error(
         "sample_memory_circuit_error - requested state prep kernel not found.");
@@ -976,8 +1069,9 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
     // Matching decoders (pymatching / trt_decoder's global pymatching) need
     // the DEM sampled with decomposition suggestions; BP (nv-qldpc-decoder)
     // natively decodes the undecomposed hyperedge columns.
-    const bool haveMatching =
+    bool haveMatching =
         contains_type("pymatching") || contains_type("trt_decoder");
+    haveMatching = haveMatching || contains_type("nv-fusion-decoder");
     const bool haveBp = contains_type("nv-qldpc-decoder");
     const bool decompose_errors = haveMatching;
     std::vector<cudaq::qec::decoder_init> matching_inputs;
@@ -1024,7 +1118,9 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
 
     if (save_dem) {
       save_dem_to_file(matching_inputs, bp_inputs, dem_filename, decoder_types,
-                       use_relay_bp, onnx_path, use_ising, ising_artifacts_dir);
+                       use_relay_bp, onnx_path, use_ising, distance,
+                       ising_artifacts_dir, task_graph, parallel_task_graph,
+                       async_streaming);
       return;
     }
   }
@@ -1132,8 +1228,12 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
 
           g_syndrome_count++;
         });
+  }
 
-    // Set RNG seed for deterministic results
+  // Keep simulation-backed example tests reproducible whether or not syndrome
+  // capture is enabled. Replay consumes fixed inputs and does not use the
+  // simulator RNG.
+  if (!load_syndrome) {
     cudaq::set_random_seed(42);
     printf("Set RNG seed to 42 for deterministic syndrome generation\n");
   }
@@ -1350,12 +1450,12 @@ void demo_circuit_host(const cudaq::qec::code &code, int distance,
                          /*allow_device_calls=*/true, prep, numData, numAncx,
                          numAncz, numRounds, numLogical, cnot_schedX_flat,
                          cnot_schedZ_flat, p_spam_per_patch,
-                         /*apply_corrections=*/true)
+                         /*apply_corrections=*/true, final_mapping_id)
             : cudaq::run(numShots, noise, cudaq::qec::qpu::demo_circuit_qpu,
                          /*allow_device_calls=*/true, prep, numData, numAncx,
                          numAncz, numRounds, numLogical, cnot_schedX_flat,
                          cnot_schedZ_flat, p_spam_per_patch,
-                         /*apply_corrections=*/true);
+                         /*apply_corrections=*/true, final_mapping_id);
   }
   printf("Result size: %ld\n", run_result.size());
   std::vector<std::vector<uint8_t>> logical_results;
@@ -1428,9 +1528,23 @@ void show_help() {
          "distance\n");
   printf("  --decoder_type <list>   Comma-separated decoder types to write "
          "when generating a config (with --save_dem). Entries: 'pymatching', "
-         "'nv-qldpc-decoder', 'trt_decoder'. One entry per logical patch "
+         "'nv-qldpc-decoder', 'nv-fusion-decoder', "
+         "'trt_decoder'. One entry per logical patch "
          "(patch i decodes with entry i), or a single entry replicated to "
          "all patches. Default: pymatching\n");
+  printf("  --task_graph        Write each generated entry as a decoding task "
+         "graph instead of a plain decoder. Ordinary decoders use one "
+         "single_window node over the whole volume; trt_decoder uses a "
+         "predecoder feeding a PyMatching single_window node. Supports every "
+         "--decoder_type listed above. Generation phase only.\n");
+  printf("  --parallel_task_graph Generate a two-branch single_window + xor "
+         "task graph to exercise intra-graph streaming parallelism. Requires "
+         "--task_graph and does not support trt_decoder. Generation phase "
+         "only.\n");
+  printf(
+      "  --async_streaming   Enable asynchronous streaming on generated task "
+      "graphs.\n"
+      "      Requires --task_graph. Generation phase only.\n");
   printf("  --onnx-path <file>  Use this ONNX model for trt_decoder entries "
          "during --save_dem. Mutually exclusive with --use-ising.\n");
   printf("  --save_dem <string> Generate the DEM + decoder config and save to "
@@ -1454,6 +1568,9 @@ void show_help() {
          "containing model.onnx, H_csr.bin, O_csr.bin, priors.bin, "
          "metadata.txt, and D_sparse.txt. Only valid with --use-ising; use "
          "this for compatible custom d/T exports.\n");
+  printf("  --final_mapping_id <id> Name this syndrome_mapping row on the "
+         "final data round (the last enqueue of the shot). The config must "
+         "declare the row; 0, the default, is the pass-through row.\n");
   printf("  --help              Show this help message\n");
 }
 
@@ -1477,6 +1594,9 @@ int main(int argc, char **argv) {
   // --save_dem); with --yaml the decoder is read from the file.
   std::string decoder_type = "pymatching"; // Default
   bool decoder_type_explicit = false;
+  bool task_graph = false; // write the entries as task graphs, not plain types
+  bool parallel_task_graph = false;
+  bool async_streaming = false;
   bool yaml_mode = false;
   std::string onnx_path;
   bool use_ising = false;
@@ -1487,6 +1607,10 @@ int main(int argc, char **argv) {
   bool load_syndrome = false;
   std::string syndrome_filename;
   bool use_relay_bp = false;
+  // The syndrome_mapping row the final data round names.  0 is the
+  // pass-through row every configuration has, so the default sends what
+  // enqueue_syndromes always sent.
+  std::uint64_t final_mapping_id = 0;
 
   // Parse the command line arguments. Value-taking flags read the next argv
   // entry through require_value, which errors out (rather than reading past the
@@ -1574,6 +1698,13 @@ int main(int argc, char **argv) {
     } else if (arg == "--decoder_type") {
       decoder_type = require_value("--decoder_type");
       decoder_type_explicit = true;
+    } else if (arg == "--task_graph" || arg == "--task-graph") {
+      task_graph = true;
+    } else if (arg == "--parallel_task_graph" ||
+               arg == "--parallel-task-graph") {
+      parallel_task_graph = true;
+    } else if (arg == "--async_streaming" || arg == "--async-streaming") {
+      async_streaming = true;
     } else if (arg == "--onnx_path" || arg == "--onnx-path") {
       onnx_path = require_value("--onnx-path");
     } else if (arg == "--use-ising") {
@@ -1596,6 +1727,13 @@ int main(int argc, char **argv) {
       syndrome_filename = require_value("--load_syndrome");
     } else if (arg == "--use-relay-bp") {
       use_relay_bp = true;
+    } else if (arg == "--final_mapping_id") {
+      const int id = require_int("--final_mapping_id");
+      if (id < 0) {
+        printf("Error: --final_mapping_id expects a non-negative id.\n");
+        return 1;
+      }
+      final_mapping_id = static_cast<std::uint64_t>(id);
     } else {
       printf("Unknown argument: %s\n", arg.c_str());
       show_help();
@@ -1722,6 +1860,33 @@ int main(int argc, char **argv) {
         "With --yaml the decoder is read from the file; do not pass both.\n");
     return 1;
   }
+  // Likewise a generation knob: whether the entries are task graphs is settled
+  // in the file --yaml reads.
+  if (yaml_mode && task_graph) {
+    printf(
+        "Error: --task_graph only applies to --save_dem (generation). "
+        "With --yaml the decoder is read from the file; do not pass both.\n");
+    return 1;
+  }
+  if (yaml_mode && parallel_task_graph) {
+    printf("Error: --parallel_task_graph only applies to --save_dem "
+           "(generation). With --yaml the topology is read from the file; do "
+           "not pass both.\n");
+    return 1;
+  }
+  if (yaml_mode && async_streaming) {
+    printf("Error: --async_streaming only applies to --save_dem (generation). "
+           "With --yaml the policy is read from the file; do not pass both.\n");
+    return 1;
+  }
+  if (async_streaming && !task_graph) {
+    printf("Error: --async_streaming requires --task_graph\n");
+    return 1;
+  }
+  if (parallel_task_graph && !task_graph) {
+    printf("Error: --parallel_task_graph requires --task_graph\n");
+    return 1;
+  }
   // --save_dem (generation) and --yaml (realtime) are separate phases that
   // write and read the same config file. Passing both silently drops the save,
   // so reject the combination rather than surprise the user.
@@ -1746,12 +1911,14 @@ int main(int argc, char **argv) {
   for (const auto &t : decoder_types) {
     bool supported =
         t == "pymatching" || t == "nv-qldpc-decoder" || t == "trt_decoder";
+    supported = supported || t == "nv-fusion-decoder";
 #ifdef QEC_APP_EXTERNAL_DECODING_SERVER
     supported = supported || t == "concurrency_test_decoder";
 #endif
     if (!supported) {
       printf("Error: --decoder_type entries must be 'pymatching', "
-             "'nv-qldpc-decoder', or 'trt_decoder' (got '%s')\n",
+             "'nv-qldpc-decoder', 'nv-fusion-decoder', "
+             "or 'trt_decoder' (got '%s')\n",
              t.c_str());
       return 1;
     }
@@ -1793,6 +1960,10 @@ int main(int argc, char **argv) {
   }
   if (!onnx_path.empty() && !has_type("trt_decoder")) {
     printf("Error: --onnx-path is only valid with a trt_decoder entry.\n");
+    return 1;
+  }
+  if (parallel_task_graph && has_type("trt_decoder")) {
+    printf("Error: --parallel_task_graph does not support trt_decoder.\n");
     return 1;
   }
 
@@ -1870,7 +2041,8 @@ int main(int argc, char **argv) {
         *code, distance, p_spam_per_patch, cudaq::qec::operation::prep0,
         num_shots, num_rounds, num_logical, dem_filename, save_dem, load_dem,
         decoder_types, save_syndrome, load_syndrome, syndrome_filename,
-        use_relay_bp, onnx_path, use_ising, ising_artifacts_dir);
+        use_relay_bp, onnx_path, use_ising, ising_artifacts_dir, task_graph,
+        parallel_task_graph, async_streaming, final_mapping_id);
   } catch (const std::exception &e) {
     // Configuration, channel, and geometry failures surface as a clean error
     // rather than an uncaught-exception abort.
