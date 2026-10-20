@@ -171,6 +171,10 @@ jobs:
         # Bring wheels into upcoming Docker context
         mkdir cudaq-wheels
         cp /tmp/wheels/*.whl cudaq-wheels/
+        # Include the cudaq-core wheel (CUDA 12 builds place it in candidate-core/)
+        if compgen -G "/tmp/wheels/candidate-core/cudaq_core-*.whl" > /dev/null; then
+          cp /tmp/wheels/candidate-core/cudaq_core-*.whl cudaq-wheels/
+        fi
 
         # Perform build
         TAGS="-t ghcr.io/nvidia/cudaqx-dev:${{ steps.get-cudaq-version-short.outputs.commit_date }}-${{ steps.get-cudaq-version-short.outputs.shortref }}-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
