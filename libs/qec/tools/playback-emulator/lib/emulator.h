@@ -42,6 +42,9 @@ struct run_params {
   // A bad stream/enqueue_data ack aborts the run, same as every other op,
   // unless the peer is known not to ack enqueue faithfully.
   bool collect_enqueue_acks = true;
+  // syndrome_mapping_id each `enqueue_data` sends; a `type: final` row ends
+  // the shot on the decoding server. Streams always send 0.
+  std::int64_t final_mapping_id = 0;
 };
 
 /// One pre-serialized round: where its frame sits in the run_plan's frame

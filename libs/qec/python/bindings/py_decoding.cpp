@@ -48,12 +48,25 @@ void bindDecoding(nb::module_ &mod) {
   qecSubMod.def(
       "enqueue_syndromes",
       [](std::uint64_t, std::vector<bool>, std::uint64_t) {},
-      R"pbdoc(Reset the decoder with the given ID.)pbdoc"
       R"pbdoc(Enqueue a vector of syndrome bit for realtime decoding.
                 Parameters
                 - decoder_id: The ID of the decoder.
                 - syndromes: A vector of syndrome bits (0 or 1).
-                - tag: An optional tag for the enqueue operation.
+                - tag: Identifies which round this is.
+                        )pbdoc");
+  qecSubMod.def(
+      "enqueue_syndromes_mapped",
+      [](std::uint64_t, std::vector<bool>, std::uint64_t, std::uint64_t) {},
+      R"pbdoc(Enqueue syndromes, naming the syndrome_mapping row this round
+              belongs to.  A separate kernel from `enqueue_syndromes` because a
+              device kernel carries one argument count per name.
+                Parameters
+                - decoder_id: The ID of the decoder.
+                - syndromes: A vector of syndrome bits (0 or 1).
+                - tag: Which round this is.
+                - syndrome_mapping_id: Which syndrome_mapping row describes it.
+                  0 is the pass-through BULK row; a row declared `type: final`
+                  ends the shot.
                         )pbdoc");
   // Mirrors the C++ `enqueue_syndromes_test(uint64_t, vector<bool>, uint64_t)`
   // entry point. The Python device kernel must pre-discriminate any
@@ -66,10 +79,6 @@ void bindDecoding(nb::module_ &mod) {
       [](std::uint64_t, std::vector<bool>, std::uint64_t) {},
       R"pbdoc(Test-only entry point for enqueueing pre-discriminated syndrome
               bits. Production code should use `enqueue_syndromes` instead.
-                Parameters
-                - decoder_id: The ID of the decoder.
-                - syndromes: A vector of syndrome bits (0 or 1).
-                - tag: An optional tag for the enqueue operation.
                         )pbdoc");
   qecSubMod.def(
       "get_corrections", [](std::uint64_t, std::uint64_t, bool) {},
@@ -84,10 +93,16 @@ void bindDecoding(nb::module_ &mod) {
     cudaq::python::registerDeviceKernel(
         qecModName, "reset_decoder",
         cudaq::python::getMangledArgsString<std::uint64_t>());
+    // The registry key is module + "." + name, with no signature component,
+    // so each name carries exactly one argument count.
     cudaq::python::registerDeviceKernel(
         qecModName, "enqueue_syndromes",
         cudaq::python::getMangledArgsString<std::uint64_t, std::vector<bool>,
                                             std::uint64_t>());
+    cudaq::python::registerDeviceKernel(
+        qecModName, "enqueue_syndromes_mapped",
+        cudaq::python::getMangledArgsString<std::uint64_t, std::vector<bool>,
+                                            std::uint64_t, std::uint64_t>());
     cudaq::python::registerDeviceKernel(
         qecModName, "enqueue_syndromes_test",
         cudaq::python::getMangledArgsString<std::uint64_t, std::vector<bool>,

@@ -410,6 +410,14 @@ TEST(DecodingServerTwoProcess, TwoProcessHostDispatchMultiErrorLut) {
   run_two_process_decode_test("decoding_server_config_multi_error_lut.yaml");
 }
 
+// Same experiment through a decoding_task_graph: the config replaces `type`
+// with a `task_graph` block, so the server takes the build_task_graph path.
+// Reusing the kernel and expected correction is the point -- a single-window
+// graph over the same matrices is indistinguishable on the wire.
+TEST(DecodingServerTwoProcess, TwoProcessHostDispatchTaskGraph) {
+  run_two_process_decode_test("decoding_server_config_task_graph.yaml");
+}
+
 // ---------------------------------------------------------------------------
 // Two decoders (two logical qubits) in ONE server, driven from ONE __qpu__
 // kernel: qubit A uses decoder 0 and qubit B uses decoder 1, with different

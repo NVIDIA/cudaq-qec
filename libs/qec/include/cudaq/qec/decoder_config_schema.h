@@ -66,6 +66,10 @@ struct param_spec {
   /// downstream consumers see the section (matches the trt_decoder
   /// global_decoder_params defaulting behavior).
   bool materialize_empty = false;
+  /// For kind::discriminated: prepended to the discriminator's value to form
+  /// the registered schema name, so a family of nested schemas can live in its
+  /// own namespace (e.g. `selection_strategy.`).
+  std::string discriminator_prefix;
 };
 
 /// Declarative description of a decoder's `decoder_custom_args` section.

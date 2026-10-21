@@ -23,6 +23,16 @@ simulation_enqueue_syndromes(std::uint64_t decoder_id,
                              const std::vector<bool> &syndromes,
                              std::uint64_t tag);
 
+// A second trampoline rather than a widened one: the device_call signature
+// must match the host definition exactly (see WARNING above), so adding a
+// parameter to the existing entry would silently corrupt every 3-argument
+// caller.
+extern "C" __attribute__((visibility("default"))) void
+simulation_enqueue_syndromes_mapped(std::uint64_t decoder_id,
+                                    const std::vector<bool> &syndromes,
+                                    std::uint64_t tag,
+                                    std::uint64_t syndrome_mapping_id);
+
 extern "C" __attribute__((visibility("default"))) void
 simulation_get_corrections(std::uint64_t decoder_id,
                            std::vector<bool> &corrections, bool reset);
@@ -37,6 +47,14 @@ enqueue_syndromes(std::uint64_t decoder_id,
   // discriminate the handles before crossing the boundary.
   cudaq::device_call(simulation_enqueue_syndromes, decoder_id,
                      cudaq::to_bools(syndromes), tag);
+}
+
+__qpu__ void
+enqueue_syndromes_mapped(std::uint64_t decoder_id,
+                         const std::vector<cudaq::measure_result> &syndromes,
+                         std::uint64_t tag, std::uint64_t syndrome_mapping_id) {
+  cudaq::device_call(simulation_enqueue_syndromes_mapped, decoder_id,
+                     cudaq::to_bools(syndromes), tag, syndrome_mapping_id);
 }
 
 __qpu__ void enqueue_syndromes_test(std::uint64_t decoder_id,

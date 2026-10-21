@@ -45,8 +45,8 @@ public:
     if (shape.empty())
       return iter->second(nullptr, {});
 
-    std::size_t size = std::accumulate(shape.begin(), shape.end(), 1,
-                                       std::multiplies<size_t>());
+    std::size_t size = std::accumulate(
+        shape.begin(), shape.end(), std::size_t{1}, std::multiplies<size_t>());
     scalar_type *data = new scalar_type[size]();
     return iter->second(data, shape);
   }

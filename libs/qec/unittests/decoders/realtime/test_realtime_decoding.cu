@@ -32,9 +32,6 @@
 // cuda-quantum RPC types/hash helper
 #include "cudaq/realtime/daemon/dispatcher/dispatch_kernel_launch.h"
 
-// cuda-quantum kernel types for graph-aware dispatch
-#include "cudaq/realtime/daemon/dispatcher/kernel_types.h"
-
 // cudaqx mock decoder (sources in unittests/realtime/)
 #include "mock_decode_handler.cuh"
 #include "mock_decode_setup.h"

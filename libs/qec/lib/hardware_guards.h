@@ -47,14 +47,15 @@ inline void pin_decode_device(const cudaq::qec::decoder &dec) {
   set_cuda_device_for_decode(dec.get_cuda_device_id());
 }
 
-/// Cached pin for dispatcher threads that call decoders inline on the hot
+/// Cached pin for dispatcher threads that call decode work inline on the hot
 /// path: the first call per (thread, device) transition pays the CUDA call;
 /// steady-state repeats cost one thread_local compare.  Debug builds
 /// re-verify against cudaGetDevice to catch a foreign cudaSetDevice on the
-/// same thread (the cache assumes none).  No-op for unpinned decoders
-/// (cuda_device_id < 0), same as pin_decode_device().
-inline void pin_decode_device_cached(const cudaq::qec::decoder &dec) {
-  const int target = dec.get_cuda_device_id();
+/// same thread (the cache assumes none).  No-op for target < 0, same as
+/// set_cuda_device_for_decode().  Shared by pin_decode_device_cached() below
+/// and by decode_target::pin_device_cached(), whose graph target has no
+/// cudaq::qec::decoder to key off of.
+inline void set_cuda_device_for_decode_cached(int target) {
   if (target < 0)
     return;
   thread_local int pinned = -1;
@@ -66,9 +67,16 @@ inline void pin_decode_device_cached(const cudaq::qec::decoder &dec) {
   int current = -1;
   if (cudaGetDevice(&current) == cudaSuccess)
     assert(current == target &&
-           "pin_decode_device_cached: a foreign cudaSetDevice moved this "
-           "thread off the decoder's device");
+           "set_cuda_device_for_decode_cached: a foreign cudaSetDevice moved "
+           "this thread off the expected device");
 #endif
+}
+
+/// Cached pin for dispatcher threads that call decoders inline on the hot
+/// path.  No-op for unpinned decoders (cuda_device_id < 0), same as
+/// pin_decode_device().
+inline void pin_decode_device_cached(const cudaq::qec::decoder &dec) {
+  set_cuda_device_for_decode_cached(dec.get_cuda_device_id());
 }
 
 /// Capture a decoder's realtime graph, pinned to its device so capture lands on

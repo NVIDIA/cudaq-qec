@@ -8,15 +8,15 @@
 
 // Test-only transport provider that serves NO CPU data plane.
 //
-// decoding_server --host-loop=unified probes each host ring's provider for
-// its CPU data plane (cudaq_bridge_get_cpu_dataplane) before READY and
-// refuses to start in two ways: "does not serve the unified CPU data plane"
-// when the provider answers CUDAQ_ERR_UNSUPPORTED, and "returned an
-// incomplete CPU data plane" when it answers CUDAQ_OK with null hooks, null
-// ring host views or zero slot strides (the unified loop dereferences those
-// unchecked).  This provider triggers either one on demand: by default
-// get_cpu_dataplane returns CUDAQ_ERR_UNSUPPORTED; with the provider argument
-// --incomplete-dataplane it returns CUDAQ_OK and a zeroed
+// decoding_server --host-loop=unified wires each host ring's dispatcher to its
+// provider (cudaq_dispatcher_set_bridge, which asks for the CPU data plane)
+// before READY and refuses to start in two ways: "does not serve the unified
+// CPU data plane" when the provider answers CUDAQ_ERR_UNSUPPORTED, and
+// "returned an incomplete CPU data plane" when it answers CUDAQ_OK with null
+// hooks, null ring host views or zero slot strides (the unified loop
+// dereferences those unchecked).  This provider triggers either one on demand:
+// by default get_cpu_dataplane returns CUDAQ_ERR_UNSUPPORTED; with the
+// provider argument --incomplete-dataplane it returns CUDAQ_OK and a zeroed
 // cudaq_cpu_dataplane_t.
 //
 // The in-tree udp provider can no longer reach these paths from a test: the

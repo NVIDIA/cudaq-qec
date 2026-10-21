@@ -7,8 +7,11 @@
  ******************************************************************************/
 
 #include "realtime_decoding.h"
-#include "../hardware_guards.h"
+#include "decode_target.h"
+#include "../decoding_task/decoding_task_graph_utils.h"
 #include "cudaq/qec/decoder.h"
+#include "cudaq/qec/decoder_config_schema.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/logger.h"
@@ -21,6 +24,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 
@@ -31,6 +35,39 @@ SyndromeCaptureCallback g_syndrome_capture_callback = nullptr;
 } // namespace
 
 std::vector<std::unique_ptr<cudaq::qec::decoder>> g_decoders;
+// Parallel to g_decoders. Populated for task_graph: configs; those slots leave
+// g_decoders[id] null. Dispatch checks g_task_graphs[id] first.
+std::vector<std::unique_ptr<cudaq::qec::decoding_task_graph>> g_task_graphs;
+
+namespace {
+
+// id -> shape, as the configuration declared it.
+std::vector<std::pair<std::uint64_t, cudaq::qec::round_type>>
+    g_syndrome_mapping;
+
+/// The shape of the row `id` names.  Derived, never sent: ids are what the
+/// wire and the kernel API carry.
+cudaq::qec::round_type shape_for_mapping_id(std::uint64_t id) {
+  std::optional<cudaq::qec::round_type> shape;
+
+  if (g_syndrome_mapping.empty()) {
+    // Nothing installed: id 0 is the only id there is and it means BULK.
+    if (id == 0)
+      shape = cudaq::qec::round_type::BULK;
+  } else {
+    for (const auto &[row_id, row_shape] : g_syndrome_mapping)
+      if (row_id == id && !shape)
+        shape = row_shape;
+  }
+
+  if (!shape)
+    throw std::runtime_error("enqueue_syndromes: syndrome_mapping_id " +
+                             std::to_string(id) +
+                             " names no row the configuration declares");
+  return *shape;
+}
+
+} // namespace
 
 // Helper to pack syndrome bits into bytes (8 bits per byte, MSB first for
 // readability)
@@ -52,24 +89,33 @@ static std::vector<uint8_t> pack_syndrome_bits(const uint8_t *syndromes,
 
 namespace cudaq::qec::decoding::host {
 
-/// Read the DEM a decoder entry names.
-std::string read_stim_dem(const std::filesystem::path &dem_path) {
+/// Read a Stim DEM file into the text a decoder is built from. `where` names
+/// the key being resolved, since both the entry-level `stim_dem_path` and a
+/// node's come through here and a bare path is not enough to place the error.
+static std::string read_stim_dem_file(const std::filesystem::path &path,
+                                      std::string_view where) {
+  // A directory opens as a stream and fails only when read, past the check
+  // below.
   std::error_code ec;
-  if (!std::filesystem::is_regular_file(dem_path, ec))
-    throw std::runtime_error(fmt::format(
-        "stim_dem_path is not a readable file: {}", dem_path.string()));
-  std::ifstream file(dem_path);
+  if (!std::filesystem::is_regular_file(path, ec))
+    throw std::runtime_error(
+        fmt::format("{} is not a readable file: {}", where, path.string()));
+  std::ifstream file(path);
   if (!file)
-    throw std::runtime_error(fmt::format(
-        "stim_dem_path could not be opened: {}", dem_path.string()));
+    throw std::runtime_error(
+        fmt::format("{} could not be opened: {}", where, path.string()));
   try {
     return std::string((std::istreambuf_iterator<char>(file)),
                        std::istreambuf_iterator<char>());
   } catch (const std::exception &error) {
-    throw std::runtime_error(
-        fmt::format("stim_dem_path could not be read: {} ({})",
-                    dem_path.string(), error.what()));
+    throw std::runtime_error(fmt::format("{} could not be read: {} ({})", where,
+                                         path.string(), error.what()));
   }
+}
+
+/// Read the DEM a decoder entry names.
+std::string read_stim_dem(const std::filesystem::path &dem_path) {
+  return read_stim_dem_file(dem_path, "stim_dem_path");
 }
 
 cudaqx::heterogeneous_map prepare_decoder_params(
@@ -82,6 +128,39 @@ cudaqx::heterogeneous_map prepare_decoder_params(
 }
 
 namespace {
+
+/// Parse the flat -1-terminated sparse encoding into per-row column lists.
+std::vector<std::vector<std::uint32_t>>
+parse_flat_sparse_rows(const std::vector<std::int64_t> &flat,
+                       const char *name) {
+  std::vector<std::vector<std::uint32_t>> rows;
+  std::vector<std::uint32_t> row;
+  // -1 terminates a row; every other value must be a column index that, with
+  // its exclusive upper bound, fits the sparse matrix index type. Narrowing an
+  // out-of-range value would silently alias it onto a real column.
+  constexpr std::int64_t max_column_index =
+      static_cast<std::int64_t>(
+          std::numeric_limits<
+              cudaq::qec::sparse_binary_matrix::index_type>::max()) -
+      1;
+  for (std::int64_t entry : flat) {
+    if (entry == -1) {
+      rows.push_back(std::move(row));
+      row.clear();
+      continue;
+    }
+    if (entry < -1 || entry > max_column_index)
+      throw std::runtime_error(
+          fmt::format("Value in {} vector is out of range: {} (expected -1 as "
+                      "a row terminator, or a column index in [0, {}])",
+                      name, entry, max_column_index));
+    row.push_back(static_cast<std::uint32_t>(entry));
+  }
+  if (!row.empty())
+    rows.push_back(std::move(row));
+
+  return rows;
+}
 
 /// Build D in GF(2)-canonical form, one row per detector. A repeated index in a
 /// row cancels under the realtime detector XOR, so canonicalizing here puts
@@ -379,10 +458,237 @@ std::unique_ptr<cudaq::qec::decoder> create_realtime_decoder(
   return decoder;
 }
 
+/// Translate one `task_graph.nodes` entry into build inputs for the graph.
+///
+/// The DEM falls back from the node's own `dem_chunks` to the entry-level DEM,
+/// which may itself be chunk or flat form. The flat form builds its inner
+/// decoder from the entry-level configuration, H and error rates included.
+cudaq::qec::task_graph_node_config translate_task_graph_node(
+    const cudaq::qec::decoding::config::decoder_config &cfg,
+    const cudaq::qec::decoding::config::decoder_config::task_graph_spec::
+        node_spec &ns,
+    const std::filesystem::path &base_dir) {
+  const std::string where =
+      "decoder " + std::to_string(cfg.id) + ": task_graph node '" + ns.id + "'";
+  if (!ns.partition_label.empty() || !ns.partition_columns.empty())
+    throw std::runtime_error(
+        where +
+        " sets partition, which is not implemented yet: DEM column ownership "
+        "is parsed and validated but not yet honored when building the graph");
+
+  cudaq::qec::task_graph_node_config node;
+  node.id = ns.id;
+  if (ns.ensemble.has_value()) {
+    // A pattern: translate its member nodes (each with the usual DEM fallback
+    // and decoder handling) and hand the pattern itself to the builder, which
+    // lowers it. The pattern node carries no DEM or decoder of its own.
+    cudaq::qec::task_graph_ensemble_spec spec;
+    for (const auto &m : ns.ensemble->members) {
+      cudaq::qec::task_graph_ensemble_spec::member member;
+      for (const auto &member_node : m.nodes)
+        member.nodes.push_back(
+            translate_task_graph_node(cfg, member_node, base_dir));
+      member.edges = m.edges;
+      spec.members.push_back(std::move(member));
+    }
+    spec.join_strategy = ns.ensemble->join_strategy;
+    spec.join_params = ns.ensemble->join_params.map();
+    node.ensemble = std::move(spec);
+    return node;
+  }
+  node.kind = ns.resolved_kind();
+  node.node_params = ns.node_params.map();
+
+  const auto *kind = cudaq::qec::find_task_graph_node_kind(node.kind);
+  if (!kind)
+    throw std::runtime_error(where + " has unregistered kind '" + node.kind +
+                             "'");
+
+  const bool flat = !cfg.H_sparse.empty();
+  // A node's own matrices outrank every entry-level form. validate_task_graph()
+  // rejects pairing them with dem_chunks, or splitting the D/O pair.
+  const bool node_flat = !ns.D_sparse.empty();
+  if (kind->requires_dem) {
+    if (node_flat) {
+      node.d_sparse = parse_flat_sparse_rows(ns.D_sparse, "D_sparse");
+      node.o_sparse = parse_flat_sparse_rows(ns.O_sparse, "O_sparse");
+      if (!ns.H_sparse.empty())
+        node.h_sparse = parse_flat_sparse_rows(ns.H_sparse, "H_sparse");
+    } else if (ns.dem_chunks.has_value())
+      node.dem = *ns.dem_chunks;
+    else if (cfg.dem_chunks.has_value() && !flat)
+      node.dem = *cfg.dem_chunks;
+    else if (flat) {
+      if (cfg.D_sparse.empty() || cfg.O_sparse.empty())
+        throw std::runtime_error(
+            where + " runs on the flat DEM, which requires D_sparse and "
+                    "O_sparse");
+      node.d_sparse = parse_flat_sparse_rows(cfg.D_sparse, "D_sparse");
+      node.o_sparse = parse_flat_sparse_rows(cfg.O_sparse, "O_sparse");
+      // The flat form already requires H to build its inner decoder; hand it
+      // to the node too, for a kind that maps errors back into detector space.
+      node.h_sparse = parse_flat_sparse_rows(cfg.H_sparse, "H_sparse");
+    } else {
+      throw std::runtime_error(where +
+                               " has no DEM: give the node dem_chunks, or the "
+                               "decoder dem_chunks or flat matrices");
+    }
+  }
+
+  if (kind->requires_decoder) {
+    const cudaq::qec::decoder_output_request decoder_output =
+        kind->inner_decoder_output(node.node_params);
+    const bool decoder_takes_observables =
+        kind->inner_decoder_takes_observables(node.node_params);
+    const auto decoder_type = ns.resolved_decoder_type();
+    if (decoder_type.empty())
+      throw std::runtime_error(where + " of kind '" + kind->name +
+                               "' needs an inner decoder name");
+    // Stim DEM text stands in for this node's H when the decoder's model needs
+    // annotations the matrices cannot carry, so it is from_topology() that
+    // builds the decoder either way -- the flat form's usual shortcut of
+    // pre-building one from the entry-level H would ignore the text.
+    if (node.dem.has_value() || !ns.stim_dem.empty() ||
+        !ns.stim_dem_path.empty()) {
+      node.decoder_type = decoder_type;
+      // Both spellings reach the builder as text, so from_topology() and
+      // everything below it never learn which one the document used.
+      // validate_task_graph() has already rejected setting both.
+      node.stim_dem =
+          ns.stim_dem_path.empty()
+              ? ns.stim_dem
+              : read_stim_dem_file(
+                    std::filesystem::path(ns.stim_dem_path).is_absolute()
+                        ? std::filesystem::path(ns.stim_dem_path)
+                        : std::filesystem::absolute(base_dir / ns.stim_dem_path)
+                              .lexically_normal(),
+                    where + " stim_dem_path");
+      node.params = ns.decoder_custom_args.map();
+      if (const auto *schema =
+              cudaq::qec::decoding::config::find_decoder_schema(decoder_type)) {
+        drop_non_schema_keys(*schema, node.params);
+        materialize_default_args(*schema, node.params);
+      }
+      if (cfg.cuda_device_id.has_value())
+        node.params.insert("cuda_device_id", *cfg.cuda_device_id);
+    } else {
+      // Flat form: build the decoder from H and the error rates, the way a
+      // plain flat decoder config does.
+      auto inner_cfg = cfg;
+      inner_cfg.type = decoder_type;
+      inner_cfg.task_graph.reset();
+      inner_cfg.decoder_custom_args = ns.decoder_custom_args;
+      // The entry-level H would pair a decoder with a D of another width, and a
+      // built decoder reaches the builder too opaque to catch it.
+      if (node_flat) {
+        if (ns.H_sparse.empty())
+          throw std::runtime_error(
+              where +
+              " has its own D_sparse and O_sparse but no H_sparse to build its "
+              "inner decoder from, and neither carries one; set the node's "
+              "H_sparse, or give it a stim_dem to build from instead");
+        inner_cfg.H_sparse = ns.H_sparse;
+        inner_cfg.D_sparse = ns.D_sparse;
+        inner_cfg.O_sparse = ns.O_sparse;
+        inner_cfg.block_size = ns.block_size;
+        inner_cfg.syndrome_size = ns.syndrome_size;
+      }
+      // Each flat-matrix node gets its own decoder instance. They re-derive the
+      // model from the same configuration rather than sharing one prebuilt
+      // initialization, which costs a reparse per node and nothing else.
+      auto inputs = resolve_decoder_init(inner_cfg, base_dir);
+      if (!decoder_takes_observables)
+        inputs = inputs.without_observables();
+      node.decoder_instance =
+          create_realtime_decoder(inner_cfg, std::move(inputs), decoder_output);
+    }
+  }
+  return node;
+}
+
+/// Build the graph a `task_graph:` configuration describes.
+///
+/// Both forms end up in the same place: a list of node configs and edges handed
+/// to from_topology(). The single-node `{type, inner_type}` form goes through
+/// from_spec(), which is that same translation for a chunk-form DEM.
+std::unique_ptr<cudaq::qec::decoding_task_graph>
+build_task_graph(const cudaq::qec::decoding::config::decoder_config &cfg,
+                 const std::filesystem::path &base_dir) {
+  using node_spec =
+      cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec;
+  const auto &tg = *cfg.task_graph;
+  const std::string who = "decoder " + std::to_string(cfg.id);
+  const bool flat = !cfg.H_sparse.empty();
+
+  if (tg.nodes.empty()) {
+    // An alias is an accepted spelling in this form too, so resolve through the
+    // registry rather than comparing spellings. An unrecognized name stays as
+    // written: unlike a node's `type`, this key never names a decoder plugin,
+    // so there is no window-over-a-plugin reading to fall back to.
+    const auto *kind = cudaq::qec::find_task_graph_node_kind(tg.type);
+    const std::string name = kind ? kind->name : tg.type;
+    if (name != "sliding_window" && name != "single_window")
+      throw std::runtime_error(who + ": unsupported task_graph type '" +
+                               tg.type +
+                               "' (supported: sliding_window, single_window)");
+    node_spec ns;
+    ns.id = "node0";
+    ns.type = name;
+    ns.inner_type = tg.inner_type;
+    ns.decoder_custom_args = cfg.decoder_custom_args;
+    if (flat) {
+      // Pre-expanded matrices are a fixed-round experiment however the type
+      // spelled it, which is what the flat form has always built.
+      ns.type = "single_window";
+      std::vector<cudaq::qec::task_graph_node_config> nodes;
+      nodes.push_back(translate_task_graph_node(cfg, ns, base_dir));
+      return cudaq::qec::decoding_task_graph::from_topology(std::move(nodes),
+                                                            {}, tg.options);
+    }
+    if (!cfg.dem_chunks.has_value())
+      throw std::runtime_error(
+          who + ": task_graph requires either dem_chunks or H_sparse");
+    // from_spec slides only when the round count is unresolved: no num_rounds
+    // and a repeating phase.  single_window states the opposite, so name it for
+    // a streaming spec and it would silently get a sliding window instead.
+    if (name == "single_window" && !cfg.dem_chunks->num_rounds.has_value() &&
+        cfg.dem_chunks->has_repeating_phase())
+      throw std::runtime_error(
+          who + ": task_graph type 'single_window' needs a fixed round count; "
+                "set dem_chunks.num_rounds, or use 'sliding_window' to decode "
+                "a stream of rounds");
+    auto inner_params = cfg.decoder_custom_args_to_heterogeneous_map();
+    if (cfg.cuda_device_id.has_value())
+      inner_params.insert("cuda_device_id", cfg.cuda_device_id.value());
+    return cudaq::qec::decoding_task_graph::from_spec(
+        *cfg.dem_chunks, tg.inner_type, inner_params, tg.options);
+  }
+
+  std::vector<cudaq::qec::task_graph_node_config> nodes;
+  nodes.reserve(tg.nodes.size());
+  for (const auto &ns : tg.nodes)
+    nodes.push_back(translate_task_graph_node(cfg, ns, base_dir));
+
+  // The configuration holds the builder's own edge type, so the wires need no
+  // translation; only the nodes do.
+  return cudaq::qec::decoding_task_graph::from_topology(std::move(nodes),
+                                                        tg.edges, tg.options);
+}
+
 int configure_decoders(
     cudaq::qec::decoding::config::multi_decoder_config &config,
     const std::filesystem::path &base_dir) {
   CUDA_QEC_INFO("Initializing decoders...");
+
+  // Nothing on this path consumes the table yet -- only the decoding server
+  // does -- but a malformed section should fail where it is supplied rather
+  // than silently later, on a different transport.
+  try {
+    config.validate_syndrome_mapping();
+  } catch (const std::exception &e) {
+    CUDA_QEC_WARN("Invalid syndrome_mapping: {}", e.what());
+    return 1;
+  }
 
   const auto &decoder_configs = config.decoders;
 
@@ -420,8 +726,8 @@ int configure_decoders(
   const auto absolute_base =
       std::filesystem::absolute(base_dir).lexically_normal();
 
-  std::vector<cudaq::qec::decoder_init> resolved;
-  resolved.reserve(config.decoders.size());
+  std::vector<std::optional<cudaq::qec::decoder_init>> resolved(
+      config.decoders.size());
   // The absolute form of each model path, applied to the caller's
   // configuration only once the whole configuration has been applied. Rewriting
   // as we go would leave a caller's config partly rewritten when a later entry
@@ -430,7 +736,8 @@ int configure_decoders(
   std::vector<std::string> absolute_model_paths(config.decoders.size());
   for (std::size_t i = 0; i < config.decoders.size(); ++i) {
     const auto &decoder_config = config.decoders[i];
-    resolved.push_back(resolve_decoder_init(decoder_config, absolute_base));
+    if (!decoder_config.task_graph.has_value())
+      resolved[i].emplace(resolve_decoder_init(decoder_config, absolute_base));
     if (!decoder_config.stim_dem_path.empty()) {
       std::filesystem::path model(decoder_config.stim_dem_path);
       absolute_model_paths[i] =
@@ -440,7 +747,6 @@ int configure_decoders(
                               : model.lexically_normal().string();
     }
   }
-
   // Construction allocates, so replacements are built in place rather than
   // alongside the old set: a constructor failure can still leave the decoder
   // set empty. Overlapping both sets would double peak decoder memory, which
@@ -448,13 +754,39 @@ int configure_decoders(
   try {
     g_decoders.clear();
     g_decoders.resize(max_decoder_id + 1);
+    g_task_graphs.clear();
+    g_task_graphs.resize(max_decoder_id + 1);
     for (std::size_t i = 0; i < decoder_configs.size(); ++i) {
-      g_decoders[decoder_configs[i].id] =
-          create_realtime_decoder(decoder_configs[i], std::move(resolved[i]));
+      const auto &cfg = decoder_configs[i];
+      if (cfg.task_graph.has_value()) {
+        auto graph = build_task_graph(cfg, absolute_base);
+        if (!graph->supports_streaming())
+          throw std::runtime_error(
+              "decoder " + std::to_string(cfg.id) +
+              ": task_graph cannot run on the realtime streaming path: " +
+              graph->streaming_incompatibility_reason());
+        g_task_graphs[cfg.id] = std::move(graph);
+      } else {
+        g_decoders[cfg.id] =
+            create_realtime_decoder(cfg, std::move(*resolved[i]));
+      }
     }
   } catch (const std::exception &e) {
     CUDA_QEC_WARN("Error initializing decoders: {}", e.what());
     return 4;
+  }
+
+  // Seeded with the pass-through BULK row: a document declaring only a `final`
+  // row must keep the id every producer sends.
+  g_syndrome_mapping.clear();
+  g_syndrome_mapping.emplace_back(0, cudaq::qec::round_type::BULK);
+  for (const auto &row : config.syndrome_mapping) {
+    const auto shape = row.type == "final" ? cudaq::qec::round_type::FINAL
+                                           : cudaq::qec::round_type::BULK;
+    if (row.id == 0)
+      g_syndrome_mapping.front().second = shape; // an explicit id 0 wins
+    else
+      g_syndrome_mapping.emplace_back(row.id, shape);
   }
 
   // The configuration is now in effect. Make its model paths absolute so the
@@ -463,12 +795,50 @@ int configure_decoders(
   for (std::size_t i = 0; i < config.decoders.size(); ++i)
     if (!absolute_model_paths[i].empty())
       config.decoders[i].stim_dem_path = absolute_model_paths[i];
+
+  // Node-local model paths obey the same rule. The cached/published
+  // configuration is later rebuilt without the originating file's base_dir.
+  for (auto &decoder_config : config.decoders) {
+    if (!decoder_config.task_graph.has_value())
+      continue;
+    for (auto &node : decoder_config.task_graph->nodes) {
+      if (node.stim_dem_path.empty())
+        continue;
+      std::filesystem::path model(node.stim_dem_path);
+      node.stim_dem_path =
+          (model.is_relative()
+               ? std::filesystem::absolute(absolute_base / model)
+               : model)
+              .lexically_normal()
+              .string();
+    }
+  }
   return 0;
 }
 
 void finalize_decoders() {
   CUDA_QEC_INFO("Finalizing the realtime decoding library.");
+  g_syndrome_mapping.clear();
   g_decoders.clear();
+  g_task_graphs.clear();
+}
+
+void register_task_graph(
+    std::size_t id, std::unique_ptr<cudaq::qec::decoding_task_graph> graph) {
+  if (!graph)
+    throw std::invalid_argument("register_task_graph: graph must not be null");
+  if (!graph->supports_streaming())
+    throw std::invalid_argument(
+        "register_task_graph: graph cannot run on the realtime streaming "
+        "path: " +
+        graph->streaming_incompatibility_reason());
+  const std::size_t needed = id + 1;
+  if (g_decoders.size() < needed)
+    g_decoders.resize(needed);
+  if (g_task_graphs.size() < needed)
+    g_task_graphs.resize(needed);
+  g_decoders[id] = nullptr;
+  g_task_graphs[id] = std::move(graph);
 }
 
 __attribute__((visibility("default"))) void
@@ -481,34 +851,35 @@ __attribute__((visibility("default"))) void (*_get_syndrome_capture_callback())(
   return g_syndrome_capture_callback;
 }
 
+namespace {
+
+using cudaq::qec::detail_dispatch::decode_target;
+
+/// Resolve an id to its decode endpoint, preferring a registered task graph.
+/// Throws when neither table holds the id.
+decode_target resolve_target(std::size_t decoder_id) {
+  if (decoder_id < g_task_graphs.size() && g_task_graphs[decoder_id])
+    return decode_target(g_task_graphs[decoder_id].get());
+  if (decoder_id < g_decoders.size() && g_decoders[decoder_id])
+    return decode_target(g_decoders[decoder_id].get());
+  throw std::invalid_argument(fmt::format("Decoder {} not found", decoder_id));
+}
+
+} // namespace
+
 void enqueue_syndromes(std::size_t decoder_id, uint8_t *syndromes,
                        std::uint64_t syndrome_length, std::uint64_t tag) {
-  if (decoder_id >= g_decoders.size()) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
-  auto *decoder = g_decoders[decoder_id].get();
-  if (!decoder) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
-  if (syndrome_length == 0) {
-    throw std::invalid_argument("syndrome_length must be greater than 0");
-  }
-  if (!syndromes) {
-    throw std::invalid_argument("syndromes buffer is null");
-  }
-  const auto max_syndromes = decoder->get_num_msyn_per_decode();
-  if (max_syndromes == 0) {
-    throw std::invalid_argument(
-        "Decoder has no measurement syndromes configured");
-  }
-  if (syndrome_length > max_syndromes) {
-    throw std::invalid_argument(
-        fmt::format("syndrome_length ({}) exceeds configured measurement count "
-                    "({})",
-                    syndrome_length, max_syndromes));
-  }
+  // Id 0 is the seeded pass-through row: an untagged enqueue is an ordinary
+  // round without naming one.
+  enqueue_syndromes(decoder_id, syndromes, syndrome_length, tag,
+                    /*syndrome_mapping_id=*/0);
+}
+
+void enqueue_syndromes(std::size_t decoder_id, uint8_t *syndromes,
+                       std::uint64_t syndrome_length, std::uint64_t tag,
+                       std::uint64_t syndrome_mapping_id) {
+  const auto target = resolve_target(decoder_id);
+  target.validate_syndromes(syndromes, syndrome_length);
 
   const auto capture_syndromes = [&] {
     // --save_syndrome feature: record what is actually submitted for decode.
@@ -519,26 +890,22 @@ void enqueue_syndromes(std::size_t decoder_id, uint8_t *syndromes,
     }
   };
 
-  // Direct-call path: this caller thread runs the decode, but
-  // configure_decoders() constructed every decoder sequentially on one thread,
-  // leaving the LAST decoder's device current. Point the thread at this
-  // decoder's pinned device before decoding (set-if-different; throws on
-  // failure) -- and before the capture callback, so a pin failure cannot
-  // record a round that was never decoded.
-  cudaq::qec::detail_affinity::pin_decode_device(*decoder);
+  // This caller thread runs the decode, but configure_decoders() constructed
+  // every decoder sequentially on one thread, leaving the LAST decoder's device
+  // current. Point the thread at this decoder's pinned device before decoding
+  // (set-if-different; throws on failure) -- and before the capture callback,
+  // so a pin failure cannot record a round that was never decoded.
+  target.pin_device();
   capture_syndromes();
 
-  std::vector<uint8_t> syndrome_u8(syndrome_length);
-  bool did_decode = false;
-  for (std::size_t i = 0; i < syndrome_length; i++) {
-    syndrome_u8[i] = syndromes[i];
-  }
-  std::chrono::duration<double> duration{};
-  auto t0 = std::chrono::high_resolution_clock::now();
-  did_decode =
-      decoder->enqueue_syndrome(syndrome_u8.data(), syndrome_u8.size());
-  auto t1 = std::chrono::high_resolution_clock::now();
-  duration = t1 - t0;
+  const std::vector<uint8_t> syndrome_u8(syndromes,
+                                         syndromes + syndrome_length);
+  const auto t0 = std::chrono::high_resolution_clock::now();
+  const bool did_decode =
+      target.enqueue_syndrome(syndrome_u8.data(), syndrome_u8.size(),
+                              shape_for_mapping_id(syndrome_mapping_id));
+  const auto t1 = std::chrono::high_resolution_clock::now();
+  const std::chrono::duration<double> duration = t1 - t0;
 
   // Consider demoting this to a lower log level.
   // Also consider logging the syndrome (at a lower log level).
@@ -553,53 +920,25 @@ void get_corrections(std::size_t decoder_id, uint8_t *corrections,
   CUDA_QEC_INFO("Entered get_corrections function decoder_id={}, "
                 "correction_length={}, reset={}",
                 decoder_id, correction_length, reset);
-  if (decoder_id >= g_decoders.size()) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
-  auto *decoder = g_decoders[decoder_id].get();
-  if (!decoder) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
-  const auto num_observables = decoder->get_num_observables();
-  if (correction_length == 0) {
-    throw std::invalid_argument("correction_length must be greater than 0");
-  }
-  if (!corrections) {
-    throw std::invalid_argument("corrections buffer is null");
-  }
-  if (correction_length != num_observables) {
-    throw std::invalid_argument(
-        fmt::format("correction_length ({}) does not match number of "
-                    "observables ({})",
-                    correction_length, num_observables));
-  }
+
+  const auto target = resolve_target(decoder_id);
+  target.validate_corrections(corrections, correction_length);
 
   // clear_corrections may touch device memory in some plugins.
-  cudaq::qec::detail_affinity::pin_decode_device(*decoder);
-  auto ret = decoder->get_obs_corrections();
-  for (std::size_t i = 0; i < correction_length; ++i) {
+  target.pin_device();
+  const auto *ret = target.obs_corrections();
+  for (std::size_t i = 0; i < correction_length; ++i)
     corrections[i] = ret[i];
-  }
   if (reset)
-    decoder->clear_corrections();
+    target.clear_corrections();
 }
 
 void reset_decoder(std::size_t decoder_id) {
   CUDA_QEC_INFO("Entered reset_decoder for decoder_id={}", decoder_id);
-  if (decoder_id >= g_decoders.size()) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
-  auto *decoder = g_decoders[decoder_id].get();
-  if (!decoder) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
 
-  cudaq::qec::detail_affinity::pin_decode_device(*decoder);
-  decoder->reset_decoder();
+  const auto target = resolve_target(decoder_id);
+  target.pin_device();
+  target.reset();
 }
 
 } // namespace cudaq::qec::decoding::host

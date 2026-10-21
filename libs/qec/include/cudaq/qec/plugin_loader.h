@@ -17,9 +17,9 @@ namespace cudaq::qec {
 
 /// @brief Enum to define different types of plugins
 enum class PluginType {
-  DECODER, // Decoder plugins
-  CODE     // QEC codes plugins
-           // Add other plugin types here as needed
+  DECODER,        // Decoder plugins
+  CODE,           // QEC codes plugins
+  TASK_GRAPH_NODE // Node-kind plugins retain registered factories for life.
 };
 
 struct PluginDeleter // deleter
@@ -48,6 +48,8 @@ void load_plugins(const std::string &plugin_dir, PluginType type);
 /// @brief Function to clean up loaded plugins of a specific type
 /// @param type The type of plugins to clean up. Only plugins of this type will
 /// be cleaned up.
+/// Task-graph node plugins must not be cleaned up: the node-kind registry
+/// retains factories whose code lives in those modules for process lifetime.
 void cleanup_plugins(PluginType type);
 
 } // namespace cudaq::qec
