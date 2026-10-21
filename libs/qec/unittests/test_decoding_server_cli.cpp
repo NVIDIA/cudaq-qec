@@ -62,7 +62,7 @@ std::string g_create_args;
 std::string g_endpoint = "transport=udp port=9 rest=foo";
 int g_bridge_ok = 1;
 int g_factory_throw = 0;
-int g_fail = 0; // 1 geometry, 2 endpoint, 3 manager, 4 connect, 5 context,
+int g_fail = 0; // 1 geometry, 2 endpoint, 3 manager, 4 connect, 5 set_bridge,
                 // 6 dg-launch, 7 dispatcher-start, 8 host-launch
 int g_n_bridge_destroy = 0;
 int g_n_bridge_disconnect = 0;
@@ -243,8 +243,6 @@ cudaq_status_t
 __wrap_cudaq_bridge_get_transport_context(cudaq_realtime_bridge_handle_t,
                                           cudaq_realtime_transport_context_t,
                                           void *out) {
-  if (g_fail == 5)
-    return CUDAQ_ERR_INTERNAL;
   auto *ring = static_cast<cudaq_ringbuffer_t *>(out);
   *ring = {};
   static uint64_t flags = 1;
@@ -295,6 +293,15 @@ __wrap_cudaq_bridge_get_cpu_dataplane(cudaq_realtime_bridge_handle_t,
 }
 cudaq_status_t __wrap_cudaq_dispatcher_set_cpu_dataplane(cudaq_dispatcher_t *,
                                                          void *) {
+  return CUDAQ_OK;
+}
+// Host rings are wired with set_bridge, before READY. g_fail==5 is that
+// probe refusing the ring-buffer context; every other case wires.
+cudaq_status_t
+__wrap_cudaq_dispatcher_set_bridge(cudaq_dispatcher_t *,
+                                   cudaq_realtime_bridge_handle_t) {
+  if (g_fail == 5)
+    return CUDAQ_ERR_INTERNAL;
   return CUDAQ_OK;
 }
 cudaq_status_t
@@ -539,7 +546,9 @@ int run_helper(const char *name) {
   if (std::strcmp(name, "fail_geometry") == 0) {
     g_fail = 1;
     auto p = qec_cc::write_temp(qec_cc::lut_yaml());
-    return host_ok(call_main({"--config=" + p}), 1, 1, 1, 0, 0, 0, 0, 0, 0, 0)
+    // The manager exists before any ring, so a geometry failure still
+    // creates it and tears it down.
+    return host_ok(call_main({"--config=" + p}), 1, 1, 1, 0, 0, 1, 1, 0, 0, 0)
                ? 0
                : 2;
   }
@@ -557,21 +566,26 @@ int run_helper(const char *name) {
   if (std::strcmp(name, "fail_manager") == 0) {
     g_fail = 3;
     auto p = qec_cc::write_temp(qec_cc::lut_yaml());
-    return host_ok(call_main({"--config=" + p}), 1, 1, 1, 0, 0, 1, 0, 0, 0, 0)
+    // Manager creation is the first dispatcher call, before any bridge.
+    return host_ok(call_main({"--config=" + p}), 0, 0, 0, 0, 0, 1, 0, 0, 0, 0)
                ? 0
                : 2;
   }
   if (std::strcmp(name, "fail_connect") == 0) {
     g_fail = 4;
     auto p = qec_cc::write_temp(qec_cc::lut_yaml());
-    return host_ok(call_main({"--config=" + p}), 1, 1, 1, 1, 0, 1, 1, 0, 0, 0)
+    // The dispatcher is created and wired before connect, so teardown
+    // stops it even though start() never ran.
+    return host_ok(call_main({"--config=" + p}), 1, 1, 1, 1, 0, 1, 1, 1, 1, 1)
                ? 0
                : 2;
   }
   if (std::strcmp(name, "fail_context") == 0) {
     g_fail = 5;
     auto p = qec_cc::write_temp(qec_cc::lut_yaml());
-    return host_ok(call_main({"--config=" + p}), 1, 1, 1, 1, 0, 1, 1, 0, 0, 0)
+    // set_bridge is the host ring-buffer probe. It fails before READY,
+    // so connect and launch never run, and teardown stops the dispatcher.
+    return host_ok(call_main({"--config=" + p}), 1, 1, 1, 0, 0, 1, 1, 1, 1, 1)
                ? 0
                : 2;
   }
