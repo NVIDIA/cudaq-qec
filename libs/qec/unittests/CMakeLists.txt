@@ -214,6 +214,7 @@ if(TARGET cudaq-qec-decoding-server)
       "LINKER:--wrap=cudaq_dispatcher_destroy"
       "LINKER:--wrap=cudaq_dispatcher_set_ringbuffer"
       "LINKER:--wrap=cudaq_dispatcher_set_cpu_dataplane"
+      "LINKER:--wrap=cudaq_dispatcher_set_bridge"
       "LINKER:--wrap=cudaq_dispatcher_set_function_table"
       "LINKER:--wrap=cudaq_dispatcher_set_control"
       "LINKER:--wrap=cudaq_dispatcher_start"
