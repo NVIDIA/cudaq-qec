@@ -31,6 +31,10 @@ namespace cudaq::qec {
 /// interpret its own parameters and hand back a node.
 struct node_build_context {
   std::string id;
+  std::any prepared_data;
+  /// Present only for a kind opting into native phase-model construction.
+  /// No full DEM/D/O has been realized before its factory is invoked.
+  std::shared_ptr<const dem_chunks_spec> native_dem_chunks;
   /// Measurement-to-detector and observable-flip matrices; null for a kind
   /// declaring `requires_dem = false`.
   std::shared_ptr<const sparse_binary_matrix> d, o;

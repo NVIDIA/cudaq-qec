@@ -70,6 +70,11 @@ struct task_graph_node_kind_spec {
   /// Whether the kind needs a DEM (`dem_chunks` or flat matrices) to build its
   /// D and O matrices.
   bool requires_dem = true;
+  /// Deliver the immutable phase spec to the factory without closing or
+  /// expanding it. Native factories own bounded window compilation and their
+  /// decoders; flat matrices and an externally built decoder are not accepted.
+  /// Defaults preserve the existing closed-model construction path.
+  bool native_dem_chunks = false;
   /// Optional policy describing the inner decoder's outputs. When absent, the
   /// output preserves the original observable-model policy: a decoder given O
   /// returns observables, while one without O returns errors. Auxiliary
@@ -201,6 +206,8 @@ struct task_graph_ensemble_spec {
 /// Move-only: it may carry an already-built decoder.
 struct task_graph_node_config {
   std::string id;
+  /// Process-local factory data supplied by a consumer after preparation.
+  std::any prepared_data;
   /// Registered node kind, e.g. "streaming", "sliding_window",
   /// "single_window", "xor".
   std::string kind = default_task_graph_node_kind;

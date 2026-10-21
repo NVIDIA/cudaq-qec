@@ -211,14 +211,16 @@ struct decoding_task_graph::impl::event_runtime {
       std::size_t blocker = no_event;
       std::size_t blocker_sequence = 0;
       // Direct children are stored in declared wire order. A later branch
-      // waits only when its transitive descendants intersect an earlier
-      // branch; disjoint fan-out remains immediately runnable.
+      // waits when a shared descendant requires ordered delivery. Rendezvous
+      // descendants can receive sibling inputs in either order: per-node
+      // leases serialize callbacks and this publication's parent cannot
+      // continue until every sibling subtree has drained.
       for (std::size_t earlier = slots[parent].first_child; earlier != no_event;
            earlier = slots[earlier].next_sibling) {
         const auto &candidate = slots[earlier];
         if (candidate.event.kind != graph_event_kind::streaming_edge)
           continue;
-        if (branches_overlap(candidate.event.node, consumer) &&
+        if (branches_require_order(candidate.event.node, consumer) &&
             (blocker == no_event || candidate.sequence > blocker_sequence)) {
           blocker = earlier;
           blocker_sequence = candidate.sequence;
@@ -428,7 +430,13 @@ private:
   }
 
   bool branches_overlap(std::size_t left, std::size_t right) const {
-    return owner.streaming_overlap[left][right] != 0;
+    return owner.streaming_overlap[left][right] !=
+           impl::streaming_overlap_kind::disjoint;
+  }
+
+  bool branches_require_order(std::size_t left, std::size_t right) const {
+    return owner.streaming_overlap[left][right] ==
+           impl::streaming_overlap_kind::ordered;
   }
 
   bool root_is_ready(const graph_event &event, const slot &candidate) const {
@@ -663,8 +671,13 @@ bool decoding_task_graph::impl::enqueue_sweep(const uint8_t *syndrome,
                                    const graph_event &event) {
     if (event.kind == graph_event_kind::streaming_raw) {
       auto &node = *streaming_nodes[event.node].capability;
+      if (event.offset == 0)
+        node.begin_input_record(type.value_or(round_type::BULK), len);
       const auto limit =
           type ? node.raw_chunk_limit() : node.untagged_chunk_limit();
+      if (limit && *limit == 0 && event.offset < len)
+        throw std::logic_error(
+            "decoding_task_graph: raw input node cannot make progress");
       const auto take =
           limit ? std::min(*limit, len - event.offset) : len - event.offset;
       const auto *chunk = syndrome ? syndrome + event.offset : nullptr;

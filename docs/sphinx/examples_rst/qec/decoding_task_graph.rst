@@ -520,3 +520,48 @@ flows into a downstream ``window_node`` (e.g. PyMatching) via a streaming edge:
    ``predecoder`` is a registered node kind. It produces both a
    ``logical_outcome`` and a ``detection_events`` residual on each fire through
    its ``pre_L`` and ``residual`` ports.
+
+Native model factories and plugin compatibility
+++++++++++++++++++++++++++++++++++++++++++++++
+
+A custom node kind can set ``native_dem_chunks`` together with
+``requires_dem = true`` and ``requires_decoder = false``. Its internal factory
+then receives an immutable ``dem_chunks_spec`` without realizing a whole-shot
+DEM or measurement map. The factory owns preparation and inner decoder
+construction. This is an optional capability; existing node kinds and decoder
+plugins retain their current model preparation and output contracts.
+
+``task_graph_node_config.prepared_data`` carries process-local factory data for
+programmatic construction. It is not serialized to YAML. A decoder-backed kind
+that declares ``requires_dem = false`` must receive an already-built decoder,
+not a decoder recipe or a model to prepare.
+
+Raw-input nodes may implement ``begin_input_record`` to learn an accepted
+operation's original tag and size before the executor splits it at that node's
+chunk limit. Only the last chunk carries ``FINAL``, as before. A zero chunk
+limit with nonempty input is an error, not permission to discard the record.
+
+A single streaming contributor may opt into explicit contiguous coverage
+instead of a fixed schedule. Each publication must start at the previous
+publication's end, beginning at round zero. Mid-stream clear preserves this
+coordinate; reset and post-``FINAL`` clear start a new coordinate epoch. This
+does not permit unscheduled, independently advancing contributors to be XORed
+together.
+
+A reconvergent operation can opt into order-independent streaming rendezvous
+when every firing consumes exactly one aligned value per input. The executor
+still serializes callbacks on each node and retains producer leases until all
+dependent deliveries finish. Other shared descendants keep ordered delivery;
+unrelated raw-input roots keep their existing ordering. A failed operation or
+reset publishes a failed streaming result with zero-valued corrections until a
+successful reset restores the graph.
+
+.. warning::
+
+   These hooks change the layout of ``task_graph_node_kind_spec``,
+   ``task_graph_node_config``, the internal ``node_build_context``, and the
+   virtual interface of ``streaming_task_graph_node``. Rebuild task-graph
+   plugins with the matching framework headers and library. Previously built
+   task-graph plugins are not binary-compatible. The loader currently runs
+   static registration during ``dlopen`` and has no pre-registration ABI gate;
+   an export manifest alone does not make a mismatched binary safe to load.

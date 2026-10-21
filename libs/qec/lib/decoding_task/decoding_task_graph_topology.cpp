@@ -78,8 +78,20 @@ node_build_context prepare_node(task_graph_node_config &cfg,
                                     decoder_model_source::dem_chunks);
   ctx.id = cfg.id;
   ctx.node_params = &cfg.node_params;
+  ctx.prepared_data = std::move(cfg.prepared_data);
 
   const bool has_flat = !cfg.d_sparse.empty();
+  if (kind.native_dem_chunks) {
+    if (!kind.requires_dem || kind.requires_decoder || !cfg.dem || has_flat ||
+        !cfg.h_sparse.empty() || !cfg.o_sparse.empty() ||
+        cfg.decoder_instance || !cfg.decoder_type.empty() ||
+        !cfg.stim_dem.empty())
+      throw std::invalid_argument(
+          where + " native kind requires only a dem_chunks phase model");
+    ctx.native_dem_chunks =
+        std::make_shared<const dem_chunks_spec>(std::move(*cfg.dem));
+    return ctx;
+  }
   // A kind applying O itself, including a guarded window, reads an error
   // pattern. Its stim_dem is therefore the node's whole model rather than the
   // inner decoder's alone, so O and H both come from the text and share the
@@ -98,6 +110,17 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     if (cfg.dem.has_value() || has_flat)
       throw std::invalid_argument(where + " of kind '" + kind.name +
                                   "' takes no DEM");
+    if (kind.requires_decoder) {
+      if (!cfg.decoder_instance || !cfg.decoder_type.empty() ||
+          !cfg.stim_dem.empty())
+        throw std::invalid_argument(where + " of kind '" + kind.name +
+                                    "' requires an already-built decoder");
+      ctx.dec = std::move(cfg.decoder_instance);
+    } else if (cfg.decoder_instance || !cfg.decoder_type.empty() ||
+               !cfg.stim_dem.empty()) {
+      throw std::invalid_argument(where + " of kind '" + kind.name +
+                                  "' takes no decoder");
+    }
     return ctx;
   }
 

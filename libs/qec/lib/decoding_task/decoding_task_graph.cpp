@@ -703,6 +703,15 @@ void decoding_task_graph::impl::compile_wires() {
           const auto endpoint =
               node_ids[idx] + "." + node_output_names[idx][slot];
           if (!schedule) {
+            std::size_t contributor_count = 0;
+            for (const auto &candidate : streaming_nodes)
+              for (const auto &reach : output_reach[candidate.node_index])
+                contributor_count += output_has_parity_contributor[k]
+                                         ? reach[k].parity
+                                         : reach[k].reachable;
+            if (contributor_count == 1 &&
+                entry.capability->has_explicit_streaming_coverage())
+              continue;
             record_streaming_conflict(
                 "streaming output '" + endpoint + "' feeds graph output '" +
                 output_names[k] +
@@ -765,20 +774,28 @@ void decoding_task_graph::impl::compile_wires() {
           streaming_reachability[si][descendant] |=
               streaming_reachability[dependent][descendant];
     }
-    streaming_overlap.assign(M, std::vector<uint8_t>(M, uint8_t{0}));
+    streaming_overlap.assign(M, std::vector<streaming_overlap_kind>(
+                                    M, streaming_overlap_kind::disjoint));
     for (std::size_t left = 0; left < M; ++left)
       for (std::size_t right = left; right < M; ++right)
         for (std::size_t descendant = 0; descendant < M; ++descendant)
           if (streaming_reachability[left][descendant] &&
               streaming_reachability[right][descendant]) {
-            streaming_overlap[left][right] = 1;
-            streaming_overlap[right][left] = 1;
-            break;
+            const auto overlap =
+                streaming_nodes[descendant]
+                        .capability->supports_streaming_rendezvous()
+                    ? streaming_overlap_kind::rendezvous
+                    : streaming_overlap_kind::ordered;
+            streaming_overlap[left][right] = overlap;
+            streaming_overlap[right][left] = overlap;
+            if (overlap == streaming_overlap_kind::ordered)
+              break;
           }
     if (M > 0)
       streaming_parallel_width = maximum_parallel_width(streaming_dependents);
 
     streaming_node_generations.assign(M, 0);
+    streaming_node_coverages.assign(M, std::nullopt);
     streaming_output_fire_ordinals.assign(num_sinks, 0);
     reset_streaming_progress();
   }
@@ -915,8 +932,20 @@ struct pending_async_run {
 // Count publications per streaming node; output barriers consume these counts.
 void decoding_task_graph::impl::record_streaming_publication(int node_idx) {
   const int streaming_idx = streaming_by_node[node_idx];
-  if (streaming_idx >= 0)
+  if (streaming_idx >= 0) {
+    const auto *capability = streaming_nodes[streaming_idx].capability;
+    if (capability->has_explicit_streaming_coverage()) {
+      const auto coverage = capability->streaming_coverage();
+      auto &previous = streaming_node_coverages[streaming_idx];
+      const auto begin = previous ? previous->end_round : 0;
+      if (!coverage || coverage->begin_round != begin ||
+          coverage->end_round <= coverage->begin_round)
+        throw std::runtime_error("streaming output violated its explicit "
+                                 "contiguous coverage contract");
+      previous = coverage;
+    }
     ++streaming_node_generations[static_cast<std::size_t>(streaming_idx)];
+  }
 }
 
 // Publish each output through the slowest contributor, then derive the exact
@@ -961,7 +990,18 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
       if (exact_count && exact_count != contributors.size())
         throw std::logic_error(
             "task graph: contributors mix exact and scheduled coverage");
-      if (exact) {
+      if (contributors.size() == 1 &&
+          streaming_nodes[contributors.front()]
+              .capability->has_explicit_streaming_coverage()) {
+        // One input operation may contain several node publications. Each was
+        // checked when recorded; expose their combined contiguous interval.
+        const auto &coverage = streaming_node_coverages[contributors.front()];
+        if (!coverage)
+          throw std::logic_error(
+              "streaming publication has no validated coverage");
+        output.coverage_begin_round = output.coverage_end_round;
+        output.coverage_end_round = coverage->end_round;
+      } else if (exact) {
         output.coverage_begin_round = exact->begin_round;
         output.coverage_end_round = exact->end_round;
         // A native shot reports exact coverage once FINAL ends its stream, so
@@ -1066,6 +1106,8 @@ void decoding_task_graph::impl::reset_streaming_progress() {
   result.error.clear();
   std::fill(streaming_node_generations.begin(),
             streaming_node_generations.end(), 0);
+  std::fill(streaming_node_coverages.begin(), streaming_node_coverages.end(),
+            std::nullopt);
   std::fill(streaming_output_fire_ordinals.begin(),
             streaming_output_fire_ordinals.end(), 0);
   std::fill(result.values.begin(), result.values.end(), uint8_t{0});
@@ -1096,6 +1138,10 @@ void decoding_task_graph::impl::fail_streaming_progress(
 void decoding_task_graph::impl::compose_streaming_values() const {
   auto &values = streaming_result_state.values;
   std::fill(values.begin(), values.end(), uint8_t{0});
+  // Failed nodes need not expose corrections. Preserve the original failure
+  // and zero output instead of replacing it with a secondary node exception.
+  if (streaming_result_state.status == task_graph_streaming_status::failed)
+    return;
   for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
     const auto &node = *streaming_nodes[si].capability;
     const uint8_t *corrections = node.corrections();
@@ -1239,9 +1285,11 @@ const uint8_t *decoding_task_graph::get_obs_corrections() const {
   const in_flight_guard guard(impl_->in_flight, "get_obs_corrections");
   auto &g = *impl_;
   g.require_streaming_support("get_obs_corrections");
-  // One streaming node owning the whole buffer returns its corrections in
-  // place, no copy.
-  if (g.streaming_nodes.size() == 1 &&
+  // One healthy streaming node owning the whole buffer returns its
+  // corrections in place, no copy. A failed reset may leave stale node data;
+  // use the graph's zero-valued failed snapshot in that case.
+  if (g.streaming_result_state.status != task_graph_streaming_status::failed &&
+      g.streaming_nodes.size() == 1 &&
       g.streaming_nodes[0].capability->num_observables() == g.n_obs &&
       g.streaming_node_output_offsets[0].size() == 1 &&
       g.streaming_node_output_offsets[0][0] == 0)
@@ -1274,9 +1322,28 @@ void decoding_task_graph::clear_corrections() {
   impl_->invalidate_async_stream_snapshot();
   // This consumes the published accumulator mid-stream. Keep each node's
   // overlap buffer so the next stride still decodes the correct frame.
+  const bool closed_epoch = impl_->finalized;
   impl_->finalized = false;
   for (const auto &entry : impl_->streaming_nodes)
     entry.capability->clear_corrections();
+  if (closed_epoch) {
+    // Explicit-coverage sources start their physical coordinates at zero on
+    // post-FINAL clear. Preserve ordinary nodes' existing generation/history
+    // semantics, and preserve explicit carry on every mid-stream clear.
+    for (std::size_t si = 0; si < impl_->streaming_nodes.size(); ++si)
+      if (impl_->streaming_nodes[si]
+              .capability->has_explicit_streaming_coverage())
+        impl_->streaming_node_coverages[si].reset();
+    for (std::size_t k = 0; k < impl_->output_streaming_nodes.size(); ++k) {
+      const auto &contributors = impl_->output_streaming_nodes[k];
+      if (contributors.size() == 1 &&
+          impl_->streaming_nodes[contributors.front()]
+              .capability->has_explicit_streaming_coverage()) {
+        impl_->streaming_result_state.outputs[k].coverage_begin_round = 0;
+        impl_->streaming_result_state.outputs[k].coverage_end_round = 0;
+      }
+    }
+  }
   impl_->consume_streaming_result();
   if (impl_->async_streaming.enabled) {
     std::lock_guard<std::mutex> lock(impl_->async_streaming.snapshot_mutex);
@@ -1290,8 +1357,17 @@ void decoding_task_graph::reset_decoder() {
     impl_->cancel_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "reset_decoder");
   impl_->invalidate_async_stream_snapshot();
+  // A reset can throw after earlier nodes have already reset. Hide the old
+  // aggregate immediately; only a fully successful reset opens a clean epoch.
+  impl_->fail_streaming_progress("graph reset did not complete");
+  std::fill(impl_->streaming_result_state.values.begin(),
+            impl_->streaming_result_state.values.end(), uint8_t{0});
+  impl_->async_streaming.needs_reset = true;
+  if (impl_->async_streaming.enabled) {
+    std::lock_guard<std::mutex> lock(impl_->async_streaming.snapshot_mutex);
+    impl_->async_streaming.read_snapshot = impl_->streaming_result_state;
+  }
   impl_->finalized = false;
-  impl_->async_streaming.needs_reset = false;
   for (auto &node : impl_->nodes)
     if (auto *decoder_backed = node->decoder_backed())
       decoder_backed->reset_decoder();
@@ -1300,6 +1376,7 @@ void decoding_task_graph::reset_decoder() {
   std::fill(impl_->streaming_deliveries_seen.begin(),
             impl_->streaming_deliveries_seen.end(), std::size_t{0});
   impl_->reset_streaming_progress();
+  impl_->async_streaming.needs_reset = false;
   if (impl_->async_streaming.enabled) {
     std::lock_guard<std::mutex> lock(impl_->async_streaming.snapshot_mutex);
     impl_->async_streaming.read_snapshot = impl_->streaming_result_state;
@@ -1328,6 +1405,8 @@ decoding_task_graph::streaming_incompatibility_reason() const noexcept {
 }
 
 const sparse_binary_matrix &decoding_task_graph::d_matrix() const {
+  if (!impl_->d)
+    throw std::logic_error("d_matrix: not a single-window-node graph");
   return *impl_->d;
 }
 

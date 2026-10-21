@@ -55,6 +55,13 @@ public:
   };
 
   virtual ~streaming_task_graph_node() = default;
+  /// Notify raw-input nodes before an accepted input operation is split at
+  /// their chunk limits. In particular, a heterogeneous terminal frame must
+  /// be identifiable before its first piece, not just its FINAL-tagged last
+  /// piece. Legacy nodes need no notification and retain their enqueue API.
+  virtual void begin_input_record(round_type /*type*/, std::size_t /*bytes*/) {}
+  /// Exact coverage of the most recent publication, when ownership cannot be
+  /// inferred from a fixed schedule (for example a partial terminal window).
   struct committed_coverage {
     std::uint64_t begin_round;
     std::uint64_t end_round;
@@ -63,6 +70,13 @@ public:
   virtual std::optional<committed_coverage> streaming_coverage() const {
     return std::nullopt;
   }
+  /// A variable-cadence source may replace a fixed schedule only for a
+  /// single-contributor graph output. It must report a contiguous, nonempty
+  /// coverage interval for every publication. This does not authorize edge
+  /// rendezvous or multi-contributor alignment without a compiled schedule.
+  /// Mid-stream clear preserves coordinates; post-FINAL clear starts a new
+  /// physical coverage epoch at round zero, as does reset.
+  virtual bool has_explicit_streaming_coverage() const { return false; }
   /// Accumulate one raw chunk.  `type` is FINAL only on the chunk that ends a
   /// FINAL round -- the last piece of it this node receives -- and BULK
   /// otherwise.  flush() follows a FINAL round either way, so a kind that
@@ -131,6 +145,16 @@ public:
   virtual bool supports_streaming_input(std::size_t /*slot*/) const {
     return false;
   }
+
+  /// Opt in to order-independent delivery within one upstream publication.
+  /// Each firing consumes exactly one value per input slot, with aligned
+  /// schedules; no slot may consume data from a later firing early. Retained
+  /// inputs must own their data or share immutable storage, never alias a
+  /// producer's mutable output. Arrival order must not change the result.
+  /// Callbacks remain serialized per node; this does not require node locks.
+  /// The executor retains publication leases until all descendants drain.
+  /// Unrelated raw input roots keep their existing ordering even when true.
+  virtual bool supports_streaming_rendezvous() const { return false; }
 
   /// Called after this node fires during streaming execution.
   /// Returns a pointer to the pre-allocated output value on `slot`, or nullptr

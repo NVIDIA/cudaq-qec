@@ -78,6 +78,10 @@ register_task_graph_node_kind_locked(task_graph_node_kind_spec spec,
   if (spec.name.empty())
     throw std::invalid_argument(
         "register_task_graph_node_kind: kind name must not be empty");
+  if (spec.native_dem_chunks && (!spec.requires_dem || spec.requires_decoder))
+    throw std::invalid_argument(
+        "register_task_graph_node_kind: native chunks require a DEM and "
+        "factory-owned decoder state");
   // The schema name is derived, not supplied, so a kind cannot register its
   // parameters under a name the config layer would not look them up by.
   params.name = task_graph_node_schema_name(spec.name);

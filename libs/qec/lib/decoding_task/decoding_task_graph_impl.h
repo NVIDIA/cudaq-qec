@@ -115,7 +115,8 @@ struct decoding_task_graph::impl {
   std::vector<std::vector<std::size_t>> streaming_dependents;
   std::vector<int32_t> streaming_predecessor_counts;
   std::vector<std::vector<uint8_t>> streaming_reachability;
-  std::vector<std::vector<uint8_t>> streaming_overlap;
+  enum class streaming_overlap_kind : uint8_t { disjoint, rendezvous, ordered };
+  std::vector<std::vector<streaming_overlap_kind>> streaming_overlap;
   std::size_t streaming_parallel_width = 1;
 
   // Sizes cached by compile_wires() so the accessors do not have to nominate a
@@ -136,6 +137,8 @@ struct decoding_task_graph::impl {
   // Graph-owned publication counters and persistent result storage. All are
   // pre-sized during compilation; streaming operations perform no allocation.
   std::vector<std::uint64_t> streaming_node_generations;
+  std::vector<std::optional<streaming_task_graph_node::committed_coverage>>
+      streaming_node_coverages;
   std::vector<std::uint64_t> streaming_output_fire_ordinals;
   mutable task_graph_streaming_result streaming_result_state;
 

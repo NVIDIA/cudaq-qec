@@ -10,6 +10,7 @@
 #include "../lib/decoding_task/decoding_task_graph_utils.h"
 #include "../lib/decoding_task/decoding_task_memory_window_node.h"
 #include "../lib/decoding_task/decoding_task_predecoder_node.h"
+#include "../lib/decoding_task/decoding_task_streaming_operation.h"
 #include "../lib/decoding_task/decoding_task_window_node.h"
 #include "../lib/realtime/decode_target.h"
 #include "../lib/realtime/realtime_decoding.h"
@@ -5425,8 +5426,10 @@ public:
 
   streaming_task_graph_node *streaming() override { return this; }
   bool enqueue(const uint8_t *, std::size_t len, round_type) override {
-    if (mode_ == "throwing")
+    if (mode_ == "throwing") {
+      failed_ = true;
       throw std::runtime_error("test streaming failure");
+    }
     if (mode_ == "guarded_noop_tail") {
       bytes_in_ += len;
       if (bytes_in_ < 3)
@@ -5436,11 +5439,16 @@ public:
     }
     return false;
   }
-  const uint8_t *corrections() const override { return &correction_; }
+  const uint8_t *corrections() const override {
+    if (failed_)
+      throw std::logic_error("test corrections unavailable after failure");
+    return &correction_;
+  }
   void clear_corrections() override { correction_ = 0; }
   void reset_streaming_state() override {
     correction_ = 0;
     bytes_in_ = 0;
+    failed_ = false;
   }
   std::size_t num_msyn_per_decode() const override {
     return mode_ == "guarded_noop_tail" ? 3 : 1;
@@ -5507,6 +5515,7 @@ private:
   std::string mode_;
   std::size_t bytes_in_ = 0;
   uint8_t correction_ = 0;
+  bool failed_ = false;
 };
 
 static const bool routing_probe_registered = [] {
@@ -5524,6 +5533,95 @@ static const bool routing_probe_registered = [] {
                      });
   return true;
 }();
+
+TEST(DecodingTaskGraph, NativeChunksReachFactoryWithoutFullRealization) {
+  constexpr std::uint64_t horizon = 1000000000;
+  auto invoked = std::make_shared<bool>(false);
+  task_graph_node_kind_spec kind;
+  kind.name = "test_native_chunks";
+  kind.requires_decoder = false;
+  kind.native_dem_chunks = true;
+  register_node_kind(
+      std::move(kind), {}, [invoked, horizon](node_build_context &ctx) {
+        EXPECT_NE(ctx.native_dem_chunks, nullptr);
+        if (ctx.native_dem_chunks)
+          EXPECT_EQ(ctx.native_dem_chunks->num_rounds, horizon);
+        EXPECT_EQ(ctx.d, nullptr);
+        EXPECT_EQ(ctx.h, nullptr);
+        EXPECT_EQ(ctx.o, nullptr);
+        EXPECT_EQ(ctx.closed_dem, nullptr);
+        EXPECT_EQ(ctx.dec, nullptr);
+        *invoked = true;
+        return std::make_unique<routing_probe_node>("no_raw_support");
+      });
+  const auto config = [] {
+    task_graph_node_config node;
+    node.id = "native";
+    node.kind = "test_native_chunks";
+    node.dem = rep5_spec(horizon);
+    return node;
+  };
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(config());
+  EXPECT_NO_THROW(decoding_task_graph::from_topology(std::move(nodes)));
+  EXPECT_TRUE(*invoked);
+  *invoked = false;
+  auto invalid = config();
+  invalid.h_sparse = {{0}};
+  nodes.clear();
+  nodes.push_back(std::move(invalid));
+  EXPECT_THROW(decoding_task_graph::from_topology(std::move(nodes)),
+               std::invalid_argument);
+  EXPECT_FALSE(*invoked);
+}
+
+TEST(DecodingTaskGraph,
+     NativeChunkKindRejectsConflictingConstructionContracts) {
+  task_graph_node_kind_spec kind;
+  kind.name = "test_invalid_native_chunks";
+  kind.native_dem_chunks = true;
+  EXPECT_THROW(register_task_graph_node_kind(kind, {}), std::invalid_argument);
+  kind.requires_decoder = false;
+  kind.requires_dem = false;
+  EXPECT_THROW(register_task_graph_node_kind(kind, {}), std::invalid_argument);
+}
+
+TEST(DecodingTaskGraph, PreparedFactoryDataPreservesAnAlreadyBuiltDecoder) {
+  auto invoked = std::make_shared<bool>(false);
+  task_graph_node_kind_spec kind;
+  kind.name = "test_prepared_decoder";
+  kind.requires_dem = false;
+  auto registration = register_scoped_node_kind(
+      std::move(kind), {}, [invoked](node_build_context &ctx) {
+        EXPECT_NE(ctx.dec, nullptr);
+        EXPECT_EQ(std::any_cast<std::string>(ctx.prepared_data), "prepared");
+        EXPECT_EQ(ctx.d, nullptr);
+        EXPECT_EQ(ctx.h, nullptr);
+        EXPECT_EQ(ctx.o, nullptr);
+        *invoked = true;
+        return std::make_unique<routing_probe_node>("no_raw_support");
+      });
+  const auto config = [] {
+    task_graph_node_config node;
+    node.id = "prepared";
+    node.kind = "test_prepared_decoder";
+    node.prepared_data = std::string{"prepared"};
+    return node;
+  };
+  std::vector<task_graph_node_config> nodes;
+  auto prepared = config();
+  prepared.decoder_instance = get_decoder(
+      "single_error_lut", make_rep3_inputs().closed.detector_error_matrix);
+  nodes.push_back(std::move(prepared));
+  EXPECT_NO_THROW(decoding_task_graph::from_topology(std::move(nodes)));
+  EXPECT_TRUE(*invoked);
+  *invoked = false;
+  nodes.clear();
+  nodes.push_back(config());
+  EXPECT_THROW(decoding_task_graph::from_topology(std::move(nodes)),
+               std::invalid_argument);
+  EXPECT_FALSE(*invoked);
+}
 
 static task_graph_node_config routing_probe_config(std::string id,
                                                    std::string mode) {
@@ -5701,6 +5799,211 @@ static const bool ordered_stream_registered = [] {
                      });
   return true;
 }();
+
+TEST(DecodingTaskGraph, ExplicitCoverageRejectsMissingOrGappedPublication) {
+  class coverage_probe final : public ordered_stream_node {
+  public:
+    explicit coverage_probe(bool missing)
+        : ordered_stream_node("source", 1), missing_(missing) {}
+    std::optional<window_spec> streaming_schedule() const override {
+      return std::nullopt;
+    }
+    bool has_explicit_streaming_coverage() const override { return true; }
+    std::optional<committed_coverage> streaming_coverage() const override {
+      return missing_ ? std::nullopt : std::optional{committed_coverage{1, 2}};
+    }
+
+  private:
+    bool missing_;
+  };
+  for (bool missing : {false, true}) {
+    task_graph_node_kind_spec kind;
+    kind.name = missing ? "test_missing_coverage" : "test_gapped_coverage";
+    kind.requires_dem = kind.requires_decoder = false;
+    const auto name = kind.name;
+    register_node_kind(std::move(kind), {}, [missing](node_build_context &) {
+      return std::make_unique<coverage_probe>(missing);
+    });
+    task_graph_node_config config;
+    config.id = "source";
+    config.kind = name;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(config));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes), {{"measurements", "output", "source", "input"},
+                           {"source", "output", "output", "input"}});
+    const std::uint8_t zero = 0;
+    EXPECT_THROW(graph->enqueue_syndrome(&zero, 1), std::runtime_error);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::failed);
+  }
+  std::vector<task_graph_node_config> folded;
+  for (const auto *id : {"left", "right"}) {
+    task_graph_node_config node;
+    node.id = id;
+    node.kind = "test_gapped_coverage";
+    folded.push_back(std::move(node));
+  }
+  task_graph_node_config combine;
+  combine.id = "combine";
+  combine.kind = "xor";
+  folded.push_back(std::move(combine));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(folded), {{"measurements", "output", "left", "input"},
+                          {"measurements", "output", "right", "input"},
+                          {"left", "output", "combine", "a"},
+                          {"right", "output", "combine", "b"},
+                          {"combine", "output", "output", "input"}});
+  EXPECT_FALSE(graph->supports_streaming());
+  EXPECT_NE(graph->streaming_incompatibility_reason().find("schedule"),
+            std::string::npos);
+}
+
+TEST(DecodingTaskGraph, ExplicitCoverageTracksBatchesClearsAndShotEpochs) {
+  class coverage_source final : public ordered_stream_node {
+  public:
+    coverage_source() : ordered_stream_node("source", 0) {}
+    bool enqueue(const uint8_t *bits, std::size_t len,
+                 round_type type) override {
+      const auto fired = ordered_stream_node::enqueue(bits, len, type);
+      parity_ ^= bits[0];
+      coverage_ = {next_round_, next_round_ + 1};
+      ++next_round_;
+      finalized_ = type == round_type::FINAL;
+      return fired;
+    }
+    std::optional<window_spec> streaming_schedule() const override {
+      return std::nullopt;
+    }
+    bool has_explicit_streaming_coverage() const override { return true; }
+    std::optional<committed_coverage> streaming_coverage() const override {
+      return coverage_;
+    }
+    const uint8_t *corrections() const override { return &parity_; }
+    void clear_corrections() override {
+      parity_ = 0;
+      if (finalized_) {
+        next_round_ = 0;
+        coverage_.reset();
+        finalized_ = false;
+      }
+    }
+    void reset_streaming_state() override {
+      ordered_stream_node::reset_streaming_state();
+      parity_ = 0;
+      next_round_ = 0;
+      coverage_.reset();
+      finalized_ = false;
+    }
+
+  private:
+    uint8_t parity_ = 0;
+    uint64_t next_round_ = 0;
+    bool finalized_ = false;
+    std::optional<committed_coverage> coverage_;
+  };
+  task_graph_node_kind_spec kind;
+  kind.name = "test_contiguous_coverage";
+  kind.requires_dem = kind.requires_decoder = false;
+  auto registration =
+      register_scoped_node_kind(std::move(kind), {}, [](node_build_context &) {
+        return std::make_unique<coverage_source>();
+      });
+  for (const bool asynchronous : {false, true}) {
+    std::vector<task_graph_node_config> nodes;
+    task_graph_node_config source;
+    source.id = "source";
+    source.kind = "test_contiguous_coverage";
+    nodes.push_back(std::move(source));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "source", "input"},
+         {"source", "output", "output", "input"}},
+        {.async_streaming = asynchronous, .async_queue_capacity = 2});
+    ASSERT_TRUE(graph->supports_streaming())
+        << graph->streaming_incompatibility_reason();
+    const std::array<uint8_t, 3> input{1, 0, 0};
+    EXPECT_EQ(graph->enqueue_syndrome(input.data(), input.size()),
+              !asynchronous);
+    EXPECT_EQ(graph->streaming_result().values, (std::vector<uint8_t>{1}));
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 0u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 3u);
+    graph->clear_corrections();
+    ASSERT_TRUE(graph->enqueue_syndrome(input.data(), 2, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 3u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 5u);
+    graph->clear_corrections();
+    ASSERT_TRUE(graph->enqueue_syndrome(input.data(), 1, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 0u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 1u);
+    graph->reset_decoder();
+    ASSERT_TRUE(graph->enqueue_syndrome(input.data(), 2, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 0u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 2u);
+  }
+}
+
+TEST(DecodingTaskGraph, FailedResetHidesPreviousCorrectionsUntilRecovery) {
+  class reset_probe final : public ordered_stream_node {
+  public:
+    explicit reset_probe(std::shared_ptr<bool> fail)
+        : ordered_stream_node("source", 0), fail_(std::move(fail)) {}
+    bool enqueue(const uint8_t *bits, std::size_t size,
+                 round_type type) override {
+      correction_ = 1;
+      return ordered_stream_node::enqueue(bits, size, type);
+    }
+    const uint8_t *corrections() const override { return &correction_; }
+    void reset_streaming_state() override {
+      if (*fail_)
+        throw std::runtime_error("injected reset failure");
+      correction_ = 0;
+      ordered_stream_node::reset_streaming_state();
+    }
+
+  private:
+    std::shared_ptr<bool> fail_;
+    uint8_t correction_ = 0;
+  };
+  auto fail = std::make_shared<bool>(false);
+  task_graph_node_kind_spec kind;
+  kind.name = "test_failed_reset";
+  kind.requires_dem = kind.requires_decoder = false;
+  auto registration = register_scoped_node_kind(
+      std::move(kind), {}, [fail](node_build_context &) {
+        return std::make_unique<reset_probe>(fail);
+      });
+  for (const bool asynchronous : {false, true}) {
+    std::vector<task_graph_node_config> nodes;
+    task_graph_node_config node;
+    node.id = "reset_probe";
+    node.kind = "test_failed_reset";
+    nodes.push_back(std::move(node));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "reset_probe", "input"},
+         {"reset_probe", "output", "output", "input"}},
+        {.async_streaming = asynchronous, .async_queue_capacity = 2});
+    const uint8_t bit = 1;
+    EXPECT_EQ(graph->enqueue_syndrome(&bit, 1), !asynchronous);
+    EXPECT_EQ(graph->streaming_result().values, (std::vector<uint8_t>{1}));
+    *fail = true;
+    EXPECT_THROW(graph->reset_decoder(), std::runtime_error);
+    ASSERT_NE(graph->get_obs_corrections(), nullptr);
+    EXPECT_EQ(graph->get_obs_corrections()[0], 0);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::failed);
+    EXPECT_EQ(graph->streaming_result().values, (std::vector<uint8_t>{0}));
+    EXPECT_THROW(graph->enqueue_syndrome(&bit, 1), std::logic_error);
+    *fail = false;
+    EXPECT_NO_THROW(graph->reset_decoder());
+    EXPECT_EQ(graph->get_obs_corrections()[0], 0);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::pending);
+    EXPECT_EQ(graph->enqueue_syndrome(&bit, 1), !asynchronous);
+    EXPECT_EQ(graph->streaming_result().values, (std::vector<uint8_t>{1}));
+  }
+}
 
 class lockstep_probe {
 public:
@@ -8594,6 +8897,12 @@ public:
   }
 };
 
+/// A malformed raw-input producer that cannot accept any bytes.
+class stalled_source_node : public dummy_source_node {
+public:
+  std::optional<std::size_t> raw_chunk_limit() const override { return 0; }
+};
+
 /// Names an output type nothing registered.
 class unregistered_source_node : public dummy_source_node {
 public:
@@ -8632,6 +8941,9 @@ static void register_one_shot_test_kind(const char *name,
 }
 
 static const bool dummy_kinds_registered = [] {
+  register_one_shot_test_kind("test_stalled_source", [](node_build_context &) {
+    return std::make_unique<stalled_source_node>();
+  });
   register_one_shot_test_kind("test_dummy_source", [](node_build_context &) {
     return std::unique_ptr<task_graph_node>(new dummy_source_node());
   });
@@ -8683,6 +8995,101 @@ TEST(DecodingTaskGraph, RegisteredEdgeValueTypeWiresAndRuns) {
   // run too.
   m.bits = {1, 1, 0, 0};
   EXPECT_EQ(graph->run(m).bits[0], 0);
+}
+
+TEST(DecodingTaskGraph, MatrixAccessorsRejectTopologyWithoutGlobalMatrices) {
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(decoderless_node("src", "test_dummy_source"));
+  nodes.push_back(decoderless_node("sink", "test_dummy_sink"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"dets", "output", "src", "input"},
+                         {"src", "output", "sink", "input"},
+                         {"sink", "output", "output", "input"}});
+  EXPECT_THROW((void)graph->d_matrix(), std::logic_error);
+  EXPECT_THROW((void)graph->o_matrix(), std::logic_error);
+}
+
+TEST(DecodingTaskGraph, ZeroRawCapacityRejectsRatherThanDroppingAcceptedInput) {
+  for (const bool asynchronous : {false, true}) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(decoderless_node("src", "test_stalled_source"));
+    nodes.push_back(decoderless_node("sink", "test_dummy_sink"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"dets", "output", "src", "input"},
+         {"src", "output", "sink", "input"},
+         {"sink", "output", "output", "input"}},
+        {.async_streaming = asynchronous, .async_queue_capacity = 2});
+    const std::uint8_t byte = 1;
+    EXPECT_THROW(graph->enqueue_syndrome(&byte, 1, round_type::FINAL),
+                 std::logic_error);
+  }
+}
+
+TEST(DecodingTaskGraph, RecordNotificationPreservesTaggedAndUntaggedChunking) {
+  struct record_trace {
+    std::vector<std::pair<round_type, std::size_t>> records;
+    std::vector<std::vector<uint8_t>> chunks;
+    std::vector<round_type> tags;
+    std::size_t untagged_chunks = 0;
+  };
+  class record_source : public dummy_source_node {
+  public:
+    explicit record_source(std::shared_ptr<record_trace> trace)
+        : trace_(std::move(trace)) {}
+    void begin_input_record(round_type type, std::size_t bytes) override {
+      trace_->records.emplace_back(type, bytes);
+    }
+    std::optional<std::size_t> raw_chunk_limit() const override { return 1; }
+    std::optional<std::size_t> untagged_chunk_limit() const override {
+      return 2;
+    }
+    bool enqueue(const uint8_t *bits, std::size_t size,
+                 round_type type) override {
+      trace_->tags.push_back(type);
+      trace_->chunks.emplace_back(bits, bits + size);
+      return dummy_source_node::enqueue(bits, size, type);
+    }
+    bool enqueue_untagged(const uint8_t *bits, std::size_t size) override {
+      ++trace_->untagged_chunks;
+      return enqueue(bits, size, round_type::BULK);
+    }
+
+  private:
+    std::shared_ptr<record_trace> trace_;
+  };
+  const auto trace = std::make_shared<record_trace>();
+  register_one_shot_test_kind("test_record_notification_source",
+                              [trace](node_build_context &) {
+                                return std::make_unique<record_source>(trace);
+                              });
+  for (const bool asynchronous : {false, true}) {
+    *trace = {};
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(decoderless_node("src", "test_record_notification_source"));
+    nodes.push_back(decoderless_node("sink", "test_dummy_sink"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"dets", "output", "src", "input"},
+         {"src", "output", "sink", "input"},
+         {"sink", "output", "output", "input"}},
+        {.async_streaming = asynchronous, .async_queue_capacity = 2});
+    const std::array<uint8_t, 5> bits{1, 0, 1, 1, 0};
+    (void)graph->enqueue_syndrome(bits.data(), bits.size());
+    (void)graph->enqueue_syndrome(bits.data(), bits.size(), round_type::FINAL);
+    const std::vector<std::pair<round_type, std::size_t>> expected_records{
+        {round_type::BULK, bits.size()}, {round_type::FINAL, bits.size()}};
+    EXPECT_EQ(trace->records, expected_records);
+    EXPECT_EQ(trace->untagged_chunks, 3u);
+    EXPECT_EQ(trace->chunks,
+              (std::vector<std::vector<uint8_t>>{
+                  {1, 0}, {1, 1}, {0}, {1}, {0}, {1}, {1}, {0}}));
+    ASSERT_EQ(trace->tags.size(), 8u);
+    EXPECT_EQ(trace->tags.back(), round_type::FINAL);
+    EXPECT_TRUE(
+        std::all_of(trace->tags.begin(), trace->tags.end() - 1,
+                    [](round_type type) { return type == round_type::BULK; }));
+  }
 }
 
 TEST(DecodingTaskGraph, RegisteredEdgeValueTypeFlowsOnAStreamingEdge) {
@@ -11700,7 +12107,8 @@ TEST(DecodingTaskGraph, StreamingResultLatchesOperationalFailure) {
   const auto &failed = graph->streaming_result();
   EXPECT_EQ(failed.status, task_graph_streaming_status::failed);
   EXPECT_FALSE(failed.operation_completed);
-  EXPECT_NE(failed.error.find("test streaming failure"), std::string::npos);
+  EXPECT_EQ(failed.error, "test streaming failure");
+  EXPECT_EQ(failed.values, (std::vector<uint8_t>{0}));
   EXPECT_EQ(failed.result_revision, 1u);
   ASSERT_EQ(failed.outputs.size(), 1u);
   EXPECT_EQ(failed.outputs[0].status, task_graph_streaming_status::failed);
@@ -11978,6 +12386,212 @@ TEST(DecodingTaskGraph, RoundSizeMismatchIsStreamingOnly) {
                          {"ones", "output", "output", "L_ones"},
                          {"twos", "output", "output", "L_twos"}});
   expect_batch_valid_streaming_conflict(std::move(graph), "num_msyn_per_round");
+}
+
+namespace {
+struct rendezvous_observation {
+  std::shared_ptr<parallel_decode_probe> gate;
+  std::vector<uint8_t> joined;
+  std::vector<std::size_t> slots;
+  bool throw_left = false;
+};
+struct rendezvous_node_data {
+  std::shared_ptr<rendezvous_observation> observation;
+  std::string role;
+  bool ordered = false;
+};
+class rendezvous_test_node : public streaming_operation {
+  rendezvous_node_data data_;
+
+public:
+  explicit rendezvous_test_node(rendezvous_node_data data)
+      : streaming_operation(data.role == "join" ? 2 : 1, 1, 1),
+        data_(std::move(data)) {}
+  bool supports_streaming_rendezvous() const override { return !data_.ordered; }
+  std::vector<std::string> inputs() const override {
+    return data_.role == "join" ? std::vector<std::string>{"a", "b"}
+                                : std::vector<std::string>{"input"};
+  }
+  std::vector<std::string> outputs() const override { return {"output"}; }
+  std::optional<edge_value_type> output_type(std::size_t) const override {
+    return logical_outcome_type;
+  }
+  std::optional<std::size_t> output_value_size(std::size_t) const override {
+    return 1;
+  }
+  bool accepts_input_type(std::size_t, edge_value_type type) const override {
+    return type == logical_outcome_type;
+  }
+  bool enqueue_edge_value(const edge_value &value, std::size_t slot) override {
+    if (data_.role == "join") {
+      data_.observation->slots.push_back(slot);
+      if (data_.observation->gate)
+        data_.observation->gate->enter();
+    }
+    return streaming_operation::enqueue_edge_value(value, slot);
+  }
+  void execute_indexed(const std::vector<edge_value> &inputs,
+                       std::vector<edge_value> &outputs) const override {
+    auto &observed = *data_.observation;
+    if (data_.role == "join") {
+      const auto &left = inputs[0].get<logical_outcome>().bits;
+      const auto &right = inputs[1].get<logical_outcome>().bits;
+      if (left != right)
+        throw std::runtime_error("mixed publication inputs");
+      observed.joined.push_back(left.at(0));
+    } else {
+      if (observed.gate && data_.role != "independent")
+        observed.gate->enter_and_wait();
+      if (data_.role == "left" && observed.throw_left)
+        throw std::runtime_error("rendezvous branch failed");
+    }
+    outputs[0] = inputs[0];
+  }
+};
+
+static const bool rendezvous_registered = [] {
+  task_graph_node_kind_spec spec;
+  spec.name = "test_rendezvous";
+  spec.requires_decoder = false;
+  spec.requires_dem = false;
+  register_node_kind(std::move(spec), {}, [](node_build_context &ctx) {
+    const auto &data =
+        std::any_cast<const rendezvous_node_data &>(ctx.prepared_data);
+    return std::make_unique<rendezvous_test_node>(data);
+  });
+  return true;
+}();
+
+std::unique_ptr<decoding_task_graph>
+make_rendezvous_graph(const std::shared_ptr<rendezvous_observation> &observed,
+                      bool asynchronous, bool ancestor = false,
+                      bool ordered = false, bool tail = false) {
+  std::vector<task_graph_node_config> nodes;
+  task_graph_node_config source;
+  source.id = "source";
+  source.kind = "test_ordered_stream";
+  source.node_params.insert("mode",
+                            std::string(tail ? "tail_source" : "source"));
+  nodes.push_back(std::move(source));
+  for (const auto &role : {"left", "right", "join"}) {
+    task_graph_node_config node;
+    node.id = role;
+    node.kind = "test_rendezvous";
+    node.prepared_data = rendezvous_node_data{
+        observed,
+        ancestor && std::string(role) == "right" ? "independent" : role,
+        ordered};
+    nodes.push_back(std::move(node));
+  }
+  // The extra right output gives the ancestor case more than one executor
+  // thread while leaving its direct/indirect join dependency unchanged.
+  std::vector<task_graph_edge> edges{
+      {"measurements", "output", "source", "input"},
+      {"source", "output", "left", "input"},
+      {"left", "output", "join", "a"},
+      {"source", "output", ancestor ? "join" : "right",
+       ancestor ? "b" : "input"},
+      {"join", "output", "output", "joined"}};
+  if (ancestor) {
+    edges.push_back({"source", "output", "right", "input"});
+    edges.push_back({"right", "output", "output", "independent"});
+  } else {
+    edges.push_back({"right", "output", "join", "b"});
+  }
+  return decoding_task_graph::from_topology(
+      std::move(nodes), std::move(edges),
+      {.async_streaming = asynchronous, .async_queue_capacity = 2});
+}
+} // namespace
+
+TEST(DecodingTaskGraph, RendezvousPreservesRepeatedPublicationValuesAndReset) {
+  ASSERT_TRUE(rendezvous_registered);
+  for (bool asynchronous : {false, true}) {
+    for (bool ancestor : {false, true}) {
+      auto observed = std::make_shared<rendezvous_observation>();
+      auto graph = make_rendezvous_graph(observed, asynchronous, ancestor);
+      std::vector<uint8_t> input(65);
+      for (std::size_t i = 0; i < input.size(); ++i)
+        input[i] = i % 2;
+      for (int epoch = 0; epoch < 2; ++epoch) {
+        observed->joined.clear();
+        EXPECT_TRUE(graph->enqueue_syndrome(input.data(), input.size(),
+                                            round_type::FINAL));
+        EXPECT_EQ(observed->joined, input);
+        EXPECT_EQ(graph->streaming_result().outputs[0].generation,
+                  input.size());
+        EXPECT_EQ(graph->streaming_result().status,
+                  task_graph_streaming_status::complete);
+        graph->reset_decoder();
+      }
+    }
+  }
+}
+
+TEST(DecodingTaskGraph, RendezvousAllowsDirectInputWhileAncestorRuns) {
+  if (std::thread::hardware_concurrency() < 2)
+    GTEST_SKIP() << "parallel execution needs at least two CPU threads";
+  for (bool asynchronous : {false, true}) {
+    auto observed = std::make_shared<rendezvous_observation>();
+    observed->gate = std::make_shared<parallel_decode_probe>();
+    auto graph = make_rendezvous_graph(observed, asynchronous, true);
+    const uint8_t input = 1;
+    auto result = std::async(std::launch::async, [&] {
+      return graph->enqueue_syndrome(&input, 1, round_type::FINAL);
+    });
+    // Left blocks before it can publish. The next entry must therefore be
+    // the join's direct slot, rather than its indirect ancestor input.
+    const bool arrived = observed->gate->wait_for_entered(2);
+    observed->gate->release();
+    EXPECT_TRUE(arrived);
+    EXPECT_TRUE(result.get());
+    EXPECT_EQ(observed->slots, (std::vector<std::size_t>{1, 0}));
+    EXPECT_EQ(observed->joined, (std::vector<uint8_t>{1}));
+  }
+}
+
+TEST(DecodingTaskGraph, RendezvousKeepsNonOptedSharedDescendantsOrdered) {
+  if (std::thread::hardware_concurrency() < 2)
+    GTEST_SKIP() << "parallel execution needs at least two CPU threads";
+  auto observed = std::make_shared<rendezvous_observation>();
+  observed->gate = std::make_shared<parallel_decode_probe>();
+  auto graph = make_rendezvous_graph(observed, false, false, true);
+  const uint8_t input = 1;
+  auto result = std::async(std::launch::async, [&] {
+    return graph->enqueue_syndrome(&input, 1, round_type::FINAL);
+  });
+  const bool left_entered = observed->gate->wait_for_entered(1);
+  const bool premature_peer = observed->gate->wait_for_entered(2);
+  observed->gate->release();
+  EXPECT_TRUE(left_entered);
+  EXPECT_FALSE(premature_peer);
+  EXPECT_TRUE(result.get());
+  EXPECT_EQ(observed->slots, (std::vector<std::size_t>{0, 1}));
+}
+
+TEST(DecodingTaskGraph, RendezvousFlushAndFailureDrainBeforeReset) {
+  for (bool asynchronous : {false, true}) {
+    auto observed = std::make_shared<rendezvous_observation>();
+    auto graph =
+        make_rendezvous_graph(observed, asynchronous, false, false, true);
+    const uint8_t input = 1;
+    EXPECT_FALSE(graph->enqueue_syndrome(&input, 1));
+    EXPECT_THROW(graph->enqueue_syndrome(nullptr, 0, round_type::FINAL),
+                 std::invalid_argument);
+    EXPECT_TRUE(graph->enqueue_syndrome(&input, 1, round_type::FINAL));
+    EXPECT_EQ(observed->joined, (std::vector<uint8_t>{1}));
+    graph->reset_decoder();
+    observed->throw_left = true;
+    EXPECT_THROW((void)graph->enqueue_syndrome(&input, 1, round_type::FINAL),
+                 std::runtime_error);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::failed);
+    graph->reset_decoder();
+    observed->throw_left = false;
+    observed->joined.clear();
+    EXPECT_TRUE(graph->enqueue_syndrome(&input, 1, round_type::FINAL));
+    EXPECT_EQ(observed->joined, (std::vector<uint8_t>{1}));
+  }
 }
 
 } // namespace cudaq::qec
