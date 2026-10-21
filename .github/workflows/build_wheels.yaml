@@ -32,6 +32,14 @@ on:
         type: string
         description: Retrieve assets from a draft release with this tag (e.g. wheels-123)
         required: false
+      plugin_framework_commit:
+        type: string
+        description: Reviewed producer commit for a manifest-based plugin archive
+        required: false
+      required_plugin_ids:
+        type: string
+        description: Semicolon-separated binary provider IDs required in this delivery
+        required: false
       artifacts_from_run:
         type: string
         description: GitHub Actions run ID from a prior run of this workflow. Skips wheel builds and reuses that run's CUDA-QX wheels and metapackages, plus its CUDA-Q wheels when using Custom CUDA-Q wheels.
@@ -62,6 +70,14 @@ on:
         default: ''
         required: false
       assets_tag:
+        type: string
+        default: ''
+        required: false
+      plugin_framework_commit:
+        type: string
+        default: ''
+        required: false
+      required_plugin_ids:
         type: string
         default: ''
         required: false
@@ -99,8 +115,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validate-inputs:
+    name: Validate binary-delivery inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject unchecked plugin requirements on reused wheels
+        env:
+          REUSED_RUN: ${{ inputs.artifacts_from_run }}
+          PLUGIN_FRAMEWORK_COMMIT: ${{ inputs.plugin_framework_commit }}
+          REQUIRED_PLUGIN_IDS: ${{ inputs.required_plugin_ids }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$REUSED_RUN" && ( -n "$PLUGIN_FRAMEWORK_COMMIT" || -n "$REQUIRED_PLUGIN_IDS" ) ]]; then
+            echo "Plugin producer/provider requirements need a fresh wheel build; reused wheels are not re-imported" >&2
+            exit 1
+          fi
+
   fetch-assets:
     name: Fetch release assets
+    needs: validate-inputs
     if: ${{ !inputs.artifacts_from_run && inputs.assets_repo != '' && inputs.assets_tag != '' }}
     runs-on: ubuntu-latest
     permissions:
@@ -116,14 +150,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-assets
-          path: '*.tar.gz'
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
           if-no-files-found: error
           retention-days: 1
 
   build-cudaqx-wheels:
     name: Build CUDA-QX wheels
-    needs: fetch-assets
-    if: ${{ !cancelled() && !inputs.artifacts_from_run && (needs.fetch-assets.result == 'success' || needs.fetch-assets.result == 'skipped') }}
+    needs: [validate-inputs, fetch-assets]
+    if: ${{ !cancelled() && needs.validate-inputs.result == 'success' && !inputs.artifacts_from_run && (needs.fetch-assets.result == 'success' || needs.fetch-assets.result == 'skipped') }}
     runs-on: linux-${{ matrix.platform }}-cpu8
     # CUDAQ requires a highly specialized environment to build. Thus, it is much
     # easier to rely on their's devdeps images to do the building.
@@ -227,14 +263,45 @@ jobs:
         run: |
           .github/workflows/scripts/build_cudaq.sh --python-version ${{ matrix.python }} --cuda-version ${{ matrix.cuda_version }}
 
+      - name: Select manifest-based wheel plugin delivery
+        env:
+          PLUGIN_FRAMEWORK_COMMIT: ${{ inputs.plugin_framework_commit }}
+          REQUIRED_PLUGIN_IDS: ${{ inputs.required_plugin_ids }}
+          PLUGIN_PLATFORM: ${{ matrix.platform }}
+          PLUGIN_CUDA_VERSION: ${{ matrix.cuda_version }}
+          PLUGIN_PYTHON_VERSION: ${{ matrix.python }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="qec-private-plugins-${PLUGIN_PLATFORM}_ubuntu24.04_cuda${PLUGIN_CUDA_VERSION}_release_py${PLUGIN_PYTHON_VERSION}.tar.gz"
+          if [[ -f "$archive" ]]; then
+            [[ "$PLUGIN_FRAMEWORK_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "An exact reviewed plugin_framework_commit is required" >&2; exit 1; }
+            [[ -z "$REQUIRED_PLUGIN_IDS" || "$REQUIRED_PLUGIN_IDS" =~ ^[A-Za-z0-9_-]+(\;[A-Za-z0-9_-]+)*$ ]] || { echo "Invalid required_plugin_ids" >&2; exit 1; }
+            echo "QEC_EXTERNAL_PLUGIN_ARCHIVE=$(pwd)/$archive" >> "$GITHUB_ENV"
+            echo "QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT=$PLUGIN_FRAMEWORK_COMMIT" >> "$GITHUB_ENV"
+            echo "QEC_EXTERNAL_PLUGIN_DELIVERY=wheel" >> "$GITHUB_ENV"
+            echo "QEC_REQUIRED_EXTERNAL_PLUGINS=$REQUIRED_PLUGIN_IDS" >> "$GITHUB_ENV"
+          elif [[ -n "$REQUIRED_PLUGIN_IDS" ]]; then
+            echo "Required external plugin archive is absent: $archive" >&2
+            exit 1
+          fi
+
       - name: Build CUDA-QX wheels
         shell: bash
         run: |
           if [[ -n "${{ inputs.assets_repo }}" ]] && [[ -n "${{ inputs.assets_tag }}" ]]; then
             # Extract the decoder that needs to be embedded in the wheel
             mkdir -p tmp
-            tar -C tmp -xzvf nv-qldpc-decoder-${{ matrix.platform }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_py${{ matrix.python }}_release.tar.gz
-            export QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so
+            legacy_archive=nv-qldpc-decoder-${{ matrix.platform }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_py${{ matrix.python }}_release.tar.gz
+            plugin_archive=qec-private-plugins-${{ matrix.platform }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_release_py${{ matrix.python }}.tar.gz
+            if [[ -f "$legacy_archive" ]]; then
+              tar -C tmp -xzvf "$legacy_archive"
+              test -f tmp/libcudaq-qec-nv-qldpc-decoder.so
+              export QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so
+            elif [[ ! -f "$plugin_archive" ]]; then
+              echo "No supported wheel plugin delivery was downloaded" >&2
+              exit 1
+            fi
           fi
           # This is needed to allow the "git rev-parse" commands in the build
           # scripts to work.
@@ -256,6 +323,7 @@ jobs:
 
   build-cudaqx-metapackages:
     name: Build CUDA-QX Meta Packages
+    needs: validate-inputs
     if: ${{ !inputs.artifacts_from_run }}
     runs-on: linux-amd64-cpu4 # No need to matrix this because it is a source distribution
     container: ubuntu:24.04
@@ -292,6 +360,7 @@ jobs:
   # Building the CUDA-Q wheels must be done outside of a container context, so
   # this is a separate job.
   build-cudaq-wheels:
+    needs: validate-inputs
     name: Build CUDA-Q wheels
     if: ${{ !inputs.artifacts_from_run && inputs.cudaq_wheels == 'Custom'}}
     strategy:
@@ -346,8 +415,8 @@ jobs:
 
   test-cudaqx-wheels:
     name: Test CUDA-QX wheels (CPU)
-    needs: [build-cudaqx-wheels, build-cudaq-wheels]
-    if: ${{ !failure() && !cancelled() }}
+    needs: [validate-inputs, build-cudaqx-wheels, build-cudaq-wheels]
+    if: ${{ needs.validate-inputs.result == 'success' && !failure() && !cancelled() }}
     runs-on: linux-${{ matrix.platform }}-cpu4
     container: ubuntu:24.04
     permissions:
@@ -437,8 +506,8 @@ jobs:
   
   test-wheels-gpu:
     name: Test CUDA-QX wheels (GPU)
-    needs: [build-cudaqx-wheels, build-cudaq-wheels]
-    if: ${{ !failure() && !cancelled() }}
+    needs: [validate-inputs, build-cudaqx-wheels, build-cudaq-wheels]
+    if: ${{ needs.validate-inputs.result == 'success' && !failure() && !cancelled() }}
     runs-on: linux-${{ matrix.runner.arch }}-gpu-${{ matrix.runner.gpu }}-latest-1
     container:
       image: nvidia/cuda:${{ matrix.cuda_version }}.0-base-ubuntu24.04

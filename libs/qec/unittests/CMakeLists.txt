@@ -38,6 +38,16 @@ set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 
 find_package(CUDAToolkit REQUIRED)
 
+# Offline binary-delivery contracts run without a GPU or proprietary modules.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME ExternalPlugins.Contracts
+    COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+      -s "${CUDAQX_QEC_SOURCE_DIR}/../../scripts/ci/tests"
+      -p "test_*plugin*.py")
+  set_tests_properties(ExternalPlugins.Contracts PROPERTIES LABELS "packaging")
+endif()
+
 # ==============================================================================
 add_compile_options(-Wno-attributes) 
 

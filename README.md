@@ -46,9 +46,11 @@ contributing to CUDA-Q QEC, please take a look at
 The code in this repository is licensed under [Apache License 2.0](./LICENSE).
 
 When distributed via PyPI, GHCR, or NGC, the binaries generated from this source
-code are also distributed under the Apache License 2.0; however, the
-`libcudaq-qec-nv-qldpc-decoder.so` library is closed source and is subject to
-the [NVIDIA Software License Agreement][github_qec_license]
+code are also distributed under the Apache License 2.0. Optional proprietary
+decoder and task-graph plugin binaries are distributed under their accompanying
+license terms, not the source repository's Apache license. NVIDIA's proprietary
+plugins, including `libcudaq-qec-nv-qldpc-decoder.so`, are subject to the
+[NVIDIA Software License Agreement][github_qec_license].
 
 [github_qec_license]: https://github.com/NVIDIA/cudaq-qec/blob/main/libs/qec/LICENSE
 

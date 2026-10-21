@@ -191,6 +191,11 @@ Consequently the two-process test (`test_decoding_server`) is a full-build
 test: it compiles the caller side, a quantum kernel, with `nvq++`. A
 decoders-only build verifies the server by building and starting it.
 
+For binary-only decoder or task-graph modules, see
+[External binary plugins](docs/ExternalPlugins.md). The generic importer keeps
+the two plugin directories separate and validates the delivery before staging
+copies for installation; no proprietary source is needed by the public build.
+
 ## Building CUDA-Q QEC Documentation from Source
 
 If you want to build and render our documentation from source, you can do this
