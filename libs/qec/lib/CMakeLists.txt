@@ -17,6 +17,7 @@ include(FetchContent)
 add_compile_options(-Wno-attributes) 
 
 find_package(CUDAToolkit REQUIRED)
+find_package(Threads REQUIRED)
 
 # cuStabilizer is shipped inside the cuquantum-python-cuXX pip wheels
 # (FindcuStabilizer auto-discovers it from the active Python environment).
@@ -57,6 +58,20 @@ set(DEM_SOURCES
 
 set(DECODERS_SOURCES
   decoder.cpp
+  decoding_task/decoding_task_edge_value.cpp
+  decoding_task/decoding_task_ensemble_node.cpp
+  decoding_task/decoding_task_graph.cpp
+  decoding_task/decoding_task_graph_executor.cpp
+  decoding_task/decoding_task_selection_strategy.cpp
+  decoding_task/decoding_task_stream_executor.cpp
+  decoding_task/decoding_task_graph_topology.cpp
+  decoding_task/decoding_task_node_kind_registry.cpp
+  decoding_task/decoding_task_predecoder_node.cpp
+  decoding_task/decoding_task_streaming_node.cpp
+  decoding_task/thread_pool.cpp
+  decoding_task/decoding_task_window_node.cpp
+  decoding_task/decoding_task_memory_window_node.cpp
+  decoding_task/decoding_task_xor_node.cpp
   decoder_init.cpp
   decoder_config_payload.cpp
   decoder_config_schema.cpp
@@ -188,6 +203,7 @@ target_link_libraries(${DECODERS_LIBRARY_NAME}
     # decoder::get() consumes the "cuda_device_id" construction parameter
     # (validation via cudaGetDeviceCount + persistent cudaSetDevice pin).
     CUDA::cudart
+    Threads::Threads
 )
 
 if(TARGET ${LIBRARY_NAME})

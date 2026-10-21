@@ -150,6 +150,18 @@ Decoder Interfaces
 .. autoclass:: cudaq_qec.Decoder
     :members:
 
+Decoding Task Graph
+===================
+
+A :class:`cudaq_qec.DecodingTaskGraph` is a composable decode pipeline backed
+by a general node/edge DAG.  Built-in factories:
+:meth:`~cudaq_qec.DecodingTaskGraph.from_spec` for a single-decoder window,
+and :meth:`~cudaq_qec.DecodingTaskGraph.combine` for two independent decoders
+whose logical outcomes are XOR'd.
+
+.. autoclass:: cudaq_qec.DecodingTaskGraph
+    :members:
+
 .. autoclass:: cudaq_qec.DecoderResult
     :members:
 

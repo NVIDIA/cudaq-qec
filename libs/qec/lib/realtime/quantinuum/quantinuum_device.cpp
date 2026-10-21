@@ -27,6 +27,19 @@ enqueue_syndromes(std::uint64_t decoder_id,
                      syndrome, tag);
 }
 
+__qpu__ void
+enqueue_syndromes_mapped(std::uint64_t decoder_id,
+                         const std::vector<cudaq::measure_result> &syndromes,
+                         std::uint64_t tag, std::uint64_t syndrome_mapping_id) {
+  uint64_t syndrome_size = syndromes.size();
+  uint64_t syndrome = cudaq::to_integer(cudaq::to_bools(syndromes));
+  // Its own wire function, not a wider enqueue_syndromes_ui64: the id is
+  // derived from the name, so this is additive and an older receiver ignores
+  // it rather than misreading a longer payload.
+  cudaq::device_call(enqueue_syndromes_mapped_ui64, decoder_id, syndrome_size,
+                     syndrome, tag, syndrome_mapping_id);
+}
+
 __qpu__ void enqueue_syndromes_test(std::uint64_t decoder_id,
                                     const std::vector<bool> &syndromes,
                                     std::uint64_t tag) {

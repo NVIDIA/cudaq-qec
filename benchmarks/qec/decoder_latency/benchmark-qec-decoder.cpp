@@ -43,6 +43,7 @@
 #include "stim.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include "cudaq/qec/extended_dem.h"
 #include "cudaq/qec/sparse_binary_matrix.h"
 #include <algorithm>
@@ -53,9 +54,11 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -76,10 +79,26 @@ using cudaq::qec::benchmark::instance_result;
 using cudaq::qec::benchmark::instance_sample_kind;
 using cudaq::qec::benchmark::instance_shot_offset;
 using cudaq::qec::benchmark::instance_work;
+using cudaq::qec::benchmark::pin_current_thread;
 using cudaq::qec::benchmark::resolve_instance_cpus;
 using cudaq::qec::benchmark::run_instances;
 using cudaq::qec::benchmark::sum_instance_results;
 using cudaq::qec::benchmark::worker_threads_per_instance;
+
+enum class execution_kind { decoder, task_graph, task_graph_async };
+
+// Render one execution selector in row names and configuration output.
+std::string execution_name(execution_kind kind) {
+  switch (kind) {
+  case execution_kind::decoder:
+    return "decoder";
+  case execution_kind::task_graph:
+    return "task-graph";
+  case execution_kind::task_graph_async:
+    return "task-graph-async";
+  }
+  return "unknown";
+}
 
 // ── Options
 // ───────────────────────────────────────────────────────────────────
@@ -109,6 +128,11 @@ struct options {
   std::chrono::nanoseconds round_interval{0};
   bool run_batch = true;
   bool run_stream = true;
+  std::vector<execution_kind> executions = {execution_kind::decoder};
+  // Zero selects one complete shot's detector-round count per sweep point.
+  std::size_t async_queue_capacity = 8;
+  bool dedicate_async_coordinator = false;
+  std::size_t async_spin_pause_iters = 0;
   // Result form every decoder is built with. Streaming reads observable
   // corrections either way.
   cudaq::qec::decode_result_type output =
@@ -164,6 +188,17 @@ void print_usage(const char *argv0) {
       << "  --round_interval_us T      pace streaming rounds by T "
          "microseconds\n"
       << "  --mode M                   batch, stream, or both (default both)\n"
+      << "  --executions E[,...]       decoder, task-graph, or "
+         "task-graph-async\n"
+      << "                             (default decoder)\n"
+      << "  --async_queue_capacity N   async task-graph records in flight "
+         "(default: 8; 0 reserves one shot)\n"
+      << "  --dedicate_async_coordinator\n"
+      << "                             reserve the last CPU in each pinned "
+         "instance block\n"
+      << "  --async_spin_pause_iters N active coordinator pauses before "
+         "parking "
+         "(default 0)\n"
       << "  --output F                 observables or errors (default\n"
       << "                             observables). errors times decode()\n"
       << "                             returning H columns, scored by O*e;\n"
@@ -211,6 +246,25 @@ std::vector<double> parse_double_list(const std::string &text) {
   return out;
 }
 
+// Parse and validate the execution modes requested for each benchmark point.
+std::vector<execution_kind> parse_executions(const std::string &text) {
+  std::vector<execution_kind> out;
+  for (std::string value : split_csv_str(text)) {
+    std::replace(value.begin(), value.end(), '_', '-');
+    if (value == "decoder")
+      out.push_back(execution_kind::decoder);
+    else if (value == "task-graph")
+      out.push_back(execution_kind::task_graph);
+    else if (value == "task-graph-async")
+      out.push_back(execution_kind::task_graph_async);
+    else
+      throw std::invalid_argument(
+          "--executions entries must be decoder, task-graph, or "
+          "task-graph-async");
+  }
+  return out;
+}
+
 bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
   // No value of this CLI starts with "--", so a token that does is the next
   // option rather than this one's value. Catching that here turns
@@ -244,6 +298,10 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
     }
     if (arg == "--pin_instances") {
       opts.auto_pin = true;
+      continue;
+    }
+    if (arg == "--dedicate_async_coordinator") {
+      opts.dedicate_async_coordinator = true;
       continue;
     }
     if (!need_value(i))
@@ -290,6 +348,18 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
         exit_code = 1;
         return false;
       }
+    } else if (arg == "--executions") {
+      try {
+        opts.executions = parse_executions(val);
+      } catch (const std::invalid_argument &error) {
+        std::cerr << "error: " << error.what() << "\n";
+        exit_code = 1;
+        return false;
+      }
+    } else if (arg == "--async_queue_capacity") {
+      opts.async_queue_capacity = std::stoull(val);
+    } else if (arg == "--async_spin_pause_iters") {
+      opts.async_spin_pause_iters = std::stoull(val);
     } else if (arg == "--output") {
       if (val == "observables") {
         opts.output = cudaq::qec::decode_result_type::observables;
@@ -353,6 +423,21 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
     exit_code = 1;
     return false;
   }
+  if (opts.executions.empty()) {
+    std::cerr << "error: --executions needs at least one value\n";
+    exit_code = 1;
+    return false;
+  }
+  if (opts.output == cudaq::qec::decode_result_type::errors &&
+      std::any_of(
+          opts.executions.begin(), opts.executions.end(),
+          [](execution_kind e) { return e != execution_kind::decoder; })) {
+    std::cerr << "error: --output errors applies to --executions decoder "
+                 "only; a task-graph node reads observables from its inner "
+                 "decoder\n";
+    exit_code = 1;
+    return false;
+  }
   if (opts.instances_list.empty())
     opts.instances_list.push_back(1);
   for (auto n : opts.instances_list) {
@@ -379,13 +464,26 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
     exit_code = 1;
     return false;
   }
+  if (opts.dedicate_async_coordinator && !opts.auto_pin &&
+      opts.cores.base < 0) {
+    std::cerr << "error: --dedicate_async_coordinator requires pinned "
+                 "instances\n";
+    exit_code = 1;
+    return false;
+  }
   // Reject an unhonorable pin now: the widest instance count decides how many
   // CPUs the run needs, and finding out mid-sweep would throw away every point
   // measured so far.
   try {
-    for (const std::size_t n : opts.instances_list)
-      (void)resolve_instance_cpus(n - 1, layout_for(opts, n),
-                                  std::thread::hardware_concurrency());
+    for (const std::size_t n : opts.instances_list) {
+      const auto layout = layout_for(opts, n);
+      const auto block = resolve_instance_cpus(
+          n - 1, layout, std::thread::hardware_concurrency());
+      if (opts.dedicate_async_coordinator && block.count < 2)
+        throw std::runtime_error(
+            "--dedicate_async_coordinator needs at least two CPUs per "
+            "instance");
+    }
   } catch (const std::exception &e) {
     std::cerr << "error: " << e.what() << "\n";
     exit_code = 1;
@@ -840,6 +938,19 @@ void add_chunks(dem_matrices &m, const std::vector<int32_t> &dr) {
   m.chunks = std::move(spec);
 } // end - add_chunks()
 
+// O as CSR rows for a graph node: one row per observable, naming the fault
+// columns that flip it. Built from column_obs rather than m.O so the columns
+// are the ones the decoder was built with, which --source chunks reorders.
+std::vector<std::vector<std::uint32_t>>
+observable_rows_of(const dem_matrices &m) {
+  std::vector<std::vector<std::uint32_t>> rows(m.O.shape()[0]);
+  for (std::size_t col = 0; col < m.column_obs.size(); ++col)
+    for (std::size_t o = 0; o < rows.size() && o < 64; ++o)
+      if (m.column_obs[col] >> o & 1)
+        rows[o].push_back(static_cast<std::uint32_t>(col));
+  return rows;
+}
+
 // The model's measurement-to-detector map: one row per detector, naming the
 // measurement records it XORs. The decoder folds arriving rounds through this
 // on the streaming path, which is why the benchmark supplies the real map
@@ -902,8 +1013,13 @@ bool wants_machine_sized_threads(const options &opts) {
 
 // Thread count to substitute for a num_threads=0 request on a row running
 // @p instances instances, or 0 to leave the request untouched.
-std::size_t auto_thread_share(const options &opts, std::size_t instances) {
-  const core_layout layout = layout_for(opts, instances);
+std::size_t auto_thread_share(const options &opts, std::size_t instances,
+                              execution_kind execution) {
+  core_layout layout = layout_for(opts, instances);
+  if (opts.dedicate_async_coordinator &&
+      execution == execution_kind::task_graph_async && layout.base >= 0 &&
+      layout.width > 1)
+    --layout.width;
 
   // A single unpinned instance genuinely does have the machine to itself, so
   // defer to the decoder's own sentinel handling and keep its numbers intact.
@@ -1080,7 +1196,9 @@ double elapsed_us(clock_type::time_point a, clock_type::time_point b) {
 // One point of the sweep: everything that identifies a row of the report.
 struct sweep_point {
   int decoder_id = 0;
+  std::string decoder_name;
   std::string name;
+  execution_kind execution = execution_kind::decoder;
   std::size_t distance = 0;
   std::size_t rounds = 0;
   double noise = 0.0;
@@ -1096,6 +1214,7 @@ enum class bench_mode {
 struct measurement {
   int decoder_id = 0;
   std::string name;
+  execution_kind execution = execution_kind::decoder;
   std::size_t distance = 0;
   std::size_t rounds = 0;
   double noise = 0.0;
@@ -1110,6 +1229,8 @@ struct measurement {
   std::size_t rounds_per_shot = 0;
   latency_stats latency;
   latency_stats tail;
+  latency_stats final_enqueue;
+  latency_stats correction_readout;
   // Detector rounds per second: the rate each instance of the point held over
   // its own timed window, summed.
   double throughput = 0.0;
@@ -1142,6 +1263,79 @@ uint64_t mask_from_corrections(const uint8_t *corr, std::size_t n) {
   return mask;
 }
 
+// Pack a graph's logical outcome into the benchmark's comparison
+// representation.
+uint64_t mask_from_outcome(const cudaq::qec::logical_outcome &outcome) {
+  uint64_t mask = 0;
+  for (std::size_t i = 0; i < outcome.bits.size() && i < 64; ++i)
+    if (outcome.bits[i])
+      mask ^= uint64_t{1} << i;
+  return mask;
+}
+
+// A benchmark row drives either a decoder directly or the same decoder hosted
+// by a one-node task graph. Keeping that distinction behind one facade makes
+// the timed loops identical across execution modes.
+class benchmark_target {
+public:
+  // Own a directly driven decoder target.
+  explicit benchmark_target(std::unique_ptr<cudaq::qec::decoder> decoder)
+      : decoder_(std::move(decoder)) {}
+  // Own a task graph target using the same timed facade.
+  explicit benchmark_target(
+      std::unique_ptr<cudaq::qec::decoding_task_graph> graph)
+      : graph_(std::move(graph)) {}
+
+  // Execute one complete shot and normalize its observable result. A direct
+  // decoder takes the folded detectors; a graph takes the raw measurement
+  // record and folds it through its own D. @p error_column_obs is set when the
+  // decoder was built for error output, and maps its H columns to observables.
+  uint64_t decode(const std::vector<cudaq::qec::float_t> &soft,
+                  const std::vector<uint8_t> &hard_measurements,
+                  const std::vector<uint64_t> *error_column_obs) {
+    if (decoder_) {
+      auto decoded = decoder_->decode(soft);
+      return error_column_obs ? mask_from_errors(decoded, *error_column_obs)
+                              : mask_from_result(decoded);
+    }
+    cudaq::qec::measurement_results measurements;
+    measurements.bits = hard_measurements;
+    return mask_from_outcome(graph_->run(measurements));
+  }
+
+  // Start a clean shot on either target representation.
+  void reset() {
+    if (decoder_)
+      decoder_->reset_decoder();
+    else
+      graph_->reset_decoder();
+  }
+
+  // Forward one streaming round, preserving FINAL only for graph execution.
+  void enqueue(const uint8_t *syndrome, std::size_t size, bool final) {
+    if (decoder_) {
+      decoder_->enqueue_syndrome(syndrome, size);
+      return;
+    }
+    graph_->enqueue_syndrome(syndrome, size,
+                             final ? cudaq::qec::round_type::FINAL
+                                   : cudaq::qec::round_type::BULK);
+  }
+
+  // Pack the target's current observable corrections for comparison.
+  uint64_t corrections() const {
+    if (decoder_)
+      return mask_from_corrections(decoder_->get_obs_corrections(),
+                                   decoder_->get_num_observables());
+    return mask_from_corrections(graph_->get_obs_corrections(),
+                                 graph_->get_num_observables());
+  }
+
+private:
+  std::unique_ptr<cudaq::qec::decoder> decoder_;
+  std::unique_ptr<cudaq::qec::decoding_task_graph> graph_;
+};
+
 // Shot an instance decodes on its i-th timed iteration.  Instances enter the
 // shared pool at different points and wrap, so concurrent instances are never
 // decoding the same syndrome in lockstep while still covering the same shots.
@@ -1149,29 +1343,38 @@ std::size_t timed_shot(const options &opts, std::size_t offset, std::size_t i) {
   return opts.warmup + (offset + i) % opts.shots;
 }
 
-void warmup_batch(cudaq::qec::decoder &dec, const benchmark_data &data,
-                  const options &opts) {
+// Observable map for scoring batch results, or null when the decoder already
+// returns observables.
+const std::vector<uint64_t> *error_scoring(const options &opts,
+                                           const dem_matrices &matrices) {
+  return opts.output == cudaq::qec::decode_result_type::errors
+             ? &matrices.column_obs
+             : nullptr;
+}
+
+void warmup_batch(benchmark_target &target, const benchmark_data &data,
+                  const dem_matrices &matrices, const options &opts) {
+  const auto *column_obs = error_scoring(opts, matrices);
   for (std::size_t s = 0; s < opts.warmup; ++s)
-    (void)dec.decode(data.soft_syndromes[s]);
+    (void)target.decode(data.soft_syndromes[s], data.hard_measurements[s],
+                        column_obs);
 }
 
 // Timed batch loop for one instance.  Only the decode() call is inside the
 // stopwatch; the observable comparison that follows is bookkeeping.
-void run_batch_instance(cudaq::qec::decoder &dec, const benchmark_data &data,
+void run_batch_instance(benchmark_target &target, const benchmark_data &data,
                         const dem_matrices &matrices, const options &opts,
                         std::size_t offset, instance_result &out) {
-  const bool errors = opts.output == cudaq::qec::decode_result_type::errors;
+  const auto *column_obs = error_scoring(opts, matrices);
   out.shots = opts.shots;
   out.shot_us.reserve(opts.shots);
   for (std::size_t i = 0; i < opts.shots; ++i) {
     const std::size_t shot = timed_shot(opts, offset, i);
     const auto t0 = clock_type::now();
-    auto decoded = dec.decode(data.soft_syndromes[shot]);
+    const uint64_t decoded = target.decode(
+        data.soft_syndromes[shot], data.hard_measurements[shot], column_obs);
     out.shot_us.push_back(elapsed_us(t0, clock_type::now()));
-    const uint64_t predicted =
-        errors ? mask_from_errors(decoded, matrices.column_obs)
-               : mask_from_result(decoded);
-    if (predicted != data.observable_masks[shot])
+    if (decoded != data.observable_masks[shot])
       ++out.logical_errors;
   }
 } // end - run_batch_instance()
@@ -1185,22 +1388,23 @@ void spin_until(clock_type::time_point t) {
 // Reports in-decoder work (sum of the enqueue calls, excluding any pacing
 // spin) and the tail (final round plus corrections readout) separately, and
 // returns the predicted observable mask.
-uint64_t stream_shot(cudaq::qec::decoder &dec, const benchmark_data &data,
+uint64_t stream_shot(benchmark_target &target, const benchmark_data &data,
                      const options &opts,
                      const std::vector<std::size_t> &round_widths,
-                     std::size_t shot, std::size_t num_obs, double *shot_us,
-                     double *tail_us) {
+                     std::size_t shot, double *shot_us, double *tail_us,
+                     double *final_enqueue_us = nullptr,
+                     double *correction_readout_us = nullptr) {
   const std::vector<uint8_t> &syn = data.hard_measurements[shot];
   double work = 0.0;
   std::size_t offset = 0;
 
-  dec.reset_decoder();
+  target.reset();
   const auto shot_start = clock_type::now();
   for (std::size_t r = 0; r + 1 < round_widths.size(); ++r) {
     if (opts.round_interval.count() > 0)
       spin_until(shot_start + static_cast<int64_t>(r) * opts.round_interval);
     const auto rs = clock_type::now();
-    dec.enqueue_syndrome(syn.data() + offset, round_widths[r]);
+    target.enqueue(syn.data() + offset, round_widths[r], /*final=*/false);
     work += elapsed_us(rs, clock_type::now());
     offset += round_widths[r];
   }
@@ -1208,44 +1412,54 @@ uint64_t stream_shot(cudaq::qec::decoder &dec, const benchmark_data &data,
     spin_until(shot_start + static_cast<int64_t>(round_widths.size() - 1) *
                                 opts.round_interval);
   const auto tail_start = clock_type::now();
-  dec.enqueue_syndrome(syn.data() + offset, round_widths.back());
-  const uint8_t *corr = dec.get_obs_corrections();
-  const double tail = elapsed_us(tail_start, clock_type::now());
+  target.enqueue(syn.data() + offset, round_widths.back(), /*final=*/true);
+  const auto enqueue_done = clock_type::now();
+  const uint64_t corrections = target.corrections();
+  const auto readout_done = clock_type::now();
+  const double tail = elapsed_us(tail_start, readout_done);
 
   if (shot_us)
     *shot_us = work + tail;
   if (tail_us)
     *tail_us = tail;
-  return mask_from_corrections(corr, num_obs);
+  if (final_enqueue_us)
+    *final_enqueue_us = elapsed_us(tail_start, enqueue_done);
+  if (correction_readout_us)
+    *correction_readout_us = elapsed_us(enqueue_done, readout_done);
+  return corrections;
 } // end - stream_shot()
 
-void warmup_stream(cudaq::qec::decoder &dec, const benchmark_data &data,
+void warmup_stream(benchmark_target &target, const benchmark_data &data,
                    const options &opts,
                    const std::vector<std::size_t> &round_widths) {
-  const std::size_t num_obs = dec.get_num_observables();
   for (std::size_t s = 0; s < opts.warmup; ++s)
-    (void)stream_shot(dec, data, opts, round_widths, s, num_obs, nullptr,
-                      nullptr);
+    (void)stream_shot(target, data, opts, round_widths, s, nullptr, nullptr);
 }
 
 // Timed streaming loop for one instance.
-void run_stream_instance(cudaq::qec::decoder &dec, const benchmark_data &data,
+void run_stream_instance(benchmark_target &target, const benchmark_data &data,
                          const options &opts,
                          const std::vector<std::size_t> &round_widths,
                          std::size_t offset, instance_result &out) {
-  const std::size_t num_obs = dec.get_num_observables();
   double shot_us = 0.0;
   double tail_us = 0.0;
+  double final_enqueue_us = 0.0;
+  double correction_readout_us = 0.0;
 
   out.shots = opts.shots;
   out.shot_us.reserve(opts.shots);
   out.tail_us.reserve(opts.shots);
+  out.final_enqueue_us.reserve(opts.shots);
+  out.correction_readout_us.reserve(opts.shots);
   for (std::size_t i = 0; i < opts.shots; ++i) {
     const std::size_t shot = timed_shot(opts, offset, i);
-    const uint64_t predicted = stream_shot(dec, data, opts, round_widths, shot,
-                                           num_obs, &shot_us, &tail_us);
+    const uint64_t predicted =
+        stream_shot(target, data, opts, round_widths, shot, &shot_us, &tail_us,
+                    &final_enqueue_us, &correction_readout_us);
     out.shot_us.push_back(shot_us);
     out.tail_us.push_back(tail_us);
+    out.final_enqueue_us.push_back(final_enqueue_us);
+    out.correction_readout_us.push_back(correction_readout_us);
     if (predicted != data.observable_masks[shot])
       ++out.logical_errors;
   }
@@ -1263,9 +1477,14 @@ measurement pool_measurement(const instance_pool_result &pool,
       concat_instance_samples(pool.instances, instance_sample_kind::shot);
   auto tail_us =
       concat_instance_samples(pool.instances, instance_sample_kind::tail);
+  auto final_enqueue_us = concat_instance_samples(
+      pool.instances, instance_sample_kind::final_enqueue);
+  auto correction_readout_us = concat_instance_samples(
+      pool.instances, instance_sample_kind::correction_readout);
 
   result.decoder_id = point.decoder_id;
   result.name = point.name;
+  result.execution = point.execution;
   result.distance = point.distance;
   result.rounds = point.rounds;
   result.noise = point.noise;
@@ -1279,6 +1498,12 @@ measurement pool_measurement(const instance_pool_result &pool,
   // can be printed against either column.
   result.tail =
       tail_us.empty() ? result.latency : summarize(std::move(tail_us));
+  result.final_enqueue = final_enqueue_us.empty()
+                             ? latency_stats{}
+                             : summarize(std::move(final_enqueue_us));
+  result.correction_readout = correction_readout_us.empty()
+                                  ? latency_stats{}
+                                  : summarize(std::move(correction_readout_us));
   // Rounds retired per second, each instance rated over its own timed window
   // and the rates then summed.  Rating them separately is what keeps an
   // instance that finishes early from being charged for the time it spent
@@ -1308,47 +1533,119 @@ measurement run_point(const options &opts, const benchmark_data &data,
                       const cudaqx::heterogeneous_map &dec_params,
                       const std::vector<std::size_t> &round_widths,
                       bench_mode mode, const sweep_point &point) {
-  std::vector<std::unique_ptr<cudaq::qec::decoder>> decoders(point.instances);
+  std::vector<std::unique_ptr<benchmark_target>> targets(point.instances);
   instance_work work;
 
   work.setup = [&](std::size_t instance) {
+    int coordinator_cpu = -1;
+    if (point.execution == execution_kind::task_graph_async &&
+        opts.dedicate_async_coordinator) {
+      const auto block =
+          resolve_instance_cpus(instance, layout_for(opts, point.instances),
+                                std::thread::hardware_concurrency());
+      coordinator_cpu = block.first + static_cast<int>(block.count) - 1;
+      const std::string pin_error =
+          pin_current_thread({block.first, block.count - 1});
+      if (!pin_error.empty())
+        throw std::runtime_error(
+            "failed to reserve the async coordinator CPU: " + pin_error);
+    }
     std::optional<cudaq::qec::sparse_binary_matrix> D;
-    if (mode == bench_mode::stream)
+    // A graph node folds the measurement record through its own D before
+    // calling decode(), so the inner decoder does not use D for that
+    // operation. It still receives reset_decoder(), however, and
+    // streaming-capable decoders such as NV-Fusion initialize their realtime
+    // state there and require a valid measurement map.
+    if (mode == bench_mode::stream ||
+        point.execution != execution_kind::decoder)
       D = measurement_map_of(data);
     auto inputs = [&] {
       if (!matrices.chunks)
         return cudaq::qec::decoder_init(
             matrices.H, cudaq::qec::sparse_binary_matrix(matrices.O),
             matrices.priors, std::move(D));
-      return cudaq::qec::decoder_needs_model_matrices(point.name, opts.source)
+      return cudaq::qec::decoder_needs_model_matrices(point.decoder_name,
+                                                      opts.source)
                  ? cudaq::qec::decoder_init::from_dem_chunks_closed(
                        *matrices.chunks, std::move(D))
                  : cudaq::qec::decoder_init::from_dem_chunks(*matrices.chunks,
                                                              std::move(D));
     }();
-    auto dec = cudaq::qec::decoder::get(point.name, std::move(inputs),
+    // parse_args has already rejected --output errors for a graph row, whose
+    // streaming node reads observables from its inner decoder.
+    auto dec = cudaq::qec::decoder::get(point.decoder_name, std::move(inputs),
                                         opts.output, dec_params);
     // Stamp the sweep's id on the decoder so any [DecoderStats] line it logs
     // carries the same ID the table rows report.  Every instance of a point
     // shares that id, matching the one pooled row the point produces.
     dec->set_decoder_id(static_cast<uint32_t>(point.decoder_id));
-    if (mode == bench_mode::stream) {
-      warmup_stream(*dec, data, opts, round_widths);
+    if (point.execution == execution_kind::decoder) {
+      targets[instance] = std::make_unique<benchmark_target>(std::move(dec));
     } else {
-      warmup_batch(*dec, data, opts);
+      cudaq::qec::task_graph_node_config node;
+      node.id = "streaming";
+      node.kind = "streaming";
+      // The graph infers D's width from the highest measurement any row
+      // names, while the inner decoder was sized to the whole record. The
+      // streaming node rejects a mismatch, so say why before it does.
+      const std::size_t num_measurements =
+          static_cast<std::size_t>(data.circuit.count_measurements());
+      std::size_t referenced = 0;
+      for (const auto &row : data.measurement_map)
+        for (const auto rec : row)
+          referenced = std::max<std::size_t>(referenced, rec + 1);
+      if (referenced != num_measurements)
+        throw std::runtime_error(
+            "task-graph execution needs every measurement read by a detector: "
+            "the circuit has " +
+            std::to_string(num_measurements) + " but detectors reach " +
+            std::to_string(referenced));
+      node.d_sparse = data.measurement_map;
+      node.o_sparse = observable_rows_of(matrices);
+      // Flat D does not encode round boundaries. Use the largest observed
+      // round width when it tiles the measurement record; otherwise use their
+      // GCD as the graph's common round unit. Async queue records still
+      // preserve the benchmark caller's complete per-round enqueue boundaries.
+      const std::size_t max_round =
+          *std::max_element(round_widths.begin(), round_widths.end());
+      std::size_t native_chunk = max_round;
+      if (num_measurements % native_chunk != 0) {
+        native_chunk = 0;
+        for (const auto width : round_widths)
+          native_chunk = std::gcd(native_chunk, width);
+      }
+      node.node_params.insert("num_syndromes_per_round", native_chunk);
+      node.decoder_instance = std::move(dec);
+      std::vector<cudaq::qec::task_graph_node_config> nodes;
+      nodes.push_back(std::move(node));
+      cudaq::qec::task_graph_options graph_options;
+      graph_options.async_streaming =
+          point.execution == execution_kind::task_graph_async;
+      graph_options.async_queue_capacity = opts.async_queue_capacity == 0
+                                               ? round_widths.size()
+                                               : opts.async_queue_capacity;
+      graph_options.async_coordinator_cpu = coordinator_cpu;
+      graph_options.async_spin_pause_iters = opts.async_spin_pause_iters;
+      targets[instance] = std::make_unique<benchmark_target>(
+          cudaq::qec::decoding_task_graph::from_topology(std::move(nodes), {},
+                                                         graph_options));
     }
-    decoders[instance] = std::move(dec);
+
+    if (mode == bench_mode::stream) {
+      warmup_stream(*targets[instance], data, opts, round_widths);
+    } else {
+      warmup_batch(*targets[instance], data, matrices, opts);
+    }
   }; // end - work.setup
 
   work.run = [&](std::size_t instance, instance_result &out) {
     const std::size_t offset =
         instance_shot_offset(instance, point.instances, opts.shots);
     if (mode == bench_mode::stream)
-      run_stream_instance(*decoders[instance], data, opts, round_widths, offset,
+      run_stream_instance(*targets[instance], data, opts, round_widths, offset,
                           out);
     else
-      run_batch_instance(*decoders[instance], data, matrices, opts, offset,
-                         out);
+      run_batch_instance(*targets[instance], data, matrices, opts, offset, out);
   };
 
   const instance_pool_result pool =
@@ -1364,7 +1661,7 @@ measurement run_point(const options &opts, const benchmark_data &data,
 
 // Column widths for the flat results table.
 constexpr int col_w_id = 4;
-constexpr int col_w_decoder = 26;
+constexpr int col_w_decoder_min = 30;
 constexpr int col_w_d = 4;
 constexpr int col_w_rounds = 8;
 constexpr int col_w_instances = 11;
@@ -1379,9 +1676,18 @@ constexpr int col_w_tput = 13; // rounds/s summed over instances
 constexpr int col_w_ler = 12;
 // Divider width. The decoder name is printed with a two-space gutter, hence
 // the + 2; deriving the total keeps it correct as columns come and go.
-constexpr int table_width =
-    col_w_id + col_w_decoder + 2 + col_w_d + col_w_rounds + col_w_instances +
-    col_w_shots + col_w_noise + 5 * col_w_lat + col_w_tput + col_w_ler;
+int table_width(int decoder_width) {
+  return col_w_id + decoder_width + 2 + col_w_d + col_w_rounds +
+         col_w_instances + col_w_shots + col_w_noise + 5 * col_w_lat +
+         col_w_tput + col_w_ler;
+}
+
+int decoder_column_width(const std::vector<measurement> &rows) {
+  std::size_t width = col_w_decoder_min;
+  for (const auto &row : rows)
+    width = std::max(width, row.name.size());
+  return static_cast<int>(width);
+}
 
 // The logical error rate divides by the shots of every instance, so a row must
 // carry the total alongside the per-instance count.
@@ -1429,14 +1735,15 @@ std::string describe_auto_pinning(const options &opts) {
   return text;
 }
 
-void print_table_header(const std::string &title, const std::string &lat_col) {
+void print_table_header(const std::string &title, const std::string &lat_col,
+                        int decoder_width) {
   std::cout << "\n" << title << "\n";
   // The round rate divides by a count no column carries, and one no reader
   // would guess from the rounds column, so spell the convention out.
   std::cout << "rounds/s: detector rounds retired per second, summed over "
                "instances; a shot carries rounds+1 of them\n";
   std::cout << std::right << std::setw(col_w_id) << "id" << std::left
-            << std::setw(col_w_decoder + 2) << "  decoder" << std::right
+            << std::setw(decoder_width + 2) << "  decoder" << std::right
             << std::setw(col_w_d) << "d" << std::setw(col_w_rounds) << "rounds"
             << std::setw(col_w_instances) << "instances"
             << std::setw(col_w_shots) << "shots/inst" << std::setw(col_w_noise)
@@ -1446,13 +1753,13 @@ void print_table_header(const std::string &title, const std::string &lat_col) {
             << std::setw(col_w_tput) << "rounds/s" << std::setw(col_w_ler)
             << "LER"
             << "\n";
-  std::cout << std::string(table_width, '-') << "\n";
+  std::cout << std::string(table_width(decoder_width), '-') << "\n";
 }
 
-void print_table_row(const measurement &row, bool use_tail) {
+void print_table_row(const measurement &row, bool use_tail, int decoder_width) {
   const auto &lat = use_tail ? row.tail : row.latency;
   std::cout << std::right << std::fixed << std::setw(col_w_id) << row.decoder_id
-            << "  " << std::left << std::setw(col_w_decoder) << row.name
+            << "  " << std::left << std::setw(decoder_width) << row.name
             << std::right << std::setw(col_w_d) << row.distance
             << std::setw(col_w_rounds) << row.rounds
             << std::setw(col_w_instances) << row.instances
@@ -1467,18 +1774,62 @@ void print_table_row(const measurement &row, bool use_tail) {
             << logical_error_rate(row) << "\n";
 }
 
-void print_csv_row(const std::string &mode, const measurement &row) {
-  std::cout << "csv," << mode << "," << row.decoder_id << "," << row.name << ","
-            << row.distance << "," << row.rounds << "," << row.rounds_per_shot
-            << "," << row.instances << "," << row.shots << ","
-            << row.total_shots << "," << std::scientific << std::setprecision(2)
-            << row.noise << "," << std::fixed << std::setprecision(3)
-            << row.latency.min << "," << row.latency.p50 << ","
-            << row.latency.p90 << "," << row.latency.p99 << ","
-            << row.latency.max << "," << row.tail.min << "," << row.tail.p50
-            << "," << row.tail.p99 << "," << row.tail.max << ","
-            << std::setprecision(1) << row.throughput << ","
-            << std::setprecision(4) << logical_error_rate(row) << "\n";
+void print_tail_decomposition(const std::vector<measurement> &rows,
+                              int decoder_width) {
+  constexpr int component_width = 18;
+  const int width = col_w_id + decoder_width + 2 + 4 * component_width;
+  std::cout << "\nstreaming tail decomposition -- microseconds, pooled over "
+               "instances\n"
+            << std::right << std::setw(col_w_id) << "id" << std::left
+            << std::setw(decoder_width + 2) << "  decoder" << std::right
+            << std::setw(component_width) << "FINAL enqueue p50"
+            << std::setw(component_width) << "FINAL enqueue p99"
+            << std::setw(component_width) << "readout p50"
+            << std::setw(component_width) << "readout p99"
+            << "\n"
+            << std::string(width, '-') << "\n";
+  for (const auto &row : rows)
+    std::cout << std::right << std::fixed << std::setw(col_w_id)
+              << row.decoder_id << "  " << std::left << std::setw(decoder_width)
+              << row.name << std::right << std::setprecision(2)
+              << std::setw(component_width) << row.final_enqueue.p50
+              << std::setw(component_width) << row.final_enqueue.p99
+              << std::setw(component_width) << row.correction_readout.p50
+              << std::setw(component_width) << row.correction_readout.p99
+              << "\n";
+}
+
+void print_csv_row(const options &opts, const std::string &mode,
+                   const measurement &row) {
+  const auto queue_capacity = row.execution == execution_kind::task_graph_async
+                                  ? opts.async_queue_capacity == 0
+                                        ? row.rounds_per_shot
+                                        : opts.async_queue_capacity
+                                  : 0;
+  const double round_interval_us =
+      static_cast<double>(opts.round_interval.count()) / 1e3;
+  const bool asynchronous = row.execution == execution_kind::task_graph_async;
+  std::cout << "csv," << mode << "," << execution_name(row.execution) << ","
+            << round_interval_us << "," << queue_capacity << ","
+            << (asynchronous ? opts.dedicate_async_coordinator ? "dedicated"
+                                                               : "inherited"
+                             : "none")
+            << "," << (asynchronous ? opts.async_spin_pause_iters : 0) << ","
+            << row.decoder_id << "," << row.name << "," << row.distance << ","
+            << row.rounds << "," << row.rounds_per_shot << "," << row.instances
+            << "," << row.shots << "," << row.total_shots << ","
+            << std::scientific << std::setprecision(2) << row.noise << ","
+            << std::fixed << std::setprecision(3) << row.latency.min << ","
+            << row.latency.p50 << "," << row.latency.p90 << ","
+            << row.latency.p99 << "," << row.latency.max << "," << row.tail.min
+            << "," << row.tail.p50 << "," << row.tail.p99 << "," << row.tail.max
+            << "," << row.final_enqueue.min << "," << row.final_enqueue.p50
+            << "," << row.final_enqueue.p99 << "," << row.final_enqueue.max
+            << "," << row.correction_readout.min << ","
+            << row.correction_readout.p50 << "," << row.correction_readout.p99
+            << "," << row.correction_readout.max << "," << std::setprecision(1)
+            << row.throughput << "," << std::setprecision(4)
+            << logical_error_rate(row) << "\n";
 }
 
 } // namespace
@@ -1497,7 +1848,17 @@ int main(int argc, char **argv) {
             << "decoders:  ";
   for (std::size_t i = 0; i < opts.decoders.size(); ++i)
     std::cout << (i ? ", " : "") << "[" << i << "] " << opts.decoders[i];
-  std::cout << "\n"
+  std::cout << "\nexecutions:";
+  for (const auto execution : opts.executions)
+    std::cout << " " << execution_name(execution);
+  std::cout << "\nasync queue="
+            << (opts.async_queue_capacity == 0
+                    ? std::string("one shot")
+                    : std::to_string(opts.async_queue_capacity) + " records")
+            << "  coordinator="
+            << (opts.dedicate_async_coordinator ? "dedicated CPU" : "inherited")
+            << "  coordinator spin=" << opts.async_spin_pause_iters << " pauses"
+            << "\n"
             << "round pacing="
             << (opts.round_interval.count() > 0
                     ? std::to_string(
@@ -1524,14 +1885,16 @@ int main(int argc, char **argv) {
 
   // Rewriting a value the user typed is only acceptable if the run says so.
   if (wants_machine_sized_threads(opts)) {
-    std::cout << "num_threads=0 ->";
-    for (const std::size_t n : opts.instances_list) {
-      const std::size_t share = auto_thread_share(opts, n);
-      std::cout << "  " << n << " inst: "
-                << (share == 0 ? std::string("decoder default")
-                               : std::to_string(share) + " threads");
+    for (const auto execution : opts.executions) {
+      std::cout << "num_threads=0 (" << execution_name(execution) << ") ->";
+      for (const std::size_t n : opts.instances_list) {
+        const std::size_t share = auto_thread_share(opts, n, execution);
+        std::cout << "  " << n << " inst: "
+                  << (share == 0 ? std::string("decoder default")
+                                 : std::to_string(share) + " threads");
+      }
+      std::cout << "\n";
     }
-    std::cout << "\n";
   }
 
   // Oversubscription turns decode latency into scheduler noise, which is easy
@@ -1558,6 +1921,7 @@ int main(int argc, char **argv) {
       opts.rounds_list.empty() ? 1 : opts.rounds_list.size();
   const std::size_t total_points = opts.distances.size() * rounds_count *
                                    opts.noises.size() * opts.decoders.size() *
+                                   opts.executions.size() *
                                    opts.instances_list.size() * mode_count;
   std::size_t point_number = 0;
 
@@ -1613,29 +1977,36 @@ int main(int argc, char **argv) {
         for (int id = 0; id < static_cast<int>(opts.decoders.size()); ++id) {
           const auto &name = opts.decoders[static_cast<std::size_t>(id)];
           try {
-            // Instance count innermost: consecutive rows then form the
-            // scaling curve for one decoder at one configuration.
-            for (const std::size_t instances : opts.instances_list) {
-              // Rebuilt per row because a machine-sized thread request
-              // resolves against this row's instance count.
-              const cudaqx::heterogeneous_map dec_params = build_decoder_params(
-                  name, param_dr, block_leaf, opts.extra_params,
-                  auto_thread_share(opts, instances));
-              sweep_point point;
-              point.decoder_id = id;
-              point.name = name;
-              point.distance = distance;
-              point.rounds = rounds;
-              point.noise = noise;
-              point.instances = instances;
+            for (const auto execution : opts.executions) {
+              // Instance count innermost: consecutive rows then form the
+              // scaling curve for one execution at one configuration.
+              for (const std::size_t instances : opts.instances_list) {
+                // Rebuilt per row because a machine-sized thread request
+                // resolves against this row's instance count.
+                const cudaqx::heterogeneous_map dec_params =
+                    build_decoder_params(
+                        name, param_dr, block_leaf, opts.extra_params,
+                        auto_thread_share(opts, instances, execution));
+                sweep_point point;
+                point.decoder_id = id;
+                point.decoder_name = name;
+                point.execution = execution;
+                point.name = execution == execution_kind::decoder
+                                 ? name
+                                 : name + "/" + execution_name(execution);
+                point.distance = distance;
+                point.rounds = rounds;
+                point.noise = noise;
+                point.instances = instances;
 
-              if (opts.run_batch)
-                run_and_record(data, matrices, dec_params, round_widths,
-                               bench_mode::batch, point, batch_rows);
-              if (opts.run_stream)
-                run_and_record(data, matrices, dec_params, round_widths,
-                               bench_mode::stream, point, stream_rows);
-            } // end - for(instances)
+                if (opts.run_batch)
+                  run_and_record(data, matrices, dec_params, round_widths,
+                                 bench_mode::batch, point, batch_rows);
+                if (opts.run_stream)
+                  run_and_record(data, matrices, dec_params, round_widths,
+                                 bench_mode::stream, point, stream_rows);
+              } // end - for(instances)
+            } // end - for(execution)
           } catch (const std::exception &e) {
             std::cerr << "error: decoder [" << id << "] " << name
                       << " (d=" << distance << " r=" << rounds << " p=" << noise
@@ -1650,30 +2021,37 @@ int main(int argc, char **argv) {
   // Print batch table (all configs, then all stream configs). Latencies are
   // pooled over the instances of a row and rounds/s is summed over them.
   if (!batch_rows.empty()) {
+    const int decoder_width = decoder_column_width(batch_rows);
     print_table_header("batch decode() -- latencies in microseconds, pooled "
                        "over instances",
-                       "decode");
+                       "decode", decoder_width);
     for (const auto &row : batch_rows)
-      print_table_row(row, /*use_tail=*/false);
+      print_table_row(row, /*use_tail=*/false, decoder_width);
   }
   if (!stream_rows.empty()) {
+    const int decoder_width = decoder_column_width(stream_rows);
     print_table_header("streaming: last round + corrections -- latencies in "
                        "microseconds, pooled over instances",
-                       "tail");
+                       "tail", decoder_width);
     for (const auto &row : stream_rows)
-      print_table_row(row, /*use_tail=*/true);
+      print_table_row(row, /*use_tail=*/true, decoder_width);
+    print_tail_decomposition(stream_rows, decoder_width);
   }
 
   // CSV output (interleaved batch then stream to keep mode grouping).
   if (opts.emit_csv) {
-    std::cout << "csv,mode,id,decoder,d,rounds,det_rounds,instances,shots,"
-                 "total_shots,noise,"
+    std::cout << "csv,mode,execution,round_interval_us,async_queue_capacity,"
+                 "coordinator_affinity,async_spin_pause_iters,id,decoder,d,"
+                 "rounds,det_rounds,instances,shots,total_shots,noise,"
                  "latency_min,p50,p90,p99,latency_max,tail_min,tail_p50,"
-                 "tail_p99,tail_max,rounds_s,ler\n";
+                 "tail_p99,tail_max,final_enqueue_min,final_enqueue_p50,"
+                 "final_enqueue_p99,final_enqueue_max,correction_readout_min,"
+                 "correction_readout_p50,correction_readout_p99,"
+                 "correction_readout_max,rounds_s,ler\n";
     for (const auto &row : batch_rows)
-      print_csv_row("batch", row);
+      print_csv_row(opts, "batch", row);
     for (const auto &row : stream_rows)
-      print_csv_row("stream", row);
+      print_csv_row(opts, "stream", row);
   }
 
   std::cout << std::defaultfloat;

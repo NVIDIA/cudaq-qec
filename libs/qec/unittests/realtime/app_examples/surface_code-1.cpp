@@ -166,6 +166,8 @@ struct run_options {
   int sw_step_size = 1;
   std::string sw_inner_decoder = "multi_error_lut";
   bool sw_inner_decoder_set = false;
+  bool task_graph = false; // wrap --decoder_type in a decoding_task_graph
+  bool async_streaming = false;
   std::vector<std::string> decoder_params; // --param key=value overrides
   bool save_dem = false;
   bool load_dem = false;
@@ -199,11 +201,11 @@ syndrome_capture_state g_capture;
 
 } // namespace
 
-// Return the custom-args map for a named decoder given the DEM error rates,
-// with any --param key=value overrides applied on top. The registered decoder
-// schema drives type coercion for each override.
+// Return the custom-args map for a named decoder, with any --param key=value
+// overrides applied on top. The registered decoder schema drives type coercion
+// for each override.
 static cudaqx::heterogeneous_map
-decoder_args(const std::string &type,
+decoder_args(const std::string &type, [[maybe_unused]] int distance,
              const std::vector<std::string> &params = {}) {
   cudaqx::heterogeneous_map args;
   if (type == "nv-qldpc-decoder") {
@@ -567,12 +569,24 @@ build_multi_decoder_config(
       sw_args.insert("straddle_end_round", true);
       sw_args.insert("inner_decoder_name", opts.sw_inner_decoder);
       sw_args.insert("inner_decoder_params",
-                     decoder_args(opts.sw_inner_decoder, opts.decoder_params));
+                     decoder_args(opts.sw_inner_decoder, opts.distance,
+                                  opts.decoder_params));
       dc.decoder_custom_args = sw_args;
     } else {
-      dc.type = opts.decoder_type;
+      // A task graph over these flat matrices is one window covering the whole
+      // syndrome volume, with the entry's custom args reaching the inner
+      // decoder unchanged -- so the two branches decode identically and differ
+      // only in which engine runs them.
+      if (opts.task_graph) {
+        dc.task_graph.emplace();
+        dc.task_graph->type = "single_window";
+        dc.task_graph->inner_type = opts.decoder_type;
+        dc.task_graph->options.async_streaming = opts.async_streaming;
+      } else {
+        dc.type = opts.decoder_type;
+      }
       dc.decoder_custom_args =
-          decoder_args(opts.decoder_type, opts.decoder_params);
+          decoder_args(opts.decoder_type, opts.distance, opts.decoder_params);
     }
 
     multi_config.decoders.push_back(dc);
@@ -788,10 +802,13 @@ bool setup_decoders(const cudaq::qec::code &code,
 
   // Characterize the DEM and build the decoder configuration. full_component()
   // canonicalizes both stabilizer types (boundary-aware) into decoder_inputs.
+  // Matching decoders need a graphlike DEM, so decompose hyperedge error
+  // mechanisms into graph-like columns for them.
   const std::string &leaf_decoder = opts.decoder_type == "sliding_window"
                                         ? opts.sw_inner_decoder
                                         : opts.decoder_type;
-  const bool decompose_errors = (leaf_decoder == "pymatching");
+  bool decompose_errors = (leaf_decoder == "pymatching");
+  decompose_errors = decompose_errors || leaf_decoder == "nv-fusion-decoder";
   auto ctx = cudaq::qec::decoder_context_from_memory_circuit(
       code, state_prep, opts.num_rounds, noise, decompose_errors);
   const auto inputs = ctx.full_component();
@@ -1117,6 +1134,15 @@ void show_help() {
   printf("  --sw_step_size <int>    Sliding window step size. Default: 1\n");
   printf("  --sw_inner_decoder <string> Inner decoder for sliding_window. "
          "Default: multi_error_lut\n");
+  printf("  --task_graph        Run --decoder_type inside a decoding task "
+         "graph\n"
+         "      (one single_window node over the whole syndrome volume) "
+         "instead of\n"
+         "      calling it directly. Not valid with --decoder_type "
+         "sliding_window.\n");
+  printf("  --async_streaming   Process task-graph streaming input on its "
+         "coordinator thread.\n"
+         "      Requires --task_graph.\n");
   printf(
       "  --param <key=value> Override a decoder parameter (repeatable). For\n"
       "      --decoder_type sliding_window the override targets the inner\n"
@@ -1185,6 +1211,10 @@ int main(int argc, char **argv) {
         opts.sw_inner_decoder = val(i);
         opts.sw_inner_decoder_set = true;
         i++;
+      } else if (arg == "--task_graph") {
+        opts.task_graph = true;
+      } else if (arg == "--async_streaming") {
+        opts.async_streaming = true;
       } else if (arg == "--save_dem") {
         opts.save_dem = true;
         opts.dem_filename = val(i);
@@ -1238,15 +1268,22 @@ int main(int argc, char **argv) {
   if (opts.sw_window_size == -1)
     opts.sw_window_size = opts.distance;
 
-  // Leaf decoders: valid as --decoder_type or --sw_inner_decoder.
+  // Sliding-window leaf decoders are valid both as --decoder_type and as
+  // --sw_inner_decoder.
+  // nv-fusion-decoder is wired only as a top-level decoder: it needs a
+  // per-detector round map sized to its own PCM, and sliding_window hands
+  // every window the same inner_decoder_params, so nothing here derives a
+  // per-window detector_round for it.
   auto is_leaf_decoder = [](const std::string &t) {
     return t == "multi_error_lut" || t == "nv-qldpc-decoder" ||
            t == "pymatching";
   };
   if (!is_leaf_decoder(opts.decoder_type) &&
+      opts.decoder_type != "nv-fusion-decoder" &&
       opts.decoder_type != "sliding_window") {
     printf("Error: --decoder_type must be 'multi_error_lut', "
-           "'nv-qldpc-decoder', 'sliding_window', or 'pymatching'\n");
+           "'nv-qldpc-decoder', 'nv-fusion-decoder', "
+           "'sliding_window', or 'pymatching'\n");
     return 1;
   }
   if (opts.decoder_type == "sliding_window" &&
@@ -1255,9 +1292,20 @@ int main(int argc, char **argv) {
            "'nv-qldpc-decoder', or 'pymatching'\n");
     return 1;
   }
-  if (opts.sw_inner_decoder_set && is_leaf_decoder(opts.decoder_type)) {
+  if (opts.sw_inner_decoder_set && opts.decoder_type != "sliding_window") {
     printf("Error: --sw_inner_decoder is only valid with "
            "--decoder_type sliding_window\n");
+    return 1;
+  }
+  // The graph node owns the windowing, so the sliding_window decoder would be a
+  // window inside a window; nothing here derives the inner one's parameters.
+  if (opts.task_graph && !is_leaf_decoder(opts.decoder_type)) {
+    printf("Error: --task_graph requires --decoder_type 'multi_error_lut', "
+           "'nv-qldpc-decoder', or 'pymatching'\n");
+    return 1;
+  }
+  if (opts.async_streaming && !opts.task_graph) {
+    printf("Error: --async_streaming requires --task_graph\n");
     return 1;
   }
 

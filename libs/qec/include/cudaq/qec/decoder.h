@@ -128,6 +128,41 @@ validate_config_parameters(const cudaqx::heterogeneous_map &config,
   return invalid_types;
 }
 
+/// @brief The shape of one round, as named by the decoding server's syndrome
+/// mapping table.  Lives here so the server and the decoder share one enum.
+enum class round_type {
+  BULK,  ///< Mid-circuit syndrome-extraction round.
+  FINAL, ///< Last round of a shot; its detector set differs from a bulk round.
+};
+
+/// @brief Optional correction access for decoders with deferred shot sealing.
+///
+/// A streaming consumer must not treat provisional output as the end of an
+/// unknown-length shot. Implement this separate capability when the legacy
+/// get_obs_corrections() accessor can settle a configured-length shot. Keeping
+/// it separate leaves decoder's layout and virtual interface unchanged; older
+/// plugins retain their existing correction-access behavior.
+class __attribute__((visibility("default"))) streaming_correction_provider {
+public:
+  virtual ~streaming_correction_provider() = default;
+
+  /// Borrow the accumulated committed frame without ending the active shot.
+  /// The view has the decoder's observable width and remains decoder-owned.
+  virtual const uint8_t *peek_obs_corrections() const = 0;
+
+  /// End the active shot, if its FINAL round has not, and borrow its complete
+  /// frame, including deferred work. Repeated access to an already finalized
+  /// shot must not publish it twice.
+  virtual const uint8_t *finalize_obs_corrections() = 0;
+
+  /// Physical rounds covered by a successfully finalized frame, when known.
+  /// Unknown-length consumers cannot infer this from a template's byte width.
+  /// Return no value before finalization or after resetting the shot.
+  virtual std::optional<std::uint64_t> finalized_round_count() const {
+    return std::nullopt;
+  }
+};
+
 /// @brief Decoder results
 struct decoder_result {
   /// @brief Whether or not the decoder converged.
@@ -435,6 +470,12 @@ public:
   /// @brief Enqueue a syndrome for decoding (vector version)
   /// @return True if enough syndromes have been enqueued to trigger a decode.
   virtual bool enqueue_syndrome(const std::vector<uint8_t> &syndrome);
+
+  /// @brief Enqueue one round, tagged with its shape.  The base drops the tag
+  /// and forwards, so a fixed-length decoder is unaffected; one that decides
+  /// its length at run time overrides this to learn where a shot ends.
+  virtual bool enqueue_syndrome(const uint8_t *syndrome,
+                                std::size_t syndrome_length, round_type type);
 
   /// @brief Get the current observable corrections.
   virtual const uint8_t *get_obs_corrections() const;

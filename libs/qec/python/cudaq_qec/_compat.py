@@ -100,6 +100,12 @@ class _deprecated_typed_config:
                     kinds = {entry["key"]: entry["kind"] for entry in schema}
             except Exception:
                 pass
+            # Model rates were part of several deprecated typed configs but
+            # are no longer declared by their custom-parameter schemas. Keep
+            # the legacy setter's type checking while conversion promotes the
+            # value to decoder_config.error_rate_vec.
+            if "error_rate_vec" in cls._fields:
+                kinds.setdefault("error_rate_vec", "float64_vec")
             cls._kind_cache = kinds
         return cls._kind_cache
 

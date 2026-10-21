@@ -285,15 +285,26 @@ concat_instance_samples(const std::vector<instance_result> &instances,
                         instance_sample_kind kind) {
   std::vector<double> pooled;
   std::size_t total = 0;
+  const auto samples_for =
+      [kind](const instance_result &instance) -> const std::vector<double> & {
+    switch (kind) {
+    case instance_sample_kind::shot:
+      return instance.shot_us;
+    case instance_sample_kind::tail:
+      return instance.tail_us;
+    case instance_sample_kind::final_enqueue:
+      return instance.final_enqueue_us;
+    case instance_sample_kind::correction_readout:
+      return instance.correction_readout_us;
+    }
+    return instance.shot_us;
+  };
 
   for (const auto &instance : instances)
-    total += (kind == instance_sample_kind::shot ? instance.shot_us
-                                                 : instance.tail_us)
-                 .size();
+    total += samples_for(instance).size();
   pooled.reserve(total);
   for (const auto &instance : instances) {
-    const auto &samples = kind == instance_sample_kind::shot ? instance.shot_us
-                                                             : instance.tail_us;
+    const auto &samples = samples_for(instance);
     pooled.insert(pooled.end(), samples.begin(), samples.end());
   }
   return pooled;

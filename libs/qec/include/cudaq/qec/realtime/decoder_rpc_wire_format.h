@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "cudaq/qec/realtime/decoder_rpc_limits.h"
 #include "cudaq/realtime/daemon/dispatcher/dispatch_kernel_launch.h"
 
 #include <cstddef>
@@ -53,11 +54,6 @@ enum class RpcStatus : std::int32_t {
   BUSY = 5,
   SYNDROMES_DROPPED = 6,
 };
-
-// Hard cap for one enqueue_syndromes request. Enforced at both transport and
-// session boundaries so alternate transports cannot bypass allocation and
-// packed-length validation.
-inline constexpr std::uint64_t kMaxSyndromeBits = 1u << 20; // 1 M bits
 
 struct __attribute__((packed)) EnqueueRequestPayload {
   std::int64_t decoder_id;          ///< arg0
@@ -105,10 +101,28 @@ CUDAQX_RPC_HD constexpr std::size_t align_to_8(std::size_t bytes) {
 
 #undef CUDAQX_RPC_HD
 
-// Maximum number of decoders the realtime dispatch can register at once.  GPU
-// dispatch implementations use it to size their device-side state tables; host
-// session code uses it for early range checks without depending on private GPU
-// dispatch headers.
-inline constexpr std::size_t kMaxDispatchedDecoders = 32;
+// kMaxDispatchedDecoders and kMaxSyndromeMappingRows live in
+// decoder_rpc_limits.h so host-only code can use them without this header.
+
+/// The syndrome_mapping table as the DEVICE-mode enqueue handler sees it.
+/// Passed by value into the install kernel, so it stays a small POD.
+///
+/// `declared == 0` means nothing was installed and only id 0 is serviceable,
+/// the same rule the host resolver applies.
+///
+/// `shapes` is carried but unread: the only shape that changes behaviour is
+/// FINAL, which commits a withheld tail, and no graph-dispatchable node
+/// withholds one (window_node::supports_graph_dispatch gates on stride and
+/// guards).
+struct DeviceSyndromeMappingTable {
+  std::uint8_t shapes[kMaxSyndromeMappingRows]; ///< cudaq::qec::round_type
+  std::uint16_t declared;                       ///< bit i set == id i has a row
+};
+static_assert(kMaxSyndromeMappingRows <= 16,
+              "DeviceSyndromeMappingTable::declared is a 16-bit mask");
+static_assert(sizeof(DeviceSyndromeMappingTable::shapes) ==
+                  kMaxSyndromeMappingRows,
+              "shapes is indexed by syndrome_mapping id, so it must have one "
+              "slot per legal id");
 
 } // namespace cudaq::qec::decoding::rpc

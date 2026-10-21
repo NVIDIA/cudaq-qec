@@ -631,6 +631,17 @@ dem_chunks_to_detector_round(const std::vector<extended_dem> &chunks,
 std::vector<std::vector<uint32_t>>
 dem_chunks_to_o_sparse(const std::vector<extended_dem> &chunks);
 
+/// @brief Cumulative fault-column offsets of T chunks, with a trailing total.
+///
+/// Chunk i owns columns [offsets[i], offsets[i + 1]) of the closed model, so
+/// the result has T + 1 entries and offsets.back() is the total fault count.
+/// Per-chunk counts differ (a rep-5 memory experiment is 9/9/5 for
+/// init/bulk/final), so a caller cannot assume a uniform stride. Seam names
+/// are not needed: closing a chain concatenates fault columns in chunk order
+/// and shares no column between chunks.
+std::vector<std::size_t>
+dem_chunks_to_fault_offsets(const std::vector<extended_dem> &chunks);
+
 /// @brief Build a canonicalized CSC parity-check matrix from chunks.
 sparse_binary_matrix
 dem_chunks_to_pcm(const std::vector<extended_dem> &chunks,

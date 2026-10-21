@@ -150,13 +150,13 @@ std::vector<std::uint8_t> build_reset_frame(std::uint64_t decoder_id,
   return build_frame(wire::kResetDecoderFunctionId, rid, &p, sizeof(p));
 }
 
-std::vector<std::uint8_t> build_enqueue_frame(std::uint64_t decoder_id,
-                                              std::uint32_t rid,
-                                              const std::uint8_t *bits,
-                                              std::size_t n_bits) {
-  wire::EnqueueRequestPayload p{static_cast<std::int64_t>(decoder_id),
-                                /*counter=*/0,
-                                /*syndrome_mapping_id=*/0,
+std::vector<std::uint8_t>
+build_enqueue_frame(const event &e, const run_params &params, std::uint32_t rid,
+                    const std::uint8_t *bits, std::size_t n_bits) {
+  const std::int64_t mapping_id =
+      e.op == operation::enqueue_data ? params.final_mapping_id : 0;
+  wire::EnqueueRequestPayload p{static_cast<std::int64_t>(e.decoder_id),
+                                /*counter=*/0, mapping_id,
                                 static_cast<std::int64_t>(n_bits)};
   return build_frame(wire::kEnqueueSyndromesFunctionId, rid, &p, sizeof(p),
                      bits, n_bits);
@@ -311,7 +311,7 @@ plan(const schedule &sched_in,
         // Literal `source=0b...`: the same round, repeated. The parser has
         // already pinned the count, so every frame is known now.
         for (std::uint32_t r = 0; r < e.stream_min_rounds; ++r)
-          place(build_enqueue_frame(e.decoder_id, /*rid=*/0,
+          place(build_enqueue_frame(e, params, /*rid=*/0,
                                     sched.syndrome_arena.data() +
                                         e.syndrome_offset,
                                     e.syndrome_count),
@@ -346,7 +346,7 @@ plan(const schedule &sched_in,
           e.syndrome_offset = off;
           e.syndrome_count = len;
         }
-        place(build_enqueue_frame(e.decoder_id, /*rid=*/0,
+        place(build_enqueue_frame(e, params, /*rid=*/0,
                                   sched.syndrome_arena.data() + off, len),
               off, len);
       }
@@ -687,7 +687,8 @@ void run_stream(const run_ctx &c, std::uint32_t i,
         term = stream_terminate::SOURCE_EXHAUSTED;
         break;
       }
-      built = build_enqueue_frame(e.decoder_id, 0, drawn.data(), drawn.size());
+      built =
+          build_enqueue_frame(e, plan.params, 0, drawn.data(), drawn.size());
       if (s.max_frame_bytes != 0 && built.size() > s.max_frame_bytes) {
         term = stream_terminate::ERROR;
         if (try_abort(st))

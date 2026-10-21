@@ -1,0 +1,30 @@
+# ============================================================================ #
+# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
+# All rights reserved.                                                         #
+#                                                                              #
+# This source code and the accompanying materials are made available under     #
+# the terms of the Apache License 2.0 which accompanies this distribution.     #
+# ============================================================================ #
+
+# The decoding_server_config.yaml experiment decoded through a task graph: the
+# entry-level `type` becomes a `task_graph` block naming the node kind and the
+# decoder it wraps, and everything else is what the plain config says.
+#
+# `single_window` is the fixed-round shape, which is what pre-expanded H/O/D
+# matrices describe -- there is no per-round column layout to slide along.
+#
+# Task graphs are CPU-hosted, so this config is `dispatch: host` (the default);
+# `device_graph` is rejected at load.
+decoders:
+  - id: 0
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0, -1, 1, -1, 2, -1]
+    O_sparse: [0, -1, 1, -1, 2, -1]
+    D_sparse: [0, -1, 1, -1, 2, -1]
+    task_graph:
+      type: single_window
+      inner_type: pymatching
+    decoder_custom_args:
+      merge_strategy: smallest_weight
+      error_rate_vec: [0.1, 0.1, 0.1]

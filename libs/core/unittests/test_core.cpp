@@ -620,6 +620,22 @@ TEST(TensorTest, ConstructorWithShape) {
   EXPECT_EQ(t.shape(), shape);
 }
 
+TEST(TensorTest, LargeShapeElementCount) {
+  if (sizeof(std::size_t) < sizeof(std::uint64_t))
+    GTEST_SKIP() << "Large tensor sizes require a 64-bit size_t";
+
+  // Query shape metadata only; no storage is accessed or allocated.
+  for (const std::vector<std::size_t> shape :
+       {std::vector<std::size_t>{65536, 32768},
+        {65536, 65536},
+        {16604, 318656}}) {
+    cudaqx::tensor<std::uint8_t> tensor;
+    tensor.borrow(nullptr, shape);
+    EXPECT_EQ(tensor.size(), std::uint64_t{shape[0]} * shape[1]);
+    EXPECT_EQ(tensor.shape(), shape);
+  }
+}
+
 TEST(TensorTest, ConstructorWithDataAndShape) {
   std::vector<std::size_t> shape = {2, 2};
   std::complex<double> *data = new std::complex<double>[4];
