@@ -55,11 +55,9 @@ void reset_decoder(std::uint64_t decoder_id);
 namespace cudaq::qec::decoding {
 
 __qpu__ void
-enqueue_syndromes(std::uint64_t decoder_id,
-                  const std::vector<cudaq::measure_result> &syndromes,
-                  std::uint64_t tag) {
-  // No syndrome mapping table yet; id 0 is the identity mapping.
-  constexpr std::uint64_t kSyndromeMappingId = 0;
+enqueue_syndromes_mapped(std::uint64_t decoder_id,
+                         const std::vector<cudaq::measure_result> &syndromes,
+                         std::uint64_t tag, std::uint64_t syndrome_mapping_id) {
   // Pass the syndrome bits as a std::vector<bool>; the realtime device_call
   // lowering bit-packs it LSB-first into a CUDAQ_TYPE_BIT_PACKED payload (cudaq
   // PR 4816) and serializes its length as an element-count prefix.  That prefix
@@ -73,17 +71,24 @@ enqueue_syndromes(std::uint64_t decoder_id,
   // sessions, rings, and channels by device id).  The payload still carries
   // decoder_id as a cross-check for fan-in topologies.
   cudaq::device_call(decoder_id, ::enqueue_syndromes, decoder_id, tag,
-                     kSyndromeMappingId, bits);
+                     syndrome_mapping_id, bits);
+}
+
+__qpu__ void
+enqueue_syndromes(std::uint64_t decoder_id,
+                  const std::vector<cudaq::measure_result> &syndromes,
+                  std::uint64_t tag) {
+  enqueue_syndromes_mapped(decoder_id, syndromes, tag,
+                           /*syndrome_mapping_id=*/0);
 }
 
 __qpu__ void enqueue_syndromes_test(std::uint64_t decoder_id,
                                     const std::vector<bool> &syndromes,
                                     std::uint64_t tag) {
-  constexpr std::uint64_t kSyndromeMappingId = 0;
   // syndromes is already a std::vector<bool>; the lowering bit-packs it and
   // serializes its length as the element-count prefix (== num_syndromes).
   cudaq::device_call(decoder_id, ::enqueue_syndromes, decoder_id, tag,
-                     kSyndromeMappingId, syndromes);
+                     /*syndrome_mapping_id=*/0, syndromes);
 }
 
 __qpu__ std::vector<bool> get_corrections(std::uint64_t decoder_id,

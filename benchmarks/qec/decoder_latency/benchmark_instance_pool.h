@@ -43,6 +43,10 @@ struct instance_result {
   /// @brief Per-shot tail latency in microseconds (streaming mode: final round
   /// plus corrections readout). Batch mode leaves this empty.
   std::vector<double> tail_us;
+  /// @brief FINAL enqueue latency, including async drain and flush.
+  std::vector<double> final_enqueue_us;
+  /// @brief Correction-readout latency after FINAL enqueue returns.
+  std::vector<double> correction_readout_us;
   /// @brief Microseconds this instance spent in its own timed region, entering
   /// to leaving its run phase. Construction, warmup, thread spawn and teardown
   /// all fall outside it, as does the wait every other instance's stragglers
@@ -206,8 +210,10 @@ std::string pin_current_thread(const cpu_block &block);
 
 /// @brief Which sample vector of an instance_result to read.
 enum class instance_sample_kind {
-  shot, ///< instance_result::shot_us
-  tail, ///< instance_result::tail_us
+  shot,              ///< instance_result::shot_us
+  tail,              ///< instance_result::tail_us
+  final_enqueue,     ///< instance_result::final_enqueue_us
+  correction_readout ///< instance_result::correction_readout_us
 };
 
 /// @brief Concatenate one sample vector from every instance, in order.

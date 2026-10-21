@@ -118,6 +118,7 @@ multi_decoder_config = qecrt.config.multi_decoder_config
 decoder_config = qecrt.config.decoder_config
 decoder_dispatch = qecrt.config.decoder_dispatch
 transport_config = qecrt.config.transport_config
+syndrome_mapping_config = qecrt.config.syndrome_mapping_config
 transport_shape_override = qecrt.config.transport_shape_override
 configure_decoders_from_file = qecrt.config.configure_decoders_from_file
 configure_decoders_from_str = qecrt.config.configure_decoders_from_str
@@ -127,6 +128,14 @@ expand_dem_chunks = qecrt.config.expand_dem_chunks
 decoder_param_schema = qecrt.config.decoder_param_schema
 registered_decoder_schemas = qecrt.config.registered_decoder_schemas
 decoder_config_json_schema = qecrt.config.decoder_config_json_schema
+task_graph_spec = qecrt.config.task_graph_spec
+task_graph_node = qecrt.config.task_graph_node
+task_graph_edge = qecrt.config.task_graph_edge
+task_graph_column_range = qecrt.config.task_graph_column_range
+task_graph_ensemble = qecrt.config.task_graph_ensemble
+task_graph_ensemble_member = qecrt.config.task_graph_ensemble_member
+registered_task_graph_node_kinds = \
+    qecrt.config.registered_task_graph_node_kinds
 
 # Deprecated typed decoder-config classes, kept for backward compatibility
 # with the pre-schema API. They warn on construction; new code should assign

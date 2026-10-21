@@ -9,6 +9,7 @@
 #include "trt_test_data.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include "cudaq/qec/trt_decoder_internal.h"
 #include <chrono>
 #include <cmath>
@@ -76,6 +77,14 @@ std::optional<std::string> get_uint8_onnx_asset_path() {
 std::optional<std::string> get_uint8_to_float_onnx_asset_path() {
 #ifdef TRT_TEST_UINT8_TO_FLOAT_ONNX_PATH
   return std::string(TRT_TEST_UINT8_TO_FLOAT_ONNX_PATH);
+#else
+  return std::nullopt;
+#endif
+}
+
+std::optional<std::string> get_predecoder_onnx_asset_path() {
+#ifdef TRT_TEST_PREDECODER_ONNX_PATH
+  return std::string(TRT_TEST_PREDECODER_ONNX_PATH);
 #else
   return std::nullopt;
 #endif
@@ -982,6 +991,96 @@ TEST_F(TRTDecoderTest, RejectsPackedOutputWithoutGlobalDecoderAtTopLevel) {
               std::string::npos)
         << e.what();
   }
+}
+
+TEST_F(TRTDecoderTest, DrivesExplicitPredecoderTaskGraph) {
+  if (!gpu_available())
+    GTEST_SKIP() << "No CUDA GPU available";
+  const auto onnx_path = get_predecoder_onnx_asset_path();
+  if (!onnx_path || !std::filesystem::exists(*onnx_path))
+    GTEST_SKIP() << "Generated predecoder ONNX fixture is unavailable";
+
+  const std::vector<std::vector<uint32_t>> identity = {{0}, {1}, {2}};
+
+  task_graph_node_config pre;
+  pre.id = "pre";
+  pre.kind = "predecoder";
+  pre.d_sparse = identity;
+  pre.o_sparse = {{0}};
+  pre.h_sparse = identity;
+  pre.decoder_type = "trt_decoder";
+  pre.params.insert("onnx_load_path", *onnx_path);
+  pre.params.insert("engine_output_format",
+                    std::string("observables_and_residual_detectors"));
+  pre.params.insert("batch_size", std::size_t{1});
+  pre.params.insert("use_cuda_graph", false);
+  pre.node_params.insert("residual_from", std::string("model"));
+  pre.stim_dem = "error(0.1) D0 L0\nerror(0.1) D1\nerror(0.1) D2\n";
+
+  task_graph_node_config global;
+  global.id = "global";
+  global.kind = "single_window";
+  global.d_sparse = identity;
+  global.o_sparse = {{0}};
+  global.h_sparse = identity;
+  global.decoder_type = "pymatching";
+  global.params.insert("merge_strategy", std::string("smallest_weight"));
+  const std::vector<double> error_rates{0.1, 0.1, 0.1};
+
+  task_graph_node_config combine;
+  combine.id = "combine";
+  combine.kind = "xor";
+
+  std::unique_ptr<decoder> direct;
+  std::unique_ptr<decoding_task_graph> graph;
+  try {
+    const auto H = sparse_binary_matrix::from_nested_csr(3, 3, identity);
+    const auto O = sparse_binary_matrix::from_nested_csr(1, 3, {{0}});
+    global.decoder_instance = decoder::get(
+        "pymatching", decoder_init(H, O, error_rates), global.params);
+
+    cudaqx::heterogeneous_map direct_params;
+    direct_params.insert("onnx_load_path", *onnx_path);
+    direct_params.insert("engine_output_format",
+                         std::string("observables_and_residual_detectors"));
+    direct_params.insert("batch_size", std::size_t{1});
+    direct_params.insert("use_cuda_graph", false);
+    direct_params.insert("global_decoder", std::string("pymatching"));
+    direct_params.insert("global_decoder_params", global.params);
+    direct = decoder::get(
+        "trt_decoder",
+        decoder_init(sparse_binary_matrix(make_identity_h(3)), O, error_rates),
+        direct_params);
+
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(pre));
+    nodes.push_back(std::move(global));
+    nodes.push_back(std::move(combine));
+    graph = decoding_task_graph::from_topology(
+        std::move(nodes), {{"measurements", "output", "pre", "input"},
+                           {"pre", "residual", "global", "input"},
+                           {"pre", "pre_L", "combine", "a"},
+                           {"global", "output", "combine", "b"},
+                           {"combine", "output", "output", "input"}});
+  } catch (const std::exception &e) {
+    FAIL() << "Failed to create TRT task graph: " << e.what();
+  }
+
+  measurement_results shot;
+  shot.bits = {1, 0, 0};
+  const auto direct_result = direct->decode({1.0, 0.0, 0.0});
+  std::vector<uint8_t> direct_hard;
+  convert_vec_soft_to_hard(direct_result.result, direct_hard);
+  ASSERT_TRUE(direct_result.converged);
+  ASSERT_EQ(direct_hard, (std::vector<uint8_t>{1}));
+
+  const auto batch = graph->run(shot);
+  EXPECT_TRUE(batch.converged);
+  EXPECT_EQ(batch.bits, direct_hard);
+
+  graph->reset_decoder();
+  ASSERT_TRUE(graph->enqueue_syndrome(shot.bits.data(), shot.bits.size()));
+  EXPECT_EQ(graph->get_obs_corrections()[0], batch.bits[0]);
 }
 
 TEST_F(TRTDecoderTest, CompositeGlobalDecoderReceivesCancellationToken) {

@@ -96,6 +96,44 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# The same decoder reached through a decoding task graph rather than directly.
+# The wrapper's save_dem/load_dem and syndrome replay steps cover the task_graph
+# YAML round-trip and correction reproducibility along with it. pymatching is
+# named explicitly so the case exercises the graph on CPU-only machines too.
+add_test(
+  NAME app_examples.surface_code-1-local-test-distance-3-task-graph
+  COMMAND
+    bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
+      ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
+      ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
+      3 60 30 NULL 12
+      ${CMAKE_BINARY_DIR}/lib
+      pymatching
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(
+  app_examples.surface_code-1-local-test-distance-3-task-graph
+  PROPERTIES ENVIRONMENT "EXTRA_CLI_ARGS=--task_graph")
+
+# Exercise the same end-to-end surface-code stream with graph decoding moved to
+# its persistent coordinator thread. The shared script also verifies YAML
+# save/load and syndrome replay under this policy.
+add_test(
+  NAME app_examples.surface_code-1-local-test-distance-3-task-graph-async
+  COMMAND
+    bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
+      ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
+      ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
+      3 60 30 NULL 12
+      ${CMAKE_BINARY_DIR}/lib
+      pymatching
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(
+  app_examples.surface_code-1-local-test-distance-3-task-graph-async
+  PROPERTIES ENVIRONMENT
+    "EXTRA_CLI_ARGS=--task_graph --async_streaming")
+
 # This must be disabled for now because the multi_error_lut decoder is not
 # powerful enough to pass this test. The nv-qldpc-decoder can pass this test,
 # but that is not available on the GitHub repo.
@@ -449,7 +487,6 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-
 # End of surface code 1, --target quantinuum --emulate
 #------------------------------------------------------------------------------#
 
@@ -560,7 +597,6 @@ add_test(
       ${CMAKE_BINARY_DIR}/lib
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
-
 
 # End of surface code 2, --target quantinuum --emulate
 #------------------------------------------------------------------------------#
@@ -774,6 +810,18 @@ if(TARGET decoding_server
               $<TARGET_FILE:decoding_server>)
     set_tests_properties(app_examples.surface_code-4-yaml-mixed-dispatch
       PROPERTIES LABELS "qec;gpu_required" SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # Same test, decoder 1 hosted by a single_window task graph instead of a
+    # plain nv-qldpc-decoder entry -- DEVICE-mode task-graph coverage through
+    # the decoding server (SessionRegistry/DecodingServer), where the
+    # nv-qldpc-task-graph-d3/d5 cases above cover only the direct-call path.
+    add_test(
+      NAME app_examples.surface_code-4-yaml-mixed-dispatch-task-graph
+      COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/surface_code-4-yaml-mixed-dispatch-task-graph-test.sh
+              $<TARGET_FILE:surface_code-4-yaml-cqr>
+              $<TARGET_FILE:decoding_server>)
+    set_tests_properties(app_examples.surface_code-4-yaml-mixed-dispatch-task-graph
+      PROPERTIES LABELS "qec;gpu_required" SKIP_RETURN_CODE 77 TIMEOUT 300)
   endif()
 
   # Test-only plugin: its realtime decode calls rendezvous at a reusable barrier,
@@ -867,7 +915,7 @@ function(add_surface_code_4_yaml_test test_suffix distance num_rounds
   )
   set_tests_properties(
     app_examples.surface_code-4-yaml-${test_suffix}
-    PROPERTIES ENVIRONMENT "${_sc4_env}")
+    PROPERTIES ENVIRONMENT "${_sc4_env}" SKIP_RETURN_CODE 77)
 endfunction()
 
 function(add_surface_code_4_yaml_external_test test_suffix distance num_rounds
@@ -904,12 +952,40 @@ endfunction()
 
 add_surface_code_4_yaml_decoder_cases(pymatching pymatching)
 
+# The same decoder hosted by a single_window task-graph node. describe_decoder_type()
+# reports the hosted decoder, so the driver's per-decoder assertions apply unchanged.
+add_surface_code_4_yaml_decoder_cases(pymatching-task-graph pymatching
+  --task_graph)
+
+# Both PyMatching nodes decode the same d3 surface-code volume in parallel. The
+# right node has a zero observable projection, so xor preserves the left node's
+# correction and the ordinary residual logical-error ceiling remains meaningful.
+add_surface_code_4_yaml_test(pymatching-intra-graph-parallel-streaming-d3
+  3 3 pymatching 200 --task_graph --parallel_task_graph)
+add_surface_code_4_yaml_test(pymatching-intra-graph-parallel-streaming-async-d3
+  3 3 pymatching 200 --task_graph --parallel_task_graph --async_streaming)
+set_property(
+  TEST app_examples.surface_code-4-yaml-pymatching-intra-graph-parallel-streaming-async-d3
+  APPEND PROPERTY ENVIRONMENT "VERIFY_SYNC_ASYNC_REPLAY=1")
+
 # TensorRT predecoder + PyMatching global decoder. The shell driver generates a
 # tiny ONNX model sized for each test case: output [pre_L=0, residual], so TRT
 # preserves the syndrome and PyMatching performs the correction.
 if(TARGET cudaq-qec-trt-decoder AND _SC4_TRY_TRT_TEST)
   add_surface_code_4_yaml_decoder_cases(trt-pymatching trt_decoder
     --generate-identity-onnx)
+  add_surface_code_4_yaml_decoder_cases(trt-pymatching-task-graph trt_decoder
+    --generate-identity-onnx --task_graph)
+endif()
+
+# nv-qldpc-decoder hosted by a single_window task-graph node, so the
+# task_graph wrapping is exercised for a BP-family decoder as well as for
+# pymatching above. Relay-BP (--use-relay-bp, composition=1) rather than plain
+# BP: surface-code degeneracy leaves plain BP well above the driver's residual
+# logical-error ceiling.
+if(_SC4_HAVE_NV_QLDPC)
+  add_surface_code_4_yaml_decoder_cases(nv-qldpc-task-graph nv-qldpc-decoder
+    --task_graph --use-relay-bp)
 endif()
 
 # Relaxed round rule (T=6 not a multiple of d=5) and multi-logical patches, each
@@ -942,10 +1018,63 @@ if(TARGET surface_code-4-yaml-cqr)
     APPEND PROPERTY ENVIRONMENT
       "QEC_CONCURRENCY_TEST_DECODERS=3;REQUIRE_DECODER_CONCURRENCY=3;EXPECTED_BARRIER_COMPLETIONS=2;EXPECTED_DECODER_CORRECTIONS=0,2,0;EXPECTED_SERVER_DECODER_CONSTRUCTIONS=3;CHECK_MISSING_SERVER_PORT=1;SKIP_LOGICAL_ERROR_CEILING=1")
 
+  add_surface_code_4_yaml_external_test(three-way-overlap-task-graph 3 3
+    "concurrency_test_decoder,concurrency_test_decoder,concurrency_test_decoder"
+    2 --task_graph)
+  set_property(
+    TEST app_examples.surface_code-4-yaml-cqr-three-way-overlap-task-graph
+    APPEND PROPERTY ENVIRONMENT
+      "QEC_CONCURRENCY_TEST_DECODERS=3;REQUIRE_DECODER_CONCURRENCY=3;EXPECTED_BARRIER_COMPLETIONS=2;EXPECTED_DECODER_CORRECTIONS=0,2,0;EXPECTED_SERVER_DECODER_CONSTRUCTIONS=3;CHECK_MISSING_SERVER_PORT=1;SKIP_LOGICAL_ERROR_CEILING=1")
+
+  add_surface_code_4_yaml_external_test(
+    three-way-overlap-task-graph-async 3 3
+    "concurrency_test_decoder,concurrency_test_decoder,concurrency_test_decoder"
+    10 --task_graph --async_streaming)
+  # Async RPC handlers return after queueing, so the server's busy-session
+  # high-water mark does not measure coordinator-thread decoder overlap. The
+  # decoder barrier is the deterministic concurrency assertion for this test.
+  set_property(
+    TEST app_examples.surface_code-4-yaml-cqr-three-way-overlap-task-graph-async
+    APPEND PROPERTY ENVIRONMENT
+      "QEC_CONCURRENCY_TEST_DECODERS=3;EXPECTED_BARRIER_COMPLETIONS=10;EXPECTED_DECODER_CORRECTIONS=0,10,0;EXPECTED_SERVER_DECODER_CONSTRUCTIONS=3;CHECK_MISSING_SERVER_PORT=1;SKIP_LOGICAL_ERROR_CEILING=1")
+
+  # Each of the three surface-code patches owns one width-two graph. All six
+  # branch decoders rendezvous at one barrier, so a serial intra-graph sweep
+  # times out after only the three server-ring workers arrive.
+  add_surface_code_4_yaml_external_test(
+    intra-graph-parallel-streaming 3 3
+    "concurrency_test_decoder,concurrency_test_decoder,concurrency_test_decoder"
+    2 --task_graph --parallel_task_graph)
+  set_property(
+    TEST app_examples.surface_code-4-yaml-cqr-intra-graph-parallel-streaming
+    APPEND PROPERTY ENVIRONMENT
+      "QEC_CONCURRENCY_TEST_DECODERS=6;REQUIRE_DECODER_CONCURRENCY=3;EXPECTED_BARRIER_COMPLETIONS=2;EXPECTED_DECODER_CORRECTIONS=0,0,0;EXPECTED_SERVER_DECODER_CONSTRUCTIONS=6;SKIP_LOGICAL_ERROR_CEILING=1")
+
+  add_surface_code_4_yaml_external_test(
+    intra-graph-parallel-streaming-async 3 3
+    "concurrency_test_decoder,concurrency_test_decoder,concurrency_test_decoder"
+    10 --task_graph --parallel_task_graph --async_streaming)
+  # As above, barrier generations—not concurrent RPC handlers—prove that all
+  # six async branch decoders entered together.
+  set_property(
+    TEST app_examples.surface_code-4-yaml-cqr-intra-graph-parallel-streaming-async
+    APPEND PROPERTY ENVIRONMENT
+      "QEC_CONCURRENCY_TEST_DECODERS=6;EXPECTED_BARRIER_COMPLETIONS=10;EXPECTED_DECODER_CORRECTIONS=0,0,0;EXPECTED_SERVER_DECODER_CONSTRUCTIONS=6;SKIP_LOGICAL_ERROR_CEILING=1")
+
   if(TARGET cudaq-qec-trt-decoder AND _SC4_TRY_TRT_TEST)
     add_surface_code_4_yaml_external_test(happy-path 3 3
       "pymatching,trt_decoder,pymatching" 200 --generate-identity-onnx)
     set_property(TEST app_examples.surface_code-4-yaml-cqr-happy-path
+      APPEND PROPERTY ENVIRONMENT
+        "REQUIRE_SERVER_DECODE_COUNTS=1")
+
+    # The middle entry is an explicit TRT predecoder -> PyMatching -> xor graph;
+    # the neighboring PyMatching entries are single_window graphs.
+    add_surface_code_4_yaml_external_test(happy-path-task-graph 3 3
+      "pymatching,trt_decoder,pymatching" 200
+      --generate-identity-onnx --task_graph)
+    set_property(TEST
+      app_examples.surface_code-4-yaml-cqr-happy-path-task-graph
       APPEND PROPERTY ENVIRONMENT
         "REQUIRE_SERVER_DECODE_COUNTS=1")
   endif()
@@ -1316,3 +1445,51 @@ if(TARGET surface_code-5-per-decoder-rings)
   set_tests_properties(app_examples.surface_code-5-per-decoder-rings
     PROPERTIES LABELS "qec")
 endif()
+
+# ---------------------------------------------------------------------------
+# Surface code 6: the only caller of enqueue_syndromes_mapped_ui64.
+#
+# enqueue_syndromes_mapped travels on its own five-field wire function on this
+# backend.  The sending client, the UDP packer and the receiving shim each
+# spell that field order out by hand with nothing checking they agree, so this
+# target exists to actually run it.
+# ---------------------------------------------------------------------------
+add_executable(surface_code-6-mapped-enqueue)
+set_target_properties(surface_code-6-mapped-enqueue PROPERTIES LINKER_LANGUAGE CXX)
+
+cudaqx_add_device_code(surface_code-6-mapped-enqueue
+  SOURCES
+    surface_code-6-mapped-enqueue.cpp
+  COMPILER_FLAGS
+    --target quantinuum --emulate --quantinuum-machine Helios-Fake
+)
+
+target_link_directories(surface_code-6-mapped-enqueue
+  PRIVATE ${CUDAQ_INSTALL_DIR}/lib)
+target_link_options(surface_code-6-mapped-enqueue PRIVATE -Wl,--export-dynamic)
+target_link_libraries(surface_code-6-mapped-enqueue
+  PRIVATE
+    cudaq-qec
+    cudaq-qec-realtime-decoding
+    cudaq-qec-realtime-decoding-quantinuum
+    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime cudaq-rest-qpu
+    nvqir nvqir-stim)
+qec_realtime_app_link_options(surface_code-6-mapped-enqueue)
+add_dependencies(surface_code-6-mapped-enqueue cudaq-qec-pymatching)
+
+# In-process: exercises the __qpu__ device_call lowering and the public
+# enqueue_syndromes_mapped_ui64 signature, decoding locally.
+add_test(
+  NAME app_examples.surface_code-6-mapped-enqueue-in-process
+  COMMAND
+    bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-6-mapped-enqueue-test.sh"
+      ${CMAKE_CURRENT_BINARY_DIR}/surface_code-6-mapped-enqueue
+      NULL
+      ${CMAKE_BINARY_DIR}/lib
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(app_examples.surface_code-6-mapped-enqueue-in-process
+  PROPERTIES TIMEOUT 300)
+
+# Tests available only in internal builds.
+include(${CMAKE_CURRENT_SOURCE_DIR}/private_tests.cmake OPTIONAL)

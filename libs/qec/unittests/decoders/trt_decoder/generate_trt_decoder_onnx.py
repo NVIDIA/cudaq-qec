@@ -42,6 +42,31 @@ def make_cast_model(output_path, name, input_type, output_type, shape):
     onnx.save(model, output_path)
 
 
+def make_predecoder_identity_model(output_path, syndrome_size):
+    input_info = helper.make_tensor_value_info("input", TensorProto.FLOAT,
+                                               [1, syndrome_size])
+    output_info = helper.make_tensor_value_info("output", TensorProto.FLOAT,
+                                                [1, syndrome_size + 1])
+    zero = helper.make_node(
+        "Constant",
+        [],
+        ["pre_l"],
+        value=helper.make_tensor("zero", TensorProto.FLOAT, [1, 1], [0.0]),
+    )
+    concat = helper.make_node("Concat", ["pre_l", "input"], ["output"], axis=1)
+    graph = helper.make_graph(
+        [zero, concat],
+        "trt_predecoder_identity",
+        [input_info],
+        [output_info],
+    )
+    model = helper.make_model(graph,
+                              opset_imports=[helper.make_opsetid("", 19)])
+    model.ir_version = MODEL_IR_VERSION
+    onnx.checker.check_model(model)
+    onnx.save(model, output_path)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate small ONNX fixtures for trt_decoder tests.")
@@ -67,6 +92,10 @@ def main():
         TensorProto.UINT8,
         TensorProto.FLOAT,
         [1, 3],
+    )
+    make_predecoder_identity_model(
+        os.path.join(args.out_dir, "trt_predecoder_identity.onnx"),
+        syndrome_size=3,
     )
 
 

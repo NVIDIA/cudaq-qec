@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <vector>
@@ -66,10 +67,16 @@ private:
   pm::MERGE_STRATEGY merge_strategy_enum = pm::MERGE_STRATEGY::DISALLOW;
   bool merge_strategy_explicit = false;
 
-  // Map of edge pairs to column indices. This does not seem particularly
-  // efficient.
+  // Construction-time maps preserve the selected column for each merge policy.
   std::map<std::pair<int64_t, int64_t>, size_t> edge2col_idx;
   std::map<std::pair<int64_t, int64_t>, double> edge2weight;
+  static constexpr auto invalid_error_column =
+      std::numeric_limits<std::size_t>::max();
+  // Immutable, compressed adjacency lookup for error reconstruction. Boundary
+  // edges have a direct index; ordinary neighbors are sorted within each row.
+  std::vector<std::size_t> error_column_offsets, error_columns,
+      boundary_error_columns;
+  std::vector<std::uint32_t> error_column_neighbors;
 
   bool decode_to_observables = false;
   // Scratch buffers reused across decode() calls so a steady-state decode
@@ -107,6 +114,47 @@ private:
       column_it->second = column;
       edge2weight.at(edge) = weight;
     }
+  }
+
+  void prepare_error_column_lookup(std::size_t detectors) {
+    error_column_offsets.assign(detectors + 1, 0);
+    boundary_error_columns.assign(detectors, invalid_error_column);
+    for (const auto &[edge, column] : edge2col_idx) {
+      if (edge.first == -1)
+        boundary_error_columns.at(edge.second) = column;
+      else
+        ++error_column_offsets.at(edge.first + 1);
+    }
+    for (std::size_t i = 1; i < error_column_offsets.size(); ++i)
+      error_column_offsets[i] += error_column_offsets[i - 1];
+    error_column_neighbors.reserve(error_column_offsets.back());
+    error_columns.reserve(error_column_offsets.back());
+    // std::map iterates canonical pairs in detector/neighbor order, so no
+    // additional sort or change to the chosen error column is required.
+    for (const auto &[edge, column] : edge2col_idx)
+      if (edge.first != -1) {
+        error_column_neighbors.push_back(edge.second);
+        error_columns.push_back(column);
+      }
+    edge2col_idx.clear();
+    edge2weight.clear();
+  }
+
+  std::size_t error_column(const std::pair<int64_t, int64_t> &edge) const {
+    if (edge.first == -1) {
+      const auto column = boundary_error_columns.at(edge.second);
+      if (column != invalid_error_column)
+        return column;
+    } else {
+      const auto begin =
+          error_column_neighbors.begin() + error_column_offsets.at(edge.first);
+      const auto end = error_column_neighbors.begin() +
+                       error_column_offsets.at(edge.first + 1);
+      const auto found = std::lower_bound(begin, end, edge.second);
+      if (found != end && *found == edge.second)
+        return error_columns[found - error_column_neighbors.begin()];
+    }
+    throw std::out_of_range("pymatching: matched edge has no error column");
   }
 
 #if PERFORM_TIMING
@@ -219,6 +267,8 @@ public:
     this->mwpm = decode_to_observables
                      ? &user_graph.get_mwpm()
                      : &user_graph.get_mwpm_with_search_graph();
+    if (!decode_to_observables)
+      prepare_error_column_lookup(H.num_rows());
     detection_events.reserve(syndrome_size);
     edges_scratch.reserve(block_size * 2);
     obs_scratch.resize(get_inputs().num_observables());
@@ -232,7 +282,7 @@ public:
   /// @return The decoder result.
   /// @throws std::runtime_error if no matching solution is found or a decode
   /// is already running on this decoder, or std::out_of_range if an edge is
-  /// not found in the edge2col_idx map.
+  /// not found in the prepared error-column lookup.
   decoder_result decode(const std::vector<float_t> &syndrome) override {
     const decode_exclusive_guard guard(decode_active);
     const auto result_size =
@@ -279,7 +329,7 @@ public:
       assert(edges.size() % 2 == 0);
       for (size_t i = 0; i < edges.size(); i += 2) {
         auto edge = make_canonical_edge(edges.at(i), edges.at(i + 1));
-        auto col_idx = edge2col_idx.at(edge);
+        auto col_idx = error_column(edge);
         output[col_idx] = 1.0;
       }
     }

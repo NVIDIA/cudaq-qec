@@ -187,7 +187,8 @@ public:
    * dlcose happens, the parent registry no longer holds references to code    \
    * that has been unloaded. */                                                \
   __attribute__((destructor)) void cudaq_extension_point_cleanup_##TYPE() {    \
-    TYPE::unregister(TYPE::class_identifier);                                  \
+    /* C++ static strings may already be destroyed when this runs. */          \
+    TYPE::unregister(#TYPE);                                                   \
   }
 
 /// In order to support building CUDA-QX libraries with g++ and building

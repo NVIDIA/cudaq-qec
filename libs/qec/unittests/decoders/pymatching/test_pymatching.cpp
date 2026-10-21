@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "cudaq/qec/decoder.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include <atomic>
 #include <cmath>
 #include <gtest/gtest.h>
@@ -47,6 +48,47 @@ TEST(PyMatchingDecoder, checkRegularEdges) {
   result = d->decode(syndrome);
   EXPECT_EQ(result.result[0], 1.0);
   EXPECT_EQ(result.result[1], 1.0);
+}
+
+TEST(PyMatchingDecoder, drivesSingleWindowTaskGraph) {
+  using namespace cudaq::qec;
+
+  constexpr std::size_t block_size = 2;
+  constexpr std::size_t syndrome_size = 3;
+  const std::vector<uint8_t> H_vec = {1, 0, 1, 1, 0, 1};
+  cudaqx::tensor<uint8_t> H;
+  H.copy(H_vec.data(), {syndrome_size, block_size});
+
+  auto direct = decoder::get("pymatching", H);
+  task_graph_node_config node;
+  node.id = "pymatching";
+  node.kind = "single_window";
+  node.d_sparse = {{0}, {1}, {2}};
+  node.o_sparse = {{0}, {1}};
+  node.decoder_instance = decoder::get("pymatching", H);
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(std::move(node));
+  auto graph = decoding_task_graph::from_topology(std::move(nodes));
+
+  const std::vector<cudaq::qec::float_t> syndrome = {1, 1, 0};
+  const auto direct_result = direct->decode(syndrome);
+  std::vector<uint8_t> direct_hard;
+  convert_vec_soft_to_hard(direct_result.result, direct_hard);
+  ASSERT_TRUE(direct_result.converged);
+  ASSERT_EQ(direct_hard, (std::vector<uint8_t>{1, 0}));
+
+  measurement_results shot;
+  shot.bits = {1, 1, 0};
+  const auto batch = graph->run(shot);
+  EXPECT_TRUE(batch.converged);
+  EXPECT_EQ(batch.bits, direct_hard);
+
+  graph->reset_decoder();
+  ASSERT_TRUE(graph->enqueue_syndrome(shot.bits.data(), shot.bits.size()));
+  EXPECT_EQ(std::vector<uint8_t>(graph->get_obs_corrections(),
+                                 graph->get_obs_corrections() +
+                                     graph->get_num_observables()),
+            batch.bits);
 }
 
 TEST(PyMatchingDecoder, checkBoundaryEdges) {
@@ -404,6 +446,43 @@ TEST(PyMatchingDecoder, ErrorOutputTracksMergedParallelEdgeColumn) {
         << "col 0 must not be flagged under replace";
     EXPECT_EQ(result.result[1], 1.0) << "col 1 must be flagged under replace";
     EXPECT_EQ(result.result[2], 0.0);
+  }
+}
+
+TEST(PyMatchingDecoder, PreparedLookupPreservesBoundaryMergesAndColumnOrder) {
+  using namespace cudaq::qec;
+  using cudaq::qec::float_t;
+  // Boundary columns are separated by regular edges, and regular neighbors
+  // are deliberately supplied out of order. The result must retain the
+  // caller's columns, including the selected parallel boundary edge.
+  const auto h =
+      sparse_binary_matrix::from_nested_csc(4, 4, {{3}, {0, 2}, {3}, {0, 1}});
+  for (const std::string strategy :
+       {"independent", "keep_original", "smallest_weight", "replace"}) {
+    cudaqx::heterogeneous_map params;
+    params.insert("merge_strategy", strategy);
+    auto dec = decoder::get("pymatching",
+                            decoder_init(h, std::nullopt, {0.1, 0.1, 0.2, 0.1}),
+                            decode_result_type::errors, params);
+    const std::size_t boundary_column =
+        strategy == "replace" || strategy == "smallest_weight" ? 2 : 0;
+    for (std::size_t epoch = 0; epoch < 8; ++epoch)
+      for (const auto &syndrome :
+           std::vector<std::vector<float_t>>{{0, 0, 0, 1},
+                                             {1, 0, 1, 0},
+                                             {1, 1, 0, 0},
+                                             {1, 1, 0, 1},
+                                             {0, 0, 0, 0}}) {
+        SCOPED_TRACE(strategy);
+        const auto result = dec->decode(syndrome);
+        ASSERT_TRUE(result.converged);
+        ASSERT_EQ(result.result.size(), 4u);
+        std::vector<float_t> expected(4);
+        expected[boundary_column] = syndrome[3];
+        expected[1] = syndrome[2];
+        expected[3] = syndrome[1];
+        EXPECT_EQ(result.result, expected);
+      }
   }
 }
 

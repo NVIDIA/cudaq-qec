@@ -27,12 +27,29 @@ namespace cudaq::qec::decoding {
 /// @brief Enqueue syndromes for decoding.
 /// @param decoder_id The ID of the decoder to use.
 /// @param syndromes The syndromes to enqueue.
-/// @param tag The tag to use for the syndrome (currently useful for logging
-/// only)
+/// @param tag Which round this is (the wire's `counter`).
 __qpu__ void
 enqueue_syndromes(std::uint64_t decoder_id,
                   const std::vector<cudaq::measure_result> &syndromes,
                   std::uint64_t tag = 0);
+
+/// @brief Enqueue syndromes, naming the syndrome_mapping row this round
+/// belongs to.
+///
+/// A device kernel carries one argument count per name, so naming a row takes
+/// its own kernel.  Any further variant needs a name that differs before the
+/// first `.`, where the registry splits a key.
+/// @param decoder_id The ID of the decoder to use.
+/// @param syndromes The syndromes to enqueue.
+/// @param tag Which round this is (the wire's `counter`).
+/// @param syndrome_mapping_id Which syndrome_mapping row describes the round:
+/// its shape, and eventually its per-virtual-port layout.  `tag` says which
+/// round, this says what kind.  0 is the pass-through BULK row; a row declared
+/// `type: final` ends the shot.
+__qpu__ void
+enqueue_syndromes_mapped(std::uint64_t decoder_id,
+                         const std::vector<cudaq::measure_result> &syndromes,
+                         std::uint64_t tag, std::uint64_t syndrome_mapping_id);
 
 /// @brief Test-only entry point for enqueueing pre-discriminated syndrome
 /// bits (e.g., raw syndromes replayed from a saved file). Production code

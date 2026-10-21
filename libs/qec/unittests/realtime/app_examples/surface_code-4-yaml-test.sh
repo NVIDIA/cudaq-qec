@@ -47,8 +47,9 @@ set -euo pipefail
 #                    with one entry per patch (pass --num_logical N in the
 #                    extra args). Optional, defaults to pymatching.
 #  $5 num_shots      Number of shots (optional, defaults to 200)
-#  $6... options     One explicit TRT model-source option, when needed, plus
-#                    extra app args for both generation and realtime phases
+#  $6... options     One explicit TRT model-source option, when needed,
+#                    --task_graph to generate task-graph entries, plus extra
+#                    app args for both generation and realtime phases
 
 if [[ $# -lt 3 ]]; then
   echo "Error: Expected at least 3 arguments (got $#)"
@@ -64,6 +65,9 @@ NUM_SHOTS=${5:-200}
 ONNX_PATH=""
 MODEL_SOURCE=""
 ISING_ARTIFACTS_DIR=""
+TASK_GRAPH=0
+PARALLEL_TASK_GRAPH=0
+ASYNC_STREAMING=0
 EXTRA_APP_ARGS=()
 
 select_model_source() {
@@ -97,6 +101,23 @@ while [[ $# -gt 0 ]]; do
       ;;
     --use-ising)
       select_model_source ising
+      shift
+      ;;
+    --task_graph|--task-graph)
+      # Generation-phase only: phase 2 reads the graph back out of the config,
+      # and the app rejects the flag alongside --yaml.
+      TASK_GRAPH=1
+      shift
+      ;;
+    --parallel_task_graph|--parallel-task-graph)
+      # Generation-phase only: make each task graph a width-two fan-out/fan-in
+      # topology so the streaming scheduler must execute independent branches.
+      PARALLEL_TASK_GRAPH=1
+      shift
+      ;;
+    --async_streaming|--async-streaming)
+      # Generation-phase only; phase 2 reads the policy from YAML.
+      ASYNC_STREAMING=1
       shift
       ;;
     --ising-artifacts-dir)
@@ -193,6 +214,9 @@ trap cleanup EXIT
 
 CONFIG_FILE=$WORKDIR/config.yml
 REALTIME_LOG=$WORKDIR/realtime.log
+REPLAY_CONFIG_FILE=$WORKDIR/config-sync.yml
+REPLAY_LOG=$WORKDIR/replay.log
+SYNDROME_FILE=$WORKDIR/syndromes.txt
 
 if [[ "$MODEL_SOURCE" == "identity" ]]; then
   ONNX_PATH=$WORKDIR/trt_identity_predecoder.onnx
@@ -236,6 +260,9 @@ echo "  num_rounds     = $NUM_ROUNDS"
 echo "  decoder_type   = $DECODER_TYPE"
 echo "  num_shots      = $NUM_SHOTS"
 echo "  num_logical    = $NUM_LOGICAL"
+echo "  task_graph     = $TASK_GRAPH"
+echo "  parallel_task_graph = $PARALLEL_TASK_GRAPH"
+echo "  async_streaming = $ASYNC_STREAMING"
 if [[ -n "$ONNX_PATH" ]]; then
   echo "  onnx_path      = $ONNX_PATH"
 fi
@@ -268,6 +295,15 @@ GEN_ARGS=(
   --decoder_type "$DECODER_TYPE" \
   --save_dem "$CONFIG_FILE"
 )
+if [[ "$TASK_GRAPH" -eq 1 ]]; then
+  GEN_ARGS+=(--task_graph)
+fi
+if [[ "$PARALLEL_TASK_GRAPH" -eq 1 ]]; then
+  GEN_ARGS+=(--parallel_task_graph)
+fi
+if [[ "$ASYNC_STREAMING" -eq 1 ]]; then
+  GEN_ARGS+=(--async_streaming)
+fi
 if [[ -n "$ONNX_PATH" ]]; then
   GEN_ARGS+=(--onnx-path "$ONNX_PATH")
 elif [[ "$MODEL_SOURCE" == "ising" ]]; then
@@ -287,6 +323,59 @@ if [[ ! -s "$CONFIG_FILE" ]]; then
   exit 1
 fi
 echo "Config file generated: $CONFIG_FILE ($(stat -c %s "$CONFIG_FILE") bytes)"
+
+# Confirm the flag reached the generator: without it the entries carry a plain
+# `type:`, and phase 2 would exercise the ordinary decoder while still passing.
+if [[ "$TASK_GRAPH" -eq 1 ]]; then
+  tg_count=$(grep -c "task_graph:" "$CONFIG_FILE" || true)
+  if [[ "$tg_count" -ne "$NUM_LOGICAL" ]]; then
+    echo "FAIL: config has $tg_count task_graph blocks; expected $NUM_LOGICAL"
+    exit 1
+  fi
+  echo "Config carries $tg_count task_graph block(s)"
+
+  if [[ "$PARALLEL_TASK_GRAPH" -eq 1 ]]; then
+    single_window_count=$(
+      grep -Ec "type:[[:space:]]+single_window" "$CONFIG_FILE" || true)
+    xor_count=$(grep -Ec "type:[[:space:]]+xor" "$CONFIG_FILE" || true)
+    expected_windows=$((2 * NUM_LOGICAL))
+    if [[ "$single_window_count" -ne "$expected_windows" ||
+          "$xor_count" -ne "$NUM_LOGICAL" ]]; then
+      echo "FAIL: parallel task graphs need $expected_windows single_window nodes and $NUM_LOGICAL xor nodes; found $single_window_count and $xor_count"
+      exit 1
+    fi
+    echo "Config carries $NUM_LOGICAL width-two streaming task graph(s)"
+  fi
+
+  if [[ "$ASYNC_STREAMING" -eq 1 ]]; then
+    async_count=$(grep -Ec "async_streaming:[[:space:]]+true" "$CONFIG_FILE" ||
+      true)
+    if [[ "$async_count" -ne "$NUM_LOGICAL" ]]; then
+      echo "FAIL: config has $async_count async task graphs; expected $NUM_LOGICAL"
+      exit 1
+    fi
+    echo "Config enables asynchronous streaming on every task graph"
+  fi
+
+  trt_count=0
+  for type in "${DECODER_TYPES[@]}"; do
+    if [[ "$type" == "trt_decoder" ]]; then ((trt_count += 1)); fi
+  done
+  if [[ "$trt_count" -gt 0 ]]; then
+    pre_count=$(grep -Ec "type:[[:space:]]+predecoder" "$CONFIG_FILE" || true)
+    model_count=$(
+      grep -Ec "residual_from:[[:space:]]+model" "$CONFIG_FILE" || true)
+    if [[ "$pre_count" -ne "$trt_count" || "$model_count" -ne "$trt_count" ]]; then
+      echo "FAIL: expected $trt_count TensorRT predecoder topology/topologies; found $pre_count predecoder nodes and $model_count model residual policies"
+      exit 1
+    fi
+    if grep -Eq "global_decoder:" "$CONFIG_FILE"; then
+      echo "FAIL: task-graph TensorRT must route residuals to a downstream node, not configure an internal global_decoder"
+      exit 1
+    fi
+    echo "TensorRT task graph uses predecoder -> global topology -- OK"
+  fi
+fi
 
 # Dual-parse structural proof (mixed BP + matching lists): BP entries carry
 # the undecomposed hyperedge H, so their block_size must be strictly LESS
@@ -435,6 +524,9 @@ REALTIME_ARGS=(
 if [[ ${#EXTRA_APP_ARGS[@]} -gt 0 ]]; then
   REALTIME_ARGS+=("${EXTRA_APP_ARGS[@]}")
 fi
+if [[ -n "${VERIFY_SYNC_ASYNC_REPLAY:-}" ]]; then
+  REALTIME_ARGS+=(--save_syndrome "$SYNDROME_FILE")
+fi
 if [[ -n "$SERVER_PORT" ]]; then
   QEC_DECODING_SERVER_PORT="$SERVER_PORT" \
     "$EXE" "${REALTIME_ARGS[@]}" 2>&1 | tee "$REALTIME_LOG"
@@ -452,6 +544,36 @@ fi
 if [[ "$app_status" -ne 0 ]]; then
   echo "FAIL: realtime phase exited with non-zero status ($app_status)"
   return_code=1
+fi
+
+if [[ -n "${VERIFY_SYNC_ASYNC_REPLAY:-}" ]]; then
+  if [[ "$ASYNC_STREAMING" -ne 1 || -n "$SERVER_PORT" ]]; then
+    echo "FAIL: VERIFY_SYNC_ASYNC_REPLAY requires a local async-streaming test"
+    return_code=1
+  elif [[ ! -s "$SYNDROME_FILE" ]]; then
+    echo "FAIL: async run did not save syndrome replay data"
+    return_code=1
+  else
+    sed 's/async_streaming:[[:space:]]*true/async_streaming: false/g' \
+      "$CONFIG_FILE" >"$REPLAY_CONFIG_FILE"
+    set +e
+    "$EXE" \
+      --distance "$DISTANCE" \
+      --num_rounds "$NUM_ROUNDS" \
+      --num_shots "$NUM_SHOTS" \
+      --p_spam "$P_SPAM" \
+      --yaml "$REPLAY_CONFIG_FILE" \
+      --load_syndrome "$SYNDROME_FILE" 2>&1 | tee "$REPLAY_LOG"
+    replay_status=${PIPESTATUS[0]}
+    set -e
+    if [[ "$replay_status" -ne 0 ]] ||
+       ! grep -q "SUCCESS: All corrections match!" "$REPLAY_LOG"; then
+      echo "FAIL: synchronous replay did not exactly match async corrections"
+      return_code=1
+    else
+      echo "Synchronous replay exactly matches async corrections -- OK"
+    fi
+  fi
 fi
 
 # -------------------------------------------------------------------------- #
@@ -509,9 +631,18 @@ fi
 if [[ "$MULTI_TYPE" -eq 1 ]]; then
   for i in "${!DECODER_TYPES[@]}"; do
     t=${DECODER_TYPES[$i]}
-    line=$(grep -F "decoder[$i] ($t):" "$REALTIME_LOG" || true)
+    report_type=$t
+    if [[ "$PARALLEL_TASK_GRAPH" -eq 1 ]]; then
+      # describe_decoder_type() lists both decoder-backed graph nodes.
+      report_type="$t,$t"
+    elif [[ "$TASK_GRAPH" -eq 1 && "$t" == "trt_decoder" ]]; then
+      # describe_decoder_type() reports every hosted decoder in the explicit
+      # predecoder -> global chain, rather than the generator's shorthand.
+      report_type="trt_decoder,pymatching"
+    fi
+    line=$(grep -F "decoder[$i] ($report_type):" "$REALTIME_LOG" || true)
     if [[ -z "$line" ]]; then
-      echo "FAIL: missing per-decoder report line 'decoder[$i] ($t):'"
+      echo "FAIL: missing per-decoder report line 'decoder[$i] ($report_type):'"
       return_code=1
       continue
     fi
@@ -539,7 +670,11 @@ if [[ -n "${EXPECTED_DECODER_CORRECTIONS:-}" ]]; then
     return_code=1
   else
     for i in "${!expected_corrections[@]}"; do
-      line=$(grep -F "decoder[$i] (${DECODER_TYPES[$i]}):" \
+      report_type=${DECODER_TYPES[$i]}
+      if [[ "$PARALLEL_TASK_GRAPH" -eq 1 ]]; then
+        report_type="$report_type,$report_type"
+      fi
+      line=$(grep -F "decoder[$i] ($report_type):" \
         "$REALTIME_LOG" || true)
       got=$(printf '%s\n' "$line" | \
         sed -n 's/.*corrections=\([0-9][0-9]*\),.*/\1/p')

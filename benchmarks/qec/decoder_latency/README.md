@@ -12,6 +12,14 @@ The benchmark supports two execution modes:
   decoder work and the latency from the final round through observable
   correction readout.
 
+Each mode can run a decoder directly, through a synchronous one-node task
+graph, or through an async-streaming task graph.
+
+Task-graph benchmark rows use the graph's `streaming` node kind, which
+forwards each chunk to the inner decoder's native streaming API. This keeps
+incremental decoders such as NV-Fusion comparable with their direct rows;
+`single_window` would instead defer a full-shot `decode()` to the tail.
+
 ## Build
 
 Configure CUDA-QX from the repository root. The benchmark does not require the
@@ -45,6 +53,7 @@ Run from the build directory:
 ```bash
 ./benchmarks/qec/decoder_latency/benchmark-qec-decoder \
   --decoders pymatching,nv-fusion-decoder \
+  --executions decoder,task-graph,task-graph-async \
   --distances 5,7,13 \
   --rounds 100,1000,10000 \
   --mode stream \
@@ -56,6 +65,15 @@ Run from the build directory:
 Use `--help` for all sweep, decoder-parameter, output, and CPU-affinity
 options. Repeated `--param KEY=VALUE` arguments are converted according to the
 selected decoder's registered parameter schema.
+
+To compare synchronous and asynchronous task-graph streaming with PyMatching:
+
+```bash
+./benchmarks/qec/decoder_latency/benchmark-qec-decoder \
+  --decoders pymatching \
+  --executions task-graph,task-graph-async \
+  --mode stream
+```
 
 ## Workload and sweep behavior
 
@@ -72,8 +90,28 @@ The sweep is the Cartesian product of:
 - `--rounds N[,N,...]` (default: the distance)
 - `--noise P` or `--noises P[,P,...]` (default: 0.001)
 - `--decoder_instances N[,N,...]` (default: 1)
+- `--executions E[,E,...]` (`decoder`, `task-graph`, or `task-graph-async`;
+  default: `decoder`)
 
 Option names accept either hyphens or underscores.
+
+`--async_queue_capacity N` controls the bounded queue used by each
+`task-graph-async` instance. Its default is 8, matching
+`task_graph_options::async_queue_capacity`. Passing zero reserves one slot per
+detector round in the shot, which avoids repeated producer stalls when queue
+backpressure is not part of the workload.
+
+`--dedicate_async_coordinator` reserves the last CPU in each pinned instance
+block for the task graph's coordinator and removes it from the producer and
+decoder-worker mask. It therefore requires at least two pinned CPUs per
+instance. `--async_spin_pause_iters N` controls how long that coordinator
+spins for the next paced round before parking. Its default is zero, matching
+`task_graph_options` and realtime YAML; zero disables spinning.
+
+For `nv-fusion-decoder`, an explicit
+`CUDAQ_QEC_NV_FUSION_WORKER_AFFINITY` overrides the worker mask inherited from
+the re-pinned instance thread. Exclude the reserved coordinator CPU from that
+environment mask as well; this option pins only the coordinator itself.
 
 Distances must be odd and at least 3. Each circuit shot contains one more
 detector round than the requested stabilizer-round count because final data
@@ -175,11 +213,25 @@ In streaming mode:
 - Streaming tail latency covers the final round's enqueue and
   `get_obs_corrections()`. This is the response time after the final syndrome
   round arrives.
+- CSV output also reports the FINAL enqueue and correction-readout portions
+  separately. Their sum is the end-to-end tail sample.
 - Pacing waits are excluded from decoder-work and tail-latency samples.
+
+For task-graph executions, the final detector round is submitted as `FINAL`.
+Consequently, `task-graph-async` tail latency includes waiting for all queued
+rounds, final graph flush, and correction readout. Earlier async enqueues
+measure queue submission and any bounded-queue backpressure.
 
 `--round_interval_us T` paces detector rounds with a busy-wait. Pacing models a
 real-time arrival rate, but it also occupies the instance's CPU between rounds.
 Without this option, rounds are enqueued as quickly as possible.
+
+An unpaced synchronous graph performs all round bookkeeping inline and will
+normally have higher peak throughput. Async streaming is intended to overlap
+that bookkeeping and decoding with real round arrival; compare the executions
+at the intended `--round_interval_us`. The async queue must be large enough to
+absorb temporary producer/coordinator skew, or queue-full waits dominate the
+result.
 
 The `rounds/s` value uses a separate wall-clock interval around each
 instance's complete timed shot loop. It includes pacing, decoder reset, and
@@ -217,24 +269,57 @@ accommodate the decoder's internal worker count, and inspect the host's CPU,
 core, SMT, and NUMA topology before assuming adjacent CPU IDs are independent
 physical cores.
 
+For low-latency asynchronous measurements, combine pinned instances with
+`--dedicate_async_coordinator`. The coordinator then cannot be preempted by
+the busy-waiting producer or a decoder worker in the same instance block.
+
 ## Output
 
 The human-readable report includes decoder, distance, rounds, instances,
 shots, noise, latency percentiles, detector rounds per second, and logical
 error rate. Streaming output has a separate table for final-round tail
-latency. Tables are printed after the requested point list finishes. While the
-sweep runs, progress for each point is printed immediately to standard error,
-including its ordinal, configuration, and elapsed wall time, so table and CSV
-output on standard output stays machine-readable.
+latency, followed by a decomposition table showing FINAL-enqueue and
+correction-readout p50/p99 values. Completed tables are printed after the
+requested point list finishes.
+While the sweep runs, progress for each point is printed immediately to
+standard error, including its ordinal, configuration, and elapsed wall time.
+CSV and table output on standard output therefore remains machine-readable.
 
 `--csv` additionally emits rows prefixed with `csv,` for machine parsing. The
 CSV columns are:
 
 ```text
-mode,id,decoder,d,rounds,det_rounds,instances,shots,total_shots,noise,
-latency_min,p50,p90,p99,latency_max,tail_min,tail_p50,tail_p99,tail_max,
-rounds_s,ler
+csv,mode,execution,round_interval_us,async_queue_capacity,coordinator_affinity,
+async_spin_pause_iters,id,decoder,d,rounds,det_rounds,instances,shots,
+total_shots,noise,latency_min,p50,p90,p99,latency_max,tail_min,tail_p50,
+tail_p99,tail_max,final_enqueue_min,final_enqueue_p50,final_enqueue_p99,
+final_enqueue_max,correction_readout_min,correction_readout_p50,
+correction_readout_p99,correction_readout_max,rounds_s,ler
 ```
+
+Minimum and maximum samples are labeled ``min`` and ``max`` rather than p0 and
+p100. This distinguishes observed extrema from percentile estimates and makes
+their sensitivity to sample count explicit.
+
+For a reproducible async-tail comparison, hold circuit, shot count, instance
+count, affinity, queue capacity, and round cadence fixed:
+
+```bash
+benchmark-qec-decoder \
+  --decoders nv-fusion-decoder \
+  --executions task-graph,task-graph-async \
+  --mode stream --rounds 1000 --shots 5000 --warmup 50 \
+  --round_interval_us <QPU-round-period> \
+  --pin_instances --dedicate_async_coordinator \
+  --async_spin_pause_iters 0 \
+  --param num_threads=0 --csv
+```
+
+Use `tail_p50` and `tail_p99` as the primary response metrics. The decomposed
+columns distinguish coordinator/FINAL delay from correction readout, while
+`rounds_s` verifies that the decoder keeps up with the requested cadence. An
+unpaced run remains useful as a throughput regression, but it is not an
+equivalent async-tail workload because queued work may move into FINAL.
 
 Percentile resolution is limited by the sample count. With 1,000 timed shots
 per instance, p99 is approximately the tenth-slowest sample; use more shots

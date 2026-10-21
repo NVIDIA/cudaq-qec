@@ -10,4 +10,5 @@ Examples that illustrate how to use CUDA-Q QEC for application development are a
       Creating New QEC Codes <creating_qec_codes.rst>
       Experiments and Noise Modeling <modeling_noise.rst>
       Decoders <decoders.rst>
+      Decoding Task Graphs <decoding_task_graph.rst>
       Realtime Decoding <realtime_decoding.rst>

@@ -8,8 +8,10 @@
 
 #include "cudaq/qec/plugin_loader.h"
 #include "cudaq/qec/logger.h"
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -35,30 +37,39 @@ void load_plugins(const std::string &plugin_dir, PluginType type) {
               << std::endl;
     return;
   }
-  for (const auto &entry : fs::directory_iterator(plugin_dir)) {
-    if (entry.path().extension() == ".so") {
-      void *raw_handle = dlopen(entry.path().c_str(), RTLD_NOW);
-      if (raw_handle) {
-        get_plugin_handles().emplace(
-            entry.path().filename().string(),
-            PluginHandle{std::unique_ptr<void, PluginDeleter>(raw_handle,
-                                                              PluginDeleter()),
-                         type});
-        CUDA_QEC_INFO("Successfully loaded plugin: {}", entry.path().string());
-      } else {
-        // The TRT decoder is an optional decoder that is not always available.
-        // Do not clutter up the console with error messages if it is not
-        // available. We only output an error message if info logging is
-        // enabled.
+  std::vector<fs::path> plugins;
+  for (const auto &entry : fs::directory_iterator(plugin_dir))
+    if (entry.path().extension() == ".so")
+      plugins.push_back(entry.path());
+  std::sort(plugins.begin(), plugins.end());
+  for (const auto &path : plugins) {
+    const auto key = path.string();
+    if (get_plugin_handles().count(key) != 0)
+      continue;
+    void *raw_handle = dlopen(path.c_str(), RTLD_NOW);
+    if (raw_handle) {
+      get_plugin_handles().emplace(
+          key, PluginHandle{std::unique_ptr<void, PluginDeleter>(
+                                raw_handle, PluginDeleter()),
+                            type});
+      CUDA_QEC_INFO("Successfully loaded plugin: {}", key);
+    } else {
+      // Decoder plugins are optional, but a task-graph plugin failure needs
+      // to be visible because its node kinds will be unavailable to YAML.
+      if (type == PluginType::TASK_GRAPH_NODE)
+        CUDA_QEC_WARN("Failed to load task-graph plugin {}: {}", key,
+                      dlerror());
+      else
         CUDA_QEC_INFO("Failed to load plugin {} Error: {}. Continuing anyway.",
-                      entry.path().string(), dlerror());
-      }
+                      key, dlerror());
     }
   }
 }
 
 // Function to clean up the plugin handles
 void cleanup_plugins(PluginType type) {
+  if (type == PluginType::TASK_GRAPH_NODE)
+    return;
   auto &handles = get_plugin_handles();
   auto it = handles.begin();
   while (it != handles.end()) {

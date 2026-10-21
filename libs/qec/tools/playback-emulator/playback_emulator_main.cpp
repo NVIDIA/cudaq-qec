@@ -79,7 +79,8 @@ void print_usage() {
          "  --config=PATH       multi_decoder_config YAML (decoders\n"
          "                      section); required for null/inproc,\n"
          "                      optional for udp/cpu_roce (which can instead\n"
-         "                      derive decoder_ids from their --*-endpoint=)\n"
+         "                      derive decoder_ids from their --*-endpoint=);\n"
+         "                      its 'type: final' row tags enqueue_data\n"
          "  --tick=DURATION     wall-clock width of one tick (default: 1us)\n"
          "  --lead-in=DURATION  setup time before the first tick (default: "
          "20ms)\n"
@@ -378,6 +379,10 @@ int main(int argc, char **argv) {
 
     auto sched = parse(read_file(schedule_path), decoder_ids, tick_ns);
 
+    run_params params;
+    for (const auto &row : config.syndrome_mapping)
+      if (row.type == "final")
+        params.final_mapping_id = static_cast<std::int64_t>(row.id);
     auto p = plan(sched, router, sources, params);
     auto result = run(std::move(p));
 

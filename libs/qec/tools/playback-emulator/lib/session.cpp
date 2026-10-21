@@ -91,15 +91,16 @@ DispatchResult dispatch_rpc(DecodingSession &dec, const std::uint8_t *bytes,
   const auto *header = reinterpret_cast<const RPCHeader *>(bytes);
 
   if (header->function_id == kEnqueueSyndromesFunctionId) {
-    // Mirrors DecodingSession::handle_enqueue: reject anything but the
-    // identity syndrome mapping, and ack OK even on an internal decode
-    // failure -- that surfaces at the next get_corrections instead.
+    // Mirrors DecodingSession::handle_enqueue: resolve the declared round
+    // shape before touching decoder state, and ack OK even on an internal
+    // decode failure -- that surfaces at the next get_corrections instead.
     slot::EnqueueView view;
     if (!slot::parse_enqueue(bytes, size, view))
       return {RpcStatus::BAD_REQUEST, 0};
-    if (view.syndrome_mapping_id != 0)
+    const auto mapping = dec.mapping_table.find(view.syndrome_mapping_id);
+    if (mapping == dec.mapping_table.end())
       return {RpcStatus::BAD_REQUEST, 0};
-    dec.enqueue_core(view);
+    dec.enqueue_core(view, mapping->second.type);
     return {RpcStatus::OK, 0};
   }
 
