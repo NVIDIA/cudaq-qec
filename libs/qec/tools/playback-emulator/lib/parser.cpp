@@ -360,6 +360,8 @@ void read_round_bounds(operands &ops, event &e) {
 schedule parse(std::string_view text,
                const std::vector<std::uint64_t> &known_decoder_ids,
                std::uint64_t tick_ns) {
+  if (tick_ns == 0)
+    throw std::invalid_argument("tick must be positive");
   schedule sched;
   sched.tick_ns = tick_ns;
 

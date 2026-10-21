@@ -17,8 +17,10 @@
 #include "syndrome_source.h"
 
 #include <algorithm>
+#include <charconv>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -40,13 +42,27 @@ std::string read_file(const std::string &path) {
   return ss.str();
 }
 
+/// All of `s` as a base-10 `T`, so a fraction, sign or trailing text is an
+/// error rather than silently truncated.
+template <typename T>
+T parse_uint(const std::string &s, const std::string &what) {
+  T value{};
+  const auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+  if (s.empty() || ec != std::errc() || end != s.data() + s.size())
+    throw std::runtime_error(what + " must be a whole number that fits in " +
+                             std::to_string(8 * sizeof(T)) + " bits, got '" +
+                             s + "'");
+  return value;
+}
+
 /// Parses an "ID:HOST:PORT" flag value into `endpoints`.
 void add_endpoint(const char *flag, const std::string &v,
                   std::unordered_map<std::uint64_t, std::string> &endpoints) {
   const auto colon = v.find(':');
   if (colon == std::string::npos)
     throw std::runtime_error(std::string(flag) + " expects ID:HOST:PORT");
-  endpoints[std::stoull(v.substr(0, colon))] = v.substr(colon + 1);
+  endpoints[parse_uint<std::uint64_t>(v.substr(0, colon), flag)] =
+      v.substr(colon + 1);
 }
 
 void print_usage() {
@@ -55,7 +71,9 @@ void print_usage() {
          "\n"
          "Required:\n"
          "  --schedule=PATH     playback schedule text, one\n"
-         "                      '<trigger> <op> [key=value...]' per line\n"
+         "                      '<trigger> <op> [key=value...]' per line.\n"
+         "                      See \"Playback Emulator\" in the CUDA-Q QEC\n"
+         "                      docs for the schedule and CSV formats\n"
          "\n"
          "Options:\n"
          "  --config=PATH       multi_decoder_config YAML (decoders\n"
@@ -64,10 +82,14 @@ void print_usage() {
          "                      derive decoder_ids from their --*-endpoint=);\n"
          "                      its 'type: final' row tags enqueue_data\n"
          "  --tick=DURATION     wall-clock width of one tick (default: 1us)\n"
+         "  --lead-in=DURATION  setup time before the first tick (default: "
+         "20ms)\n"
          "  --backend=NAME      null | inproc | udp | cpu_roce (default: "
          "inproc)\n"
          "  --udp-endpoint=ID:HOST:PORT   repeatable; required for "
          "--backend=udp\n"
+         "  --udp-timeout=DURATION   per-request reply timeout (default: "
+         "200ms)\n"
          "  --cpu-roce-endpoint=ID:HOST:PORT   repeatable; required for\n"
          "                      --backend=cpu_roce (the ring's rendezvous\n"
          "                      from the server's READY line)\n"
@@ -76,6 +98,10 @@ void print_usage() {
          "  --cpu-roce-slots=N, --cpu-roce-slot-size=N   ring geometry\n"
          "                      (default: 8 x 256 B); must match the\n"
          "                      server's --num-slots/--slot-size\n"
+         "  --cpu-roce-timeout=DURATION   per-request reply timeout\n"
+         "                      (default: 200ms)\n"
+         "  --cpu-roce-connect-timeout=DURATION   bound on the connection\n"
+         "                      handshake (default: 5s)\n"
          "  --source=ID:PATH    static_source for source_id ID, one 0/1 bit\n"
          "                      string per round, one round per line in PATH\n"
          "  --stim-source=ID:key=value,...   stim_memory_source for source_id\n"
@@ -94,9 +120,8 @@ std::uint64_t parse_duration_ns(const std::string &s) {
   std::size_t split = s.size();
   while (split > 0 && !std::isdigit(static_cast<unsigned char>(s[split - 1])))
     --split;
-  const std::uint64_t value = std::stoull(s.substr(0, split));
-  if (value == 0)
-    throw std::runtime_error("duration '" + s + "' must be positive");
+  const auto value =
+      parse_uint<std::uint64_t>(s.substr(0, split), "duration '" + s + "'");
   const std::string unit = s.substr(split);
   std::uint64_t scale = 1;
   if (unit.empty() || unit == "ns")
@@ -113,6 +138,16 @@ std::uint64_t parse_duration_ns(const std::string &s) {
   if (__builtin_mul_overflow(value, scale, &ns))
     throw std::runtime_error("duration '" + s + "' overflows nanoseconds");
   return ns;
+}
+
+/// A DURATION for an option the library takes in whole milliseconds.
+std::uint32_t parse_duration_ms(const std::string &s) {
+  const std::uint64_t ns = parse_duration_ns(s);
+  if (ns % 1'000'000 != 0 ||
+      ns / 1'000'000 > std::numeric_limits<std::uint32_t>::max())
+    throw std::runtime_error("duration '" + s +
+                             "' must be a whole number of milliseconds");
+  return static_cast<std::uint32_t>(ns / 1'000'000);
 }
 
 /// Everything one `--stim-source=ID:...` needs besides its source_id: the
@@ -133,8 +168,8 @@ parse_stim_source(const std::string &v) {
   const auto colon = v.find(':');
   if (colon == std::string::npos)
     throw std::runtime_error("--stim-source expects ID:key=value,...");
-  const std::uint32_t id =
-      static_cast<std::uint32_t>(std::stoul(v.substr(0, colon)));
+  const auto id =
+      parse_uint<std::uint32_t>(v.substr(0, colon), "--stim-source");
 
   stim_source_spec spec;
   std::istringstream iss(v.substr(colon + 1));
@@ -146,11 +181,12 @@ parse_stim_source(const std::string &v) {
     const std::string key = pair.substr(0, eq);
     const std::string val = pair.substr(eq + 1);
     if (key == "seed") {
-      spec.seed = std::stoull(val);
+      spec.seed = parse_uint<std::uint64_t>(val, "--stim-source seed");
     } else if (key == "code" || key == "task") {
       spec.params.insert(key, val);
     } else if (key == "distance" || key == "rounds") {
-      spec.params.insert(key, static_cast<std::size_t>(std::stoul(val)));
+      spec.params.insert(key,
+                         parse_uint<std::size_t>(val, "--stim-source " + key));
     } else if (key == "before_measure_flip_probability" ||
                key == "after_clifford_depolarization" ||
                key == "before_round_data_depolarization" ||
@@ -196,6 +232,8 @@ int main(int argc, char **argv) {
   std::string config_path, schedule_path, backend_name = "inproc";
   std::string out_path;
   std::uint64_t tick_ns = 1000;
+  run_params params;
+  std::uint32_t udp_timeout_ms = 200, cpu_roce_timeout_ms = 200;
   std::unordered_map<std::uint64_t, std::string> udp_endpoints;
   std::unordered_map<std::uint64_t, std::string> cpu_roce_endpoints;
   cpu_roce_options roce_opts;
@@ -214,6 +252,14 @@ int main(int argc, char **argv) {
         schedule_path = a.substr(11);
       } else if (starts_with(a, "--tick=")) {
         tick_ns = parse_duration_ns(a.substr(7));
+      } else if (starts_with(a, "--lead-in=")) {
+        params.lead_in_ns = parse_duration_ns(a.substr(10));
+      } else if (starts_with(a, "--udp-timeout=")) {
+        udp_timeout_ms = parse_duration_ms(a.substr(14));
+      } else if (starts_with(a, "--cpu-roce-timeout=")) {
+        cpu_roce_timeout_ms = parse_duration_ms(a.substr(19));
+      } else if (starts_with(a, "--cpu-roce-connect-timeout=")) {
+        roce_opts.connect_timeout_ms = parse_duration_ms(a.substr(27));
       } else if (starts_with(a, "--backend=")) {
         backend_name = a.substr(10);
       } else if (starts_with(a, "--out=")) {
@@ -228,17 +274,17 @@ int main(int argc, char **argv) {
         roce_opts.local_ip = a.substr(20);
       } else if (starts_with(a, "--cpu-roce-slots=")) {
         roce_opts.num_slots =
-            static_cast<std::uint32_t>(std::stoul(a.substr(17)));
+            parse_uint<std::uint32_t>(a.substr(17), "--cpu-roce-slots");
       } else if (starts_with(a, "--cpu-roce-slot-size=")) {
         roce_opts.slot_size =
-            static_cast<std::uint32_t>(std::stoul(a.substr(21)));
+            parse_uint<std::uint32_t>(a.substr(21), "--cpu-roce-slot-size");
       } else if (starts_with(a, "--source=")) {
         const std::string v = a.substr(9);
         const auto colon = v.find(':');
         if (colon == std::string::npos)
           throw std::runtime_error("--source expects ID:PATH");
-        const std::uint32_t id =
-            static_cast<std::uint32_t>(std::stoul(v.substr(0, colon)));
+        const auto id =
+            parse_uint<std::uint32_t>(v.substr(0, colon), "--source");
         source_files[id] = v.substr(colon + 1);
       } else if (starts_with(a, "--stim-source=")) {
         auto [id, spec] = parse_stim_source(a.substr(14));
@@ -297,12 +343,14 @@ int main(int argc, char **argv) {
       throw std::runtime_error("unknown --backend='" + backend_name + "'");
     }
     if (!udp_endpoints.empty())
-      adopt_sessions(make_udp_sessions(udp_endpoints), owned_sessions, router);
+      adopt_sessions(make_udp_sessions(udp_endpoints, udp_timeout_ms),
+                     owned_sessions, router);
     if (!cpu_roce_endpoints.empty()) {
       if (roce_opts.device.empty() || roce_opts.local_ip.empty())
         throw std::runtime_error("--cpu-roce-endpoint= requires "
                                  "--cpu-roce-device= and --cpu-roce-local-ip=");
-      adopt_sessions(make_cpu_roce_sessions(cpu_roce_endpoints, roce_opts),
+      adopt_sessions(make_cpu_roce_sessions(cpu_roce_endpoints, roce_opts,
+                                            cpu_roce_timeout_ms),
                      owned_sessions, router);
     }
     if (router.empty())
