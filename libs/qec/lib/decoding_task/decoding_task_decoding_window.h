@@ -150,8 +150,9 @@ index_range window_instances(const window_request &request,
 /// Build window @p k of @p request in a @p num_rounds round shot.
 /// @param with_m2o Also build m2o, which needs the window to hold the
 /// shot's readout round.
-/// @throws std::invalid_argument naming the operation if the request is
-/// invalid, window k does not exist, or m2o cannot be built.
+/// @throws std::invalid_argument as check_window_request() if the request is
+/// invalid, or naming the operation if window k does not exist or m2o cannot
+/// be built.
 decoding_window
 window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
                        const window_request &request, std::int64_t k,

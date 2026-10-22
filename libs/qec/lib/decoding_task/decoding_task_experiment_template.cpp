@@ -74,7 +74,7 @@ experiment_template::experiment_template(dem_chunks_spec spec)
       throw std::invalid_argument("experiment_template: phase '" +
                                   entry.id.name() +
                                   "' spans more than one round");
-    p.rows = spec_.detectors_of(entry.spec);
+    p.rows = spec_.detectors_of(entry.spec, context);
     p.faults = p.inner.num_faults();
     if (entry.spec.num_measurements || spec_.measurements_per_round)
       p.measurements = spec_.measurements_of(entry.spec);

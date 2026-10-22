@@ -78,7 +78,8 @@ namespace {
 std::map<phase_id, uint64_t> detectors_per_phase(const dem_chunks_spec &spec) {
   std::map<phase_id, uint64_t> detectors;
   for (const auto &entry : spec.phases)
-    detectors[entry.id] = spec.detectors_of(entry.spec);
+    detectors[entry.id] =
+        spec.detectors_of(entry.spec, "dem_chunks." + entry.id.name());
   return detectors;
 }
 

@@ -438,8 +438,10 @@ struct dem_chunks_spec {
 
   /// The detector rows @p phase's round contributes when closed: its to_seam
   /// band and interior rows. Builds the phase's chunk on each call.
+  /// @param context Prefix for error messages, as for dem_chunk_from_spec().
   /// @throws std::invalid_argument if the phase is inconsistent.
-  uint64_t detectors_of(const dem_chunk_spec &phase) const;
+  uint64_t detectors_of(const dem_chunk_spec &phase,
+                        const std::string &context = "dem_chunk") const;
 
   /// @brief Whether the phases supply D, rather than leaving
   /// dem_chunks_to_d_sparse() to apply the memory convention.

@@ -447,7 +447,9 @@ void bindDecodingConfig(nb::module_ &mod) {
               "DEM for this node alone; falls back to the entry-level DEM.")
       .def_rw("windows", &task_graph_spec::node_spec::windows,
               "An ingest node's layers, as experimental.ingest_window: each\n"
-              "names an output port and its window request.")
+              "names an output port and its window request. Their order\n"
+              "carries no meaning; parsing YAML sorts them by name, so keep\n"
+              "a hand-built list sorted for it to round-trip equal.")
       .def_rw("stim_dem", &task_graph_spec::node_spec::stim_dem,
               "Stim DEM text to build the inner decoder from, in place of "
               "this node's H, for a decoder whose model needs annotations the "

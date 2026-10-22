@@ -21,9 +21,11 @@ namespace cudaq::qec {
 /// Every round range is written [begin, end] or {rounds: [begin, end]}; the
 /// map form reserves `occurrences` and `block`. `ports` names only `input`
 /// and `output`. The window keys `responsibility` and `soundness_class` are
-/// reserved. A send's `rounds` is one range.
-/// @throws std::invalid_argument for malformed YAML, an unknown key, a
-/// reserved key or port, or a malformed range.
+/// reserved. A send's `rounds` is one range. `period`, `zones` and `ports`
+/// are required.
+/// @throws std::invalid_argument for malformed YAML, a missing required key,
+/// an unknown key, a reserved key or port, a malformed range, or a request
+/// check_window_request() rejects.
 __attribute__((visibility("default"))) experimental::window_request
 window_request_from_yaml_str(const std::string &text);
 

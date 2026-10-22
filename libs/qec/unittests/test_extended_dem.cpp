@@ -1792,6 +1792,23 @@ TEST(DemChunkSpec, PerPhaseMapsMustNumberTheChunksDetectors) {
   EXPECT_THROW(dem_chunks_to_d_sparse(spec), std::invalid_argument);
 }
 
+// A phase that fails to build is named in the error.
+TEST(DemChunkSpec, PerPhaseMapsNameAPhaseThatFailsToBuild) {
+  auto spec = rep5_spec_with_maps(3);
+  auto &bulk = rep5_phase(spec, phase_name::dem_bulk);
+  bulk.seam_specs = {{seam_name::prev_round, {bulk.H_sparse, {0, -1}}},
+                     {seam_name::next_round, {bulk.H_sparse, {}}}};
+  bulk.H_sparse.clear();
+  try {
+    dem_chunks_to_d_sparse(spec);
+    ADD_FAILURE() << "a per-seam O_sparse built";
+  } catch (const std::invalid_argument &e) {
+    EXPECT_NE(std::string(e.what()).find("dem_chunks.bulk: per-seam O_sparse"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
 TEST(DemChunkSpec, PerPhaseMapsMustNameMeasurementsInReach) {
   auto spec = rep5_spec_with_maps(3);
   rep5_phase(spec, phase_name::dem_final).D_sparse.front() = 2 * rep5_checks;

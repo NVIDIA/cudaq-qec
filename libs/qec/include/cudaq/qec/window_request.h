@@ -105,4 +105,11 @@ struct ingest_window {
   bool operator==(const ingest_window &) const = default;
 };
 
+/// Check @p request against the window construction rules: a period of at
+/// least 1, one non-empty commit zone, disjoint contiguous zones, a
+/// disposition on each port, a valid prior, imports at the output wire, and
+/// well-formed sends.
+/// @throws std::invalid_argument naming the first rule the request breaks.
+void check_window_request(const window_request &request);
+
 } // namespace cudaq::qec::experimental

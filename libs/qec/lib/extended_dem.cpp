@@ -970,8 +970,10 @@ uint64_t dem_chunks_spec::measurements_of(const dem_chunk_spec &phase) const {
 
 // Built through dem_chunk_from_spec(), so the shorthand and per-seam forms
 // count alike.
-uint64_t dem_chunks_spec::detectors_of(const dem_chunk_spec &phase) const {
-  const auto chunk = dem_chunk_from_spec(phase, {seam.to_seam, seam.from_seam});
+uint64_t dem_chunks_spec::detectors_of(const dem_chunk_spec &phase,
+                                       const std::string &context) const {
+  const auto chunk =
+      dem_chunk_from_spec(phase, {seam.to_seam, seam.from_seam}, context);
   return (chunk.has_seam(seam.to_seam) ? chunk.get_seam(seam.to_seam).num_rows()
                                        : 0) +
          uint64_t{chunk.num_interior_rows()};

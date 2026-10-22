@@ -27,6 +27,12 @@ namespace {
   throw std::invalid_argument("window_from_dem_chunks: " + what);
 }
 
+// Throws std::invalid_argument for a request that breaks a construction
+// rule, which config validation reports as well as construction.
+[[noreturn]] void reject(const std::string &what) {
+  throw std::invalid_argument("window request: " + what);
+}
+
 // Floor of a / b for b > 0.
 std::int64_t floor_div(std::int64_t a, std::int64_t b) {
   return a >= 0 ? a / b : -((-a + b - 1) / b);
@@ -65,11 +71,11 @@ std::vector<round_range> sorted_zones(const window_request &request) {
 // Checks the period and the commit zone, which every query needs.
 void check_anchor(const window_request &request) {
   if (request.period < 1)
-    fail("period must be at least 1");
+    reject("period must be at least 1");
   if (!request.commit)
-    fail("no commit zone");
+    reject("no commit zone");
   if (request.commit->empty())
-    fail("the commit zone is empty");
+    reject("the commit zone is empty");
 }
 
 // Checks one request's sends against its relative rounds [begin, end).
@@ -79,26 +85,26 @@ void check_sends(const window_request &request, round_range window) {
     const auto name = "send '" + send.id + "'";
     auto rounds = send.rounds;
     if (std::find(ids.begin(), ids.end(), send.id) != ids.end())
-      fail(name + " is repeated");
+      reject(name + " is repeated");
     ids.push_back(send.id);
     if (is_default_send(send)) {
       if (send.id == "forward" && !trailing_buffer(request))
-        fail("a forward send needs a buffer zone after the commit zone");
+        reject("a forward send needs a buffer zone after the commit zone");
       continue;
     }
     if (!send.mode || send.rounds.empty())
-      fail(name + " needs a mode and rounds");
+      reject(name + " needs a mode and rounds");
     std::sort(rounds.begin(), rounds.end(),
               [](const round_range &a, const round_range &b) {
                 return a.begin < b.begin;
               });
     for (std::size_t i = 0; i < rounds.size(); ++i) {
       if (rounds[i].empty())
-        fail(name + " has an empty round range");
+        reject(name + " has an empty round range");
       if (rounds[i].begin < window.begin || rounds[i].end > window.end)
-        fail(name + " reaches past the window");
+        reject(name + " reaches past the window");
       if (i > 0 && rounds[i].begin < rounds[i - 1].end)
-        fail(name + " repeats round " + std::to_string(rounds[i].begin));
+        reject(name + " repeats round " + std::to_string(rounds[i].begin));
     }
   } // end - for(send)
 } // end - check_sends()
@@ -114,36 +120,36 @@ void check_request(const window_request &request) {
   const round_range window{zones.front().begin, zones.back().end};
   for (const auto &buffer : request.buffers)
     if (buffer.empty())
-      fail("a buffer zone is empty");
+      reject("a buffer zone is empty");
   for (std::size_t i = 1; i < zones.size(); ++i) {
     if (zones[i].begin < zones[i - 1].end)
-      fail("zones overlap");
+      reject("zones overlap");
     if (zones[i].begin > zones[i - 1].end)
-      fail("zones are not contiguous");
+      reject("zones are not contiguous");
   }
   if (!input.disposition)
-    fail("the input port has no disposition");
+    reject("the input port has no disposition");
   if (!output.disposition)
-    fail("the output port has no disposition");
+    reject("the output port has no disposition");
   const bool open_input = *input.disposition == port_disposition::open;
   const bool truncated = input.boundary == input_boundary::truncate;
   if (!open_input && input.boundary)
-    fail("a closed input takes no boundary");
+    reject("a closed input takes no boundary");
   if (open_input && !truncated && !input.prior)
-    fail("an open input needs a prior");
+    reject("an open input needs a prior");
   if (!open_input && input.prior)
-    fail("a closed input takes no prior");
+    reject("a closed input takes no prior");
   if (truncated && input.prior)
-    fail("a truncated input takes no prior");
+    reject("a truncated input takes no prior");
   if (input.prior && !(*input.prior > 0.0 && *input.prior < 1.0))
-    fail("the input prior must be strictly between 0 and 1");
+    reject("the input prior must be strictly between 0 and 1");
   if (output.imports) {
     if (*output.disposition == port_disposition::open)
-      fail("an open output imports nothing");
+      reject("an open output imports nothing");
     if (output.imports->empty())
-      fail("the imports are empty");
+      reject("the imports are empty");
     if (output.imports->begin != window.end)
-      fail("imports must start at the output wire");
+      reject("imports must start at the output wire");
   }
   check_sends(request, window);
 } // end - check_request()
@@ -431,6 +437,10 @@ affine_map build_m2o(const experiment_template &t, const decoding_window &w,
 } // end - build_m2o()
 
 } // namespace
+
+void experimental::check_window_request(const window_request &request) {
+  check_request(request);
+}
 
 // The first k whose clipped commit zone ends after round 0, to the first
 // whose commit zone starts at or past R.

@@ -45,18 +45,26 @@ range_form to_form(round_range range) {
 
 // Field for field; a send's one range becomes its list of ranges.
 window_request request_from_form(const request_form &form) {
+  if (!form.period)
+    reject("missing required key 'period'");
+  if (!form.zones)
+    reject("missing required key 'zones'");
+  if (!form.ports)
+    reject("missing required key 'ports'");
+  const auto &zones = *form.zones;
+  const auto &ports = *form.ports;
   window_request request;
-  request.period = form.period;
+  request.period = *form.period;
   request.offset = form.offset;
-  if (form.zones.commit)
-    request.commit = to_range(*form.zones.commit);
-  for (const auto &buffer : form.zones.buffers)
+  if (zones.commit)
+    request.commit = to_range(*zones.commit);
+  for (const auto &buffer : zones.buffers)
     request.buffers.push_back(to_range(buffer));
-  request.input = {form.ports.input.disposition, form.ports.input.prior,
-                   form.ports.input.boundary};
-  request.output.disposition = form.ports.output.disposition;
-  if (form.ports.output.imports)
-    request.output.imports = to_range(*form.ports.output.imports);
+  request.input = {ports.input.disposition, ports.input.prior,
+                   ports.input.boundary};
+  request.output.disposition = ports.output.disposition;
+  if (ports.output.imports)
+    request.output.imports = to_range(*ports.output.imports);
   for (const auto &send : form.sends) {
     auto &out = request.sends.emplace_back();
     out.id = send.id;
@@ -74,15 +82,17 @@ request_form form_from_request(const window_request &request) {
   request_form form;
   form.period = request.period;
   form.offset = request.offset;
+  auto &zones = form.zones.emplace();
+  auto &ports = form.ports.emplace();
   if (request.commit)
-    form.zones.commit = to_form(*request.commit);
+    zones.commit = to_form(*request.commit);
   for (const auto buffer : request.buffers)
-    form.zones.buffers.push_back(to_form(buffer));
-  form.ports.input = {request.input.disposition, request.input.boundary,
-                      request.input.prior};
-  form.ports.output.disposition = request.output.disposition;
+    zones.buffers.push_back(to_form(buffer));
+  ports.input = {request.input.disposition, request.input.boundary,
+                 request.input.prior};
+  ports.output.disposition = request.output.disposition;
   if (request.output.imports)
-    form.ports.output.imports = to_form(*request.output.imports);
+    ports.output.imports = to_form(*request.output.imports);
   for (const auto &send : request.sends) {
     auto &out = form.sends.emplace_back();
     if (send.rounds.size() > 1)
@@ -103,8 +113,9 @@ request_form form_from_request(const window_request &request) {
 
 namespace cudaq::qec {
 
-// Parses into the form, then converts. Shape errors inside the traits throw
-// directly; the rest surface as the input's error.
+// Parses into the form, converts, and checks the construction rules. Shape
+// errors inside the traits throw directly; the rest surface as the input's
+// error.
 experimental::window_request
 window_request_from_yaml_str(const std::string &text) {
   window_yaml::request_form form;
@@ -112,7 +123,9 @@ window_request_from_yaml_str(const std::string &text) {
   in >> form;
   if (in.error())
     window_yaml::reject("invalid YAML (" + in.error().message() + ")");
-  return window_yaml::request_from_form(form);
+  auto request = window_yaml::request_from_form(form);
+  experimental::check_window_request(request);
+  return request;
 }
 
 // Emits the request's form.

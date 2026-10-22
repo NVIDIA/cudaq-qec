@@ -167,8 +167,10 @@ struct decoder_config {
       /// DEM for this node alone; falls back to the entry-level DEM.
       std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
       /// An ingest node's layers, sorted by name: each names an output port
-      /// and the window request published on it. Experimental, as the
-      /// request type is.
+      /// and the window request published on it. Their order carries no
+      /// meaning; parsing YAML sorts them by name, so keep a hand-built list
+      /// sorted for it to round-trip equal. Experimental, as the request
+      /// type is.
       std::vector<cudaq::qec::experimental::ingest_window> windows;
       /// This node's own matrices, in the entry-level flat form and the same
       /// -1-separated row encoding. Use them for a detector map that follows no

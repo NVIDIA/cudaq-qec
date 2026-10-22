@@ -74,18 +74,20 @@ struct columns_form {
   bool operator==(const columns_form &) const = default;
 };
 
-/// One window request, as YAML writes it.
+/// One window request, as YAML writes it. The required keys are optional
+/// here so that a missing one is told apart from its default.
 struct request_form {
-  std::int64_t period = 0;
+  std::optional<std::int64_t> period;
   std::int64_t offset = 0;
-  zones_form zones;
-  ports_form ports;
+  std::optional<zones_form> zones;
+  std::optional<ports_form> ports;
   std::vector<send_form> sends;
   columns_form columns;
 };
 
 /// The request a form describes.
-/// @throws std::invalid_argument for a malformed range.
+/// @throws std::invalid_argument for a missing period, zones or ports, or a
+/// malformed range.
 window_request request_from_form(const request_form &form);
 
 /// The form that writes @p request, every range in list form.
@@ -251,13 +253,13 @@ struct CustomMappingTraits<cudaq::qec::window_yaml::request_form> {
   static void inputOne(IO &io, StringRef key,
                        cudaq::qec::window_yaml::request_form &form) {
     if (key == "period")
-      io.mapRequired("period", form.period);
+      io.mapRequired("period", form.period.emplace());
     else if (key == "offset")
       io.mapRequired("offset", form.offset);
     else if (key == "zones")
-      io.mapRequired("zones", form.zones);
+      io.mapRequired("zones", form.zones.emplace());
     else if (key == "ports")
-      io.mapRequired("ports", form.ports);
+      io.mapRequired("ports", form.ports.emplace());
     else if (key == "sends")
       io.mapRequired("sends", form.sends);
     else if (key == "columns")
@@ -270,10 +272,10 @@ struct CustomMappingTraits<cudaq::qec::window_yaml::request_form> {
       cudaq::qec::window_yaml::reject("unknown key '" + key.str() + "'");
   }
   static void output(IO &io, cudaq::qec::window_yaml::request_form &form) {
-    io.mapRequired("period", form.period);
+    io.mapRequired("period", form.period.value());
     io.mapOptional("offset", form.offset, std::int64_t{0});
-    io.mapRequired("zones", form.zones);
-    io.mapRequired("ports", form.ports);
+    io.mapRequired("zones", form.zones.value());
+    io.mapRequired("ports", form.ports.value());
     io.mapOptional("sends", form.sends);
     io.mapOptional("columns", form.columns,
                    cudaq::qec::window_yaml::columns_form{});

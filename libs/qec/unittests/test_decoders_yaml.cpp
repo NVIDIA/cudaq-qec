@@ -2759,6 +2759,59 @@ TEST(WindowRequestYAML, RejectsReservedShapes) {
   rejects("period: 12", "period: 12\nperiodd: 5", "unknown key 'periodd'");
 } // end - TEST(WindowRequestYAML, RejectsReservedShapes)
 
+// period, zones and ports are required, as the schema says, rather than
+// left at defaults that build no window.
+TEST(WindowRequestYAML, RejectsMissingRequiredKeys) {
+  using namespace cudaq::qec;
+  const auto rejects = [](const std::string &line, const std::string &key) {
+    auto yaml = window_a_yaml();
+    const auto at = yaml.find(line);
+    ASSERT_NE(at, std::string::npos) << line;
+    yaml.erase(at, line.size());
+    try {
+      window_request_from_yaml_str(yaml);
+      ADD_FAILURE() << "parsed without '" << key << "'";
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(
+          std::string(e.what()).find("missing required key '" + key + "'"),
+          std::string::npos)
+          << e.what();
+    }
+  };
+  rejects("period: 12\n", "period");
+  rejects("zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}\n", "zones");
+  rejects("ports:\n  input: {disposition: open, prior: 0.01}\n"
+          "  output: {disposition: open}\n",
+          "ports");
+} // end - TEST(WindowRequestYAML, RejectsMissingRequiredKeys)
+
+// A well-formed request that breaks a construction rule is rejected when
+// parsed.
+TEST(WindowRequestYAML, RejectsInvalidRequests) {
+  using namespace cudaq::qec;
+  const auto rejects = [](const std::string &from, const std::string &to,
+                          const std::string &text) {
+    auto yaml = window_a_yaml();
+    const auto at = yaml.find(from);
+    ASSERT_NE(at, std::string::npos) << from;
+    yaml.replace(at, from.size(), to);
+    try {
+      window_request_from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find("window request: " + text),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  rejects("period: 12", "period: 0", "period must be at least 1");
+  rejects("[3, 6]]", "[2, 6]]", "zones overlap");
+  rejects("{disposition: open, prior: 0.01}", "{prior: 0.01}",
+          "the input port has no disposition");
+  rejects("prior: 0.01", "prior: 1.5",
+          "the input prior must be strictly between 0 and 1");
+} // end - TEST(WindowRequestYAML, RejectsInvalidRequests)
+
 // The plan's hand-written parallel-window graph, with a two-input xor, over
 // a streaming rep-code template. edit() changes the text before parsing.
 std::string pw_graph_yaml() {
@@ -2894,10 +2947,13 @@ TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters) {
           << e.what();
     }
   };
-  rejects(pw_graph_yaml_with("        - id: sum\n          type: xor\n",
-                             "        - id: sum\n          type: xor\n"
-                             "          windows: {C: {period: 1}}\n"),
-          "sets windows, which only an ingest node takes");
+  rejects(
+      pw_graph_yaml_with("        - id: sum\n          type: xor\n",
+                         "        - id: sum\n          type: xor\n"
+                         "          windows: {C: {period: 1, zones: {commit: "
+                         "[0, 1]}, ports: {input: {disposition: closed}, "
+                         "output: {disposition: closed}}}}\n"),
+      "sets windows, which only an ingest node takes");
   rejects(pw_graph_yaml_with("          windows:\n            A:",
                              "          read_logical: false\n"
                              "          other:\n            A:"),
@@ -2912,6 +2968,44 @@ TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters) {
       pw_graph_yaml_with("verify_residual: report", "verify_residual: maybe"),
       "verify_residual");
 } // end - TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters)
+
+// A layer missing a required key, or well formed but breaking a window
+// construction rule, fails when the config loads rather than when the graph
+// is built.
+TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &from, const std::string &to,
+                          const std::string &text) {
+    const auto yaml = pw_graph_yaml_with(from, to);
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  const std::string a = "            A:\n              period: 12\n";
+  rejects(a, "            A:\n",
+          "window layer 'A': window request: missing required key 'period'");
+  rejects("              zones: {commit: [0, 9]}\n", "",
+          "window layer 'B': window request: missing required key 'zones'");
+  rejects("              ports:\n"
+          "                input: {disposition: closed}\n"
+          "                output: {disposition: closed}\n",
+          "", "window layer 'B': window request: missing required key 'ports'");
+
+  rejects(a, "            A:\n              period: 0\n",
+          "window layer 'A': window request: period must be at least 1");
+  rejects("[[-3, 0], [3, 6]]", "[[-3, 0], [2, 6]]",
+          "window layer 'A': window request: zones overlap");
+  rejects("input: {disposition: closed}", "input: {}",
+          "window layer 'B': window request: the input port has no "
+          "disposition");
+  rejects("output: {disposition: open}", "output: {}",
+          "window layer 'A': window request: the output port has no "
+          "disposition");
+} // end - TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded)
 
 // An ingest node with no windows has nothing to publish.
 TEST(TaskGraphWindowKinds, IngestNeedsAWindow) {

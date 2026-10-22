@@ -449,6 +449,15 @@ static void validate_task_graph(const decoder_config &config) {
           "inner decoder");
     }
 
+    for (const auto &window : node.windows) {
+      try {
+        cudaq::qec::experimental::check_window_request(window.request);
+      } catch (const std::invalid_argument &e) {
+        throw std::runtime_error(where + " window layer '" + window.layer +
+                                 "': " + e.what());
+      }
+    }
+
     // Two descriptions of one node's matrices, with nothing choosing between.
     const bool node_flat = !node.H_sparse.empty() || !node.D_sparse.empty() ||
                            !node.O_sparse.empty();
