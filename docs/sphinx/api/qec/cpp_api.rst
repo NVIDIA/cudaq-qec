@@ -44,6 +44,17 @@ Detector Error Model
 .. doxygenfunction:: cudaq::qec::decoder_context_from_memory_circuit(const code &, operation, std::size_t, cudaq::noise_model &, bool)
 .. doxygenfunction:: cudaq::qec::dem_from_stim_text(const std::string &, bool)
 
+.. _edem_conversion_cpp_api:
+
+EDEM Conversion
+---------------
+
+Convert a closed DEM projection from ``cudaq-edem`` to QEC's matrices and
+independent fault rates. See :doc:`/examples_rst/qec/edem_composition` for
+composition and sampling, including the approximation for exclusive faults.
+
+.. doxygenfunction:: cudaq::qec::dem_from_edem
+
 .. _dyn_dem_cpp_api:
 
 Dynamic DEM Construction

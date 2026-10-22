@@ -358,7 +358,7 @@ jobs:
 
       - name: Install cuStabilizer runtime
         run: |
-          pip install --upgrade "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
+          pip install --upgrade "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0" "cudaq-edem>=0.1.0,<0.2"
 
       - name: Install TensorRT (C++, amd64)
         if: matrix.platform == 'amd64'
@@ -462,7 +462,7 @@ jobs:
 
       - name: Install cuStabilizer runtime
         run: |
-          pip install --upgrade "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
+          pip install --upgrade "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0" "cudaq-edem>=0.1.0,<0.2"
 
       - name: Install TensorRT (C++, arm64)
         if: matrix.runner.arch == 'arm64' && !startsWith(matrix.cuda_version, '12')

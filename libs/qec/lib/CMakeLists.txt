@@ -25,6 +25,7 @@ find_package(Threads REQUIRED)
 # default "Could NOT find cuStabilizer" message.
 # Decoders-only builds skip it: only libcudaq-qec.so (DEM sampling) needs it.
 if(NOT CUDAQ_QEC_DECODERS_ONLY)
+find_package(cudaq-edem REQUIRED)
 find_package(cuStabilizer QUIET)
 if(NOT cuStabilizer_FOUND)
   set(_cuda_major "${CUDAToolkit_VERSION_MAJOR}")
@@ -88,6 +89,7 @@ set(QEC_SOURCES
   code.cpp
   decoder_config_payload_provider.cpp
   dem_construction_code.cpp
+  edem_composer.cpp
   experiments.cpp
   stabilizer_utils.cpp
 )
@@ -112,6 +114,7 @@ set_target_properties(${DECODERS_LIBRARY_NAME} PROPERTIES
 if(NOT CUDAQ_QEC_DECODERS_ONLY)
   # FIXME?: This must be a shared library. Trying to build a static one will fail.
   add_library(${LIBRARY_NAME} SHARED ${QEC_SOURCES})
+  target_link_libraries(${LIBRARY_NAME} PUBLIC cudaq::edem)
 endif()
 
 if(NOT TARGET libstim)
@@ -269,11 +272,12 @@ else()
   # as a runtime dependency in pyproject.toml).  Its layout in site-packages is
   #   <sp>/cudaq_qec/lib/libcudaq-qec.so   (this target -- $ORIGIN)
   #   <sp>/cuquantum/lib/libcustabilizer.so.0
+  #   <sp>/cudaq_edem/lib/libcudaq-edem.so.0 and libcudaq-gf2.so.0
   # so we add a relative RPATH entry pointing into that sibling wheel.  Using a
   # relative path (rather than the absolute cuStabilizer_LIBRARY_DIR resolved
   # at build time) keeps the wheel portable across environments.
   set_target_properties(${LIBRARY_NAME} PROPERTIES
-    INSTALL_RPATH "$ORIGIN:$ORIGIN/../../lib:$ORIGIN/../../cuquantum/lib"
+    INSTALL_RPATH "$ORIGIN:$ORIGIN/../../lib:$ORIGIN/../../cuquantum/lib:$ORIGIN/../../cudaq_edem/lib"
   )
 endif()
 

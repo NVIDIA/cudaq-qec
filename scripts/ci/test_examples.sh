@@ -45,6 +45,8 @@ run_cpp_test() {
     
     nvq++ $lib_flag \
         -I"$CUDAQX_INCLUDE" -L"$CUDAQX_LIB" -Wl,-rpath,"$CUDAQX_LIB" \
+        -I"$CUDAQ_EDEM_PREFIX/include" -L"$CUDAQ_EDEM_PREFIX/lib" \
+        -Wl,-rpath,"$CUDAQ_EDEM_PREFIX/lib" \
         "$file"
     
     if [ $? -ne 0 ]; then
@@ -62,6 +64,7 @@ run_cpp_test() {
 }
 
 if [[ "$LIB" == "qec" || "$LIB" == "all" ]]; then
+    CUDAQ_EDEM_PREFIX=$(python3 -c 'from pathlib import Path; import cudaq_edem; print(Path(cudaq_edem.__file__).resolve().parent)') || exit 1
     echo "Running QEC examples..."
     echo "------------------------"
     

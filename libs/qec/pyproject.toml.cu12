@@ -7,7 +7,7 @@
 # ============================================================================ #
 
 [build-system]
-requires = ["scikit-build-core>=0.10"]
+requires = ["scikit-build-core>=0.10", "cudaq-edem>=0.1.0,<0.2"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -20,6 +20,7 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = "LicenseRef-NVIDIA-Proprietary"
 dependencies = [
+  'cudaq-edem>=0.1.0,<0.2',
   'cuda-quantum-cu12 >= 0.16.0, < 0.17',
   'cuquantum-python-cu12>=26.03.0',
 ]

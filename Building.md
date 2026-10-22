@@ -40,6 +40,9 @@ git clone https://github.com/NVIDIA/cudaq-qec.git
 cd cudaq-qec
 mkdir build && cd build
 
+# Install the native EDEM dependency
+python3 -m pip install "cudaq-edem>=0.1.0,<0.2"
+
 # Configure your build (adjust as necessary)
 cmake -G Ninja -S .. \
   -DCUDAQ_INSTALL_DIR=$CUDAQ_INSTALL_PREFIX \
@@ -60,6 +63,11 @@ ctest
 cd ..
 python3 -m pytest -v libs/qec/python/tests --ignore libs/qec/python/tests/test_tensor_network_decoder.py
 ```
+
+The full QEC build requires `cudaq-edem`. Its wheel includes the native headers,
+libraries, and CMake package. CMake discovers the wheel through the active Python
+interpreter; set `Python_EXECUTABLE` if it is installed in another environment.
+For a native installation, pass `-Dcudaq-edem_DIR=/path/to/lib/cmake/cudaq-edem`.
 
 Additionally, the following CMake options can be configured:
 

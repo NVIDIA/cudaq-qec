@@ -73,3 +73,13 @@ Memory circuit experiments test a QEC code's ability to preserve quantum informa
 A memory circuit experiment measures how well a code and decoder preserve a logical qubit through repeated rounds of noisy stabilizer measurement. After a logical state is prepared, each round extracts a syndrome while noise acts on the qubits; the final data-qubit measurement reconstructs the logical observable so the outcome can be compared against the prepared state. Because the same logical information must survive every round, the experiment exercises the full detection-and-correction loop over time rather than a single shot -- it reveals whether the decoder keeps accumulated errors below the code's threshold, and how the logical error rate grows with the number of rounds and the physical error rate. Running many shots yields the statistics used to estimate a code's logical error rate, and ultimately its threshold.
 
 For the runnable code -- the ``sample_memory_circuit`` function variants, a full experiment, and additional noise models -- see :ref:`Memory Circuit Experiments <examples_rst/qec/modeling_noise:Memory Circuit Experiments>`.
+
+Sampling from EDEM Compositions
+-------------------------------
+
+When gadget EDEMs are available, compose them with ``cudaq-edem`` and project
+the closed experiment to a DEM. ``cudaq::qec::dem_from_edem`` converts its
+fault-to-detector and fault-to-observable responses to QEC matrices for CPU
+sampling. See :doc:`EDEM Composition and Sampling
+</examples_rst/qec/edem_composition>` for a C++ example and its fault-law
+conversion assumptions.
