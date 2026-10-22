@@ -212,15 +212,21 @@ ARG CUDA_VERSION
 #     flavor; skipped on arm64+CUDA 12.x, where trt_decoder is not built
 # The Holoscan SDK is not needed: HSB is linked statically into
 # libcudaq-realtime-bridge-gpu-roce.so.
+# The DOCA version is the one cuda-quantum's deps_common.sh pins, so the
+# runtime matches what the builder stage compiled against.
 # curl is installed only to fetch the DOCA repo key and purged afterwards.
-RUN set -e; \
+RUN --mount=type=bind,from=toolchain,source=/opt/cudaq-src/realtime/scripts/deps_common.sh,target=/tmp/deps_common.sh \
+    set -e; \
+    DOCA_VERSION=$(sed -n 's/^DOCA_VERSION=\${DOCA_VERSION:-\(.*\)}/\1/p' /tmp/deps_common.sh); \
+    test -n "$DOCA_VERSION"; echo "== DOCA version: $DOCA_VERSION (from deps_common.sh)"; \
     apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*; \
     DOCA_ARCH=$(uname -m); case "$DOCA_ARCH" in aarch64|arm64) DOCA_ARCH="arm64-sbsa" ;; esac; \
-    DOCA_REPO="https://linux.mellanox.com/public/repo/doca/3.3.0/ubuntu24.04/$DOCA_ARCH"; \
-    curl -fsSL "$DOCA_REPO/GPG-KEY-Mellanox.pub" -o /usr/share/keyrings/GPG-KEY-Mellanox.pub; \
-    echo "deb [signed-by=/usr/share/keyrings/GPG-KEY-Mellanox.pub] $DOCA_REPO /" \
+    DOCA_REPO="https://linux.mellanox.com/public/repo/doca/$DOCA_VERSION/ubuntu24.04/$DOCA_ARCH"; \
+    curl -fsSL https://linux.mellanox.com/public/repo/doca/public_keys/nvidia-doca-rpm-gpg-public-key.asc \
+        -o /usr/share/keyrings/nvidia-doca.asc; \
+    echo "deb [signed-by=/usr/share/keyrings/nvidia-doca.asc] $DOCA_REPO /" \
         > /etc/apt/sources.list.d/doca.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends doca-sdk-gpunetio; \
