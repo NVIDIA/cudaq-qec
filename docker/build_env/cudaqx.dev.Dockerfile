@@ -41,7 +41,36 @@ RUN mkdir -p /workspaces/cudaq && cd /workspaces/cudaq \
   && CUDAQ_COMMIT=$(jq -r '.cudaq.ref' /cudaq_version) \
   && git remote add origin https://github.com/${CUDAQ_REPO} \
   && git fetch -q --depth=1 origin ${CUDAQ_COMMIT} \
-  && git reset --hard FETCH_HEAD \
+  && git reset --hard FETCH_HEAD
+
+# CUDA-Q realtime's cpu_roce transport requires HSB's HololinkRoce package.
+# Build that CUDA-free leaf at the ref CUDA-Q pins and install it under
+# /usr/local. It needs a newer libibverbs than the base image's OFED one,
+# taken from the DOCA repo CUDA-Q pins.
+RUN set -e; \
+  deps=/workspaces/cudaq/realtime/scripts/deps_common.sh; \
+  DOCA_VERSION=$(sed -n 's/^DOCA_VERSION=\${DOCA_VERSION:-\(.*\)}/\1/p' "$deps"); \
+  HSB_REPO=$(sed -n 's/^CUDAQ_REALTIME_HSB_REPO=\${CUDAQ_REALTIME_HSB_REPO:-\(.*\)}/\1/p' "$deps"); \
+  HSB_REF=$(sed -n 's/^CUDAQ_REALTIME_HSB_REF=\${CUDAQ_REALTIME_HSB_REF:-\(.*\)}/\1/p' "$deps"); \
+  test -n "$DOCA_VERSION" && test -n "$HSB_REPO" && test -n "$HSB_REF"; \
+  DOCA_ARCH=$(uname -m); case "$DOCA_ARCH" in aarch64|arm64) DOCA_ARCH="arm64-sbsa" ;; esac; \
+  echo "== rdma-core from DOCA $DOCA_VERSION; HololinkRoce from $HSB_REPO @ $HSB_REF"; \
+  wget -qO /usr/share/keyrings/nvidia-doca.asc \
+    https://linux.mellanox.com/public/repo/doca/public_keys/nvidia-doca-rpm-gpg-public-key.asc; \
+  echo "deb [signed-by=/usr/share/keyrings/nvidia-doca.asc] https://linux.mellanox.com/public/repo/doca/$DOCA_VERSION/ubuntu24.04/$DOCA_ARCH /" \
+    > /etc/apt/sources.list.d/doca.list; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    libibverbs-dev libibverbs1 ibverbs-providers ibverbs-utils rdma-core librdmacm1 libibumad3 libibmad5; \
+  apt-get clean && rm -rf /var/lib/apt/lists/*; \
+  git clone -q --depth 1 --branch "$HSB_REF" "$HSB_REPO" /tmp/hsb; \
+  cmake -G Ninja -S /tmp/hsb/src/hololink/transport/roce -B /tmp/hsb/build-roce \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local; \
+  cmake --build /tmp/hsb/build-roce --target install; \
+  test -f /usr/local/lib/cmake/HololinkRoce/HololinkRoceConfig.cmake; \
+  rm -rf /tmp/hsb /etc/apt/sources.list.d/doca.list /usr/share/keyrings/nvidia-doca.asc
+
+RUN cd /workspaces/cudaq \
   && CUDAQ_SRC=/workspaces/cudaq bash /usr/local/bin/build_cudaq_with_realtime.sh \
   && rm -rf build realtime/build
 

@@ -73,12 +73,20 @@ find_library(QEC_PLAYBACK_CPU_ROCE_TRANSPORT_LIBRARY
   HINTS ${CUDAQ_REALTIME_ROOT} ${CUDAQ_INSTALL_DIR} ${CUDAQ_INSTALL_PREFIX}
   PATH_SUFFIXES lib)
 find_library(QEC_PLAYBACK_IBVERBS_LIBRARY ibverbs)
+# The static transport archive is linked by path, so its own link-only
+# dependencies do not propagate. Since CUDA-Q realtime moved the transport
+# onto Hololink's CpuRoceTransceiver, the archive needs
+# hololink::transport::roce; HSB exports that package from its build tree.
+find_package(HololinkRoce 2.7 CONFIG QUIET COMPONENTS transport
+  HINTS "${HOLOSCAN_SENSOR_BRIDGE_BUILD_DIR}/HololinkRoce")
 if(QEC_PLAYBACK_CPU_ROCE_TRANSPORT_LIBRARY AND QEC_PLAYBACK_IBVERBS_LIBRARY)
   # PUBLIC: the unit tests read it to learn whether the backend was built.
   target_compile_definitions(cudaq-qec-playback-emulator PUBLIC
     CUDAQ_QEC_PLAYBACK_CPU_ROCE)
   target_link_libraries(cudaq-qec-playback-emulator PRIVATE
-    ${QEC_PLAYBACK_CPU_ROCE_TRANSPORT_LIBRARY} ${QEC_PLAYBACK_IBVERBS_LIBRARY})
+    ${QEC_PLAYBACK_CPU_ROCE_TRANSPORT_LIBRARY}
+    $<$<BOOL:${HololinkRoce_FOUND}>:hololink::transport::roce>
+    ${QEC_PLAYBACK_IBVERBS_LIBRARY})
 else()
   message(STATUS "playback-emulator: cudaq-realtime-cpu-roce-transport or "
                  "libibverbs not found; cpu_roce backend will not be built.")
