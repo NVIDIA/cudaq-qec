@@ -181,6 +181,12 @@ target_link_libraries(test_dem_construction_code PRIVATE GTest::gtest_main
 add_dependencies(CUDAQXQECUnitTests test_dem_construction_code)
 gtest_discover_tests(test_dem_construction_code)
 
+add_executable(test_memory_dem_chunks test_memory_dem_chunks.cpp)
+target_link_libraries(test_memory_dem_chunks PRIVATE
+  GTest::gtest_main cudaq-qec cudaq::cudaq-stim-target)
+add_dependencies(CUDAQXQECUnitTests test_memory_dem_chunks)
+gtest_discover_tests(test_memory_dem_chunks PROPERTIES LABELS "qec")
+
 add_executable(test_cancellation test_cancellation.cpp)
 target_link_libraries(test_cancellation PRIVATE GTest::gtest_main cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_cancellation)
