@@ -27,6 +27,10 @@ public:
   void (*enqueue_syndromes_ui64_private)(std::uint64_t, std::uint64_t,
                                          std::uint64_t,
                                          std::uint64_t) = nullptr;
+  // (decoder_id, syndrome_size, syndrome, tag, syndrome_mapping_id)
+  void (*enqueue_syndromes_mapped_ui64_private)(std::uint64_t, std::uint64_t,
+                                                std::uint64_t, std::uint64_t,
+                                                std::uint64_t) = nullptr;
   std::uint64_t (*get_corrections_ui64_private)(std::uint64_t, std::uint64_t,
                                                 std::uint64_t) = nullptr;
   void (*reset_decoder_ui64_private)(std::uint64_t) = nullptr;
@@ -41,6 +45,10 @@ public:
       enqueue_syndromes_ui64_private = reinterpret_cast<void (*)(
           std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t)>(
           dlsym(handle, "enqueue_syndromes_ui64_private"));
+      enqueue_syndromes_mapped_ui64_private =
+          reinterpret_cast<void (*)(std::uint64_t, std::uint64_t, std::uint64_t,
+                                    std::uint64_t, std::uint64_t)>(
+              dlsym(handle, "enqueue_syndromes_mapped_ui64_private"));
       get_corrections_ui64_private = reinterpret_cast<std::uint64_t (*)(
           std::uint64_t, std::uint64_t, std::uint64_t)>(
           dlsym(handle, "get_corrections_ui64_private"));
@@ -54,6 +62,9 @@ public:
             "libcudaq-qec-realtime-decoding-quantinuum-private.so not found. "
             "Cannot run with CUDAQ_QTM_PRIVATE_IMPL=1.");
       }
+      // enqueue_syndromes_mapped_ui64_private is optional: private libraries
+      // built before it existed still serve every other call, and
+      // enqueue_syndromes_mapped_ui64() reports its absence when called.
       if (!enqueue_syndromes_ui64_private || !get_corrections_ui64_private ||
           !reset_decoder_ui64_private) {
         throw std::runtime_error(
@@ -71,6 +82,7 @@ public:
       dlclose(handle);
     handle = nullptr;
     enqueue_syndromes_ui64_private = nullptr;
+    enqueue_syndromes_mapped_ui64_private = nullptr;
     get_corrections_ui64_private = nullptr;
     reset_decoder_ui64_private = nullptr;
   }
@@ -93,6 +105,32 @@ void enqueue_syndromes_ui64(std::uint64_t decoder_id,
       syndrome_u8[i] = (syndrome >> i) & 1;
     cudaq::qec::decoding::host::enqueue_syndromes(
         decoder_id, syndrome_u8.data(), syndrome_u8.size(), tag);
+  }
+}
+
+void enqueue_syndromes_mapped_ui64(std::uint64_t decoder_id,
+                                   std::uint64_t syndrome_size,
+                                   std::uint64_t syndrome, std::uint64_t tag,
+                                   std::uint64_t syndrome_mapping_id) {
+  CUDA_QEC_INFO("Entering enqueue_syndromes_mapped_ui64 for decoder id: {}, "
+                "tag: {}, syndrome_mapping_id: {}",
+                decoder_id, tag, syndrome_mapping_id);
+  if (z_use_private_impl) {
+    if (!z_quantinuum_private_handler.enqueue_syndromes_mapped_ui64_private)
+      throw std::runtime_error(
+          "enqueue_syndromes_mapped_ui64_private not found in "
+          "libcudaq-qec-realtime-decoding-quantinuum-private.so; that library "
+          "predates enqueue_syndromes_mapped. Update it to name "
+          "syndrome_mapping rows with CUDAQ_QTM_PRIVATE_IMPL=1.");
+    z_quantinuum_private_handler.enqueue_syndromes_mapped_ui64_private(
+        decoder_id, syndrome_size, syndrome, tag, syndrome_mapping_id);
+  } else {
+    std::vector<uint8_t> syndrome_u8(syndrome_size);
+    for (std::size_t i = 0; i < syndrome_size; i++)
+      syndrome_u8[i] = (syndrome >> i) & 1;
+    cudaq::qec::decoding::host::enqueue_syndromes(
+        decoder_id, syndrome_u8.data(), syndrome_u8.size(), tag,
+        syndrome_mapping_id);
   }
 }
 

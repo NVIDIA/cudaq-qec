@@ -76,11 +76,12 @@ TEST(Analyzer, AnEmptyResultProducesTheHeaderAndNothingElse) {
   ASSERT_FALSE(csv.empty());
   EXPECT_EQ(std::count(csv.begin(), csv.end(), '\n'), 1);
   const auto header = columns_of(lines_of(csv)[0]);
-  for (const char *col : {"event_index", "decoder_id", "op", "deadline_ns",
-                          "call_ns", "return_ns", "status", "rounds_streamed",
-                          "read_completed", "syndrome_bits", "correction_bits",
-                          "correction_mismatch", "request_ids", "dispatched",
-                          "request_dispatch_ns", "request_return_ns"})
+  for (const char *col :
+       {"event_index", "decoder_id", "op", "deadline_ns", "call_ns",
+        "return_ns", "status", "rounds_streamed", "read_completed",
+        "syndrome_bits", "correction_bits", "correction_mismatch",
+        "request_ids", "dispatched", "request_dispatch_ns", "request_return_ns",
+        "request_status"})
     EXPECT_NE(std::find(header.begin(), header.end(), col), header.end())
         << "missing column " << col;
 }
@@ -102,6 +103,7 @@ TEST(Analyzer, RecordFieldsSurviveIntoTheCsvRow) {
   EXPECT_EQ(column("decoder_id"), "3");
   EXPECT_EQ(column("op"), "get_corrections");
   EXPECT_EQ(column("request_ids"), "7");
+  EXPECT_EQ(column("request_status"), "0");
 
   // The ostream overload has to agree with the string one exactly, or a
   // report written to a file would differ from the same report in memory.
@@ -143,7 +145,7 @@ std::vector<std::string> csv_lines(const std::string &csv) {
   return lines;
 }
 
-constexpr std::size_t kNumColumns = 16;
+constexpr std::size_t kNumColumns = 17;
 
 // Columns these tests assert on, by position in write_csv()'s header.
 constexpr std::size_t kColOp = 2;
@@ -716,6 +718,23 @@ TEST(Timing, ANullBackendGetCorrectionsWithRealWidthStillReportsOk) {
   EXPECT_EQ(result.records[0].status, static_cast<std::int32_t>(RpcStatus::OK));
   EXPECT_TRUE(result.records[0].read_completed);
   EXPECT_EQ(result.records[0].correction_count, 8u);
+}
+
+TEST(Timing, OnlyEnqueueDataCarriesTheFinalSyndromeMappingId) {
+  struct MappingSession : blocking_session {
+    std::vector<std::uint64_t> ids;
+    RpcStatus send_sync(const frame &f, std::span<std::uint8_t>,
+                        std::size_t &reply_len) override {
+      cudaq::qec::decoding_server::slot::EnqueueView v;
+      if (cudaq::qec::decoding_server::slot::parse_enqueue(f.bytes, f.size, v))
+        ids.push_back(v.syndrome_mapping_id);
+      reply_len = 0;
+      return RpcStatus::OK;
+    }
+  } s;
+  run_text("0 stream source=0b1010 rounds=2\n1 enqueue_data source=0b1\n", 1000,
+           s, {.final_mapping_id = 3});
+  EXPECT_EQ(s.ids, (std::vector<std::uint64_t>{0, 0, 3}));
 }
 
 // ─── Signals ────────────────────────────────────────────────────────────────
