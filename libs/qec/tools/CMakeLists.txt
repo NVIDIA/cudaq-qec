@@ -7,3 +7,4 @@
 # ============================================================================ #
 add_subdirectory(decoding-server)
 add_subdirectory(playback-emulator)
+add_subdirectory(memory-experiment-generator)

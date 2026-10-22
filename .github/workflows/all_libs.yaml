@@ -102,20 +102,12 @@ jobs:
       # Run tests
       # ========================================================================
       #
-      - name: Run tests
-        env:
-          OMPI_MCA_pml: ob1
-        run: cmake --build ${{ steps.build.outputs.build-dir }} --target run_tests
-
-      # ========================================================================
-      # Run python tests
-      # ========================================================================
- 
       - name: Install python requirements
         env:
           LD_LIBRARY_PATH: ${{ env.MPI_PATH }}/lib:${{ env.LD_LIBRARY_PATH }}
         shell: bash
         run: |
+          python3 -m pip install --break-system-packages -r libs/qec/unittests/memory-experiment-generator/requirements.txt
           # Install the correct torch first.
           cuda_no_dot=$(echo ${{ matrix.cuda_version }} | sed 's/\.//')
           pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}
@@ -126,6 +118,11 @@ jobs:
               # install for x86_64.
               pip install stim beliefmatching
           fi
+
+      - name: Run tests
+        env:
+          OMPI_MCA_pml: ob1
+        run: cmake --build ${{ steps.build.outputs.build-dir }} --target run_tests
 
       - name: Run Python tests
         env:
