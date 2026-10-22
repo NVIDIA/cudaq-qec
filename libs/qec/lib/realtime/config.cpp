@@ -8,6 +8,7 @@
 #include "llvm/Support/YAMLTraits.h"
 #include "llvm/Support/raw_ostream.h"
 #include "realtime_decoding.h"
+#include "window_request_yaml_traits.h"
 #include "cudaq/qec/decoder_config_payload.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -18,6 +19,7 @@
 #include "cudaq/qec/realtime/decoding_config.h"
 #include "cudaq/qec/selection_strategy.h"
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -413,6 +415,13 @@ static void validate_task_graph(const decoder_config &config) {
       if (!kind->requires_dem && node.dem_chunks.has_value())
         throw std::runtime_error(where + " of kind '" + kind->name +
                                  "' takes no dem_chunks");
+      if (!kind->takes_windows && !node.windows.empty())
+        throw std::runtime_error(where + " of kind '" + kind->name +
+                                 "' sets windows, which only an ingest node "
+                                 "takes");
+      if (kind->takes_windows && node.windows.empty())
+        throw std::runtime_error(where + " of kind '" + kind->name +
+                                 "' needs at least one window");
       if (!kind->requires_dem &&
           (!node.H_sparse.empty() || !node.D_sparse.empty() ||
            !node.O_sparse.empty()))
@@ -1031,6 +1040,55 @@ struct MappingTraits<ensemble_spec_t> {
   static void mapping(IO &io, ensemble_spec_t &e);
 };
 
+/// An ingest node's `windows`: layer names to window requests, kept sorted by
+/// name, since llvm::yaml does not keep a mapping's key order. Each layer is
+/// also an output port, so it must be a port name and cannot be one ingest
+/// already uses.
+struct windows_form {
+  std::vector<cudaq::qec::experimental::ingest_window> *windows = nullptr;
+  const std::string *node = nullptr;
+};
+
+template <>
+struct CustomMappingTraits<windows_form> {
+  static void inputOne(IO &io, StringRef key, windows_form &form) {
+    const std::string layer = key.str();
+    const std::string where =
+        "task_graph node '" + *form.node + "' window layer '" + layer + "'";
+    cudaq::qec::window_yaml::request_form request;
+    const bool identifier =
+        !layer.empty() && !std::isdigit(static_cast<unsigned char>(layer[0])) &&
+        std::all_of(layer.begin(), layer.end(), [](char c) {
+          return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+        });
+    if (!identifier)
+      throw std::runtime_error(where + " is not a port name");
+    if (layer == "logical" || layer == "input")
+      throw std::runtime_error(where +
+                               " is reserved: ingest uses that port itself");
+    // Request errors throw std::invalid_argument; config errors are
+    // std::runtime_error, which is what from_yaml_str() callers catch.
+    try {
+      io.mapRequired(layer.c_str(), request);
+      const auto at =
+          std::lower_bound(form.windows->begin(), form.windows->end(), layer,
+                           [](const auto &window, const std::string &name) {
+                             return window.layer < name;
+                           });
+      form.windows->insert(
+          at, {layer, cudaq::qec::window_yaml::request_from_form(request)});
+    } catch (const std::invalid_argument &e) {
+      throw std::runtime_error(where + ": " + e.what());
+    }
+  }
+  static void output(IO &io, windows_form &form) {
+    for (const auto &window : *form.windows) {
+      auto request = cudaq::qec::window_yaml::form_from_request(window.request);
+      io.mapRequired(window.layer.c_str(), request);
+    }
+  }
+};
+
 template <>
 struct CustomMappingTraits<task_graph_spec_t::node_spec> {
   using node_spec = task_graph_spec_t::node_spec;
@@ -1046,6 +1104,11 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
     }
     if (key == "dem_chunks") {
       io.mapOptional("dem_chunks", node.dem_chunks);
+      return;
+    }
+    if (key == "windows") {
+      windows_form form{&node.windows, &node.id};
+      io.mapRequired("windows", form);
       return;
     }
     if (key == "H_sparse") {
@@ -1160,6 +1223,10 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
     std::string type = kind ? kind->name : node.type;
     io.mapRequired("type", type);
     io.mapOptional("dem_chunks", node.dem_chunks);
+    if (!node.windows.empty()) {
+      windows_form form{&node.windows, &node.id};
+      io.mapRequired("windows", form);
+    }
     if (!node.H_sparse.empty())
       io.mapRequired("H_sparse", node.H_sparse);
     if (!node.D_sparse.empty())
@@ -2014,6 +2081,18 @@ llvm::json::Object task_graph_json_schema() {
                                    {"required", llvm::json::Array{"type"}}}},
       {"decoder_custom_args", llvm::json::Object{{"type", "object"}}},
       {"dem_chunks", llvm::json::Object{{"$ref", "#/$defs/dem_chunks"}}},
+      // An ingest node's layers; each name is also an output port.
+      {"windows",
+       llvm::json::Object{
+           {"type", "object"},
+           {"propertyNames",
+            llvm::json::Object{
+                {"pattern", "^[A-Za-z_][A-Za-z0-9_]*$"},
+                {"not",
+                 llvm::json::Object{
+                     {"enum", llvm::json::Array{"logical", "input"}}}}}},
+           {"additionalProperties",
+            llvm::json::Object{{"$ref", "#/$defs/window_request"}}}}},
       {"H_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"O_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"D_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
@@ -2102,7 +2181,69 @@ llvm::json::Object task_graph_json_schema() {
   if (!per_kind.empty())
     node["allOf"] = std::move(per_kind);
 
+  // A window request, as an ingest node's `windows` holds it. Each helper
+  // returns a fresh object, since json::Value takes objects by move.
+  const auto rounds_pair = [] {
+    return llvm::json::Object{
+        {"type", "array"},
+        {"items", llvm::json::Object{{"type", "integer"}}},
+        {"minItems", 2},
+        {"maxItems", 2}};
+  };
+  const auto range_ref = [] {
+    return llvm::json::Object{{"$ref", "#/$defs/round_range"}};
+  };
+  const auto closed_object = [](llvm::json::Object properties) {
+    return llvm::json::Object{{"type", "object"},
+                              {"properties", std::move(properties)},
+                              {"additionalProperties", false}};
+  };
+  const auto one_of = [](std::initializer_list<const char *> values) {
+    llvm::json::Array list;
+    for (const auto *value : values)
+      list.push_back(value);
+    return llvm::json::Object{{"enum", std::move(list)}};
+  };
+  llvm::json::Object range_map =
+      closed_object(llvm::json::Object{{"rounds", rounds_pair()}});
+  range_map["required"] = llvm::json::Array{"rounds"};
+  llvm::json::Object send = closed_object(
+      llvm::json::Object{{"id", llvm::json::Object{{"type", "string"}}},
+                         {"mode", one_of({"delta", "residual"})},
+                         {"rounds", range_ref()}});
+  send["required"] = llvm::json::Array{"id"};
+  llvm::json::Object input = closed_object(llvm::json::Object{
+      {"disposition", one_of({"open", "closed"})},
+      {"boundary", one_of({"columns", "truncate"})},
+      {"prior", llvm::json::Object{{"type", "number"},
+                                   {"exclusiveMinimum", 0},
+                                   {"exclusiveMaximum", 1}}}});
+  llvm::json::Object output = closed_object(llvm::json::Object{
+      {"disposition", one_of({"open", "closed"})}, {"imports", range_ref()}});
+  llvm::json::Object zones = closed_object(llvm::json::Object{
+      {"commit", range_ref()},
+      {"buffers",
+       llvm::json::Object{{"type", "array"}, {"items", range_ref()}}}});
+  llvm::json::Object columns = closed_object(llvm::json::Object{
+      {"merge_identical", llvm::json::Object{{"type", "boolean"}}},
+      {"conflicting_parallel", one_of({"reject", "most_likely"})}});
+  llvm::json::Object window_request = closed_object(llvm::json::Object{
+      {"period", llvm::json::Object{{"type", "integer"}, {"minimum", 1}}},
+      {"offset", llvm::json::Object{{"type", "integer"}}},
+      {"zones", std::move(zones)},
+      {"ports",
+       closed_object(llvm::json::Object{{"input", std::move(input)},
+                                        {"output", std::move(output)}})},
+      {"sends",
+       llvm::json::Object{{"type", "array"}, {"items", std::move(send)}}},
+      {"columns", std::move(columns)}});
+  window_request["required"] = llvm::json::Array{"period", "zones", "ports"};
+
   return llvm::json::Object{
+      {"round_range",
+       llvm::json::Object{
+           {"oneOf", llvm::json::Array{rounds_pair(), std::move(range_map)}}}},
+      {"window_request", std::move(window_request)},
       {"task_graph_partition",
        llvm::json::Object{
            {"oneOf",

@@ -8,6 +8,7 @@
 #include "cuda-qx/core/heterogeneous_map.h"
 #include "cudaq/qec/decoding_task_graph_config.h"
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/window_request.h"
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -165,6 +166,10 @@ struct decoder_config {
       decoder_custom_args_t node_params;
       /// DEM for this node alone; falls back to the entry-level DEM.
       std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
+      /// An ingest node's layers, sorted by name: each names an output port
+      /// and the window request published on it. Experimental, as the
+      /// request type is.
+      std::vector<cudaq::qec::experimental::ingest_window> windows;
       /// This node's own matrices, in the entry-level flat form and the same
       /// -1-separated row encoding. Use them for a detector map that follows no
       /// round structure; a node takes these or `dem_chunks`, never both.

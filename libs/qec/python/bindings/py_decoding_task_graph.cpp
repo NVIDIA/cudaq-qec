@@ -129,6 +129,7 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("kind", &task_graph_node_config::kind)
       .def_rw("node_params", &task_graph_node_config::node_params)
       .def_rw("dem", &task_graph_node_config::dem)
+      .def_rw("windows", &task_graph_node_config::windows)
       .def_rw("d_sparse", &task_graph_node_config::d_sparse)
       .def_rw("o_sparse", &task_graph_node_config::o_sparse)
       .def_rw("h_sparse", &task_graph_node_config::h_sparse)

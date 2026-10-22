@@ -97,4 +97,12 @@ struct window_request {
   bool operator==(const window_request &) const = default;
 };
 
+/// One layer of an ingest node: its name, which is also the node's output
+/// port for the layer, and the window request it publishes views of.
+struct ingest_window {
+  std::string layer;
+  window_request request;
+  bool operator==(const ingest_window &) const = default;
+};
+
 } // namespace cudaq::qec::experimental

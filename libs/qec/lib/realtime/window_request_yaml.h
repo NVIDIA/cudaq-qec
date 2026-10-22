@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include "../decoding_task/decoding_task_decoding_window.h"
+#include "cudaq/qec/window_request.h"
 #include <string>
 
 namespace cudaq::qec {
@@ -22,9 +22,9 @@ namespace cudaq::qec {
 /// map form reserves `occurrences` and `block`. `ports` names only `input`
 /// and `output`. The window keys `responsibility` and `soundness_class` are
 /// reserved. A send's `rounds` is one range.
-/// @throws std::invalid_argument naming the operation for malformed YAML,
-/// an unknown key, a reserved key or port, or a malformed range.
-__attribute__((visibility("default"))) window_request
+/// @throws std::invalid_argument for malformed YAML, an unknown key, a
+/// reserved key or port, or a malformed range.
+__attribute__((visibility("default"))) experimental::window_request
 window_request_from_yaml_str(const std::string &text);
 
 /// @brief Emit a window request as YAML that window_request_from_yaml_str()
@@ -32,6 +32,6 @@ window_request_from_yaml_str(const std::string &text);
 /// @throws std::invalid_argument if a send has more than one round range,
 /// which the YAML form cannot write.
 __attribute__((visibility("default"))) std::string
-window_request_to_yaml_str(const window_request &request);
+window_request_to_yaml_str(const experimental::window_request &request);
 
 } // namespace cudaq::qec

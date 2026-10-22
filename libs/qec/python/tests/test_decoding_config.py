@@ -1093,6 +1093,112 @@ def test_task_graph_edge_index_offset():
     assert edge == other
 
 
+_PW_GRAPH_YAML = """decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: ingest
+          type: ingest
+          windows:
+            A:
+              period: 12
+              zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
+              ports:
+                input: {disposition: open, prior: 0.01}
+                output: {disposition: open}
+              sends: [{id: forward}, {id: backward}]
+            B:
+              period: 12
+              offset: -9
+              zones: {commit: [0, 9]}
+              ports:
+                input: {disposition: closed}
+                output: {disposition: closed}
+        - id: A
+          type: decode_window
+          max_in_flight: 4
+          inner: {type: single_error_lut}
+        - id: B
+          type: decode_window
+          num_receives: 2
+          verify_residual: report
+          inner: {type: single_error_lut}
+        - id: sum
+          type: xor
+      edges:
+        - {from: measurements, to: ingest}
+        - {from: ingest.A, to: A}
+        - {from: ingest.B, to: B}
+        - {from: A.forward, to: B.receive_0, index_offset: -1}
+        - {from: A.backward, to: B.receive_1}
+        - {from: A, to: sum.a}
+        - {from: B, to: sum.b}
+        - {from: sum, to: output}
+"""
+
+
+def test_ingest_windows_parse_into_experimental_requests():
+    mdc = qec.multi_decoder_config.from_yaml_str(_PW_GRAPH_YAML)
+    ingest = mdc.decoders[0].task_graph.nodes[0]
+    assert [w.layer for w in ingest.windows] == ["A", "B"]
+    a = ingest.windows[0].request
+    assert a.period == 12
+    assert a.commit.begin == 0 and a.commit.end == 3
+    assert [(r.begin, r.end) for r in a.buffers] == [(-3, 0), (3, 6)]
+    assert a.input.disposition == qec.experimental.port_disposition.open
+    assert a.input.prior == 0.01
+    assert [s.id for s in a.sends] == ["forward", "backward"]
+    b = ingest.windows[1].request
+    assert b.offset == -9
+    assert b.output.disposition == qec.experimental.port_disposition.closed
+
+    again = qec.multi_decoder_config.from_yaml_str(mdc.to_yaml_str())
+    assert again.decoders[0].task_graph.nodes[0].windows[1].request == b
+
+
+def test_experimental_window_request_is_writable():
+    exp = qec.experimental
+    request = exp.window_request()
+    request.period = 4
+    commit = exp.round_range()
+    commit.begin, commit.end = 0, 2
+    request.commit = commit
+    request.input.disposition = exp.port_disposition.closed
+    request.output.disposition = exp.port_disposition.open
+    request.columns.conflicting_parallel = exp.parallel_resolution.most_likely
+    window = exp.ingest_window()
+    window.layer = "W"
+    window.request = request
+    assert window.request.commit.end == 2
+    assert window.request.columns.conflicting_parallel == \
+        exp.parallel_resolution.most_likely
+
+
+def test_parallel_window_graph_validates_against_the_schema():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    validator.validate(yaml.safe_load(_PW_GRAPH_YAML))
+    bad = yaml.safe_load(_PW_GRAPH_YAML)
+    bad["decoders"][0]["task_graph"]["nodes"][0]["windows"]["A"][
+        "responsibility"] = [0]
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(bad)
+
+
 # A DEM whose detector coordinates carry the colour a colour-code decoder
 # needs. Those annotations have no home in detector_error_model, so a decoder
 # that reads them can only be built from the text -- which is what `stim_dem`

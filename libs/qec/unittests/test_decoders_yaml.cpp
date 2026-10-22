@@ -2756,8 +2756,179 @@ TEST(WindowRequestYAML, RejectsReservedShapes) {
           "'soundness_class' is reserved");
   rejects("commit: [0, 3]", "commit: [0, 3, 5]",
           "a round range is [begin, end]");
-  rejects("period: 12", "period: 12\nperiodd: 5", "window_request_from_yaml");
+  rejects("period: 12", "period: 12\nperiodd: 5", "unknown key 'periodd'");
 } // end - TEST(WindowRequestYAML, RejectsReservedShapes)
+
+// The plan's hand-written parallel-window graph, with a two-input xor, over
+// a streaming rep-code template. edit() changes the text before parsing.
+std::string pw_graph_yaml() {
+  return R"(
+decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: ingest
+          type: ingest
+          windows:
+            A:
+              period: 12
+              zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
+              ports:
+                input: {disposition: open, prior: 0.01}
+                output: {disposition: open}
+              sends: [{id: forward}, {id: backward}]
+            B:
+              period: 12
+              offset: -9
+              zones: {commit: [0, 9]}
+              ports:
+                input: {disposition: closed}
+                output: {disposition: closed}
+        - id: A
+          type: decode_window
+          max_in_flight: 4
+          inner: {type: single_error_lut}
+        - id: B
+          type: decode_window
+          num_receives: 2
+          max_in_flight: 4
+          verify_residual: report
+          inner: {type: single_error_lut}
+        - id: sum
+          type: xor
+      edges:
+        - {from: measurements, to: ingest}
+        - {from: ingest.A, to: A}
+        - {from: ingest.B, to: B}
+        - {from: A.forward, to: B.receive_0, index_offset: -1}
+        - {from: A.backward, to: B.receive_1}
+        - {from: A, to: sum.a}
+        - {from: B, to: sum.b}
+        - {from: sum, to: output}
+)";
+}
+
+// pw_graph_yaml() with `from` replaced by `to`.
+std::string pw_graph_yaml_with(const std::string &from, const std::string &to) {
+  auto yaml = pw_graph_yaml();
+  const auto at = yaml.find(from);
+  if (at == std::string::npos)
+    throw std::logic_error("pw_graph_yaml has no '" + from + "'");
+  return yaml.replace(at, from.size(), to);
+}
+
+// The layers parse into the ingest node, sorted by name, as the window
+// requests the C++ API writes; decode_window's parameters go to its kind;
+// and the document round-trips.
+TEST(TaskGraphWindowKinds, ParsesThePlansParallelWindowGraph) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using namespace cudaq::qec::experimental;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_graph_yaml());
+  const auto &graph = *parsed.decoders.at(0).task_graph;
+  auto b = window_a();
+  b.offset = -9;
+  b.commit = round_range{0, 9};
+  b.buffers.clear();
+  b.input = {port_disposition::closed, std::nullopt};
+  b.output = {port_disposition::closed, std::nullopt};
+  b.sends.clear();
+  ASSERT_EQ(graph.nodes.size(), 4u);
+  const auto &ingest = graph.nodes[0];
+  ASSERT_EQ(ingest.windows.size(), 2u);
+  EXPECT_EQ(ingest.windows[0], (ingest_window{"A", window_a()}));
+  EXPECT_EQ(ingest.windows[1], (ingest_window{"B", b}));
+  const auto &params = graph.nodes[2].node_params.map();
+  EXPECT_EQ(params.get<std::size_t>("num_receives"), 2u);
+  EXPECT_EQ(params.get<std::size_t>("max_in_flight"), 4u);
+  EXPECT_EQ(params.get<std::string>("verify_residual"), "report");
+  EXPECT_EQ(graph.nodes[2].inner_type, "single_error_lut");
+  EXPECT_EQ(graph.edges[3].index_offset, -1);
+
+  const auto emitted = parsed.to_yaml_str(200);
+  EXPECT_NE(emitted.find("windows:"), std::string::npos);
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+} // end - TEST(TaskGraphWindowKinds, ParsesThePlansParallelWindowGraph)
+
+// The kinds are registered for configuration, so a graph naming them parses
+// and validates, and building it says the kinds are not available yet.
+TEST(TaskGraphWindowKinds, BuildingSaysTheKindsAreNotAvailableYet) {
+  namespace cfg = cudaq::qec::decoding::config;
+  // build_task_graph() expands the entry-level DEM, so it needs a length.
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(
+      pw_graph_yaml_with("      seam: {from: next_round, to: prev_round}\n",
+                         "      seam: {from: next_round, to: prev_round}\n"
+                         "      num_rounds: 12\n"));
+  try {
+    cudaq::qec::decoding::host::build_task_graph(parsed.decoders.at(0));
+    ADD_FAILURE() << "the graph built";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find("'ingest'"), std::string::npos)
+        << e.what();
+    EXPECT_NE(std::string(e.what()).find("not available yet"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+// Misplaced or malformed windows, and a bad verify_residual, are each
+// rejected when parsed, with their own message.
+TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(pw_graph_yaml_with("        - id: sum\n          type: xor\n",
+                             "        - id: sum\n          type: xor\n"
+                             "          windows: {C: {period: 1}}\n"),
+          "sets windows, which only an ingest node takes");
+  rejects(pw_graph_yaml_with("          windows:\n            A:",
+                             "          read_logical: false\n"
+                             "          other:\n            A:"),
+          "'other'");
+  rejects(pw_graph_yaml_with("            B:\n", "            logical:\n"),
+          "layer 'logical'");
+  rejects(pw_graph_yaml_with("              offset: -9\n",
+                             "              offset: -9\n"
+                             "              responsibility: [0]\n"),
+          "'responsibility' is reserved");
+  rejects(
+      pw_graph_yaml_with("verify_residual: report", "verify_residual: maybe"),
+      "verify_residual");
+} // end - TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters)
+
+// An ingest node with no windows has nothing to publish.
+TEST(TaskGraphWindowKinds, IngestNeedsAWindow) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto yaml = pw_graph_yaml();
+  const auto begin = yaml.find("          windows:");
+  const auto end = yaml.find("        - id: A");
+  yaml.erase(begin, end - begin);
+  try {
+    cfg::multi_decoder_config::from_yaml_str(yaml);
+    ADD_FAILURE() << "an ingest node without windows parsed";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("needs at least one window"),
+              std::string::npos)
+        << e.what();
+  }
+}
 
 // The chunk form stays the authoritative source, carrying the closed model
 // expand_dem_chunks() would write for any decoder that reads matrices.

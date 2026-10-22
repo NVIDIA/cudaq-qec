@@ -337,6 +337,83 @@ void bindDecodingConfig(nb::module_ &mod) {
         return a == b;
       });
 
+  // Experimental: window requests prototype the cudaq-edem composer's
+  // request and may change or be replaced when its windows land.
+  {
+    namespace exp = cudaq::qec::experimental;
+    auto mod_exp = qecmod.def_submodule(
+        "experimental",
+        "Experimental types. They may change, or be replaced, in a later "
+        "release.");
+    nb::enum_<exp::port_disposition>(mod_exp, "port_disposition")
+        .value("open", exp::port_disposition::open)
+        .value("closed", exp::port_disposition::closed);
+    nb::enum_<exp::send_mode>(mod_exp, "send_mode")
+        .value("delta", exp::send_mode::delta)
+        .value("residual", exp::send_mode::residual);
+    nb::enum_<exp::input_boundary>(mod_exp, "input_boundary")
+        .value("columns", exp::input_boundary::columns)
+        .value("truncate", exp::input_boundary::truncate);
+    nb::enum_<exp::parallel_resolution>(mod_exp, "parallel_resolution")
+        .value("reject", exp::parallel_resolution::reject)
+        .value("most_likely", exp::parallel_resolution::most_likely);
+    nb::class_<exp::round_range>(
+        mod_exp, "round_range",
+        "Half-open rounds [begin, end), relative to a window's anchor.")
+        .def(nb::init<>())
+        .def_rw("begin", &exp::round_range::begin)
+        .def_rw("end", &exp::round_range::end)
+        .def("__eq__", [](const exp::round_range &a,
+                          const exp::round_range &b) { return a == b; });
+    nb::class_<exp::window_request::input_port>(mod_exp, "window_input_port")
+        .def(nb::init<>())
+        .def_rw("disposition", &exp::window_request::input_port::disposition)
+        .def_rw("prior", &exp::window_request::input_port::prior)
+        .def_rw("boundary", &exp::window_request::input_port::boundary);
+    nb::class_<exp::window_request::output_port>(mod_exp, "window_output_port")
+        .def(nb::init<>())
+        .def_rw("disposition", &exp::window_request::output_port::disposition)
+        .def_rw("imports", &exp::window_request::output_port::imports);
+    nb::class_<exp::window_request::send_request>(mod_exp,
+                                                  "window_send_request")
+        .def(nb::init<>())
+        .def_rw("id", &exp::window_request::send_request::id)
+        .def_rw("mode", &exp::window_request::send_request::mode)
+        .def_rw("rounds", &exp::window_request::send_request::rounds);
+    nb::class_<exp::window_request::column_options>(mod_exp,
+                                                    "window_column_options")
+        .def(nb::init<>())
+        .def_rw("merge_identical",
+                &exp::window_request::column_options::merge_identical)
+        .def_rw("conflicting_parallel",
+                &exp::window_request::column_options::conflicting_parallel);
+    nb::class_<exp::window_request>(
+        mod_exp, "window_request",
+        "The windows of one layer: window k is anchored at offset + k * "
+        "period, and its zones, imports and sends are rounds relative to "
+        "that anchor.")
+        .def(nb::init<>())
+        .def_rw("period", &exp::window_request::period)
+        .def_rw("offset", &exp::window_request::offset)
+        .def_rw("commit", &exp::window_request::commit)
+        .def_rw("buffers", &exp::window_request::buffers)
+        .def_rw("input", &exp::window_request::input)
+        .def_rw("output", &exp::window_request::output)
+        .def_rw("sends", &exp::window_request::sends)
+        .def_rw("columns", &exp::window_request::columns)
+        .def("__eq__", [](const exp::window_request &a,
+                          const exp::window_request &b) { return a == b; });
+    nb::class_<exp::ingest_window>(
+        mod_exp, "ingest_window",
+        "One layer of an ingest node: its name, which is also its output "
+        "port, and its window request.")
+        .def(nb::init<>())
+        .def_rw("layer", &exp::ingest_window::layer)
+        .def_rw("request", &exp::ingest_window::request)
+        .def("__eq__", [](const exp::ingest_window &a,
+                          const exp::ingest_window &b) { return a == b; });
+  }
+
   nb::class_<task_graph_spec::node_spec>(
       mod_cfg, "task_graph_node",
       "One node of a task graph: an id, a type naming either a registered "
@@ -368,6 +445,9 @@ void bindDecodingConfig(nb::module_ &mod) {
           "`type` first.")
       .def_rw("dem_chunks", &task_graph_spec::node_spec::dem_chunks,
               "DEM for this node alone; falls back to the entry-level DEM.")
+      .def_rw("windows", &task_graph_spec::node_spec::windows,
+              "An ingest node's layers, as experimental.ingest_window: each\n"
+              "names an output port and its window request.")
       .def_rw("stim_dem", &task_graph_spec::node_spec::stim_dem,
               "Stim DEM text to build the inner decoder from, in place of "
               "this node's H, for a decoder whose model needs annotations the "
