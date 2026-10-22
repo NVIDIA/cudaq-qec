@@ -46,6 +46,11 @@ if(Python3_Interpreter_FOUND)
       -s "${CUDAQX_QEC_SOURCE_DIR}/../../scripts/ci/tests"
       -p "test_*plugin*.py")
   set_tests_properties(ExternalPlugins.Contracts PROPERTIES LABELS "packaging")
+  add_test(NAME PlaybackServer.Contracts
+    COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+      -s "${CUDAQX_QEC_SOURCE_DIR}/../../scripts/ci/tests"
+      -p "test_*play*.py")
+  set_tests_properties(PlaybackServer.Contracts PROPERTIES LABELS "packaging;playback")
 endif()
 
 # ==============================================================================

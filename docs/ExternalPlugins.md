@@ -90,3 +90,39 @@ runtime with no access to those source/build trees. A builder-only success is
 not validation of the downloaded release image. Pin the image digest and record
 the framework/provider commits, CUDA and TensorRT versions, bundle hashes and
 replay results before making a support statement.
+
+## Send requests through the installed server
+
+Registration without a GPU is a packaging check, not an end-to-end decode.
+Run the installed server and playback client with external configuration,
+schedule, measurement fixtures and a completed-shot correction oracle:
+
+```bash
+python3 scripts/ci/replay_decoding_server.py \
+  --server=/path/to/install/bin/decoding_server \
+  --playback=/path/to/install/bin/playback-emulator \
+  --config=/fixtures/server.yaml \
+  --schedule=/fixtures/playback.schedule \
+  --expected=/fixtures/expected.csv \
+  --output=/results/new-replay \
+  --transport=/path/to/runtime/lib/libcudaq-realtime-bridge-udp.so \
+  --udp-timeout=30s \
+  --require-final \
+  --server-arg=--slot-size=8192 \
+  --server-arg=--num-slots=8 \
+  --server-arg=--host-loop=threaded
+```
+
+The output directory must be new. `--transport` is optional when the installed
+runtime already selects the intended bridge. Use `--require-final` for an
+unknown-duration stream; omit it for finite decoders that do not require FINAL.
+The oracle CSV requires an `expected` header containing exact correction bit
+strings in completed-shot order, and optionally `decoder_id` (default `0`).
+This is a generic completed-shot smoke profile: it validates every raw RPC
+status, complete reads, exact corrections and the server's dispatched counts.
+Cancellation and intentionally failing requests need their own test profile.
+Models and fixtures are not bundled with the public harness. Pin compatible
+framework, provider, runtime and model versions, and expose their installed
+dependencies rather than loading libraries from source/build trees. A passing
+smoke run alone does not establish performance, logical-error accuracy,
+concurrent-request behavior or release qualification.
