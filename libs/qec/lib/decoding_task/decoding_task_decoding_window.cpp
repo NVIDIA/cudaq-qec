@@ -16,6 +16,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace cudaq::qec {
@@ -29,6 +30,11 @@ namespace {
 // Floor of a / b for b > 0.
 std::int64_t floor_div(std::int64_t a, std::int64_t b) {
   return a >= 0 ? a / b : -((-a + b - 1) / b);
+}
+
+// Ceiling of a / b for b > 0.
+std::int64_t ceil_div(std::int64_t a, std::int64_t b) {
+  return floor_div(a + b - 1, b);
 }
 
 // Whether a send is one of the spec's defaults, named by id alone.
@@ -142,6 +148,79 @@ void check_request(const window_request &request) {
   check_sends(request, window);
 } // end - check_request()
 
+// The rounds a window's model reads, relative to its anchor: from the round
+// before its first (v_in, and a truncated input's crossing faults) to the
+// end of the chunks it stitches. Past that it reads only whether the end
+// round exists, which decides the last chunk's outgoing seam and the output
+// port.
+round_range model_reach(const experiment_template &t,
+                        const window_request &request) {
+  const auto zones = sorted_zones(request);
+  const auto m = static_cast<std::int64_t>(t.max_span());
+  const auto end = zones.back().end;
+  auto imports_end = end;
+  if (request.output.disposition == port_disposition::closed)
+    imports_end =
+        request.output.imports ? request.output.imports->end : end + m;
+  return {zones.front().begin - 1, std::max(end + m, imports_end)};
+}
+
+// The first k whose model reads no prefix round.
+std::int64_t first_bulk_index(const experiment_template &t,
+                              const window_request &request) {
+  const auto reach = model_reach(t, request);
+  return ceil_div(static_cast<std::int64_t>(t.prefix_rounds()) -
+                      request.offset - reach.begin,
+                  request.period);
+}
+
+// Rounds the suffix keeps from the shot's end, and at least the last one,
+// whose chunk has no outgoing seam.
+std::int64_t end_rounds(const experiment_template &t) {
+  return std::max<std::int64_t>(t.suffix_rounds(), 1);
+}
+
+// Row-major element access to a rank-2 tensor. tensor::at() allocates an
+// index vector and builds a view on every call, and tensor::shape() returns
+// a new vector, so loops over a window's model read both once through this.
+template <typename T>
+struct dense_view {
+  T *data = nullptr;
+  std::size_t rows = 0;
+  std::size_t cols = 0;
+  T &operator()(std::size_t r, std::size_t c) const {
+    return data[r * cols + c];
+  }
+};
+
+// A mutable view of m.
+dense_view<std::uint8_t> view(cudaqx::tensor<uint8_t> &m) {
+  const auto shape = m.shape();
+  return {m.data(), shape[0], shape[1]};
+}
+
+// A read-only view of m.
+dense_view<const std::uint8_t> view(const cudaqx::tensor<uint8_t> &m) {
+  const auto shape = m.shape();
+  return {m.data(), shape[0], shape[1]};
+}
+
+// Whether two dense matrices are equal, compared as one buffer.
+bool same_tensor(const cudaqx::tensor<uint8_t> &a,
+                 const cudaqx::tensor<uint8_t> &b) {
+  return a.shape() == b.shape() &&
+         std::equal(a.data(), a.data() + a.size(), b.data());
+}
+
+// Whether two affine maps are equal.
+bool same_map(const affine_map &a, const affine_map &b) {
+  return a.matrix.num_rows() == b.matrix.num_rows() &&
+         a.matrix.num_cols() == b.matrix.num_cols() &&
+         a.matrix.to_nested_csr() == b.matrix.to_nested_csr() &&
+         a.offset == b.offset && a.input_sizes == b.input_sizes &&
+         a.output_sizes == b.output_sizes;
+}
+
 // Rows r of a GF(2) map as sorted column lists, with repeated columns
 // cancelled in pairs.
 sparse_binary_matrix map_matrix(std::size_t num_rows, std::size_t num_cols,
@@ -162,11 +241,11 @@ sparse_binary_matrix map_matrix(std::size_t num_rows, std::size_t num_cols,
 }
 
 // Column c of a matrix, over every row.
-std::vector<std::uint8_t> column_bits(const cudaqx::tensor<uint8_t> &m,
+std::vector<std::uint8_t> column_bits(dense_view<const std::uint8_t> m,
                                       std::size_t c) {
-  std::vector<std::uint8_t> bits(m.shape()[0]);
-  for (std::size_t r = 0; r < bits.size(); ++r)
-    bits[r] = m.at({r, c});
+  std::vector<std::uint8_t> bits(m.rows);
+  for (std::size_t r = 0; r < m.rows; ++r)
+    bits[r] = m(r, c);
   return bits;
 }
 
@@ -184,9 +263,16 @@ group_fault_columns(const detector_error_model &closed, std::size_t first,
   std::map<signature, std::vector<std::size_t>> classes;
   std::vector<std::vector<std::size_t>> by_first(zone.size());
   std::vector<std::vector<std::size_t>> groups;
-  const auto &h = closed.detector_error_matrix;
-  const auto &o = closed.observables_flips_matrix;
+  const auto h = view(closed.detector_error_matrix);
+  const auto o = view(closed.observables_flips_matrix);
   const auto &rates = closed.error_rates;
+  // Without an option every column is its own group.
+  if (!options.merge_identical &&
+      options.conflicting_parallel == parallel_resolution::reject) {
+    for (std::size_t j = 0; j < zone.size(); ++j)
+      groups.push_back({j});
+    return groups;
+  }
   for (std::size_t j = 0; j < zone.size(); ++j)
     classes[{zone[j], column_bits(h, first + j)}].push_back(j);
   for (const auto &[key, members] : classes) {
@@ -446,8 +532,8 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
     chunks.push_back(t.chunk(r, num_rounds));
   const auto closed =
       dem_close_all(chunks, t.spec().seam.from_seam, t.spec().seam.to_seam);
-  const auto &closed_h = closed.detector_error_matrix;
-  const auto &closed_o = closed.observables_flips_matrix;
+  const auto closed_h = view(closed.detector_error_matrix);
+  const auto closed_o = view(closed.observables_flips_matrix);
 
   // The window's rows of the chain: own, then imports.
   std::vector<std::size_t> rows;
@@ -474,7 +560,7 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
       group_fault_columns(closed, col_shift, zone, request.columns);
   for (std::size_t c = 0; c < col_shift; ++c)
     if (std::any_of(rows.begin(), rows.end(),
-                    [&](std::size_t r) { return closed_h.at({r, c}) != 0; }))
+                    [&](std::size_t r) { return closed_h(r, c) != 0; }))
       crossing.push_back(c);
 
   // The model: fault columns, then boundary or crossing columns, then
@@ -503,13 +589,15 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
   model.observables_flips_matrix =
       cudaqx::tensor<uint8_t>(std::vector<std::size_t>{n_obs, F + V + C + K});
   model.error_rates.assign(F + V + C + K, w.input.prior);
+  const auto model_h = view(model.detector_error_matrix);
+  const auto model_o = view(model.observables_flips_matrix);
   for (std::size_t g = 0; g < F; ++g) {
     const auto source = col_shift + groups[g].front();
     double prior = 0.0;
     for (std::size_t i = 0; i < rows.size(); ++i)
-      model.detector_error_matrix.at({i, g}) = closed_h.at({rows[i], source});
+      model_h(i, g) = closed_h(rows[i], source);
     for (std::size_t o = 0; o < n_obs; ++o)
-      model.observables_flips_matrix.at({o, g}) = closed_o.at({o, source});
+      model_o(o, g) = closed_o(o, source);
     for (const auto j : groups[g]) {
       const auto p = closed.error_rates[col_shift + j];
       prior = prior + p - 2 * prior * p;
@@ -517,18 +605,16 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
     model.error_rates[g] = prior;
   } // end - for(g)
   for (std::size_t j = 0; j < V; ++j)
-    model.detector_error_matrix.at({j, F + j}) = 1;
+    model_h(j, F + j) = 1;
   for (std::size_t x = 0; x < C; ++x) {
     for (std::size_t i = 0; i < rows.size(); ++i)
-      model.detector_error_matrix.at({i, F + V + x}) =
-          closed_h.at({rows[i], crossing[x]});
+      model_h(i, F + V + x) = closed_h(rows[i], crossing[x]);
     for (std::size_t o = 0; o < n_obs; ++o)
-      model.observables_flips_matrix.at({o, F + V + x}) =
-          closed_o.at({o, crossing[x]});
+      model_o(o, F + V + x) = closed_o(o, crossing[x]);
     model.error_rates[F + V + x] = closed.error_rates[crossing[x]];
   }
   for (std::size_t o = 0; o < K; ++o)
-    model.observables_flips_matrix.at({o, F + V + C + o}) = 1;
+    model_o(o, F + V + C + o) = 1;
 
   // Sends: the defaults cover the first max_span() rounds of their zone.
   for (const auto &request_send : request.sends) {
@@ -567,21 +653,182 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
   return w;
 } // end - window_from_dem_chunks()
 
+// Prefix and terminal positions follow from where the model's reach meets
+// the shot's prefix rounds and its end.
+variant_key window_variant(const experiment_template &context,
+                           const window_request &request, std::int64_t k,
+                           std::size_t num_rounds) {
+  variant_key key;
+  check_anchor(request);
+  const auto reach = model_reach(context, request);
+  const auto R = static_cast<std::int64_t>(num_rounds);
+  const auto anchor = request.offset + k * request.period;
+  if (anchor + reach.begin < static_cast<std::int64_t>(context.prefix_rounds()))
+    key.position = k;
+  if (anchor + reach.end > R - end_rounds(context))
+    key.terminal = R - anchor;
+  return key;
+}
+
+// Every prefix key has k below k_bulk and every terminal key R - anchor
+// below the reach's end plus end_rounds(), so the shots up to one period
+// past the bulk at k_bulk + 1 hold every key.
+std::size_t variant_probe_rounds(const experiment_template &context,
+                                 const window_request &request) {
+  check_request(request);
+  if (!context.repeats())
+    return context.min_rounds() + 1;
+  const auto reach = model_reach(context, request);
+  const auto k = first_bulk_index(context, request) + 1;
+  const auto end =
+      request.offset + k * request.period + reach.end + end_rounds(context) + 1;
+  return std::max<std::size_t>(
+      context.min_rounds(),
+      static_cast<std::size_t>(std::max<std::int64_t>(end, 0)));
+}
+
+// Compares in a fixed order, so the first mismatch named is deterministic:
+// rounds, zones, ports, sends, model, then the measurement maps.
+void check_same_window_up_to_shift(const decoding_window &a,
+                                   const decoding_window &b) {
+  const auto differ = [&](const std::string &what) {
+    throw std::invalid_argument("check_same_window_up_to_shift: windows " +
+                                std::to_string(a.k) + " and " +
+                                std::to_string(b.k) + " differ in " + what);
+  };
+  const auto shift = [](round_range r, std::int64_t by) {
+    return r.empty() ? round_range{} : round_range{r.begin - by, r.end - by};
+  };
+  const auto shifted = [&](const std::vector<round_range> &ranges,
+                           std::int64_t by) {
+    std::vector<round_range> out;
+    for (const auto r : ranges)
+      out.push_back(shift(r, by));
+    return out;
+  };
+  const auto da = a.rounds.begin;
+  const auto db = b.rounds.begin;
+  const auto port_fields = [&](const window_port &p, std::int64_t by) {
+    return std::tuple{p.exists, p.disposition, p.boundary, p.prior,
+                      shift(p.imports, by)};
+  };
+  if (a.rounds.end - da != b.rounds.end - db)
+    differ("their rounds");
+  if (shift(a.commit, da) != shift(b.commit, db) ||
+      shifted(a.buffers, da) != shifted(b.buffers, db))
+    differ("their zones");
+  if (port_fields(a.input, da) != port_fields(b.input, db))
+    differ("their input port");
+  if (port_fields(a.output, da) != port_fields(b.output, db))
+    differ("their output port");
+  if (a.sends.size() != b.sends.size())
+    differ("their sends");
+  for (std::size_t i = 0; i < a.sends.size(); ++i)
+    if (a.sends[i].id != b.sends[i].id || a.sends[i].mode != b.sends[i].mode ||
+        shifted(a.sends[i].rounds, da) != shifted(b.sends[i].rounds, db) ||
+        a.sends[i].rows != b.sends[i].rows)
+      differ("send '" + a.sends[i].id + "'");
+  if (a.num_own_rows != b.num_own_rows ||
+      a.num_fault_columns != b.num_fault_columns ||
+      a.num_virtual_outcome_columns != b.num_virtual_outcome_columns ||
+      a.num_crossing_columns != b.num_crossing_columns ||
+      a.num_logical_error_columns != b.num_logical_error_columns ||
+      a.commit_columns != b.commit_columns ||
+      a.fault_column_sources != b.fault_column_sources ||
+      !same_tensor(a.model.detector_error_matrix,
+                   b.model.detector_error_matrix) ||
+      !same_tensor(a.model.observables_flips_matrix,
+                   b.model.observables_flips_matrix) ||
+      a.model.error_rates != b.model.error_rates)
+    differ("their model");
+  if (a.num_virtual_outcomes != b.num_virtual_outcomes ||
+      a.num_measurements != b.num_measurements || !same_map(a.m2d, b.m2d))
+    differ("their m2d");
+  if (a.m2o.has_value() != b.m2o.has_value() ||
+      (a.m2o && !same_map(*a.m2o, *b.m2o)))
+    differ("their m2o");
+} // end - check_same_window_up_to_shift()
+
+// Builds k_bulk and k_bulk + 1 in the shortest shot where both are bulk.
+void check_translation_invariance(
+    std::shared_ptr<const experiment_template> context,
+    const window_request &request) {
+  if (!context)
+    fail("no template");
+  check_request(request);
+  if (!context->repeats())
+    return;
+  const auto reach = model_reach(*context, request);
+  const auto k = first_bulk_index(*context, request);
+  const auto R =
+      std::max<std::int64_t>(static_cast<std::int64_t>(context->min_rounds()),
+                             request.offset + (k + 1) * request.period +
+                                 reach.end + end_rounds(*context));
+  const auto num_rounds = static_cast<std::size_t>(R);
+  check_same_window_up_to_shift(
+      window_from_dem_chunks(context, request, k, num_rounds),
+      window_from_dem_chunks(context, request, k + 1, num_rounds));
+}
+
+// H keeps the decoder's columns, the leading ones; O and the priors keep
+// every column.
+window_kernel_forms kernel_forms(const decoding_window &window) {
+  window_kernel_forms forms;
+  const auto h = view(window.model.detector_error_matrix);
+  const auto o = view(window.model.observables_flips_matrix);
+  const auto columns = [](dense_view<const std::uint8_t> m, std::size_t n) {
+    std::vector<std::vector<sparse_binary_matrix::index_type>> nested(n);
+    for (std::size_t c = 0; c < n; ++c)
+      for (std::size_t r = 0; r < m.rows; ++r)
+        if (m(r, c))
+          nested[c].push_back(static_cast<sparse_binary_matrix::index_type>(r));
+    return sparse_binary_matrix::from_nested_csc(
+        static_cast<sparse_binary_matrix::index_type>(m.rows),
+        static_cast<sparse_binary_matrix::index_type>(n), nested);
+  };
+  forms.h = columns(h, window.num_decoder_columns());
+  forms.o = columns(o, o.cols);
+  forms.priors = window.model.error_rates;
+  return forms;
+}
+
+// Columns past H's are the ones the decoder does not see.
+detector_error_model model_from_kernel_forms(const window_kernel_forms &forms) {
+  detector_error_model model;
+  const auto total = static_cast<std::size_t>(forms.o.num_cols());
+  const auto h = forms.h.to_nested_csc();
+  const auto o = forms.o.to_nested_csc();
+  model.detector_error_matrix = cudaqx::tensor<uint8_t>(
+      std::vector<std::size_t>{forms.h.num_rows(), total});
+  model.observables_flips_matrix = cudaqx::tensor<uint8_t>(
+      std::vector<std::size_t>{forms.o.num_rows(), total});
+  const auto model_h = view(model.detector_error_matrix);
+  const auto model_o = view(model.observables_flips_matrix);
+  for (std::size_t c = 0; c < h.size(); ++c)
+    for (const auto r : h[c])
+      model_h(r, c) = 1;
+  for (std::size_t c = 0; c < o.size(); ++c)
+    for (const auto r : o[c])
+      model_o(r, c) = 1;
+  model.error_rates = forms.priors;
+  return model;
+}
+
 // e' masks every column outside the commit zone; each send multiplies its
 // rows of H by e', and a residual adds the window's detectors.
 window_outputs commit_window(const decoding_window &window,
                              const std::vector<std::uint8_t> &detectors,
                              const std::vector<std::uint8_t> &estimate) {
   window_outputs out;
-  const auto &h = window.model.detector_error_matrix;
-  const auto &o = window.model.observables_flips_matrix;
+  const auto h = view(window.model.detector_error_matrix);
+  const auto o = view(window.model.observables_flips_matrix);
   const auto commit = window.commit_columns;
-  if (detectors.size() != h.shape()[0] || estimate.size() != h.shape()[1])
-    throw std::invalid_argument(
-        "commit_window: expected " + std::to_string(h.shape()[0]) +
-        " detectors and " + std::to_string(h.shape()[1]) + " estimates, got " +
-        std::to_string(detectors.size()) + " and " +
-        std::to_string(estimate.size()));
+  if (detectors.size() != h.rows || estimate.size() != h.cols)
+    throw std::invalid_argument("commit_window: expected " +
+                                std::to_string(h.rows) + " detectors and " +
+                                std::to_string(h.cols) + " estimates, got " +
+                                std::to_string(detectors.size()) + " and " +
+                                std::to_string(estimate.size()));
   out.committed.assign(estimate.size(), 0);
   for (auto c = commit.begin; c < commit.end; ++c)
     out.committed[c] = estimate[c] & 1;
@@ -590,16 +837,16 @@ window_outputs commit_window(const decoding_window &window,
     for (const auto r : send.rows) {
       std::uint8_t delta = 0;
       for (auto c = commit.begin; c < commit.end; ++c)
-        delta ^= h.at({r, c}) & out.committed[c];
+        delta ^= h(r, c) & out.committed[c];
       values.push_back(send.mode == send_mode::residual
                            ? static_cast<std::uint8_t>(detectors[r] ^ delta)
                            : delta);
     }
   }
-  out.frame.assign(o.shape()[0], 0);
-  for (std::size_t i = 0; i < o.shape()[0]; ++i)
+  out.frame.assign(o.rows, 0);
+  for (std::size_t i = 0; i < o.rows; ++i)
     for (auto c = commit.begin; c < commit.end; ++c)
-      out.frame[i] ^= o.at({i, c}) & out.committed[c];
+      out.frame[i] ^= o(i, c) & out.committed[c];
   return out;
 } // end - commit_window()
 

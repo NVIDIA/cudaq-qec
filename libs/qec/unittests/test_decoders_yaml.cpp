@@ -4,7 +4,10 @@
  */
 
 #include "SessionRegistry.h"
+#include "task_graph_test_fixtures.h"
+#include "../lib/decoding_task/decoding_task_decoding_window.h"
 #include "../lib/realtime/realtime_decoding.h"
+#include "../lib/realtime/window_request_yaml.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/dem_chunks_memory.h"
@@ -2638,6 +2641,123 @@ TEST(DecoderDemChunksYAMLTest, ReadoutMapAndNamesAreCheckedWhenParsed) {
                "      observable_names: [Z_L, X_L]\n");
   rejects(named, "2 observable_names for 1 observables");
 } // end - TEST(..., ReadoutMapAndNamesAreCheckedWhenParsed)
+
+// ---------------------------------------------------------------------------
+// Window requests
+// ---------------------------------------------------------------------------
+
+// The plan's hand-written layer A: c_A = b = 3, c_B = 9.
+std::string window_a_yaml() {
+  return R"(period: 12
+zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
+ports:
+  input: {disposition: open, prior: 0.01}
+  output: {disposition: open}
+sends: [{id: forward}, {id: backward}]
+)";
+}
+
+// The same layer as a C++ request.
+cudaq::qec::window_request window_a() {
+  using namespace cudaq::qec;
+  window_request a;
+  a.period = 12;
+  a.commit = round_range{0, 3};
+  a.buffers = {{-3, 0}, {3, 6}};
+  a.input = {port_disposition::open, 0.01};
+  a.output = {port_disposition::open, std::nullopt};
+  a.sends = {{"forward", std::nullopt, {}}, {"backward", std::nullopt, {}}};
+  return a;
+}
+
+TEST(WindowRequestYAML, ParsesThePlansLayerA) {
+  EXPECT_EQ(cudaq::qec::window_request_from_yaml_str(window_a_yaml()),
+            window_a());
+}
+
+// Every range may be written [b, e] or {rounds: [b, e]}, and both build the
+// same window.
+TEST(WindowRequestYAML, MapFormRangesEqualListForm) {
+  using namespace cudaq::qec;
+  const std::string list = R"(period: 12
+offset: -9
+zones: {commit: [0, 9]}
+ports:
+  input: {disposition: closed}
+  output: {disposition: closed, imports: [9, 10]}
+sends: [{id: back, mode: residual, rounds: [0, 1]}]
+)";
+  const std::string map = R"(period: 12
+offset: -9
+zones: {commit: {rounds: [0, 9]}}
+ports:
+  input: {disposition: closed}
+  output: {disposition: closed, imports: {rounds: [9, 10]}}
+sends: [{id: back, mode: residual, rounds: {rounds: [0, 1]}}]
+)";
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto from_list = window_request_from_yaml_str(list);
+  const auto from_map = window_request_from_yaml_str(map);
+  ASSERT_EQ(from_list, from_map);
+  EXPECT_EQ(from_list.output.imports, (round_range{9, 10}));
+  const auto a = window_from_dem_chunks(tmpl, from_list, 2, 40);
+  const auto b = window_from_dem_chunks(tmpl, from_map, 2, 40);
+  EXPECT_NO_THROW(check_same_window_up_to_shift(a, b));
+} // end - TEST(WindowRequestYAML, MapFormRangesEqualListForm)
+
+// Emitting and parsing again gives the same request, for every key.
+TEST(WindowRequestYAML, RoundTrips) {
+  using namespace cudaq::qec;
+  auto full = window_a();
+  auto closed = window_a();
+  full.input.prior.reset();
+  full.input.boundary = input_boundary::truncate;
+  full.sends.push_back({"wide", send_mode::delta, {{-3, 6}}});
+  full.columns.merge_identical = true;
+  full.columns.conflicting_parallel = parallel_resolution::most_likely;
+  closed.offset = -9;
+  closed.input = {port_disposition::closed, std::nullopt};
+  closed.output = {port_disposition::closed, round_range{6, 8}};
+  for (const auto &request : {window_a(), full, closed}) {
+    const auto text = window_request_to_yaml_str(request);
+    EXPECT_EQ(window_request_from_yaml_str(text), request) << text;
+  }
+}
+
+// The forward-compatible shapes reserved for spatial windows are each
+// rejected with their own message, as are malformed ranges and unknown keys.
+TEST(WindowRequestYAML, RejectsReservedShapes) {
+  using namespace cudaq::qec;
+  const auto rejects = [](const std::string &from, const std::string &to,
+                          const std::string &text) {
+    auto yaml = window_a_yaml();
+    const auto at = yaml.find(from);
+    ASSERT_NE(at, std::string::npos) << from;
+    yaml.replace(at, from.size(), to);
+    try {
+      window_request_from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects("commit: [0, 3]", "commit: {rounds: [0, 3], occurrences: [[0, 1]]}",
+          "'occurrences' is reserved");
+  rejects("commit: [0, 3]", "commit: {rounds: [0, 3], block: 0}",
+          "'block' is reserved");
+  rejects("  output: {disposition: open}",
+          "  output: {disposition: open}\n  west: {disposition: open}",
+          "spatial ports are not supported yet");
+  rejects("period: 12", "period: 12\nresponsibility: [0]",
+          "'responsibility' is reserved");
+  rejects("period: 12", "period: 12\nsoundness_class: strict",
+          "'soundness_class' is reserved");
+  rejects("commit: [0, 3]", "commit: [0, 3, 5]",
+          "a round range is [begin, end]");
+  rejects("period: 12", "period: 12\nperiodd: 5", "window_request_from_yaml");
+} // end - TEST(WindowRequestYAML, RejectsReservedShapes)
 
 // The chunk form stays the authoritative source, carrying the closed model
 // expand_dem_chunks() would write for any decoder that reads matrices.

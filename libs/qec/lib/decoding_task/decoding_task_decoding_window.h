@@ -74,6 +74,7 @@ struct window_request {
     std::optional<port_disposition> disposition; ///< Required
     std::optional<double> prior; ///< Boundary-column prior; open only
     std::optional<input_boundary> boundary; ///< Open only; default columns
+    bool operator==(const input_port &) const = default;
   };
   /// The port past the window's last round.
   struct output_port {
@@ -81,6 +82,7 @@ struct window_request {
     /// Imported rounds, starting at the wire; closed only. Defaults to the
     /// template's max_span() rounds past the wire.
     std::optional<round_range> imports;
+    bool operator==(const output_port &) const = default;
   };
   /// A named send. The ids `forward` and `backward` are the spec's defaults
   /// and need no mode or rounds.
@@ -88,6 +90,7 @@ struct window_request {
     std::string id;
     std::optional<send_mode> mode;
     std::vector<round_range> rounds;
+    bool operator==(const send_request &) const = default;
   };
   /// How fault columns are built. Merged columns combine their priors as
   /// p = p1 + p2 - 2 p1 p2.
@@ -96,6 +99,7 @@ struct window_request {
     /// omitted outside the window, and identical observable effect.
     bool merge_identical = false;
     parallel_resolution conflicting_parallel = parallel_resolution::reject;
+    bool operator==(const column_options &) const = default;
   };
 
   std::int64_t period = 0;
@@ -106,6 +110,7 @@ struct window_request {
   output_port output;
   std::vector<send_request> sends;
   column_options columns;
+  bool operator==(const window_request &) const = default;
 };
 
 /// A built port. A window edge at the shot's first or last round is a
@@ -200,6 +205,56 @@ struct window_outputs {
   std::vector<std::vector<std::uint8_t>> sends; ///< One per window send
   std::vector<std::uint8_t> frame;              ///< O * e'
 };
+
+/// Which windows of a layer share a model. position is k while the shot's
+/// prefix reaches the rounds the window's model reads; terminal is R minus
+/// the anchor while the shot's end does. A key with neither is the layer's
+/// bulk. Windows with equal keys are the same problem up to a shift of
+/// rounds, so a layer has finitely many variants for every shot length.
+struct variant_key {
+  std::optional<std::int64_t> position;
+  std::optional<std::int64_t> terminal;
+  /// True for the layer's bulk.
+  bool bulk() const { return !position && !terminal; }
+  auto operator<=>(const variant_key &) const = default;
+};
+
+/// The variant key of window @p k of @p request in a @p num_rounds shot.
+variant_key window_variant(const experiment_template &context,
+                           const window_request &request, std::int64_t k,
+                           std::size_t num_rounds);
+
+/// A shot length past which a layer gains no variant: every key appears in
+/// some shot of [context.min_rounds(), variant_probe_rounds()).
+std::size_t variant_probe_rounds(const experiment_template &context,
+                                 const window_request &request);
+
+/// Check that two windows are the same problem up to a shift of rounds.
+/// @throws std::invalid_argument naming the first field they differ in.
+void check_same_window_up_to_shift(const decoding_window &a,
+                                   const decoding_window &b);
+
+/// Check that the layer's bulk windows k_bulk and k_bulk + 1 are the same
+/// problem up to a shift, which lets one bulk model serve every bulk window.
+/// @throws std::invalid_argument as check_same_window_up_to_shift().
+void check_translation_invariance(
+    std::shared_ptr<const experiment_template> context,
+    const window_request &request);
+
+/// The forms a decode kernel uses: H over the decoder's columns as canonical
+/// CSC, and O and the priors over every column.
+struct window_kernel_forms {
+  sparse_binary_matrix h;
+  sparse_binary_matrix o;
+  std::vector<double> priors;
+};
+
+/// Convert a window's model to the kernel's forms.
+window_kernel_forms kernel_forms(const decoding_window &window);
+
+/// Convert the kernel's forms back to a model; the columns the decoder does
+/// not see have no H entries.
+detector_error_model model_from_kernel_forms(const window_kernel_forms &forms);
 
 /// Commit @p estimate and compute the window's sends and frame update.
 /// @param detectors The window's detector values, one per model row.

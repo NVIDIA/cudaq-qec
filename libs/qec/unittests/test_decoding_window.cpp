@@ -10,17 +10,21 @@
 // dem_chunks: per-round phases, chunks and offsets against an expanded shot;
 // window rows, columns, ports, sends and measurement maps against a dense
 // slice of the whole shot; the window spec's nine-SEC example; the spec's
-// invalid constructions; and the column-handling options.
+// invalid constructions; the column-handling options; variant keys and
+// translation invariance; and the kernel's forms.
 
 #include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/pcm_utils.h"
+#include <algorithm>
 #include <array>
 #include <gtest/gtest.h>
+#include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -1008,5 +1012,123 @@ TEST(DecodingWindowColumns, RejectsInvalidOptions) {
   expect_error([&] { window_from_dem_chunks(tmpl, closed, 1, 12); },
                "a closed input takes no boundary");
 }
+
+// ---------------------------------------------------------------------------
+// Variants and hot-path forms
+// ---------------------------------------------------------------------------
+
+// The distinct variant keys of a layer over shots [min_rounds, end).
+std::set<variant_key> keys_up_to(const experiment_template &tmpl,
+                                 const window_request &request,
+                                 std::size_t end) {
+  std::set<variant_key> keys;
+  for (auto R = tmpl.min_rounds(); R < end; ++R) {
+    const auto instances = window_instances(request, R);
+    for (auto k = instances.begin; k < instances.end; ++k)
+      keys.insert(window_variant(tmpl, request, k, R));
+  }
+  return keys;
+}
+
+// The layer's keys, counted by hand for arbitrary_memory_spec (one prefix
+// and one suffix round, max_span 1). A[k] (period 5, rounds [-2, 4) of its
+// anchor 5k) meets the prefix only at k = 0 and the shot's end while
+// R - 5k <= 5, so 1 prefix key, 5 terminal keys, 3 short-shot pairs
+// (R = 3, 4, 5) and the bulk. B[k] (rounds [5k - 3, 5k), importing round 5k)
+// never meets the prefix and meets the end while R - (5k - 3) <= 4: 4
+// terminal keys and the bulk. Longer probes add none.
+TEST(WindowVariants, CountMatchesTheLayout) {
+  const experiment_template tmpl(arbitrary_memory_spec(5));
+  const auto layers = layered(2, 2, 3);
+  for (const auto &[request, count] :
+       {std::pair{layers.a, 10u}, std::pair{layers.b, 5u}}) {
+    const auto end = variant_probe_rounds(tmpl, request);
+    const auto keys = keys_up_to(tmpl, request, end);
+    EXPECT_EQ(keys.size(), count);
+    EXPECT_EQ(keys_up_to(tmpl, request, end + 50), keys);
+    EXPECT_EQ(keys.count(variant_key{}), 1u);
+  }
+}
+
+// Windows with equal keys are the same problem up to a shift of rounds.
+TEST(WindowVariants, EqualKeysBuildTheSameWindow) {
+  for (const auto &spec : {rep5_spec(), arbitrary_memory_spec(5, true),
+                           multi_terminal_memory_spec(5, 3),
+                           narrow_readout_spec(), duplicate_columns_spec()}) {
+    const auto tmpl = std::make_shared<const experiment_template>(spec);
+    for (const auto &request : sweep_requests()) {
+      std::map<variant_key, decoding_window> first;
+      const auto end = variant_probe_rounds(*tmpl, request) + 2 * 12;
+      for (auto R = tmpl->min_rounds(); R < end; ++R) {
+        const auto instances = window_instances(request, R);
+        for (auto k = instances.begin; k < instances.end; ++k) {
+          const auto key = window_variant(*tmpl, request, k, R);
+          auto w = window_from_dem_chunks(tmpl, request, k, R);
+          const auto [it, inserted] = first.emplace(key, w);
+          if (!inserted)
+            EXPECT_NO_THROW(check_same_window_up_to_shift(it->second, w))
+                << "R=" << R << " k=" << k;
+        }
+      } // end - for(R)
+    } // end - for(request)
+  } // end - for(spec)
+} // end - TEST(WindowVariants, EqualKeysBuildTheSameWindow)
+
+// The bulk windows k_bulk and k_bulk + 1 agree for every layer, and the
+// comparison names the first field two windows differ in.
+TEST(WindowVariants, BulkWindowsAreTranslationInvariant) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto a = layered(2, 2, 3).a;
+  auto other_prior = a;
+  for (const auto &spec : {rep5_spec(), arbitrary_memory_spec(5, true)}) {
+    const auto t = std::make_shared<const experiment_template>(spec);
+    for (const auto &request : sweep_requests())
+      EXPECT_NO_THROW(check_translation_invariance(t, request));
+  }
+  // No dem_chunks spec has a varying bulk, so compare windows that differ.
+  expect_error(
+      [&] {
+        check_same_window_up_to_shift(window_from_dem_chunks(tmpl, a, 0, 20),
+                                      window_from_dem_chunks(tmpl, a, 1, 20));
+      },
+      "windows 0 and 1 differ in their rounds");
+  other_prior.input.prior = 0.02;
+  expect_error(
+      [&] {
+        check_same_window_up_to_shift(
+            window_from_dem_chunks(tmpl, a, 1, 20),
+            window_from_dem_chunks(tmpl, other_prior, 2, 20));
+      },
+      "windows 1 and 2 differ in their input port");
+} // end - TEST(WindowVariants, BulkWindowsAreTranslationInvariant)
+
+// The kernel's forms: H over the decoder's columns as canonical CSC, O and
+// the priors over every column; converting back loses nothing.
+TEST(WindowKernelForms, RoundTripWithoutLoss) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(narrow_readout_spec());
+  auto request = layered(2, 2, 3).a;
+  for (const auto truncate : {false, true}) {
+    if (truncate)
+      request.input = {port_disposition::open, std::nullopt,
+                       input_boundary::truncate};
+    const auto w = window_from_dem_chunks(tmpl, request, 1, 14);
+    const auto forms = kernel_forms(w);
+    const auto back = model_from_kernel_forms(forms);
+    const auto csc = forms.h.to_nested_csc();
+    EXPECT_EQ(forms.h.num_cols(), w.num_decoder_columns());
+    EXPECT_EQ(forms.o.num_cols(), w.model.num_error_mechanisms());
+    for (const auto &column : csc)
+      EXPECT_TRUE(std::is_sorted(column.begin(), column.end()));
+    EXPECT_EQ(back.error_rates, w.model.error_rates);
+    ASSERT_EQ(back.detector_error_matrix.shape(),
+              w.model.detector_error_matrix.shape());
+    ASSERT_EQ(back.observables_flips_matrix.shape(),
+              w.model.observables_flips_matrix.shape());
+    for (std::size_t c = 0; c < w.model.num_error_mechanisms(); ++c)
+      EXPECT_EQ(column_of(w, c), column_of(decoding_window{.model = back}, c));
+  } // end - for(truncate)
+} // end - TEST(WindowKernelForms, RoundTripWithoutLoss)
 } // namespace
 } // namespace cudaq::qec
