@@ -908,8 +908,14 @@ struct MappingTraits<cudaq::qec::task_graph_edge> {
     std::string to = join_endpoint(edge.to_node, edge.to_input, "input");
     io.mapRequired("from", from);
     io.mapRequired("to", to);
+    io.mapOptional("index_offset", edge.index_offset, std::int64_t{0});
     if (io.outputting())
       return;
+    // A window waits only on the same or an earlier index.
+    if (edge.index_offset > 0)
+      throw std::runtime_error(
+          "edge " + from + " -> " + to + " has index_offset " +
+          std::to_string(edge.index_offset) + "; it must be zero or negative");
     if (auto err =
             split_endpoint(from, edge.from_node, edge.from_output, "output");
         !err.empty())
@@ -2126,7 +2132,9 @@ llvm::json::Object task_graph_json_schema() {
                 {"from",
                  llvm::json::Object{{"$ref", "#/$defs/task_graph_endpoint"}}},
                 {"to",
-                 llvm::json::Object{{"$ref", "#/$defs/task_graph_endpoint"}}}}},
+                 llvm::json::Object{{"$ref", "#/$defs/task_graph_endpoint"}}},
+                {"index_offset",
+                 llvm::json::Object{{"type", "integer"}, {"maximum", 0}}}}},
            {"required", llvm::json::Array{"from", "to"}},
            {"additionalProperties", false}}},
       {"task_graph_node", std::move(node)},

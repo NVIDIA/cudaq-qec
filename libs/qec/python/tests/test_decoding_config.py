@@ -1081,6 +1081,18 @@ def test_task_graph_edges_carry_ports():
     assert graph.edges[0].to_input == "input"
 
 
+def test_task_graph_edge_index_offset():
+    # Consumer instance k reads producer instance k + index_offset; it defaults
+    # to 0 and takes part in equality.
+    edge = qec.task_graph_edge()
+    other = qec.task_graph_edge()
+    assert edge.index_offset == 0
+    edge.index_offset = -1
+    assert not edge == other
+    other.index_offset = -1
+    assert edge == other
+
+
 # A DEM whose detector coordinates carry the colour a colour-code decoder
 # needs. Those annotations have no home in detector_error_model, so a decoder
 # that reads them can only be built from the text -- which is what `stim_dem`

@@ -1990,6 +1990,100 @@ decoders:
   cfg::finalize_decoders();
 }
 
+// An edge's index_offset round-trips through YAML and is written only when
+// set; a positive one is rejected when parsed, and the schema agrees.
+TEST(DecodingTaskGraph, EdgeIndexOffsetRoundTripsThroughYaml) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto yaml = [](const std::string &offset) {
+    return R"(
+decoders:
+  - id: 0
+    task_graph:
+      nodes:
+        - id: x
+          type: single_window
+          inner: {type: single_error_lut}
+        - id: z
+          type: single_window
+          inner: {type: single_error_lut}
+        - id: combine
+          type: xor
+      edges:
+        - {from: measurements, to: x}
+        - {from: measurements, to: z}
+        - {from: x, to: combine.a)" +
+           offset + R"(}
+        - {from: z, to: combine.b}
+        - {from: combine, to: output}
+    block_size: 3
+    syndrome_size: 2
+    H_sparse: [0, 1, -1, 1, 2, -1]
+    O_sparse: [0, -1]
+    D_sparse: [0, -1, 1, -1]
+)";
+  };
+  auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(yaml(", index_offset: -1"));
+  const auto &edges = parsed.decoders.at(0).task_graph->edges;
+  const auto emitted = parsed.to_yaml_str(200);
+  const auto schema = cfg::decoder_config_json_schema();
+  ASSERT_EQ(edges.size(), 5u);
+  EXPECT_EQ(edges[2].index_offset, -1);
+  EXPECT_EQ(edges[3].index_offset, 0);
+  // Written once, for the one edge that sets it; the emitter aligns values.
+  ASSERT_NE(emitted.find("index_offset:"), std::string::npos) << emitted;
+  EXPECT_EQ(emitted.find("index_offset:"), emitted.rfind("index_offset:"));
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed);
+  EXPECT_EQ(
+      cfg::multi_decoder_config::from_yaml_str(yaml("")).to_yaml_str(200).find(
+          "index_offset"),
+      std::string::npos);
+  try {
+    cfg::multi_decoder_config::from_yaml_str(yaml(", index_offset: 1"));
+    ADD_FAILURE() << "a positive index_offset parsed";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("index_offset"), std::string::npos)
+        << e.what();
+  }
+  const auto at = schema.find("\"index_offset\"");
+  ASSERT_NE(at, std::string::npos);
+  EXPECT_NE(schema.find("\"maximum\": 0", at), std::string::npos)
+      << schema.substr(at, 120);
+} // end - TEST(DecodingTaskGraph, EdgeIndexOffsetRoundTripsThroughYaml)
+
+// No node joins its inputs by index yet, so the build rejects a non-zero
+// index_offset, naming the edge.
+TEST(DecodingTaskGraph, EdgeIndexOffsetNeedsAnIndexedNode) {
+  std::vector<task_graph_node_config> nodes;
+  for (const auto *id : {"left", "right"}) {
+    task_graph_node_config window;
+    window.id = id;
+    window.kind = "single_window";
+    window.dem = rep5_spec(5);
+    window.decoder_type = "single_error_lut";
+    nodes.push_back(std::move(window));
+  }
+  task_graph_node_config combiner;
+  combiner.id = "combine";
+  combiner.kind = "xor";
+  nodes.push_back(std::move(combiner));
+  const std::vector<task_graph_edge> edges{
+      {"measurements", "output", "left", "input"},
+      {"measurements", "output", "right", "input"},
+      {"left", "output", "combine", "a", -1},
+      {"right", "output", "combine", "b"},
+      {"combine", "output", "output", "input"}};
+  try {
+    decoding_task_graph::from_topology(std::move(nodes), edges);
+    ADD_FAILURE() << "an index_offset built";
+  } catch (const std::invalid_argument &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "edge left.output -> combine.a has index_offset -1"),
+              std::string::npos)
+        << e.what();
+  }
+} // end - TEST(DecodingTaskGraph, EdgeIndexOffsetNeedsAnIndexedNode)
+
 TEST(DecodingTaskGraph, NodesFormMultiNodeGraphConfiguresAndStreams) {
   namespace cfg = cudaq::qec::decoding::config;
   namespace h = cudaq::qec::decoding::host;

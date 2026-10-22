@@ -8,15 +8,17 @@
 
 // Internal header: decoding windows built from dem_chunks. A window is the
 // problem statement of one decode task, as in the EDEM window specification:
-// its zones, ports, imports, sends and measurement maps. Window requests name
-// a layer's windows relative to an anchor; window_from_dem_chunks() builds
-// window k of a shot. Never included from a public header.
+// its zones, ports, imports, sends and measurement maps. A window request
+// (window_request.h) names a layer's windows relative to an anchor;
+// window_from_dem_chunks() builds window k of a shot. Never included from a
+// public header.
 
 #pragma once
 
 #include "decoding_task_experiment_template.h"
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/sparse_binary_matrix.h"
+#include "cudaq/qec/window_request.h"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -26,15 +28,14 @@
 
 namespace cudaq::qec {
 
-/// Half-open rounds [begin, end): relative to the anchor in a request,
-/// absolute in a built window.
-struct round_range {
-  std::int64_t begin = 0;
-  std::int64_t end = 0;
-  /// True when the range holds no round.
-  bool empty() const { return end <= begin; }
-  bool operator==(const round_range &) const = default;
-};
+// The request types are experimental in the public API; the window code uses
+// them throughout.
+using experimental::input_boundary;
+using experimental::parallel_resolution;
+using experimental::port_disposition;
+using experimental::round_range;
+using experimental::send_mode;
+using experimental::window_request;
 
 /// Half-open model columns [begin, end).
 struct column_range {
@@ -49,70 +50,6 @@ struct index_range {
   std::int64_t end = 0;
 };
 
-/// Whether a port is open (boundary columns or omitted rows) or closed
-/// (received deltas or imports).
-enum class port_disposition { open, closed };
-
-/// What a send delivers: the committed faults' flips, or the detectors left
-/// for the recipient to explain.
-enum class send_mode { delta, residual };
-
-/// What stands for the outside faults at an open input: the wire's boundary
-/// columns, or the previous chunk's crossing faults truncated to the window.
-enum class input_boundary { columns, truncate };
-
-/// How a same-zone class of columns with identical rows but different
-/// observable effects is handled: rejected by commitment validation, or
-/// merged into its most likely member's response.
-enum class parallel_resolution { reject, most_likely };
-
-/// The windows of one layer: window k is anchored at offset + k * period,
-/// and every round range is relative to that anchor.
-struct window_request {
-  /// The port where the window's first round begins.
-  struct input_port {
-    std::optional<port_disposition> disposition; ///< Required
-    std::optional<double> prior; ///< Boundary-column prior; open only
-    std::optional<input_boundary> boundary; ///< Open only; default columns
-    bool operator==(const input_port &) const = default;
-  };
-  /// The port past the window's last round.
-  struct output_port {
-    std::optional<port_disposition> disposition; ///< Required
-    /// Imported rounds, starting at the wire; closed only. Defaults to the
-    /// template's max_span() rounds past the wire.
-    std::optional<round_range> imports;
-    bool operator==(const output_port &) const = default;
-  };
-  /// A named send. The ids `forward` and `backward` are the spec's defaults
-  /// and need no mode or rounds.
-  struct send_request {
-    std::string id;
-    std::optional<send_mode> mode;
-    std::vector<round_range> rounds;
-    bool operator==(const send_request &) const = default;
-  };
-  /// How fault columns are built. Merged columns combine their priors as
-  /// p = p1 + p2 - 2 p1 p2.
-  struct column_options {
-    /// Merge same-zone columns with identical full rows, including rows
-    /// omitted outside the window, and identical observable effect.
-    bool merge_identical = false;
-    parallel_resolution conflicting_parallel = parallel_resolution::reject;
-    bool operator==(const column_options &) const = default;
-  };
-
-  std::int64_t period = 0;
-  std::int64_t offset = 0;
-  std::optional<round_range> commit;
-  std::vector<round_range> buffers;
-  input_port input;
-  output_port output;
-  std::vector<send_request> sends;
-  column_options columns;
-  bool operator==(const window_request &) const = default;
-};
-
 /// A built port. A window edge at the shot's first or last round is a
 /// physical boundary, not a port.
 struct window_port {
@@ -121,6 +58,24 @@ struct window_port {
   input_boundary boundary = input_boundary::columns; ///< An open input's
   double prior = 0.0;  ///< An open input's boundary-column prior
   round_range imports; ///< A closed output's imported rounds
+};
+
+/// Why a commit column's parallel column, one with the same rows in the
+/// window, lets the decoder's choice between them change the commitment or
+/// the logical.
+enum class parallel_conflict {
+  other_zone,   ///< The parallel column is in another zone
+  boundary,     ///< It is a virtual-outcome or truncated crossing column
+  outside_rows, ///< Same zone, but rows outside the window differ
+  observable,   ///< Same zone and full rows, different observable effect
+};
+
+/// A commit column and a parallel column the decoder could pick instead.
+struct parallel_columns {
+  std::size_t commit_column = 0;
+  std::size_t other_column = 0;
+  parallel_conflict conflict = parallel_conflict::other_zone;
+  bool operator==(const parallel_columns &) const = default;
 };
 
 /// A built send: its rounds, clipped to the window, and their own rows.
@@ -163,6 +118,9 @@ struct decoding_window {
   std::size_t num_crossing_columns = 0;
   std::size_t num_logical_error_columns = 0;
   column_range commit_columns;
+  /// Each commit column's first conflicting parallel column, found while
+  /// the full rows are known; empty when the column options resolve them.
+  std::vector<parallel_columns> parallel_conflicts;
   /// For each fault column, the unmerged fault columns it stands for,
   /// counted from the window's first; the one its corrections are reported
   /// against, the most likely, comes first.
