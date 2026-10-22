@@ -774,22 +774,15 @@ void decoding_task_graph::impl::compile_wires() {
           streaming_reachability[si][descendant] |=
               streaming_reachability[dependent][descendant];
     }
-    streaming_overlap.assign(M, std::vector<streaming_overlap_kind>(
-                                    M, streaming_overlap_kind::disjoint));
+    streaming_overlap.assign(M, std::vector<uint8_t>(M, uint8_t{0}));
     for (std::size_t left = 0; left < M; ++left)
       for (std::size_t right = left; right < M; ++right)
         for (std::size_t descendant = 0; descendant < M; ++descendant)
           if (streaming_reachability[left][descendant] &&
               streaming_reachability[right][descendant]) {
-            const auto overlap =
-                streaming_nodes[descendant]
-                        .capability->supports_streaming_rendezvous()
-                    ? streaming_overlap_kind::rendezvous
-                    : streaming_overlap_kind::ordered;
-            streaming_overlap[left][right] = overlap;
-            streaming_overlap[right][left] = overlap;
-            if (overlap == streaming_overlap_kind::ordered)
-              break;
+            streaming_overlap[left][right] = 1;
+            streaming_overlap[right][left] = 1;
+            break;
           }
     if (M > 0)
       streaming_parallel_width = maximum_parallel_width(streaming_dependents);

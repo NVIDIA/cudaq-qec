@@ -18,11 +18,6 @@
 #include <stdexcept>
 #include <vector>
 
-extern "C" __attribute__((visibility("default"))) uint32_t
-cudaq_qec_task_graph_host_abi_version(void) {
-  return CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION;
-}
-
 namespace fs = std::filesystem;
 
 namespace cudaq::qec {
@@ -161,14 +156,8 @@ void load_plugins(const std::string &plugin_dir, PluginType type) {
                             type});
       CUDA_QEC_INFO("Successfully loaded plugin: {}", key);
     } else {
-      // Decoder plugins are optional, but a task-graph plugin failure needs
-      // to be visible because its node kinds will be unavailable to YAML.
-      if (type == PluginType::TASK_GRAPH_NODE)
-        CUDA_QEC_WARN("Failed to load task-graph plugin {}: {}", key,
-                      dlerror());
-      else
-        CUDA_QEC_INFO("Failed to load plugin {} Error: {}. Continuing anyway.",
-                      key, dlerror());
+      CUDA_QEC_INFO("Failed to load plugin {} Error: {}. Continuing anyway.",
+                    key, dlerror());
     }
   }
 }

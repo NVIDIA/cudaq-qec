@@ -15,7 +15,7 @@
 // Bump the framework version and the versioned registration symbols together
 // whenever the task-graph factory, metadata or node C++ ABI changes.
 #define CUDAQ_QEC_TASK_GRAPH_PLUGIN_PROTOCOL_VERSION 1u
-#define CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION 1u
+#define CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION 2u
 #define CUDAQ_QEC_TASK_GRAPH_PLUGIN_DESCRIBE_SYMBOL                            \
   "cudaq_qec_task_graph_plugin_describe"
 #define CUDAQ_QEC_TASK_GRAPH_PLUGIN_REGISTER_SYMBOL                            \
@@ -43,10 +43,6 @@ typedef const cudaq_qec_task_graph_plugin_descriptor *(
     *cudaq_qec_task_graph_plugin_describe_function)(void);
 typedef int (*cudaq_qec_task_graph_plugin_register_function)(char *error,
                                                              size_t capacity);
-
-// This host-only symbol deliberately has a different name from the plugin
-// entry points: missing plugin symbols must not resolve through a dependency.
-uint32_t cudaq_qec_task_graph_host_abi_version(void);
 
 // Plugins export the two symbols named above with default visibility. Describe
 // returns immutable module-owned metadata. Register returns zero on success,

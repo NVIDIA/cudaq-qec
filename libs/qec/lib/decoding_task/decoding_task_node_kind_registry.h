@@ -82,7 +82,7 @@ node_kind_registry_lock lock_node_kind_registry();
 /// Register a kind's public metadata and parameter schema together with the
 /// factory that builds it.  One registrar per kind covers both registries.
 __attribute__((visibility("default"))) void
-register_node_kind_v1(task_graph_node_kind_spec spec,
+register_node_kind_v2(task_graph_node_kind_spec spec,
                       decoding::config::decoder_schema params,
                       node_factory factory);
 
@@ -90,7 +90,7 @@ __attribute__((visibility("hidden"))) inline void
 register_node_kind(task_graph_node_kind_spec spec,
                    decoding::config::decoder_schema params,
                    node_factory factory) {
-  register_node_kind_v1(std::move(spec), std::move(params), std::move(factory));
+  register_node_kind_v2(std::move(spec), std::move(params), std::move(factory));
 }
 
 /// Unregister `name` only if `registration_id` still owns it.
@@ -135,7 +135,7 @@ private:
 
 /// Register a kind and return a token that unregisters it on destruction.
 __attribute__((visibility("default"))) node_kind_registration
-register_scoped_node_kind_v1(task_graph_node_kind_spec spec,
+register_scoped_node_kind_v2(task_graph_node_kind_spec spec,
                              decoding::config::decoder_schema params,
                              node_factory factory);
 
@@ -143,7 +143,7 @@ __attribute__((visibility("hidden"))) inline node_kind_registration
 register_scoped_node_kind(task_graph_node_kind_spec spec,
                           decoding::config::decoder_schema params,
                           node_factory factory) {
-  return register_scoped_node_kind_v1(std::move(spec), std::move(params),
+  return register_scoped_node_kind_v2(std::move(spec), std::move(params),
                                       std::move(factory));
 }
 

@@ -7,7 +7,8 @@
 # ============================================================================ #
 """Check final installed binary plugins and run a CPU decoding-server replay.
 
-Run this inside the final native server image, not against a build tree.
+Run this against the copied customer install, not against a build tree. The
+release image uses a separate validation stage so QA tools are not shipped.
 Model/engine execution is deliberately a separate GPU qualification.
 """
 

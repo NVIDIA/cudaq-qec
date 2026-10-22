@@ -548,13 +548,8 @@ coordinate; reset and post-``FINAL`` clear start a new coordinate epoch. This
 does not permit unscheduled, independently advancing contributors to be XORed
 together.
 
-A reconvergent operation can opt into order-independent streaming rendezvous
-when every firing consumes exactly one aligned value per input. The executor
-still serializes callbacks on each node and retains producer leases until all
-dependent deliveries finish. Other shared descendants keep ordered delivery;
-unrelated raw-input roots keep their existing ordering. A failed operation or
-reset publishes a failed streaming result with zero-valued corrections until a
-successful reset restores the graph.
+A failed operation or reset publishes a failed streaming result with
+zero-valued corrections until a successful reset restores the graph.
 
 .. warning::
 
@@ -562,6 +557,6 @@ successful reset restores the graph.
    ``task_graph_node_config``, the internal ``node_build_context``, and the
    virtual interface of ``streaming_task_graph_node``. Rebuild task-graph
    plugins with the matching framework headers and library. Previously built
-   task-graph plugins are not binary-compatible. The loader currently runs
-   static registration during ``dlopen`` and has no pre-registration ABI gate;
-   an export manifest alone does not make a mismatched binary safe to load.
+   task-graph plugins are not binary-compatible. See the
+   `task-graph plugin ABI gate <https://github.com/NVIDIA/cudaq-qec/blob/main/docs/ExternalPlugins.md#task-graph-plugin-abi-gate>`_
+   for the required entry points, compatibility checks and registration rules.

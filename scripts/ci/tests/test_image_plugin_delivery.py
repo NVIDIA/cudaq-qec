@@ -127,6 +127,7 @@ class ImagePluginDeliveryTest(unittest.TestCase):
     def test_image_build_passes_all_delivery_requirements(self):
         step = "\n".join(named_step(WORKFLOW, "Build and push image by digest"))
         self.assertIn("file: docker/release/Dockerfile.decoding-server", step)
+        self.assertIn("target: runtime", step)
         for name in ("QEC_EXTERNAL_PLUGIN_ARCHIVE",
                      "QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT",
                      "QEC_REQUIRED_EXTERNAL_PLUGINS",
@@ -145,18 +146,51 @@ class ImagePluginDeliveryTest(unittest.TestCase):
         self.assertIn("inputs.cuda_version == '13.0'", matrices[0])
         self.assertIn("options: [all, '12.6', '13.0']", workflow)
 
-    def test_smoke_runs_after_final_runtime_copy_without_private_sources(self):
+    def image_stages(self):
         dockerfile = (REPOSITORY /
                       "docker/release/Dockerfile.decoding-server").read_text()
-        runtime = dockerfile[dockerfile.index("FROM nvidia/cuda:"):]
-        self.assertLess(runtime.index("COPY --from=builder /opt/nvidia/cudaqx"),
-                        runtime.index("CUDA_VISIBLE_DEVICES=\"\" python3"))
-        self.assertIn("QEC_EXTERNAL_PLUGIN_DELIVERY=native", dockerfile)
+        base_start = dockerfile.index("FROM nvidia/cuda:")
+        validation_start = dockerfile.index("FROM runtime-base AS validation")
+        runtime_start = dockerfile.index("FROM runtime-base AS runtime\n")
+        return (dockerfile[:base_start],
+                dockerfile[base_start:validation_start],
+                dockerfile[validation_start:runtime_start],
+                dockerfile[runtime_start:])
+
+    def test_customer_filesystem_has_no_validation_tools_or_reports(self):
+        builder, base, _, runtime = self.image_stages()
+        self.assertIn("COPY --from=builder /opt/nvidia/cudaqx", base)
+        self.assertIn("-o /tmp/qec-plugin-registration-probe", builder)
+        self.assertNotIn("bin/qec-plugin-registration-probe", builder)
+        for value in ("python3-minimal", "patchelf", "installed_plugin_smoke",
+                      "fixtures/", "qualification/", "COPY --from=validation"):
+            with self.subTest(value=value):
+                self.assertNotIn(value, base)
+                self.assertNotIn(value, runtime)
+        self.assertNotIn("/private/ising", base)
+        self.assertIn('ENTRYPOINT ["bash", "-l"]', base)
+
+    def test_validation_runs_against_installed_customer_artifacts(self):
+        builder, _, validation, _ = self.image_stages()
+        self.assertIn("QEC_EXTERNAL_PLUGIN_DELIVERY=native", builder)
+        self.assertIn("python3-minimal patchelf", validation)
+        self.assertIn("COPY --from=builder /tmp/qec-plugin-registration-probe",
+                      validation)
+        self.assertIn("CUDA_VISIBLE_DEVICES=\"\" python3", validation)
+        self.assertIn("--prefix=/opt/nvidia/cudaqx", validation)
+        self.assertIn("--require-provider=$provider", validation)
+        self.assertIn("--require-node-kind=$kind", validation)
+        self.assertIn("--output=/tmp/qec-plugin-validation/results", validation)
+        self.assertIn("touch /tmp/qec-plugin-validation/passed", validation)
+        self.assertNotIn("/private/ising", validation)
+
+    def test_published_runtime_requires_validation_without_copying_it(self):
+        _, _, _, runtime = self.image_stages()
         self.assertIn(
-            "--output=/opt/nvidia/cudaqx/share/cudaq-qec/qualification/installed-smoke",
-            runtime)
-        self.assertNotIn("/private/ising", runtime)
-        self.assertIn("python3-minimal patchelf", runtime)
+            "--mount=type=bind,from=validation,source=/tmp/qec-plugin-validation/passed,"
+            "target=/tmp/qec-plugin-validation-passed,readonly", runtime)
+        self.assertIn("test -f /tmp/qec-plugin-validation-passed", runtime)
+        self.assertNotIn("COPY", runtime)
 
 
 if __name__ == "__main__":

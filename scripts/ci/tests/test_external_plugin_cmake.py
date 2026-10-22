@@ -180,7 +180,7 @@ class ExternalPluginCMakeTest(unittest.TestCase):
                 "cuda_version": "13.0.88",
                 "tensorrt_version": None,
                 "glibcxx_use_cxx11_abi": 1,
-                "framework_abi_version": 1 if kind == "task_graph" else None,
+                "framework_abi_version": 2 if kind == "task_graph" else None,
                 "sha256": hashlib.sha256(self.elf_bytes).hexdigest(),
                 "size_bytes": len(self.elf_bytes),
                 "needed": [],

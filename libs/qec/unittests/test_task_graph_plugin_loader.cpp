@@ -157,9 +157,6 @@ INSTANTIATE_TEST_SUITE_P(Gateway, CollidingTaskGraphPlugin,
 TEST(TaskGraphPluginLoader, CompatibleModuleStaysUsableAfterCleanup) {
   const std::string fixture = "compatible";
   ASSERT_TRUE(fs::is_regular_file(module_path(fixture)));
-  EXPECT_EQ(cudaq_qec_task_graph_host_abi_version(),
-            CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION);
-
   load_plugins(fixture_directory(fixture).string(),
                PluginType::TASK_GRAPH_NODE);
   ASSERT_EQ(registration_calls()[fixture], 1u);

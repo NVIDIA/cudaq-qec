@@ -188,6 +188,7 @@ jobs:
         with:
           context: .
           file: docker/release/Dockerfile.decoding-server
+          target: runtime
           platforms: linux/${{ matrix.platform }}
           build-contexts: |
             artifacts=./artifacts

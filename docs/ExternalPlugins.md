@@ -121,12 +121,13 @@ the native archive in the existing artifacts context. Use `cuda_version=13.0`
 for a TensorRT delivery requiring both amd64 and arm64; unsupported required
 providers fail rather than disappearing from a release matrix.
 
-After final copying, the runtime image executes
-`/opt/nvidia/cudaqx/share/cudaq-qec/validation/installed_plugin_smoke.py` without
-a GPU. It verifies manifests, RPATHs, dependencies, positive/negative node-kind
-registration and eight ordinary PyMatching shots over UDP. The report is
-retained under `share/cudaq-qec/qualification/installed-smoke/summary.json`.
-This is an installed-image packaging check, not model or GPU qualification.
+The `runtime` image target depends on a separate `validation` stage that checks
+the copied install without a GPU: manifests, RPATHs, dependencies,
+positive/negative node-kind registration and eight ordinary PyMatching shots
+over UDP. Validation failure prevents publication. Python, patchelf, the probe,
+fixtures and reports stay in that stage, not the shipped runtime. CI can collect
+`/tmp/qec-plugin-validation/results` from the `validation` target. This packaging
+check does not replace model or GPU qualification.
 
 ## Send requests through the installed server
 

@@ -218,14 +218,14 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
     test -x "$CUDAQX_INSTALL_PREFIX/bin/playback-emulator"; \
     g++-12 -std=c++20 scripts/ci/plugin_registration_probe.cpp \
         -I"$CUDAQX_INSTALL_PREFIX/include" -I/usr/local/cuda/include \
-        -L"$CUDAQX_INSTALL_PREFIX/lib" -Wl,-rpath,'$ORIGIN/../lib' \
-        -lcudaq-qec-decoders -o "$CUDAQX_INSTALL_PREFIX/bin/qec-plugin-registration-probe"
+        -L"$CUDAQX_INSTALL_PREFIX/lib" -Wl,-rpath,"$CUDAQX_INSTALL_PREFIX/lib" \
+        -lcudaq-qec-decoders -o /tmp/qec-plugin-registration-probe
 
 # ---------------------------------------------------------------------------
-# Stage: runtime -- the shipped image. nvq++ for user programs; no gcc,
+# Stage: runtime-base -- the customer filesystem. nvq++ for user programs; no gcc,
 # nvcc, cmake, or sources.
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:${cuda_base_image_tag} AS runtime
+FROM nvidia/cuda:${cuda_base_image_tag} AS runtime-base
 ARG TARGETARCH
 ARG CUDA_VERSION
 
@@ -260,7 +260,7 @@ RUN set -e; \
         cuda-nvrtc-${CUDA_VER_DASH} \
         libnl-3-200 libnl-route-3-200 \
         libgomp1 \
-        binutils libc6-dev libstdc++-13-dev python3-minimal patchelf \
+        binutils libc6-dev libstdc++-13-dev \
         libpython3.12t64 libevent-core-2.1-7t64 libevent-pthreads-2.1-7t64; \
     if [ "$TARGETARCH" != "arm64" ] || [ "$CUDA_MAJOR" != "12" ]; then \
         apt-cache search tensorrt \
@@ -301,15 +301,6 @@ COPY --from=cudaq-official \
 COPY --from=builder /opt/nvidia/cudaq-realtime /opt/nvidia/cudaq-realtime
 COPY --from=builder /opt/nvidia/cudaqx /opt/nvidia/cudaqx
 
-# These generic checks operate only on the copied install, never on the builder
-# sources. No private source or model bundle is copied into the image.
-COPY --from=builder /workspaces/cudaqx/scripts/ci/installed_plugin_smoke.py \
-                    /workspaces/cudaqx/scripts/ci/replay_decoding_server.py \
-                    /workspaces/cudaqx/scripts/ci/playback_result_checks.py \
-                    /opt/nvidia/cudaqx/share/cudaq-qec/validation/
-COPY --from=builder /workspaces/cudaqx/scripts/ci/fixtures/ \
-                    /opt/nvidia/cudaqx/share/cudaq-qec/validation/fixtures/
-
 # libcudaq-qec.so's RPATH points at cuStabilizer inside the cuquantum
 # wheel, so that one library must land at the same path.
 COPY --from=builder \
@@ -328,25 +319,6 @@ ENV CUDAQX_INSTALL_DIR=/opt/nvidia/cudaqx \
     LIBRARY_PATH=/opt/nvidia/cudaqx/lib:/opt/nvidia/cudaq-realtime/lib \
     LD_LIBRARY_PATH=/opt/nvidia/cudaqx/lib:/opt/nvidia/cudaqx/lib/decoder-plugins:/opt/nvidia/cudaq-realtime/lib:/opt/nvidia/cudaq/lib:/usr/local/openmpi/lib:${LD_LIBRARY_PATH}
 
-# Registration/schema checks need no TensorRT engine or GPU. The ordinary CPU
-# decoder replay additionally catches configuration, bridge and runtime-copy
-# failures before the image is published. Every task-graph delivery must name
-# the kinds it expects; omission cannot silently turn this into a generic pass.
-ARG QEC_REQUIRED_EXTERNAL_PLUGINS
-ARG QEC_REQUIRED_TASK_GRAPH_KINDS
-RUN set -ef; \
-    set --; \
-    old_ifs="$IFS"; IFS=';'; \
-    for provider in ${QEC_REQUIRED_EXTERNAL_PLUGINS:-}; do set -- "$@" "--require-provider=$provider"; done; \
-    for kind in ${QEC_REQUIRED_TASK_GRAPH_KINDS:-}; do set -- "$@" "--require-node-kind=$kind"; done; \
-    IFS="$old_ifs"; \
-    mkdir -p /opt/nvidia/cudaqx/share/cudaq-qec/qualification; \
-    CUDA_VISIBLE_DEVICES="" python3 /opt/nvidia/cudaqx/share/cudaq-qec/validation/installed_plugin_smoke.py \
-        --prefix=/opt/nvidia/cudaqx \
-        --registration-probe=/opt/nvidia/cudaqx/bin/qec-plugin-registration-probe \
-        --transport=/opt/nvidia/cudaq-realtime/lib/libcudaq-realtime-bridge-udp.so \
-        --output=/opt/nvidia/cudaqx/share/cudaq-qec/qualification/installed-smoke "$@"
-
 # Examples: the realtime decoding programs from the test suite, with a
 # build script that compiles them with the shipped nvq++ and a README with
 # run recipes. Sources come from the builder stage's checkout so they
@@ -358,3 +330,41 @@ COPY --from=builder /workspaces/cudaqx/docker/release/decoding-server-examples/R
 
 WORKDIR /root
 ENTRYPOINT ["bash", "-l"]
+
+# ---------------------------------------------------------------------------
+# Stage: validation -- test the copied customer install without putting QA
+# tools, fixtures or generated reports in the shipped image.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS validation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-minimal patchelf \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /tmp/qec-plugin-registration-probe \
+                    /tmp/qec-plugin-validation/plugin-registration-probe
+COPY --from=builder /workspaces/cudaqx/scripts/ci/installed_plugin_smoke.py \
+                    /workspaces/cudaqx/scripts/ci/replay_decoding_server.py \
+                    /workspaces/cudaqx/scripts/ci/playback_result_checks.py \
+                    /tmp/qec-plugin-validation/
+COPY --from=builder /workspaces/cudaqx/scripts/ci/fixtures/ \
+                    /tmp/qec-plugin-validation/fixtures/
+
+ARG QEC_REQUIRED_EXTERNAL_PLUGINS
+ARG QEC_REQUIRED_TASK_GRAPH_KINDS
+RUN set -ef; \
+    set --; \
+    old_ifs="$IFS"; IFS=';'; \
+    for provider in ${QEC_REQUIRED_EXTERNAL_PLUGINS:-}; do set -- "$@" "--require-provider=$provider"; done; \
+    for kind in ${QEC_REQUIRED_TASK_GRAPH_KINDS:-}; do set -- "$@" "--require-node-kind=$kind"; done; \
+    IFS="$old_ifs"; \
+    CUDA_VISIBLE_DEVICES="" python3 /tmp/qec-plugin-validation/installed_plugin_smoke.py \
+        --prefix=/opt/nvidia/cudaqx \
+        --registration-probe=/tmp/qec-plugin-validation/plugin-registration-probe \
+        --transport=/opt/nvidia/cudaq-realtime/lib/libcudaq-realtime-bridge-udp.so \
+        --output=/tmp/qec-plugin-validation/results "$@"; \
+    touch /tmp/qec-plugin-validation/passed
+
+# Preserve the published target name. The read-only mount forces validation to
+# succeed but leaves its tools, reports and even the pass marker out of runtime.
+FROM runtime-base AS runtime
+RUN --mount=type=bind,from=validation,source=/tmp/qec-plugin-validation/passed,target=/tmp/qec-plugin-validation-passed,readonly \
+    test -f /tmp/qec-plugin-validation-passed

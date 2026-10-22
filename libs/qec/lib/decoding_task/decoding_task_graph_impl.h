@@ -115,8 +115,7 @@ struct decoding_task_graph::impl {
   std::vector<std::vector<std::size_t>> streaming_dependents;
   std::vector<int32_t> streaming_predecessor_counts;
   std::vector<std::vector<uint8_t>> streaming_reachability;
-  enum class streaming_overlap_kind : uint8_t { disjoint, rendezvous, ordered };
-  std::vector<std::vector<streaming_overlap_kind>> streaming_overlap;
+  std::vector<std::vector<uint8_t>> streaming_overlap;
   std::size_t streaming_parallel_width = 1;
 
   // Sizes cached by compile_wires() so the accessors do not have to nominate a

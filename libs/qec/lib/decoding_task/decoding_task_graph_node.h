@@ -146,16 +146,6 @@ public:
     return false;
   }
 
-  /// Opt in to order-independent delivery within one upstream publication.
-  /// Each firing consumes exactly one value per input slot, with aligned
-  /// schedules; no slot may consume data from a later firing early. Retained
-  /// inputs must own their data or share immutable storage, never alias a
-  /// producer's mutable output. Arrival order must not change the result.
-  /// Callbacks remain serialized per node; this does not require node locks.
-  /// The executor retains publication leases until all descendants drain.
-  /// Unrelated raw input roots keep their existing ordering even when true.
-  virtual bool supports_streaming_rendezvous() const { return false; }
-
   /// Called after this node fires during streaming execution.
   /// Returns a pointer to the pre-allocated output value on `slot`, or nullptr
   /// if not supported.  The pointer is valid until the next call that mutates

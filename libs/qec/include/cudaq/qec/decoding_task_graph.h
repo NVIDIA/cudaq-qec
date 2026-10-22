@@ -124,7 +124,7 @@ inline std::string task_graph_node_schema_name(const std::string &kind) {
 /// ordering hazards. A plugin that registers executable metadata must arrange
 /// to unregister its kind before that plugin is unloaded.
 __attribute__((visibility("default"))) void
-register_task_graph_node_kind_v1(task_graph_node_kind_spec spec,
+register_task_graph_node_kind_v2(task_graph_node_kind_spec spec,
                                  decoding::config::decoder_schema params);
 
 // Preserve source compatibility, not the pre-gate binary entry point. An old
@@ -133,7 +133,7 @@ register_task_graph_node_kind_v1(task_graph_node_kind_spec spec,
 __attribute__((visibility("hidden"))) inline void
 register_task_graph_node_kind(task_graph_node_kind_spec spec,
                               decoding::config::decoder_schema params) {
-  register_task_graph_node_kind_v1(std::move(spec), std::move(params));
+  register_task_graph_node_kind_v2(std::move(spec), std::move(params));
 }
 
 /// Unregister a canonical kind or alias while its defining image is mapped.

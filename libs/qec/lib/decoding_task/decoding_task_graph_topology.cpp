@@ -116,10 +116,6 @@ node_build_context prepare_node(task_graph_node_config &cfg,
         throw std::invalid_argument(where + " of kind '" + kind.name +
                                     "' requires an already-built decoder");
       ctx.dec = std::move(cfg.decoder_instance);
-    } else if (cfg.decoder_instance || !cfg.decoder_type.empty() ||
-               !cfg.stim_dem.empty()) {
-      throw std::invalid_argument(where + " of kind '" + kind.name +
-                                  "' takes no decoder");
     }
     return ctx;
   }
