@@ -278,6 +278,9 @@ void bindExtendedDem(nb::module_ &mod) {
            "Return the measurement count of the phase's round, which is its\n"
            "num_measurements when set and measurements_per_round otherwise.\n"
            "Raises ValueError if neither is set.")
+      .def("detectors_of", &dem_chunks_spec::detectors_of, nb::arg("phase"),
+           "Return the detector rows the phase's round contributes when\n"
+           "closed: its incoming seam band and interior rows.")
       .def("num_observables", &dem_chunks_spec::num_observables,
            "Return the number of O_sparse rows every phase carries.\n"
            "Raises ValueError if two phases disagree.")

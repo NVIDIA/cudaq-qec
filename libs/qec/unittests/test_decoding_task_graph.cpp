@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_graph_utils.h"
 #include "../lib/decoding_task/decoding_task_memory_window_node.h"
@@ -98,44 +99,6 @@ rep3_inputs make_rep3_inputs() {
                                  seam_name::prev_round),
           dem_chunks_to_o_sparse(chunks),
           dem_close_all(chunks, seam_name::next_round, seam_name::prev_round)};
-}
-
-// Build the rep-5 spec used in test_extended_dem.cpp.
-static dem_chunks_spec rep5_spec(uint64_t num_rounds = 5) {
-  dem_chunks_spec spec;
-  spec.seam = {seam_name::next_round, seam_name::prev_round};
-  spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
-                      {phase_name::dem_bulk, phase_name::dem_bulk},
-                      {phase_name::dem_bulk, phase_name::dem_final}};
-  spec.num_rounds = num_rounds;
-
-  auto make = [](uint64_t nf, std::vector<int64_t> H, std::vector<int64_t> O,
-                 double rate) {
-    dem_chunk_spec s;
-    s.num_faults = nf;
-    s.H_sparse = std::move(H);
-    s.O_sparse = std::move(O);
-    s.error_rates.assign(nf, rate);
-    return s;
-  };
-
-  phase_spec_entry init_e;
-  init_e.id = phase_name::dem_init;
-  init_e.spec = make(9, {0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1, 3, 4, 8, -1},
-                     {0, -1}, 0.02);
-
-  phase_spec_entry bulk_e;
-  bulk_e.id = phase_name::dem_bulk;
-  bulk_e.spec = make(9, {0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1, 3, 4, 8, -1},
-                     {0, -1}, 0.02);
-
-  phase_spec_entry final_e;
-  final_e.id = phase_name::dem_final;
-  final_e.spec =
-      make(5, {0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1}, {0, -1}, 0.02);
-
-  spec.phases = {init_e, bulk_e, final_e};
-  return spec;
 }
 
 // ---------------------------------------------------------------------------
@@ -6450,29 +6413,6 @@ TEST(DecodingTaskGraph, ArbitraryLengthFinalMatchesFiniteShotOracle) {
     }
 }
 
-static dem_chunks_spec arbitrary_memory_spec(std::size_t rounds,
-                                             bool explicit_d = false,
-                                             std::size_t observable = 0) {
-  auto spec = rep5_spec(rounds);
-  for (auto &phase : spec.phases) {
-    phase.spec.num_faults = 4;
-    phase.spec.O_sparse = {static_cast<std::int64_t>(observable), -1};
-    phase.spec.H_sparse = {0, -1, 1, -1, 2, -1, 3, -1};
-    phase.spec.error_rates.assign(4, 0.02);
-    if (explicit_d) {
-      phase.spec.num_measurements = 4;
-      for (std::int64_t k = 0; k < 4; ++k) {
-        if (phase.id != phase_name::dem_init)
-          phase.spec.D_sparse.push_back(k);
-        phase.spec.D_sparse.push_back(phase.id == phase_name::dem_init ? k
-                                                                       : 4 + k);
-        phase.spec.D_sparse.push_back(-1);
-      }
-    }
-  }
-  return spec;
-}
-
 static std::unique_ptr<decoding_task_graph> make_arbitrary_memory_graph(
     const std::string &name = "single_error_lut",
     task_graph_options options = {},
@@ -6521,27 +6461,6 @@ TEST(ArbitraryLengthMemory, PyMatchingEveryFaultAndByteFragmentMatchesOracle) {
         graph->clear_corrections();
       }
     }
-}
-
-static dem_chunks_spec multi_terminal_memory_spec(std::size_t rounds,
-                                                  std::size_t tail_count) {
-  auto spec = arbitrary_memory_spec(rounds, true);
-  auto previous = spec.repeating_phase();
-  const auto final = spec.phases.back().id;
-  for (std::size_t i = 0; i + 1 < tail_count; ++i) {
-    const auto id = phase_id::from_name("terminal" + std::to_string(i));
-    auto phase = spec.phases.back().spec;
-    // Different observable ownership makes treating this as bulk detectable.
-    phase.O_sparse = {1, -1};
-    phase.error_rates.assign(4, 0.03);
-    spec.phases.push_back({id, std::move(phase)});
-    for (auto &connection : spec.connections)
-      if (connection.from_phase == previous && connection.to_phase == final)
-        connection.to_phase = id;
-    spec.connections.push_back({id, final});
-    previous = id;
-  }
-  return spec;
 }
 
 TEST(ArbitraryLengthMemory, DistinctTerminalPhasesMatchClosedOracle) {

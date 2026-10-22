@@ -720,6 +720,19 @@ dem_chunks_spec::repeating_span dem_chunks_spec::repeating_rounds() const {
   return {prefix, *num_rounds - prefix - suffix, suffix};
 }
 
+// The shortest chain visits every prefix and suffix phase once, so it holds
+// the layout of every longer shot.
+dem_chunks_spec::phase_layout dem_chunks_spec::layout() const {
+  const phase_id repeating = repeating_phase();
+  auto shortest = *this;
+  shortest.num_rounds = std::max<uint64_t>(2, minimum_rounds());
+  const auto sequence = shortest.phase_sequence();
+  const auto first = std::find(sequence.begin(), sequence.end(), repeating);
+  const auto last =
+      std::find(sequence.rbegin(), sequence.rend(), repeating).base();
+  return {{sequence.begin(), first}, repeating, {last, sequence.end()}};
+}
+
 std::vector<phase_id> dem_chunks_spec::phase_sequence() const {
   if (phases.empty())
     throw std::invalid_argument(
@@ -949,6 +962,15 @@ uint64_t dem_chunks_spec::measurements_of(const dem_chunk_spec &phase) const {
   throw std::invalid_argument(
       "dem_chunks_spec: a phase has no measurement count (num_measurements / "
       "measurements_per_round)");
+}
+
+// Built through dem_chunk_from_spec(), so the shorthand and per-seam forms
+// count alike.
+uint64_t dem_chunks_spec::detectors_of(const dem_chunk_spec &phase) const {
+  const auto chunk = dem_chunk_from_spec(phase, {seam.to_seam, seam.from_seam});
+  return (chunk.has_seam(seam.to_seam) ? chunk.get_seam(seam.to_seam).num_rows()
+                                       : 0) +
+         uint64_t{chunk.num_interior_rows()};
 }
 
 // Every phase must carry the same number of O_sparse rows.

@@ -435,6 +435,11 @@ struct dem_chunks_spec {
   /// @throws std::invalid_argument if two phases disagree.
   uint64_t num_observables() const;
 
+  /// The detector rows @p phase's round contributes when closed: its to_seam
+  /// band and interior rows. Builds the phase's chunk on each call.
+  /// @throws std::invalid_argument if the phase is inconsistent.
+  uint64_t detectors_of(const dem_chunk_spec &phase) const;
+
   /// @brief Whether the phases supply D, rather than leaving
   /// dem_chunks_to_d_sparse() to apply the memory convention.
   ///
@@ -472,6 +477,19 @@ struct dem_chunks_spec {
   /// shortest chain, so nothing proportional to num_rounds is built.
   /// @throws std::invalid_argument as phase_sequence() and repeating_phase().
   repeating_span repeating_rounds() const;
+
+  /// @brief The phases of a shot's rounds before, of, and after the repeating
+  /// phase.
+  struct phase_layout {
+    std::vector<phase_id> prefix; ///< phases of the rounds before it, in order
+    phase_id repeating;           ///< the repeating phase
+    std::vector<phase_id> suffix; ///< phases of the rounds after it, in order
+  };
+
+  /// @brief The phase layout of a shot of any length, from the shortest
+  /// chain; num_rounds is not consulted. Copies the spec on each call.
+  /// @throws std::invalid_argument as phase_sequence() and repeating_phase().
+  phase_layout layout() const;
 
   /// @brief Expand connections + num_rounds into an ordered phase_id list.
   ///

@@ -67,6 +67,7 @@ set(DECODERS_SOURCES
   decoding_task/decoding_task_window_node.cpp
   decoding_task/decoding_task_memory_window_node.cpp
   decoding_task/decoding_task_xor_node.cpp
+  decoding_task/decoding_task_experiment_template.cpp
   decoder_init.cpp
   decoder_config_payload.cpp
   decoder_config_schema.cpp

@@ -1096,6 +1096,12 @@ def _with_readout(spec, phase, m2o):
     return spec
 
 
+def test_dem_chunks_spec_detectors_of():
+    spec = _rep5_spec()
+    for e in spec.phases:
+        assert spec.detectors_of(e.spec) == REP5_CHECKS
+
+
 def test_dem_chunk_spec_m2o_sparse():
     s = qec.DemChunkSpec()
     assert s.m2o_sparse == []
