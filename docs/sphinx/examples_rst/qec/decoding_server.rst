@@ -59,88 +59,86 @@ See :doc:`/components/qec/realtime_decoding` for these matrix conventions.
 Before you start
 ----------------
 
-Use a **Linux Docker host** with Docker access and Python 3.10 or later. Run
-all commands below in the same terminal on that host. These examples use UDP
-host networking and one decoder with ID 0. They measure functional correctness;
-they do not establish a QPU feedback-latency guarantee.
+Use a **Linux x86-64 Docker host** with Docker access and Python 3.10 or later. Run
+all commands below in the same terminal. These walkthroughs use UDP host
+networking and one decoder with ID 0. They check functionality; they do not
+establish a QPU feedback-latency guarantee.
 
-The CPU connectivity, Chromobius, PyMatching, and lookup-table examples do not
-need a GPU. The AI and NVIDIA qLDPC examples additionally need a compatible
-NVIDIA GPU, driver, NVIDIA Container Toolkit, and a package containing the
-required decoder plugin. The ARM64 CUDA 12 package variant in the image work
-does not include TensorRT; use a TensorRT-enabled variant for AI decoding.
+The connectivity check and surface-code examples need no GPU or host CUDA-Q
+SDK. The color-code AI example additionally needs a compatible NVIDIA GPU,
+driver, NVIDIA Container Toolkit, Git, and host Python 3.12 with ``venv`` for
+exporting the model. The server, playback emulator, and CUDA-Q application run
+in the Docker package.
 
 Get the prebuilt package
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. important::
 
-   The dedicated server package is currently a private preview from
-   `the decoding-server image work <https://github.com/NVIDIA/cudaq-qec/pull/798>`__.
-   The preview registry is ``ghcr.io/nvidia/private/cudaq-decoders``; its CUDA
-   13 moving tag is ``cu13-latest``. You need package read access. The general
-   CUDA-Q QEC 0.8.0 and 0.8.1 images do not contain this server.
+   This guide currently targets the **NGC staging preview**, which requires
+   access granted by the package owner. It is not a public production image.
+   The commands below pin the CUDA 13 image tested on October 22, 2026; the
+   ``cu13-latest`` tag can change. The general CUDA-Q QEC images are separate
+   packages and cannot replace this image in these commands.
 
-   If the pull below returns ``denied``, obtain access from the package owner
-   before continuing. Successful registry login alone does not confirm package
-   access. A public release URI and an end-to-end tested image digest are still
-   required before publishing this page as release documentation.
-
-Pull the CUDA 13 preview, then pin the local reference to its immutable digest:
+Sign in to NGC using the account granted staging access. Select organization
+``nvstaging`` and team ``cudaq-qec``. Generate a personal API key with
+**NGC Catalog** and **NVIDIA Private Registry** access in
+`NGC API Keys <https://org.ngc.nvidia.com/account/api-keys>`__.
+Run the following on the Docker host, entering that key at the password prompt:
 
 .. code-block:: bash
 
-   docker pull ghcr.io/nvidia/private/cudaq-decoders:cu13-latest
-   export DECODING_SERVER_IMAGE="$(docker image inspect \
-     ghcr.io/nvidia/private/cudaq-decoders:cu13-latest \
-     --format '{{index .RepoDigests 0}}')"
+   docker login nvcr.io --username '$oauthtoken'
+   export DECODING_SERVER_IMAGE='nvcr.io/nvstaging/cudaq-qec/cudaq-decoding@sha256:08c1926453a87e37ec4f4f30c817247fd8dde3d02a63080bc741a5c22bd5a88a'
+   docker pull "$DECODING_SERVER_IMAGE"
    docker run --rm --entrypoint decoding_server "$DECODING_SERVER_IMAGE" --help
    docker run --rm --entrypoint playback-emulator "$DECODING_SERVER_IMAGE" --help
    docker run --rm --entrypoint ls "$DECODING_SERVER_IMAGE" \
      /opt/nvidia/cudaqx/lib/decoder-plugins
 
-Both help commands must succeed. Keep the digest for reproducibility. For a
-CUDA 12 deployment, use the package owner's corresponding CUDA 12 reference
-and check decoder availability for that architecture. Do not mix plugin
-libraries from other package versions into this image.
+Successful login confirms authentication; the pull must also succeed to confirm
+image access. Never put an API key in these commands or share it in logs.
+For current key-management instructions, see the
+`NGC user guide <https://docs.nvidia.com/ngc/latest/ngc-user-guide.html>`__.
 
-The plugin listing must include ``libcudaq-qec-trt-decoder.so`` for the AI
-examples and ``libcudaq-qec-nv-qldpc-decoder.so`` for the NVIDIA qLDPC example.
-If either is absent, obtain a package variant containing it before attempting
-that example. CPU-only examples can still be run with their required plugins.
+Both help commands must succeed. This image contains the server, playback
+emulator, CUDA-Q compiler and headers, and surface-code example sources under
+``/root/examples``. It includes PyMatching, Chromobius, and TensorRT decoder
+plugins; lookup-table and sliding-window decoding are built into QEC. It does
+not include the optional NVIDIA qLDPC plugin, a Python interpreter, or Python
+QEC bindings. Do not copy plugins from other image versions into it.
 
 Prepare the example directory
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Use the CUDA-Q QEC checkout containing this page. From its repository root:
+Create a directory for inputs and results:
 
 .. code-block:: bash
 
-   export QEC_SOURCE="$PWD"
    export QEC_RUN_DIR="$HOME/qec-decoding-server-runs"
    mkdir -p "$QEC_RUN_DIR"
-   cp "$QEC_SOURCE/docs/sphinx/examples/qec/decoding_server/"{run_package_example.py,config.yaml,schedule.txt} \
-     "$QEC_RUN_DIR/"
    cd "$QEC_RUN_DIR"
 
-You can also download the three files directly:
+Save these three downloads in that directory with their displayed filenames:
 :download:`run_package_example.py <../../examples/qec/decoding_server/run_package_example.py>`,
 :download:`config.yaml <../../examples/qec/decoding_server/config.yaml>`, and
 :download:`schedule.txt <../../examples/qec/decoding_server/schedule.txt>`.
-The CUDA-Q and model-preparation sections additionally need the full checkout.
+If you already have the source checkout containing this guide, you can copy
+them from ``docs/sphinx/examples/qec/decoding_server/`` instead.
+A source checkout is not needed for the walkthroughs.
 
-The example launcher starts the Docker server on an available UDP port, waits
-for readiness, runs the requested client, and stops and removes its containers.
-It saves the client output and a separate ``.server.log`` file. It fails on
-startup errors, client errors, incomplete corrections, or server decoder errors.
-Output files must not already exist; choose a new output name when repeating a
-run. This prevents overwriting previous results.
+The launcher starts the packaged server on an available UDP port, waits for
+readiness, runs a client in a second container using the same image, then stops
+and removes its containers. It saves client output and a separate
+``.server.log`` file. It fails on startup errors, client errors, incomplete
+corrections, or server decoder errors. Output files must not already exist;
+choose a new output name when repeating a run.
 
-All configuration and model files must be under ``QEC_RUN_DIR``. The launcher
-mounts this directory at the same absolute path inside the container, so the
-absolute paths written by SDK tools continue to work. Keep the SDK and client
-sources compatible with the server package's QEC configuration and CUDA-Q
-Realtime protocol versions.
+All configurations, schedules, compiled clients, and models must remain under
+``QEC_RUN_DIR``. The launcher mounts this directory at the same absolute path
+inside both containers so that generated paths remain valid. Leave the terminal
+in this directory for the remaining commands.
 
 Playback emulator
 -----------------
@@ -208,8 +206,10 @@ RDMA), ``inproc`` (local decoder), and ``null`` (no decoding). This page uses
 ``udp``. CPU RoCE additionally needs a configured RDMA device and matching ring
 geometry; it is not required for any walkthrough here.
 
-.. TODO: Link the complete playback grammar and Python reference after #850
-   lands. That reference owns the full grammar requested in issue #835.
+The full playback reference is being developed in
+`the playback documentation work <https://github.com/NVIDIA/cudaq-qec/pull/850>`__
+for `issue #835 <https://github.com/NVIDIA/cudaq-qec/issues/835>`__. The commands
+on this page use only the packaged CLI and the schedule syntax above.
 
 .. _decoding-server-color-code:
 
@@ -231,218 +231,182 @@ color-code model and mapping.
 Color-code example: prepare once, run both decoders
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Preparation needs a CUDA-Q QEC SDK environment on the Docker host with
-``cudaq_qec`` and its playback bindings. The runtime-only server image does not
-contain that Python SDK. Activate the SDK's Python environment, install the
-inference dependencies from the Ising checkout used by the example, and accept
-the model terms at
-`Ising-Decoder-ColorCode-1-Fast <https://huggingface.co/nvidia/Ising-Decoder-ColorCode-1-Fast>`__.
-Authenticate the ``hf`` CLI before downloading gated weights.
+Download
+:download:`color_code_demo.py <../../examples/qec/color_code_demo/color_code_demo.py>`
+into ``QEC_RUN_DIR``. Preparation runs on the host, exports ONNX, and writes
+inputs for the packaged server. It requires Python dependencies but no CUDA-Q
+SDK and does not build the server.
 
-The following commands fetch the same Ising revision pinned by the example
-and install its inference requirements. They do not build the server:
+Create a virtual environment and install the inference dependencies from the
+pinned Ising source revision:
 
 .. code-block:: bash
 
+   python3.12 -m venv .venv
+   source .venv/bin/activate
+   python3 -m pip install --upgrade pip
+   python3 -m pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
    mkdir -p model-deps
    git clone https://github.com/NVIDIA/Ising-Decoding.git model-deps/Ising-Decoding
    git -C model-deps/Ising-Decoding checkout 33acb152e403bc189f2effdb07f1a87b34c745f1
    python3 -m pip install -r model-deps/Ising-Decoding/code/requirements_public_inference.txt
-   python3 -m pip install huggingface_hub
-   hf auth login
-   python3 -c 'import cudaq_qec; print(cudaq_qec.playback)'
-   python3 "$QEC_SOURCE/docs/sphinx/examples/qec/color_code_demo/color_code_demo.py" \
-     --prepare-only --deps "$PWD/model-deps" --distances 5 --shots 100 --seed 1234
+   python3 -m pip install huggingface_hub onnx
 
-Preparation writes five server inputs in the current directory:
-``pre_d5.onnx``, ``dem_d5.txt``, ``schedule_d5.txt``,
-``config_chromobius_d5.yaml``, and ``config_trt_decoder_d5.yaml``.
-It does not start a decoder or server. The example pins the model revision and
-measurement mapping; keep these five files together.
+Use a fresh ``model-deps`` directory. When reusing an existing Ising checkout,
+its HEAD must match the revision above; preparation checks this before using it.
+On Linux distributions that package ``venv`` separately, install the matching
+``python3.12-venv`` package before creating the environment.
 
-Run the CPU baseline:
+First prepare and run Chromobius without downloading AI weights:
 
 .. code-block:: bash
 
+   python3 color_code_demo.py --prepare-only --baseline-only \
+     --deps "$PWD/model-deps" --distances 5 --shots 100 --seed 1234
    python3 run_package_example.py --image "$DECODING_SERVER_IMAGE" \
      --config config_chromobius_d5.yaml --schedule schedule_d5.txt \
      --shots 100 --output color-chromobius.csv
 
-Check GPU access, then run the AI decoder:
+For the AI comparison, accept the model's terms at
+`Ising-Decoder-ColorCode-1-Fast <https://huggingface.co/nvidia/Ising-Decoder-ColorCode-1-Fast>`__
+and authenticate the host's ``hf`` CLI. Enter your Hugging Face token only at
+its prompt. Then prepare the AI model using the same distance, shots, and seed:
 
 .. code-block:: bash
 
+   hf auth login
+   python3 color_code_demo.py --prepare-only --deps "$PWD/model-deps" \
+     --distances 5 --shots 100 --seed 1234
    docker run --rm --gpus all --entrypoint nvidia-smi "$DECODING_SERVER_IMAGE"
    python3 run_package_example.py --image "$DECODING_SERVER_IMAGE" \
      --config config_trt_decoder_d5.yaml --schedule schedule_d5.txt \
      --gpu --writable --shots 100 --output color-ising.csv
 
-``--gpu`` exposes the GPU to the server. ``--writable`` allows the server to
-save ``engine_d5.trt`` while building TensorRT from ONNX. Engine construction
-happens before readiness; the launcher's default startup timeout is 600 seconds.
-If the log shows ongoing engine construction at that limit, rerun with a new
-output name and ``--startup-timeout 1800``. No engine is copied from another GPU.
+Full preparation writes ``pre_d5.onnx``, ``dem_d5.txt``, ``schedule_d5.txt``,
+``config_chromobius_d5.yaml``, and ``config_trt_decoder_d5.yaml``. The baseline
+step omits the ONNX and AI configuration. The second preparation deterministically
+regenerates the same measurements for the comparison; keep the files together.
+It does not load a decoder or start a server.
+
+``--gpu`` exposes the GPU to the server. ``--writable`` lets the server save
+``engine_d5.trt`` while building TensorRT from ONNX on that GPU. Construction
+finishes before readiness; the default startup timeout is 600 seconds. If the
+log shows ongoing construction at that limit, use a new output name and
+``--startup-timeout 1800``. Engines depend on the GPU and TensorRT runtime;
+regenerate them when either changes.
 
 Both runs must complete 100 correction reads and report zero server errors.
-The launcher prints the logical-mismatch count and fraction for each run.
-For this quantum-code experiment, a mismatch is a logical decoding error,
-not a transport failure; a valid run can contain mismatches. The 100-shot run
-checks operation and is too small for an accuracy claim. See
-:doc:`color_code_demo` for larger studies, per-round logical error rates, and
-uncertainties. This deliberately paced walkthrough is not a latency benchmark.
+The launcher prints the logical-mismatch count and fraction. A mismatch in
+this experiment is a logical decoding error; it does not mean the transport
+failed. A valid run can contain mismatches. This small, deliberately paced
+run checks operation and is not an accuracy claim or a latency benchmark.
+See :doc:`color_code_demo` for larger studies and uncertainties.
 
 CUDA-Q examples: surface-code programs
 --------------------------------------
 
-These examples run a surface-code circuit in Stim and stream its measurements
-to the Docker server through CUDA-Q realtime calls. They cover PyMatching,
-lookup-table decoding, NVIDIA qLDPC, and surface-code Ising + PyMatching.
-Every run uses a single decoder with ID 0.
+The packaged ``surface_code-1`` program runs a distance-3 surface-code memory
+circuit in Stim. Its ``-cqr`` variant streams measurements to the separate
+server while the circuit executes. The following examples run 100 shots with
+three rounds and CNOT error probability 0.001, using three decoders:
 
-Build the client programs once
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
 
-Use an installed CUDA-Q QEC SDK with realtime support and a CUDA compiler on
-this Linux Docker host. The server runtime image does not contain the compiler
-or development headers. Activate the SDK environment so that:
+   * - Decoder
+     - Configuration
+   * - ``pymatching``
+     - CPU minimum-weight perfect matching.
+   * - ``multi_error_lut``
+     - CPU lookup table, using the example's lookup depth 2. Keep this small
+       geometry because table size grows with code size and lookup depth.
+   * - ``sliding_window``
+     - CPU sliding window with PyMatching, window size 3, and step size 1.
+       Here the window covers the three-round shot.
 
-* ``CUDA_QUANTUM_PATH`` names the CUDA-Q installation containing ``bin/nvq++``.
-* ``CUDAQX_INSTALL_DIR`` names the QEC installation containing
-  ``include/cudaq/qec/code.h`` and ``lib/libcudaq-qec.so``.
+Build the packaged client once
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-From ``QEC_RUN_DIR``, verify the installations and compile the client examples:
+Compile only the application using the compiler and matching headers inside
+the image. The server is already built. Save the executables under the shared
+run directory so later containers can use them:
 
 .. code-block:: bash
 
-   : "${CUDA_QUANTUM_PATH:?Set CUDA_QUANTUM_PATH to your CUDA-Q SDK installation}"
-   : "${CUDAQX_INSTALL_DIR:?Set CUDAQX_INSTALL_DIR to your CUDA-Q QEC SDK installation}"
-   test -x "$CUDA_QUANTUM_PATH/bin/nvq++"
-   test -f "$CUDAQX_INSTALL_DIR/include/cudaq/qec/code.h"
    export EXAMPLE_BUILD_DIR="$QEC_RUN_DIR/client-build"
-   cmake -S "$QEC_SOURCE/docs/sphinx/examples/qec/realtime_decoding_demo" \
-     -B "$EXAMPLE_BUILD_DIR" \
-     -DCUDAQ_INSTALL_DIR="$CUDA_QUANTUM_PATH" \
-     -DCUDAQX_INSTALL_DIR="$CUDAQX_INSTALL_DIR"
-   cmake --build "$EXAMPLE_BUILD_DIR" --parallel 4
+   docker run --rm \
+     --mount "type=bind,src=$QEC_RUN_DIR,dst=$QEC_RUN_DIR" \
+     --workdir /root/examples --env BUILD_DIR="$EXAMPLE_BUILD_DIR" \
+     --entrypoint bash "$DECODING_SERVER_IMAGE" -c './build.sh surface_code-1'
+   test -f "$EXAMPLE_BUILD_DIR/surface_code-1-local"
+   test -f "$EXAMPLE_BUILD_DIR/surface_code-1-cqr"
 
-If your SDK installs realtime libraries separately, also pass
-``-DCUDAQ_REALTIME_DIR="$CUDAQ_REALTIME_DIR"`` to CMake with that directory
-set to the realtime installation prefix. These commands compile the four
-example executables, including the two ``-cqr`` clients. They do not compile
-the server. All subsequent commands run from ``QEC_RUN_DIR`` on the SDK host;
-the launcher passes the discovered server port to the client automatically.
+Use the image's example sources and build script together. An arbitrary host
+SDK or a newer source checkout may use a different realtime protocol.
 
-PyMatching on the CPU
-^^^^^^^^^^^^^^^^^^^^^
+Generate configurations and run all three decoders
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Generate the configuration, then run 100 shots through the packaged server:
-
-.. code-block:: bash
-
-   "$EXAMPLE_BUILD_DIR/surface_code_realtime_decoding" \
-     --distance 3 --num_rounds 3 --num_shots 100 \
-     --decoder_type pymatching --save_dem "$PWD/surface-pymatching.yaml"
-   python3 run_package_example.py --image "$DECODING_SERVER_IMAGE" \
-     --config surface-pymatching.yaml --shots 100 --output surface-pymatching.log \
-     --client "$EXAMPLE_BUILD_DIR/surface_code_realtime_decoding-cqr" \
-     --distance 3 --num_rounds 3 --num_shots 100 \
-     --decoder_type pymatching --load_dem "$PWD/surface-pymatching.yaml"
-
-Lookup-table decoding on the CPU
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Generate a separate configuration for the same distance-3 experiment:
+Each iteration first writes a separate server YAML using the local executable.
+The launcher then runs its matching ``-cqr`` client against the packaged server.
+The block stops on the first error and supplies sliding-window options only
+for that decoder. Run it in Bash.
 
 .. code-block:: bash
 
-   "$EXAMPLE_BUILD_DIR/surface_code_realtime_decoding" \
-     --distance 3 --num_rounds 3 --num_shots 100 \
-     --decoder_type multi_error_lut --save_dem "$PWD/surface-lut.yaml"
-   python3 run_package_example.py --image "$DECODING_SERVER_IMAGE" \
-     --config surface-lut.yaml --shots 100 --output surface-lut.log \
-     --client "$EXAMPLE_BUILD_DIR/surface_code_realtime_decoding-cqr" \
-     --distance 3 --num_rounds 3 --num_shots 100 \
-     --decoder_type multi_error_lut --load_dem "$PWD/surface-lut.yaml"
+   (
+     set -e
+     for DECODER in pymatching multi_error_lut sliding_window; do
+       SW_ARGS=()
+       if [ "$DECODER" = sliding_window ]; then
+         SW_ARGS=(--sw_inner_decoder pymatching --sw_window_size 3 --sw_step_size 1)
+       fi
+       docker run --rm \
+         --mount "type=bind,src=$QEC_RUN_DIR,dst=$QEC_RUN_DIR" \
+         --workdir "$QEC_RUN_DIR" \
+         --entrypoint "$EXAMPLE_BUILD_DIR/surface_code-1-local" "$DECODING_SERVER_IMAGE" \
+         --distance 3 --num_rounds 3 --num_shots 100 --p_cnot 0.001 \
+         --decoder_type "$DECODER" \
+         "${SW_ARGS[@]}" \
+         --save_dem "$QEC_RUN_DIR/surface-$DECODER.yaml"
+       python3 run_package_example.py --image "$DECODING_SERVER_IMAGE" \
+         --config "surface-$DECODER.yaml" --shots 100 --output "surface-$DECODER.log" \
+         --client "$EXAMPLE_BUILD_DIR/surface_code-1-cqr" \
+         --distance 3 --num_rounds 3 --num_shots 100 --p_cnot 0.001 \
+         --decoder_type "$DECODER" \
+         "${SW_ARGS[@]}" \
+         --load_dem "$QEC_RUN_DIR/surface-$DECODER.yaml"
+     done
+   )
 
-This configuration uses lookup depth 2. Keep the small example geometry;
-lookup-table memory and setup work grow with the code size and error depth.
-
-NVIDIA qLDPC decoding on the GPU
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The image must contain the ``nv-qldpc-decoder`` plugin. Check GPU access with
-the ``nvidia-smi`` command above, then run:
-
-.. code-block:: bash
-
-   "$EXAMPLE_BUILD_DIR/surface_code_realtime_decoding" \
-     --distance 3 --num_rounds 3 --num_shots 100 \
-     --decoder_type nv-qldpc-decoder --save_dem "$PWD/surface-qldpc.yaml"
-   python3 run_package_example.py --image "$DECODING_SERVER_IMAGE" \
-     --config surface-qldpc.yaml --gpu --shots 100 --output surface-qldpc.log \
-     --client "$EXAMPLE_BUILD_DIR/surface_code_realtime_decoding-cqr" \
-     --distance 3 --num_rounds 3 --num_shots 100 \
-     --decoder_type nv-qldpc-decoder --load_dem "$PWD/surface-qldpc.yaml"
-
-The server uses a CPU host-dispatch thread to invoke the GPU decoder. GPU
-computation does not require GPU RoCE or device-graph transport in this example.
-
-Surface-code Ising AI decoder with PyMatching
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This path uses the separate ``surface_code_ising_realtime_decoding`` executable
-pair. Its circuit is distance 7, seven rounds, Z basis, XV orientation, with
-SPAM probability 0.01. The ordinary surface-code executable above has a different
-measurement layout and cannot use these model artifacts.
-
-Accept the terms for
-`Ising-Decoder-SurfaceCode-1-Fast <https://huggingface.co/nvidia/Ising-Decoder-SurfaceCode-1-Fast>`__
-and authenticate ``hf``. Artifact preparation requires a GPU in the SDK
-environment and the exporter dependencies below:
-
-.. code-block:: bash
-
-   python3 -m pip install beliefmatching hydra-core ldpc matplotlib numpy \
-     omegaconf onnx pymatching safetensors scipy stim torch huggingface_hub
-   hf auth login
-   python3 "$QEC_SOURCE/docs/sphinx/examples/qec/realtime_decoding_demo/prepare_ising_artifacts.py" \
-     --app "$EXAMPLE_BUILD_DIR/surface_code_ising_realtime_decoding" \
-     --artifacts-dir "$PWD/surface-ising-artifacts"
-   "$EXAMPLE_BUILD_DIR/surface_code_ising_realtime_decoding" \
-     --distance 7 --num_rounds 7 --num_shots 100 --p_spam 0.01 \
-     --decoder_type trt_decoder --ising-artifacts-dir "$PWD/surface-ising-artifacts" \
-     --save_dem "$PWD/surface-ising.yaml"
-   python3 run_package_example.py --image "$DECODING_SERVER_IMAGE" \
-     --config surface-ising.yaml --gpu --shots 100 --output surface-ising.log \
-     --client "$EXAMPLE_BUILD_DIR/surface_code_ising_realtime_decoding-cqr" \
-     --distance 7 --num_rounds 7 --num_shots 100 --p_spam 0.01 \
-     --yaml "$PWD/surface-ising.yaml"
-
-Preparation produces ``model.onnx``, ``H_csr.bin``, ``O_csr.bin``, ``priors.bin``,
-``metadata.txt``, and ``D_sparse.txt``. The generator embeds the matrices in
-``surface-ising.yaml`` and records the ONNX path under the mounted directory.
-The server builds TensorRT on its deployment GPU. With ``--yaml``, the client
-reads the decoder choice from the file; do not also pass ``--decoder_type``.
+The launcher supplies the discovered UDP endpoint and
+``CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch`` to the client container. No server
+port or host SDK environment variables need to be set manually.
 
 Verify each surface-code run
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Each launch must print ``Client completed with external server routing
-confirmed`` and report nonzero server dispatches. The launcher checks that
-the client exited successfully, its local CQR dispatch count was zero, and
-server statistics contain 100 decodes, at least 100 correction requests, and
-zero decoder errors.
-The ``.log`` file contains the application output; the corresponding
-``.log.server.log`` contains the server output. This proves requests reached
-the external server. It is not a logical-error-rate or latency benchmark.
+confirmed``. Its server log must contain:
 
-These are fixed-shot examples with complete configurations. NVIDIA Fusion's
-streaming decoder, chunked DEM execution, and Ising overlap-save task graphs
-have additional configuration and model contracts. Do not substitute their
-names into these commands or assume that this example demonstrates
-unknown-duration shots. See :ref:`the Fusion C++ API <nv_fusion_decoder_api_cpp>` for Fusion's
-configuration and package availability; its type is not accepted by the
-ordinary surface-code example's ``--decoder_type`` option.
+.. code-block:: text
+
+   QEC_DECODING_SERVER_DECODER_STATS id=0 decodes=100 enqueues=400 corrections=100 resets=100 errors=0
+   QEC_DECODING_SERVER_DISPATCHED count=600
+
+The launcher checks 100 decodes, at least 100 correction requests, zero server
+errors, and nonzero dispatches. The client log must report
+``CQR service dispatch count: 0``, confirming that decoding was routed externally.
+The logs also contain the circuit's correction and logical-error counts;
+those are experiment results, distinct from server errors.
+
+These examples cover fixed-duration shots. NVIDIA qLDPC and Fusion require
+separate package variants containing their plugins and cannot be selected in
+this pinned image. Surface-code Ising and chunked task graphs also require
+their own model and measurement contracts. See
+:doc:`realtime_decoding_demo` for the surface-code Ising application and
+:ref:`the Fusion API <nv_fusion_decoder_api_cpp>` for Fusion configuration.
 
 Integrate a third-party runtime
 -------------------------------
@@ -451,19 +415,40 @@ A real QPU deployment uses the same server but needs a runtime adapter for its
 control system. The hardware vendor supplies the QPU connection; the adapter
 supplies decoder messages and a compatible transport.
 
+To keep a server running for a third-party UDP client, use the synthetic
+connectivity configuration first. Run this in a dedicated terminal with the
+same ``DECODING_SERVER_IMAGE`` and ``QEC_RUN_DIR`` values set:
+
+.. code-block:: bash
+
+   docker run --rm --name qec-decoding-server --network host \
+     --mount "type=bind,src=$QEC_RUN_DIR,dst=$QEC_RUN_DIR,readonly" \
+     --workdir "$QEC_RUN_DIR" --env QEC_DECODING_SERVER_STATS=1 \
+     --entrypoint decoding_server "$DECODING_SERVER_IMAGE" \
+     --config="$QEC_RUN_DIR/config.yaml" --transport=udp --port=50000 --timeout=3600
+
+Wait for ``QEC_DECODING_SERVER_READY`` and confirm ``ring0=50000``. A client on
+this host connects to ``127.0.0.1:50000`` and decoder ID 0. Stop the foreground
+server with Ctrl+C, or run ``docker stop qec-decoding-server`` in another
+terminal. Replace the synthetic configuration with a validated circuit
+configuration before sending real measurements. For a GPU decoder, add
+``--gpus all`` and allow writes to the run directory if building an engine.
+
+The integration steps are:
+
 1. Generate the configuration for the actual circuit, noise model,
    measurement ordering, and observables. Match the decoder ID and the number
    of correction bits to the runtime.
 2. Implement ``reset_decoder``, ``enqueue_syndromes``, and ``get_corrections``
-   using the package version of the
-   `Decoding Server Message Format <https://github.com/NVIDIA/cudaq-qec/blob/main/libs/qec/tools/decoding-server/MESSAGE_FORMAT.md>`__
-   and `CUDA-Q Realtime protocol <https://github.com/NVIDIA/cuda-quantum/blob/main/realtime/docs/cudaq_realtime_message_protocol.md>`__.
+   using the references pinned to this image: the
+   `Decoding Server Message Format <https://github.com/NVIDIA/cudaq-qec/blob/8e69945cb2d123d9ad53dc96c1cf992d77dc8bcd/libs/qec/tools/decoding-server/MESSAGE_FORMAT.md>`__
+   and `CUDA-Q Realtime protocol <https://github.com/NVIDIA/cuda-quantum/blob/a67dc853396e84698fd5aa2761f62ef78945e666/realtime/docs/cudaq_realtime_message_protocol.md>`__.
    These specify framing, function IDs, packed-bit order, request correlation,
    and statuses. ``NOT_READY`` is not a valid correction.
 3. Connect through the selected provider. UDP supports functional integration;
    CPU RoCE and GPU RoCE require the package's hardware deployment setup.
    A custom provider implements the matching
-   `bridge interface <https://github.com/NVIDIA/cuda-quantum/blob/main/realtime/include/cudaq/realtime/daemon/bridge/bridge_interface.h>`__.
+   `bridge interface <https://github.com/NVIDIA/cuda-quantum/blob/a67dc853396e84698fd5aa2761f62ef78945e666/realtime/include/cudaq/realtime/daemon/bridge/bridge_interface.h>`__.
    The third-party client does not need the CUDA-Q compiler.
 4. Reset at the beginning of an independent shot, send every configured
    measurement group including the final readout, and read the logical
@@ -504,10 +489,15 @@ Troubleshooting
    * - Playback has incomplete or failed reads
      - Check that the schedule, decoder ID, DEM, and measurement mapping belong
        to the same experiment. Inspect the returned status in the CSV.
-   * - Client compilation or Python import fails
-     - Activate the compatible SDK environment and check its installed
-       development headers, realtime libraries, and Python bindings. These
-       tools are not included in the server runtime image.
+   * - Client compilation fails
+     - Use the packaged ``/root/examples/build.sh`` with ``--entrypoint bash``
+       as shown above. Keep the client and server on the same image digest.
+   * - Color-code preparation cannot import a Python module
+     - Activate ``.venv`` and install the pinned Ising source's inference
+       requirements. Preparation runs on the host, where Python is installed.
+   * - Hugging Face returns ``401`` or ``403``
+     - Accept the model's access terms using the same account authenticated by
+       ``hf auth login``. The Chromobius-only preparation needs no model access.
    * - Model or engine initialization fails
      - Check GPU visibility, TensorRT/plugin availability, and paths under
        ``QEC_RUN_DIR``. Build engines on the deployment GPU/runtime.

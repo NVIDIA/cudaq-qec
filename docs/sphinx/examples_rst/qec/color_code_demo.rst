@@ -24,7 +24,11 @@ once per path between the emulator and the decoder (``session``):
    :doc:`/examples_rst/qec/realtime_decoding_demo` serves the surface-code Ising
    predecoder from ``decoding_server``, with syndromes sourced from a QPU kernel or an
    FPGA. Here, the playback emulator replays the pre-sampled shots of the superdense color-code
-   memory circuit to every the decoder on a fixed timing loop using the playback emulator.
+   memory circuit to each decoder on a fixed timing loop.
+
+   For an end-to-end walkthrough using the prebuilt server package, see
+   :ref:`decoding-server-color-code`. That workflow needs no host CUDA-Q SDK.
+   The prerequisites below apply to the full native benchmark on this page.
 
 Prerequisites
 -------------
@@ -62,6 +66,9 @@ To prepare artifacts for the prebuilt Docker server without starting a local
 decoder or server, use ``--prepare-only``. This writes a DEM, ONNX model,
 schedule, and separate Chromobius and TensorRT server configurations for each
 distance. It does not build TensorRT engines or produce benchmark results.
+This preparation mode needs the Ising Python dependencies but no ``cudaq_qec``
+installation. Add ``--baseline-only`` to prepare Chromobius inputs without
+downloading AI weights or exporting ONNX.
 See :ref:`decoding-server-color-code` for the preparation command and the
 container launch sequence.
 

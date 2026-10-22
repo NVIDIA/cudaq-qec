@@ -56,10 +56,13 @@ class PackageExampleTest(unittest.TestCase):
 
     def fake_client(self, command, **kwargs):
         self.calls.append(tuple(command))
-        if command[0] == "qec-client":
-            self.assertEqual(kwargs["env"]["QEC_DECODING_SERVER_PORT"], "54321")
-            self.assertEqual(kwargs["env"]["QEC_DECODING_SERVER_TRANSPORT"],
-                             "udp")
+        if "qec-client" in command:
+            self.assertIn("QEC_DECODING_SERVER_PORT=54321", command)
+            self.assertIn("QEC_DECODING_SERVER_TRANSPORT=udp", command)
+            self.assertIn("CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch", command)
+            self.assertEqual(command[command.index("--entrypoint") + 1],
+                             "qec-client")
+            self.assertEqual(command[0:2], ["docker", "run"])
             if self.client_confirms_routing:
                 kwargs["stdout"].write("CQR service dispatch count: 0\n")
             return subprocess.CompletedProcess(command, 0)
