@@ -7,15 +7,15 @@
 # ============================================================================ #
 """Consistency tests for the `cudaq_qec.playback` bindings.
 
-The emulator's behaviour is covered in C++ (libs/qec/tools/playback-emulator/
-tests). What only a Python test can reach is the seam itself: the names the
-module exports, the fields each bound struct exposes, the two places the
-binding re-derives something C++ already computes (`record.status` and
-`run_result.request_ids()`), the backend-selection check that lives in the
-binding and nowhere else, and how a C++ exception arrives on this side.
+The emulator's behaviour is covered in C++ (libs/qec/unittests/
+playback-emulator). What only a Python test can reach is the seam itself: the
+names the module exports, the keys each record dict carries, the binding's
+slicing of the run's logs into per-record values, the backend-selection check
+that lives in the binding and nowhere else, and how a C++ exception arrives on
+this side.
 
 So the shape of most tests here is: take one run, then check that two
-independent paths out of the same C++ value agree -- a bound attribute
+independent paths out of the same C++ value agree -- a record dict entry
 against the corresponding cell of `write_csv()`, which is written by C++ and
 never passes through nanobind.
 """
@@ -45,21 +45,14 @@ def cell(header, row, name):
     return row[header.index(name)]
 
 
-def bits_of(bits):
-    """The rendering write_csv() documents: one '0'/'1' character per bit, in
-    log order. Re-derived here so the Python view of an arena can be checked
-    against the column C++ wrote from it."""
-    return "".join("1" if b else "0" for b in bits)
-
-
 def a_run():
-    """One successful run covering three of the four ops (reset, stream,
-    get_corrections); `enqueue_data` has no schedule spelling reachable from
-    here. Runs entirely against the null backend, which never fails."""
+    """One successful run covering all four ops. Runs entirely against the
+    null backend, which never fails."""
     return pb.run(
         "0 reset\n"
         "1 stream source=0 rounds=2\n"
-        "2 get_corrections return_size=1\n",
+        "2 enqueue_data source=0\n"
+        "3 get_corrections return_size=1\n",
         1000,
         {0: {
             "type": "static",
@@ -101,41 +94,18 @@ def an_aborted_run():
 
 def test_module_exports_exactly_the_documented_surface():
     assert sorted(n for n in dir(pb) if not n.startswith("_")) == [
-        "operation",
-        "record",
         "run",
         "run_result",
     ]
 
 
-def test_every_record_and_run_result_field_is_reachable():
-    # A field dropped from the binding but still present in C++ would
-    # otherwise only show up as an AttributeError in a demo.
+def test_every_record_key_and_run_result_field_is_reachable():
     result = a_run()
-    for name in (
-            "event_index",
-            "decoder_id",
-            "op",
-            "dispatched",
-            "deadline_ns",
-            "call_ns",
-            "return_ns",
-            "status",
-            "rounds_streamed",
-            "read_completed",
-            "syndrome_offset",
-            "syndrome_count",
-            "correction_offset",
-            "correction_count",
-            "correction_mismatch",
-            "request_id_offset",
-            "request_id_count",
-    ):
-        assert hasattr(result.records[0], name), name
-    for name in ("records", "syndrome_log", "correction_log", "request_id_log",
-                 "warnings", "t0_ns", "tick_ns"):
+    header, _ = rows(result)
+    for rec in result.records:
+        assert set(rec) == set(header)
+    for name in ("records", "warnings", "t0_ns", "tick_ns"):
         assert hasattr(result, name), name
-    assert callable(result.request_ids)
     assert callable(result.write_csv)
 
 
@@ -158,6 +128,35 @@ def test_run_accepts_every_documented_keyword_by_name():
     assert len(result.records) == 1
 
 
+def test_run_defaults_match_the_cli():
+    # tick_ns and sources default like the CLI's --tick=1us and no --source.
+    result = pb.run("1 reset\n", null_decoder_ids=[0])
+    assert result.tick_ns == 1000
+    assert result.records[0]["deadline_ns"] == 1000
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(tick_ns=0, null_decoder_ids=[0]),
+    dict(udp_endpoints={0: "127.0.0.1:1"}, udp_timeout_ms=0),
+    dict(cpu_roce_endpoints={0: "127.0.0.1:1"},
+         cpu_roce_options={
+             "device": "none",
+             "local_ip": "127.0.0.1"
+         },
+         cpu_roce_timeout_ms=0),
+    dict(cpu_roce_endpoints={0: "127.0.0.1:1"},
+         cpu_roce_options={
+             "device": "none",
+             "local_ip": "127.0.0.1",
+             "connect_timeout_ms": 0
+         }),
+])
+def test_a_zero_tick_or_timeout_is_a_value_error(kwargs):
+    # Checked in the C++ library, so the CLI rejects the same values.
+    with pytest.raises(ValueError, match="must be positive"):
+        pb.run("0 reset\n", **kwargs)
+
+
 # -- bound values against the CSV C++ writes ---------------------------------
 
 
@@ -166,109 +165,60 @@ def test_one_csv_row_per_record_with_matching_scalar_fields():
     header, data = rows(result)
     assert len(data) == len(result.records)
     for rec, row in zip(result.records, data):
-        assert cell(header, row, "event_index") == str(rec.event_index)
-        assert cell(header, row, "decoder_id") == str(rec.decoder_id)
-        assert cell(header, row, "deadline_ns") == str(rec.deadline_ns)
-        assert cell(header, row, "call_ns") == str(rec.call_ns)
-        assert cell(header, row, "return_ns") == str(rec.return_ns)
-        assert cell(header, row, "rounds_streamed") == str(rec.rounds_streamed)
-        assert cell(header, row,
-                    "read_completed") == str(int(rec.read_completed))
-        assert cell(header, row,
-                    "correction_mismatch") == str(int(rec.correction_mismatch))
-        assert cell(header, row, "dispatched") == str(int(rec.dispatched))
-
-
-def test_operation_enum_names_match_the_csv_op_column():
-    result = a_run()
-    header, data = rows(result)
-    for rec, row in zip(result.records, data):
-        assert rec.op.name == cell(header, row, "op")
-    # `enqueue` lowers to a one-round stream, so three lines cover three of
-    # the four values; the fourth must still exist and be distinct.
-    assert {r.op for r in result.records} == {
-        pb.operation.reset,
-        pb.operation.stream,
-        pb.operation.get_corrections,
+        for name in ("event_index", "decoder_id", "op", "deadline_ns",
+                     "call_ns", "return_ns", "status", "rounds_streamed",
+                     "syndrome_bits", "correction_bits"):
+            assert cell(header, row, name) == str(rec[name]), name
+        for name in ("read_completed", "correction_mismatch", "dispatched"):
+            assert cell(header, row, name) == str(int(rec[name])), name
+    assert {r["op"] for r in result.records} == {
+        "reset",
+        "stream",
+        "enqueue_data",
+        "get_corrections",
     }
-    assert pb.operation.enqueue_data not in {r.op for r in result.records}
 
 
-def test_status_string_agrees_with_the_numeric_status_column():
-    # record.status is a binding-side property that re-derives which enum a
-    # numeric status belongs to (the two ranges are disjoint: RpcStatus 0..6,
-    # stream_terminate 100..103, and -1 for never-dispatched). Nothing in C++
-    # shares that code, so it is checked against the raw number here.
-    numeric_to_name = {
-        "0": "OK",
-        "2": "BAD_REQUEST",
-        "3": "INTERNAL_ERROR",
-        "4": "NOT_READY",
-        "100": "OK",
-        "101": "SOURCE_EXHAUSTED",
-        "102": "EXHAUSTED_ROUNDS",
-        "103": "ERROR",
-        "-1": "NOT_DISPATCHED",
-    }
+def test_status_matches_the_csv_for_ok_error_and_never_dispatched():
+    # a_run() covers OK; an_aborted_run() covers INTERNAL_ERROR (3) and, past
+    # the abort, never-dispatched (-1).
     seen = set()
-    # a_run() covers OK; an_aborted_run() covers INTERNAL_ERROR and, past
-    # the abort, NOT_DISPATCHED -- together, all three shapes of status.
     for result in (a_run(), an_aborted_run()):
         header, data = rows(result)
         for rec, row in zip(result.records, data):
-            raw = cell(header, row, "status")
-            assert raw in numeric_to_name, f"unmapped status {raw}"
-            assert rec.status == numeric_to_name[raw]
-            seen.add(rec.status)
-    assert {"OK", "INTERNAL_ERROR", "NOT_DISPATCHED"} <= seen
+            assert cell(header, row, "status") == str(rec["status"])
+            seen.add(rec["status"])
+    assert {0, 3, -1} <= seen
 
 
-def test_request_ids_helper_agrees_with_the_offsets_and_the_csv_column():
+def test_per_request_lists_match_the_csv_columns():
     result = a_run()
     header, data = rows(result)
-    total = 0
-    for i, (rec, row) in enumerate(zip(result.records, data)):
-        ids = result.request_ids(i)
-        assert len(ids) == rec.request_id_count
-        assert ids == list(
-            result.request_id_log[rec.request_id_offset:rec.request_id_offset +
-                                  rec.request_id_count])
-        assert cell(header, row, "request_ids") == " ".join(str(x) for x in ids)
-        total += len(ids)
-    # Every id the run issued belongs to exactly one record, and the log is
-    # strictly increasing.
-    assert total == len(result.request_id_log)
-    assert sorted(set(result.request_id_log)) == list(result.request_id_log)
-
-
-def test_request_ids_rejects_an_event_index_that_does_not_exist():
-    result = a_run()
-    with pytest.raises(IndexError):
-        result.request_ids(len(result.records))
-
-
-def test_syndrome_log_slice_matches_the_bits_column_written_from_it():
-    result = a_run()
-    header, data = rows(result)
+    all_ids = []
     for rec, row in zip(result.records, data):
-        bits = list(
-            result.syndrome_log[rec.syndrome_offset:rec.syndrome_offset +
-                                rec.syndrome_count])
-        assert cell(header, row, "syndrome_bits") == bits_of(bits)
-        corrections = list(
-            result.correction_log[rec.correction_offset:rec.correction_offset +
-                                  rec.correction_count])
-        assert cell(header, row, "correction_bits") == bits_of(corrections)
-    # The streamed rounds really did reach the log, so the check above is not
-    # vacuously comparing two empty strings.
-    assert list(result.syndrome_log) == [1, 0, 1, 1, 0, 1]
+        for name in ("request_ids", "request_dispatch_ns", "request_return_ns",
+                     "request_status"):
+            assert cell(header, row,
+                        name) == " ".join(str(x) for x in rec[name]), name
+        assert len(rec["request_status"]) == len(rec["request_ids"])
+        assert set(rec["request_status"]) <= {0}
+        all_ids += rec["request_ids"]
+    # Every id the run issued belongs to exactly one record, in issue order.
+    assert all_ids and sorted(set(all_ids)) == all_ids
+
+
+def test_bits_reach_the_records():
+    # The bits columns are compared above; this checks they are not vacuously
+    # empty.
+    result = a_run()
+    assert "".join(r["syndrome_bits"] for r in result.records) == "101" * 3
 
 
 def test_an_aborted_run_reports_a_warning_and_stops_dispatching():
     result = an_aborted_run()
     assert len(result.warnings) == 1
     assert "aborting the run" in result.warnings[0]
-    dispatched = [r.dispatched for r in result.records]
+    dispatched = [r["dispatched"] for r in result.records]
     assert dispatched[0] is True  # the failing get_corrections itself ran
     assert False in dispatched  # the abort pre-empted at least one reset
     # dispatch never reorders or skips backward: every True precedes every
@@ -334,8 +284,8 @@ def test_backends_can_be_mixed_per_decoder():
                     null_decoder_ids=[0],
                     udp_endpoints={1: f"127.0.0.1:{port}"},
                     udp_timeout_ms=50)
-    by_decoder = {r.decoder_id: r.status for r in result.records}
-    assert by_decoder == {0: "OK", 1: "INTERNAL_ERROR"}
+    by_decoder = {r["decoder_id"]: r["status"] for r in result.records}
+    assert by_decoder == {0: 0, 1: 3}  # OK, INTERNAL_ERROR
 
 
 def test_cpu_roce_options_are_parsed_before_any_transport_is_touched():
@@ -368,12 +318,12 @@ def test_a_static_source_spec_replays_identically_across_separate_runs():
 
     # A fresh source is built per run(), so the same spec replays identically.
     first = pb.run(schedule, 1000, spec, null_decoder_ids=[0])
-    assert first.records[0].rounds_streamed == 3
-    assert list(first.syndrome_log) == [1, 1, 0] * 3
+    assert first.records[0]["rounds_streamed"] == 3
+    assert first.records[0]["syndrome_bits"] == "110" * 3
 
     second = pb.run(schedule, 1000, spec, null_decoder_ids=[0])
-    assert second.records[0].rounds_streamed == 3
-    assert list(second.syndrome_log) == [1, 1, 0] * 3
+    assert second.records[0]["rounds_streamed"] == 3
+    assert second.records[0]["syndrome_bits"] == "110" * 3
 
 
 def test_a_source_spec_missing_its_type_key_is_a_value_error():
@@ -382,6 +332,27 @@ def test_a_source_spec_missing_its_type_key_is_a_value_error():
                1000, {0: {
                    "rounds": [[1]]
                }},
+               null_decoder_ids=[0])
+
+
+@pytest.mark.parametrize("spec", [
+    {
+        "type": "static",
+        "rounds": [[1]],
+        "seed": 1
+    },
+    {
+        "type": "stim_memory",
+        "code": "repetition_code",
+        "task": "memory",
+        "distance": 3,
+        "distnace": 3
+    },
+])
+def test_an_unknown_source_key_is_a_value_error(spec):
+    with pytest.raises(ValueError, match="unknown .* source key"):
+        pb.run("0 stream source=0 rounds=1\n",
+               1000, {0: spec},
                null_decoder_ids=[0])
 
 
@@ -395,17 +366,17 @@ def test_an_unrecognized_source_type_is_a_value_error():
 
 
 def test_a_stim_memory_source_spec_drives_a_run_and_rejects_bad_params():
+    # "seed" defaults to 1, like the CLI's --stim-source.
     params = dict(type="stim_memory",
-                  seed=1,
                   code="repetition_code",
                   task="memory",
                   distance=3)
     result = pb.run("0 stream source=0 rounds=4\n",
                     1000, {0: params},
                     null_decoder_ids=[0])
-    assert result.records[0].rounds_streamed == 4
-    assert len(
-        result.syndrome_log) == 4 * 2  # 2 ancilla bits/round at distance 3
+    assert result.records[0]["rounds_streamed"] == 4
+    assert len(result.records[0]
+               ["syndrome_bits"]) == 4 * 2  # 2 ancilla bits/round at distance 3
 
     # The C++ constructor throws std::runtime_error, which nanobind maps to
     # RuntimeError rather than ValueError. Stim inlines the round body
@@ -442,16 +413,16 @@ def test_a_cudaq_memory_source_spec_drives_a_run_and_rejects_bad_params():
     result = pb.run("0 stream source=0 rounds=3\n",
                     1000, {0: params},
                     null_decoder_ids=[0])
-    assert result.records[0].rounds_streamed == 3
-    assert len(
-        result.syndrome_log) == 3 * 2  # 2 ancilla bits/round at distance 3
+    assert result.records[0]["rounds_streamed"] == 3
+    assert len(result.records[0]
+               ["syndrome_bits"]) == 3 * 2  # 2 ancilla bits/round at distance 3
 
     # "noise" is optional -- a fresh, empty NoiseModel is used if omitted.
     no_noise = {k: v for k, v in params.items() if k != "noise"}
     result2 = pb.run("0 stream source=0 rounds=3\n",
                      1000, {0: no_noise},
                      null_decoder_ids=[0])
-    assert result2.records[0].rounds_streamed == 3
+    assert result2.records[0]["rounds_streamed"] == 3
 
     # An unrecognized state_prep name is a ValueError, not a crash.
     with pytest.raises(ValueError, match="state_prep"):

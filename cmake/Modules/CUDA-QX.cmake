@@ -214,6 +214,11 @@ function(cudaqx_import_cudaq_targets)
   find_package(CUDAQMlirRuntime REQUIRED CONFIG)
   find_package(CUDAQPythonInterop CONFIG)
 
+  set(CUDAQTargetCatalog_DIR "${CUDAQ_CMAKE_DIR}/../CUDAQTargetCatalog")
+  if(EXISTS "${CUDAQTargetCatalog_DIR}/CUDAQTargetCatalogConfig.cmake")
+    find_package(CUDAQTargetCatalog REQUIRED CONFIG)
+  endif()
+
   # Import the CUDA-Q library target without loading CUDAQConfig.cmake, which
   # enables the CUDAQ CMake language in current CUDA-Q installs.
   if(NOT TARGET cudaq::cudaq)

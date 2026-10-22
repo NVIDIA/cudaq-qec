@@ -1063,7 +1063,7 @@ chain_layout plan_chain(const std::vector<extended_dem> &chunks,
                         seam_id from_seam, seam_id to_seam) {
   const std::size_t T = chunks.size();
   chain_layout plan;
-  plan.col_off.assign(T + 1, 0);
+  plan.col_off = dem_chunks_to_fault_offsets(chunks);
   plan.interior_row.assign(T, 0);
   plan.seam_row.assign(T - 1, 0);
   plan.lead = seam_rows_or_zero(chunks.front(), to_seam);
@@ -1071,7 +1071,6 @@ chain_layout plan_chain(const std::vector<extended_dem> &chunks,
 
   std::size_t rows = plan.lead;
   for (std::size_t i = 0; i < T; ++i) {
-    plan.col_off[i + 1] = plan.col_off[i] + chunks[i].num_faults();
     plan.interior_row[i] = rows;
     rows += chunks[i].num_interior_rows();
     if (i + 1 < T) {
@@ -1296,10 +1295,7 @@ detector_error_model dem_close_all(const std::vector<extended_dem> &chunks,
     check_seam_boundary(chunks[i], chunks[i + 1], from_seam, to_seam,
                         "dem_close_all: boundary " + std::to_string(i));
 
-  // Cumulative fault column offsets
-  std::vector<std::size_t> col_off(T + 1, 0);
-  for (std::size_t i = 0; i < T; ++i)
-    col_off[i + 1] = col_off[i] + chunks[i].num_faults();
+  const auto col_off = dem_chunks_to_fault_offsets(chunks);
   const std::size_t n_faults = col_off.back();
 
   const std::size_t lead =
@@ -1435,6 +1431,16 @@ dem_chunks_to_detector_round(const std::vector<extended_dem> &chunks,
       result.insert(result.end(), d, round);
   }
   return result;
+}
+
+std::vector<std::size_t>
+dem_chunks_to_fault_offsets(const std::vector<extended_dem> &chunks) {
+  std::vector<std::size_t> offsets;
+  offsets.reserve(chunks.size() + 1);
+  offsets.push_back(0);
+  for (const auto &c : chunks)
+    offsets.push_back(offsets.back() + c.num_faults());
+  return offsets;
 }
 
 std::vector<std::vector<uint32_t>>

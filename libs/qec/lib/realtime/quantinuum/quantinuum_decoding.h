@@ -31,6 +31,35 @@ __attribute__((visibility("default"))) void
 enqueue_syndromes_ui64_private(uint64_t decoder_id, uint64_t syndrome_size,
                                uint64_t syndrome, uint64_t tag);
 
+/// @brief Enqueue a syndrome, naming the syndrome_mapping row it belongs to.
+///
+/// A separate wire function rather than a wider `enqueue_syndromes_ui64`: the
+/// function id is derived from this name, so a new name is additive and a
+/// receiver that predates it warns and ignores rather than misreading a
+/// longer payload.
+///
+/// The payload is `enqueue_syndromes_ui64`'s with `syndrome_mapping_id`
+/// appended, so the two share a byte-identical four-field prefix and this
+/// transport keeps one field order throughout.  (That order is this
+/// transport's own and predates the decoding-server wire, which puts its
+/// fixed-size scalars first.)
+/// @param decoder_id The ID of the decoder to use.
+/// @param syndrome_size The size of the syndrome (in bits). This must be <= 64.
+/// @param syndrome The bit-packed syndrome to enqueue, LSB first.
+/// @param tag Which round this is (logging only)
+/// @param syndrome_mapping_id Which syndrome_mapping row describes the round.
+__attribute__((visibility("default"))) void
+enqueue_syndromes_mapped_ui64(uint64_t decoder_id, uint64_t syndrome_size,
+                              uint64_t syndrome, uint64_t tag,
+                              uint64_t syndrome_mapping_id);
+
+// Private variant for alternative testing (closer to in-system).
+__attribute__((visibility("default"))) void
+enqueue_syndromes_mapped_ui64_private(uint64_t decoder_id,
+                                      uint64_t syndrome_size, uint64_t syndrome,
+                                      uint64_t tag,
+                                      uint64_t syndrome_mapping_id);
+
 /// @brief Get the corrections for a given decoder.
 /// @param decoder_id The ID of the decoder to use.
 /// @param return_size The number of bits to return (in bits). This must be

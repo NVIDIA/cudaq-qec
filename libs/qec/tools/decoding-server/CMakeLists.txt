@@ -183,6 +183,10 @@ if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET cudaq-qec-realtime-decoding-server-cqr)
       ${CMAKE_CURRENT_SOURCE_DIR}/decoding_server_config_multi_error_lut.yaml
       ${CMAKE_BINARY_DIR}/bin/decoding_server_config_multi_error_lut.yaml
       COPYONLY)
+    configure_file(
+      ${CMAKE_CURRENT_SOURCE_DIR}/decoding_server_config_task_graph.yaml
+      ${CMAKE_BINARY_DIR}/bin/decoding_server_config_task_graph.yaml
+      COPYONLY)
 
     # Install the server (and its example configs) alongside the libraries.
     # The qec-tools component is deliberately NOT in the Python wheel's
@@ -195,6 +199,7 @@ if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET cudaq-qec-realtime-decoding-server-cqr)
     install(FILES
       ${CMAKE_CURRENT_SOURCE_DIR}/decoding_server_config.yaml
       ${CMAKE_CURRENT_SOURCE_DIR}/decoding_server_config_multi_error_lut.yaml
+      ${CMAKE_CURRENT_SOURCE_DIR}/decoding_server_config_task_graph.yaml
       COMPONENT qec-tools
       DESTINATION ${CMAKE_INSTALL_BINDIR}
     )

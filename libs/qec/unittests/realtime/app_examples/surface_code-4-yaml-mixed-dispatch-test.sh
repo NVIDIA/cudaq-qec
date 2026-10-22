@@ -79,6 +79,7 @@ ERR_VEC='[ 0.00666667, 0.00334452, 0.00334452, 0.00334452, 0.00334452, 0.0033445
 cat > "$config" <<EOF
 transport:
   provider:        udp
+  args:            [--port=0]
   device_graph:
     args:          [--pinned-rings]
 decoders:
@@ -117,7 +118,7 @@ decoders:
 EOF
 
 # --- server: wire named by the YAML only (no --transport) ------------------
-CUDAQ_LOG_LEVEL=info "$SERVER" --config="$config" --port=0 --timeout=120 \
+CUDAQ_LOG_LEVEL=info "$SERVER" --config="$config" --timeout=120 \
     > "$server_log" 2>&1 &
 server_pid=$!
 

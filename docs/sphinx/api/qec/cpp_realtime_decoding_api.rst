@@ -10,6 +10,7 @@ Core Decoding Functions
 These functions can be called from within CUDA-Q quantum kernels (``__qpu__`` functions) to interact with real-time decoders.
 
 .. doxygenfunction:: cudaq::qec::decoding::enqueue_syndromes
+.. doxygenfunction:: cudaq::qec::decoding::enqueue_syndromes_mapped
 .. doxygenfunction:: cudaq::qec::decoding::get_corrections
 .. doxygenfunction:: cudaq::qec::decoding::reset_decoder
 
@@ -24,6 +25,9 @@ The configuration API enables setting up decoders before circuit execution. Deco
 
 .. doxygenenum:: cudaq::qec::decoding::config::DecoderDispatch
 
+.. doxygenclass:: cudaq::qec::decoding::config::decoder_custom_args_t
+   :members:
+
 .. doxygenstruct:: cudaq::qec::decoding::config::decoder_config
    :members:
 
@@ -31,6 +35,9 @@ The configuration API enables setting up decoders before circuit execution. Deco
    :members:
 
 .. doxygenstruct:: cudaq::qec::decoding::config::transport_config
+   :members:
+
+.. doxygenstruct:: cudaq::qec::decoding::config::syndrome_mapping_config
    :members:
 
 .. doxygenclass:: cudaq::qec::decoding::config::multi_decoder_config
