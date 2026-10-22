@@ -256,13 +256,19 @@ RUN --mount=type=bind,from=toolchain,source=/opt/cudaq-src/realtime/scripts/deps
 
 # The three install trees at the same absolute paths as in the builder
 # stage (decoding_server's RPATH depends on it). From CUDA-Q: lib/ (whole,
-# so anything dlopen'd by name is present), targets/, bin/ and include/
+# so anything dlopen'd by name is present, minus the GPU circuit-simulator
+# backends removed below), targets/, bin/ and include/
 # (nvq++ and the headers user programs compile against), license files,
 # and build_info.txt. nvq++ drives the clang/lld install at
 # /usr/local/llvm, copied from the same image. The Python package and
 # sources are not shipped. Supplied decoder plugins live in the cudaqx
 # tree; the cudevice archive is linked into decoding_server.
 COPY --from=cudaq-official /opt/nvidia/cudaq/lib /opt/nvidia/cudaq/lib
+# GPU circuit simulators: their cuQuantum and CUDA math libraries are not shipped.
+RUN rm -f /opt/nvidia/cudaq/lib/libnvqir-custatevec*.so \
+          /opt/nvidia/cudaq/lib/libnvqir-tensornet*.so \
+          /opt/nvidia/cudaq/lib/libnvqir-nvidia-mgpu*.so \
+          /opt/nvidia/cudaq/lib/libnvqir-dynamics.so
 COPY --from=cudaq-official /opt/nvidia/cudaq/bin /opt/nvidia/cudaq/bin
 COPY --from=cudaq-official /opt/nvidia/cudaq/include /opt/nvidia/cudaq/include
 COPY --from=cudaq-official /usr/local/llvm /usr/local/llvm
