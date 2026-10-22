@@ -125,8 +125,9 @@ if (NOT SKBUILD)
 else()
   # CUDA-Q install its libraries in site-packages/lib (or dist-packages/lib)
   # Thus, we need the $ORIGIN/../lib
+  # EDEM and GF2 are direct dependencies in the sibling cudaq_edem wheel.
   set_target_properties(${MODULE_NAME} PROPERTIES
-    INSTALL_RPATH "$ORIGIN/lib:$ORIGIN/../lib"
+    INSTALL_RPATH "$ORIGIN/lib:$ORIGIN/../lib:$ORIGIN/../cudaq_edem/lib"
   )
 endif()
 

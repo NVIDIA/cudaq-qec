@@ -128,7 +128,7 @@ jobs:
           python3 -m pip install IPython breathe enum_tools myst_parser nbsphinx \
             sphinx_copybutton sphinx_inline_tabs sphinx_gallery sphinx_rtd_theme \
             sphinx_reredirects "sphinx<9" sphinx_toolbox \
-            "cuquantum-python-cu12>=26.3.0"
+            "cuquantum-python-cu12>=26.3.0" "cudaq-edem>=0.1.0,<0.2"
 
       - name: Build docs
         env:

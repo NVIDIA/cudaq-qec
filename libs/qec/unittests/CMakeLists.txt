@@ -86,7 +86,9 @@ else()
                  "(cudaq-qec-decoding-server not built)")
 endif()
 
-add_executable(test_qec test_qec.cpp)
+add_executable(test_qec test_qec.cpp test_edem_composer.cpp)
+target_include_directories(test_qec PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../examples/qec/cpp")
 target_link_libraries(test_qec PRIVATE GTest::gtest_main cudaq-qec cudaq::cudaq-stim-target)
 add_dependencies(CUDAQXQECUnitTests test_qec)
 gtest_discover_tests(test_qec)

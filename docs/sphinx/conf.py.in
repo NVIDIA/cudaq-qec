@@ -285,6 +285,7 @@ nitpick_ignore = [
     ('cpp:identifier', 'cudaq::qview<>'),
     ('cpp:identifier', 'cudaq::measure_result'),
     ('cpp:identifier', 'cudaq::M2DSparseMatrix'),
+    ('cpp:identifier', 'cudaq_edem_dem_view'),
     ('py:class', 'SpinOperator'),
     ('py:class', 'cudaq.SpinOperator'),
     ('py:class', 'cudaq::sum_op<cudaq::spin_handler>'),

@@ -186,6 +186,8 @@ $python -m auditwheel -v repair dist/*.whl $CUDAQ_EXCLUDE_LIST \
   --wheel-dir /wheels \
   --exclude libcudart.so.${cuda_version} \
   --exclude libcustabilizer.so.0 \
+  --exclude libcudaq-edem.so.0 \
+  --exclude libcudaq-gf2.so.0 \
   --exclude libnvinfer.so.10 \
   --exclude libnvonnxparser.so.10 \
   --exclude libcudaq-qec.so \

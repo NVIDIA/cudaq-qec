@@ -49,6 +49,7 @@ runs:
       run: |
         apt update
         apt install -y --no-install-recommends ccache
+        python3 -m pip install "cudaq-edem>=0.1.0,<0.2"
       shell: bash
 
     - name: Compilation cache key
