@@ -9,8 +9,8 @@
 // Unit tests for the experiment template and decoding windows built from
 // dem_chunks: per-round phases, chunks and offsets against an expanded shot;
 // window rows, columns, ports, sends and measurement maps against a dense
-// slice of the whole shot; the window spec's nine-SEC example; and the
-// spec's invalid constructions.
+// slice of the whole shot; the window spec's nine-SEC example; the spec's
+// invalid constructions; and the column-handling options.
 
 #include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
@@ -790,5 +790,223 @@ TEST(DecodingWindow, RejectsInvalidRequests) {
     expect_error([&] { window_from_dem_chunks(tmpl, good, k, 12); },
                  "has no commit round");
 } // end - TEST(DecodingWindow, RejectsInvalidRequests)
+
+// ---------------------------------------------------------------------------
+// Column-handling options
+// ---------------------------------------------------------------------------
+
+// Four detectors a round, per seam, with eight faults a chunk:
+//   0, 1: detector 0 in both rounds, no observable (identical pair);
+//   2, 3: detector 1 in both rounds; 2 flips the observable, 3 does not;
+//   4, 5: detector 2; 4 also flips it in the next round, 5 does not;
+//   6:    detector 3 in both rounds;
+//   7:    silent: no detector, no observable.
+dem_chunks_spec duplicate_columns_spec() {
+  auto spec = arbitrary_memory_spec(5);
+  const std::vector<std::int64_t> prev{0, 1, -1, 2, 3, -1, 4, 5, -1, 6, -1};
+  const std::vector<std::int64_t> next{0, 1, -1, 2, 3, -1, 4, -1, 6, -1};
+  for (auto &phase : spec.phases) {
+    phase.spec.H_sparse.clear();
+    phase.spec.num_faults = 8;
+    phase.spec.O_sparse = {2, -1};
+    phase.spec.error_rates = {0.01, 0.02, 0.03, 0.01, 0.02, 0.02, 0.02, 0.005};
+    phase.spec.seam_specs = {{seam_name::prev_round, {prev, {}}}};
+    if (phase.id != phase_name::dem_final)
+      phase.spec.seam_specs.push_back({seam_name::next_round, {next, {}}});
+  }
+  return spec;
+} // end - duplicate_columns_spec()
+
+// Column c of a window's H, over its rows, and its O.
+std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
+column_of(const decoding_window &w, std::size_t c) {
+  std::pair<std::vector<uint8_t>, std::vector<uint8_t>> out;
+  const auto &h = w.model.detector_error_matrix;
+  const auto &o = w.model.observables_flips_matrix;
+  for (std::size_t r = 0; r < h.shape()[0]; ++r)
+    out.first.push_back(h.at({r, c}));
+  for (std::size_t i = 0; i < o.shape()[0]; ++i)
+    out.second.push_back(o.at({i, c}));
+  return out;
+}
+
+// The zone of an unmerged fault column: 0 for the commit zone, else 1 plus
+// the buffer's index.
+std::size_t zone_of(const decoding_window &w, std::size_t column,
+                    std::size_t faults_per_round) {
+  const auto round =
+      w.rounds.begin + static_cast<std::int64_t>(column / faults_per_round);
+  if (round >= w.commit.begin && round < w.commit.end)
+    return 0;
+  for (std::size_t b = 0; b < w.buffers.size(); ++b)
+    if (round >= w.buffers[b].begin && round < w.buffers[b].end)
+      return b + 1;
+  return w.buffers.size() + 1;
+}
+
+// merge_identical merges same-zone columns with identical full rows and
+// observable effect, with the combined prior, and records every source with
+// the most likely first. It never merges across zones, a pair that differs
+// only in rows omitted at the open output, or the boundary columns.
+TEST(DecodingWindowColumns, MergeIdenticalMergesWithinAZone) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(duplicate_columns_spec());
+  auto request = layered(2, 2, 3).a;
+  const std::size_t R = 14;
+  const auto plain = window_from_dem_chunks(tmpl, request, 1, R);
+  request.columns.merge_identical = true;
+  const auto w = window_from_dem_chunks(tmpl, request, 1, R);
+  std::vector<int> seen(plain.num_fault_columns, 0);
+  ASSERT_EQ(w.rounds, (round_range{3, 9}));
+  ASSERT_EQ(plain.num_fault_columns, 48u);
+  // Per zone of two chunks: 0 and 1 merge in each chunk, and the two silent
+  // columns merge, leaving 16 - 2 - 1 = 13.
+  EXPECT_EQ(w.num_fault_columns, 39u);
+  ASSERT_EQ(w.fault_column_sources.size(), w.num_fault_columns);
+  for (std::size_t c = 0; c < w.num_fault_columns; ++c) {
+    const auto &sources = w.fault_column_sources[c];
+    double prior = 0.0;
+    ASSERT_FALSE(sources.empty());
+    for (const auto source : sources) {
+      ++seen[source];
+      EXPECT_EQ(column_of(w, c), column_of(plain, source)) << c;
+      EXPECT_EQ(zone_of(plain, source, 8), zone_of(plain, sources[0], 8));
+      EXPECT_LE(plain.model.error_rates[source],
+                plain.model.error_rates[sources[0]]);
+      prior = prior + plain.model.error_rates[source] -
+              2 * prior * plain.model.error_rates[source];
+    }
+    EXPECT_NEAR(w.model.error_rates[c], prior, 1e-12);
+    const bool in_commit = zone_of(plain, sources[0], 8) == 0;
+    EXPECT_EQ(in_commit,
+              c >= w.commit_columns.begin && c < w.commit_columns.end);
+  } // end - for(c)
+  EXPECT_EQ(seen, std::vector<int>(plain.num_fault_columns, 1));
+  // The commit zone's first chunk: 0 and 1 merge, reported against 1.
+  const auto merged = w.commit_columns.begin;
+  EXPECT_EQ(w.fault_column_sources[merged], (std::vector<std::size_t>{17, 16}));
+  EXPECT_NEAR(w.model.error_rates[merged], 0.01 + 0.02 - 2 * 0.01 * 0.02,
+              1e-12);
+  // In the last chunk, 4 and 5 agree inside the window; round 9 differs.
+  EXPECT_EQ(column_of(plain, 44), column_of(plain, 45));
+  for (const auto &sources : w.fault_column_sources)
+    for (const auto source : sources)
+      if (source == 44)
+        EXPECT_EQ(sources, (std::vector<std::size_t>{44}));
+  EXPECT_EQ(w.num_virtual_outcome_columns, plain.num_virtual_outcome_columns);
+  EXPECT_EQ(w.num_logical_error_columns, plain.num_logical_error_columns);
+} // end - TEST(DecodingWindowColumns, MergeIdenticalMergesWithinAZone)
+
+// Without an option, every built column is its own source.
+TEST(DecodingWindowColumns, DefaultKeepsEveryColumn) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(duplicate_columns_spec());
+  const auto w = window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, 14);
+  ASSERT_EQ(w.fault_column_sources.size(), w.num_fault_columns);
+  for (std::size_t c = 0; c < w.num_fault_columns; ++c)
+    EXPECT_EQ(w.fault_column_sources[c], (std::vector<std::size_t>{c}));
+}
+
+// conflicting_parallel: most_likely merges a same-zone class with identical
+// full rows but different observable effects into one column with the most
+// likely member's response; ties keep the first. Identical pairs stay unless
+// merge_identical is also set.
+TEST(DecodingWindowColumns, MostLikelyKeepsTheMoreLikelyResponse) {
+  auto spec = duplicate_columns_spec();
+  auto request = layered(2, 2, 3).a;
+  const std::size_t R = 14;
+  request.columns.conflicting_parallel = parallel_resolution::most_likely;
+  const auto check = [&](const dem_chunks_spec &s, std::size_t reported,
+                         double prior) {
+    const auto tmpl = std::make_shared<const experiment_template>(s);
+    const auto plain = window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, R);
+    const auto w = window_from_dem_chunks(tmpl, request, 1, R);
+    // Each chunk's 2 and 3 become one column: 48 - 6.
+    ASSERT_EQ(w.num_fault_columns, 42u);
+    // The commit zone's first chunk is unmerged columns 16..23.
+    const auto c = w.commit_columns.begin + 2;
+    EXPECT_EQ(w.fault_column_sources[c],
+              (std::vector<std::size_t>{reported, 18 + 19 - reported}));
+    EXPECT_EQ(column_of(w, c), column_of(plain, reported));
+    EXPECT_NEAR(w.model.error_rates[c], prior, 1e-12);
+    EXPECT_EQ(w.fault_column_sources[w.commit_columns.begin],
+              (std::vector<std::size_t>{16}));
+  };
+  check(spec, 18, 0.03 + 0.01 - 2 * 0.03 * 0.01);
+  for (auto &phase : spec.phases)
+    phase.spec.error_rates[3] = 0.03;
+  check(spec, 18, 0.03 + 0.03 - 2 * 0.03 * 0.03);
+  for (auto &phase : spec.phases)
+    phase.spec.error_rates[3] = 0.04;
+  check(spec, 19, 0.03 + 0.04 - 2 * 0.03 * 0.04);
+} // end - TEST(DecodingWindowColumns, MostLikelyKeepsTheMoreLikelyResponse)
+
+// boundary: truncate replaces the open input's boundary columns with the
+// previous chunk's crossing faults, restricted to the window's rows, with
+// their own priors and never committed: get_pcm_for_rounds() with the start
+// straddlers.
+TEST(DecodingWindowColumns, TruncateMatchesGetPcmForRounds) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto tmpl = std::make_shared<const experiment_template>(spec);
+  const std::size_t R = 15;
+  const auto shot = make_whole_shot(spec, R);
+  auto request = layered(2, 2, 3).a;
+  request.input = {port_disposition::open, std::nullopt,
+                   input_boundary::truncate};
+  const auto instances = window_instances(request, R);
+  for (auto k = instances.begin; k < instances.end; ++k) {
+    const auto w = window_from_dem_chunks(tmpl, request, k, R);
+    const auto [pcm, first, last] = get_pcm_for_rounds(
+        shot.model.detector_error_matrix, rep5_checks, w.rounds.begin,
+        w.rounds.end - 1, true, w.output.exists);
+    const auto F = w.num_fault_columns;
+    const auto C = w.num_crossing_columns;
+    SCOPED_TRACE("k=" + std::to_string(k));
+    EXPECT_EQ(w.num_virtual_outcome_columns + w.num_logical_error_columns, 0u);
+    EXPECT_EQ(C, w.rounds.begin > 0 ? 4u : 0u);
+    EXPECT_EQ(w.num_decoder_columns(), F + C);
+    ASSERT_EQ(pcm.shape()[1], F + C);
+    // get_pcm_for_rounds() keeps shot order: the crossing columns first.
+    for (std::size_t r = 0; r < pcm.shape()[0]; ++r) {
+      for (std::size_t c = 0; c < C; ++c)
+        EXPECT_EQ(pcm.at({r, c}), w.model.detector_error_matrix.at({r, F + c}));
+      for (std::size_t c = 0; c < F; ++c)
+        EXPECT_EQ(pcm.at({r, C + c}), w.model.detector_error_matrix.at({r, c}));
+    }
+    for (std::size_t c = 0; c < C; ++c)
+      EXPECT_EQ(w.model.error_rates[F + c],
+                shot.model.error_rates[shot.column[w.rounds.begin - 1] + c]);
+    EXPECT_LE(w.commit_columns.end, F);
+  } // end - for(k)
+} // end - TEST(DecodingWindowColumns, TruncateMatchesGetPcmForRounds)
+
+// Truncated crossing columns never merge, even when identical in the window.
+TEST(DecodingWindowColumns, TruncatedColumnsNeverMerge) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(duplicate_columns_spec());
+  auto request = layered(2, 2, 3).a;
+  request.input = {port_disposition::open, std::nullopt,
+                   input_boundary::truncate};
+  request.columns.merge_identical = true;
+  const auto w = window_from_dem_chunks(tmpl, request, 1, 14);
+  const auto F = w.num_fault_columns;
+  // Faults 0, 1, 2, 3, 4 and 6 of round 2 reach round 3; 5 and 7 do not.
+  ASSERT_EQ(w.num_crossing_columns, 6u);
+  EXPECT_EQ(column_of(w, F), column_of(w, F + 1));
+}
+
+// The options' own invalid combinations.
+TEST(DecodingWindowColumns, RejectsInvalidOptions) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  auto truncated = layered(2, 2, 3).a;
+  auto closed = layered(2, 2, 3).b;
+  truncated.input.boundary = input_boundary::truncate;
+  closed.input.boundary = input_boundary::columns;
+  expect_error([&] { window_from_dem_chunks(tmpl, truncated, 1, 12); },
+               "a truncated input takes no prior");
+  expect_error([&] { window_from_dem_chunks(tmpl, closed, 1, 12); },
+               "a closed input takes no boundary");
+}
 } // namespace
 } // namespace cudaq::qec

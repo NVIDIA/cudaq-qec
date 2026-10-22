@@ -13,8 +13,10 @@
 
 #include "decoding_task_decoding_window.h"
 #include <algorithm>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace cudaq::qec {
 namespace {
@@ -117,10 +119,16 @@ void check_request(const window_request &request) {
     fail("the input port has no disposition");
   if (!output.disposition)
     fail("the output port has no disposition");
-  if (*input.disposition == port_disposition::open && !input.prior)
+  const bool open_input = *input.disposition == port_disposition::open;
+  const bool truncated = input.boundary == input_boundary::truncate;
+  if (!open_input && input.boundary)
+    fail("a closed input takes no boundary");
+  if (open_input && !truncated && !input.prior)
     fail("an open input needs a prior");
-  if (*input.disposition == port_disposition::closed && input.prior)
+  if (!open_input && input.prior)
     fail("a closed input takes no prior");
+  if (truncated && input.prior)
+    fail("a truncated input takes no prior");
   if (input.prior && !(*input.prior > 0.0 && *input.prior < 1.0))
     fail("the input prior must be strictly between 0 and 1");
   if (output.imports) {
@@ -152,6 +160,62 @@ sparse_binary_matrix map_matrix(std::size_t num_rows, std::size_t num_cols,
       static_cast<sparse_binary_matrix::index_type>(num_rows),
       static_cast<sparse_binary_matrix::index_type>(num_cols), rows);
 }
+
+// Column c of a matrix, over every row.
+std::vector<std::uint8_t> column_bits(const cudaqx::tensor<uint8_t> &m,
+                                      std::size_t c) {
+  std::vector<std::uint8_t> bits(m.shape()[0]);
+  for (std::size_t r = 0; r < bits.size(); ++r)
+    bits[r] = m.at({r, c});
+  return bits;
+}
+
+// Groups the window's fault columns, closed columns first + j for zone[j],
+// into built columns. A class is a zone's columns with identical full rows
+// in the closed chain, which holds every row they touch. most_likely merges
+// a class whose observable effects differ; merge_identical merges the
+// members with equal effects. Groups are ordered by their first column, and
+// list their most likely column first, ties by index.
+std::vector<std::vector<std::size_t>>
+group_fault_columns(const detector_error_model &closed, std::size_t first,
+                    const std::vector<std::size_t> &zone,
+                    const window_request::column_options &options) {
+  using signature = std::pair<std::size_t, std::vector<std::uint8_t>>;
+  std::map<signature, std::vector<std::size_t>> classes;
+  std::vector<std::vector<std::size_t>> by_first(zone.size());
+  std::vector<std::vector<std::size_t>> groups;
+  const auto &h = closed.detector_error_matrix;
+  const auto &o = closed.observables_flips_matrix;
+  const auto &rates = closed.error_rates;
+  for (std::size_t j = 0; j < zone.size(); ++j)
+    classes[{zone[j], column_bits(h, first + j)}].push_back(j);
+  for (const auto &[key, members] : classes) {
+    std::map<std::vector<std::uint8_t>, std::vector<std::size_t>> by_effect;
+    for (const auto j : members)
+      by_effect[column_bits(o, first + j)].push_back(j);
+    if (options.conflicting_parallel == parallel_resolution::most_likely &&
+        by_effect.size() > 1) {
+      by_first[members.front()] = members;
+    } else {
+      for (const auto &[effect, part] : by_effect)
+        if (options.merge_identical)
+          by_first[part.front()] = part;
+        else
+          for (const auto j : part)
+            by_first[j] = {j};
+    }
+  } // end - for(classes)
+  for (auto &group : by_first) {
+    if (group.empty())
+      continue;
+    std::stable_sort(group.begin(), group.end(),
+                     [&](std::size_t a, std::size_t b) {
+                       return rates[first + a] > rates[first + b];
+                     });
+    groups.push_back(std::move(group));
+  }
+  return groups;
+} // end - group_fault_columns()
 
 // The measurement layout of a window's rounds: each round's width and where
 // its measurements start among the map's inputs, after v_in.
@@ -347,64 +411,124 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
   w.input.disposition = *request.input.disposition;
   w.output.exists = e < R;
   w.output.disposition = *request.output.disposition;
+  w.input.boundary = request.input.boundary.value_or(input_boundary::columns);
   const bool open_input =
       w.input.exists && w.input.disposition == port_disposition::open;
-  if (open_input)
+  const bool truncated =
+      open_input && w.input.boundary == input_boundary::truncate;
+  const bool boundary_columns = open_input && !truncated;
+  if (boundary_columns)
     w.input.prior = *request.input.prior;
   if (w.output.exists && w.output.disposition == port_disposition::closed)
     w.output.imports = clip(request.output.imports.value_or(
         round_range{relative_end, relative_end + m_span}));
 
-  // Rows and columns, relative to round s.
+  // Rows and columns, relative to round s. The chain starts at round lo: s,
+  // or the round before it, whose crossing faults a truncated input keeps;
+  // its rows and columns are shifted by the rounds before s.
   const auto row = [&](std::int64_t r) {
     return t.row_offset(r, num_rounds) - t.row_offset(s, num_rounds);
   };
   const auto col = [&](std::int64_t r) {
     return t.column_offset(r, num_rounds) - t.column_offset(s, num_rounds);
   };
-  const auto hi = w.output.imports.empty() ? e : w.output.imports.end;
-  for (auto r = s; r < hi; ++r)
+  const auto lo = truncated ? s - 1 : s;
+  const auto row_shift =
+      t.row_offset(s, num_rounds) - t.row_offset(lo, num_rounds);
+  const auto col_shift =
+      t.column_offset(s, num_rounds) - t.column_offset(lo, num_rounds);
+  // Closing drops the last chunk's outgoing band, so the chain runs past e
+  // far enough to hold every row the window's faults touch, which the
+  // column options compare, and past the imports.
+  const auto hi =
+      std::max(std::min<std::int64_t>(R, e + m_span), w.output.imports.end);
+  for (auto r = lo; r < hi; ++r)
     chunks.push_back(t.chunk(r, num_rounds));
   const auto closed =
       dem_close_all(chunks, t.spec().seam.from_seam, t.spec().seam.to_seam);
+  const auto &closed_h = closed.detector_error_matrix;
+  const auto &closed_o = closed.observables_flips_matrix;
 
-  // The model: own rows, then imports; fault columns, then boundary ones.
+  // The window's rows of the chain: own, then imports.
+  std::vector<std::size_t> rows;
   w.num_own_rows = row(e);
-  w.num_fault_columns = col(e);
-  w.num_virtual_outcome_columns = open_input ? row(s + 1) : 0;
-  w.num_logical_error_columns = open_input ? t.num_observables() : 0;
-  w.commit_columns = {col(w.commit.begin), col(w.commit.end)};
-  std::vector<std::size_t> rows(w.num_own_rows);
-  for (std::size_t i = 0; i < rows.size(); ++i)
-    rows[i] = i;
+  for (std::size_t i = 0; i < w.num_own_rows; ++i)
+    rows.push_back(row_shift + i);
   if (!w.output.imports.empty())
     for (auto i = row(w.output.imports.begin); i < row(w.output.imports.end);
          ++i)
-      rows.push_back(i);
+      rows.push_back(row_shift + i);
+
+  // Fault columns, grouped by the column options, with each one's zone: 0
+  // for the commit zone, else 1 plus its buffer's index.
+  std::vector<std::size_t> zone;
+  std::vector<std::size_t> crossing;
+  for (auto r = s; r < e; ++r) {
+    std::size_t z = 0;
+    for (std::size_t b = 0; b < w.buffers.size(); ++b)
+      if (r >= w.buffers[b].begin && r < w.buffers[b].end)
+        z = b + 1;
+    zone.resize(col(r + 1), z);
+  }
+  w.fault_column_sources =
+      group_fault_columns(closed, col_shift, zone, request.columns);
+  for (std::size_t c = 0; c < col_shift; ++c)
+    if (std::any_of(rows.begin(), rows.end(),
+                    [&](std::size_t r) { return closed_h.at({r, c}) != 0; }))
+      crossing.push_back(c);
+
+  // The model: fault columns, then boundary or crossing columns, then
+  // logical-error columns.
+  const auto &groups = w.fault_column_sources;
+  const auto first_commit = static_cast<std::size_t>(col(w.commit.begin));
+  w.num_fault_columns = groups.size();
+  w.num_virtual_outcome_columns = boundary_columns ? row(s + 1) : 0;
+  w.num_crossing_columns = crossing.size();
+  w.num_logical_error_columns = boundary_columns ? t.num_observables() : 0;
+  for (const auto &group : groups) {
+    if (group.front() < first_commit)
+      ++w.commit_columns.begin;
+    if (zone[group.front()] == 0)
+      ++w.commit_columns.end;
+  }
+  w.commit_columns.end += w.commit_columns.begin;
   const auto F = w.num_fault_columns;
   const auto V = w.num_virtual_outcome_columns;
+  const auto C = w.num_crossing_columns;
   const auto K = w.num_logical_error_columns;
   const auto n_obs = closed.num_observables();
   auto &model = w.model;
-  model.detector_error_matrix =
-      cudaqx::tensor<uint8_t>(std::vector<std::size_t>{rows.size(), F + V + K});
+  model.detector_error_matrix = cudaqx::tensor<uint8_t>(
+      std::vector<std::size_t>{rows.size(), F + V + C + K});
   model.observables_flips_matrix =
-      cudaqx::tensor<uint8_t>(std::vector<std::size_t>{n_obs, F + V + K});
-  for (std::size_t i = 0; i < rows.size(); ++i)
-    for (std::size_t c = 0; c < F; ++c)
-      model.detector_error_matrix.at({i, c}) =
-          closed.detector_error_matrix.at({rows[i], c});
-  for (std::size_t o = 0; o < n_obs; ++o)
-    for (std::size_t c = 0; c < F; ++c)
-      model.observables_flips_matrix.at({o, c}) =
-          closed.observables_flips_matrix.at({o, c});
+      cudaqx::tensor<uint8_t>(std::vector<std::size_t>{n_obs, F + V + C + K});
+  model.error_rates.assign(F + V + C + K, w.input.prior);
+  for (std::size_t g = 0; g < F; ++g) {
+    const auto source = col_shift + groups[g].front();
+    double prior = 0.0;
+    for (std::size_t i = 0; i < rows.size(); ++i)
+      model.detector_error_matrix.at({i, g}) = closed_h.at({rows[i], source});
+    for (std::size_t o = 0; o < n_obs; ++o)
+      model.observables_flips_matrix.at({o, g}) = closed_o.at({o, source});
+    for (const auto j : groups[g]) {
+      const auto p = closed.error_rates[col_shift + j];
+      prior = prior + p - 2 * prior * p;
+    }
+    model.error_rates[g] = prior;
+  } // end - for(g)
   for (std::size_t j = 0; j < V; ++j)
     model.detector_error_matrix.at({j, F + j}) = 1;
+  for (std::size_t x = 0; x < C; ++x) {
+    for (std::size_t i = 0; i < rows.size(); ++i)
+      model.detector_error_matrix.at({i, F + V + x}) =
+          closed_h.at({rows[i], crossing[x]});
+    for (std::size_t o = 0; o < n_obs; ++o)
+      model.observables_flips_matrix.at({o, F + V + x}) =
+          closed_o.at({o, crossing[x]});
+    model.error_rates[F + V + x] = closed.error_rates[crossing[x]];
+  }
   for (std::size_t o = 0; o < K; ++o)
-    model.observables_flips_matrix.at({o, F + V + o}) = 1;
-  model.error_rates.assign(closed.error_rates.begin(),
-                           closed.error_rates.begin() + F);
-  model.error_rates.resize(F + V + K, w.input.prior);
+    model.observables_flips_matrix.at({o, F + V + C + o}) = 1;
 
   // Sends: the defaults cover the first max_span() rounds of their zone.
   for (const auto &request_send : request.sends) {

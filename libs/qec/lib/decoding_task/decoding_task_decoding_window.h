@@ -57,6 +57,15 @@ enum class port_disposition { open, closed };
 /// for the recipient to explain.
 enum class send_mode { delta, residual };
 
+/// What stands for the outside faults at an open input: the wire's boundary
+/// columns, or the previous chunk's crossing faults truncated to the window.
+enum class input_boundary { columns, truncate };
+
+/// How a same-zone class of columns with identical rows but different
+/// observable effects is handled: rejected by commitment validation, or
+/// merged into its most likely member's response.
+enum class parallel_resolution { reject, most_likely };
+
 /// The windows of one layer: window k is anchored at offset + k * period,
 /// and every round range is relative to that anchor.
 struct window_request {
@@ -64,6 +73,7 @@ struct window_request {
   struct input_port {
     std::optional<port_disposition> disposition; ///< Required
     std::optional<double> prior; ///< Boundary-column prior; open only
+    std::optional<input_boundary> boundary; ///< Open only; default columns
   };
   /// The port past the window's last round.
   struct output_port {
@@ -79,6 +89,14 @@ struct window_request {
     std::optional<send_mode> mode;
     std::vector<round_range> rounds;
   };
+  /// How fault columns are built. Merged columns combine their priors as
+  /// p = p1 + p2 - 2 p1 p2.
+  struct column_options {
+    /// Merge same-zone columns with identical full rows, including rows
+    /// omitted outside the window, and identical observable effect.
+    bool merge_identical = false;
+    parallel_resolution conflicting_parallel = parallel_resolution::reject;
+  };
 
   std::int64_t period = 0;
   std::int64_t offset = 0;
@@ -87,6 +105,7 @@ struct window_request {
   input_port input;
   output_port output;
   std::vector<send_request> sends;
+  column_options columns;
 };
 
 /// A built port. A window edge at the shot's first or last round is a
@@ -94,6 +113,7 @@ struct window_request {
 struct window_port {
   bool exists = false;
   port_disposition disposition = port_disposition::open;
+  input_boundary boundary = input_boundary::columns; ///< An open input's
   double prior = 0.0;  ///< An open input's boundary-column prior
   round_range imports; ///< A closed output's imported rounds
 };
@@ -128,14 +148,20 @@ struct decoding_window {
   window_port output;
   std::vector<window_send> sends;
   /// Own rows, then imported rows. Fault columns in occurrence order, then
-  /// one virtual-outcome column per input seam detector, then one
-  /// logical-error column per observable.
+  /// for an open input one virtual-outcome column per input seam detector,
+  /// or the truncated crossing columns, then one logical-error column per
+  /// observable.
   detector_error_model model;
   std::size_t num_own_rows = 0;
   std::size_t num_fault_columns = 0;
   std::size_t num_virtual_outcome_columns = 0;
+  std::size_t num_crossing_columns = 0;
   std::size_t num_logical_error_columns = 0;
   column_range commit_columns;
+  /// For each fault column, the unmerged fault columns it stands for,
+  /// counted from the window's first; the one its corrections are reported
+  /// against, the most likely, comes first.
+  std::vector<std::vector<std::size_t>> fault_column_sources;
   /// (v_in, m) -> (own rows, then the virtual outcomes on the commit zone's
   /// outgoing wire and on the output port's wire, where those are ports).
   affine_map m2d;
@@ -146,7 +172,8 @@ struct decoding_window {
   /// Columns the inner decoder sees: every column but the logical-error ones,
   /// which touch no detector.
   std::size_t num_decoder_columns() const {
-    return num_fault_columns + num_virtual_outcome_columns;
+    return num_fault_columns + num_virtual_outcome_columns +
+           num_crossing_columns;
   }
 };
 
