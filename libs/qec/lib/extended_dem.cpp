@@ -562,7 +562,7 @@ extended_dem extended_dem_from_css_matrices(const css_code_matrices &code,
 bool dem_chunk_spec::is_empty() const {
   return num_faults == 0 && H_sparse.empty() && seam_specs.empty() &&
          O_sparse.empty() && error_rates.empty() && D_sparse.empty() &&
-         !num_measurements.has_value();
+         !num_measurements.has_value() && m2o_sparse.empty();
 }
 
 void dem_chunk_spec::expand(const std::vector<seam_id> &ids) {
@@ -608,6 +608,10 @@ void dem_chunk_spec::validate(const std::string &context) const {
   if (!D_sparse.empty() && D_sparse.back() != -1)
     throw std::invalid_argument(context +
                                 ".D_sparse must end with a -1 terminator");
+  // Index bounds need the round's width; dem_chunks_spec::validate() checks
+  // them.
+  validate_index_list(m2o_sparse, std::numeric_limits<uint64_t>::max(), context,
+                      "m2o_sparse");
 }
 
 // ---------------------------------------------------------------------------
@@ -829,6 +833,58 @@ const dem_chunk_spec &dem_chunks_spec::get_phase(phase_id id) const {
                               " not found");
 }
 
+// Checks observable_names and m2o_sparse against the observable count. The
+// last phase is entered by a non-self connection and left by none, so it is
+// never the repeating phase.
+static void validate_observables(const dem_chunks_spec &spec) {
+  const uint64_t observables = spec.num_observables();
+  std::unordered_set<std::string> names;
+  if (!spec.observable_names.empty() &&
+      spec.observable_names.size() != observables)
+    throw std::invalid_argument(
+        "dem_chunks_spec: " + std::to_string(spec.observable_names.size()) +
+        " observable_names for " + std::to_string(observables) +
+        " observables");
+  for (const auto &name : spec.observable_names)
+    if (!names.insert(name).second)
+      throw std::invalid_argument(
+          "dem_chunks_spec: observable_names repeats '" + name + "'");
+
+  for (const auto &e : spec.phases) {
+    const auto &m2o = e.spec.m2o_sparse;
+    const auto fail = [&](const std::string &what) {
+      throw std::invalid_argument("dem_chunks_spec: phase '" + e.id.name() +
+                                  "' " + what);
+    };
+    if (m2o.empty())
+      continue;
+    const bool entered =
+        std::any_of(spec.connections.begin(), spec.connections.end(),
+                    [&](const phase_connection &c) {
+                      return !c.is_self() && c.to_phase == e.id;
+                    });
+    const bool left = std::any_of(
+        spec.connections.begin(), spec.connections.end(),
+        [&](const phase_connection &c) { return c.from_phase == e.id; });
+    if (!entered || left)
+      fail("carries m2o_sparse, which only the last phase may carry");
+    const auto rows = static_cast<uint64_t>(
+        std::count(m2o.begin(), m2o.end(), std::int64_t{-1}));
+    if (rows != observables)
+      fail("has " + std::to_string(rows) + " m2o_sparse rows for " +
+           std::to_string(observables) + " observables");
+    if (!e.spec.num_measurements && !spec.measurements_per_round)
+      fail("carries m2o_sparse but neither it nor the spec sets a measurement "
+           "count (num_measurements / measurements_per_round)");
+    const uint64_t width = spec.measurements_of(e.spec);
+    const std::int64_t last = *std::max_element(m2o.begin(), m2o.end());
+    if (last >= 0 && static_cast<uint64_t>(last) >= width)
+      fail("m2o_sparse reads measurement " + std::to_string(last) +
+           ", past the " + std::to_string(width) +
+           " measurements its round has");
+  } // end - for(e)
+} // end - validate_observables()
+
 void dem_chunks_spec::validate() const {
   if (is_empty())
     throw std::invalid_argument("dem_chunks_spec: no phases or connections");
@@ -841,6 +897,15 @@ void dem_chunks_spec::validate() const {
     throw std::invalid_argument("dem_chunks_spec: num_rounds must be >= 2");
   for (const auto &e : phases)
     e.spec.validate("dem_chunks." + e.id.name());
+  // Every phase a connection names needs a spec.
+  for (const auto &c : connections)
+    for (const phase_id id : {c.from_phase, c.to_phase})
+      if (std::none_of(phases.begin(), phases.end(),
+                       [&](const phase_spec_entry &e) { return e.id == id; }))
+        throw std::invalid_argument(
+            "dem_chunks_spec: a connection names phase '" + id.name() +
+            "', which has no spec");
+  validate_observables(*this);
   // Emptiness is only a half-written map when the map is inferred from it. A
   // declared map says which phases are mapped on its own, so a phase that
   // contributes no detector rows is legal under it.
@@ -885,6 +950,24 @@ uint64_t dem_chunks_spec::measurements_of(const dem_chunk_spec &phase) const {
       "dem_chunks_spec: a phase has no measurement count (num_measurements / "
       "measurements_per_round)");
 }
+
+// Every phase must carry the same number of O_sparse rows.
+uint64_t dem_chunks_spec::num_observables() const {
+  const auto rows = [](const phase_spec_entry &e) {
+    return static_cast<uint64_t>(std::count(
+        e.spec.O_sparse.begin(), e.spec.O_sparse.end(), std::int64_t{-1}));
+  };
+  if (phases.empty())
+    return 0;
+  for (const auto &e : phases)
+    if (rows(e) != rows(phases.front()))
+      throw std::invalid_argument("dem_chunks_spec: phase '" + e.id.name() +
+                                  "' has " + std::to_string(rows(e)) +
+                                  " observable rows (O_sparse) but phase '" +
+                                  phases.front().id.name() + "' has " +
+                                  std::to_string(rows(phases.front())));
+  return rows(phases.front());
+} // end - dem_chunks_spec::num_observables()
 
 // ---------------------------------------------------------------------------
 // dem_chunks_from_spec

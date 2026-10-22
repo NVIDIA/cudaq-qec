@@ -806,6 +806,7 @@ struct MappingTraits<cudaq::qec::dem_chunk_spec> {
     io.mapRequired("error_rates", spec.error_rates);
     io.mapOptional("D_sparse", spec.D_sparse, std::vector<std::int64_t>{});
     io.mapOptional("num_measurements", spec.num_measurements);
+    io.mapOptional("m2o_sparse", spec.m2o_sparse, std::vector<std::int64_t>{});
   }
 };
 
@@ -856,6 +857,8 @@ struct MappingTraits<cudaq::qec::dem_chunks_spec> {
     io.mapOptional("num_rounds", spec.num_rounds);
     io.mapOptional("measurements_per_round", spec.measurements_per_round);
     io.mapOptional("phases_supply_D_sparse", spec.phases_supply_D_sparse);
+    io.mapOptional("observable_names", spec.observable_names,
+                   std::vector<std::string>{});
     io.mapRequired("phases", spec.phases);
   }
 };
@@ -2275,6 +2278,29 @@ std::string decoder_config_json_schema() {
             llvm::json::Object{{"required", llvm::json::Array{"type"}}}}}},
       {"else", llvm::json::Object{{"required", llvm::json::Array{"type"}}}}});
 
+  // A {from, to} pair of names: the seam connection, and each phase
+  // connection.
+  const auto from_to = [] {
+    return llvm::json::Object{
+        {"type", "object"},
+        {"properties",
+         llvm::json::Object{{"from", llvm::json::Object{{"type", "string"}}},
+                            {"to", llvm::json::Object{{"type", "string"}}}}},
+        {"required", llvm::json::Array{"from", "to"}},
+        {"additionalProperties", false}};
+  };
+  // A {name, spec} entry, as a phase or per-seam spec is written.
+  const auto named_spec = [](const std::string &spec_def) {
+    return llvm::json::Object{
+        {"type", "object"},
+        {"properties",
+         llvm::json::Object{
+             {"name", llvm::json::Object{{"type", "string"}}},
+             {"spec", llvm::json::Object{{"$ref", "#/$defs/" + spec_def}}}}},
+        {"required", llvm::json::Array{"name", "spec"}},
+        {"additionalProperties", false}};
+  };
+
   // The cross-phase rules dem_chunks_spec::validate() enforces (empty init
   // incoming seam, empty final outgoing seam, equal seam widths, one error rate
   // per fault) are not expressible here, so a document that passes this schema
@@ -2282,6 +2308,9 @@ std::string decoder_config_json_schema() {
   llvm::json::Object dem_chunk_properties{
       {"num_faults", llvm::json::Object{{"type", "integer"}, {"minimum", 1}}},
       {"H_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
+      {"seam_specs",
+       llvm::json::Object{{"type", "array"},
+                          {"items", named_spec("dem_seam_spec")}}},
       {"O_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"error_rates",
        llvm::json::Object{{"type", "array"},
@@ -2291,6 +2320,7 @@ std::string decoder_config_json_schema() {
       {"D_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"num_measurements",
        llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
+      {"m2o_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
   };
 
   llvm::json::Object defs{
@@ -2345,6 +2375,16 @@ std::string decoder_config_json_schema() {
                  llvm::json::Object{
                      {"$ref", "#/$defs/transport_shape_override"}}}}},
            {"additionalProperties", false}}},
+      {"dem_seam_spec",
+       llvm::json::Object{
+           {"type", "object"},
+           {"properties",
+            llvm::json::Object{
+                {"H_sparse",
+                 llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
+                {"O_sparse",
+                 llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}}}},
+           {"additionalProperties", false}}},
       {"dem_chunk",
        llvm::json::Object{
            {"type", "object"},
@@ -2356,15 +2396,22 @@ std::string decoder_config_json_schema() {
            {"type", "object"},
            {"properties",
             llvm::json::Object{
-                {"seam", llvm::json::Object{{"type", "object"}}},
-                {"connections", llvm::json::Object{{"type", "array"}}},
+                {"seam", from_to()},
+                {"connections",
+                 llvm::json::Object{{"type", "array"}, {"items", from_to()}}},
                 {"num_rounds",
                  llvm::json::Object{{"type", "integer"}, {"minimum", 2}}},
                 {"measurements_per_round",
                  llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
                 {"phases_supply_D_sparse",
                  llvm::json::Object{{"type", "boolean"}}},
-                {"phases", llvm::json::Object{{"type", "array"}}}}},
+                {"observable_names",
+                 llvm::json::Object{
+                     {"type", "array"},
+                     {"items", llvm::json::Object{{"type", "string"}}}}},
+                {"phases",
+                 llvm::json::Object{{"type", "array"},
+                                    {"items", named_spec("dem_chunk")}}}}},
            // num_rounds is absent from a streaming configuration, whose round
            // count is only known once the experiment runs, so the parser
            // accepts it as optional and expand_dem_chunks() is what demands it.

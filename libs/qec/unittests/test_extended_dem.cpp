@@ -1847,6 +1847,118 @@ TEST(DemChunkSpec, PerPhaseMapsMustNameMeasurementsInReach) {
   EXPECT_THROW(negative.validate(), std::invalid_argument);
 }
 
+// Expect validate() to reject spec with a message containing text.
+void expect_rejected(const dem_chunks_spec &spec, const std::string &text) {
+  try {
+    spec.validate();
+    ADD_FAILURE() << "expected a rejection naming: " << text;
+  } catch (const std::invalid_argument &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+// Every phase a connection names needs a spec.
+TEST(DemChunkSpec, ConnectionsMustNamePhasesWithSpecs) {
+  auto spec = rep5_spec();
+  spec.connections.push_back(
+      {phase_name::dem_final, phase_id::from_name("readout")});
+  expect_rejected(spec, "names phase 'readout', which has no spec");
+}
+
+// The observable count is the O_sparse row count every phase agrees on.
+TEST(DemChunkSpec, PhasesMustAgreeOnTheObservableCount) {
+  auto streaming = rep5_spec();
+  auto two = rep5_spec();
+  auto none = rep5_spec();
+  streaming.num_rounds.reset();
+  EXPECT_EQ(rep5_spec().num_observables(), 1u);
+  EXPECT_EQ(streaming.num_observables(), 1u);
+
+  rep5_phase(two, phase_name::dem_bulk).O_sparse = {0, -1, 1, -1};
+  expect_rejected(two, "phase 'bulk' has 2 observable rows");
+  EXPECT_THROW(two.num_observables(), std::invalid_argument);
+
+  for (auto &e : none.phases)
+    e.spec.O_sparse.clear();
+  EXPECT_NO_THROW(none.validate());
+  EXPECT_EQ(none.num_observables(), 0u);
+}
+
+// observable_names, when given, names each observable once.
+TEST(DemChunkSpec, ObservableNamesNameEachObservableOnce) {
+  auto spec = rep5_spec();
+  auto two = rep5_spec();
+  spec.observable_names = {"Z_L"};
+  EXPECT_NO_THROW(spec.validate());
+  spec.observable_names = {"Z_L", "X_L"};
+  expect_rejected(spec, "2 observable_names for 1 observables");
+
+  for (auto &e : two.phases)
+    e.spec.O_sparse = {0, -1, 1, -1};
+  two.observable_names = {"Z_L", "X_L"};
+  EXPECT_NO_THROW(two.validate());
+  two.observable_names = {"Z_L", "Z_L"};
+  expect_rejected(two, "observable_names repeats 'Z_L'");
+}
+
+// m2o_sparse sits only on the last phase, with one row per observable inside
+// that phase's round.
+TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase) {
+  auto spec = rep5_spec(3);
+  spec.measurements_per_round = kRep5Checks;
+  rep5_phase(spec, phase_name::dem_final).m2o_sparse = {0, 3, -1};
+  EXPECT_NO_THROW(spec.validate());
+  auto streaming = spec;
+  streaming.num_rounds.reset();
+  EXPECT_NO_THROW(streaming.validate());
+
+  auto early = spec;
+  rep5_phase(early, phase_name::dem_bulk).m2o_sparse = {0, -1};
+  expect_rejected(early, "only the last phase");
+
+  // A chain that ends on its repeating phase has no readout round.
+  auto open = spec;
+  open.connections = {{phase_name::dem_init, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_bulk}};
+  open.phases.pop_back();
+  rep5_phase(open, phase_name::dem_bulk).m2o_sparse = {0, -1};
+  expect_rejected(open, "only the last phase");
+
+  auto rows = spec;
+  rep5_phase(rows, phase_name::dem_final).m2o_sparse = {0, -1, 1, -1};
+  expect_rejected(rows, "2 m2o_sparse rows for 1 observables");
+
+  auto past = spec;
+  rep5_phase(past, phase_name::dem_final).m2o_sparse = {kRep5Checks, -1};
+  expect_rejected(past, "m2o_sparse reads measurement 4, past the 4");
+
+  auto uncounted = spec;
+  uncounted.measurements_per_round.reset();
+  expect_rejected(uncounted, "measurement count");
+
+  auto unterminated = spec;
+  rep5_phase(unterminated, phase_name::dem_final).m2o_sparse = {0};
+  expect_rejected(unterminated, "m2o_sparse must end with a -1");
+  auto negative = spec;
+  rep5_phase(negative, phase_name::dem_final).m2o_sparse = {-2, -1};
+  expect_rejected(negative, "m2o_sparse index -2 out of range");
+  auto repeated = spec;
+  rep5_phase(repeated, phase_name::dem_final).m2o_sparse = {1, 1, -1};
+  expect_rejected(repeated, "m2o_sparse duplicate");
+} // end - TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase)
+
+// A wider final round's own num_measurements bounds m2o_sparse.
+TEST(DemChunkSpec, ReadoutMapReadsAWiderFinalRound) {
+  auto spec = rep5_spec(3);
+  auto &final_spec = rep5_phase(spec, phase_name::dem_final);
+  spec.measurements_per_round = kRep5Checks;
+  final_spec.num_measurements = kRep5Checks + 1;
+  final_spec.m2o_sparse = {0, 1, 2, 3, 4, -1};
+  EXPECT_NO_THROW(spec.validate());
+  final_spec.m2o_sparse = {kRep5Checks + 1, -1};
+  expect_rejected(spec, "m2o_sparse reads measurement 5, past the 5");
+}
+
 TEST(DemChunkSpec, NumFaultsMustFitUint32) {
   dem_chunk_spec spec;
   spec.num_faults =

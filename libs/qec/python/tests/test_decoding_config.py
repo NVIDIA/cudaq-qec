@@ -339,6 +339,107 @@ def qec_yaml_for(dc):
     return mdc.to_yaml_str()
 
 
+# The rep5 chunk form with a wider readout round, its m2o_sparse, and a name.
+_REP5_READOUT_YAML = """decoders:
+  - id: 0
+    type: single_error_lut
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      measurements_per_round: 4
+      observable_names: [Z_L]
+      phases:
+        - name: init
+          spec: {num_faults: 9, H_sparse: [0,1,5,-1,1,2,6,-1,2,3,7,-1,3,4,8,-1], O_sparse: [0,-1], error_rates: [0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02]}
+        - name: bulk
+          spec: {num_faults: 9, H_sparse: [0,1,5,-1,1,2,6,-1,2,3,7,-1,3,4,8,-1], O_sparse: [0,-1], error_rates: [0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02]}
+        - name: final
+          spec: {num_faults: 5, H_sparse: [0,1,-1,1,2,-1,2,3,-1,3,4,-1], O_sparse: [0,-1], error_rates: [0.02,0.02,0.02,0.02,0.02], num_measurements: 5, m2o_sparse: [0,4,-1]}
+"""
+
+
+def test_readout_map_and_observable_names_round_trip_through_yaml():
+    mdc = qec.multi_decoder_config.from_yaml_str(_REP5_READOUT_YAML)
+    spec = mdc.decoders[0].dem_chunks
+    assert spec.observable_names == ["Z_L"]
+    assert spec.get_phase(qec.SeamId("final")).m2o_sparse == [0, 4, -1]
+    spec.validate()
+
+    again = qec.multi_decoder_config.from_yaml_str(mdc.to_yaml_str())
+    assert again.decoders[0].dem_chunks.observable_names == ["Z_L"]
+    assert again.decoders[0].dem_chunks.get_phase(
+        qec.SeamId("final")).m2o_sparse == [0, 4, -1]
+
+
+def test_readout_map_and_observable_names_validate_against_the_schema():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    document = yaml.safe_load(_REP5_READOUT_YAML)
+    validator.validate(document)
+
+    unnamed = yaml.safe_load(_REP5_READOUT_YAML)
+    unnamed["decoders"][0]["dem_chunks"]["observable_names"] = [0]
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(unnamed)
+
+
+def test_dem_chunks_schema_matches_the_parser():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    # The init phase written per seam instead of with the H_sparse shorthand.
+    init_h = "H_sparse: [0,1,5,-1,1,2,6,-1,2,3,7,-1,3,4,8,-1]"
+    per_seam = _REP5_READOUT_YAML.replace(
+        "{num_faults: 9, " + init_h,
+        "{num_faults: 9, seam_specs: [{name: prev_round, spec: {" + init_h +
+        "}}, {name: next_round, spec: {" + init_h + "}}]", 1)
+    assert per_seam != _REP5_READOUT_YAML
+
+    # What the parser accepts and emits, the schema accepts.
+    for text in (_REP5_READOUT_YAML, per_seam):
+        emitted = qec.multi_decoder_config.from_yaml_str(text).to_yaml_str()
+        validator.validate(yaml.safe_load(text))
+        validator.validate(yaml.safe_load(emitted))
+
+    # What the parser rejects for its shape, the schema rejects.
+    def rejected_by_both(text, edit):
+        doc = yaml.safe_load(text)
+        edit(doc["decoders"][0]["dem_chunks"])
+        with pytest.raises(jsonschema.ValidationError):
+            validator.validate(doc)
+        with pytest.raises(RuntimeError):
+            qec.multi_decoder_config.from_yaml_str(yaml.safe_dump(doc))
+
+    def rename(spec, old, new):
+        spec[new] = spec.pop(old)
+
+    rejected_by_both(
+        _REP5_READOUT_YAML,
+        lambda c: rename(c["phases"][2]["spec"], "m2o_sparse", "m2o_spares"))
+    rejected_by_both(_REP5_READOUT_YAML, lambda c: c["phases"][0].pop("spec"))
+    rejected_by_both(_REP5_READOUT_YAML,
+                     lambda c: c["phases"][0].update(extra=1))
+    rejected_by_both(_REP5_READOUT_YAML, lambda c: c["seam"].pop("to"))
+    rejected_by_both(_REP5_READOUT_YAML, lambda c: c["seam"].update(via="bulk"))
+    rejected_by_both(_REP5_READOUT_YAML,
+                     lambda c: c["connections"][0].pop("to"))
+    rejected_by_both(_REP5_READOUT_YAML,
+                     lambda c: c["connections"][0].update(weight=1))
+    rejected_by_both(
+        per_seam, lambda c: c["phases"][0]["spec"]["seam_specs"][0]["spec"].
+        update(D_sparse=[0, -1]))
+
+
 def test_decoder_config_json_schema_covers_dispatch_and_transport():
     # The exported JSON schema is generated separately from the YAML parser, so
     # validate a real document that populates `dispatch:` and the server-level

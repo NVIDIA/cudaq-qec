@@ -2558,6 +2558,87 @@ TEST(DecoderDemChunksYAMLTest, PerPhaseMeasurementMapsRoundTripAndExpand) {
   EXPECT_EQ(inputs.measurement_to_detectors()->num_cols(), 4u);
 }
 
+// dem_chunks_yaml() with extra keys on the named phase and a round width.
+std::string dem_chunks_yaml_with_readout(const std::string &phase,
+                                         const std::string &extra) {
+  auto yaml = dem_chunks_yaml(3);
+  const auto at = yaml.find("error_rates", yaml.find("name: " + phase));
+  yaml.insert(yaml.find('\n', at) + 1, extra);
+  yaml.insert(yaml.find("      phases:"), "      measurements_per_round: 1\n");
+  return yaml;
+}
+
+// m2o_sparse and observable_names round-trip and are in the schema.
+TEST(DecoderDemChunksYAMLTest, ReadoutMapAndNamesRoundTripAndAreInTheSchema) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto yaml = dem_chunks_yaml_with_readout(
+      "final", "            num_measurements: 3\n"
+               "            m2o_sparse: [0, 2, -1]\n");
+  yaml.insert(yaml.find("      phases:"), "      observable_names: [Z_L]\n");
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(yaml);
+  const std::vector<std::int64_t> want{0, 2, -1};
+  const std::vector<std::string> names{"Z_L"};
+  const auto emitted = parsed.to_yaml_str(200);
+  const auto schema = cfg::decoder_config_json_schema();
+  auto plain = cfg::multi_decoder_config::from_yaml_str(dem_chunks_yaml(3));
+
+  ASSERT_TRUE(parsed.decoders.at(0).dem_chunks.has_value());
+  const auto &spec = *parsed.decoders.at(0).dem_chunks;
+  EXPECT_EQ(spec.get_phase(cudaq::qec::phase_name::dem_final).m2o_sparse, want);
+  EXPECT_EQ(spec.observable_names, names);
+  EXPECT_NE(emitted.find("m2o_sparse"), std::string::npos);
+  EXPECT_NE(emitted.find("observable_names"), std::string::npos);
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed);
+
+  EXPECT_NE(schema.find("\"m2o_sparse\""), std::string::npos);
+  EXPECT_NE(schema.find("\"observable_names\""), std::string::npos);
+
+  // A spec without the new keys emits neither.
+  EXPECT_EQ(plain.to_yaml_str(200).find("m2o_sparse"), std::string::npos);
+  EXPECT_EQ(plain.to_yaml_str(200).find("observable_names"), std::string::npos);
+} // end - TEST(..., ReadoutMapAndNamesRoundTripAndAreInTheSchema)
+
+// Parsing validates m2o_sparse and observable_names, with or without
+// num_rounds.
+TEST(DecoderDemChunksYAMLTest, ReadoutMapAndNamesAreCheckedWhenParsed) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  const auto streaming = [](std::string yaml) {
+    return yaml.substr(0, yaml.find("      num_rounds:")) +
+           yaml.substr(yaml.find("      measurements_per_round:"));
+  };
+  const auto good = dem_chunks_yaml_with_readout(
+      "final", "            m2o_sparse: [0, -1]\n");
+  auto named = dem_chunks_yaml_with_readout("final", "");
+
+  EXPECT_NO_THROW(cfg::multi_decoder_config::from_yaml_str(good));
+  EXPECT_NO_THROW(cfg::multi_decoder_config::from_yaml_str(streaming(good)));
+  rejects(dem_chunks_yaml_with_readout("bulk", "            m2o_sparse: "
+                                               "[0, -1]\n"),
+          "only the last phase");
+  rejects(streaming(dem_chunks_yaml_with_readout("bulk", "            "
+                                                         "m2o_sparse: "
+                                                         "[0, -1]\n")),
+          "only the last phase");
+  rejects(dem_chunks_yaml_with_readout("final", "            m2o_sparse: "
+                                                "[0, -1, 0, -1]\n"),
+          "2 m2o_sparse rows for 1 observables");
+  rejects(dem_chunks_yaml_with_readout("final", "            m2o_sparse: "
+                                                "[1, -1]\n"),
+          "m2o_sparse reads measurement 1, past the 1");
+  named.insert(named.find("      phases:"),
+               "      observable_names: [Z_L, X_L]\n");
+  rejects(named, "2 observable_names for 1 observables");
+} // end - TEST(..., ReadoutMapAndNamesAreCheckedWhenParsed)
+
 // The chunk form stays the authoritative source, carrying the closed model
 // expand_dem_chunks() would write for any decoder that reads matrices.
 TEST(ResolveDecoderInputs, ChunkFormCarriesItsClosedModelForAMatrixDecoder) {

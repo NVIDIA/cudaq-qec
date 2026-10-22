@@ -317,6 +317,11 @@ struct dem_chunk_spec {
   /// dem_chunks_spec::measurements_per_round (a final data readout, say).
   std::optional<uint64_t> num_measurements;
 
+  /// Optional readout map, -1-terminated: one row per observable, listing
+  /// the measurements of this phase's own round whose parity is the
+  /// observable's raw value. Only the last phase may carry it.
+  std::vector<std::int64_t> m2o_sparse;
+
   /// True when nothing has been set.
   bool is_empty() const;
   bool operator==(const dem_chunk_spec &) const = default;
@@ -419,9 +424,16 @@ struct dem_chunks_spec {
   /// present. See has_D_sparse().
   std::optional<bool> phases_supply_D_sparse;
 
+  /// Optional observable names, one per O_sparse row.
+  std::vector<std::string> observable_names;
+
   /// The measurement count of @p phase's round: its num_measurements, else
   /// measurements_per_round. @throws std::invalid_argument if neither is set.
   uint64_t measurements_of(const dem_chunk_spec &phase) const;
+
+  /// @brief The number of O_sparse rows every phase carries; 0 with no phases.
+  /// @throws std::invalid_argument if two phases disagree.
+  uint64_t num_observables() const;
 
   /// @brief Whether the phases supply D, rather than leaving
   /// dem_chunks_to_d_sparse() to apply the memory convention.
@@ -479,6 +491,11 @@ struct dem_chunks_spec {
   const dem_chunk_spec &get_phase(phase_id id) const;
 
   /// @brief Validate phase specs, connection graph, and seam widths.
+  ///
+  /// Also checks that every connection names a phase with a spec, the phases
+  /// agree on the observable count, observable_names has one unique name per
+  /// observable, and only the last phase carries m2o_sparse, with one row per
+  /// observable inside its round.
   /// @throws std::invalid_argument on the first violation.
   void validate() const;
 };
