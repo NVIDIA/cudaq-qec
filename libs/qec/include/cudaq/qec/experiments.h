@@ -12,6 +12,7 @@
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/sparse_binary_matrix.h"
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace cudaq::qec {
@@ -83,6 +84,27 @@ dem_sampling(const cudaqx::tensor<uint8_t> &check_matrix, std::size_t numShots,
 std::tuple<cudaqx::tensor<uint8_t>, cudaqx::tensor<uint8_t>>
 dem_sampling(const cudaqx::tensor<uint8_t> &check_matrix, std::size_t numShots,
              const std::vector<double> &error_probabilities, unsigned seed);
+
+/// @brief Sample raw memory-circuit measurement records with circuit noise.
+/// @param code QEC code providing preparation and stabilizer-round operations
+/// @param statePrep One of prep0, prep1, prepp or prepm supported by the code
+/// @param numShots Positive number of independent shots
+/// @param numRounds Positive number of stabilizer extraction rounds, excluding
+/// terminal data-qubit readout
+/// @param noise Noise model to apply
+/// @return One chronological bit string per shot: each extraction round's
+/// ancilla measurements, followed by the final data-qubit readout. The standard
+/// stabilizer-round operation orders Z ancillas before X ancillas. No detector
+/// XOR, decoding or circuit DEM analysis is performed. The final readout is in
+/// the preparation basis (Z for prep0/prep1, X for prepp/prepm).
+/// Sampling uses CUDA-Q's current backend and random seed, as set by
+/// cudaq::set_random_seed. Callers must serialize concurrent changes to global
+/// sampling, random-seed and noise state.
+std::vector<std::string> sample_memory_circuit_raw(const code &code,
+                                                   operation statePrep,
+                                                   std::size_t numShots,
+                                                   std::size_t numRounds,
+                                                   cudaq::noise_model &noise);
 
 /// @brief Sample syndrome measurements with circuit-level noise
 /// @param code QEC Code to sample

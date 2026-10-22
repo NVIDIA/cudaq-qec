@@ -256,6 +256,84 @@ stabilizer_detector_ranges(std::size_t numRounds, std::size_t numZStabs,
   return ranges;
 }
 
+// Shared host setup for raw records and detector-valued sampling. Both routes
+// call the same compiled memory kernel; only the detector route analyzes a DEM.
+struct memory_circuit_sampling_setup {
+  const code &qec_code;
+  operation state_prep;
+  bool is_z_prep;
+  std::size_t num_data;
+  std::size_t num_ancilla_x;
+  std::size_t num_ancilla_z;
+  std::size_t num_rounds;
+  std::size_t num_observables;
+  std::vector<std::size_t> x_schedule;
+  std::vector<std::size_t> z_schedule;
+  std::vector<std::size_t> observable_map;
+
+  memory_circuit_sampling_setup(const code &qec_code, operation state_prep,
+                                std::size_t num_rounds)
+      : qec_code(qec_code), state_prep(state_prep),
+        is_z_prep(state_prep == operation::prep0 ||
+                  state_prep == operation::prep1),
+        num_data(qec_code.get_num_data_qubits()),
+        num_ancilla_x(qec_code.get_num_ancilla_x_qubits()),
+        num_ancilla_z(qec_code.get_num_ancilla_z_qubits()),
+        num_rounds(num_rounds) {
+    if (num_rounds == 0)
+      throw std::runtime_error(
+          "sample_memory_circuit error - numRounds must be >= 1. The memory "
+          "circuit always performs at least one stabilizer measurement "
+          "round. ");
+    if (!qec_code.contains_operation(state_prep))
+      throw std::runtime_error("sample_memory_circuit_error - requested state "
+                               "prep kernel not found.");
+    if (!(state_prep == operation::prep0 || state_prep == operation::prep1 ||
+          state_prep == operation::prepp || state_prep == operation::prepm))
+      throw std::runtime_error(
+          "sample_memory_circuit_error - invalid requested state prep kernel.");
+    if (!qec_code.contains_operation(operation::stabilizer_round))
+      throw std::runtime_error("sample_memory_circuit error - no stabilizer "
+                               "round kernel for this code.");
+
+    // Nonzero entries are interaction timesteps, not binary support values.
+    const auto sched_x = qec_code.get_stabilizer_schedule_x();
+    const auto sched_z = qec_code.get_stabilizer_schedule_z();
+    x_schedule.assign(sched_x.data(), sched_x.data() + sched_x.size());
+    z_schedule.assign(sched_z.data(), sched_z.data() + sched_z.size());
+    const auto observables =
+        is_z_prep ? qec_code.get_observables_z() : qec_code.get_observables_x();
+    num_observables = observables.shape()[0];
+    observable_map.assign(observables.data(),
+                          observables.data() + observables.size());
+  }
+
+  void measurement_maps(cudaq::noise_model &noise, cudaq::M2DSparseMatrix &m2d,
+                        cudaq::M2OSparseMatrix &m2o) const {
+    cudaq::dem_from_kernel(
+        memory_circuit, &noise, /*options=*/{}, m2d, m2o,
+        qec_code.get_operation<code::stabilizer_round>(
+            operation::stabilizer_round),
+        qec_code.get_operation<code::one_qubit_encoding>(state_prep), num_data,
+        num_ancilla_x, num_ancilla_z, num_rounds, x_schedule, z_schedule,
+        observable_map, num_observables, !is_z_prep);
+  }
+
+  std::vector<std::string> sample(std::size_t num_shots,
+                                  cudaq::noise_model &noise) const {
+    const cudaq::sample_options options{
+        .shots = num_shots, .noise = noise, .explicit_measurements = true};
+    auto result = cudaq::sample(
+        options, memory_circuit,
+        qec_code.get_operation<code::stabilizer_round>(
+            operation::stabilizer_round),
+        qec_code.get_operation<code::one_qubit_encoding>(state_prep), num_data,
+        num_ancilla_x, num_ancilla_z, num_rounds, x_schedule, z_schedule,
+        observable_map, num_observables, !is_z_prep);
+    return result.sequential_data();
+  }
+};
+
 /// @brief Given a memory circuit setup, sample syndrome and data qubit
 /// measurements. This is the main driver function that all of the
 /// sample_memory_circuit overloads invoke.
@@ -267,72 +345,24 @@ sample_memory_circuit(const code &code, operation statePrep,
   if (!keep_x_stabilizers && !keep_z_stabilizers)
     throw std::runtime_error(
         "sample_memory_circuit error - no stabilizers to keep.");
-  if (numRounds == 0)
-    throw std::runtime_error(
-        "sample_memory_circuit error - numRounds must be >= 1. The memory "
-        "circuit always performs at least one stabilizer measurement round. ");
-  if (!code.contains_operation(statePrep))
-    throw std::runtime_error(
-        "sample_memory_circuit_error - requested state prep kernel not found.");
-
-  auto &prep = code.get_operation<code::one_qubit_encoding>(statePrep);
-  if (!(statePrep == operation::prep0 || statePrep == operation::prep1 ||
-        statePrep == operation::prepp || statePrep == operation::prepm))
-    throw std::runtime_error(
-        "sample_memory_circuit_error - invalid requested state prep kernel.");
-
-  bool is_z_prep =
-      statePrep == operation::prep0 || statePrep == operation::prep1;
-
-  if (!code.contains_operation(operation::stabilizer_round))
-    throw std::runtime_error("sample_memory_circuit error - no stabilizer "
-                             "round kernel for this code.");
-
-  auto &stabRound =
-      code.get_operation<code::stabilizer_round>(operation::stabilizer_round);
-
-  // Schedule matrices, not plain parity matrices: nonzero entries carry the
-  // per-stabilizer interaction timestep (see code::get_stabilizer_schedule_x).
-  auto sched_x = code.get_stabilizer_schedule_x();
-  auto sched_z = code.get_stabilizer_schedule_z();
-  auto numData = code.get_num_data_qubits();
-  auto numAncx = code.get_num_ancilla_x_qubits();
-  auto numAncz = code.get_num_ancilla_z_qubits();
+  const memory_circuit_sampling_setup setup(code, statePrep, numRounds);
+  const auto numData = setup.num_data;
+  const auto numCols = setup.num_ancilla_x + setup.num_ancilla_z;
+  const auto is_z_prep = setup.is_z_prep;
   auto numXStabs = code.get_num_x_stabilizers();
   auto numZStabs = code.get_num_z_stabilizers();
-
-  std::vector<std::size_t> xVec(sched_x.data(),
-                                sched_x.data() + sched_x.size());
-  std::vector<std::size_t> zVec(sched_z.data(),
-                                sched_z.data() + sched_z.size());
-  auto logical_obs =
-      is_z_prep ? code.get_observables_z() : code.get_observables_x();
-  const std::size_t num_obs = logical_obs.shape()[0];
-  std::vector<std::size_t> obs_flat(logical_obs.data(),
-                                    logical_obs.data() + logical_obs.size());
-
-  const std::size_t numCols = numAncx + numAncz;
 
   // Obtain the Measurement-to-Detector (M2D) sparse matrix.
   // m2d.rows[d] = set of chronological measurement indices whose XOR = detector
   // d.
   cudaq::M2DSparseMatrix m2d;
   cudaq::M2OSparseMatrix m2o;
-  cudaq::dem_from_kernel(memory_circuit, &noise, /*options=*/{}, m2d, m2o,
-                         stabRound, prep, numData, numAncx, numAncz, numRounds,
-                         xVec, zVec, obs_flat, num_obs, !is_z_prep);
-
-  // Sample the memory circuit and collect all raw measurements.
-  cudaq::sample_options opts{
-      .shots = numShots, .noise = noise, .explicit_measurements = true};
-  auto result = cudaq::sample(opts, memory_circuit, stabRound, prep, numData,
-                              numAncx, numAncz, numRounds, xVec, zVec, obs_flat,
-                              num_obs, !is_z_prep);
+  setup.measurement_maps(noise, m2d, m2o);
 
   // mzTable[shot, meas_idx] = raw 0/1 outcome; shape (numShots,
   // numMeasPerShot). Measurement layout per shot: numRounds*numCols ancilla,
   // then numData qubits.
-  cudaqx::tensor<uint8_t> mzTable(result.sequential_data());
+  cudaqx::tensor<uint8_t> mzTable(setup.sample(numShots, noise));
 
   // Data results: tail numData measurements of each shot.
   cudaqx::tensor<uint8_t> dataResults({numShots, numData});
@@ -387,6 +417,31 @@ sample_memory_circuit(const code &code, operation statePrep,
   return std::make_tuple(syndromeTensor, dataResults);
 }
 } // namespace details
+
+std::vector<std::string> sample_memory_circuit_raw(const code &code,
+                                                   operation statePrep,
+                                                   std::size_t numShots,
+                                                   std::size_t numRounds,
+                                                   cudaq::noise_model &noise) {
+  if (numShots == 0)
+    throw std::invalid_argument(
+        "sample_memory_circuit_raw error - numShots must be positive.");
+  const details::memory_circuit_sampling_setup setup(code, statePrep,
+                                                     numRounds);
+  const auto maximum = std::string{}.max_size();
+  if (setup.num_ancilla_x > maximum ||
+      setup.num_ancilla_z > maximum - setup.num_ancilla_x)
+    throw std::overflow_error(
+        "sample_memory_circuit_raw error - ancilla record width overflows.");
+  const auto regular_width = setup.num_ancilla_x + setup.num_ancilla_z;
+  if (setup.num_data > maximum ||
+      (regular_width != 0 &&
+       numRounds > (maximum - setup.num_data) / regular_width) ||
+      numShots > std::vector<std::string>{}.max_size())
+    throw std::overflow_error("sample_memory_circuit_raw error - raw records "
+                              "exceed addressable storage.");
+  return setup.sample(numShots, noise);
+}
 
 std::tuple<cudaqx::tensor<uint8_t>, cudaqx::tensor<uint8_t>>
 sample_memory_circuit(const code &code, operation statePrep,
