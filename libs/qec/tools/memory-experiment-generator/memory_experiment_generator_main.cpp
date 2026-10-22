@@ -77,9 +77,6 @@ int main(int argc, char **argv) {
     std::map<std::string, std::string> values;
     for (int i = 1; i < argc; ++i) {
       const std::string argument(argv[i]);
-      if (argument == "--emit-graph" || argument.starts_with("--emit-graph="))
-        throw std::invalid_argument(
-            "A/B graph generation is pending the public framework interface");
       const auto equals = argument.find('=');
       if (!argument.starts_with("--") || equals == std::string::npos ||
           equals + 1 == argument.size())

@@ -323,9 +323,9 @@ class GeneratorCliTest(unittest.TestCase):
                     success=False)
         self.assertEqual(list(output.iterdir()), [])
 
-    def test_provider_failures_and_pending_graph_leave_no_partial_bundle(self):
-        for extra in (("--distance=4",), ("--error-rate=0",),
-                      ("--emit-graph",)):
+    def test_invalid_requests_leave_no_partial_bundle(self):
+        for extra in (("--distance=4",), ("--error-rate=0",), ("--emit-graph",),
+                      ("--emit-graph=true",)):
             with self.subTest(extra=extra):
                 output = self.root / "failed"
                 distance = extra[0] if extra[0].startswith(
@@ -338,6 +338,8 @@ class GeneratorCliTest(unittest.TestCase):
                                      *rest,
                                      success=False)
                 self.assertFalse(output.exists())
+                if extra == ("--emit-graph=true",):
+                    self.assertIn("unknown option: --emit-graph", result.stderr)
                 self.assertTrue(result.stderr.strip())
         blocker = self.root / "parent-is-file"
         blocker.write_text("keep")
