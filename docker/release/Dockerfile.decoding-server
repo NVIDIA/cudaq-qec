@@ -27,6 +27,12 @@
 #   artifacts/
 #     libcudaq-qec-<name>-decoder.so              (decoder plugins)
 #     libcudaq-qec-realtime-cudevice-proprietary.a (device_graph dispatch)
+#     qec-private-plugins-<platform>_<build>.tar.gz
+#     qec-private-plugins-<platform>_<build>.tar.gz.sha256
+#
+# Manifest-based native deliveries use QEC_EXTERNAL_PLUGIN_ARCHIVE (a basename)
+# and a reviewed QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT. Required providers and
+# task-graph kinds are checked in the final runtime without requiring a GPU.
 #
 # Without the cudevice archive, device_graph dispatch is not linked;
 # host-dispatch decoders still work.
@@ -144,15 +150,36 @@ RUN set -e; \
 # hsb_fpga_syndrome_playback lives under unittests/; test binaries are
 # built but not installed.
 #
-# Supplied plugins are copied out of the read-only mount because the
-# build patches their rpath in place. The cudevice archive is only read.
+# Supplied artifacts remain immutable: CMake patches staged module copies, not
+# the mounted archive or legacy input modules. The cudevice archive is only read.
 #
 # CUDAQX_QEC_VERSION is the version string baked into libcudaq-qec;
 # unset or empty leaves CMake's 0.0.0 default.
 ARG CUDAQX_QEC_VERSION
+ARG QEC_EXTERNAL_PLUGIN_ARCHIVE
+ARG QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT
+ARG QEC_REQUIRED_EXTERNAL_PLUGINS
 RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
     set -e; \
     if [ -n "${CUDAQX_QEC_VERSION:-}" ]; then export CUDAQX_QEC_VERSION; else unset CUDAQX_QEC_VERSION; fi; \
+    export QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT QEC_REQUIRED_EXTERNAL_PLUGINS; \
+    export QEC_EXTERNAL_PLUGIN_DELIVERY=native; \
+    if [ -n "${QEC_EXTERNAL_PLUGIN_ARCHIVE:-}" ]; then \
+        case "$QEC_EXTERNAL_PLUGIN_ARCHIVE" in \
+            [!A-Za-z0-9]*|*[!A-Za-z0-9_.+-]*) \
+                echo "ERROR: QEC_EXTERNAL_PLUGIN_ARCHIVE must be a portable archive basename" >&2; exit 1 ;; \
+        esac; \
+        case "$QEC_EXTERNAL_PLUGIN_ARCHIVE" in \
+            *.tar.gz) ;; \
+            *) echo "ERROR: external plugin archive must end in .tar.gz" >&2; exit 1 ;; \
+        esac; \
+        _archive_source="/mnt/artifacts/$QEC_EXTERNAL_PLUGIN_ARCHIVE"; \
+        test -f "$_archive_source" && test ! -L "$_archive_source"; \
+        test -f "$_archive_source.sha256" && test ! -L "$_archive_source.sha256"; \
+        export QEC_EXTERNAL_PLUGIN_ARCHIVE="$_archive_source"; \
+    else \
+        unset QEC_EXTERNAL_PLUGIN_ARCHIVE; \
+    fi; \
     _cudevice_archive=""; \
     if [ -f /mnt/artifacts/libcudaq-qec-realtime-cudevice-proprietary.a ]; then \
         _cudevice_archive=/mnt/artifacts/libcudaq-qec-realtime-cudevice-proprietary.a; \
@@ -161,11 +188,9 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
         echo "== cudevice archive: absent (device_graph dispatch will not be linked)"; \
     fi; \
     _plugins=""; \
-    mkdir -p /tmp/decoder-plugins; \
     for so in /mnt/artifacts/libcudaq-qec-*-decoder.so; do \
         [ -e "$so" ] || continue; \
-        cp -f "$so" /tmp/decoder-plugins/; \
-        _plugins="${_plugins:+$_plugins;}/tmp/decoder-plugins/$(basename "$so")"; \
+        _plugins="${_plugins:+$_plugins;}$so"; \
     done; \
     if [ -n "$_plugins" ]; then \
         export QEC_EXTERNAL_DECODERS="$_plugins"; \
@@ -190,7 +215,11 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
     cmake --install build; \
     test -x "$CUDAQX_INSTALL_PREFIX/bin/decoding_server"; \
     test -x "$CUDAQX_INSTALL_PREFIX/bin/hsb_fpga_syndrome_playback"; \
-    test -x "$CUDAQX_INSTALL_PREFIX/bin/playback-emulator"
+    test -x "$CUDAQX_INSTALL_PREFIX/bin/playback-emulator"; \
+    g++-12 -std=c++20 scripts/ci/plugin_registration_probe.cpp \
+        -I"$CUDAQX_INSTALL_PREFIX/include" -I/usr/local/cuda/include \
+        -L"$CUDAQX_INSTALL_PREFIX/lib" -Wl,-rpath,'$ORIGIN/../lib' \
+        -lcudaq-qec-decoders -o "$CUDAQX_INSTALL_PREFIX/bin/qec-plugin-registration-probe"
 
 # ---------------------------------------------------------------------------
 # Stage: runtime -- the shipped image. nvq++ for user programs; no gcc,
@@ -231,7 +260,7 @@ RUN set -e; \
         cuda-nvrtc-${CUDA_VER_DASH} \
         libnl-3-200 libnl-route-3-200 \
         libgomp1 \
-        binutils libc6-dev libstdc++-13-dev \
+        binutils libc6-dev libstdc++-13-dev python3-minimal patchelf \
         libpython3.12t64 libevent-core-2.1-7t64 libevent-pthreads-2.1-7t64; \
     if [ "$TARGETARCH" != "arm64" ] || [ "$CUDA_MAJOR" != "12" ]; then \
         apt-cache search tensorrt \
@@ -272,6 +301,15 @@ COPY --from=cudaq-official \
 COPY --from=builder /opt/nvidia/cudaq-realtime /opt/nvidia/cudaq-realtime
 COPY --from=builder /opt/nvidia/cudaqx /opt/nvidia/cudaqx
 
+# These generic checks operate only on the copied install, never on the builder
+# sources. No private source or model bundle is copied into the image.
+COPY --from=builder /workspaces/cudaqx/scripts/ci/installed_plugin_smoke.py \
+                    /workspaces/cudaqx/scripts/ci/replay_decoding_server.py \
+                    /workspaces/cudaqx/scripts/ci/playback_result_checks.py \
+                    /opt/nvidia/cudaqx/share/cudaq-qec/validation/
+COPY --from=builder /workspaces/cudaqx/scripts/ci/fixtures/ \
+                    /opt/nvidia/cudaqx/share/cudaq-qec/validation/fixtures/
+
 # libcudaq-qec.so's RPATH points at cuStabilizer inside the cuquantum
 # wheel, so that one library must land at the same path.
 COPY --from=builder \
@@ -289,6 +327,25 @@ ENV CUDAQX_INSTALL_DIR=/opt/nvidia/cudaqx \
     CPLUS_INCLUDE_PATH=/opt/nvidia/cudaqx/include:/opt/nvidia/cudaq-realtime/include \
     LIBRARY_PATH=/opt/nvidia/cudaqx/lib:/opt/nvidia/cudaq-realtime/lib \
     LD_LIBRARY_PATH=/opt/nvidia/cudaqx/lib:/opt/nvidia/cudaqx/lib/decoder-plugins:/opt/nvidia/cudaq-realtime/lib:/opt/nvidia/cudaq/lib:/usr/local/openmpi/lib:${LD_LIBRARY_PATH}
+
+# Registration/schema checks need no TensorRT engine or GPU. The ordinary CPU
+# decoder replay additionally catches configuration, bridge and runtime-copy
+# failures before the image is published. Every task-graph delivery must name
+# the kinds it expects; omission cannot silently turn this into a generic pass.
+ARG QEC_REQUIRED_EXTERNAL_PLUGINS
+ARG QEC_REQUIRED_TASK_GRAPH_KINDS
+RUN set -ef; \
+    set --; \
+    old_ifs="$IFS"; IFS=';'; \
+    for provider in ${QEC_REQUIRED_EXTERNAL_PLUGINS:-}; do set -- "$@" "--require-provider=$provider"; done; \
+    for kind in ${QEC_REQUIRED_TASK_GRAPH_KINDS:-}; do set -- "$@" "--require-node-kind=$kind"; done; \
+    IFS="$old_ifs"; \
+    mkdir -p /opt/nvidia/cudaqx/share/cudaq-qec/qualification; \
+    CUDA_VISIBLE_DEVICES="" python3 /opt/nvidia/cudaqx/share/cudaq-qec/validation/installed_plugin_smoke.py \
+        --prefix=/opt/nvidia/cudaqx \
+        --registration-probe=/opt/nvidia/cudaqx/bin/qec-plugin-registration-probe \
+        --transport=/opt/nvidia/cudaq-realtime/lib/libcudaq-realtime-bridge-udp.so \
+        --output=/opt/nvidia/cudaqx/share/cudaq-qec/qualification/installed-smoke "$@"
 
 # Examples: the realtime decoding programs from the test suite, with a
 # build script that compiles them with the shipped nvq++ and a README with

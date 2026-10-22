@@ -16,6 +16,7 @@
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoding_task_graph.h"
 #include "cudaq/qec/sparse_binary_matrix.h"
+#include "cudaq/qec/task_graph_plugin.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -81,17 +82,24 @@ node_kind_registry_lock lock_node_kind_registry();
 /// Register a kind's public metadata and parameter schema together with the
 /// factory that builds it.  One registrar per kind covers both registries.
 __attribute__((visibility("default"))) void
+register_node_kind_v1(task_graph_node_kind_spec spec,
+                      decoding::config::decoder_schema params,
+                      node_factory factory);
+
+__attribute__((visibility("hidden"))) inline void
 register_node_kind(task_graph_node_kind_spec spec,
                    decoding::config::decoder_schema params,
-                   node_factory factory);
+                   node_factory factory) {
+  register_node_kind_v1(std::move(spec), std::move(params), std::move(factory));
+}
 
 /// Unregister `name` only if `registration_id` still owns it.
 __attribute__((visibility("default"))) void
 unregister_task_graph_node_kind_if_current(const std::string &name,
                                            uint64_t registration_id);
 
-/// Unregisters its kind when destroyed. Hold one at namespace scope in the
-/// plugin that registered the kind.
+/// Unregisters its kind when destroyed. A plugin may hold an initially empty
+/// token at namespace scope and assign it from its explicit register entry.
 class [[nodiscard]] node_kind_registration {
 public:
   node_kind_registration() = default;
@@ -127,9 +135,63 @@ private:
 
 /// Register a kind and return a token that unregisters it on destruction.
 __attribute__((visibility("default"))) node_kind_registration
+register_scoped_node_kind_v1(task_graph_node_kind_spec spec,
+                             decoding::config::decoder_schema params,
+                             node_factory factory);
+
+__attribute__((visibility("hidden"))) inline node_kind_registration
 register_scoped_node_kind(task_graph_node_kind_spec spec,
                           decoding::config::decoder_schema params,
-                          node_factory factory);
+                          node_factory factory) {
+  return register_scoped_node_kind_v1(std::move(spec), std::move(params),
+                                      std::move(factory));
+}
+
+/// Construct module metadata from the headers and C++ toolchain actually used.
+/// This is inline so a plugin cannot accidentally report the host's layout.
+static inline cudaq_qec_task_graph_plugin_descriptor
+make_task_graph_plugin_descriptor(const char *commit, const char *build_id) {
+#ifdef _GLIBCXX_USE_CXX11_ABI
+  constexpr uint32_t string_abi = _GLIBCXX_USE_CXX11_ABI;
+#else
+  constexpr uint32_t string_abi = UINT32_MAX;
+#endif
+#ifdef __GXX_ABI_VERSION
+  constexpr uint32_t compiler_abi = __GXX_ABI_VERSION;
+#else
+  constexpr uint32_t compiler_abi = 0;
+#endif
+  return {sizeof(cudaq_qec_task_graph_plugin_descriptor),
+          CUDAQ_QEC_TASK_GRAPH_PLUGIN_PROTOCOL_VERSION,
+          CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION,
+          string_abi,
+          compiler_abi,
+          0,
+          sizeof(node_build_context),
+          sizeof(task_graph_node_kind_spec),
+          sizeof(task_graph_node),
+          commit,
+          build_id};
+}
+
+/// Serializes plugin initialization, refuses constructor-time registration and
+/// owns rollback until explicit registration has completed successfully.
+class node_kind_plugin_registration {
+public:
+  node_kind_plugin_registration();
+  ~node_kind_plugin_registration();
+  node_kind_plugin_registration(const node_kind_plugin_registration &) = delete;
+  node_kind_plugin_registration &
+  operator=(const node_kind_plugin_registration &) = delete;
+  bool initialization_rejected() const noexcept;
+  void begin_registration();
+  bool ready_to_commit() const noexcept;
+  void commit() noexcept;
+
+private:
+  struct impl;
+  std::unique_ptr<impl> pimpl_;
+};
 
 /// Factory registered for a canonical kind name or alias, or nullptr. A kind
 /// registered through the public metadata-only entry point has no factory, so

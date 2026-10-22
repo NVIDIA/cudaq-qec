@@ -43,6 +43,9 @@ struct PluginHandle {
 /// @param plugin_dir The directory where the plugins are located
 /// @param type The type of plugins to load. Only plugins of this type will be
 /// loaded.
+/// Task-graph modules must pass the explicit C ABI gateway before registering
+/// any kinds. Incompatible or failed modules are reported and skipped without
+/// making ordinary decoder plugins unavailable.
 void load_plugins(const std::string &plugin_dir, PluginType type);
 
 /// @brief Function to clean up loaded plugins of a specific type

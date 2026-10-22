@@ -8,6 +8,7 @@
 
 #include "decoding_task_node_kind_registry.h"
 
+#include <algorithm>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -19,6 +20,15 @@ void unregister_task_graph_node_schema(const std::string &name);
 }
 
 namespace {
+
+struct plugin_registration_state {
+  bool accepting = false;
+  bool rejected = false;
+  bool committed = false;
+  std::vector<std::pair<std::string, uint64_t>> registrations;
+};
+
+thread_local plugin_registration_state *active_plugin_registration = nullptr;
 
 // Node-based maps so pointers handed out by find_task_graph_node_kind() stay
 // valid across later registrations, and intentionally leaked for the same
@@ -75,6 +85,26 @@ register_task_graph_node_kind_locked(task_graph_node_kind_spec spec,
                                      decoding::config::decoder_schema params) {
   std::string name;
   uint64_t registration_id = 0;
+  if (active_plugin_registration) {
+    auto &state = *active_plugin_registration;
+    if (!state.accepting) {
+      // Do not throw through a DSO static initializer. The loader observes the
+      // refusal and closes the module without publishing any registration.
+      state.rejected = true;
+      return 0;
+    }
+    if (!canonical_locked(spec.name).empty())
+      throw std::invalid_argument(
+          "plugin cannot replace an existing node kind");
+    std::vector<std::string> names{spec.name};
+    for (const auto &alias : spec.aliases) {
+      if (alias.empty() || !canonical_locked(alias).empty() ||
+          std::find(names.begin(), names.end(), alias) != names.end())
+        throw std::invalid_argument(
+            "plugin cannot replace or repeat a node alias");
+      names.push_back(alias);
+    }
+  }
   if (spec.name.empty())
     throw std::invalid_argument(
         "register_task_graph_node_kind: kind name must not be empty");
@@ -93,6 +123,9 @@ register_task_graph_node_kind_locked(task_graph_node_kind_spec spec,
   registration_id = next_registration_id_locked();
   kind_registry().insert_or_assign(name, std::move(spec));
   registration_registry().insert_or_assign(name, registration_id);
+  if (active_plugin_registration)
+    active_plugin_registration->registrations.emplace_back(name,
+                                                           registration_id);
   return registration_id;
 } // end - register_task_graph_node_kind_locked()
 
@@ -126,14 +159,73 @@ void unregister_task_graph_node_kind_locked(const std::string &name,
 
 } // namespace
 
+struct node_kind_plugin_registration::impl {
+  node_kind_registry_lock lock{registry_mutex()};
+  plugin_registration_state state;
+
+  impl() {
+    if (active_plugin_registration)
+      throw std::logic_error("nested task-graph plugin loading is unsupported");
+    active_plugin_registration = &state;
+  }
+
+  ~impl() {
+    if (!state.committed)
+      for (auto item = state.registrations.rbegin();
+           item != state.registrations.rend(); ++item)
+        unregister_task_graph_node_kind_locked(item->first, item->second);
+    active_plugin_registration = nullptr;
+  }
+};
+
+node_kind_plugin_registration::node_kind_plugin_registration()
+    : pimpl_(std::make_unique<impl>()) {}
+node_kind_plugin_registration::~node_kind_plugin_registration() = default;
+
+bool node_kind_plugin_registration::initialization_rejected() const noexcept {
+  return pimpl_->state.rejected;
+}
+
+void node_kind_plugin_registration::begin_registration() {
+  if (pimpl_->state.rejected)
+    throw std::logic_error("plugin registered from a static initializer");
+  pimpl_->state.accepting = true;
+}
+
+bool node_kind_plugin_registration::ready_to_commit() const noexcept {
+  return pimpl_->state.accepting && !pimpl_->state.rejected &&
+         !pimpl_->state.registrations.empty();
+}
+
+void node_kind_plugin_registration::commit() noexcept {
+  pimpl_->state.committed = true;
+}
+
+namespace {
+bool may_unregister_locked(const std::string &name) {
+  if (!active_plugin_registration)
+    return true;
+  const auto &entries = active_plugin_registration->registrations;
+  const auto canonical = canonical_locked(name);
+  if (active_plugin_registration->accepting &&
+      std::any_of(entries.begin(), entries.end(), [&](const auto &entry) {
+        return entry.first == canonical &&
+               registration_registry().at(canonical) == entry.second;
+      }))
+    return true;
+  active_plugin_registration->rejected = true;
+  return false;
+}
+} // namespace
+
 /// @brief Lock the node-kind registry across a multi-step pointer operation.
 /// @return Recursive registry lock owned by the caller.
 node_kind_registry_lock lock_node_kind_registry() {
   return node_kind_registry_lock(registry_mutex());
 }
 
-void register_task_graph_node_kind(task_graph_node_kind_spec spec,
-                                   decoding::config::decoder_schema params) {
+void register_task_graph_node_kind_v1(task_graph_node_kind_spec spec,
+                                      decoding::config::decoder_schema params) {
   std::lock_guard<std::recursive_mutex> lock(registry_mutex());
   register_task_graph_node_kind_locked(std::move(spec), std::move(params));
 }
@@ -157,20 +249,21 @@ std::vector<std::string> registered_task_graph_node_kinds() {
   return names;
 }
 
-void register_node_kind(task_graph_node_kind_spec spec,
-                        decoding::config::decoder_schema params,
-                        node_factory factory) {
+void register_node_kind_v1(task_graph_node_kind_spec spec,
+                           decoding::config::decoder_schema params,
+                           node_factory factory) {
   const std::string name = spec.name;
   std::lock_guard<std::recursive_mutex> lock(registry_mutex());
-  register_task_graph_node_kind_locked(std::move(spec), std::move(params));
-  factory_registry().insert_or_assign(name, std::move(factory));
+  if (register_task_graph_node_kind_locked(std::move(spec), std::move(params)))
+    factory_registry().insert_or_assign(name, std::move(factory));
 }
 
 /// @brief Remove a node kind while plugin-owned callbacks remain callable.
 /// @param name Canonical kind name or alias to unregister.
 void unregister_task_graph_node_kind(const std::string &name) {
   std::lock_guard<std::recursive_mutex> lock(registry_mutex());
-  unregister_task_graph_node_kind_locked(name, 0);
+  if (may_unregister_locked(name))
+    unregister_task_graph_node_kind_locked(name, 0);
 } // end - unregister_task_graph_node_kind()
 
 /// @brief Remove a node kind only while a scoped token still owns it.
@@ -179,7 +272,8 @@ void unregister_task_graph_node_kind(const std::string &name) {
 void unregister_task_graph_node_kind_if_current(const std::string &name,
                                                 uint64_t registration_id) {
   std::lock_guard<std::recursive_mutex> lock(registry_mutex());
-  unregister_task_graph_node_kind_locked(name, registration_id);
+  if (may_unregister_locked(name))
+    unregister_task_graph_node_kind_locked(name, registration_id);
 }
 
 /// @brief Register a plugin-owned node kind with an unload cleanup token.
@@ -188,13 +282,15 @@ void unregister_task_graph_node_kind_if_current(const std::string &name,
 /// @param factory Factory that constructs nodes of this kind.
 /// @return Move-only token that unregisters the kind when destroyed.
 node_kind_registration
-register_scoped_node_kind(task_graph_node_kind_spec spec,
-                          decoding::config::decoder_schema params,
-                          node_factory factory) {
+register_scoped_node_kind_v1(task_graph_node_kind_spec spec,
+                             decoding::config::decoder_schema params,
+                             node_factory factory) {
   std::string name = spec.name;
   std::lock_guard<std::recursive_mutex> lock(registry_mutex());
   const uint64_t registration_id =
       register_task_graph_node_kind_locked(std::move(spec), std::move(params));
+  if (!registration_id)
+    return {};
   factory_registry().insert_or_assign(name, std::move(factory));
   return node_kind_registration(std::move(name), registration_id);
 }

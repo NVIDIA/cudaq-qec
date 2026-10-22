@@ -1,5 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-License-Identifier: Apache-2.0
+# ============================================================================ #
+# Copyright (c) 2026 NVIDIA Corporation & Affiliates.
+# All rights reserved.
+#
+# This source code and the accompanying materials are made available under
+# the terms of the Apache License 2.0 which accompanies this distribution.
+# ============================================================================ #
 """Public import contract tests using synthetic, never-loaded ELF modules."""
 
 import copy
@@ -56,6 +61,7 @@ def module_descriptor(identity, kind, data, architecture="x86_64"):
         "cuda_version": "13.0.88",
         "tensorrt_version": None,
         "glibcxx_use_cxx11_abi": 1,
+        "framework_abi_version": 1 if kind == "task_graph" else None,
         "sha256": hashlib.sha256(data).hexdigest(),
         "size_bytes": len(data),
         "needed": ["libcudaq-qec-decoders.so"],
@@ -164,6 +170,36 @@ class ImportExternalPluginsTest(unittest.TestCase):
         self.manifest["modules"][0]["cuda_version"] = None
         self.write_archive()
         self.run_import()
+
+    def test_task_graph_abi_must_match_before_staging(self):
+        for value in (None, 0, 2, -1, True, "1"):
+            with self.subTest(value=value):
+                self.manifest["modules"][0]["framework_abi_version"] = value
+                self.write_archive()
+                with self.assertRaisesRegex(ValueError, "ABI version mismatch"):
+                    self.run_import()
+                self.assertFalse(self.output.exists())
+
+    def test_decoder_does_not_claim_task_graph_abi(self):
+        self.manifest["modules"] = [
+            module_descriptor("decoder", "decoder", self.data)
+        ]
+        self.manifest["modules"][0]["framework_abi_version"] = 1
+        self.write_archive()
+        with self.assertRaisesRegex(ValueError, "must not declare"):
+            self.run_import()
+        self.assertFalse(self.output.exists())
+
+    def test_import_abi_version_matches_public_gateway(self):
+        import re
+        header = SCRIPT.parents[
+            2] / "libs/qec/include/cudaq/qec/task_graph_plugin.h"
+        match = re.search(
+            r"#define CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION ([0-9]+)",
+            header.read_text(encoding="utf-8"))
+        self.assertIsNotNone(match)
+        self.assertEqual(int(match.group(1)),
+                         IMPORTER.EXPECTED_TASK_GRAPH_FRAMEWORK_ABI_VERSION)
 
     def test_checksum_is_required_before_tar_processing(self):
         self.archive.write_bytes(b"not a tar file")

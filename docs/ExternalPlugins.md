@@ -23,11 +23,34 @@ cmake --install build --prefix /path/to/install
 ```
 
 The producer commit is an exact, reviewed 40-character Git commit identifying
-the delivered binaries. It is **not** an automatic public/private source mapping
-or a runtime ABI handshake. Before importing a task-graph binary, confirm that
-its build interfaces match the target framework and rebuild it when those
-interfaces change. Current modules may register from static initializers during
-`dlopen`; a post-load metadata check cannot make an incompatible binary safe.
+the delivered binaries, not an automatic public/private source mapping. Each
+task-graph module also declares `framework_abi_version` in its manifest. Decoder
+modules use `null` for this task-graph-specific field.
+
+## Task-graph plugin ABI gate
+
+Task-graph modules must implement the C gateway in
+`cudaq/qec/task_graph_plugin.h`: `cudaq_qec_task_graph_plugin_describe` and
+`cudaq_qec_task_graph_plugin_register`. The description is immutable and reports
+the protocol/framework ABI versions, compiled C++ layouts and toolchain ABI,
+framework source identity and build identity. Neither entry point may throw.
+
+The loader resolves both entry points from the module itself, checks the
+description before invoking registration, and refuses missing/incompatible
+modules with a warning. Versioned C++ registration symbols prevent pre-gate
+task-graph binaries from resolving the old by-value interface before their
+constructors run. Registration from a new module's static initializer is also
+refused: there is no task-graph legacy grace path. Initialize registrations only
+inside the explicit entry point. Existing ordinary decoder plugins retain their
+current interface and load before task-graph modules.
+
+Registration cannot replace an existing kind or alias. Failed registration is
+rolled back while module-owned callbacks remain mapped, then the handle is
+closed. Successful task-graph modules remain mapped for the process lifetime.
+The gate protects compatibility, not execution of untrusted code: native plugins
+remain trusted inputs. Bump the framework ABI version and registration symbols
+together when the factory, metadata or node C++ interfaces change, and rebuild
+all affected modules. These checks run at loading, not in the decode hot path.
 
 `QEC_EXTERNAL_PLUGIN_DELIVERY` defaults to `native`, or `wheel` under
 scikit-build. A native build rejects a wheel delivery and vice versa. The target
@@ -90,6 +113,20 @@ runtime with no access to those source/build trees. A builder-only success is
 not validation of the downloaded release image. Pin the image digest and record
 the framework/provider commits, CUDA and TensorRT versions, bundle hashes and
 replay results before making a support statement.
+
+The decoding-server release workflow extends the image supplied by PR #798; it
+does not define a second server image. Its optional `plugin_framework_commit`,
+`required_plugin_ids` and `required_task_graph_kinds` inputs select and require
+the native archive in the existing artifacts context. Use `cuda_version=13.0`
+for a TensorRT delivery requiring both amd64 and arm64; unsupported required
+providers fail rather than disappearing from a release matrix.
+
+After final copying, the runtime image executes
+`/opt/nvidia/cudaqx/share/cudaq-qec/validation/installed_plugin_smoke.py` without
+a GPU. It verifies manifests, RPATHs, dependencies, positive/negative node-kind
+registration and eight ordinary PyMatching shots over UDP. The report is
+retained under `share/cudaq-qec/qualification/installed-smoke/summary.json`.
+This is an installed-image packaging check, not model or GPU qualification.
 
 ## Send requests through the installed server
 

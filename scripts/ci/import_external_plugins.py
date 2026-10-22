@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-License-Identifier: Apache-2.0
+# ============================================================================ #
+# Copyright (c) 2026 NVIDIA Corporation & Affiliates.
+# All rights reserved.
+#
+# This source code and the accompanying materials are made available under
+# the terms of the Apache License 2.0 which accompanies this distribution.
+# ============================================================================ #
 """Validate a binary plugin delivery and stage its modules without loading them.
 
 The mandatory checksum sidecar is ``ARCHIVE.sha256`` and names only ARCHIVE's
 basename. The reviewed producer framework commit is provenance, not a runtime
-ABI handshake with the consumer. Successful import does not establish ABI or
-GPU compatibility; installed-package loading and execution still need testing.
+ABI handshake with the consumer. The recorded task-graph ABI must match this
+importer's interface; the runtime loader independently verifies the module's
+compiled descriptor before registration. GPU execution still needs testing.
 """
 
 import argparse
@@ -21,6 +27,9 @@ import tarfile
 import tempfile
 
 SCHEMA_VERSION = 1
+# Keep this in step with CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION in the
+# installed C gateway. The runtime checks the binary rather than trusting JSON.
+EXPECTED_TASK_GRAPH_FRAMEWORK_ABI_VERSION = 1
 MANIFEST_LIMIT_BYTES = 1024 * 1024
 CHECKSUM_LIMIT_BYTES = 1024
 COPY_CHUNK_BYTES = 1024 * 1024
@@ -35,7 +44,8 @@ MODULE_FIELDS = {
     "schema_version", "id", "kind", "path", "framework_commit", "source_dirty",
     "build_type", "architecture", "compiler", "cxx_standard", "cuda_version",
     "tensorrt_version", "glibcxx_use_cxx11_abi", "sha256", "size_bytes",
-    "needed", "rpath", "build_id", "required_symbol_versions"
+    "needed", "rpath", "build_id", "required_symbol_versions",
+    "framework_abi_version"
 }
 COMMIT_PATTERN = r"[0-9a-f]{40}"
 VERSION_PATTERN = r"[0-9]+\.[0-9]+(?:\.[0-9]+)?"
@@ -76,6 +86,13 @@ def _validate_module(module, architecture, framework_commit, cuda_version):
     kind = module["kind"]
     if not isinstance(kind, str) or kind not in PLUGIN_DIRECTORIES:
         raise ValueError("Unsupported plugin kind")
+    framework_abi = module["framework_abi_version"]
+    if kind == "task_graph":
+        if (type(framework_abi) is not int or
+                framework_abi != EXPECTED_TASK_GRAPH_FRAMEWORK_ABI_VERSION):
+            raise ValueError("Task-graph framework ABI version mismatch")
+    elif framework_abi is not None:
+        raise ValueError("Decoder plugins must not declare a task-graph ABI")
     path = _canonical_path(module["path"])
     if (len(path.parts) != 2 or path.parts[0] != PLUGIN_DIRECTORIES[kind] or
             path.suffix != ".so" or
