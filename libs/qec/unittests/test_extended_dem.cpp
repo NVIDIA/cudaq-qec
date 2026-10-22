@@ -1847,6 +1847,18 @@ TEST(DemChunkSpec, PhasesMustAgreeOnTheObservableCount) {
   EXPECT_EQ(none.num_observables(), 0u);
 }
 
+// A phase no connection names is never built, so its O_sparse rows are not
+// counted.
+TEST(DemChunkSpec, PhasesOutsideTheChainDoNotCountObservables) {
+  auto spec = rep5_spec(3);
+  auto spare = rep5_phase(spec, phase_name::dem_bulk);
+  spare.O_sparse = {0, -1, 1, -1};
+  spec.phases.push_back({phase_id::from_name("spare"), spare});
+  EXPECT_NO_THROW(spec.validate());
+  EXPECT_EQ(spec.num_observables(), 1u);
+  EXPECT_EQ(dem_chunks_from_spec(spec).size(), 3u);
+}
+
 // observable_names, when given, names each observable once.
 TEST(DemChunkSpec, ObservableNamesNameEachObservableOnce) {
   auto spec = rep5_spec();
@@ -1909,6 +1921,17 @@ TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase) {
   rep5_phase(repeated, phase_name::dem_final).m2o_sparse = {1, 1, -1};
   expect_rejected(repeated, "m2o_sparse duplicate");
 } // end - TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase)
+
+// A branch has two sinks, but the chain has no last phase to read out.
+TEST(DemChunkSpec, ReadoutMapNeedsALinearChain) {
+  auto spec = rep5_spec(3);
+  spec.measurements_per_round = rep5_checks;
+  spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
+                      {phase_name::dem_init, phase_name::dem_final}};
+  rep5_phase(spec, phase_name::dem_bulk).m2o_sparse = {0, -1};
+  rep5_phase(spec, phase_name::dem_final).m2o_sparse = {0, -1};
+  expect_rejected(spec, "multiple non-self outgoing edges");
+}
 
 // layout() orders the phases around the repeating one for a shot of any
 // length, and agrees with repeating_rounds() at a fixed one.

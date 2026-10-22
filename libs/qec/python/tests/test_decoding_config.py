@@ -438,6 +438,10 @@ def test_dem_chunks_schema_matches_the_parser():
     rejected_by_both(
         per_seam, lambda c: c["phases"][0]["spec"]["seam_specs"][0]["spec"].
         update(D_sparse=[0, -1]))
+    rejected_by_both(per_seam,
+                     lambda c: c["phases"][0]["spec"].update(H_sparse=[0, -1]))
+    rejected_by_both(_REP5_READOUT_YAML,
+                     lambda c: c.update(observable_names=["Z_L", "Z_L"]))
 
 
 def test_decoder_config_json_schema_covers_dispatch_and_transport():

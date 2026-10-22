@@ -431,8 +431,9 @@ struct dem_chunks_spec {
   /// measurements_per_round. @throws std::invalid_argument if neither is set.
   uint64_t measurements_of(const dem_chunk_spec &phase) const;
 
-  /// @brief The number of O_sparse rows every phase carries; 0 with no phases.
-  /// @throws std::invalid_argument if two phases disagree.
+  /// @brief The number of O_sparse rows every phase a connection names
+  /// carries; 0 when no connection names a phase.
+  /// @throws std::invalid_argument if two of those phases disagree.
   uint64_t num_observables() const;
 
   /// The detector rows @p phase's round contributes when closed: its to_seam

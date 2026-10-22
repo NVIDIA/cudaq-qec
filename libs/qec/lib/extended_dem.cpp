@@ -847,11 +847,13 @@ const dem_chunk_spec &dem_chunks_spec::get_phase(phase_id id) const {
 }
 
 // Checks observable_names and m2o_sparse against the observable count. The
-// last phase is entered by a non-self connection and left by none, so it is
-// never the repeating phase.
+// readout phase is the last of the chain phase_sequence() walks, which
+// rejects branches and cycles; the shortest chain is enough to find it, and
+// it must not be the repeating phase.
 static void validate_observables(const dem_chunks_spec &spec) {
   const uint64_t observables = spec.num_observables();
   std::unordered_set<std::string> names;
+  std::optional<phase_id> last_phase;
   if (!spec.observable_names.empty() &&
       spec.observable_names.size() != observables)
     throw std::invalid_argument(
@@ -871,15 +873,17 @@ static void validate_observables(const dem_chunks_spec &spec) {
     };
     if (m2o.empty())
       continue;
-    const bool entered =
+    if (!last_phase) {
+      auto shortest = spec;
+      shortest.num_rounds = std::max<uint64_t>(2, spec.minimum_rounds());
+      last_phase = shortest.phase_sequence().back();
+    }
+    const bool repeats =
         std::any_of(spec.connections.begin(), spec.connections.end(),
                     [&](const phase_connection &c) {
-                      return !c.is_self() && c.to_phase == e.id;
+                      return c.is_self() && c.from_phase == *last_phase;
                     });
-    const bool left = std::any_of(
-        spec.connections.begin(), spec.connections.end(),
-        [&](const phase_connection &c) { return c.from_phase == e.id; });
-    if (!entered || left)
+    if (e.id != *last_phase || repeats)
       fail("carries m2o_sparse, which only the last phase may carry");
     const auto rows = static_cast<uint64_t>(
         std::count(m2o.begin(), m2o.end(), std::int64_t{-1}));
@@ -973,22 +977,32 @@ uint64_t dem_chunks_spec::detectors_of(const dem_chunk_spec &phase) const {
          uint64_t{chunk.num_interior_rows()};
 }
 
-// Every phase must carry the same number of O_sparse rows.
+// Every phase a connection names must carry the same number of O_sparse
+// rows. Other phases are never built, so they are not counted.
 uint64_t dem_chunks_spec::num_observables() const {
+  const phase_spec_entry *first = nullptr;
   const auto rows = [](const phase_spec_entry &e) {
     return static_cast<uint64_t>(std::count(
         e.spec.O_sparse.begin(), e.spec.O_sparse.end(), std::int64_t{-1}));
   };
-  if (phases.empty())
-    return 0;
-  for (const auto &e : phases)
-    if (rows(e) != rows(phases.front()))
-      throw std::invalid_argument("dem_chunks_spec: phase '" + e.id.name() +
-                                  "' has " + std::to_string(rows(e)) +
-                                  " observable rows (O_sparse) but phase '" +
-                                  phases.front().id.name() + "' has " +
-                                  std::to_string(rows(phases.front())));
-  return rows(phases.front());
+  const auto in_chain = [&](const phase_spec_entry &e) {
+    return std::any_of(connections.begin(), connections.end(),
+                       [&](const phase_connection &c) {
+                         return c.from_phase == e.id || c.to_phase == e.id;
+                       });
+  };
+  for (const auto &e : phases) {
+    if (!in_chain(e))
+      continue;
+    if (!first)
+      first = &e;
+    if (rows(e) != rows(*first))
+      throw std::invalid_argument(
+          "dem_chunks_spec: phase '" + e.id.name() + "' has " +
+          std::to_string(rows(e)) + " observable rows (O_sparse) but phase '" +
+          first->id.name() + "' has " + std::to_string(rows(*first)));
+  } // end - for(e)
+  return first ? rows(*first) : 0;
 } // end - dem_chunks_spec::num_observables()
 
 // ---------------------------------------------------------------------------

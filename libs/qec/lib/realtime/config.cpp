@@ -2390,6 +2390,11 @@ std::string decoder_config_json_schema() {
            {"type", "object"},
            {"properties", std::move(dem_chunk_properties)},
            {"required", llvm::json::Array{"num_faults", "error_rates"}},
+           // H_sparse and seam_specs are the shorthand and per-seam forms
+           // of one phase's H; a phase uses one or the other.
+           {"not",
+            llvm::json::Object{
+                {"required", llvm::json::Array{"H_sparse", "seam_specs"}}}},
            {"additionalProperties", false}}},
       {"dem_chunks",
        llvm::json::Object{
@@ -2408,7 +2413,8 @@ std::string decoder_config_json_schema() {
                 {"observable_names",
                  llvm::json::Object{
                      {"type", "array"},
-                     {"items", llvm::json::Object{{"type", "string"}}}}},
+                     {"items", llvm::json::Object{{"type", "string"}}},
+                     {"uniqueItems", true}}},
                 {"phases",
                  llvm::json::Object{{"type", "array"},
                                     {"items", named_spec("dem_chunk")}}}}},

@@ -184,7 +184,7 @@ void bindExtendedDem(nb::module_ &mod) {
               "differs from DemChunksSpec.measurements_per_round (a final\n"
               "data readout, say). None to use the spec-wide value.")
       .def_rw("m2o_sparse", &dem_chunk_spec::m2o_sparse,
-              "Optional readout map, -1-terminated: one row per observable,\n"
+              "Optional readout map, -1-terminated, one row per observable\n"
               "listing the measurements of this phase's own round whose\n"
               "parity is the observable's raw value. Only the last phase\n"
               "may carry it.")
@@ -282,7 +282,8 @@ void bindExtendedDem(nb::module_ &mod) {
            "Return the detector rows the phase's round contributes when\n"
            "closed: its incoming seam band and interior rows.")
       .def("num_observables", &dem_chunks_spec::num_observables,
-           "Return the number of O_sparse rows every phase carries.\n"
+           "Return the number of O_sparse rows every phase a connection\n"
+           "names carries.\n"
            "Raises ValueError if two phases disagree.")
       .def("has_D_sparse", &dem_chunks_spec::has_D_sparse,
            "True when the phases supply D rather than leaving\n"
