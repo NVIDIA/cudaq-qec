@@ -2335,6 +2335,31 @@ TEST(DecoderDemChunksYAMLTest, ParsesAllPhases) {
   EXPECT_TRUE(chunks->has_repeating_phase());
 }
 
+TEST(MemoryExperimentYaml, PreservesEveryPhaseProbabilityExactly) {
+  namespace config = cudaq::qec::decoding::config;
+  auto entry = parse_one(dem_chunks_yaml(3));
+  ASSERT_TRUE(entry.dem_chunks.has_value());
+  // A native phase fixture keeps this framework serialization regression
+  // independent of circuit characterization and the generator executable.
+  for (const auto probability :
+       {0.0, 1.0, std::numeric_limits<double>::denorm_min(),
+        std::nextafter(0.001, 1.0), std::numeric_limits<double>::min(),
+        std::nextafter(1.0, 0.0), 0.12345678901234567}) {
+    SCOPED_TRACE(probability);
+    for (auto &phase : entry.dem_chunks->phases)
+      for (auto &rate : phase.spec.error_rates)
+        rate = probability;
+    EXPECT_EQ(config::dem_chunks_from_yaml_str(
+                  config::dem_chunks_to_yaml_str(*entry.dem_chunks)),
+              *entry.dem_chunks);
+    EXPECT_EQ(
+        config::decoder_config::from_yaml_str(entry.to_yaml_str()).dem_chunks,
+        entry.dem_chunks);
+  }
+  EXPECT_THROW(config::dem_chunks_from_yaml_str("unknown_field: 1\n"),
+               std::exception);
+}
+
 TEST(DecoderDemChunksYAMLTest, ParsedPhasesExpandAndClose) {
   const auto config =
       cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(

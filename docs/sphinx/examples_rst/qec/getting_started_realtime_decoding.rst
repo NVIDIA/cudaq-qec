@@ -88,6 +88,13 @@ Decoder parameters are validated against the parameter schema each decoder regis
 
 The configuration is then saved to a YAML file for reuse. The YAML format is human-readable, making it easy to inspect, modify, and share configurations across different execution environments.
 
+.. note::
+
+   DEM-chunk ``error_rates`` now retain full double precision when configurations
+   are saved. Earlier versions rounded these phase priors to six significant
+   digits. Exported YAML text may therefore change, including decoder-server
+   configurations and ``--save_dem`` output; the input schema is unchanged.
+
 Use :func:`~cudaq_qec.decoder_context_from_memory_circuit` to obtain the parity-check, observable,
 and measurement-to-detector matrices in one call, then assemble the decoder config:
 

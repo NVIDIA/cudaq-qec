@@ -16,9 +16,21 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace cudaq::qec::decoding::config {
+
+/// Serialize a standalone phase model, without implying a decoder or task
+/// graph configuration. Uses the same representation as `dem_chunks` in a
+/// decoder configuration. Validates phase data before serialization.
+__attribute__((visibility("default"))) std::string
+dem_chunks_to_yaml_str(const dem_chunks_spec &spec, int column_wrap = 80);
+
+/// Parse and validate a standalone phase model. This does not construct or
+/// qualify a decoder. Unknown fields and invalid phase data are rejected.
+__attribute__((visibility("default"))) dem_chunks_spec
+dem_chunks_from_yaml_str(std::string_view yaml);
 
 /// Dispatch shape for a decoder session -- HOW its RPCs are executed, not
 /// which wire the bytes arrive on (the wire is a server-level transport

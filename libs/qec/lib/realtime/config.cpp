@@ -21,6 +21,9 @@
 #include "cudaq/qec/realtime/decoding_config.h"
 #include "cudaq/qec/selection_strategy.h"
 #include <algorithm>
+#include <array>
+#include <cassert>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -540,6 +543,17 @@ static void validate_task_graph(const decoder_config &config) {
 
 } // namespace cudaq::qec::decoding::config
 
+namespace {
+
+// LLVM's default double emitter rounds to six significant digits. Phase priors
+// are model data and must survive export without changing their probabilities.
+struct phase_probability {
+  double value = 0;
+};
+
+} // namespace
+
+LLVM_YAML_IS_FLOW_SEQUENCE_VECTOR(phase_probability)
 LLVM_YAML_IS_SEQUENCE_VECTOR(std::vector<double>)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::decoding::config::decoder_config)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::phase_connection)
@@ -556,6 +570,24 @@ LLVM_YAML_IS_SEQUENCE_VECTOR(
     cudaq::qec::decoding::config::syndrome_mapping_config)
 
 namespace llvm::yaml {
+
+template <>
+struct ScalarTraits<phase_probability> {
+  static void output(const phase_probability &probability, void *,
+                     raw_ostream &stream) {
+    std::array<char, 64> buffer;
+    const auto result = std::to_chars(
+        buffer.data(), buffer.data() + buffer.size(), probability.value);
+    assert(result.ec == std::errc() &&
+           "the buffer must fit the shortest double representation");
+    stream << StringRef(buffer.data(), result.ptr - buffer.data());
+  }
+  static StringRef input(StringRef text, void *context,
+                         phase_probability &value) {
+    return ScalarTraits<double>::input(text, context, value.value);
+  }
+  static QuotingType mustQuote(StringRef) { return QuotingType::None; }
+};
 
 // Binds a heterogeneous_map to the decoder_schema that describes it so the
 // generic mapping traits below can convert between the two. The schema drives
@@ -806,7 +838,19 @@ struct MappingTraits<cudaq::qec::dem_chunk_spec> {
     io.mapOptional("H_sparse", spec.H_sparse);
     io.mapOptional("seam_specs", spec.seam_specs);
     io.mapOptional("O_sparse", spec.O_sparse, std::vector<std::int64_t>{});
-    io.mapRequired("error_rates", spec.error_rates);
+    std::vector<phase_probability> rates;
+    if (io.outputting()) {
+      rates.reserve(spec.error_rates.size());
+      for (const auto value : spec.error_rates)
+        rates.push_back({value});
+    }
+    io.mapRequired("error_rates", rates);
+    if (!io.outputting()) {
+      spec.error_rates.clear();
+      spec.error_rates.reserve(rates.size());
+      for (const auto value : rates)
+        spec.error_rates.push_back(value.value);
+    }
     io.mapOptional("D_sparse", spec.D_sparse, std::vector<std::int64_t>{});
     io.mapOptional("num_measurements", spec.num_measurements);
   }
@@ -1789,6 +1833,28 @@ cudaq::qec::decoding::config::decoder_config::to_yaml_str(int column_wrap) {
 }
 
 namespace cudaq::qec::decoding::config {
+
+std::string dem_chunks_to_yaml_str(const dem_chunks_spec &spec,
+                                   int column_wrap) {
+  spec.validate();
+  // LLVM's mapping interface takes mutable data even while emitting.
+  auto writable = spec;
+  std::string yaml;
+  llvm::raw_string_ostream stream(yaml);
+  llvm::yaml::Output output(stream, nullptr, column_wrap);
+  output << writable;
+  return yaml;
+}
+
+dem_chunks_spec dem_chunks_from_yaml_str(std::string_view yaml) {
+  dem_chunks_spec spec;
+  llvm::yaml::Input input(yaml);
+  input >> spec;
+  if (const auto error = input.error())
+    throw std::runtime_error("Invalid phase-model YAML: " + error.message());
+  spec.validate();
+  return spec;
+}
 
 // ---------------------------------------------------------------------------
 // JSON Schema export
