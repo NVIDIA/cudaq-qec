@@ -100,6 +100,9 @@ dem_sampling(const cudaqx::tensor<uint8_t> &check_matrix, std::size_t numShots,
 /// Sampling uses CUDA-Q's current backend and random seed, as set by
 /// cudaq::set_random_seed. Callers must serialize concurrent changes to global
 /// sampling, random-seed and noise state.
+/// @throws std::runtime_error If counts or preparation are invalid, required
+/// code operations are missing, or the sampling backend fails.
+/// @throws std::overflow_error If the raw records exceed addressable storage.
 std::vector<std::string> sample_memory_circuit_raw(const code &code,
                                                    operation statePrep,
                                                    std::size_t numShots,

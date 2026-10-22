@@ -20,7 +20,9 @@ struct bundle_options {
 
 /// Publish model.yaml and manifest.yaml in a new directory, with optional raw
 /// replay files. Never overwrites an existing directory. No runnable server
-/// configuration is emitted.
+/// configuration is emitted. Incomplete writes are removed; completed output
+/// is retained if the subsequent self-validation fails, with its path reported
+/// in the exception.
 void write_model_bundle(const preparation_request &request,
                         const prepared_model &model,
                         const bundle_options &options,
@@ -28,6 +30,8 @@ void write_model_bundle(const preparation_request &request,
 
 /// Check the versioned manifest, file integrity, bounded phase-model topology,
 /// raw-record layout and readout map. Does not construct or execute a graph.
+/// Reports malformed bundles as std::runtime_error with an
+/// "invalid model bundle:" diagnostic; allocation failures propagate unchanged.
 void validate_model_bundle(const std::filesystem::path &directory);
 
 } // namespace cudaq::qec::memory_experiment

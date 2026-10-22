@@ -18,6 +18,7 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <string_view>
 
 using namespace cudaqx;
 
@@ -271,8 +272,9 @@ struct memory_circuit_sampling_setup {
   std::vector<std::size_t> z_schedule;
   std::vector<std::size_t> observable_map;
 
-  memory_circuit_sampling_setup(const code &qec_code, operation state_prep,
-                                std::size_t num_rounds)
+  memory_circuit_sampling_setup(
+      const code &qec_code, operation state_prep, std::size_t num_rounds,
+      std::string_view sampler_name = "sample_memory_circuit")
       : qec_code(qec_code), state_prep(state_prep),
         is_z_prep(state_prep == operation::prep0 ||
                   state_prep == operation::prep1),
@@ -282,19 +284,22 @@ struct memory_circuit_sampling_setup {
         num_rounds(num_rounds) {
     if (num_rounds == 0)
       throw std::runtime_error(
-          "sample_memory_circuit error - numRounds must be >= 1. The memory "
+          std::string(sampler_name) +
+          " error - numRounds must be >= 1. The memory "
           "circuit always performs at least one stabilizer measurement "
           "round. ");
     if (!qec_code.contains_operation(state_prep))
-      throw std::runtime_error("sample_memory_circuit_error - requested state "
-                               "prep kernel not found.");
+      throw std::runtime_error(
+          std::string(sampler_name) +
+          "_error - requested state prep kernel not found.");
     if (!(state_prep == operation::prep0 || state_prep == operation::prep1 ||
           state_prep == operation::prepp || state_prep == operation::prepm))
-      throw std::runtime_error(
-          "sample_memory_circuit_error - invalid requested state prep kernel.");
+      throw std::runtime_error(std::string(sampler_name) +
+                               "_error - invalid requested state prep kernel.");
     if (!qec_code.contains_operation(operation::stabilizer_round))
-      throw std::runtime_error("sample_memory_circuit error - no stabilizer "
-                               "round kernel for this code.");
+      throw std::runtime_error(
+          std::string(sampler_name) +
+          " error - no stabilizer round kernel for this code.");
 
     // Nonzero entries are interaction timesteps, not binary support values.
     const auto sched_x = qec_code.get_stabilizer_schedule_x();
@@ -323,14 +328,21 @@ struct memory_circuit_sampling_setup {
                                   cudaq::noise_model &noise) const {
     const cudaq::sample_options options{
         .shots = num_shots, .noise = noise, .explicit_measurements = true};
-    auto result = cudaq::sample(
-        options, memory_circuit,
-        qec_code.get_operation<code::stabilizer_round>(
-            operation::stabilizer_round),
-        qec_code.get_operation<code::one_qubit_encoding>(state_prep), num_data,
-        num_ancilla_x, num_ancilla_z, num_rounds, x_schedule, z_schedule,
-        observable_map, num_observables, !is_z_prep);
-    return result.sequential_data();
+    try {
+      auto result = cudaq::sample(
+          options, memory_circuit,
+          qec_code.get_operation<code::stabilizer_round>(
+              operation::stabilizer_round),
+          qec_code.get_operation<code::one_qubit_encoding>(state_prep),
+          num_data, num_ancilla_x, num_ancilla_z, num_rounds, x_schedule,
+          z_schedule, observable_map, num_observables, !is_z_prep);
+      return result.sequential_data();
+    } catch (...) {
+      // CUDA-Q resets noise on success only. Clear its borrowed pointer before
+      // the noise model owned by options is destroyed during unwinding.
+      cudaq::get_platform().reset_noise();
+      throw;
+    }
   }
 };
 
@@ -424,10 +436,10 @@ std::vector<std::string> sample_memory_circuit_raw(const code &code,
                                                    std::size_t numRounds,
                                                    cudaq::noise_model &noise) {
   if (numShots == 0)
-    throw std::invalid_argument(
+    throw std::runtime_error(
         "sample_memory_circuit_raw error - numShots must be positive.");
-  const details::memory_circuit_sampling_setup setup(code, statePrep,
-                                                     numRounds);
+  const details::memory_circuit_sampling_setup setup(
+      code, statePrep, numRounds, "sample_memory_circuit_raw");
   const auto maximum = std::string{}.max_size();
   if (setup.num_ancilla_x > maximum ||
       setup.num_ancilla_z > maximum - setup.num_ancilla_x)

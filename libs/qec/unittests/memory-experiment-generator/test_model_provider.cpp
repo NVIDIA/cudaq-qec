@@ -28,6 +28,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include <map>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -348,7 +349,7 @@ TEST(MemoryExperimentBundle, RejectsDegenerateCharacterizationProvenance) {
     metadata.model.characterization_rounds = characterization;
     metadata.model.validation_rounds = validation;
     write_test_manifest(path, metadata);
-    EXPECT_THROW(validate_model_bundle(output), std::exception);
+    EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
   }
   for (const auto &key : {"characterization_rounds", "validation_rounds"}) {
     auto yaml = manifest::to_yaml(original_metadata);
@@ -363,6 +364,75 @@ TEST(MemoryExperimentBundle, RejectsDegenerateCharacterizationProvenance) {
   }
   write_test_manifest(path, original_metadata);
   EXPECT_NO_THROW(validate_model_bundle(output));
+}
+
+TEST(MemoryExperimentBundle, InvalidManifestValuesHaveOneDiagnosticContract) {
+  const preparation_request request{
+      {"surface_code", 3, 26, 1, memory_basis::z}};
+  const auto model = prepare_model(request);
+  temporary_bundle_directory temporary;
+  const auto output = temporary.path / "bundle";
+  write_model_bundle(request, model, {}, output);
+  const auto manifest_path = output / "manifest.yaml";
+  const auto original = read_test_manifest(manifest_path);
+  std::vector<manifest::document> invalid(4, original);
+  invalid[0].experiment.distance = 4;
+  invalid[1].experiment.rounds = std::numeric_limits<std::uint64_t>::max();
+  invalid[2].delivery.batch_rounds = 0;
+  invalid[3].model.characterization_rounds = 0;
+  constexpr std::string_view prefix = "invalid model bundle: ";
+  for (const auto &metadata : invalid) {
+    write_test_manifest(manifest_path, metadata);
+    try {
+      validate_model_bundle(output);
+      FAIL() << "invalid manifest was accepted";
+    } catch (const std::runtime_error &error) {
+      const std::string_view message(error.what());
+      EXPECT_TRUE(message.starts_with(prefix)) << message;
+      EXPECT_EQ(message.find(prefix, prefix.size()), std::string_view::npos)
+          << message;
+    }
+  }
+  write_test_manifest(manifest_path, original);
+  EXPECT_NO_THROW(validate_model_bundle(output));
+}
+
+TEST(MemoryExperimentBundle, SelfValidationFailureRetainsCompletedOutput) {
+  const preparation_request request{
+      {"surface_code", 3, 26, 1, memory_basis::z}};
+  auto model = prepare_model(request);
+  // A second empty observable preserves the chunk topology, but disagrees
+  // with this independent patch's one raw-logical readout. This makes the
+  // completed bundle fail self-validation without racing filesystem access.
+  for (auto &phase : model.chunks.phases)
+    phase.spec.O_sparse.push_back(-1);
+  ASSERT_NO_THROW(validate_prepared_model(request, model));
+  temporary_bundle_directory temporary;
+  const auto output = temporary.path / "retained";
+  try {
+    write_model_bundle(request, model, {.replay_shots = 1}, output);
+    FAIL() << "bundle with inconsistent observable count was accepted";
+  } catch (const std::runtime_error &error) {
+    const std::string message(error.what());
+    EXPECT_TRUE(message.starts_with(
+        "model bundle written but failed self-validation: "))
+        << message;
+    EXPECT_NE(message.find(output.string()), std::string::npos);
+    EXPECT_NE(message.find("phase fault-observable count"), std::string::npos)
+        << message;
+  }
+  ASSERT_TRUE(std::filesystem::is_regular_file(output / "manifest.yaml"));
+  ASSERT_TRUE(std::filesystem::is_regular_file(output / "model.yaml"));
+  ASSERT_TRUE(std::filesystem::is_regular_file(output / "raw-0-0.txt"));
+  const auto metadata = read_test_manifest(output / "manifest.yaml");
+  EXPECT_EQ(metadata.model.sha256,
+            test_digest(read_test_text(output / "model.yaml")));
+  ASSERT_TRUE(metadata.replay.has_value());
+  ASSERT_EQ(metadata.replay->files.size(), 1);
+  const auto raw = read_test_text(output / "raw-0-0.txt");
+  EXPECT_FALSE(raw.empty());
+  EXPECT_EQ(metadata.replay->files.front().sha256, test_digest(raw));
+  EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
 }
 
 TEST(MemoryExperimentBundle, RejectsExtraModelYamlDocumentsEvenWithValidHash) {
@@ -481,7 +551,11 @@ TEST(MemoryExperimentBundle,
     const auto rejected = cleanup.path / (std::string(name) + "-rejected");
     EXPECT_THROW(write_model_bundle(request, wrong, {}, rejected),
                  std::runtime_error);
-    EXPECT_FALSE(std::filesystem::exists(rejected));
+    // This disagreement is found after publication, so retain the completed
+    // files for inspection rather than treating them as incomplete writes.
+    EXPECT_TRUE(std::filesystem::is_regular_file(rejected / "model.yaml"));
+    EXPECT_TRUE(std::filesystem::is_regular_file(rejected / "manifest.yaml"));
+    EXPECT_THROW(validate_model_bundle(rejected), std::runtime_error);
 
     const auto output = cleanup.path / name;
     write_model_bundle(request, model, {}, output);

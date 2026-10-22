@@ -2357,7 +2357,27 @@ TEST(MemoryExperimentYaml, PreservesEveryPhaseProbabilityExactly) {
         entry.dem_chunks);
   }
   EXPECT_THROW(config::dem_chunks_from_yaml_str("unknown_field: 1\n"),
-               std::exception);
+               std::runtime_error);
+}
+
+TEST(MemoryExperimentYaml, InvalidPhaseModelUsesConfigurationExceptionType) {
+  namespace config = cudaq::qec::decoding::config;
+  const auto entry = parse_one(dem_chunks_yaml(3));
+  auto yaml = config::dem_chunks_to_yaml_str(*entry.dem_chunks);
+  const auto field = yaml.find("num_rounds:");
+  ASSERT_NE(field, std::string::npos);
+  const auto value = yaml.find(':', field) + 1;
+  const auto end = yaml.find('\n', value);
+  ASSERT_NE(end, std::string::npos);
+  yaml.replace(value, end - value, " 1");
+  try {
+    (void)config::dem_chunks_from_yaml_str(yaml);
+    FAIL() << "invalid phase-model horizon was accepted";
+  } catch (const std::runtime_error &error) {
+    EXPECT_NE(std::string(error.what()).find("Invalid phase-model YAML:"),
+              std::string::npos);
+    EXPECT_NE(std::string(error.what()).find("num_rounds"), std::string::npos);
+  }
 }
 
 TEST(DecoderDemChunksYAMLTest, ParsedPhasesExpandAndClose) {

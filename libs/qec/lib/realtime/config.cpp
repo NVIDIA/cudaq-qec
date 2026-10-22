@@ -1852,7 +1852,12 @@ dem_chunks_spec dem_chunks_from_yaml_str(std::string_view yaml) {
   input >> spec;
   if (const auto error = input.error())
     throw std::runtime_error("Invalid phase-model YAML: " + error.message());
-  spec.validate();
+  try {
+    spec.validate();
+  } catch (const std::invalid_argument &error) {
+    throw std::runtime_error(std::string("Invalid phase-model YAML: ") +
+                             error.what());
+  }
   return spec;
 }
 

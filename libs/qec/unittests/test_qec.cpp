@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "cuda-qx/core/library_utils.h"
+#include "cudaq/platform.h"
 #include "cudaq/qec/codes/surface_code.h"
 #include "cudaq/qec/experiments.h"
 #include "cudaq/qec/noise_model.h"
@@ -376,15 +377,18 @@ TEST(MemoryRecordSampling, InvalidCountsAndPreparationRejectBeforeSampling) {
   auto surface =
       get_code("surface_code", cudaqx::heterogeneous_map{{"distance", 3}});
   cudaq::noise_model noise;
-  EXPECT_THROW(
-      sample_memory_circuit_raw(*surface, operation::prep0, 0, 3, noise),
-      std::invalid_argument);
-  EXPECT_THROW(
-      sample_memory_circuit_raw(*surface, operation::prep0, 1, 0, noise),
-      std::runtime_error);
-  EXPECT_THROW(sample_memory_circuit_raw(*surface, operation::stabilizer_round,
-                                         1, 3, noise),
-               std::runtime_error);
+  const auto expect_raw_input_error = [&](operation prep, std::size_t shots,
+                                          std::size_t rounds) {
+    try {
+      sample_memory_circuit_raw(*surface, prep, shots, rounds, noise);
+      FAIL() << "Expected an invalid raw-sampling request to fail";
+    } catch (const std::runtime_error &error) {
+      EXPECT_EQ(std::string(error.what()).find("sample_memory_circuit_raw"), 0);
+    }
+  };
+  expect_raw_input_error(operation::prep0, 0, 3);
+  expect_raw_input_error(operation::prep0, 1, 0);
+  expect_raw_input_error(operation::stabilizer_round, 1, 3);
   EXPECT_THROW(
       sample_memory_circuit_raw(*surface, operation::prep0, 1,
                                 std::numeric_limits<std::size_t>::max(), noise),
@@ -393,6 +397,54 @@ TEST(MemoryRecordSampling, InvalidCountsAndPreparationRejectBeforeSampling) {
                    *surface, operation::prep0,
                    std::numeric_limits<std::size_t>::max(), 3, noise),
                std::overflow_error);
+}
+
+TEST(MemoryRecordSampling, FailedSampleClearsNoiseAndAllowsRecovery) {
+  using namespace cudaq::qec;
+  auto surface =
+      get_code("surface_code", cudaqx::heterogeneous_map{{"distance", 3}});
+  constexpr std::size_t rounds = 3;
+  const auto expected_records = rounds * (surface->get_num_ancilla_x_qubits() +
+                                          surface->get_num_ancilla_z_qubits()) +
+                                surface->get_num_data_qubits();
+  for (const bool raw_records : {true, false}) {
+    SCOPED_TRACE(raw_records);
+    bool failed_during_sampling = false;
+    cudaq::noise_model noise;
+    noise.add_channel("x",
+                      [&](const std::vector<std::size_t> &,
+                          const std::vector<double> &) -> cudaq::kraus_channel {
+                        // The detector-valued API analyzes a DEM first. Fail
+                        // only in the sampling context to exercise cleanup
+                        // shared by both APIs.
+                        const auto *context = cudaq::getExecutionContext();
+                        if (context && context->name == "sample") {
+                          failed_during_sampling = true;
+                          throw std::runtime_error(
+                              "intentional sampling callback failure");
+                        }
+                        return {};
+                      });
+    if (raw_records)
+      EXPECT_THROW(sample_memory_circuit_raw(*surface, operation::prep0, 1,
+                                             rounds, noise),
+                   std::runtime_error);
+    else
+      EXPECT_THROW(
+          sample_memory_circuit(*surface, operation::prep0, 1, rounds, noise),
+          std::runtime_error);
+    EXPECT_TRUE(failed_during_sampling);
+    EXPECT_EQ(cudaq::get_platform().get_noise(), nullptr);
+    // Keep the global platform safe even when this regression fails.
+    cudaq::get_platform().reset_noise();
+
+    cudaq::noise_model noiseless;
+    const auto recovered = sample_memory_circuit_raw(*surface, operation::prep0,
+                                                     1, rounds, noiseless);
+    ASSERT_EQ(recovered.size(), 1);
+    EXPECT_EQ(recovered.front().size(), expected_records);
+    EXPECT_EQ(cudaq::get_platform().get_noise(), nullptr);
+  }
 }
 
 TEST(QECCodeTester, checkSteane) {

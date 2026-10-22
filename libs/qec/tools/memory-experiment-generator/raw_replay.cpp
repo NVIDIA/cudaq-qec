@@ -7,7 +7,6 @@
  ******************************************************************************/
 
 #include "raw_replay.h"
-#include "cudaq/platform.h"
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/experiments.h"
 #include "cudaq/qec/noise_model.h"
@@ -69,17 +68,6 @@ void sample_raw_replay(
         "memory experiment: one replay shot exceeds addressable storage");
 
   auto surface = create_experiment_code(request.experiment);
-  const auto num_data = surface->get_num_data_qubits();
-  const auto num_ancilla_x = surface->get_num_ancilla_x_qubits();
-  const auto num_ancilla_z = surface->get_num_ancilla_z_qubits();
-  if (model.regular_measurements != num_ancilla_x + num_ancilla_z ||
-      model.final_measurements != num_data ||
-      model.physical_qubits != num_data + num_ancilla_x + num_ancilla_z ||
-      model.chunks.num_rounds != layout.input_rounds())
-    throw std::invalid_argument(
-        "memory experiment: replay model geometry or duration disagrees "
-        "with the experiment");
-
   const bool measure_x = request.experiment.basis == memory_basis::x;
   const auto prep_kind = measure_x ? operation::prepp : operation::prep0;
   const auto observables =
@@ -107,20 +95,10 @@ void sample_raw_replay(
       // different seeded shots concurrently or hold this lock in the consumer.
       auto samples = [&] {
         const std::lock_guard lock(sampling_mutex);
-        // An empty sample_options::noise otherwise inherits a previously set
-        // global noise model. CUDA-Q sample also resets noise only on success.
-        cudaq::get_platform().reset_noise();
-        try {
-          cudaq::set_random_seed(static_cast<std::size_t>(output.seed));
-          auto result = sample_memory_circuit_raw(
-              *surface, prep_kind, 1,
-              static_cast<std::size_t>(request.experiment.rounds), noise);
-          cudaq::get_platform().reset_noise();
-          return result;
-        } catch (...) {
-          cudaq::get_platform().reset_noise();
-          throw;
-        }
+        cudaq::set_random_seed(static_cast<std::size_t>(output.seed));
+        return sample_memory_circuit_raw(
+            *surface, prep_kind, 1,
+            static_cast<std::size_t>(request.experiment.rounds), noise);
       }();
       if (samples.size() != 1 || samples.front().size() != num_measurements ||
           samples.front().find_first_not_of("01") != std::string::npos)

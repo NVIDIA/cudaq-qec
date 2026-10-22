@@ -25,13 +25,15 @@ if(TARGET memory-experiment-generator)
     cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime nvqir nvqir-stim)
   add_dependencies(CUDAQXQECUnitTests test_memory_model_provider)
   gtest_discover_tests(test_memory_model_provider PROPERTIES LABELS "qec")
-  find_package(Python3 COMPONENTS Interpreter REQUIRED)
-  add_test(NAME memory_experiment_generator_cli
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py
-      --generator=$<TARGET_FILE:memory-experiment-generator>)
-  set_tests_properties(memory_experiment_generator_cli PROPERTIES
-    LABELS "qec"
-    SKIP_RETURN_CODE 77
-    TIMEOUT 300)
+  find_package(Python COMPONENTS Interpreter QUIET)
+  if(Python_Interpreter_FOUND)
+    add_test(NAME memory_experiment_generator_cli
+      COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py
+        --generator=$<TARGET_FILE:memory-experiment-generator>)
+    set_tests_properties(memory_experiment_generator_cli PROPERTIES
+      LABELS "qec"
+      SKIP_RETURN_CODE 77
+      TIMEOUT 300)
+  endif()
   add_dependencies(CUDAQXQECUnitTests memory-experiment-generator)
 endif()

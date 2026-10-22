@@ -23,8 +23,10 @@ build/bin/memory-experiment-generator --validate-bundle=/tmp/memory-d3-r26
 
 The output directory must not exist, and its parent must exist. Existing
 files, directories and symlinks are never overwritten. Failures return a
-diagnostic and nonzero exit code; cleanup removes only the directory created
-by that invocation. The manifest is written last as the completion marker.
+diagnostic and nonzero exit code; incomplete writes remove only the directory
+created by that invocation. The manifest is written last as the completion
+marker. If subsequent self-validation fails, all written files are retained
+and the diagnostic identifies the bundle for inspection.
 Do not modify a bundle concurrently with generation or validation.
 
 With `--replay-shots=N`, the tool simulates N noisy experiment shots per
@@ -67,6 +69,10 @@ CUDA-Q runtime dependencies. Circuit characterization needs full QEC, CUDA-Q
 and Stim; this target is skipped in decoders-only builds. Pure layout code
 does not need a CUDA-Q runtime or GPU. Building the server alone does not
 acquire circuit-generation dependencies.
+
+Full-QEC release archives include this executable through the existing
+`qec-tools` packaging component, as they do the playback emulator. It remains
+a model/sample generator, not an executable A/B graph generator.
 
 ## Bundle contract
 

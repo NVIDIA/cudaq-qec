@@ -10,6 +10,7 @@
 #include "manifest.h"
 #include "raw_replay.h"
 #include "cudaq/qec/decoder_init.h"
+#include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include "cudaq/qec/version.h"
 #include <llvm/ADT/StringExtras.h>
@@ -27,7 +28,9 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <new>
 #include <stdexcept>
+#include <string_view>
 
 namespace manifest_data = cudaq::qec::memory_experiment::manifest;
 
@@ -266,6 +269,7 @@ constexpr auto bundle_kind = "cudaq-qec-memory-model-bundle";
 constexpr auto bundle_status = "model_prepared_graph_pending";
 constexpr auto model_filename = "model.yaml";
 constexpr auto manifest_filename = "manifest.yaml";
+constexpr std::string_view bundle_error_prefix = "invalid model bundle: ";
 constexpr std::size_t replay_validation_buffer_bytes = 4096;
 
 std::string replay_filename(std::uint64_t patch, std::uint64_t shot) {
@@ -306,7 +310,7 @@ void write_file(const fs::path &path, const std::string &text) {
 
 void require(bool condition, const char *message) {
   if (!condition)
-    throw std::runtime_error(std::string("invalid model bundle: ") + message);
+    throw std::runtime_error(std::string(bundle_error_prefix) + message);
 }
 
 struct replay_file_result {
@@ -379,6 +383,12 @@ replay_file_result validate_replay_file(
           std::move(logical)};
 }
 
+dem_chunks_spec bounded_phase_model(const dem_chunks_spec &spec) {
+  auto bounded = spec;
+  bounded.num_rounds = std::max<std::uint64_t>(2, spec.minimum_rounds()) + 1;
+  return bounded;
+}
+
 void validate_phase_model(const dem_chunks_spec &spec) {
   spec.validate();
   require(spec.num_rounds.has_value() && spec.has_D_sparse(),
@@ -387,9 +397,9 @@ void validate_phase_model(const dem_chunks_spec &spec) {
   // potentially billion-round experiment. The second bulk visit tests its
   // self-connection as well as both endpoint connections.
   (void)spec.repeating_rounds();
-  auto bounded = spec;
-  bounded.num_rounds = std::max<std::uint64_t>(2, spec.minimum_rounds()) + 1;
+  const auto bounded = bounded_phase_model(spec);
   (void)decoder_init::from_dem_chunks(bounded);
+  (void)dem_chunks_to_d_sparse(bounded);
 }
 
 manifest::document make_manifest(const preparation_request &request,
@@ -427,7 +437,7 @@ manifest::document make_manifest(const preparation_request &request,
 
 } // namespace
 
-void validate_model_bundle(const fs::path &directory) {
+void validate_model_bundle(const fs::path &directory) try {
   const auto metadata =
       manifest::from_yaml(read_file(directory / manifest_filename));
   require(metadata.schema_version == bundle_version,
@@ -472,8 +482,7 @@ void validate_model_bundle(const fs::path &directory) {
           "raw record counts disagree");
   require(model.measurements_per_round == regular,
           "regular measurement width disagrees with model");
-  auto compact = model;
-  compact.num_rounds = std::max<std::uint64_t>(2, model.minimum_rounds()) + 1;
+  const auto compact = bounded_phase_model(model);
   const auto sequence = compact.phase_sequence();
   for (std::size_t i = 0; i < sequence.size(); ++i)
     require(model.measurements_of(model.get_phase(sequence[i])) ==
@@ -560,6 +569,13 @@ void validate_model_bundle(const fs::path &directory) {
   require(validation.phase_model_roundtrip && !validation.graph_generated &&
               !validation.graph_constructed && !validation.replayed,
           "model-only bundle must not claim graph execution");
+} catch (const std::bad_alloc &) {
+  // A resource failure is not evidence that the bundle is malformed.
+  throw;
+} catch (const std::exception &error) {
+  if (std::string_view(error.what()).starts_with(bundle_error_prefix))
+    throw;
+  throw std::runtime_error(std::string(bundle_error_prefix) + error.what());
 }
 
 void write_model_bundle(const preparation_request &request,
@@ -621,12 +637,20 @@ void write_model_bundle(const preparation_request &request,
     // Manifest is the completion marker and is written after all model data.
     write_file(output / manifest_filename,
                manifest::to_yaml(std::move(metadata)));
-    validate_model_bundle(output);
   } catch (...) {
     // Only this call's freshly created directory is eligible for cleanup.
     std::error_code ignored;
     fs::remove_all(output, ignored);
     throw;
+  }
+  // Publication is complete. A failed re-read must not destroy successfully
+  // written model data or expensive sampled shots.
+  try {
+    validate_model_bundle(output);
+  } catch (const std::exception &error) {
+    throw std::runtime_error(
+        "model bundle written but failed self-validation: " + output.string() +
+        ": " + error.what());
   }
 }
 

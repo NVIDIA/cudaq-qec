@@ -359,6 +359,39 @@ class GeneratorCliTest(unittest.TestCase):
         model_path.write_bytes(original)
         self.invoke(f"--validate-bundle={output}")
 
+    def test_validation_rejects_invalid_detector_maps_with_valid_model_hash(
+            self):
+        output, original = self.generate()
+        model_path = output / "model.yaml"
+        model_bytes = model_path.read_bytes()
+        original_model = yaml.safe_load(model_bytes)
+        for mutation in ("missing_row", "out_of_range_index"):
+            with self.subTest(mutation=mutation):
+                model = copy.deepcopy(original_model)
+                bulk = next(phase["spec"]
+                            for phase in model["phases"]
+                            if phase["name"] == "bulk")
+                rows = bulk["D_sparse"]
+                if mutation == "missing_row":
+                    del rows[:rows.index(-1) + 1]
+                else:
+                    index = next(
+                        index for index, value in enumerate(rows) if value >= 0)
+                    rows[index] = 1000000
+                replacement = yaml.safe_dump(model, sort_keys=False).encode()
+                model_path.write_bytes(replacement)
+                manifest = copy.deepcopy(original)
+                manifest["model"]["sha256"] = hashlib.sha256(
+                    replacement).hexdigest()
+                self.write_manifest(output, manifest)
+                result = self.invoke(f"--validate-bundle={output}",
+                                     success=False)
+                self.assertIn("invalid model bundle:", result.stderr)
+                self.assertIn("D_sparse", result.stderr)
+        model_path.write_bytes(model_bytes)
+        self.write_manifest(output, original)
+        self.invoke(f"--validate-bundle={output}")
+
     def test_validation_rejects_schema_layout_and_logical_map_corruption(self):
         output, original = self.generate()
         cases = (
