@@ -29,6 +29,16 @@ on:
         default: all
         required: false
         options: [all, '12.6', '13.0']
+      delivery_profile:
+        type: choice
+        description: Generic image, or Ising with required binary provider and compatible runtime examples
+        default: generic
+        required: false
+        options: [generic, ising]
+      runtime_asset_id:
+        type: string
+        description: Runtime model/example asset ID from the same native release (required for Ising)
+        required: false
       assets_repo:
         type: string
         description: Retrieve decoder assets from a draft release in this repo (e.g. NVIDIA/cudaqx)
@@ -82,6 +92,24 @@ jobs:
       # something to point at regardless of whether assets were supplied.
       - name: Create artifacts dir
         run: mkdir -p artifacts
+
+      - name: Validate image delivery profile
+        env:
+          DELIVERY_PROFILE: ${{ inputs.delivery_profile }}
+          RUNTIME_ASSET_ID: ${{ inputs.runtime_asset_id }}
+          CUDA_SELECTION: ${{ inputs.cuda_version }}
+          ASSETS_TAG: ${{ inputs.assets_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${DELIVERY_PROFILE:-generic}" in
+            generic) ;;
+            ising)
+              [[ "$CUDA_SELECTION" == 13.0 && -n "$RUNTIME_ASSET_ID" && -n "$ASSETS_TAG" ]] || { echo "Ising delivery requires cuda_version=13.0, runtime_asset_id and assets_tag" >&2; exit 1; }
+              ;;
+            *) echo "Unknown image delivery profile" >&2; exit 1 ;;
+          esac
+          [[ -z "$RUNTIME_ASSET_ID" || "$RUNTIME_ASSET_ID" =~ ^[A-Za-z0-9_-]{1,100}$ ]] || { echo "Invalid runtime_asset_id" >&2; exit 1; }
 
       # Version string baked into libcudaq-qec: use the release number on a
       # releases/vX.Y.Z branch; otherwise left empty.
@@ -141,6 +169,7 @@ jobs:
           REQUIRED_TASK_GRAPH_KINDS: ${{ inputs.required_task_graph_kinds }}
           PLUGIN_PLATFORM: ${{ matrix.platform }}
           PLUGIN_CUDA_VERSION: ${{ matrix.cuda_version }}
+          DELIVERY_PROFILE: ${{ inputs.delivery_profile }}
         shell: bash
         run: |
           set -euo pipefail
@@ -148,6 +177,10 @@ jobs:
           for names in "$REQUIRED_PLUGIN_IDS" "$REQUIRED_TASK_GRAPH_KINDS"; do
             [[ -z "$names" || "$names" =~ ^[A-Za-z0-9_-]+(\;[A-Za-z0-9_-]+)*$ ]] || { echo "Invalid required provider/kind list" >&2; exit 1; }
           done
+          if [[ "${DELIVERY_PROFILE:-generic}" == ising ]]; then
+            REQUIRED_PLUGIN_IDS="${REQUIRED_PLUGIN_IDS:+$REQUIRED_PLUGIN_IDS;}cudaq-qec-ising-task-graph-plugin"
+            REQUIRED_TASK_GRAPH_KINDS="${REQUIRED_TASK_GRAPH_KINDS:+$REQUIRED_TASK_GRAPH_KINDS;}ising_dem_chunks;ising"
+          fi
           if [[ -f "$archive" ]]; then
             [[ "$PLUGIN_FRAMEWORK_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "An exact reviewed plugin_framework_commit is required" >&2; exit 1; }
             test -f "$archive.sha256" && test ! -L "$archive.sha256"
@@ -161,6 +194,29 @@ jobs:
           fi
           echo "QEC_REQUIRED_EXTERNAL_PLUGINS=$REQUIRED_PLUGIN_IDS" >> "$GITHUB_ENV"
           echo "QEC_REQUIRED_TASK_GRAPH_KINDS=$REQUIRED_TASK_GRAPH_KINDS" >> "$GITHUB_ENV"
+
+      - name: Select runtime model and example delivery
+        env:
+          DELIVERY_PROFILE: ${{ inputs.delivery_profile }}
+          RUNTIME_ASSET_ID: ${{ inputs.runtime_asset_id }}
+          PLUGIN_PLATFORM: ${{ matrix.platform }}
+          PLUGIN_CUDA_VERSION: ${{ matrix.cuda_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$RUNTIME_ASSET_ID" ]]; then
+            [[ "$RUNTIME_ASSET_ID" =~ ^[A-Za-z0-9_-]{1,100}$ ]] || { echo "Invalid runtime_asset_id" >&2; exit 1; }
+            archive="qec-runtime-assets-${RUNTIME_ASSET_ID}-${PLUGIN_PLATFORM}_ubuntu24.04_cuda${PLUGIN_CUDA_VERSION}_release.tar.gz"
+            test -f "$archive" && test ! -L "$archive" || { echo "Required runtime asset archive is absent: $archive" >&2; exit 1; }
+            test -f "$archive.sha256" && test ! -L "$archive.sha256"
+            cp -- "$archive" "$archive.sha256" artifacts/
+            echo "QEC_RUNTIME_ASSET_ARCHIVE=$archive" >> "$GITHUB_ENV"
+          elif [[ "${DELIVERY_PROFILE:-generic}" == ising ]]; then
+            echo "Ising delivery requires runtime assets" >&2
+            exit 1
+          fi
+          echo "QEC_DELIVERY_PROFILE=${DELIVERY_PROFILE:-generic}" >> "$GITHUB_ENV"
+          echo "QEC_RUNTIME_ASSET_ID=$RUNTIME_ASSET_ID" >> "$GITHUB_ENV"
 
       - name: Set up context for buildx
         run: docker context create builder_context
@@ -201,6 +257,9 @@ jobs:
             QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT=${{ env.QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT }}
             QEC_REQUIRED_EXTERNAL_PLUGINS=${{ env.QEC_REQUIRED_EXTERNAL_PLUGINS }}
             QEC_REQUIRED_TASK_GRAPH_KINDS=${{ env.QEC_REQUIRED_TASK_GRAPH_KINDS }}
+            QEC_DELIVERY_PROFILE=${{ env.QEC_DELIVERY_PROFILE }}
+            QEC_RUNTIME_ASSET_ID=${{ env.QEC_RUNTIME_ASSET_ID }}
+            QEC_RUNTIME_ASSET_ARCHIVE=${{ env.QEC_RUNTIME_ASSET_ARCHIVE }}
           labels: |
             org.opencontainers.image.source=${{ github.repositoryUrl }}
             org.opencontainers.image.revision=${{ github.sha }}

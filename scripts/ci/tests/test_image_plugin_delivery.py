@@ -65,6 +65,104 @@ class ImagePluginDeliveryTest(unittest.TestCase):
         self.assertNotIn("QEC_EXTERNAL_PLUGIN_ARCHIVE=",
                          self.envfile.read_text())
 
+    def run_asset_selection(self, **overrides):
+        environment = dict(os.environ)
+        environment.pop("BASH_ENV", None)
+        environment.update({
+            "GITHUB_ENV": str(self.envfile),
+            "DELIVERY_PROFILE": "generic",
+            "RUNTIME_ASSET_ID": "",
+            "PLUGIN_PLATFORM": "amd64",
+            "PLUGIN_CUDA_VERSION": "13.0"
+        })
+        environment.update(overrides)
+        self.envfile.write_text("")
+        return subprocess.run([
+            "bash", "--noprofile", "--norc", "-eu", "-c",
+            bash_block(WORKFLOW, "Select runtime model and example delivery")
+        ],
+                              cwd=self.root,
+                              env=environment,
+                              check=False,
+                              capture_output=True,
+                              text=True)
+
+    def test_ising_profile_requires_binary_provider_and_kinds(self):
+        result = self.run_selection(DELIVERY_PROFILE="ising")
+        self.assertNotEqual(0, result.returncode)
+        self.supply_archive()
+        result = self.run_selection(DELIVERY_PROFILE="ising",
+                                    PLUGIN_FRAMEWORK_COMMIT=PRODUCER_COMMIT)
+        self.assertEqual(0, result.returncode, result.stderr)
+        values = self.envfile.read_text()
+        self.assertIn(
+            "QEC_REQUIRED_EXTERNAL_PLUGINS=cudaq-qec-ising-task-graph-plugin\n",
+            values)
+        self.assertIn("QEC_REQUIRED_TASK_GRAPH_KINDS=ising_dem_chunks;ising\n",
+                      values)
+
+    def test_runtime_data_optional_for_generic_required_for_ising(self):
+        self.assertEqual(0, self.run_asset_selection().returncode)
+        self.assertNotEqual(
+            0,
+            self.run_asset_selection(DELIVERY_PROFILE="ising").returncode)
+        self.assertNotEqual(
+            0,
+            self.run_asset_selection(RUNTIME_ASSET_ID="fixture").returncode)
+        archive = self.root / "qec-runtime-assets-fixture-amd64_ubuntu24.04_cuda13.0_release.tar.gz"
+        archive.write_bytes(b"data archive fixture")
+        sidecar = archive.with_name(archive.name + ".sha256")
+        sidecar.write_text("checksum fixture")
+        result = self.run_asset_selection(DELIVERY_PROFILE="ising",
+                                          RUNTIME_ASSET_ID="fixture")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(archive.read_bytes(),
+                         (self.root / "artifacts" / archive.name).read_bytes())
+        self.assertIn(f"QEC_RUNTIME_ASSET_ARCHIVE={archive.name}\n",
+                      self.envfile.read_text())
+        # The arm64 matrix entry cannot silently use an amd64/SM120 delivery.
+        result = self.run_asset_selection(DELIVERY_PROFILE="ising",
+                                          RUNTIME_ASSET_ID="fixture",
+                                          PLUGIN_PLATFORM="arm64")
+        self.assertNotEqual(0, result.returncode)
+        sidecar.unlink()
+        sidecar.symlink_to(archive)
+        self.assertNotEqual(
+            0,
+            self.run_asset_selection(RUNTIME_ASSET_ID="fixture").returncode)
+
+    def test_runtime_asset_name_cannot_inject_build_arguments(self):
+        for value in ("../fixture", "fixture\nINJECTED=yes", "fixture;other",
+                      "$(touch injected)"):
+            with self.subTest(value=value):
+                result = self.run_asset_selection(RUNTIME_ASSET_ID=value)
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual("", self.envfile.read_text())
+        self.assertFalse((self.root / "injected").exists())
+
+    def test_ising_profile_input_validation_runs_before_download(self):
+        script = bash_block(WORKFLOW, "Validate image delivery profile")
+        environment = dict(os.environ,
+                           DELIVERY_PROFILE="ising",
+                           RUNTIME_ASSET_ID="fixture",
+                           CUDA_SELECTION="13.0",
+                           ASSETS_TAG="docker-files-fixture")
+        result = subprocess.run(["bash", "-eu", "-c", script],
+                                env=environment,
+                                check=False,
+                                capture_output=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        for field, value in (("CUDA_SELECTION",
+                              "all"), ("CUDA_SELECTION",
+                                       "12.6"), ("RUNTIME_ASSET_ID", ""),
+                             ("ASSETS_TAG", ""), ("DELIVERY_PROFILE", "other")):
+            with self.subTest(field=field, value=value):
+                result = subprocess.run(["bash", "-eu", "-c", script],
+                                        env=dict(environment, **{field: value}),
+                                        check=False,
+                                        capture_output=True)
+                self.assertNotEqual(0, result.returncode)
+
     def test_provider_kind_or_commit_requirement_needs_archive(self):
         for field, value in (("PLUGIN_FRAMEWORK_COMMIT", PRODUCER_COMMIT),
                              ("REQUIRED_PLUGIN_IDS", "fixture"),
@@ -131,7 +229,8 @@ class ImagePluginDeliveryTest(unittest.TestCase):
         for name in ("QEC_EXTERNAL_PLUGIN_ARCHIVE",
                      "QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT",
                      "QEC_REQUIRED_EXTERNAL_PLUGINS",
-                     "QEC_REQUIRED_TASK_GRAPH_KINDS"):
+                     "QEC_REQUIRED_TASK_GRAPH_KINDS", "QEC_DELIVERY_PROFILE",
+                     "QEC_RUNTIME_ASSET_ID", "QEC_RUNTIME_ASSET_ARCHIVE"):
             self.assertIn(f"{name}=${{{{ env.{name} }}}}", step)
 
     def test_cuda_selection_is_shared_by_build_publish_and_promotion(self):
@@ -183,6 +282,95 @@ class ImagePluginDeliveryTest(unittest.TestCase):
         self.assertIn("--output=/tmp/qec-plugin-validation/results", validation)
         self.assertIn("touch /tmp/qec-plugin-validation/passed", validation)
         self.assertNotIn("/private/ising", validation)
+
+    def test_data_import_and_final_runtime_compatibility_are_both_checked(self):
+        builder, base, validation, _ = self.image_stages()
+        self.assertIn('ARG QEC_DELIVERY_PROFILE=generic', builder)
+        self.assertIn('test "${CUDA_VERSION%%.*}" = 13', builder)
+        self.assertIn('Ising delivery requires its binary provider', builder)
+        self.assertIn('Ising delivery requires kind $kind', builder)
+        self.assertIn('python3 scripts/ci/runtime_assets.py import', builder)
+        self.assertIn(
+            '--provider-commit="$QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT"',
+            builder)
+        self.assertIn('--require-asset="$QEC_RUNTIME_ASSET_ID"', builder)
+        self.assertIn('dpkg-query -W', builder)
+        self.assertIn('runtime_assets.py verify-installed', validation)
+        self.assertIn('dpkg-query -W', validation)
+        self.assertIn('share/cudaq-qec/runtime-assets/$QEC_RUNTIME_ASSET_ID',
+                      validation)
+        self.assertIn('run-ising-example.sh', base)
+        self.assertNotIn('runtime_assets.py', base)
+
+    def test_direct_docker_profile_fails_before_build_without_requirements(
+            self):
+        builder, _, _, _ = self.image_stages()
+        start = builder.index("# Import data separately")
+        start = builder.index("RUN --mount=", start)
+        end = builder.index("\n\n", start)
+        # Execute the literal preflight RUN body. Negative cases stop before
+        # consulting archives or building anything; no container is simulated.
+        script = "\n".join(builder[start:end].splitlines()[1:])
+        script = script.replace("\\\n", "\n")
+        environment = dict(os.environ,
+                           CUDA_VERSION="13.0",
+                           QEC_DELIVERY_PROFILE="generic",
+                           QEC_EXTERNAL_PLUGIN_ARCHIVE="",
+                           QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT="",
+                           QEC_REQUIRED_EXTERNAL_PLUGINS="",
+                           QEC_REQUIRED_TASK_GRAPH_KINDS="",
+                           QEC_RUNTIME_ASSET_ARCHIVE="",
+                           QEC_RUNTIME_ASSET_ID="")
+        result = subprocess.run(["sh", "-c", script],
+                                env=environment,
+                                capture_output=True,
+                                check=False)
+        self.assertEqual(0, result.returncode, result.stderr)
+        for changes in ({
+                "QEC_DELIVERY_PROFILE": "ising"
+        }, {
+                "QEC_DELIVERY_PROFILE": "unknown"
+        }, {
+                "QEC_RUNTIME_ASSET_ID": "fixture"
+        }, {
+                "QEC_DELIVERY_PROFILE": "ising",
+                "CUDA_VERSION": "12.6"
+        }):
+            with self.subTest(changes=changes):
+                result = subprocess.run(["sh", "-c", script],
+                                        env=dict(environment, **changes),
+                                        capture_output=True,
+                                        check=False)
+                self.assertNotEqual(0, result.returncode)
+
+        # Valid required lists must not mask absent archives through POSIX
+        # `set -e` exceptions for intermediate AND-list commands.
+        required = dict(
+            environment,
+            QEC_DELIVERY_PROFILE="ising",
+            QEC_REQUIRED_EXTERNAL_PLUGINS="cudaq-qec-ising-task-graph-plugin",
+            QEC_REQUIRED_TASK_GRAPH_KINDS="ising_dem_chunks;ising",
+            QEC_EXTERNAL_PLUGIN_ARCHIVE="plugin.tar.gz",
+            QEC_RUNTIME_ASSET_ARCHIVE="data.tar.gz",
+            QEC_RUNTIME_ASSET_ID="fixture")
+        for missing in ("QEC_EXTERNAL_PLUGIN_ARCHIVE",
+                        "QEC_RUNTIME_ASSET_ARCHIVE", "QEC_RUNTIME_ASSET_ID"):
+            with self.subTest(missing=missing):
+                result = subprocess.run(["sh", "-c", script],
+                                        env=dict(required, **{missing: ""}),
+                                        capture_output=True,
+                                        check=False)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(b"requires binary, model and example artifacts",
+                              result.stderr)
+
+    def test_packaging_contracts_run_in_cpu_pr_ci(self):
+        workflow = (REPOSITORY /
+                    ".github/workflows/pr_sanity_checks.yaml").read_text()
+        self.assertIn("check-packaging-contracts:", workflow)
+        self.assertIn("binutils patchelf", workflow)
+        self.assertIn("python3 -m unittest discover -s scripts/ci/tests",
+                      workflow)
 
     def test_published_runtime_requires_validation_without_copying_it(self):
         _, _, _, runtime = self.image_stages()

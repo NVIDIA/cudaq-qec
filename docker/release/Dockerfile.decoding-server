@@ -29,6 +29,8 @@
 #     libcudaq-qec-realtime-cudevice-proprietary.a (device_graph dispatch)
 #     qec-private-plugins-<platform>_<build>.tar.gz
 #     qec-private-plugins-<platform>_<build>.tar.gz.sha256
+#     qec-runtime-assets-<asset-id>-<platform>_<build>.tar.gz
+#     qec-runtime-assets-<asset-id>-<platform>_<build>.tar.gz.sha256
 #
 # Manifest-based native deliveries use QEC_EXTERNAL_PLUGIN_ARCHIVE (a basename)
 # and a reviewed QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT. Required providers and
@@ -130,6 +132,56 @@ COPY --from=cudaq-official /opt/nvidia/cudaq /opt/nvidia/cudaq
 WORKDIR /workspaces/cudaqx
 COPY . .
 
+ARG CUDA_VERSION
+ARG QEC_DELIVERY_PROFILE=generic
+ARG QEC_EXTERNAL_PLUGIN_ARCHIVE
+ARG QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT
+ARG QEC_REQUIRED_EXTERNAL_PLUGINS
+ARG QEC_REQUIRED_TASK_GRAPH_KINDS
+ARG QEC_RUNTIME_ASSET_ARCHIVE
+ARG QEC_RUNTIME_ASSET_ID
+# Import data separately from ELF modules. Required profiles fail before any
+# source build; generic images retain the optional-artifact behavior.
+RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
+    set -ef; \
+    case "$QEC_DELIVERY_PROFILE" in \
+        generic) ;; \
+        ising) \
+            test "${CUDA_VERSION%%.*}" = 13; \
+            if [ -z "$QEC_EXTERNAL_PLUGIN_ARCHIVE" ] || [ -z "$QEC_RUNTIME_ASSET_ARCHIVE" ] || [ -z "$QEC_RUNTIME_ASSET_ID" ]; then \
+                echo 'Ising delivery requires binary, model and example artifacts' >&2; exit 1; \
+            fi; \
+            case ";$QEC_REQUIRED_EXTERNAL_PLUGINS;" in *';cudaq-qec-ising-task-graph-plugin;'*) ;; *) echo 'Ising delivery requires its binary provider' >&2; exit 1 ;; esac; \
+            for kind in ising_dem_chunks ising; do \
+                case ";$QEC_REQUIRED_TASK_GRAPH_KINDS;" in *";$kind;"*) ;; *) echo "Ising delivery requires kind $kind" >&2; exit 1 ;; esac; \
+            done ;; \
+        *) echo 'Unknown image delivery profile' >&2; exit 1 ;; \
+    esac; \
+    if [ -n "$QEC_RUNTIME_ASSET_ARCHIVE" ]; then \
+        case "$QEC_RUNTIME_ASSET_ARCHIVE" in [!A-Za-z0-9]*|*[!A-Za-z0-9_.+-]*) echo 'Invalid runtime asset archive basename' >&2; exit 1 ;; esac; \
+        case "$QEC_RUNTIME_ASSET_ARCHIVE" in *.tar.gz) ;; *) exit 1 ;; esac; \
+        case "$QEC_RUNTIME_ASSET_ID" in ''|*[!A-Za-z0-9_-]*) echo 'Invalid runtime asset ID' >&2; exit 1 ;; esac; \
+        trt_version=$(dpkg-query -W -f='${Version}' libnvinfer10); trt_version=${trt_version%%-*}; \
+        set -- --architecture="$(uname -m)" --cuda-version="$CUDA_VERSION" --tensorrt-version="$trt_version" --require-asset="$QEC_RUNTIME_ASSET_ID"; \
+        if [ -n "$QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT" ]; then set -- "$@" --provider-commit="$QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT"; fi; \
+        if [ "$QEC_DELIVERY_PROFILE" = ising ]; then \
+            abi=$(sed -n 's/^#define CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION \([0-9][0-9]*\)u$/\1/p' libs/qec/include/cudaq/qec/task_graph_plugin.h); test -n "$abi"; \
+            set -- "$@" --require-provider=cudaq-qec-ising-task-graph-plugin --framework-abi-version="$abi"; \
+        fi; \
+        mkdir -p "$CUDAQX_INSTALL_PREFIX/share/cudaq-qec/runtime-assets"; \
+        python3 scripts/ci/runtime_assets.py import --archive="/mnt/artifacts/$QEC_RUNTIME_ASSET_ARCHIVE" \
+            --output="$CUDAQX_INSTALL_PREFIX/share/cudaq-qec/runtime-assets/$QEC_RUNTIME_ASSET_ID" "$@"; \
+        if [ "$QEC_DELIVERY_PROFILE" = ising ]; then \
+            for example in x-global z-global x-partitioned z-partitioned; do \
+                for extension in yaml schedule csv; do \
+                    test -f "$CUDAQX_INSTALL_PREFIX/share/cudaq-qec/runtime-assets/$QEC_RUNTIME_ASSET_ID/examples/$example.$extension" || { echo "Missing Ising example $example.$extension" >&2; exit 1; }; \
+                done; \
+            done; \
+        fi; \
+    else \
+        test -z "$QEC_RUNTIME_ASSET_ID" || { echo 'Runtime asset ID supplied without an archive' >&2; exit 1; }; \
+    fi
+
 # cudaq-realtime with HSB tools ON, installed alongside CUDA-Q.
 RUN set -e; \
     . scripts/cudaq_realtime_cmake_flags.sh; \
@@ -156,9 +208,6 @@ RUN set -e; \
 # CUDAQX_QEC_VERSION is the version string baked into libcudaq-qec;
 # unset or empty leaves CMake's 0.0.0 default.
 ARG CUDAQX_QEC_VERSION
-ARG QEC_EXTERNAL_PLUGIN_ARCHIVE
-ARG QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT
-ARG QEC_REQUIRED_EXTERNAL_PLUGINS
 RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
     set -e; \
     if [ -n "${CUDAQX_QEC_VERSION:-}" ]; then export CUDAQX_QEC_VERSION; else unset CUDAQX_QEC_VERSION; fi; \
@@ -311,7 +360,9 @@ COPY --from=builder \
 # compiled with nvq++ find the QEC and realtime headers and libraries at
 # compile, link and run time without extra flags (the CUDA-Q ones nvq++
 # handles itself).
+ARG QEC_RUNTIME_ASSET_ID
 ENV CUDAQX_INSTALL_DIR=/opt/nvidia/cudaqx \
+    QEC_RUNTIME_ASSET_ID=${QEC_RUNTIME_ASSET_ID} \
     CUDA_QUANTUM_PATH=/opt/nvidia/cudaq \
     CUDAQ_REALTIME_DIR=/opt/nvidia/cudaq-realtime \
     PATH=/opt/nvidia/cudaqx/bin:/opt/nvidia/cudaq/bin:${PATH} \
@@ -325,6 +376,7 @@ ENV CUDAQX_INSTALL_DIR=/opt/nvidia/cudaqx \
 # match the commit the image was built from.
 COPY --from=builder /workspaces/cudaqx/docker/release/decoding-server-examples/README.md \
                     /workspaces/cudaqx/docker/release/decoding-server-examples/build.sh \
+                    /workspaces/cudaqx/docker/release/decoding-server-examples/run-ising-example.sh \
                     /workspaces/cudaqx/libs/qec/unittests/realtime/app_examples/surface_code-*.cpp \
                     /root/examples/
 
@@ -342,6 +394,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /tmp/qec-plugin-registration-probe \
                     /tmp/qec-plugin-validation/plugin-registration-probe
 COPY --from=builder /workspaces/cudaqx/scripts/ci/installed_plugin_smoke.py \
+                    /workspaces/cudaqx/scripts/ci/runtime_assets.py \
                     /workspaces/cudaqx/scripts/ci/replay_decoding_server.py \
                     /workspaces/cudaqx/scripts/ci/playback_result_checks.py \
                     /tmp/qec-plugin-validation/
@@ -350,6 +403,10 @@ COPY --from=builder /workspaces/cudaqx/scripts/ci/fixtures/ \
 
 ARG QEC_REQUIRED_EXTERNAL_PLUGINS
 ARG QEC_REQUIRED_TASK_GRAPH_KINDS
+ARG QEC_DELIVERY_PROFILE=generic
+ARG QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT
+ARG QEC_RUNTIME_ASSET_ID
+ARG CUDA_VERSION
 RUN set -ef; \
     set --; \
     old_ifs="$IFS"; IFS=';'; \
@@ -361,6 +418,17 @@ RUN set -ef; \
         --registration-probe=/tmp/qec-plugin-validation/plugin-registration-probe \
         --transport=/opt/nvidia/cudaq-realtime/lib/libcudaq-realtime-bridge-udp.so \
         --output=/tmp/qec-plugin-validation/results "$@"; \
+    if [ -n "$QEC_RUNTIME_ASSET_ID" ]; then \
+        trt_version=$(dpkg-query -W -f='${Version}' libnvinfer10); trt_version=${trt_version%%-*}; \
+        set -- --architecture="$(uname -m)" --cuda-version="$CUDA_VERSION" --tensorrt-version="$trt_version" --require-asset="$QEC_RUNTIME_ASSET_ID"; \
+        if [ -n "$QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT" ]; then set -- "$@" --provider-commit="$QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT"; fi; \
+        if [ "$QEC_DELIVERY_PROFILE" = ising ]; then \
+            abi=$(sed -n 's/^#define CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION \([0-9][0-9]*\)u$/\1/p' /opt/nvidia/cudaqx/include/cudaq/qec/task_graph_plugin.h); test -n "$abi"; \
+            set -- "$@" --require-provider=cudaq-qec-ising-task-graph-plugin --framework-abi-version="$abi"; \
+        fi; \
+        python3 /tmp/qec-plugin-validation/runtime_assets.py verify-installed \
+            --root="/opt/nvidia/cudaqx/share/cudaq-qec/runtime-assets/$QEC_RUNTIME_ASSET_ID" "$@"; \
+    fi; \
     touch /tmp/qec-plugin-validation/passed
 
 # Preserve the published target name. The read-only mount forces validation to

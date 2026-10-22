@@ -128,3 +128,43 @@ and others) live in `libcudaq-qec-decoders.so`. Plugin decoders are loaded from
 `/opt/nvidia/cudaqx/lib/decoder-plugins`; this image ships `pymatching`,
 `chromobius`, `trt_decoder` and a small `example` plugin. The `nv-qldpc-decoder`
 GPU plugin is present when the image was built with the proprietary artifacts.
+
+## Optimized Ising example
+
+An image built with `delivery_profile=ising` includes the private binary plugin
+and a separate, compatible runtime-data archive. No private GitLab access,
+Python, PyTorch, training checkpoint or model-generation script is required to
+run the examples. Generic images intentionally do not require these artifacts.
+
+On a GPU listed in the installed asset manifest, run inside the GPU-enabled
+container:
+
+```bash
+bash /root/examples/run-ising-example.sh x-global
+bash /root/examples/run-ising-example.sh z-global
+bash /root/examples/run-ising-example.sh x-partitioned
+bash /root/examples/run-ising-example.sh z-partitioned
+```
+
+The runner starts the installed server and UDP playback client, checks every
+RPC status and compares completed corrections with the independent oracle CSV.
+It prints a new results directory containing `server.log`, `client.log` and
+`events.csv`. It does not compile code, contact a private repository or generate
+a model. `global` selects CNN followed by one global matching solve;
+`partitioned` selects CNN followed by A/B block matching. These are separate
+algorithms, not two names for block-parallel matching.
+
+`QEC_RUNTIME_ASSET_ID` identifies the included asset directory under
+`/opt/nvidia/cudaqx/share/cudaq-qec/runtime-assets/`. Its `manifest.json` records
+CPU architecture, CUDA/TensorRT versions, supported GPU compute capabilities,
+model variant, checkpoint fingerprint and producer identities. The YAML and
+playback files are under `examples/`, and the runtime bundle is under `bundle/`.
+When running the server manually, first change to that asset directory: the
+configuration intentionally uses the relocatable `artifact_bundle: bundle`.
+
+The shipped data is a small correctness example, not a throughput benchmark,
+logical-error-rate estimate or claim of release qualification. TensorRT engines
+are target-specific: a bundle built for SM120 does not establish support for
+GB200/SM100 or arm64. Each architecture in an Ising-enabled release matrix must
+have a compatible supplied archive; missing artifacts fail the build rather
+than producing an image without working Ising examples.

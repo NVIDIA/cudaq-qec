@@ -11,7 +11,8 @@ The binary producer supplies a `.tar.gz` archive and a basename-only
 `<archive>.sha256` sidecar. Its schema-1 `manifest.json` lists each module's
 provider ID, `decoder` or `task_graph` kind, destination, build requirements and
 SHA-256. Native and wheel archives are separate deliveries. Model bundles are
-not included.
+not included in these ELF-only archives; the companion runtime-data delivery
+below keeps code and data validation separate.
 
 ```bash
 cmake -S libs/qec -B build \
@@ -114,12 +115,75 @@ not validation of the downloaded release image. Pin the image digest and record
 the framework/provider commits, CUDA and TensorRT versions, bundle hashes and
 replay results before making a support statement.
 
-The decoding-server release workflow extends the image supplied by PR #798; it
+The decoding-server release workflow extends the existing release image; it
 does not define a second server image. Its optional `plugin_framework_commit`,
 `required_plugin_ids` and `required_task_graph_kinds` inputs select and require
 the native archive in the existing artifacts context. Use `cuda_version=13.0`
 for a TensorRT delivery requiring both amd64 and arm64; unsupported required
 providers fail rather than disappearing from a release matrix.
+
+## Runtime model and example delivery
+
+The same native release can supply a separate companion archive:
+
+```
+qec-runtime-assets-<asset-id>-<platform>_ubuntu24.04_cuda<version>_release.tar.gz
+qec-runtime-assets-<asset-id>-<platform>_ubuntu24.04_cuda<version>_release.tar.gz.sha256
+```
+
+The schema-1 `manifest.json` declares `asset_id`, `provider_id`, the exact
+`provider_commit`, a nullable `framework_abi_version`, `bundle_root`, typed
+`files` with SHA-256 and byte counts, and `examples` with config, schedule and
+expected-correction paths. `compatibility` declares CPU architecture, CUDA and
+TensorRT versions and explicit supported GPU compute capabilities. `model`
+records profile, variant, producer commit/version and checkpoint SHA-256. These
+are provenance and compatibility constraints, not an approval or qualification
+label. Each archive supplies one model profile.
+
+`scripts/ci/runtime_assets.py` is the shared standard-library-only packer and
+validator. A private producer first validates its own model format, then passes
+an explicit file list to this helper. The archive permits only named engine,
+binary-constant, JSON, YAML, schedule, text-record and expected-CSV data. It
+rejects source, ONNX, checkpoints, executables, symlinks, special files,
+traversal, undeclared members, extended tar headers and hash mismatches. Archive
+and decompressed size bounds apply before extraction. No payload is executed
+during validation, and neither the archive nor an existing install is replaced.
+
+```bash
+python3 scripts/ci/runtime_assets.py verify \
+  --archive=/artifacts/runtime-data.tar.gz \
+  --architecture=x86_64 --cuda-version=13.0 --tensorrt-version=10.14.1.48 \
+  --require-provider=<provider-id> --provider-commit=<reviewed-producer-commit> \
+  --require-asset=<asset-id> --gpu-compute-capability=12.0
+```
+
+The importer compares CUDA major/minor and the exact full TensorRT version,
+including its build component; the manifest retains complete producer versions.
+GPU capability support is an
+explicit model property, not inferred from the CPU architecture or TensorRT
+SONAME. The final image validation stage rehashes the copied data and compares
+the actual runtime's architecture and TensorRT package version. A real GPU
+example run on each intended target remains a separate gate.
+
+For the decoding-server workflow, `delivery_profile=generic` remains the
+default and needs no runtime archive. An explicit `runtime_asset_id` requires
+its matching per-platform archive. `delivery_profile=ising` additionally
+requires `cuda_version=13.0`, an asset ID, the reviewed native provider and
+both `ising_dem_chunks` and `ising` node kinds. Missing binary, model or example
+artifacts fail the build; the profile must not silently fall back to a generic
+image. The current matrix includes amd64 and arm64, so an amd64-only archive
+does not establish an arm64 delivery.
+
+Direct Docker builds use `QEC_DELIVERY_PROFILE`, `QEC_RUNTIME_ASSET_ID` and
+`QEC_RUNTIME_ASSET_ARCHIVE` alongside the existing plugin arguments. The archive
+and checksum enter through the same read-only `artifacts` context, but are
+validated by their separate data contract. Data installs under
+`/opt/nvidia/cudaqx/share/cudaq-qec/runtime-assets/<asset-id>/`. Example configs
+use relative bundle paths, so the image-local shell runner changes to this
+directory before invoking the installed server and playback client. Run
+`bash /root/examples/run-ising-example.sh x-global` (or `z-global`,
+`x-partitioned`, `z-partitioned`) in a compatible GPU-enabled Ising image.
+No private source, training framework or external fixture generation is needed.
 
 The `runtime` image target depends on a separate `validation` stage that checks
 the copied install without a GPU: manifests, RPATHs, dependencies,
@@ -159,8 +223,9 @@ strings in completed-shot order, and optionally `decoder_id` (default `0`).
 This is a generic completed-shot smoke profile: it validates every raw RPC
 status, complete reads, exact corrections and the server's dispatched counts.
 Cancellation and intentionally failing requests need their own test profile.
-Models and fixtures are not bundled with the public harness. Pin compatible
-framework, provider, runtime and model versions, and expose their installed
+The public harness itself generates neither models nor fixtures; an
+Ising-enabled release image supplies its separately validated companion data.
+Pin compatible framework, provider, runtime and model versions, and expose their installed
 dependencies rather than loading libraries from source/build trees. A passing
 smoke run alone does not establish performance, logical-error accuracy,
 concurrent-request behavior or release qualification.
