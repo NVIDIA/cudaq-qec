@@ -10,7 +10,7 @@ starting point.
 | Path | Contents |
 | --- | --- |
 | `~/examples/` | Five surface-code memory experiments with realtime decoding, plus `build.sh` |
-| `/opt/nvidia/cudaqx/bin` | `decoding_server`, `playback-emulator`, `hsb_fpga_syndrome_playback`, example server configs |
+| `/opt/nvidia/cudaq-qec/bin` | `decoding_server`, `playback-emulator`, `hsb_fpga_syndrome_playback`, example server configs |
 
 `nvq++`, the CUDA-Q and QEC headers, and all libraries are on the default
 search paths. A program is compiled with `nvq++ --target stim`, linking the QEC
@@ -125,6 +125,6 @@ the realtime decoding examples.
 
 The built-in decoders (`multi_error_lut`, `single_error_lut`, `sliding_window`
 and others) live in `libcudaq-qec-decoders.so`. Plugin decoders are loaded from
-`/opt/nvidia/cudaqx/lib/decoder-plugins`; this image ships `pymatching`,
+`/opt/nvidia/cudaq-qec/lib/decoder-plugins`; this image ships `pymatching`,
 `chromobius`, `trt_decoder` and a small `example` plugin. The `nv-qldpc-decoder`
 GPU plugin is present when the image was built with the proprietary artifacts.

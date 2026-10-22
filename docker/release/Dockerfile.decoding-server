@@ -12,7 +12,7 @@
 #   cudaq-realtime -- rebuilt with HSB tools ON, from the exact
 #     cuda-quantum commit that container was built at (this repo's
 #     .cudaq_version does not apply).
-#   cudaqx/qec -- decoding_server, decoder plugins,
+#   cudaq-qec -- decoding_server, decoder plugins,
 #     hsb_fpga_syndrome_playback, playback-emulator.
 #
 # Prebuilt proprietary artifacts are supplied via an optional build
@@ -31,7 +31,7 @@ ARG TARGETARCH
 # The official CUDA-Q container whose /opt/nvidia/cudaq is consumed. Expected to be
 # either a nightly or release image.
 ARG cudaq_image=nvcr.io/nvidia/nightly/cuda-quantum:cu13-latest
-# Toolchain for compiling cudaq-realtime and cudaqx/qec: gcc-12, CUDA
+# Toolchain for compiling cudaq-realtime and cudaq-qec: gcc-12, CUDA
 # toolkit, and the LLVM/MLIR install CUDA-Q builds against.
 ARG devcontainer_image=ghcr.io/nvidia/cuda-quantum-devcontainer
 ARG devcontainer_tag_suffix=gcc12-main
@@ -103,7 +103,7 @@ RUN set -e; \
     fi
 
 # ---------------------------------------------------------------------------
-# Stage: builder -- compile cudaq-realtime (HSB tools ON) and cudaqx/qec.
+# Stage: builder -- compile cudaq-realtime (HSB tools ON) and cudaq-qec.
 #
 # The three install prefixes are absolute paths that the runtime stage
 # must reproduce exactly: decoding_server's RPATH references the CUDA-Q
@@ -112,11 +112,11 @@ RUN set -e; \
 FROM toolchain AS builder
 ENV CUDAQ_INSTALL_PREFIX=/opt/nvidia/cudaq \
     CUDAQ_REALTIME_ROOT=/opt/nvidia/cudaq-realtime \
-    CUDAQX_INSTALL_PREFIX=/opt/nvidia/cudaqx
+    CUDAQ_QEC_INSTALL_PREFIX=/opt/nvidia/cudaq-qec
 
 COPY --from=cudaq-official /opt/nvidia/cudaq /opt/nvidia/cudaq
 
-WORKDIR /workspaces/cudaqx
+WORKDIR /workspaces/cudaq-qec
 COPY . .
 
 # cudaq-realtime with HSB tools ON, installed alongside CUDA-Q.
@@ -132,7 +132,7 @@ RUN set -e; \
     cmake --install /tmp/realtime-build; \
     rm -rf /tmp/realtime-build
 
-# cudaqx/qec: decoding_server, hsb_fpga_syndrome_playback, playback-emulator,
+# cudaq-qec: decoding_server, hsb_fpga_syndrome_playback, playback-emulator,
 # the QEC and realtime libraries, and the decoder plugins (built-in plus any
 # libcudaq-qec-*-decoder.so from the artifacts context, via
 # QEC_EXTERNAL_DECODERS). CUDAQX_INCLUDE_TESTS=ON because
@@ -175,7 +175,7 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
         -DCUDAQ_DIR="$CUDAQ_INSTALL_PREFIX/lib/cmake/cudaq/" \
         -DCUDAQX_INCLUDE_TESTS=ON \
         -DCUDAQX_BINDINGS_PYTHON=OFF \
-        -DCMAKE_INSTALL_PREFIX="$CUDAQX_INSTALL_PREFIX" \
+        -DCMAKE_INSTALL_PREFIX="$CUDAQ_QEC_INSTALL_PREFIX" \
         -DCUDAQ_REALTIME_ROOT="$CUDAQ_REALTIME_ROOT" \
         -DCUDAQX_QEC_ENABLE_HSB_TOOLS=ON \
         -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR="$HSB_ROOT" \
@@ -183,15 +183,15 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
         ${_cudevice_archive:+-DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE="$_cudevice_archive"}; \
     cmake --build build -j"$(nproc)"; \
     cmake --install build; \
-    test -x "$CUDAQX_INSTALL_PREFIX/bin/decoding_server"; \
-    test -x "$CUDAQX_INSTALL_PREFIX/bin/hsb_fpga_syndrome_playback"; \
-    test -x "$CUDAQX_INSTALL_PREFIX/bin/playback-emulator"
+    test -x "$CUDAQ_QEC_INSTALL_PREFIX/bin/decoding_server"; \
+    test -x "$CUDAQ_QEC_INSTALL_PREFIX/bin/hsb_fpga_syndrome_playback"; \
+    test -x "$CUDAQ_QEC_INSTALL_PREFIX/bin/playback-emulator"
 
 # ---------------------------------------------------------------------------
 # Stage: runtime -- the shipped image. nvq++ for user programs; no gcc,
 # nvcc, cmake, or sources.
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:${cuda_base_image_tag} AS runtime
+FROM nvcr.io/nvidia/cuda:${cuda_base_image_tag} AS runtime
 ARG TARGETARCH
 ARG CUDA_VERSION
 
@@ -228,7 +228,7 @@ RUN --mount=type=bind,from=toolchain,source=/opt/cudaq-src/realtime/scripts/deps
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VER_DASH="$(echo "$CUDA_VERSION" | tr '.' '-')"; \
     apt-get install -y --no-install-recommends \
-        rdma-core ibverbs-providers \
+        libibverbs1 ibverbs-providers \
         cuda-nvrtc-${CUDA_VER_DASH} \
         libnl-3-200 libnl-route-3-200 \
         libgomp1 \
@@ -256,7 +256,7 @@ RUN --mount=type=bind,from=toolchain,source=/opt/cudaq-src/realtime/scripts/deps
 # (nvq++ and the headers user programs compile against), license files,
 # and build_info.txt. nvq++ drives the clang/lld install at
 # /usr/local/llvm, copied from the same image. The Python package and
-# sources are not shipped. Supplied decoder plugins live in the cudaqx
+# sources are not shipped. Supplied decoder plugins live in the cudaq-qec
 # tree; the cudevice archive is linked into decoding_server.
 COPY --from=cudaq-official /opt/nvidia/cudaq/lib /opt/nvidia/cudaq/lib
 # GPU circuit simulators: their cuQuantum and CUDA math libraries are not shipped.
@@ -277,7 +277,18 @@ COPY --from=cudaq-official \
     /opt/nvidia/cudaq/build_info.txt \
     /opt/nvidia/cudaq/
 COPY --from=builder /opt/nvidia/cudaq-realtime /opt/nvidia/cudaq-realtime
-COPY --from=builder /opt/nvidia/cudaqx /opt/nvidia/cudaqx
+COPY --from=builder /opt/nvidia/cudaq-qec /opt/nvidia/cudaq-qec
+
+# CUDA-Q QEC license material; the installed tree carries none. libs/qec/LICENSE
+# also holds the NVIDIA Software License Agreement for the nv-qldpc plugin.
+COPY LICENSE NOTICE /opt/nvidia/cudaq-qec/
+COPY libs/qec/LICENSE /opt/nvidia/cudaq-qec/LICENSE.qec
+RUN printf '%s\n' \
+    '' \
+    'This container also includes CUDA-Q QEC.' \
+    'Use of this container implies consent to the NVIDIA Software License agreement at' \
+    '/opt/nvidia/cudaq-qec/LICENSE.qec (https://github.com/NVIDIA/cudaq-qec/blob/main/libs/qec/LICENSE)' \
+    >> /opt/nvidia/cudaq/Copyright.txt
 
 # libcudaq-qec.so's RPATH points at cuStabilizer inside the cuquantum
 # wheel, so that one library must land at the same path.
@@ -289,21 +300,21 @@ COPY --from=builder \
 # compiled with nvq++ find the QEC and realtime headers and libraries at
 # compile, link and run time without extra flags (the CUDA-Q ones nvq++
 # handles itself).
-ENV CUDAQX_INSTALL_DIR=/opt/nvidia/cudaqx \
+ENV CUDAQX_INSTALL_DIR=/opt/nvidia/cudaq-qec \
     CUDA_QUANTUM_PATH=/opt/nvidia/cudaq \
     CUDAQ_REALTIME_DIR=/opt/nvidia/cudaq-realtime \
-    PATH=/opt/nvidia/cudaqx/bin:/opt/nvidia/cudaq/bin:${PATH} \
-    CPLUS_INCLUDE_PATH=/opt/nvidia/cudaqx/include:/opt/nvidia/cudaq-realtime/include \
-    LIBRARY_PATH=/opt/nvidia/cudaqx/lib:/opt/nvidia/cudaq-realtime/lib \
-    LD_LIBRARY_PATH=/opt/nvidia/cudaqx/lib:/opt/nvidia/cudaqx/lib/decoder-plugins:/opt/nvidia/cudaq-realtime/lib:/opt/nvidia/cudaq/lib:/usr/local/openmpi/lib:${LD_LIBRARY_PATH}
+    PATH=/opt/nvidia/cudaq-qec/bin:/opt/nvidia/cudaq/bin:${PATH} \
+    CPLUS_INCLUDE_PATH=/opt/nvidia/cudaq-qec/include:/opt/nvidia/cudaq-realtime/include \
+    LIBRARY_PATH=/opt/nvidia/cudaq-qec/lib:/opt/nvidia/cudaq-realtime/lib \
+    LD_LIBRARY_PATH=/opt/nvidia/cudaq-qec/lib:/opt/nvidia/cudaq-qec/lib/decoder-plugins:/opt/nvidia/cudaq-realtime/lib:/opt/nvidia/cudaq/lib:/usr/local/openmpi/lib:${LD_LIBRARY_PATH}
 
 # Examples: the realtime decoding programs from the test suite, with a
 # build script that compiles them with the shipped nvq++ and a README with
 # run recipes. Sources come from the builder stage's checkout so they
 # match the commit the image was built from.
-COPY --from=builder /workspaces/cudaqx/docker/release/decoding-server-examples/README.md \
-                    /workspaces/cudaqx/docker/release/decoding-server-examples/build.sh \
-                    /workspaces/cudaqx/libs/qec/unittests/realtime/app_examples/surface_code-*.cpp \
+COPY --from=builder /workspaces/cudaq-qec/docker/release/decoding-server-examples/README.md \
+                    /workspaces/cudaq-qec/docker/release/decoding-server-examples/build.sh \
+                    /workspaces/cudaq-qec/libs/qec/unittests/realtime/app_examples/surface_code-*.cpp \
                     /root/examples/
 
 WORKDIR /root
