@@ -121,8 +121,9 @@ struct decoding_window {
   /// the full rows are known; empty when the column options resolve them.
   std::vector<parallel_columns> parallel_conflicts;
   /// For each fault column, the unmerged fault columns it stands for,
-  /// counted from the window's first; the one its corrections are reported
-  /// against, the most likely, comes first.
+  /// counted from the window's first. The one its corrections are reported
+  /// against comes first: the most likely, and under most_likely the most
+  /// likely of the effect whose columns together are most likely.
   std::vector<std::vector<std::size_t>> fault_column_sources;
   /// (v_in, m) -> (own rows, then the virtual outcomes on the commit zone's
   /// outgoing wire and on the output port's wire, where those are ports).

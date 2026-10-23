@@ -256,9 +256,11 @@ std::vector<std::uint8_t> column_bits(dense_view<const std::uint8_t> m,
 // Groups the window's fault columns, closed columns first + j for zone[j],
 // into built columns. A class is a zone's columns with identical full rows
 // in the closed chain, which holds every row they touch. most_likely merges
-// a class whose observable effects differ; merge_identical merges the
-// members with equal effects. Groups are ordered by their first column, and
-// list their most likely column first, ties by index.
+// a class whose observable effects differ, keeping the effect whose columns
+// together are most likely; merge_identical merges the members with equal
+// effects. Groups are ordered by their first column. Each lists first the
+// column its corrections are reported against: its most likely, of the kept
+// effect under most_likely; ties go to the lower index.
 std::vector<std::vector<std::size_t>>
 group_fault_columns(const detector_error_model &closed, std::size_t first,
                     const std::vector<std::size_t> &zone,
@@ -270,6 +272,14 @@ group_fault_columns(const detector_error_model &closed, std::size_t first,
   const auto h = view(closed.detector_error_matrix);
   const auto o = view(closed.observables_flips_matrix);
   const auto &rates = closed.error_rates;
+  // Columns most likely first, ties by index; parts arrive in index order.
+  const auto by_rate = [&](std::vector<std::size_t> part) {
+    std::stable_sort(part.begin(), part.end(),
+                     [&](std::size_t a, std::size_t b) {
+                       return rates[first + a] > rates[first + b];
+                     });
+    return part;
+  };
   // Without an option every column is its own group.
   if (!options.merge_identical &&
       options.conflicting_parallel == parallel_resolution::reject) {
@@ -281,29 +291,45 @@ group_fault_columns(const detector_error_model &closed, std::size_t first,
     classes[{zone[j], column_bits(h, first + j)}].push_back(j);
   for (const auto &[key, members] : classes) {
     std::map<std::vector<std::uint8_t>, std::vector<std::size_t>> by_effect;
+    const std::vector<std::size_t> *kept = nullptr;
+    double kept_rate = -1.0;
+    std::vector<std::size_t> rest;
     for (const auto j : members)
       by_effect[column_bits(o, first + j)].push_back(j);
-    if (options.conflicting_parallel == parallel_resolution::most_likely &&
-        by_effect.size() > 1) {
-      by_first[members.front()] = members;
-    } else {
+    if (options.conflicting_parallel != parallel_resolution::most_likely ||
+        by_effect.size() == 1) {
       for (const auto &[effect, part] : by_effect)
         if (options.merge_identical)
-          by_first[part.front()] = part;
+          by_first[part.front()] = by_rate(part);
         else
           for (const auto j : part)
             by_first[j] = {j};
-    }
-  } // end - for(classes)
-  for (auto &group : by_first) {
-    if (group.empty())
       continue;
-    std::stable_sort(group.begin(), group.end(),
-                     [&](std::size_t a, std::size_t b) {
-                       return rates[first + a] > rates[first + b];
-                     });
-    groups.push_back(std::move(group));
-  }
+    }
+    // An effect's rate is the chance that an odd number of its columns
+    // fire; the most likely effect is kept, ties to the lower first index.
+    for (const auto &[effect, part] : by_effect) {
+      double rate = 0.0;
+      for (const auto j : part)
+        rate = rate + rates[first + j] - 2 * rate * rates[first + j];
+      if (rate > kept_rate ||
+          (rate == kept_rate && part.front() < kept->front())) {
+        kept = &part;
+        kept_rate = rate;
+      }
+    }
+    for (const auto &[effect, part] : by_effect)
+      if (&part != kept)
+        rest.insert(rest.end(), part.begin(), part.end());
+    std::sort(rest.begin(), rest.end());
+    auto &group = by_first[members.front()];
+    group = by_rate(*kept);
+    for (const auto j : by_rate(rest))
+      group.push_back(j);
+  } // end - for(classes)
+  for (auto &group : by_first)
+    if (!group.empty())
+      groups.push_back(std::move(group));
   return groups;
 } // end - group_fault_columns()
 

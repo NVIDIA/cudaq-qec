@@ -300,8 +300,11 @@ bool sends_round(const scheduled_window &p, const scheduled_window &c,
   return false;
 }
 
-// F1-F3 on every row that some fault touches, in row order. The faults on
-// a row are round q's and round q - 1's, each named by its first column.
+// F1 and F3 on every row that some fault touches, in row order. The faults
+// on a row are round q's and round q - 1's, each named by its first column.
+// F2 needs no check: check_commits() has already found every detectable
+// fault committed once, so each fault on the row is the finalizer's column
+// or committed by another window.
 void check_rows(const experiment_template &t, const window_schedule &s,
                 const round_windows &index,
                 const std::vector<const chunk_touch *> &touch) {
@@ -340,9 +343,6 @@ void check_rows(const experiment_template &t, const window_schedule &s,
         const auto fault = "fault " +
                            std::to_string(t.column_offset(x, R) + column) +
                            " (round " + std::to_string(x) + ")";
-        if (!contains(f.rounds, x) && index.committers[x].empty())
-          reject("F2: " + row() + ", finalized by " + name(f) + ": " + fault +
-                 " is not its column and is committed by no window");
         for (const auto w : index.committers[x]) {
           const auto &p = s.windows[w];
           if (w != finalizers.front() && !sends_round(p, f, round))
@@ -522,9 +522,11 @@ std::size_t commitment_probe_rounds(const experiment_template &context,
   return end + static_cast<std::size_t>(reach * first.request.period);
 } // end - commitment_probe_rounds()
 
-// Sends are checked for every probe shot before any row, so an edge with
-// the wrong index map reports its mismatch rather than the row it leaves
-// uncovered; parallel columns last, once per layer variant.
+// Sends are checked for every probe shot before anything else, so an edge
+// with the wrong index map reports its mismatch rather than the row it
+// leaves uncovered; then F4 for every shot, so a fault committed twice or
+// not at all is reported as such rather than as a row it unsettles; then
+// the rows; parallel columns last, once per layer variant.
 void validate_commitment(std::shared_ptr<const experiment_template> context,
                          const std::vector<window_layer> &layers,
                          const std::vector<task_graph_edge> &edges) {
@@ -541,11 +543,12 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
     schedules.push_back(schedule_windows(context, layers, edges, R));
     check_deliveries(schedules.back());
   }
+  for (const auto &schedule : schedules)
+    check_commits(*context, schedule, index_rounds(schedule),
+                  touch_rounds(*context, schedule.num_rounds, touches));
   for (const auto &schedule : schedules) {
-    const auto index = index_rounds(schedule);
-    const auto touch = touch_rounds(*context, schedule.num_rounds, touches);
-    check_rows(*context, schedule, index, touch);
-    check_commits(*context, schedule, index, touch);
+    check_rows(*context, schedule, index_rounds(schedule),
+               touch_rounds(*context, schedule.num_rounds, touches));
     check_imports(schedule);
   }
   for (const auto &schedule : schedules)

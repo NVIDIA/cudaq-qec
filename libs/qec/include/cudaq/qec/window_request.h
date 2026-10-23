@@ -44,7 +44,8 @@ enum class input_boundary { columns, truncate };
 
 /// How a same-zone class of columns with identical rows but different
 /// observable effects is handled: rejected by commitment validation, or
-/// merged into its most likely member's response.
+/// merged into one column with the effect whose columns together are most
+/// likely.
 enum class parallel_resolution { reject, most_likely };
 
 /// The windows of one layer: window k is anchored at offset + k * period,

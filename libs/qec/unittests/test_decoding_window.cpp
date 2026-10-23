@@ -1148,6 +1148,46 @@ TEST(DecodingWindowColumns, MostLikelyKeepsTheMoreLikelyResponse) {
   check(spec, 19, 0.03 + 0.04 - 2 * 0.03 * 0.04);
 } // end - TEST(DecodingWindowColumns, MostLikelyKeepsTheMoreLikelyResponse)
 
+// most_likely keeps the observable effect whose faults together are most
+// likely, not the single most likely fault's: faults 2 and 8 flip the
+// observable at 0.01 each, about 0.0198 together, and outweigh fault 3,
+// which does not, at 0.015. The merged column reports against fault 2, the
+// first of the winning effect's most likely faults.
+TEST(DecodingWindowColumns, MostLikelyWeighsEachEffectsFaultsTogether) {
+  auto spec = duplicate_columns_spec();
+  const std::vector<std::int64_t> prev{0, 1, -1, 2, 3, 8, -1, 4, 5, -1, 6, -1};
+  const std::vector<std::int64_t> next{0, 1, -1, 2, 3, 8, -1, 4, -1, 6, -1};
+  for (auto &phase : spec.phases) {
+    auto &p = phase.spec;
+    p.num_faults = 9;
+    p.error_rates = {0.01, 0.02, 0.01, 0.015, 0.02, 0.02, 0.02, 0.005, 0.01};
+    p.O_sparse = {2, 8, -1};
+    p.seam_specs = {{seam_name::prev_round, {prev, {}}}};
+    if (phase.id != phase_name::dem_final)
+      p.seam_specs.push_back({seam_name::next_round, {next, {}}});
+  }
+  const auto tmpl = std::make_shared<const experiment_template>(spec);
+  auto request = layered(2, 2, 3).a;
+  request.columns.conflicting_parallel = parallel_resolution::most_likely;
+  const auto plain = window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, 14);
+  const auto w = window_from_dem_chunks(tmpl, request, 1, 14);
+  // The commit zone's first chunk is unmerged columns 18..26: faults 2, 3
+  // and 8 of it are columns 20, 21 and 26.
+  const auto merged = std::find_if(
+      w.fault_column_sources.begin(), w.fault_column_sources.end(),
+      [](const auto &sources) {
+        return std::find(sources.begin(), sources.end(), 20) != sources.end();
+      });
+  ASSERT_NE(merged, w.fault_column_sources.end());
+  const auto c =
+      static_cast<std::size_t>(merged - w.fault_column_sources.begin());
+  const double x = 0.01 + 0.01 - 2 * 0.01 * 0.01;
+  EXPECT_EQ(*merged, (std::vector<std::size_t>{20, 26, 21}));
+  EXPECT_EQ(column_of(w, c), column_of(plain, 20));
+  EXPECT_NEAR(w.model.error_rates[c], x + 0.015 - 2 * x * 0.015, 1e-12);
+} // end - TEST(DecodingWindowColumns,
+  // MostLikelyWeighsEachEffectsFaultsTogether)
+
 // Each commit column's first conflicting parallel column. In the commit zone
 // of rounds 5 and 6, faults 2 and 3 have the same full rows, but only 2
 // flips the observable; 0 and 1 are identical, which is no conflict.
@@ -1688,8 +1728,10 @@ TEST(Commitment, RejectsARowWithTwoFinalizers) {
       "validate_commitment: F1: row", "has 2 finalizers: A[1], B[1]");
 }
 
-// F2: a layer importing a round that no window commits finalizes the round's
-// rows, but the round's own faults touch them uncommitted.
+// A round no window commits is reported as F4, before the rows it leaves
+// unsettled: here a layer importing it would finalize its rows, with the
+// round's own faults on them uncommitted. F4 implies F2, which therefore
+// needs no check of its own.
 TEST(Commitment, RejectsAFaultNoWindowCommits) {
   window_graph g;
   window_request w;
@@ -1699,9 +1741,8 @@ TEST(Commitment, RejectsAFaultNoWindowCommits) {
   w.output = {port_disposition::closed, round_range{2, 3}};
   g.layers = {{"W", "w", w}};
   expect_error([&] { validate(arbitrary_memory_spec(5), g); },
-               "validate_commitment: F2: row 8 (round 2) of the 3-round shot, "
-               "finalized by W[0]: fault 8 (round 2)",
-               "committed by no window");
+               "validate_commitment: F4: fault 8 (round 2) of the 3-round "
+               "shot is committed by no window");
 }
 
 // F3: without the receive_1 edge, A[k] commits faults on the rows B[k]
@@ -1734,6 +1775,12 @@ TEST(Commitment, RejectsAFaultCommittedTwice) {
   d.sends = {{"delta", send_mode::delta, {{0, 1}}}};
   g.layers.push_back({"D", "d", d});
   g.edges.push_back({"D", "delta", "W", "receive_1", 0});
+  expect_error([&] { validate(single_round_spec(), g); },
+               "validate_commitment: F4: fault 4 (round 1)",
+               "committed by 2 windows: W[0], D[0]");
+  // Without the delta edge, the rows would also fail F3; the double commit
+  // is reported first, as the cause.
+  g.edges.pop_back();
   expect_error([&] { validate(single_round_spec(), g); },
                "validate_commitment: F4: fault 4 (round 1)",
                "committed by 2 windows: W[0], D[0]");
