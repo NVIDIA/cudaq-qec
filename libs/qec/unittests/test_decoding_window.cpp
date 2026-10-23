@@ -8,16 +8,18 @@
 // window rows, columns, ports, sends and measurement maps against a dense
 // slice of the whole shot; the window spec's nine-SEC example; the spec's
 // invalid constructions; the column-handling options and parallel-column
-// conflicts; variant keys and translation invariance; the kernel's forms;
-// the window schedule and commitment validation: row finalization (F1-F4)
-// checked against the built windows, each failure's own message, send and
-// receive matching, and ambiguous parallel commit columns; the serial
-// parallel-window reference: its windows match the schedule and its models
-// the production ones, single faults decode exactly, each send is needed,
-// sampled shots are sound and the production windows commit, send and
-// update the frame as it does, and the logical error rate tracks monolithic
-// matching; and the data artifact store: sha256, canonical content, shared
-// entries, templates as content, and lookups that never build.
+// conflicts; variant keys and translation invariance; the sparse model in
+// the kernel's forms, and a window whose dense model would take gigabytes
+// building in little memory; the window schedule and commitment validation:
+// row finalization (F1-F4) checked against the built windows, each failure's
+// own message, send and receive matching, and ambiguous parallel commit
+// columns; the serial parallel-window reference: its windows match the
+// schedule and its models the production ones, single faults decode exactly,
+// each send is needed, sampled shots are sound and the production windows
+// commit, send and update the frame as it does, and the logical error rate
+// tracks monolithic matching; and the data artifact store: sha256, canonical
+// content, shared entries, templates as content, and lookups that never
+// build.
 
 #include "parallel_window_reference.h"
 #include "task_graph_test_fixtures.h"
@@ -32,6 +34,8 @@
 #include "cudaq/qec/pcm_utils.h"
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <limits>
@@ -42,6 +46,8 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -372,11 +378,18 @@ std::vector<std::vector<uint8_t>> h_block(const whole_shot &s,
   return out;
 }
 
+// The window's model as dense matrices, H padded with the logical-error
+// columns it leaves out.
+detector_error_model dense(const decoding_window &w) {
+  return dense_model(w.model);
+}
+
 // Entries of the window model's H, for its rows and columns [begin, end).
 std::vector<std::vector<uint8_t>>
 window_h(const decoding_window &w, std::size_t col_begin, std::size_t col_end) {
   std::vector<std::vector<uint8_t>> out;
-  const auto &h = w.model.detector_error_matrix;
+  const auto model = dense(w);
+  const auto &h = model.detector_error_matrix;
   for (std::size_t r = 0; r < h.shape()[0]; ++r) {
     auto &line = out.emplace_back();
     for (auto c = col_begin; c < col_end; ++c)
@@ -407,6 +420,7 @@ TEST(DecodingWindow, MatchesTheWholeShot) {
         const auto instances = window_instances(request, R);
         for (auto k = instances.begin; k < instances.end; ++k) {
           const auto w = window_from_dem_chunks(tmpl, request, k, R);
+          const auto model = dense(w);
           auto rows = rows_of(shot, w.rounds);
           const auto imports = rows_of(shot, w.output.imports);
           SCOPED_TRACE("k=" + std::to_string(k));
@@ -419,9 +433,9 @@ TEST(DecodingWindow, MatchesTheWholeShot) {
                             shot.column[w.rounds.end]));
           for (std::size_t c = 0; c < w.num_fault_columns; ++c) {
             const auto shot_c = shot.column[w.rounds.begin] + c;
-            EXPECT_EQ(w.model.error_rates[c], shot.model.error_rates[shot_c]);
+            EXPECT_EQ(w.model.priors[c], shot.model.error_rates[shot_c]);
             for (std::size_t o = 0; o < tmpl->num_observables(); ++o)
-              EXPECT_EQ(w.model.observables_flips_matrix.at({o, c}),
+              EXPECT_EQ(model.observables_flips_matrix.at({o, c}),
                         shot.model.observables_flips_matrix.at({o, shot_c}));
           }
           EXPECT_EQ(w.commit_columns.begin,
@@ -463,8 +477,9 @@ TEST(DecodingWindow, OpenInputAddsBoundaryColumns) {
   const auto a = layered(2, 2, 3).a;
   const std::size_t R = 12;
   const auto w = window_from_dem_chunks(tmpl, a, 1, R);
-  const auto &h = w.model.detector_error_matrix;
-  const auto &o = w.model.observables_flips_matrix;
+  const auto model = dense(w);
+  const auto &h = model.detector_error_matrix;
+  const auto &o = model.observables_flips_matrix;
   const auto first = w.num_fault_columns;
   const auto seam = tmpl->row_offset(w.rounds.begin + 1, R) -
                     tmpl->row_offset(w.rounds.begin, R);
@@ -487,7 +502,7 @@ TEST(DecodingWindow, OpenInputAddsBoundaryColumns) {
       EXPECT_EQ(o.at({j, c}), j == i ? 1 : 0);
   }
   for (auto c = first; c < h.shape()[1]; ++c)
-    EXPECT_EQ(w.model.error_rates[c], 0.01);
+    EXPECT_EQ(w.model.priors[c], 0.01);
   EXPECT_LE(w.commit_columns.end, first);
 } // end - TEST(DecodingWindow, OpenInputAddsBoundaryColumns)
 
@@ -588,8 +603,9 @@ TEST(DecodingWindow, MatchesTheChunkAdapter) {
               w.input.exists && w.input.disposition == port_disposition::open;
           ASSERT_EQ(w.num_crossing_columns, 0u);
           const auto adapter = chunk_adapter(*tmpl, w.rounds, block, R);
-          const auto &h = w.model.detector_error_matrix;
-          const auto &o = w.model.observables_flips_matrix;
+          const auto model = dense(w);
+          const auto &h = model.detector_error_matrix;
+          const auto &o = model.observables_flips_matrix;
           const auto F = w.num_fault_columns;
           const auto V = w.num_virtual_outcome_columns;
           SCOPED_TRACE("k=" + std::to_string(k));
@@ -628,6 +644,7 @@ TEST(DecodingWindow, ClosedInputAndOpenOutputMatchGetPcmForRounds) {
   const auto instances = window_instances(request, R);
   for (auto k = instances.begin; k < instances.end; ++k) {
     const auto w = window_from_dem_chunks(tmpl, request, k, R);
+    const auto model = dense(w);
     const auto [pcm, first, last] = get_pcm_for_rounds(
         shot.model.detector_error_matrix, rep5_checks, w.rounds.begin,
         w.rounds.end - 1, false, w.output.exists);
@@ -636,7 +653,7 @@ TEST(DecodingWindow, ClosedInputAndOpenOutputMatchGetPcmForRounds) {
     ASSERT_EQ(pcm.shape()[1], w.num_fault_columns);
     for (std::size_t r = 0; r < pcm.shape()[0]; ++r)
       for (std::size_t c = 0; c < pcm.shape()[1]; ++c)
-        EXPECT_EQ(pcm.at({r, c}), w.model.detector_error_matrix.at({r, c}));
+        EXPECT_EQ(pcm.at({r, c}), model.detector_error_matrix.at({r, c}));
   } // end - for(k)
 } // end - TEST(DecodingWindow, ClosedInputAndOpenOutputMatchGetPcmForRounds)
 
@@ -717,8 +734,8 @@ TEST(DecodingWindow, NineSecExample) {
   EXPECT_GE(meas(6), w.commit_columns.begin);
   EXPECT_LT(meas(6), w.commit_columns.end);
 
-  std::vector<uint8_t> d(w.model.detector_error_matrix.shape()[0], 0);
-  std::vector<uint8_t> e(w.model.detector_error_matrix.shape()[1], 0);
+  std::vector<uint8_t> d(w.model.h.num_rows(), 0);
+  std::vector<uint8_t> e(w.model.o.num_cols(), 0);
   for (const std::int64_t sec : {3, 4, 6, 7})
     d[sec - w.rounds.begin] = 1;
   e[meas(3)] = e[meas(6)] = 1;
@@ -747,7 +764,8 @@ TEST(DecodingWindow, SendsMatchTheWholeShot) {
   const auto instances = window_instances(a, R);
   for (auto k = instances.begin; k < instances.end; ++k) {
     const auto w = window_from_dem_chunks(tmpl, a, k, R);
-    const auto &h = w.model.detector_error_matrix;
+    const auto model = dense(w);
+    const auto &h = model.detector_error_matrix;
     std::vector<uint8_t> d(h.shape()[0]);
     std::vector<uint8_t> e(h.shape()[1]);
     SCOPED_TRACE("k=" + std::to_string(k));
@@ -1071,8 +1089,9 @@ dem_chunks_spec duplicate_columns_spec() {
 std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
 column_of(const decoding_window &w, std::size_t c) {
   std::pair<std::vector<uint8_t>, std::vector<uint8_t>> out;
-  const auto &h = w.model.detector_error_matrix;
-  const auto &o = w.model.observables_flips_matrix;
+  const auto model = dense(w);
+  const auto &h = model.detector_error_matrix;
+  const auto &o = model.observables_flips_matrix;
   for (std::size_t r = 0; r < h.shape()[0]; ++r)
     out.first.push_back(h.at({r, c}));
   for (std::size_t i = 0; i < o.shape()[0]; ++i)
@@ -1121,12 +1140,11 @@ TEST(DecodingWindowColumns, MergeIdenticalMergesWithinAZone) {
       ++seen[source];
       EXPECT_EQ(column_of(w, c), column_of(plain, source)) << c;
       EXPECT_EQ(zone_of(plain, source, 8), zone_of(plain, sources[0], 8));
-      EXPECT_LE(plain.model.error_rates[source],
-                plain.model.error_rates[sources[0]]);
-      prior = prior + plain.model.error_rates[source] -
-              2 * prior * plain.model.error_rates[source];
+      EXPECT_LE(plain.model.priors[source], plain.model.priors[sources[0]]);
+      prior = prior + plain.model.priors[source] -
+              2 * prior * plain.model.priors[source];
     }
-    EXPECT_NEAR(w.model.error_rates[c], prior, 1e-12);
+    EXPECT_NEAR(w.model.priors[c], prior, 1e-12);
     const bool in_commit = zone_of(plain, sources[0], 8) == 0;
     EXPECT_EQ(in_commit,
               c >= w.commit_columns.begin && c < w.commit_columns.end);
@@ -1135,8 +1153,7 @@ TEST(DecodingWindowColumns, MergeIdenticalMergesWithinAZone) {
   // The commit zone's first chunk: 0 and 1 merge, reported against 1.
   const auto merged = w.commit_columns.begin;
   EXPECT_EQ(w.fault_column_sources[merged], (std::vector<std::size_t>{17, 16}));
-  EXPECT_NEAR(w.model.error_rates[merged], 0.01 + 0.02 - 2 * 0.01 * 0.02,
-              1e-12);
+  EXPECT_NEAR(w.model.priors[merged], 0.01 + 0.02 - 2 * 0.01 * 0.02, 1e-12);
   // In the last chunk, 4 and 5 agree inside the window; round 9 differs.
   EXPECT_EQ(column_of(plain, 44), column_of(plain, 45));
   for (const auto &sources : w.fault_column_sources)
@@ -1178,7 +1195,7 @@ TEST(DecodingWindowColumns, MostLikelyKeepsTheMoreLikelyResponse) {
     EXPECT_EQ(w.fault_column_sources[c],
               (std::vector<std::size_t>{reported, 18 + 19 - reported}));
     EXPECT_EQ(column_of(w, c), column_of(plain, reported));
-    EXPECT_NEAR(w.model.error_rates[c], prior, 1e-12);
+    EXPECT_NEAR(w.model.priors[c], prior, 1e-12);
     EXPECT_EQ(w.fault_column_sources[w.commit_columns.begin],
               (std::vector<std::size_t>{16}));
   };
@@ -1227,7 +1244,7 @@ TEST(DecodingWindowColumns, MostLikelyWeighsEachEffectsFaultsTogether) {
   const double x = 0.01 + 0.01 - 2 * 0.01 * 0.01;
   EXPECT_EQ(*merged, (std::vector<std::size_t>{20, 26, 21}));
   EXPECT_EQ(column_of(w, c), column_of(plain, 20));
-  EXPECT_NEAR(w.model.error_rates[c], x + 0.015 - 2 * x * 0.015, 1e-12);
+  EXPECT_NEAR(w.model.priors[c], x + 0.015 - 2 * x * 0.015, 1e-12);
 } // end - TEST(DecodingWindowColumns,
   // MostLikelyWeighsEachEffectsFaultsTogether)
 
@@ -1298,6 +1315,7 @@ TEST(DecodingWindowColumns, TruncateMatchesGetPcmForRounds) {
   const auto instances = window_instances(request, R);
   for (auto k = instances.begin; k < instances.end; ++k) {
     const auto w = window_from_dem_chunks(tmpl, request, k, R);
+    const auto model = dense(w);
     const auto [pcm, first, last] = get_pcm_for_rounds(
         shot.model.detector_error_matrix, rep5_checks, w.rounds.begin,
         w.rounds.end - 1, true, w.output.exists);
@@ -1311,12 +1329,12 @@ TEST(DecodingWindowColumns, TruncateMatchesGetPcmForRounds) {
     // get_pcm_for_rounds() keeps shot order: the crossing columns first.
     for (std::size_t r = 0; r < pcm.shape()[0]; ++r) {
       for (std::size_t c = 0; c < C; ++c)
-        EXPECT_EQ(pcm.at({r, c}), w.model.detector_error_matrix.at({r, F + c}));
+        EXPECT_EQ(pcm.at({r, c}), model.detector_error_matrix.at({r, F + c}));
       for (std::size_t c = 0; c < F; ++c)
-        EXPECT_EQ(pcm.at({r, C + c}), w.model.detector_error_matrix.at({r, c}));
+        EXPECT_EQ(pcm.at({r, C + c}), model.detector_error_matrix.at({r, c}));
     }
     for (std::size_t c = 0; c < C; ++c)
-      EXPECT_EQ(w.model.error_rates[F + c],
+      EXPECT_EQ(w.model.priors[F + c],
                 shot.model.error_rates[shot.column[w.rounds.begin - 1] + c]);
     EXPECT_LE(w.commit_columns.end, F);
   } // end - for(k)
@@ -1441,9 +1459,10 @@ TEST(WindowVariants, BulkWindowsAreTranslationInvariant) {
       "windows 1 and 2 differ in their input port");
 } // end - TEST(WindowVariants, BulkWindowsAreTranslationInvariant)
 
-// The kernel's forms: H over the decoder's columns as canonical CSC, O and
-// the priors over every column; converting back loses nothing.
-TEST(WindowKernelForms, RoundTripWithoutLoss) {
+// The model is in the kernel's forms: H over the decoder's columns and O
+// over every column, both canonical CSC, and a prior per column. The dense
+// view pads H with the logical-error columns, which touch no detector.
+TEST(WindowModel, HoldsTheKernelForms) {
   const auto tmpl =
       std::make_shared<const experiment_template>(narrow_readout_spec());
   auto request = layered(2, 2, 3).a;
@@ -1452,22 +1471,67 @@ TEST(WindowKernelForms, RoundTripWithoutLoss) {
       request.input = {port_disposition::open, std::nullopt,
                        input_boundary::truncate};
     const auto w = window_from_dem_chunks(tmpl, request, 1, 14);
-    const auto forms = kernel_forms(w);
-    const auto back = model_from_kernel_forms(forms);
-    const auto csc = forms.h.to_nested_csc();
-    EXPECT_EQ(forms.h.num_cols(), w.num_decoder_columns());
-    EXPECT_EQ(forms.o.num_cols(), w.model.num_error_mechanisms());
-    for (const auto &column : csc)
-      EXPECT_TRUE(std::is_sorted(column.begin(), column.end()));
-    EXPECT_EQ(back.error_rates, w.model.error_rates);
-    ASSERT_EQ(back.detector_error_matrix.shape(),
-              w.model.detector_error_matrix.shape());
-    ASSERT_EQ(back.observables_flips_matrix.shape(),
-              w.model.observables_flips_matrix.shape());
-    for (std::size_t c = 0; c < w.model.num_error_mechanisms(); ++c)
-      EXPECT_EQ(column_of(w, c), column_of(decoding_window{.model = back}, c));
+    const auto model = dense(w);
+    const auto total = w.num_decoder_columns() + w.num_logical_error_columns;
+    const std::vector<std::size_t> shape{w.model.h.num_rows(), total};
+    SCOPED_TRACE(truncate ? "truncate" : "columns");
+    EXPECT_EQ(w.num_logical_error_columns, truncate ? 0u : 1u);
+    EXPECT_EQ(w.model.h.layout(), sparse_binary_matrix_layout::csc);
+    EXPECT_EQ(w.model.o.layout(), sparse_binary_matrix_layout::csc);
+    EXPECT_NO_THROW(w.model.h.validate_sorted_unique_indices());
+    EXPECT_NO_THROW(w.model.o.validate_sorted_unique_indices());
+    EXPECT_EQ(w.model.h.num_cols(), w.num_decoder_columns());
+    EXPECT_EQ(w.model.o.num_cols(), total);
+    EXPECT_EQ(w.model.priors.size(), total);
+    ASSERT_EQ(model.detector_error_matrix.shape(), shape);
+    EXPECT_EQ(model.error_rates, w.model.priors);
+    for (std::size_t r = 0; r < shape[0]; ++r)
+      for (auto c = w.num_decoder_columns(); c < total; ++c)
+        EXPECT_EQ(model.detector_error_matrix.at({r, c}), 0);
   } // end - for(truncate)
-} // end - TEST(WindowKernelForms, RoundTripWithoutLoss)
+} // end - TEST(WindowModel, HoldsTheKernelForms)
+
+// A repetition-code memory over n bits: n - 1 detectors a round.
+dem_chunks_spec repetition_memory_spec(std::size_t n) {
+  using index = sparse_binary_matrix::index_type;
+  std::vector<std::vector<index>> checks(n - 1);
+  for (std::size_t i = 0; i + 1 < n; ++i)
+    checks[i] = {static_cast<index>(i), static_cast<index>(i + 1)};
+  const auto hz = sparse_binary_matrix::from_nested_csr(
+      static_cast<index>(n - 1), static_cast<index>(n), checks);
+  const auto lz =
+      sparse_binary_matrix::from_nested_csr(1, static_cast<index>(n), {{0}});
+  return phenomenological_memory_spec(hz, lz, 0.01, 0.01);
+}
+
+// Bytes of address space the process maps.
+std::size_t mapped_bytes() {
+  std::ifstream statm("/proc/self/statm");
+  std::size_t pages = 0;
+  statm >> pages;
+  return pages * static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+}
+
+// An A window over a 3000-bit repetition memory: 10 rounds of 2999 rows and
+// 5999 fault columns, then 2999 boundary columns and 1 logical-error column.
+// That is about 2 GB as a dense H and a few megabytes sparse, and it builds
+// within a little address space beyond what the process maps.
+TEST(DecodingWindowDeathTest, BuildsLargeWindowsSparsely) {
+  constexpr std::size_t bits = 3000;          // 2999 detectors a round
+  constexpr std::size_t headroom = 256 << 20; // under a seventh of dense H
+  const auto tmpl =
+      std::make_shared<const experiment_template>(repetition_memory_spec(bits));
+  const auto request = layered(4, 3, 6).a;
+  const auto build = [&] {
+    const rlimit limit{mapped_bytes() + headroom, RLIM_INFINITY};
+    setrlimit(RLIMIT_AS, &limit);
+    const auto w = window_from_dem_chunks(tmpl, request, 1, 40);
+    const bool shape = w.model.h.num_rows() == 10 * (bits - 1) &&
+                       w.model.o.num_cols() == 10 * (2 * bits - 1) + bits;
+    std::exit(shape ? 0 : 1);
+  };
+  EXPECT_EXIT(build(), testing::ExitedWithCode(0), "");
+}
 
 // ---------------------------------------------------------------------------
 // Window schedule and commitment validation
@@ -1645,7 +1709,8 @@ void expect_sound(const dem_chunks_spec &spec, const window_graph &g) {
       const auto instances = window_instances(layer.request, R);
       for (auto k = instances.begin; k < instances.end; ++k) {
         const auto w = window_from_dem_chunks(tmpl, layer.request, k, R);
-        const auto &model = w.model.detector_error_matrix;
+        const auto full = dense(w);
+        const auto &model = full.detector_error_matrix;
         const auto first_row = tmpl->row_offset(w.rounds.begin, R);
         const auto first_column = tmpl->column_offset(w.rounds.begin, R);
         for (std::size_t i = 0; i < model.shape()[0]; ++i) {
@@ -1946,7 +2011,8 @@ TEST(CommitmentParallel, AcceptsBoundaryTwinsOfBufferColumns) {
       std::make_shared<const experiment_template>(twin_spec(false));
   auto requests = layered(2, 2, 3);
   const auto w = window_from_dem_chunks(tmpl, requests.a, 1, 14);
-  const auto &h = w.model.detector_error_matrix;
+  const auto model = dense(w);
+  const auto &h = model.detector_error_matrix;
   // Round 3's fault 4 has the same rows as boundary column 3.
   for (std::size_t r = 0; r < h.shape()[0]; ++r)
     EXPECT_EQ(h.at({r, 4}), h.at({r, w.num_fault_columns + 3}));
@@ -2112,8 +2178,9 @@ void expect_models_match(const std::shared_ptr<const experiment_template> &t,
   for (std::size_t i = 0; i < windows.size(); ++i) {
     const auto &rw = windows[i];
     const auto w = window_from_dem_chunks(t, request_of(g, rw.node), rw.k, R);
-    const auto &h = w.model.detector_error_matrix;
-    const auto &o = w.model.observables_flips_matrix;
+    const auto model = dense(w);
+    const auto &h = model.detector_error_matrix;
+    const auto &o = model.observables_flips_matrix;
     const auto &columns = reference.decoder_columns(i);
     SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
     ASSERT_EQ(w.num_own_rows, rw.num_own_rows);
@@ -2121,7 +2188,7 @@ void expect_models_match(const std::shared_ptr<const experiment_template> &t,
     ASSERT_EQ(w.num_decoder_columns(), columns.size());
     for (std::size_t c = 0; c < columns.size(); ++c) {
       EXPECT_EQ(column_rows(h, c), columns[c]) << "column " << c;
-      EXPECT_EQ(w.model.error_rates[c], reference.priors(i)[c]) << c;
+      EXPECT_EQ(w.model.priors[c], reference.priors(i)[c]) << c;
     }
     for (std::size_t c = 0; c < rw.columns.size(); ++c)
       EXPECT_EQ(column_rows(o, c), s.o[rw.columns[c]]) << "column " << c;
