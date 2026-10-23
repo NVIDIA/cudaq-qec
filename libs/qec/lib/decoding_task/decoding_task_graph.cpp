@@ -528,12 +528,14 @@ void decoding_task_graph::impl::compile_wires() {
                       output_offset[k] + output_width[k], n_obs);
 
     streaming_node_output_offsets.assign(streaming_nodes.size(), {});
+    streaming_node_outputs.assign(streaming_nodes.size(), {});
     output_streaming_nodes.assign(num_sinks, {});
     if (!obs_conflict)
       for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
         for (std::size_t k = 0; k < num_sinks; ++k) {
           if (reach[streaming_nodes[si].node_index][k].parity) {
             streaming_node_output_offsets[si].push_back(output_offset[k]);
+            streaming_node_outputs[si].push_back(k);
           }
           const auto &path = reach[streaming_nodes[si].node_index][k];
           if (output_has_parity_contributor[k] ? path.parity : path.reachable) {
@@ -721,7 +723,31 @@ void decoding_task_graph::impl::compile_wires() {
     // schedule to distinguish it from an unavailable value.
     const auto num_sinks = wires_to.back().size();
     output_streaming_schedules.assign(num_sinks, {});
+    output_stagers.assign(num_sinks, {});
+    streaming_node_staged.assign(M, 0);
     for (std::size_t k = 0; k < num_sinks && streaming_conflict.empty(); ++k) {
+      // Contributors reporting exact commit intervals fold through a stager
+      // in round order, so they need no common schedule; mixing them with
+      // scheduled contributors has no single publication policy.
+      std::size_t staged = 0;
+      for (const auto si : output_streaming_nodes[k])
+        staged += streaming_nodes[si].capability->exact_interval_coverage();
+      if (staged != 0 && staged != output_streaming_nodes[k].size()) {
+        record_streaming_conflict(
+            "graph output '" + output_names[k] +
+            "' mixes contributors that report exact commit intervals with "
+            "ones that publish on a schedule; wire them to separate outputs");
+        break;
+      }
+      if (staged != 0) {
+        auto &stager = output_stagers[k];
+        stager.enabled = true;
+        stager.bits.assign(streaming_result_state.outputs[k].value_width, 0);
+        stager.whole.assign(stager.bits.size(), 0);
+        for (const auto si : output_streaming_nodes[k])
+          streaming_node_staged[si] = 1;
+        continue;
+      }
       std::optional<window_spec> shared;
       std::string first_endpoint;
       for (std::size_t si = 0; si < M; ++si) {
@@ -977,7 +1003,17 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
     for (const auto si : contributors)
       generation = std::min(generation, streaming_node_generations[si]);
 
-    if (generation > output.generation) {
+    if (k < output_stagers.size() && output_stagers[k].enabled) {
+      auto &stager = output_stagers[k];
+      if (final)
+        fold_whole_shot(stager);
+      if (stager.generation > output.generation) {
+        output.coverage_begin_round = 0;
+        output.coverage_end_round = stager.frontier;
+        output.generation = stager.generation;
+        output.status = task_graph_streaming_status::available;
+      }
+    } else if (generation > output.generation) {
       const auto &schedule = output_streaming_schedules[k];
       std::optional<streaming_task_graph_node::committed_coverage> exact;
       std::size_t exact_count = 0;
@@ -1076,6 +1112,15 @@ void decoding_task_graph::impl::consume_streaming_result() {
   result.status = task_graph_streaming_status::pending;
   for (std::size_t k = 0; k < result.outputs.size(); ++k) {
     auto &output = result.outputs[k];
+    if (k < output_stagers.size()) {
+      auto &stager = output_stagers[k];
+      std::fill(stager.bits.begin(), stager.bits.end(), uint8_t{0});
+      // Consuming a complete shot starts the next one from round 0.
+      if (output.status == task_graph_streaming_status::complete) {
+        stager.frontier = 0;
+        stager.pending.clear();
+      }
+    }
     output.status = task_graph_streaming_status::pending;
     // A zero-value guarded tail is an output publication without a node fire.
     // Keep contributor barriers caught up before streaming resumes.
@@ -1110,6 +1155,83 @@ void decoding_task_graph::impl::reset_streaming_progress() {
     output.coverage_end_round = 0;
     output.status = task_graph_streaming_status::pending;
   }
+  for (auto &stager : output_stagers) {
+    stager.frontier = 0;
+    stager.generation = 0;
+    stager.has_whole = false;
+    stager.pending.clear();
+    std::fill(stager.bits.begin(), stager.bits.end(), uint8_t{0});
+    std::fill(stager.whole.begin(), stager.whole.end(), uint8_t{0});
+  }
+}
+
+// File one contributor's delta under output k and advance the frontier over
+// every interval that now starts at it.
+void decoding_task_graph::impl::stage_delta(
+    std::size_t k, streaming_task_graph_node::committed_coverage coverage,
+    const std::vector<uint8_t> &bits) {
+  auto &stager = output_stagers[k];
+  const auto fold = [](std::vector<uint8_t> &dst,
+                       const std::vector<uint8_t> &src) {
+    for (std::size_t i = 0; i < dst.size() && i < src.size(); ++i)
+      dst[i] ^= src[i];
+  };
+  if (coverage.end_round == streaming_task_graph_node::whole_shot) {
+    fold(stager.whole, bits);
+    stager.has_whole = true;
+    return;
+  }
+  if (coverage.begin_round >= coverage.end_round) {
+    fold(stager.bits,
+         bits); // commits no round; the frame still takes its flips
+    return;
+  }
+  if (coverage.begin_round < stager.frontier)
+    throw std::logic_error("decoding_task_graph: output '" +
+                           streaming_result_state.outputs[k].name +
+                           "' received a commit interval starting at round " +
+                           std::to_string(coverage.begin_round) +
+                           ", behind its frontier " +
+                           std::to_string(stager.frontier));
+  if (stager.pending.size() == stager.capacity)
+    throw std::logic_error("decoding_task_graph: output '" +
+                           streaming_result_state.outputs[k].name +
+                           "' has more pending commit intervals than its "
+                           "stager was sized for");
+  const auto at = std::upper_bound(
+      stager.pending.begin(), stager.pending.end(), coverage.begin_round,
+      [](std::uint64_t begin, const output_stager::interval &entry) {
+        return begin < entry.begin;
+      });
+  stager.pending.insert(at, {coverage.begin_round, coverage.end_round, bits});
+  bool advanced = false;
+  while (!stager.pending.empty() &&
+         stager.pending.front().begin == stager.frontier) {
+    const auto &next = stager.pending.front();
+    fold(stager.bits, next.bits);
+    stager.frontier = next.end;
+    stager.pending.erase(stager.pending.begin());
+    advanced = true;
+  }
+  if (advanced)
+    ++stager.generation;
+}
+
+// At FINAL the frontier has reached the last committed round, so the
+// whole-shot deltas (the raw logical value) join the frame.
+void decoding_task_graph::impl::fold_whole_shot(output_stager &stager) {
+  if (!stager.has_whole)
+    return;
+  if (!stager.pending.empty())
+    throw std::logic_error(
+        "decoding_task_graph: a staged output still has an uncommitted "
+        "interval starting at round " +
+        std::to_string(stager.pending.front().begin) + " at FINAL");
+  for (std::size_t i = 0; i < stager.bits.size(); ++i)
+    stager.bits[i] ^= stager.whole[i];
+  std::fill(stager.whole.begin(), stager.whole.end(), uint8_t{0});
+  stager.has_whole = false;
+  ++stager.generation;
 }
 
 // Latch an operational failure on the graph and every named output.
@@ -1142,6 +1264,11 @@ void decoding_task_graph::impl::compose_streaming_values() const {
       for (std::size_t i = 0; i < corrections.size(); ++i)
         values[offset + i] ^= corrections[i];
   }
+  for (std::size_t k = 0; k < output_stagers.size(); ++k)
+    if (output_stagers[k].enabled)
+      std::copy(output_stagers[k].bits.begin(), output_stagers[k].bits.end(),
+                values.begin() +
+                    streaming_result_state.outputs[k].value_offset);
 }
 
 namespace {

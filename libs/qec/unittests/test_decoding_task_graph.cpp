@@ -12666,16 +12666,20 @@ static std::vector<index_fire> index_fires;
 /// index of its own fire ordinal, and publishes nothing from `limit` on.
 /// `join` joins `a` (offset 0, required) and `b` (offset -1 from the edge) by
 /// index: instance k pairs a[k] with b[k - 1] and has no `b` at k = 0. It
-/// records every fire.
+/// records every fire. `logical` folds every input bit and publishes the
+/// parity once, at flush, over the whole shot. With `staged`, `join`
+/// commits instance k over round [k, k + 1) and `logical` reports whole-shot
+/// coverage, so an output they feed is staged.
 class index_probe_node : public task_graph_node,
                          public streaming_task_graph_node,
                          public indexed_join_node {
 public:
   index_probe_node(std::string id, std::string mode, std::int64_t limit,
-                   std::size_t hold_ms, int hold_bit,
+                   std::size_t hold_ms, int hold_bit, bool staged,
                    std::shared_ptr<pipeline_probe> probe)
       : id_(std::move(id)), mode_(std::move(mode)), limit_(limit),
-        hold_(hold_ms), hold_bit_(hold_bit), probe_(std::move(probe)) {
+        hold_(hold_ms), hold_bit_(hold_bit), staged_(staged),
+        probe_(std::move(probe)) {
     logical_outcome output;
     output.bits = {0};
     output.converged = true;
@@ -12707,6 +12711,8 @@ public:
     value_out_.get<logical_outcome>().bits[0] = out;
     correction_ ^= out;
     published_ = k;
+    coverage_ = committed_coverage{static_cast<std::uint64_t>(k),
+                                   static_cast<std::uint64_t>(k) + 1};
     valid_ = true;
     return true;
   }
@@ -12718,6 +12724,15 @@ public:
   bool enqueue_edge_value(const edge_value &value, std::size_t) override {
     const uint8_t bit = value.get<logical_outcome>().bits[0];
     probe_->log(id_, records_);
+    if (mode_ == "logical") {
+      // Publishes its running parity without coverage: nothing to fold yet.
+      parity_ ^= bit;
+      ++records_;
+      value_out_.get<logical_outcome>().bits[0] = parity_;
+      coverage_.reset();
+      valid_ = true;
+      return true;
+    }
     if (static_cast<std::int64_t>(records_) >= limit_) {
       ++records_;
       return false;
@@ -12729,21 +12744,36 @@ public:
     valid_ = true;
     return true;
   }
+  bool flush() override {
+    if (mode_ != "logical")
+      return false;
+    value_out_.get<logical_outcome>().bits[0] = parity_;
+    correction_ = parity_;
+    coverage_ = committed_coverage{0, whole_shot};
+    valid_ = true;
+    return true;
+  }
   std::optional<std::int64_t> published_index() const override {
     return published_;
+  }
+  bool exact_interval_coverage() const override { return staged_; }
+  std::optional<committed_coverage> streaming_coverage() const override {
+    return staged_ ? coverage_ : std::nullopt;
   }
   const uint8_t *corrections() const override { return &correction_; }
   void clear_corrections() override { correction_ = 0; }
   void reset_streaming_state() override {
     correction_ = 0;
+    parity_ = 0;
     valid_ = false;
     records_ = 0;
     published_ = 0;
+    coverage_.reset();
   }
   std::size_t num_msyn_per_decode() const override { return 0; }
   std::size_t num_msyn_per_round() const override { return 1; }
   std::size_t num_observables() const override {
-    return mode_ == "join" ? 1 : 0;
+    return mode_ == "join" || mode_ == "logical" ? 1 : 0;
   }
   bool supports_streaming_input(std::size_t slot) const override {
     return slot < (mode_ == "join" ? 2u : 1u);
@@ -12788,11 +12818,14 @@ private:
   std::int64_t limit_;
   std::size_t hold_;
   int hold_bit_;
+  bool staged_;
   std::shared_ptr<pipeline_probe> probe_;
   uint8_t correction_ = 0;
+  uint8_t parity_ = 0;
   bool valid_ = false;
   std::size_t records_ = 0;
   std::int64_t published_ = 0;
+  std::optional<committed_coverage> coverage_;
   edge_value value_out_;
 };
 
@@ -12807,22 +12840,23 @@ static const bool index_probe_registered = [] {
   schema.params.push_back({"limit", param_kind::int32, /*required=*/false});
   schema.params.push_back({"hold_ms", param_kind::uint64, /*required=*/false});
   schema.params.push_back({"hold_bit", param_kind::int32, /*required=*/false});
+  schema.params.push_back({"staged", param_kind::int32, /*required=*/false});
   register_node_kind(
       std::move(spec), std::move(schema), [](node_build_context &ctx) {
         return std::make_unique<index_probe_node>(
             ctx.id, ctx.node_params->get<std::string>("mode"),
             ctx.node_params->get<int>("limit", 1 << 30),
             ctx.node_params->get<std::size_t>("hold_ms", 0),
-            ctx.node_params->get<int>("hold_bit", -1), active_pipeline_probe);
+            ctx.node_params->get<int>("hold_bit", -1),
+            ctx.node_params->get<int>("staged", 0) != 0, active_pipeline_probe);
       });
   return true;
 }();
 
-static task_graph_node_config index_node(std::string id, std::string mode,
-                                         int limit = 1 << 30,
-                                         std::size_t hold_ms = 0,
-                                         int hold_bit = -1,
-                                         std::size_t max_in_flight = 1) {
+static task_graph_node_config
+index_node(std::string id, std::string mode, int limit = 1 << 30,
+           std::size_t hold_ms = 0, int hold_bit = -1,
+           std::size_t max_in_flight = 1, bool staged = false) {
   task_graph_node_config config;
   config.id = std::move(id);
   config.kind = "test_index_probe";
@@ -12830,6 +12864,7 @@ static task_graph_node_config index_node(std::string id, std::string mode,
   config.node_params.insert("limit", limit);
   config.node_params.insert("hold_ms", hold_ms);
   config.node_params.insert("hold_bit", hold_bit);
+  config.node_params.insert("staged", staged ? 1 : 0);
   config.max_in_flight = max_in_flight;
   return config;
 }
@@ -12837,11 +12872,15 @@ static task_graph_node_config index_node(std::string id, std::string mode,
 // measurements -> A -> {T, R} -> J, where T and R tag their publications
 // with their fire ordinal and J joins a = T[k] with b = R[k - 1]. T stops
 // publishing at `limit`.
+// With `staged`, J reports its commit intervals and the output is staged;
+// `logical` adds a whole-shot contributor L on the same output, itself
+// staged unless `logical_staged` is false.
 static std::unique_ptr<decoding_task_graph>
 make_indexed_join_graph(const std::shared_ptr<pipeline_probe> &probe,
                         task_graph_options options, int limit = 1 << 30,
                         std::size_t join_copies = 1, std::size_t r_hold = 0,
-                        int r_hold_bit = -1) {
+                        int r_hold_bit = -1, bool staged = false,
+                        bool logical = false, bool logical_staged = true) {
   active_pipeline_probe = probe;
   {
     std::lock_guard<std::mutex> lock(index_fires_mutex);
@@ -12851,16 +12890,29 @@ make_indexed_join_graph(const std::shared_ptr<pipeline_probe> &probe,
   nodes.push_back(pipeline_node("A", "source"));
   nodes.push_back(index_node("T", "tag", limit));
   nodes.push_back(index_node("R", "tag", 1 << 30, r_hold, r_hold_bit));
-  nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, join_copies));
-  return decoding_task_graph::from_topology(
-      std::move(nodes),
-      {{"measurements", "output", "A", "input"},
-       {"A", "output", "T", "input"},
-       {"A", "output", "R", "input"},
-       {"T", "output", "J", "a"},
-       {"R", "output", "J", "b", /*index_offset=*/-1},
-       {"J", "output", "output", "input"}},
-      options);
+  nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, join_copies, staged));
+  std::vector<task_graph_edge> edges{
+      {"measurements", "output", "A", "input"},
+      {"A", "output", "T", "input"},
+      {"A", "output", "R", "input"},
+      {"T", "output", "J", "a"},
+      {"R", "output", "J", "b", /*index_offset=*/-1},
+      {"J", "output", "output", "input"}};
+  if (logical) {
+    // J and L fold into one output through an xor node.
+    nodes.push_back(
+        index_node("L", "logical", 1 << 30, 0, -1, 1, logical_staged));
+    task_graph_node_config x;
+    x.id = "X";
+    x.kind = "xor";
+    nodes.push_back(std::move(x));
+    edges.back() = {"J", "output", "X", "a"};
+    edges.push_back({"A", "output", "L", "input"});
+    edges.push_back({"L", "output", "X", "b"});
+    edges.push_back({"X", "output", "output", "input"});
+  }
+  return decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
+                                            options);
 }
 
 /// Every recorded fire of J pairs record k with record k - 1.
@@ -13195,6 +13247,101 @@ TEST(DecodingTaskGraph, IndexedJoinHandlesManyInstancesPerRecord) {
   expect_indexed_pairs(rounds, rounds.size());
   EXPECT_EQ(graph->streaming_result().values[0],
             expected_join_parity(rounds, rounds.size()));
+}
+
+// ---------------------------------------------------------------------------
+// Staged outputs
+// ---------------------------------------------------------------------------
+
+static uint8_t xor_all(const std::vector<uint8_t> &records) {
+  uint8_t parity = 0;
+  for (const auto bit : records)
+    parity ^= bit;
+  return parity;
+}
+
+TEST(DecodingTaskGraph, StagedOutputFoldsInRoundOrder) {
+  if (std::thread::hardware_concurrency() < 4)
+    GTEST_SKIP() << "overlap needs at least four CPU threads";
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  // R is slow on records carrying 1, so J's instances complete out of order.
+  // The staged output still reports a contiguous frontier whose value is
+  // the fold of exactly the instances below it.
+  auto graph = make_indexed_join_graph(
+      probe, {.async_streaming = true, .async_queue_capacity = 16},
+      /*limit=*/1 << 30, /*join_copies=*/4, /*r_hold=*/15, /*r_hold_bit=*/1,
+      /*staged=*/true);
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const std::vector<uint8_t> records = {1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1};
+  std::uint64_t frontier = 0;
+  for (std::size_t i = 0; i + 1 < records.size(); ++i) {
+    graph->enqueue_syndrome(&records[i], 1);
+    const auto result = graph->streaming_result();
+    const auto &output = result.outputs[0];
+    EXPECT_EQ(output.coverage_begin_round, 0u);
+    EXPECT_GE(output.coverage_end_round, frontier) << "record " << i;
+    EXPECT_LE(output.coverage_end_round, i + 1) << "record " << i;
+    frontier = output.coverage_end_round;
+    EXPECT_EQ(result.values[0], expected_join_parity(records, frontier))
+        << "record " << i << " frontier " << frontier;
+  }
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  const auto result = graph->streaming_result();
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+  EXPECT_EQ(result.outputs[0].coverage_begin_round, 0u);
+  EXPECT_EQ(result.outputs[0].coverage_end_round, records.size());
+  EXPECT_EQ(result.values[0], expected_join_parity(records, records.size()));
+  expect_indexed_pairs(records, records.size());
+}
+
+TEST(DecodingTaskGraph, StagedOutputHoldsWholeShotUntilFinal) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_indexed_join_graph(probe, {}, /*limit=*/1 << 30,
+                                       /*join_copies=*/1, /*r_hold=*/0,
+                                       /*r_hold_bit=*/-1, /*staged=*/true,
+                                       /*logical=*/true);
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const std::vector<uint8_t> records = {0, 1, 1, 0, 1, 1, 1, 0, 1, 1};
+  ASSERT_EQ(xor_all(records), 1);
+  for (std::size_t i = 0; i + 1 < records.size(); ++i) {
+    graph->enqueue_syndrome(&records[i], 1);
+    const auto result = graph->streaming_result();
+    // L's whole-shot value is not in the frame yet.
+    EXPECT_EQ(result.outputs[0].coverage_end_round, i + 1);
+    EXPECT_EQ(result.values[0], expected_join_parity(records, i + 1))
+        << "record " << i;
+  }
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  const auto result = graph->streaming_result();
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+  EXPECT_EQ(result.outputs[0].coverage_end_round, records.size());
+  EXPECT_EQ(result.values[0],
+            expected_join_parity(records, records.size()) ^ xor_all(records));
+  // The next shot starts from an empty frame at round 0.
+  graph->reset_decoder();
+  EXPECT_EQ(graph->streaming_result().values[0], 0);
+  graph->enqueue_syndrome(&records[1], 1);
+  EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 1u);
+  EXPECT_EQ(graph->streaming_result().values[0], records[1]);
+}
+
+TEST(DecodingTaskGraph, StagedOutputRejectsMixedContributors) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_indexed_join_graph(probe, {}, /*limit=*/1 << 30,
+                                       /*join_copies=*/1, /*r_hold=*/0,
+                                       /*r_hold_bit=*/-1, /*staged=*/true,
+                                       /*logical=*/true,
+                                       /*logical_staged=*/false);
+  EXPECT_FALSE(graph->supports_streaming());
+  EXPECT_NE(
+      graph->streaming_incompatibility_reason().find("exact commit intervals"),
+      std::string::npos)
+      << graph->streaming_incompatibility_reason();
 }
 
 } // namespace cudaq::qec

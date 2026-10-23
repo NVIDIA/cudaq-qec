@@ -147,6 +147,32 @@ struct decoding_task_graph::impl {
   std::vector<std::vector<std::size_t>> output_streaming_nodes;
   std::vector<window_spec> output_streaming_schedules;
 
+  // A staged output folds exact commit intervals in round order: a delta
+  // waits in `pending` until the frontier reaches its first round. The
+  // contributors' deltas never go through latest_node_corrections.
+  struct output_stager {
+    struct interval {
+      std::uint64_t begin = 0;
+      std::uint64_t end = 0;
+      std::vector<uint8_t> bits;
+    };
+    bool enabled = false;
+    std::uint64_t frontier = 0;
+    std::uint64_t generation = 0;
+    std::vector<uint8_t> bits;  ///< the frame at the frontier
+    std::vector<uint8_t> whole; ///< whole-shot deltas held until FINAL
+    bool has_whole = false;
+    std::vector<interval> pending; ///< sorted by begin round
+    std::size_t capacity = 0;      ///< fixed at build; overflow is a bug
+  };
+  std::vector<output_stager> output_stagers;
+  std::vector<uint8_t> streaming_node_staged; // by streaming node
+  std::vector<std::vector<std::size_t>> streaming_node_outputs; // sinks fed
+  void stage_delta(std::size_t k,
+                   streaming_task_graph_node::committed_coverage coverage,
+                   const std::vector<uint8_t> &bits);
+  void fold_whole_shot(output_stager &stager);
+
   // Graph-owned publication counters and persistent result storage. All are
   // pre-sized during compilation; streaming operations perform no allocation.
   std::vector<std::uint64_t> streaming_node_generations;

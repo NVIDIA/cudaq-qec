@@ -122,6 +122,13 @@ struct decoding_task_graph::impl::record_context {
   std::vector<uint8_t> node_snapshotted;
   // Set when node_corrections holds a delta to XOR in rather than a copy.
   std::vector<uint8_t> node_delta;
+  // Deltas of staged nodes, each with the commit interval it covers, in the
+  // order their fires finished; folded in round order when the record retires.
+  struct staged_delta {
+    streaming_task_graph_node::committed_coverage coverage;
+    std::vector<uint8_t> bits;
+  };
+  std::vector<std::vector<staged_delta>> staged;
   // Replica of each pooled node leased to this record, or no_event.
   std::vector<std::size_t> pool_replica;
   std::vector<std::uint32_t> node_published;
@@ -224,6 +231,19 @@ struct decoding_task_graph::impl::record_scheduler {
                              std::vector<const edge_value *>(
                                  owner.node_input_counts[node_idx], nullptr));
     }
+    for (std::size_t k = 0; k < owner.output_stagers.size(); ++k) {
+      auto &stager = owner.output_stagers[k];
+      if (!stager.enabled)
+        continue;
+      // Every pending interval is a published delta of a record that has
+      // not retired, or of an entry its join table held for one.
+      std::size_t capacity = 1;
+      for (const auto si : owner.output_streaming_nodes[k])
+        capacity += context_count + (this->indexed(si) ? joins[si].size() : 0) +
+                    owner.streaming_nodes[si].replicas.size();
+      stager.capacity = capacity;
+      stager.pending.reserve(capacity);
+    }
     if (context_count > 1)
       copy_outputs = true;
     for (auto &c : contexts) {
@@ -241,6 +261,7 @@ struct decoding_task_graph::impl::record_scheduler {
       c.node_coverage.assign(M, std::nullopt);
       c.node_snapshotted.assign(M, 0);
       c.node_delta.assign(M, 0);
+      c.staged.assign(M, {});
       c.pool_replica.assign(M, no_event);
       c.node_published.assign(M, 0);
       c.node_live.assign(M, 0);
@@ -288,6 +309,8 @@ struct decoding_task_graph::impl::record_scheduler {
     std::fill(c.wire_valid.begin(), c.wire_valid.end(), 0);
     std::fill(c.node_snapshotted.begin(), c.node_snapshotted.end(), 0);
     std::fill(c.node_delta.begin(), c.node_delta.end(), 0);
+    for (auto &deltas : c.staged)
+      deltas.clear();
     for (std::size_t si = 0; si < c.node_corrections.size(); ++si)
       if (pooled(si) || indexed(si))
         std::fill(c.node_corrections[si].begin(), c.node_corrections[si].end(),
@@ -471,6 +494,25 @@ struct decoding_task_graph::impl::record_scheduler {
                      const streaming_task_graph_node *capability = nullptr) {
     if (!capability)
       capability = owner.streaming_nodes[si].capability;
+    if (si < owner.streaming_node_staged.size() &&
+        owner.streaming_node_staged[si]) {
+      // Each publication is one delta over one commit interval; the record
+      // hands them to the output stagers when it retires.
+      const auto coverage = capability->streaming_coverage();
+      if (!coverage)
+        return; // nothing to fold from this publication
+      const auto n = capability->num_observables();
+      const uint8_t *delta = capability->corrections();
+      auto lock = lock_runtime();
+      auto &entry = c.staged[si].emplace_back();
+      entry.coverage = *coverage;
+      if (delta)
+        entry.bits.assign(delta, delta + n);
+      else
+        entry.bits.assign(n, 0);
+      c.node_snapshotted[si] = 1;
+      return;
+    }
     if (pooled(si) || indexed(si)) {
       // The replica's corrections were cleared before this delivery, so they
       // hold only this fire's delta. Deliveries of one record to a pooled node
@@ -1472,7 +1514,12 @@ int decoding_task_graph::impl::resolve_cuda_device_id() const {
 // progress model reads. Generations advance here, in record order.
 void decoding_task_graph::impl::apply_record_context(record_context &c) {
   for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
-    if (c.node_snapshotted[si]) {
+    if (si < streaming_node_staged.size() && streaming_node_staged[si]) {
+      for (const auto &delta : c.staged[si])
+        for (const auto k : streaming_node_outputs[si])
+          stage_delta(k, delta.coverage, delta.bits);
+      c.staged[si].clear();
+    } else if (c.node_snapshotted[si]) {
       auto &latest = latest_node_corrections[si];
       const auto &captured = c.node_corrections[si];
       if (c.node_delta[si]) {

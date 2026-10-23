@@ -346,6 +346,20 @@ Overlap needs ``async_streaming``; a synchronous graph runs one fire at a
 time. The default pool grows by ``max_in_flight - 1`` workers per pooled node,
 so ``async_num_workers`` is only needed to cap or widen that.
 
+Staged outputs
+++++++++++++++
+
+Nodes that fold into one graph output normally share one firing and commit
+schedule, and the output's coverage follows that schedule. A node whose fires
+commit arbitrary round intervals, possibly out of order, instead reports each
+publication's exact commit interval. An output fed only by such nodes is
+*staged*: the graph holds each delta until every earlier round is committed,
+folds them in round order, and reports coverage ``[0, frontier)`` with the
+value at that frontier. A publication covering the whole shot, such as a raw
+logical readout, is folded only at FINAL, after the frontier reaches the last
+committed round. An output that mixes staged and scheduled contributors is a
+streaming conflict; wire them to separate outputs.
+
 Multi-node graphs (combine)
 ++++++++++++++++++++++++++++
 

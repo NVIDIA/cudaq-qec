@@ -14,6 +14,7 @@
 #include "cudaq/qec/decoding_task_types.h"
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -65,6 +66,17 @@ public:
   virtual std::optional<committed_coverage> streaming_coverage() const {
     return std::nullopt;
   }
+  /// Coverage end meaning the whole shot: such a publication is folded into
+  /// a staged output only at FINAL, once every round before it is committed.
+  static constexpr std::uint64_t whole_shot =
+      std::numeric_limits<std::uint64_t>::max();
+  /// Opt-in: every publication reports, through streaming_coverage(), the
+  /// exact commit interval its corrections() delta covers, or no coverage
+  /// when it carries no delta; publications may arrive in any round order.
+  /// An output whose contributors all opt in is staged: the graph folds
+  /// their deltas in round order behind a frontier, and the output's
+  /// coverage is [0, frontier).
+  virtual bool exact_interval_coverage() const { return false; }
   /// Accumulate one raw chunk.  `type` is FINAL only on the chunk that ends a
   /// FINAL round -- the last piece of it this node receives -- and BULK
   /// otherwise.  flush() follows a FINAL round either way, so a kind that
