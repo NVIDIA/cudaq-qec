@@ -49,6 +49,7 @@ void usage() {
          "       --decoder=NAME [--logical-qubits=N] [--error-rate=P]\n"
          "       [--commit-rounds=N] [--buffer-rounds=N]\n"
          "       [--gap-rounds=N] [--decoder-arg=PATH=VALUE ...]\n"
+         "       [--workers-per-graph=N]\n"
          "\nGenerates server.yaml for a Surface Code memory experiment.\n"
          "--rounds counts extraction cycles, excluding terminal readout.\n"
          "Multiple logical qubits represent independent patches.\n"
@@ -56,6 +57,10 @@ void usage() {
          "depolarization=0.001.\n"
          "A/B commit and buffer widths default to distance for Surface Code;\n"
          "the gap uses the framework rule unless explicitly overridden.\n"
+         "Workers are configured per graph, not shared across patches.\n"
+         "Each patch has its own graph; coordinator threads are additional.\n"
+         "Omitting --workers-per-graph preserves framework execution "
+         "defaults.\n"
          "Writes server.yaml in the working directory, shared with the "
          "server.\n"
          "CUDAQ_QEC_DECODER_CONFIG selects a deployment configuration path.\n"
@@ -94,7 +99,8 @@ int main(int argc, char **argv) {
       if (name != "distance" && name != "rounds" && name != "basis" &&
           name != "logical-qubits" && name != "error-rate" && name != "code" &&
           name != "decoder" && name != "commit-rounds" &&
-          name != "buffer-rounds" && name != "gap-rounds")
+          name != "buffer-rounds" && name != "gap-rounds" &&
+          name != "workers-per-graph")
         throw std::invalid_argument("unknown option: --" + name);
       if (!values.emplace(name, argument.substr(equals + 1)).second)
         throw std::invalid_argument("duplicate option: --" + name);
@@ -132,8 +138,13 @@ int main(int argc, char **argv) {
             : spec.distance;
     if (values.contains("gap-rounds"))
       options.gap_rounds = integer(values.at("gap-rounds"), "--gap-rounds");
+    if (values.contains("workers-per-graph"))
+      options.workers_per_graph =
+          integer(values.at("workers-per-graph"), "--workers-per-graph");
     options.decoder_args = std::move(decoder_args);
     generator::validate_preparation_request(request);
+    const auto total_workers =
+        generator::configured_worker_total(options, spec.logical_qubits);
     generator::validate_server_config_options(options);
     const auto output = cudaq::qec::tools::default_server_config_path();
     if (std::filesystem::exists(std::filesystem::symlink_status(output)))
@@ -146,6 +157,14 @@ int main(int argc, char **argv) {
     const auto model = generator::prepare_model(request);
     generator::write_server_config(request, model, options, output);
     std::cout << "Generated server configuration: " << output << '\n';
+    if (total_workers)
+      std::cout << "Workers per graph: " << *options.workers_per_graph
+                << "; graphs: " << spec.logical_qubits
+                << "; total configured workers: " << *total_workers
+                << " (excluding coordinators).\n";
+    else
+      std::cout
+          << "Workers per graph: framework-selected (total not specified).\n";
     return 0;
   } catch (const std::exception &error) {
     std::cerr << "memory-experiment-generator: " << error.what() << '\n';

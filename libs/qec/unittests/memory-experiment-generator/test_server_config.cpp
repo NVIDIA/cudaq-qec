@@ -16,6 +16,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -56,6 +57,48 @@ server_config_options reference_options() {
           .gap_rounds = 9};
 }
 
+template <typename Options>
+void expect_worker_policy(const Options &options, std::uint64_t workers) {
+  if constexpr (requires { options.async_num_workers; }) {
+    auto expected = Options{};
+    expected.async_streaming = true;
+    expected.async_num_workers = static_cast<std::size_t>(workers);
+    EXPECT_EQ(options, expected);
+  } else {
+    ADD_FAILURE() << "The public pattern requires worker configuration support";
+  }
+}
+
+template <typename Config>
+void expect_worker_policy_tampering_rejected(Config value,
+                                             const dem_chunks_spec &model,
+                                             std::uint64_t workers) {
+  if constexpr (requires {
+                  value.decoders.back().task_graph->options.async_num_workers;
+                }) {
+    auto &options = value.decoders.back().task_graph->options;
+    const auto expected = options;
+    const auto reject = [&] {
+      EXPECT_THROW(validate_server_config(value.to_yaml_str(), model,
+                                          value.decoders.size(), workers),
+                   std::runtime_error);
+      options = expected;
+    };
+    options.async_num_workers.reset();
+    reject();
+    options.async_num_workers = static_cast<std::size_t>(workers + 1);
+    reject();
+    options.async_streaming = false;
+    reject();
+    options.async_worker_cpus.push_back(0);
+    reject();
+    options.async_coordinator_cpu = 0;
+    reject();
+  } else {
+    ADD_FAILURE() << "The public pattern requires worker configuration support";
+  }
+}
+
 // Only the parameter schema is replaced, for a real registered decoder. The
 // test never constructs it and never registers a stand-in pattern or executor.
 struct scoped_parameter_schema {
@@ -86,6 +129,22 @@ TEST(MemoryExperimentServerConfig, MissingPublicCapabilityFailsExplicitly) {
     EXPECT_NE(std::string(error.what()).find("public parallel_window"),
               std::string::npos);
   }
+}
+
+TEST(MemoryExperimentServerConfig, ConfiguredWorkerTotalIsExplicitAndChecked) {
+  auto options = reference_options();
+  EXPECT_EQ(configured_worker_total(options, 3), std::nullopt);
+  options.workers_per_graph = 4;
+  EXPECT_EQ(configured_worker_total(options, 3), 12);
+  EXPECT_THROW(configured_worker_total(options, 0), std::invalid_argument);
+  options.workers_per_graph = 0;
+  EXPECT_THROW(configured_worker_total(options, 3), std::invalid_argument);
+  options.workers_per_graph = std::numeric_limits<std::uint64_t>::max();
+  if (std::numeric_limits<std::size_t>::max() >=
+      std::numeric_limits<std::uint64_t>::max())
+    EXPECT_EQ(configured_worker_total(options, 1),
+              std::numeric_limits<std::uint64_t>::max());
+  EXPECT_THROW(configured_worker_total(options, 2), std::overflow_error);
 }
 
 TEST(MemoryExperimentServerConfig, PublicSchemaChecksGeometryAndDecoderArgs) {
@@ -192,6 +251,7 @@ TEST(MemoryExperimentServerConfig,
                std::runtime_error);
   EXPECT_NE(yaml.find("memory_model"), std::string::npos);
   EXPECT_NE(yaml.find("corrections"), std::string::npos);
+  EXPECT_EQ(yaml.find("async_streaming"), std::string::npos);
   EXPECT_EQ(yaml.find("async_num_workers"), std::string::npos);
   EXPECT_EQ(yaml.find("async_worker_cpus"), std::string::npos);
   const auto value = config::multi_decoder_config::from_yaml_str(yaml);
@@ -205,11 +265,43 @@ TEST(MemoryExperimentServerConfig,
     const auto &decoder = value.decoders[patch];
     EXPECT_EQ(decoder.id, patch);
     ASSERT_TRUE(decoder.task_graph);
+    EXPECT_EQ(decoder.task_graph->options, task_graph_options{});
     ASSERT_EQ(decoder.task_graph->nodes.size(), 1);
     EXPECT_EQ(
         decoder.task_graph->nodes.front().node_params.map().get<std::string>(
             "output"),
         "corrections");
+  }
+}
+
+TEST(MemoryExperimentServerConfig,
+     WorkersPerGraphRoundtripWithoutChangingDecoderOrAffinity) {
+  if (!has_pattern_schema())
+    GTEST_SKIP() << "Requires the real public parallel-window schema";
+  const preparation_request request{
+      {"surface_code", 3, 26, 1, memory_basis::z}};
+  const auto model = prepare_model(request);
+  auto options = reference_options();
+  const auto baseline = config::multi_decoder_config::from_yaml_str(
+      emit_server_config(model, options, 3));
+  for (const std::uint64_t workers : {1, 4}) {
+    SCOPED_TRACE(workers);
+    options.workers_per_graph = workers;
+    const auto yaml = emit_server_config(model, options, 3);
+    EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 3, workers));
+    EXPECT_THROW(validate_server_config(yaml, model.chunks, 3),
+                 std::runtime_error);
+    const auto value = config::multi_decoder_config::from_yaml_str(yaml);
+    ASSERT_EQ(value.decoders.size(), 3);
+    for (const auto &decoder : value.decoders) {
+      ASSERT_TRUE(decoder.task_graph);
+      expect_worker_policy(decoder.task_graph->options, workers);
+      EXPECT_EQ(decoder.task_graph->nodes,
+                baseline.decoders.front().task_graph->nodes);
+      EXPECT_EQ(decoder.task_graph->edges,
+                baseline.decoders.front().task_graph->edges);
+    }
+    expect_worker_policy_tampering_rejected(value, model.chunks, workers);
   }
 }
 

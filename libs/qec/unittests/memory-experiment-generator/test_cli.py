@@ -144,7 +144,8 @@ class GeneratorCliTest(unittest.TestCase):
                       patches=1,
                       commit=None,
                       buffer=None,
-                      gap=None):
+                      gap=None,
+                      workers=None):
         self.assertEqual(set(document),
                          {"data_artifacts", "decoders", "syndrome_mapping"})
         self.assertEqual(set(document["data_artifacts"]), {"memory_model"})
@@ -163,7 +164,14 @@ class GeneratorCliTest(unittest.TestCase):
         for decoder in decoders:
             self.assertEqual(decoder["dem_chunks"], "memory_model")
             graph = decoder["task_graph"]
-            self.assertEqual(set(graph), {"nodes", "edges"})
+            if workers is None:
+                self.assertEqual(set(graph), {"nodes", "edges"})
+            else:
+                self.assertEqual(
+                    set(graph),
+                    {"nodes", "edges", "async_streaming", "async_num_workers"})
+                self.assertIs(graph["async_streaming"], True)
+                self.assertEqual(graph["async_num_workers"], workers)
             self.assertEqual(graph["edges"], [
                 {
                     "from": "measurements",
@@ -187,7 +195,8 @@ class GeneratorCliTest(unittest.TestCase):
                 self.assertNotIn("gap_rounds", node)
             else:
                 self.assertEqual(node["gap_rounds"], gap)
-            self.assertNotIn("async_num_workers", graph)
+            if workers is None:
+                self.assertNotIn("async_num_workers", graph)
             self.assertNotIn("async_worker_cpus", graph)
         connections = model["connections"]
         connected = {connection["to"] for connection in connections}
@@ -208,7 +217,8 @@ class GeneratorCliTest(unittest.TestCase):
     def test_help_lists_inputs_without_an_output_or_config_flag(self):
         result = self.invoke("--help")
         for option in ("--distance", "--rounds", "--basis", "--decoder",
-                       "--commit-rounds", "--buffer-rounds", "--decoder-arg"):
+                       "--commit-rounds", "--buffer-rounds", "--decoder-arg",
+                       "--workers-per-graph"):
             self.assertIn(option, result.stdout)
         for removed in ("--output", "--config", "--batch-rounds",
                         "--replay-shots", "--seed", "--validate-bundle"):
@@ -259,6 +269,8 @@ class GeneratorCliTest(unittest.TestCase):
             "commit-rounds": ("0", "-1", "1.5"),
             "buffer-rounds": ("0", "-1", "1.5"),
             "gap-rounds": ("0", "-1", "1.5"),
+            "workers-per-graph":
+                ("0", "-1", "+1", "1.5", "4junk", "18446744073709551616"),
         }
         for option, values in invalid.items():
             for value in values:
@@ -269,7 +281,8 @@ class GeneratorCliTest(unittest.TestCase):
                                 success=False)
                     self.assertEqual(list(working.iterdir()), [])
         for extra in (("--distance=3",), ("--decoder=single_error_lut",),
-                      ("--distance", "3")):
+                      ("--distance", "3"), ("--workers-per-graph=2",
+                                            "--workers-per-graph=3")):
             with self.subTest(extra=extra):
                 working = self.case_directory()
                 self.invoke(*generation_options(),
@@ -399,6 +412,54 @@ class GeneratorCliTest(unittest.TestCase):
         _, multiple = self.generate(**{"logical-qubits": 4})
         self.assertEqual(self.assert_server(single),
                          self.assert_server(multiple, patches=4))
+
+    def test_worker_summary_does_not_invent_a_framework_selected_total(self):
+        self.require_public_api()
+        working = self.case_directory()
+        result = self.invoke(*generation_options(**{"logical-qubits": 3}),
+                             cwd=working)
+        self.assertIn(
+            "Workers per graph: framework-selected (total not specified).",
+            result.stdout)
+        document = yaml.safe_load((working / "server.yaml").read_text())
+        self.assert_server(document, patches=3)
+
+    def test_workers_per_graph_apply_to_every_patch_not_inner_decoders(self):
+        self.require_public_api()
+        for workers in (1, 4):
+            with self.subTest(workers=workers):
+                working = self.case_directory()
+                result = self.invoke(
+                    *generation_options(**{
+                        "logical-qubits": 3,
+                        "workers-per-graph": workers,
+                    }),
+                    cwd=working)
+                self.assertIn(
+                    f"Workers per graph: {workers}; graphs: 3; total "
+                    f"configured workers: {workers * 3} (excluding coordinators).",
+                    result.stdout)
+                document = yaml.safe_load((working / "server.yaml").read_text())
+                self.assert_server(document, patches=3, workers=workers)
+                for decoder in document["decoders"]:
+                    node = decoder["task_graph"]["nodes"][0]
+                    self.assertNotIn("workers_per_graph", node)
+                    self.assertNotIn("async_num_workers", node)
+                    self.assertEqual(node["inner"],
+                                     {"type": "single_error_lut"})
+
+    def test_total_worker_overflow_is_rejected_without_output(self):
+        working = self.case_directory()
+        result = self.invoke(
+            *generation_options(**{
+                "logical-qubits": 2,
+                "workers-per-graph": "18446744073709551615",
+            }),
+            cwd=working,
+            success=False)
+        self.assertIn("worker", result.stderr.lower())
+        self.assertNotIn(SERVER_UNAVAILABLE, result.stderr)
+        self.assertEqual(list(working.iterdir()), [])
 
     def test_schema_typed_nested_decoder_arguments_are_preserved(self):
         _, document = self.generate(

@@ -38,6 +38,13 @@ build/bin/memory-experiment-generator \
   --decoder=pymatching
 ```
 
+To request four pool workers for each of those two patch graphs, add
+`--workers-per-graph=4`. The generated configuration sets `async_streaming: true`
+and `async_num_workers: 4` on each graph, and the command reports eight configured
+workers in total, excluding the additional coordinator thread for each graph.
+This is a per-graph setting, not a shared process-wide core budget or CPU
+reservation. The framework must support the worker-pool runtime to execute it.
+
 These examples are separate configurations. Retain or move an existing
 configuration before generating another; the tool never replaces it.
 
@@ -97,6 +104,7 @@ Arguments use `--name=value` form; there is no JSON or YAML input format.
 | `--buffer-rounds` | Optional positive A-layer buffer width; defaults to distance |
 | `--gap-rounds` | Optional positive B-layer gap override; omitted otherwise |
 | `--decoder-arg` | Repeatable `PATH=VALUE`, typed by the registered decoder schema |
+| `--workers-per-graph` | Optional positive pool-worker count for each patch's graph; excludes its coordinator |
 
 Window geometry belongs to the A/B scheduling scheme, not to an individual
 decoder's parameters. Every `parallel_window` configuration requires commit
@@ -116,9 +124,14 @@ before preparation.
 The same configuration structure is used for each decoder; its name and
 schema-typed parameters differ. Configuration emission does not qualify a
 decoder's fault-output capability, A/B accuracy or parallel execution.
-Worker-count and affinity flags are not exposed while executor interfaces are
-being reconciled. Independent patches must not silently multiply a process-wide
-core budget.
+When a worker count is supplied, every independent patch receives that same
+per-graph count. The total is checked for overflow before model preparation and
+reported explicitly; no allocation across graphs is invented. Omitting the
+option preserves framework execution defaults and reports that the worker total
+is unspecified. The count is an execution option, not an inner-decoder argument.
+CPU affinity remains unset, allowing the framework to inherit process affinity;
+the generator neither assigns cores nor duplicates cross-graph overlap checks.
+Configuring workers does not establish runtime availability or measured overlap.
 
 ## Server configuration and deployment
 
@@ -144,7 +157,7 @@ Pass-through syndrome mapping ID 0 is BULK; ID 1 is FINAL. A producer must selec
 the terminal mapping correctly. Packet batching and transport-control schedules
 are not model geometry.
 
-This draft leaves transport and worker policy unset. It does not yet render a
+This draft leaves transport and CPU placement unset. It does not yet render a
 qualified CPU RoCE/GPU RoCE deployment or adapt the FPGA producer protocol.
 GPU RoCE transport and GPU decoder dispatch are different choices; host A/B
 decoding must not be switched to device dispatch merely to select a wire.
@@ -225,8 +238,10 @@ Tests cover bounded/full-circuit agreement, Justin's layout, awkward batches,
 overflow and invalid inputs, exact round trips, huge horizons, independent
 patches, typed decoder arguments, malformed detector maps, default geometry,
 shared generator/server configuration lookup, safe publication and rejection of
-removed output/replay/bundle flags. Base-framework tests check explicit
-unavailability; positive configuration tests require the public pattern.
+removed output/replay/bundle flags. Per-graph worker tests check exact policy
+round trips, independent patches, unchanged defaults and checked worker totals.
+Base-framework tests check explicit unavailability; positive configuration tests
+require the public pattern.
 
 Actual graph construction, same-plan serial/parallel correctness, seam faults,
 sustained overlap, sampled logical accuracy, installed replay and

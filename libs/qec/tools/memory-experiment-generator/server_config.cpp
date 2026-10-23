@@ -242,6 +242,32 @@ pattern_arguments(const server_config_options &options) {
   return result;
 }
 
+void validate_worker_count(std::optional<std::uint64_t> workers) {
+  if (!workers)
+    return;
+  if (*workers == 0)
+    throw std::invalid_argument("--workers-per-graph must be at least 1");
+  if (*workers > std::numeric_limits<std::size_t>::max())
+    throw std::overflow_error("workers per graph exceeds size_t");
+}
+
+template <typename Options>
+Options execution_options(std::optional<std::uint64_t> workers) {
+  validate_worker_count(workers);
+  Options result;
+  if (workers) {
+    if constexpr (requires { result.async_num_workers; }) {
+      result.async_streaming = true;
+      result.async_num_workers = static_cast<std::size_t>(*workers);
+    } else {
+      throw std::invalid_argument(
+          "--workers-per-graph requires public task-graph worker "
+          "configuration support; this QEC build does not provide it");
+    }
+  }
+  return result;
+}
+
 void require(bool condition, const char *message) {
   if (!condition)
     throw std::runtime_error(std::string("invalid server configuration: ") +
@@ -269,6 +295,8 @@ Config make_configuration(const dem_chunks_spec &model,
     artifact.dem_chunks = model;
     const auto inner = decoder_arguments(options);
     const auto parameters = pattern_arguments(options);
+    const auto policy =
+        execution_options<task_graph_options>(options.workers_per_graph);
     result.decoders.reserve(static_cast<std::size_t>(logical_qubits));
     for (std::uint64_t patch = 0; patch < logical_qubits; ++patch) {
       auto &decoder = result.decoders.emplace_back();
@@ -278,6 +306,7 @@ Config make_configuration(const dem_chunks_spec &model,
       decoder.dem_chunks = model;
       decoder.dem_chunks_artifact = model_name;
       auto &graph = decoder.task_graph.emplace();
+      graph.options = policy;
       auto &node = graph.nodes.emplace_back();
       node.id = node_name;
       node.type = pattern_name;
@@ -296,8 +325,11 @@ Config make_configuration(const dem_chunks_spec &model,
 template <typename Config>
 void validate_configuration(const Config &value,
                             const dem_chunks_spec &expected_model,
-                            std::uint64_t logical_qubits) {
+                            std::uint64_t logical_qubits,
+                            std::optional<std::uint64_t> workers_per_graph) {
   if constexpr (has_public_server_model<Config, dem_chunks_spec>) {
+    const auto policy =
+        execution_options<task_graph_options>(workers_per_graph);
     require(value.transport == config::transport_config{} &&
                 value.syndrome_mapping == syndrome_mapping(),
             "unexpected deployment or syndrome-mapping overrides");
@@ -325,10 +357,10 @@ void validate_configuration(const Config &value,
               "decoder must reference the shared prepared model");
       require(decoder.task_graph.has_value(), "missing task graph");
       const auto &graph = *decoder.task_graph;
-      require(graph.type.empty() && graph.inner_type.empty() &&
-                  graph.nodes.size() == 1 &&
-                  graph.options == task_graph_options{},
-              "expected one pattern with no worker-policy overrides");
+      require(
+          graph.type.empty() && graph.inner_type.empty() &&
+              graph.nodes.size() == 1 && graph.options == policy,
+          "expected one pattern with the configured per-graph worker policy");
       const auto &node = graph.nodes.front();
       require(node.id == node_name && node.type == pattern_name &&
                   cudaq::qec::decoder::is_registered(node.inner_type) &&
@@ -366,8 +398,22 @@ void validate_configuration(const Config &value,
 
 } // namespace
 
+std::optional<std::uint64_t>
+configured_worker_total(const server_config_options &options,
+                        std::uint64_t logical_qubits) {
+  validate_patch_count(logical_qubits);
+  validate_worker_count(options.workers_per_graph);
+  if (!options.workers_per_graph)
+    return std::nullopt;
+  if (*options.workers_per_graph >
+      std::numeric_limits<std::uint64_t>::max() / logical_qubits)
+    throw std::overflow_error("total configured workers exceeds uint64");
+  return *options.workers_per_graph * logical_qubits;
+}
+
 void validate_server_config_options(const server_config_options &options) {
   const auto &schema = require_public_server_config();
+  (void)execution_options<task_graph_options>(options.workers_per_graph);
   if (options.decoder.empty())
     throw std::invalid_argument("--decoder must not be empty");
   if (!cudaq::qec::decoder::is_registered(options.decoder))
@@ -382,7 +428,7 @@ std::string emit_server_config(const prepared_model &model,
                                const server_config_options &options,
                                std::uint64_t logical_qubits) {
   validate_server_config_options(options);
-  validate_patch_count(logical_qubits);
+  (void)configured_worker_total(options, logical_qubits);
   model.chunks.validate();
   validate_final_readout(model.chunks, model.final_m2o, true);
   auto value = make_configuration<config::multi_decoder_config>(
@@ -392,17 +438,22 @@ std::string emit_server_config(const prepared_model &model,
   require(
       parsed == value,
       "public YAML roundtrip changed model, geometry or decoder parameters");
-  validate_configuration(parsed, model.chunks, logical_qubits);
+  validate_configuration(parsed, model.chunks, logical_qubits,
+                         options.workers_per_graph);
   return yaml;
 }
 
 void validate_server_config(std::string_view yaml,
                             const dem_chunks_spec &expected_model,
-                            std::uint64_t logical_qubits) {
+                            std::uint64_t logical_qubits,
+                            std::optional<std::uint64_t> workers_per_graph) {
   (void)require_public_server_config();
-  validate_patch_count(logical_qubits);
+  server_config_options options;
+  options.workers_per_graph = workers_per_graph;
+  (void)configured_worker_total(options, logical_qubits);
   const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
-  validate_configuration(parsed, expected_model, logical_qubits);
+  validate_configuration(parsed, expected_model, logical_qubits,
+                         workers_per_graph);
 }
 
 void write_server_config(const preparation_request &request,
