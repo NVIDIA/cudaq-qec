@@ -50,7 +50,7 @@ TEST(MemoryExperimentSpec, RejectsUnsupportedExperimentInputs) {
   EXPECT_THROW(validate_experiment_spec(spec), std::overflow_error);
 }
 
-TEST(MemoryRecordLayout, JustinReferencePreservesTerminalReadoutAndLookback) {
+TEST(MemoryRecordLayout, ReferenceLayoutPreservesTerminalReadoutAndLookback) {
   const memory_record_layout layout(26, 8, 9);
   EXPECT_EQ(layout.extraction_rounds(), 26);
   EXPECT_EQ(layout.input_rounds(), 27);

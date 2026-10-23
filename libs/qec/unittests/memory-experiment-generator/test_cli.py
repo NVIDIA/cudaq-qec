@@ -370,7 +370,7 @@ class GeneratorCliTest(unittest.TestCase):
         self.assert_server(yaml.safe_load(
             (working / "server.yaml").read_text()))
 
-    def test_justin_reference_in_both_bases_emits_only_default_server_yaml(
+    def test_reference_layout_in_both_bases_emits_only_default_server_yaml(
             self):
         for basis in ("X", "Z"):
             with self.subTest(basis=basis):

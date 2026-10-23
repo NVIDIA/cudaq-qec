@@ -131,7 +131,7 @@ TEST(MemoryExperimentProvider, BoundedModelMatchesCompleteXMemoryCircuit) {
   compare_with_full_circuit(3, memory_basis::x);
 }
 
-TEST(MemoryExperimentProvider, PyMatchingFaultFramesCommitJustinWindows) {
+TEST(MemoryExperimentProvider, PyMatchingFaultFramesCommitReferenceWindows) {
 #if __has_include("../../lib/decoding_task/decoding_task_commitment.h") &&     \
                   __has_include("../task_graph_test_fixtures.h")
   if (!decoder::is_registered("pymatching"))

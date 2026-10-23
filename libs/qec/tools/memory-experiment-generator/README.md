@@ -23,10 +23,10 @@ build/bin/memory-experiment-generator \
   --decoder-arg=merge_strategy=smallest_weight
 ```
 
-This is Justin's distance-three reference. A/B commit and buffer widths
+This is the distance-three reference. A/B commit and buffer widths
 default to distance, so the emitted pattern contains `commit_rounds: 3`
 and `buffer_rounds: 3`. The gap is omitted unless explicitly supplied,
-leaving its rule to the framework. Tracy's pattern documents that rule as
+leaving its rule to the framework. The public pattern documents that rule as
 `commit_rounds + 2 * buffer_rounds`, giving 9 for this profile; the draft
 configuration interface does not yet implement the runtime expansion.
 
@@ -195,7 +195,7 @@ round. There are T+1 raw rounds. Actual D determines detector rows and lookback;
 endpoint counts, including the basis-dependent readout layer, need not equal
 regular counts.
 
-Justin's reference has `26 * 8 + 9 = 217` measurements. The layout test groups
+The reference has `26 * 8 + 9 = 217` measurements. The layout test groups
 these as eight 24-bit batches and a terminal batch of `2 * 8 + 9 = 25` bits.
 B0 needs raw rounds `[2,12)` (80 bits); A2 needs `[20,27)` (57 bits). The
 fixture tiles exactly and exercises both experiment edges, but not a terminal
@@ -248,14 +248,14 @@ Python dependency. CTest reports missing PyYAML as a skip with installation
 instructions; CI installs it before testing. CLI tests have a five-minute
 timeout, with measured runtime recorded separately.
 
-Tests cover bounded/full-circuit agreement, Justin's layout, awkward batches,
+Tests cover bounded/full-circuit agreement, the reference layout, awkward batches,
 overflow and invalid inputs, exact round trips, huge horizons, independent
 patches, typed decoder arguments, malformed detector maps, default geometry,
 shared generator/server configuration lookup, safe publication and rejection of
 removed output/replay/bundle flags. Per-graph worker tests check exact policy
 round trips, independent patches, unchanged defaults and checked worker totals.
 PyMatching tests check explicit merge-policy preservation and, when the public
-window model is available, fault estimates and committed effects on Justin's
+window model is available, fault estimates and committed effects on the
 X/Z reference windows. They use the framework's existing model and commit
 helpers, not a tool-owned scheduler.
 Base-framework tests check explicit unavailability; positive configuration tests
