@@ -115,6 +115,7 @@ Chunk types
 
 .. doxygenfunction:: cudaq::qec::dem_chunk_from_spec
 .. doxygenfunction:: cudaq::qec::dem_chunks_from_spec
+.. doxygenfunction:: cudaq::qec::memory_dem_chunks_from_decoder_inputs
 
 Stitch, close, and merge
 ------------------------
@@ -161,6 +162,10 @@ Compact chunk forms
 
 Detector Error Model (DEM) Sampling
 ===================================
+
+Raw memory-circuit measurement records (before detector formation):
+
+.. doxygenfunction:: cudaq::qec::sample_memory_circuit_raw
 
 CPU sampling (host tensors):
 

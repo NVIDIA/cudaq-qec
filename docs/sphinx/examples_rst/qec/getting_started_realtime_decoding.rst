@@ -88,6 +88,21 @@ Decoder parameters are validated against the parameter schema each decoder regis
 
 The configuration is then saved to a YAML file for reuse. The YAML format is human-readable, making it easy to inspect, modify, and share configurations across different execution environments.
 
+The standalone ``decoding_server`` and ``memory-experiment-generator`` share a
+default configuration location: ``server.yaml`` in their working directory, or
+the path selected by ``CUDAQ_QEC_DECODER_CONFIG`` when that deployment setting
+is nonempty. The generator has no output-path argument and never replaces an
+existing configuration. The server's optional ``--config=PATH`` overrides the
+shared default. This does not change in-process configuration APIs.
+
+.. note::
+
+   DEM-chunk ``error_rates`` and schema-typed floating-point decoder parameters
+   now retain full double precision when configurations are saved. Earlier
+   versions rounded these values to six significant digits. Exported YAML text
+   may therefore change, including decoder-server configurations and
+   ``--save_dem`` output; the input schema is unchanged.
+
 Use :func:`~cudaq_qec.decoder_context_from_memory_circuit` to obtain the parity-check, observable,
 and measurement-to-detector matrices in one call, then assemble the decoder config:
 

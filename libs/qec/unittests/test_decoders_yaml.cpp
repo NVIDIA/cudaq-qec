@@ -1762,6 +1762,95 @@ decoders:
                std::runtime_error);
 }
 
+TEST(DecoderSchemaTest, PreservesFloatingPointParametersExactly) {
+  using namespace cudaq::qec::decoding::config;
+  // Schema-only metadata is enough to exercise configuration serialization;
+  // this test never creates a decoder or registers a stand-in executor.
+  register_decoder_schema({"exact_parameter_engine",
+                           {{"gain", param_kind::f64},
+                            {"weights", param_kind::f64_vec},
+                            {"matrix", param_kind::f64_matrix}}});
+  register_decoder_schema(
+      {"exact_parameter_decoder",
+       {{"gain", param_kind::f64},
+        {"weights", param_kind::f64_vec},
+        {"matrix", param_kind::f64_matrix},
+        {"label", param_kind::string},
+        {"fixed", param_kind::subschema, false, "exact_parameter_engine"},
+        {"engine", param_kind::string},
+        {"engine_params", param_kind::discriminated, false, "", "engine"}}});
+
+  const std::string label = "001,alpha;beta='quoted':a=b/with spaces\nnext";
+  for (const auto gain :
+       {std::nextafter(0.001, 1.0), 0.12345678901234567,
+        std::numeric_limits<double>::denorm_min(), std::nextafter(1.0, 0.0)}) {
+    SCOPED_TRACE(gain);
+    const std::vector<double> weights{gain, -gain, 1.2345678901234567e-20};
+    const std::vector<std::vector<double>> matrix{
+        {gain, -gain}, {1.2345678901234567e-20, gain}};
+    cudaqx::heterogeneous_map nested;
+    nested.insert("gain", gain);
+    nested.insert("weights", weights);
+    nested.insert("matrix", matrix);
+    cudaqx::heterogeneous_map arguments = nested;
+    arguments.insert("label", label);
+    arguments.insert("fixed", nested);
+    arguments.insert("engine", "exact_parameter_engine");
+    arguments.insert("engine_params", nested);
+    auto decoder = create_test_empty_decoder_config(0);
+    decoder.type = "exact_parameter_decoder";
+    decoder.decoder_custom_args = arguments;
+    multi_decoder_config original;
+    original.decoders.push_back(std::move(decoder));
+    const auto emitted = original.to_yaml_str(200);
+    const auto parsed = multi_decoder_config::from_yaml_str(emitted);
+    EXPECT_EQ(parsed, original);
+    const auto &roundtrip = parsed.decoders.front().decoder_custom_args.map();
+    EXPECT_EQ(roundtrip.get<double>("gain"), gain);
+    EXPECT_EQ(roundtrip.get<std::vector<double>>("weights"), weights);
+    EXPECT_EQ(roundtrip.get<std::vector<std::vector<double>>>("matrix"),
+              matrix);
+    EXPECT_EQ(roundtrip.get<std::string>("label"), label);
+    for (const auto *section : {"fixed", "engine_params"}) {
+      const auto child = roundtrip.get<cudaqx::heterogeneous_map>(section);
+      EXPECT_EQ(child.get<double>("gain"), gain);
+      EXPECT_EQ(child.get<std::vector<double>>("weights"), weights);
+      EXPECT_EQ(child.get<std::vector<std::vector<double>>>("matrix"), matrix);
+    }
+  }
+}
+
+TEST(DecoderSchemaTest, DiscriminatedSchemaPrefixRoundtrips) {
+  using namespace cudaq::qec::decoding::config;
+  register_decoder_schema(
+      {"prefixed_parameter_engine.demo", {{"passes", param_kind::int32}}});
+  register_decoder_schema(
+      {"prefixed_parameter_decoder",
+       {{"engine", param_kind::string},
+        {"engine_params", param_kind::discriminated, false, "", "engine", false,
+         "prefixed_parameter_engine."}}});
+  auto parsed = multi_decoder_config::from_yaml_str(R"(
+decoders:
+  - id: 0
+    type: prefixed_parameter_decoder
+    block_size: 2
+    syndrome_size: 1
+    H_sparse: [0, -1]
+    O_sparse: [0, -1]
+    D_sparse: [0, -1]
+    decoder_custom_args:
+      engine: demo
+      engine_params: {passes: 3}
+)");
+  const auto &arguments = parsed.decoders.front().decoder_custom_args.map();
+  EXPECT_EQ(arguments.get<std::string>("engine"), "demo");
+  EXPECT_EQ(arguments.get<cudaqx::heterogeneous_map>("engine_params")
+                .get<int>("passes"),
+            3);
+  const auto emitted = parsed.to_yaml_str();
+  EXPECT_EQ(multi_decoder_config::from_yaml_str(emitted), parsed);
+}
+
 TEST(DecoderSchemaTest, CustomArgsForUnregisteredTypeThrow) {
   const std::string yaml = R"(
 decoders:
@@ -2330,6 +2419,51 @@ TEST(DecoderDemChunksYAMLTest, ParsesAllPhases) {
   EXPECT_EQ(chunks->connections.size(), 3u);
   EXPECT_FALSE(chunks->is_empty());
   EXPECT_TRUE(chunks->has_repeating_phase());
+}
+
+TEST(MemoryExperimentYaml, PreservesEveryPhaseProbabilityExactly) {
+  namespace config = cudaq::qec::decoding::config;
+  auto entry = parse_one(dem_chunks_yaml(3));
+  ASSERT_TRUE(entry.dem_chunks.has_value());
+  // A native phase fixture keeps this framework serialization regression
+  // independent of circuit characterization and the generator executable.
+  for (const auto probability :
+       {0.0, 1.0, std::numeric_limits<double>::denorm_min(),
+        std::nextafter(0.001, 1.0), std::numeric_limits<double>::min(),
+        std::nextafter(1.0, 0.0), 0.12345678901234567}) {
+    SCOPED_TRACE(probability);
+    for (auto &phase : entry.dem_chunks->phases)
+      for (auto &rate : phase.spec.error_rates)
+        rate = probability;
+    EXPECT_EQ(config::dem_chunks_from_yaml_str(
+                  config::dem_chunks_to_yaml_str(*entry.dem_chunks)),
+              *entry.dem_chunks);
+    EXPECT_EQ(
+        config::decoder_config::from_yaml_str(entry.to_yaml_str()).dem_chunks,
+        entry.dem_chunks);
+  }
+  EXPECT_THROW(config::dem_chunks_from_yaml_str("unknown_field: 1\n"),
+               std::runtime_error);
+}
+
+TEST(MemoryExperimentYaml, InvalidPhaseModelUsesConfigurationExceptionType) {
+  namespace config = cudaq::qec::decoding::config;
+  const auto entry = parse_one(dem_chunks_yaml(3));
+  auto yaml = config::dem_chunks_to_yaml_str(*entry.dem_chunks);
+  const auto field = yaml.find("num_rounds:");
+  ASSERT_NE(field, std::string::npos);
+  const auto value = yaml.find(':', field) + 1;
+  const auto end = yaml.find('\n', value);
+  ASSERT_NE(end, std::string::npos);
+  yaml.replace(value, end - value, " 1");
+  try {
+    (void)config::dem_chunks_from_yaml_str(yaml);
+    FAIL() << "invalid phase-model horizon was accepted";
+  } catch (const std::runtime_error &error) {
+    EXPECT_NE(std::string(error.what()).find("Invalid phase-model YAML:"),
+              std::string::npos);
+    EXPECT_NE(std::string(error.what()).find("num_rounds"), std::string::npos);
+  }
 }
 
 TEST(DecoderDemChunksYAMLTest, ParsedPhasesExpandAndClose) {

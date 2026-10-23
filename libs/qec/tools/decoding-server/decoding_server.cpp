@@ -9,7 +9,7 @@
 /// YAML config file selects.
 ///
 /// Both the decoder and the transport are configuration, not code:
-///   - decoders come from `--config=<yaml>`
+///   - decoders come from the shared default YAML or `--config=<yaml>`
 ///     (multi_decoder_config::from_yaml_str);
 ///   - the transport comes from the YAML `transport:` section for every
 ///     device_graph decoder. Host-only configurations using other providers
@@ -47,7 +47,7 @@
 /// device_graph` and reports execution via the trigger diagnostics.
 ///
 /// Usage:
-///   decoding_server --config=<decoders.yaml>
+///   decoding_server [--config=<decoders.yaml>]
 ///                   [--transport=<name|/path/to/lib.so>] [--timeout=60]
 ///                   [--host-loop=threaded|unified]
 ///                   [provider args, forwarded verbatim...]
@@ -82,6 +82,7 @@
 /// must not appear among a device_graph ring's or a gpu_roce ring's YAML
 /// transport arguments.
 
+#include "../common/decoding_server_config.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 
 // Ring-consumer C ABI prototypes (weak references below are checked against
@@ -106,6 +107,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -183,17 +185,22 @@ bool starts_with(const std::string &s, const char *prefix) {
 }
 
 bool parse_args(int argc, char **argv, ServerConfig &cfg) {
+  bool config_from_cli = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--help" || a == "-h") {
       std::cout << "Usage: " << argv[0]
-                << " --config=<decoders.yaml> "
+                << " [--config=<decoders.yaml>] "
                    "[--transport=<name|/path/to/lib.so>] [--timeout=N] "
                    "[--host-loop=threaded|unified] "
                    "[provider args, forwarded verbatim: e.g. --port=N "
                    "--num-slots=N --slot-size=N --device=NAME "
                    "--local-ip=ADDR --qp_config=rendezvous|hsb_fpga "
                    "--peer-ip=ADDR --remote-qp=N --frame-size=N]\n"
+                   "The configuration defaults to server.yaml in the working "
+                   "directory, shared with memory-experiment-generator. "
+                   "CUDAQ_QEC_DECODER_CONFIG selects a deployment path; "
+                   "--config overrides either default.\n"
                    "--transport and command-line provider arguments apply "
                    "only to non-gpu_roce, host-only configurations whose "
                    "YAML transport section names no provider (a conflict is "
@@ -215,9 +222,10 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
                    "truth."
                 << std::endl;
       return false;
-    } else if (starts_with(a, "--config="))
+    } else if (starts_with(a, "--config=")) {
       cfg.config_path = a.substr(9);
-    else if (starts_with(a, "--transport=")) {
+      config_from_cli = true;
+    } else if (starts_with(a, "--transport=")) {
       cfg.transport = a.substr(12);
       cfg.transport_from_cli = true;
     } else if (starts_with(a, "--timeout=")) {
@@ -245,8 +253,18 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
     } else
       cfg.provider_args.push_back(a);
   }
+  if (!config_from_cli) {
+    try {
+      cfg.config_path =
+          cudaq::qec::tools::default_server_config_path().string();
+    } catch (const std::filesystem::filesystem_error &error) {
+      std::cerr << "ERROR: cannot resolve default configuration: "
+                << error.what() << std::endl;
+      return false;
+    }
+  }
   if (cfg.config_path.empty()) {
-    std::cerr << "ERROR: --config=<decoders.yaml> is required" << std::endl;
+    std::cerr << "ERROR: --config must not be empty" << std::endl;
     return false;
   }
   return true;

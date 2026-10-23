@@ -82,7 +82,8 @@ else()
 endif()
 
 add_executable(test_qec test_qec.cpp)
-target_link_libraries(test_qec PRIVATE GTest::gtest_main cudaq-qec cudaq::cudaq-stim-target)
+target_link_libraries(test_qec PRIVATE GTest::gtest_main cudaq-qec
+  cudaq::cudaq cudaq::cudaq-stim-target)
 add_dependencies(CUDAQXQECUnitTests test_qec)
 gtest_discover_tests(test_qec)
 
@@ -175,6 +176,12 @@ target_link_libraries(test_dem_construction_code PRIVATE GTest::gtest_main
                                                   cudaq::cudaq-stim-target)
 add_dependencies(CUDAQXQECUnitTests test_dem_construction_code)
 gtest_discover_tests(test_dem_construction_code)
+
+add_executable(test_memory_dem_chunks test_memory_dem_chunks.cpp)
+target_link_libraries(test_memory_dem_chunks PRIVATE
+  GTest::gtest_main cudaq-qec cudaq::cudaq-stim-target)
+add_dependencies(CUDAQXQECUnitTests test_memory_dem_chunks)
+gtest_discover_tests(test_memory_dem_chunks PROPERTIES LABELS "qec")
 
 add_executable(test_cancellation test_cancellation.cpp)
 target_link_libraries(test_cancellation PRIVATE GTest::gtest_main cudaq-qec-decoders)
@@ -805,6 +812,7 @@ add_subdirectory(realtime)
 add_subdirectory(decoders/pymatching)
 add_subdirectory(decoders/chromobius)
 add_subdirectory(playback-emulator)
+add_subdirectory(memory-experiment-generator)
 
 # HSB rig tools (FPGA playback + graph-launched QLDPC bridge)
 if(CUDAQX_QEC_ENABLE_HSB_TOOLS)

@@ -149,13 +149,16 @@ jobs:
       # Run tests
       # ========================================================================
 
+      - name: Install generator CLI test requirements
+        run: python3 -m pip install --break-system-packages -r libs/qec/unittests/memory-experiment-generator/requirements.txt
+
       - name: Run tests
         run: cmake --build ${{ steps.build.outputs.build-dir }} --target run_tests
 
       # ========================================================================
       # Run python tests
       # ========================================================================
- 
+
       - name: Install python requirements
         shell: bash
         run: |
