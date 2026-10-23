@@ -2932,6 +2932,45 @@ std::string pw_graph_yaml_with(const std::string &from, const std::string &to) {
   return yaml.replace(at, from.size(), to);
 }
 
+// pw_graph_yaml() with an xor of num_inputs inputs: A, B and the raw
+// logical value, as a corrected-logical graph wires it.
+std::string three_input_sum_yaml(const std::string &num_inputs) {
+  auto yaml = pw_graph_yaml_with("        - id: sum\n          type: xor\n",
+                                 "        - id: sum\n          type: xor\n"
+                                 "          num_inputs: " +
+                                     num_inputs + "\n");
+  const std::string edges = "        - {from: A, to: sum.a}\n"
+                            "        - {from: B, to: sum.b}\n";
+  return yaml.replace(yaml.find(edges), edges.size(),
+                      "        - {from: A, to: sum.in_0}\n"
+                      "        - {from: B, to: sum.in_1}\n"
+                      "        - {from: ingest.logical, to: sum.in_2}\n");
+}
+
+// xor's num_inputs parses and round-trips, and below 2 it is rejected.
+TEST(XorNumInputs, ParsesAndIsChecked) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(three_input_sum_yaml("3"));
+  const auto &sum = parsed.decoders.at(0).task_graph->nodes.at(3);
+  const auto emitted = parsed.to_yaml_str(200);
+  ASSERT_EQ(sum.id, "sum");
+  EXPECT_EQ(sum.node_params.map().get<std::size_t>("num_inputs"), 3u);
+  EXPECT_NE(emitted.find("num_inputs"), std::string::npos) << emitted;
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+  for (const auto *n : {"0", "1"})
+    try {
+      cfg::multi_decoder_config::from_yaml_str(three_input_sum_yaml(n));
+      ADD_FAILURE() << "num_inputs " << n << " was accepted";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(
+          std::string(e.what()).find("xor: num_inputs must be at least 2"),
+          std::string::npos)
+          << e.what();
+    }
+}
+
 // The layers parse into the ingest node, sorted by name, as the window
 // requests the C++ API writes; decode_window's parameters go to its kind;
 // and the document round-trips.
