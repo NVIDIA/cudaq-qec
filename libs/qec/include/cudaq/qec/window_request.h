@@ -99,6 +99,9 @@ struct window_request {
 struct ingest_window {
   std::string layer;
   window_request request;
+  /// The data_artifacts window entry the layer names, if it names one;
+  /// request is then a copy of that entry's request.
+  std::string artifact;
   bool operator==(const ingest_window &) const = default;
 };
 

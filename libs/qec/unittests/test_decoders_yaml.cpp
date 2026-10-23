@@ -3024,6 +3024,224 @@ TEST(TaskGraphWindowKinds, IngestNeedsAWindow) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// data_artifacts
+// ---------------------------------------------------------------------------
+
+// A template, a Stim file pinned by its hash, and the plan's two window
+// requests, named once and referenced from a decoder and its ingest node.
+std::string artifacts_yaml() {
+  return R"(
+data_artifacts:
+  rep_memory:
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+  rep_stim:
+    stim_dem_path: dems/rep.dem
+    sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  pw_A:
+    window:
+      context: rep_memory
+      period: 12
+      zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
+      ports:
+        input: {disposition: open, prior: 0.01}
+        output: {disposition: open}
+      sends: [{id: forward}, {id: backward}]
+  pw_B:
+    window:
+      context: rep_memory
+      period: 12
+      offset: -9
+      zones: {commit: [0, 9]}
+      ports:
+        input: {disposition: closed}
+        output: {disposition: closed}
+decoders:
+  - id: 0
+    dem_chunks: rep_memory
+    task_graph:
+      nodes:
+        - id: ingest
+          type: ingest
+          windows: {A: pw_A, B: pw_B}
+        - {id: A, type: decode_window, inner: {type: single_error_lut}}
+        - id: B
+          type: decode_window
+          num_receives: 2
+          inner: {type: single_error_lut}
+        - {id: sum, type: xor}
+      edges:
+        - {from: measurements, to: ingest}
+        - {from: ingest.A, to: A}
+        - {from: ingest.B, to: B}
+        - {from: A.forward, to: B.receive_0, index_offset: -1}
+        - {from: A.backward, to: B.receive_1}
+        - {from: A, to: sum.a}
+        - {from: B, to: sum.b}
+        - {from: sum, to: output}
+)";
+}
+
+// artifacts_yaml() with `from` replaced by `to`.
+std::string artifacts_yaml_with(const std::string &from,
+                                const std::string &to) {
+  auto yaml = artifacts_yaml();
+  const auto at = yaml.find(from);
+  if (at == std::string::npos)
+    throw std::logic_error("artifacts_yaml has no '" + from + "'");
+  return yaml.replace(at, from.size(), to);
+}
+
+// Entries parse sorted by name; references resolve to copies of the named
+// entries, which keep the name, so emission writes the name back and the
+// document round-trips.
+TEST(DataArtifactsYAML, ReferencesResolveToTheNamedEntries) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using namespace cudaq::qec::experimental;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(artifacts_yaml());
+  const auto &artifacts = parsed.data_artifacts;
+  const auto &decoder = parsed.decoders.at(0);
+  const auto &ingest = decoder.task_graph->nodes.at(0);
+  ASSERT_EQ(artifacts.size(), 4u);
+  EXPECT_EQ(artifacts[0].name, "pw_A");
+  EXPECT_EQ(artifacts[1].name, "pw_B");
+  EXPECT_EQ(artifacts[2].name, "rep_memory");
+  EXPECT_EQ(artifacts[3].name, "rep_stim");
+  ASSERT_TRUE(artifacts[0].window.has_value());
+  EXPECT_EQ(*artifacts[0].window, window_a());
+  EXPECT_EQ(artifacts[0].context, "rep_memory");
+  EXPECT_EQ(artifacts[3].stim_dem_path, "dems/rep.dem");
+  EXPECT_EQ(artifacts[3].sha256.size(), 64u);
+
+  EXPECT_EQ(decoder.dem_chunks_artifact, "rep_memory");
+  ASSERT_TRUE(decoder.dem_chunks.has_value());
+  EXPECT_EQ(*decoder.dem_chunks, *artifacts[2].dem_chunks);
+  ASSERT_EQ(ingest.windows.size(), 2u);
+  EXPECT_EQ(ingest.windows[0].artifact, "pw_A");
+  EXPECT_EQ(ingest.windows[0].request, window_a());
+  EXPECT_EQ(ingest.windows[1].artifact, "pw_B");
+  EXPECT_EQ(ingest.windows[1].request, *artifacts[1].window);
+
+  // The requests are written once, in data_artifacts; the uses name them.
+  const auto emitted = parsed.to_yaml_str(200);
+  std::size_t periods = 0;
+  for (auto at = emitted.find("period:"); at != std::string::npos;
+       at = emitted.find("period:", at + 1))
+    ++periods;
+  EXPECT_EQ(periods, 2u) << emitted;
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+} // end - TEST(DataArtifactsYAML, ReferencesResolveToTheNamedEntries)
+
+// A decoder that names its template builds the same graph as one that writes
+// it inline, and a file without data_artifacts emits none.
+TEST(DataArtifactsYAML, ByNameBuildsWhatInlineBuilds) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const std::string tmpl = R"(
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      num_rounds: 5
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+)";
+  const std::string graph = R"(
+    task_graph:
+      nodes:
+        - {id: w, type: single_window, inner: {type: single_error_lut}}
+      edges:
+        - {from: measurements, to: w}
+        - {from: w, to: output}
+)";
+  auto inline_form = cfg::multi_decoder_config::from_yaml_str(
+      "decoders:\n  - id: 0\n    dem_chunks:" + tmpl + graph);
+  auto by_name = cfg::multi_decoder_config::from_yaml_str(
+      "data_artifacts:\n  t:\n    dem_chunks:" + tmpl +
+      "decoders:\n  - id: 0\n    dem_chunks: t\n" + graph);
+  const auto a =
+      cudaq::qec::decoding::host::build_task_graph(inline_form.decoders.at(0));
+  const auto b =
+      cudaq::qec::decoding::host::build_task_graph(by_name.decoders.at(0));
+  EXPECT_EQ(by_name.decoders.at(0).dem_chunks,
+            inline_form.decoders.at(0).dem_chunks);
+  EXPECT_EQ(a->get_num_msyn_per_decode(), b->get_num_msyn_per_decode());
+  EXPECT_EQ(a->get_num_msyn_per_round(), b->get_num_msyn_per_round());
+  EXPECT_EQ(a->get_num_observables(), b->get_num_observables());
+  EXPECT_EQ(inline_form.to_yaml_str().find("data_artifacts"),
+            std::string::npos);
+} // end - TEST(DataArtifactsYAML, ByNameBuildsWhatInlineBuilds)
+
+// Each malformed entry or reference is rejected when parsed, with its own
+// message.
+TEST(DataArtifactsYAML, RejectsMalformedEntriesAndReferences) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(artifacts_yaml_with("dem_chunks: rep_memory", "dem_chunks: nowhere"),
+          "names data_artifacts entry 'nowhere', which does not exist");
+  rejects(artifacts_yaml_with("dem_chunks: rep_memory", "dem_chunks: pw_A"),
+          "'pw_A' is a window entry, not a dem_chunks entry");
+  rejects(artifacts_yaml_with("{A: pw_A, B: pw_B}", "{A: rep_memory, B: pw_B}"),
+          "'rep_memory' is a dem_chunks entry, not a window entry");
+  rejects(artifacts_yaml_with("    stim_dem_path: dems/rep.dem\n",
+                              "    stim_dem_path: dems/rep.dem\n"
+                              "    edem_path: x.edem\n"),
+          "entry 'rep_stim' has two kinds");
+  rejects(artifacts_yaml_with("    stim_dem_path: dems/rep.dem\n", ""),
+          "entry 'rep_stim' has no kind");
+  rejects(artifacts_yaml_with("      context: rep_memory\n      period: 12\n"
+                              "      zones: {buffers",
+                              "      context: rep_stim\n      period: 12\n"
+                              "      zones: {buffers"),
+          "context 'rep_stim' is not a dem_chunks entry");
+  rejects(artifacts_yaml_with("stim_dem_path: dems/rep.dem",
+                              "edem_path: gadgets/sec.edem"),
+          "edem_path is not supported until the cudaq-edem migration");
+  rejects(artifacts_yaml_with("stim_dem_path: dems/rep.dem",
+                              "stim_dem: \"error(0.1) D0\""),
+          "sha256 pins a file");
+  rejects(artifacts_yaml_with("sha256: 0123456789abcdef", "sha256: 0123"),
+          "sha256 must be 64 hexadecimal digits");
+  rejects(artifacts_yaml_with("      offset: -9\n",
+                              "      offset: -9\n"
+                              "      responsibility: [0]\n"),
+          "'responsibility' is reserved");
+} // end - TEST(DataArtifactsYAML, RejectsMalformedEntriesAndReferences)
+
+// A decoder parsed on its own has no data_artifacts to name.
+TEST(DataArtifactsYAML, AStandaloneDecoderCannotNameAnEntry) {
+  namespace cfg = cudaq::qec::decoding::config;
+  try {
+    cfg::decoder_config::from_yaml_str("id: 0\ntype: single_error_lut\n"
+                                       "dem_chunks: rep_memory\n");
+    ADD_FAILURE() << "a standalone decoder resolved a name";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("outside a multi_decoder_config"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
 // The chunk form stays the authoritative source, carrying the closed model
 // expand_dem_chunks() would write for any decoder that reads matrices.
 TEST(ResolveDecoderInputs, ChunkFormCarriesItsClosedModelForAMatrixDecoder) {

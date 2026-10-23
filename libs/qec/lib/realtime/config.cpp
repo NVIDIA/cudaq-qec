@@ -560,6 +560,132 @@ LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::decoding::config::decoder_config)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::phase_connection)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::seam_spec_entry)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::phase_spec_entry)
+
+namespace {
+
+using data_artifact_t = cudaq::qec::decoding::config::data_artifact;
+
+/// What a parse of one configuration document shares: its data_artifacts,
+/// read before the decoders, so a reference resolves while the decoder or
+/// node naming it is parsed, and validation reads the resolved block.
+struct config_parse_context {
+  const std::vector<data_artifact_t> *artifacts = nullptr;
+};
+
+/// The entry named @p name in a list sorted by name, or nullptr. Names are
+/// looked up only while a configuration is parsed.
+const data_artifact_t *named_artifact(const std::vector<data_artifact_t> &list,
+                                      const std::string &name) {
+  const auto it =
+      std::lower_bound(list.begin(), list.end(), name,
+                       [](const data_artifact_t &e, const std::string &n) {
+                         return e.name < n;
+                       });
+  return it != list.end() && it->name == name ? &*it : nullptr;
+}
+
+/// The kinds an entry holds, in key order, for checks and messages.
+std::vector<std::string> artifact_kinds(const data_artifact_t &entry) {
+  std::vector<std::string> kinds;
+  if (entry.dem_chunks)
+    kinds.push_back("dem_chunks");
+  if (!entry.stim_dem.empty())
+    kinds.push_back("stim_dem");
+  if (!entry.stim_dem_path.empty())
+    kinds.push_back("stim_dem_path");
+  if (entry.window)
+    kinds.push_back("window");
+  if (!entry.edem_path.empty())
+    kinds.push_back("edem_path");
+  return kinds;
+}
+
+/// The entry @p name names, which must hold @p kind; @p where names the
+/// reference in messages.
+const data_artifact_t &find_artifact(llvm::yaml::IO &io,
+                                     const std::string &name,
+                                     const std::string &kind,
+                                     const std::string &where) {
+  const auto *context =
+      static_cast<const config_parse_context *>(io.getContext());
+  const auto prefix = where + " names data_artifacts entry '" + name + "'";
+  if (!context || !context->artifacts)
+    throw std::runtime_error(
+        prefix + ", but it was parsed outside a "
+                 "multi_decoder_config, which holds data_artifacts");
+  const auto *entry = named_artifact(*context->artifacts, name);
+  if (!entry)
+    throw std::runtime_error(prefix + ", which does not exist");
+  const auto kinds = artifact_kinds(*entry);
+  if (kinds.size() != 1 || kinds.front() != kind)
+    throw std::runtime_error(prefix + ", but '" + name + "' is a " +
+                             (kinds.empty() ? "kindless" : kinds.front()) +
+                             " entry, not a " + kind + " entry");
+  return *entry;
+}
+
+/// Checks each entry on its own and against the others: exactly one kind;
+/// edem_path reserved; sha256 only on a file, as 64 hex digits; a window's
+/// request valid and its context a dem_chunks entry; a template valid.
+void validate_data_artifacts(const std::vector<data_artifact_t> &list) {
+  for (const auto &entry : list) {
+    const auto where = "data_artifacts entry '" + entry.name + "'";
+    const auto kinds = artifact_kinds(entry);
+    if (kinds.empty())
+      throw std::runtime_error(where +
+                               " has no kind: give one of dem_chunks, "
+                               "stim_dem, stim_dem_path, window or edem_path");
+    if (kinds.size() == 2)
+      throw std::runtime_error(where + " has two kinds, '" + kinds[0] +
+                               "' and '" + kinds[1] + "'; give one");
+    if (kinds.size() > 2)
+      throw std::runtime_error(where + " has " + std::to_string(kinds.size()) +
+                               " kinds; give one");
+    if (!entry.edem_path.empty())
+      throw std::runtime_error(where + ": edem_path is not supported until "
+                                       "the cudaq-edem migration");
+    if (!entry.sha256.empty()) {
+      if (entry.stim_dem_path.empty())
+        throw std::runtime_error(where +
+                                 ": sha256 pins a file, so it needs a "
+                                 "file-backed entry such as stim_dem_path");
+      const bool hex =
+          std::all_of(entry.sha256.begin(), entry.sha256.end(), [](char c) {
+            return std::isxdigit(static_cast<unsigned char>(c));
+          });
+      if (entry.sha256.size() != 64 || !hex)
+        throw std::runtime_error(where +
+                                 ": sha256 must be 64 hexadecimal digits");
+    }
+    if (!entry.context.empty() && !entry.window)
+      throw std::runtime_error(where +
+                               ": context belongs to a window entry only");
+    if (entry.window) {
+      const auto *context = named_artifact(list, entry.context);
+      if (entry.context.empty())
+        throw std::runtime_error(where + ": a window entry needs a context "
+                                         "naming a dem_chunks entry");
+      if (!context || !context->dem_chunks)
+        throw std::runtime_error(where + ": context '" + entry.context +
+                                 "' is not a dem_chunks entry");
+      try {
+        cudaq::qec::experimental::check_window_request(*entry.window);
+      } catch (const std::invalid_argument &e) {
+        throw std::runtime_error(where + ": " + e.what());
+      }
+    }
+    if (entry.dem_chunks) {
+      try {
+        entry.dem_chunks->validate();
+      } catch (const std::invalid_argument &e) {
+        throw std::runtime_error("Invalid dem_chunks for " + where + ": " +
+                                 e.what());
+      }
+    }
+  } // end - for(entry)
+} // end - validate_data_artifacts()
+
+} // namespace
 LLVM_YAML_IS_SEQUENCE_VECTOR(
     cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec)
 LLVM_YAML_IS_SEQUENCE_VECTOR(
@@ -1049,6 +1175,177 @@ struct MappingTraits<ensemble_spec_t> {
   static void mapping(IO &io, ensemble_spec_t &e);
 };
 
+/// A `dem_chunks` value: the block, or the name of a data_artifacts entry.
+/// A list is kept only to be rejected.
+struct dem_chunks_form {
+  std::string name;
+  cudaq::qec::dem_chunks_spec spec;
+  std::vector<std::int64_t> list;
+};
+
+template <>
+struct PolymorphicTraits<dem_chunks_form> {
+  static NodeKind getKind(const dem_chunks_form &form) {
+    return form.name.empty() ? NodeKind::Map : NodeKind::Scalar;
+  }
+  static std::string &getAsScalar(dem_chunks_form &form) { return form.name; }
+  static cudaq::qec::dem_chunks_spec &getAsMap(dem_chunks_form &form) {
+    return form.spec;
+  }
+  static std::vector<std::int64_t> &getAsSequence(dem_chunks_form &form) {
+    return form.list;
+  }
+};
+
+/// Maps a `dem_chunks` key holding the block or naming an entry. A name
+/// resolves to a copy of the entry's template and is kept, so emission writes
+/// the name back.
+static void map_dem_chunks(IO &io,
+                           std::optional<cudaq::qec::dem_chunks_spec> &spec,
+                           std::string &artifact, const std::string &where) {
+  std::optional<dem_chunks_form> form;
+  if (io.outputting()) {
+    if (!artifact.empty())
+      io.mapRequired("dem_chunks", artifact);
+    else
+      io.mapOptional("dem_chunks", spec);
+    return;
+  }
+  io.mapOptional("dem_chunks", form);
+  if (!form)
+    return;
+  if (!form->list.empty())
+    throw std::runtime_error(where + " dem_chunks is a mapping, or the name "
+                                     "of a data_artifacts entry");
+  if (form->name.empty()) {
+    spec = std::move(form->spec);
+    return;
+  }
+  artifact = form->name;
+  spec = *find_artifact(io, artifact, "dem_chunks", where).dem_chunks;
+}
+
+/// A window layer's value: a request, or the name of a data_artifacts window
+/// entry. A list is kept only to be rejected.
+struct layer_form {
+  std::string name;
+  cudaq::qec::window_yaml::request_form request;
+  std::vector<std::int64_t> list;
+};
+
+template <>
+struct PolymorphicTraits<layer_form> {
+  static NodeKind getKind(const layer_form &form) {
+    return form.name.empty() ? NodeKind::Map : NodeKind::Scalar;
+  }
+  static std::string &getAsScalar(layer_form &form) { return form.name; }
+  static cudaq::qec::window_yaml::request_form &getAsMap(layer_form &form) {
+    return form.request;
+  }
+  static std::vector<std::int64_t> &getAsSequence(layer_form &form) {
+    return form.list;
+  }
+};
+
+/// A `window` entry of data_artifacts: a request and the dem_chunks entry
+/// it is built on.
+struct window_entry_form {
+  std::string context;
+  cudaq::qec::window_yaml::request_form request;
+};
+
+template <>
+struct CustomMappingTraits<window_entry_form> {
+  static void inputOne(IO &io, StringRef key, window_entry_form &form) {
+    if (key == "context") {
+      io.mapRequired("context", form.context);
+      return;
+    }
+    CustomMappingTraits<cudaq::qec::window_yaml::request_form>::inputOne(
+        io, key, form.request);
+  }
+  static void output(IO &io, window_entry_form &form) {
+    io.mapRequired("context", form.context);
+    CustomMappingTraits<cudaq::qec::window_yaml::request_form>::output(
+        io, form.request);
+  }
+};
+
+/// One data_artifacts entry; its name is the key that holds it.
+template <>
+struct CustomMappingTraits<data_artifact_t> {
+  static void inputOne(IO &io, StringRef key, data_artifact_t &entry) {
+    const auto where = "data_artifacts entry '" + entry.name + "'";
+    if (key == "dem_chunks") {
+      io.mapRequired("dem_chunks", entry.dem_chunks.emplace());
+    } else if (key == "stim_dem") {
+      io.mapRequired("stim_dem", entry.stim_dem);
+    } else if (key == "stim_dem_path") {
+      io.mapRequired("stim_dem_path", entry.stim_dem_path);
+    } else if (key == "edem_path") {
+      io.mapRequired("edem_path", entry.edem_path);
+    } else if (key == "sha256") {
+      io.mapRequired("sha256", entry.sha256);
+    } else if (key == "window") {
+      // Request errors throw std::invalid_argument; config errors are
+      // std::runtime_error, which is what from_yaml_str() callers catch.
+      window_entry_form form;
+      try {
+        io.mapRequired("window", form);
+        entry.window = cudaq::qec::window_yaml::request_from_form(form.request);
+      } catch (const std::invalid_argument &e) {
+        throw std::runtime_error(where + ": " + e.what());
+      }
+      entry.context = form.context;
+    } else {
+      throw std::runtime_error(where + " has unknown key '" + key.str() + "'");
+    }
+  }
+  static void output(IO &io, data_artifact_t &entry) {
+    if (entry.dem_chunks)
+      io.mapRequired("dem_chunks", *entry.dem_chunks);
+    if (!entry.stim_dem.empty())
+      io.mapRequired("stim_dem", entry.stim_dem);
+    if (!entry.stim_dem_path.empty())
+      io.mapRequired("stim_dem_path", entry.stim_dem_path);
+    if (entry.window) {
+      window_entry_form form{
+          entry.context,
+          cudaq::qec::window_yaml::form_from_request(*entry.window)};
+      io.mapRequired("window", form);
+    }
+    if (!entry.edem_path.empty())
+      io.mapRequired("edem_path", entry.edem_path);
+    if (!entry.sha256.empty())
+      io.mapRequired("sha256", entry.sha256);
+  }
+};
+
+/// The data_artifacts section: names to entries, kept sorted by name, since
+/// llvm::yaml does not keep a mapping's key order.
+struct artifacts_form {
+  std::vector<data_artifact_t> *list = nullptr;
+};
+
+template <>
+struct CustomMappingTraits<artifacts_form> {
+  static void inputOne(IO &io, StringRef key, artifacts_form &form) {
+    data_artifact_t entry;
+    entry.name = key.str();
+    io.mapRequired(entry.name.c_str(), entry);
+    const auto at =
+        std::lower_bound(form.list->begin(), form.list->end(), entry.name,
+                         [](const data_artifact_t &e, const std::string &name) {
+                           return e.name < name;
+                         });
+    form.list->insert(at, std::move(entry));
+  }
+  static void output(IO &io, artifacts_form &form) {
+    for (auto &entry : *form.list)
+      io.mapRequired(entry.name.c_str(), entry);
+  }
+};
+
 /// An ingest node's `windows`: layer names to window requests, kept sorted by
 /// name, since llvm::yaml does not keep a mapping's key order. Each layer is
 /// also an output port, so it must be a port name and cannot be one ingest
@@ -1064,7 +1361,7 @@ struct CustomMappingTraits<windows_form> {
     const std::string layer = key.str();
     const std::string where =
         "task_graph node '" + *form.node + "' window layer '" + layer + "'";
-    cudaq::qec::window_yaml::request_form request;
+    layer_form value;
     const bool identifier =
         !layer.empty() && !std::isdigit(static_cast<unsigned char>(layer[0])) &&
         std::all_of(layer.begin(), layer.end(), [](char c) {
@@ -1077,21 +1374,33 @@ struct CustomMappingTraits<windows_form> {
                                " is reserved: ingest uses that port itself");
     // Request errors throw std::invalid_argument; config errors are
     // std::runtime_error, which is what from_yaml_str() callers catch.
+    cudaq::qec::experimental::ingest_window window{layer, {}, {}};
     try {
-      io.mapRequired(layer.c_str(), request);
-      const auto at =
-          std::lower_bound(form.windows->begin(), form.windows->end(), layer,
-                           [](const auto &window, const std::string &name) {
-                             return window.layer < name;
-                           });
-      form.windows->insert(
-          at, {layer, cudaq::qec::window_yaml::request_from_form(request)});
+      io.mapRequired(layer.c_str(), value);
+      if (!value.list.empty())
+        throw std::runtime_error(where + " is a window request, or the name "
+                                         "of a data_artifacts window entry");
+      if (value.name.empty()) {
+        window.request =
+            cudaq::qec::window_yaml::request_from_form(value.request);
+      } else {
+        window.artifact = value.name;
+        window.request = *find_artifact(io, value.name, "window", where).window;
+      }
     } catch (const std::invalid_argument &e) {
       throw std::runtime_error(where + ": " + e.what());
     }
+    const auto at = std::lower_bound(
+        form.windows->begin(), form.windows->end(), layer,
+        [](const auto &w, const std::string &name) { return w.layer < name; });
+    form.windows->insert(at, std::move(window));
   }
   static void output(IO &io, windows_form &form) {
-    for (const auto &window : *form.windows) {
+    for (auto &window : *form.windows) {
+      if (!window.artifact.empty()) {
+        io.mapRequired(window.layer.c_str(), window.artifact);
+        continue;
+      }
       auto request = cudaq::qec::window_yaml::form_from_request(window.request);
       io.mapRequired(window.layer.c_str(), request);
     }
@@ -1112,7 +1421,8 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       return;
     }
     if (key == "dem_chunks") {
-      io.mapOptional("dem_chunks", node.dem_chunks);
+      map_dem_chunks(io, node.dem_chunks, node.dem_chunks_artifact,
+                     "task_graph node '" + node.id + "'");
       return;
     }
     if (key == "windows") {
@@ -1231,7 +1541,8 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
     const auto *kind = cudaq::qec::find_task_graph_node_kind(node.type);
     std::string type = kind ? kind->name : node.type;
     io.mapRequired("type", type);
-    io.mapOptional("dem_chunks", node.dem_chunks);
+    map_dem_chunks(io, node.dem_chunks, node.dem_chunks_artifact,
+                   "task_graph node '" + node.id + "'");
     if (!node.windows.empty()) {
       windows_form form{&node.windows, &node.id};
       io.mapRequired("windows", form);
@@ -1439,7 +1750,8 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
     // established researcher-facing wire YAML does not change.
     if (!io.outputting() || !schema)
       io.mapOptional("error_rate_vec", config.error_rate_vec);
-    io.mapOptional("dem_chunks", config.dem_chunks);
+    map_dem_chunks(io, config.dem_chunks, config.dem_chunks_artifact,
+                   "decoder " + std::to_string(config.id));
     io.mapOptional("stim_dem_path", config.stim_dem_path, std::string{});
 
     // Convert decoder_custom_args through the schema registered for this
@@ -1739,6 +2051,17 @@ template <>
 struct MappingTraits<cudaq::qec::decoding::config::multi_decoder_config> {
   static void
   mapping(IO &io, cudaq::qec::decoding::config::multi_decoder_config &config) {
+    // Read before the decoders, whose references resolve against it.
+    artifacts_form artifacts{&config.data_artifacts};
+    if (io.outputting()) {
+      if (!config.data_artifacts.empty())
+        io.mapRequired("data_artifacts", artifacts);
+    } else {
+      io.mapOptional("data_artifacts", artifacts);
+      validate_data_artifacts(config.data_artifacts);
+      if (auto *context = static_cast<config_parse_context *>(io.getContext()))
+        context->artifacts = &config.data_artifacts;
+    }
     io.mapRequired("decoders", config.decoders);
     io.mapOptional("transport", config.transport,
                    cudaq::qec::decoding::config::transport_config());
@@ -1828,7 +2151,8 @@ cudaq::qec::decoding::config::multi_decoder_config
 cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
     const std::string_view yaml_str) {
   multi_decoder_config config;
-  llvm::yaml::Input yaml_in(yaml_str);
+  config_parse_context context;
+  llvm::yaml::Input yaml_in(yaml_str, &context);
   yaml_in >> config;
   if (const auto error = yaml_in.error())
     throw std::runtime_error("Invalid decoder configuration YAML: " +
@@ -2089,7 +2413,8 @@ llvm::json::Object task_graph_json_schema() {
       {"inner", llvm::json::Object{{"type", "object"},
                                    {"required", llvm::json::Array{"type"}}}},
       {"decoder_custom_args", llvm::json::Object{{"type", "object"}}},
-      {"dem_chunks", llvm::json::Object{{"$ref", "#/$defs/dem_chunks"}}},
+      {"dem_chunks",
+       llvm::json::Object{{"$ref", "#/$defs/dem_chunks_or_name"}}},
       // An ingest node's layers; each name is also an output port.
       {"windows",
        llvm::json::Object{
@@ -2101,7 +2426,11 @@ llvm::json::Object task_graph_json_schema() {
                  llvm::json::Object{
                      {"enum", llvm::json::Array{"logical", "input"}}}}}},
            {"additionalProperties",
-            llvm::json::Object{{"$ref", "#/$defs/window_request"}}}}},
+            llvm::json::Object{
+                {"oneOf",
+                 llvm::json::Array{
+                     llvm::json::Object{{"$ref", "#/$defs/window_request"}},
+                     llvm::json::Object{{"type", "string"}}}}}}}},
       {"H_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"O_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"D_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
@@ -2247,12 +2576,41 @@ llvm::json::Object task_graph_json_schema() {
        llvm::json::Object{{"type", "array"}, {"items", std::move(send)}}},
       {"columns", std::move(columns)}});
   window_request["required"] = llvm::json::Array{"period", "zones", "ports"};
+  // A data_artifacts window entry: the request and the dem_chunks entry it
+  // is built on.
+  llvm::json::Object artifact_window = window_request;
+  (*artifact_window.getObject("properties"))["context"] =
+      llvm::json::Object{{"type", "string"}};
+  artifact_window["required"] =
+      llvm::json::Array{"context", "period", "zones", "ports"};
+  llvm::json::Array one_kind;
+  for (const auto *kind :
+       {"dem_chunks", "stim_dem", "stim_dem_path", "window", "edem_path"})
+    one_kind.push_back(
+        llvm::json::Object{{"required", llvm::json::Array{kind}}});
+  llvm::json::Object data_artifact = closed_object(llvm::json::Object{
+      {"dem_chunks", llvm::json::Object{{"$ref", "#/$defs/dem_chunks"}}},
+      {"stim_dem", llvm::json::Object{{"type", "string"}}},
+      {"stim_dem_path", llvm::json::Object{{"type", "string"}}},
+      {"window", llvm::json::Object{{"$ref", "#/$defs/artifact_window"}}},
+      {"edem_path", llvm::json::Object{{"type", "string"}}},
+      {"sha256", llvm::json::Object{{"type", "string"},
+                                    {"pattern", "^[0-9a-fA-F]{64}$"}}}});
+  data_artifact["oneOf"] = std::move(one_kind);
 
   return llvm::json::Object{
       {"round_range",
        llvm::json::Object{
            {"oneOf", llvm::json::Array{rounds_pair(), std::move(range_map)}}}},
       {"window_request", std::move(window_request)},
+      {"artifact_window", std::move(artifact_window)},
+      {"data_artifact", std::move(data_artifact)},
+      {"dem_chunks_or_name",
+       llvm::json::Object{
+           {"oneOf",
+            llvm::json::Array{
+                llvm::json::Object{{"$ref", "#/$defs/dem_chunks"}},
+                llvm::json::Object{{"type", "string"}}}}}},
       {"task_graph_partition",
        llvm::json::Object{
            {"oneOf",
@@ -2372,7 +2730,8 @@ std::string decoder_config_json_schema() {
       {"error_rate_vec",
        llvm::json::Object{{"type", "array"},
                           {"items", llvm::json::Object{{"type", "number"}}}}},
-      {"dem_chunks", llvm::json::Object{{"$ref", "#/$defs/dem_chunks"}}},
+      {"dem_chunks",
+       llvm::json::Object{{"$ref", "#/$defs/dem_chunks_or_name"}}},
       {"decoder_custom_args", llvm::json::Object{{"type", "object"}}},
       {"task_graph", llvm::json::Object{{"$ref", "#/$defs/task_graph"}}},
   };
@@ -2666,6 +3025,11 @@ std::string decoder_config_json_schema() {
       {"type", "object"},
       {"properties",
        llvm::json::Object{
+           {"data_artifacts",
+            llvm::json::Object{
+                {"type", "object"},
+                {"additionalProperties",
+                 llvm::json::Object{{"$ref", "#/$defs/data_artifact"}}}}},
            {"decoders",
             llvm::json::Object{
                 {"type", "array"},

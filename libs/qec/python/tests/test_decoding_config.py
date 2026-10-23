@@ -1199,6 +1199,73 @@ def test_parallel_window_graph_validates_against_the_schema():
         validator.validate(bad)
 
 
+_ARTIFACTS_YAML = """data_artifacts:
+  rep_memory:
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+  pw_A:
+    window:
+      context: rep_memory
+      period: 12
+      zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
+      ports:
+        input: {disposition: open, prior: 0.01}
+        output: {disposition: open}
+decoders:
+  - id: 0
+    dem_chunks: rep_memory
+    task_graph:
+      nodes:
+        - {id: ingest, type: ingest, windows: {A: pw_A}}
+        - {id: A, type: decode_window, inner: {type: single_error_lut}}
+      edges:
+        - {from: measurements, to: ingest}
+        - {from: ingest.A, to: A}
+        - {from: A, to: output}
+"""
+
+
+def test_data_artifacts_resolve_references():
+    mdc = qec.multi_decoder_config.from_yaml_str(_ARTIFACTS_YAML)
+    assert [a.name for a in mdc.data_artifacts] == ["pw_A", "rep_memory"]
+    window_entry = mdc.data_artifacts[0]
+    assert window_entry.context == "rep_memory"
+    assert window_entry.window.period == 12
+    decoder = mdc.decoders[0]
+    assert decoder.dem_chunks_artifact == "rep_memory"
+    # DemChunksSpec compares by identity in Python, so compare its content.
+    resolved = decoder.dem_chunks
+    assert len(resolved.phases) == 3
+    assert resolved.get_phase(qec.SeamId("bulk")).error_rates == [0.01, 0.01]
+    layer = decoder.task_graph.nodes[0].windows[0]
+    assert layer.artifact == "pw_A"
+    assert layer.request == window_entry.window
+    again = qec.multi_decoder_config.from_yaml_str(mdc.to_yaml_str())
+    assert again.decoders[0].task_graph.nodes[0].windows[0].artifact == "pw_A"
+
+
+def test_data_artifacts_validate_against_the_schema():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    validator.validate(yaml.safe_load(_ARTIFACTS_YAML))
+    two_kinds = yaml.safe_load(_ARTIFACTS_YAML)
+    two_kinds["data_artifacts"]["rep_memory"]["stim_dem"] = "error(0.1) D0"
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(two_kinds)
+
+
 # A DEM whose detector coordinates carry the colour a colour-code decoder
 # needs. Those annotations have no home in detector_error_model, so a decoder
 # that reads them can only be built from the text -- which is what `stim_dem`

@@ -110,6 +110,7 @@ generate_timelike_sparse_detector_matrix = qecrt.generate_timelike_sparse_detect
 pcm_to_sparse_vec = qecrt.pcm_to_sparse_vec
 
 multi_decoder_config = qecrt.config.multi_decoder_config
+data_artifact = qecrt.config.data_artifact
 decoder_config = qecrt.config.decoder_config
 decoder_dispatch = qecrt.config.decoder_dispatch
 transport_config = qecrt.config.transport_config
