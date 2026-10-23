@@ -69,7 +69,11 @@ void SessionRegistry::load_from_config(const multi_decoder_config &config,
                                        const std::string &source_name,
                                        const std::filesystem::path &base_dir) {
   const auto mapping_table = make_mapping_table(config);
-  for (const auto &dc : config.decoders) {
+  // Decoders and nodes naming a pinned Stim DEM are built from its text, read
+  // once and checked against the pin.
+  const auto pinned =
+      cudaq::qec::decoding::host::with_pinned_stim_dems(config, base_dir);
+  for (const auto &dc : pinned.decoders) {
     if (dc.id < 0)
       throw std::runtime_error("Negative decoder id " + std::to_string(dc.id) +
                                " in " + source_name);

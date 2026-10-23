@@ -9,22 +9,35 @@
 // slice of the whole shot; the window spec's nine-SEC example; the spec's
 // invalid constructions; the column-handling options and parallel-column
 // conflicts; variant keys and translation invariance; the kernel's forms;
-// and the window schedule and commitment validation: row finalization
-// (F1-F4) checked against the built windows, each failure's own message,
-// send and receive matching, and ambiguous parallel commit columns.
+// the window schedule and commitment validation: row finalization (F1-F4)
+// checked against the built windows, each failure's own message, send and
+// receive matching, and ambiguous parallel commit columns; the serial
+// parallel-window reference: its windows match the schedule and its models
+// the production ones, single faults decode exactly, each send is needed,
+// sampled shots are sound and the production windows commit, send and
+// update the frame as it does, and the logical error rate tracks monolithic
+// matching; and the data artifact store: sha256, canonical content, shared
+// entries, templates as content, and lookups that never build.
 
+#include "parallel_window_reference.h"
 #include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_commitment.h"
+#include "../lib/decoding_task/decoding_task_data_artifacts.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
+#include "cudaq/qec/code.h"
 #include "cudaq/qec/dem_chunks_memory.h"
+#include "cudaq/qec/dem_construction_code.h"
+#include "cudaq/qec/dem_sampling.h"
 #include "cudaq/qec/pcm_utils.h"
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -1465,50 +1478,12 @@ TEST(WindowKernelForms, RoundTripWithoutLoss) {
 // explicit sends and ports instead.
 // ---------------------------------------------------------------------------
 
-// Window layers and the send edges between them.
-struct window_graph {
-  std::vector<window_layer> layers;
-  std::vector<task_graph_edge> edges;
-};
-
-// The parallel-window graph: A[k-1].forward to B[k].receive_0 and
-// A[k].backward to B[k].receive_1.
-window_graph parallel_graph(const layered_requests &requests) {
-  window_graph g;
-  g.layers = {{"A", "a", requests.a}, {"B", "b", requests.b}};
-  g.edges = {{"A", "forward", "B", "receive_0", -1},
-             {"A", "backward", "B", "receive_1", 0}};
-  return g;
-}
-
-// A sliding window whose forward delta feeds its next instance.
-window_graph sliding_graph(std::int64_t step, std::int64_t size) {
-  window_graph g;
-  g.layers = {{"W", "w", sliding(step, size)}};
-  g.edges = {{"W", "forward", "W", "receive_0", -1}};
-  return g;
-}
-
-// The interior-commit layout for the default sizes, with M = 1: A commits
-// c_a - 2 rounds between b + 1 buffer rounds, and B's gap grows to c_b + 2.
-layered_requests interior_commit(std::int64_t c_a, std::int64_t b,
-                                 std::int64_t c_b) {
-  return layered(c_a - 2, b + 1, c_b + 2);
-}
-
 // Both layers resolve observable conflicts by the more likely column.
 window_graph with_most_likely(window_graph g) {
   for (auto &layer : g.layers)
     layer.request.columns.conflicting_parallel =
         parallel_resolution::most_likely;
   return g;
-}
-
-// A's input truncates the previous round's crossing faults.
-layered_requests with_truncate(layered_requests requests) {
-  requests.a.input = {port_disposition::open, std::nullopt,
-                      input_boundary::truncate};
-  return requests;
 }
 
 // Calls validate_commitment() on a fresh template of spec.
@@ -1999,6 +1974,569 @@ TEST(CommitmentParallel, MostLikelyResolvesAnObservableConflict) {
                "conflicting_parallel: most_likely");
   expect_sound(rep5_spec(), with_most_likely(g));
 }
+
+// ---------------------------------------------------------------------------
+// Serial parallel-window reference
+// ---------------------------------------------------------------------------
+
+using pw_reference::make_decoder;
+using pw_reference::observables_of;
+using pw_reference::parallel_window_reference;
+using pw_reference::syndrome_of;
+
+// Phenomenological memory over the distance-d surface code's Z checks.
+dem_chunks_spec surface_memory_spec(std::size_t distance, double p) {
+  cudaqx::heterogeneous_map options;
+  options.insert("distance", distance);
+  const auto matrices =
+      css_matrices_from_code(*code::get("surface_code", options));
+  return phenomenological_memory_spec(matrices.hz, matrices.lz, p, p);
+}
+
+// Detection events of one fault column.
+std::vector<std::uint8_t> detectors_of(const pw_reference::shot &s,
+                                       std::size_t column) {
+  std::vector<std::uint8_t> e(s.h.size(), 0);
+  e[column] = 1;
+  return syndrome_of(s, e);
+}
+
+// Row i of a sampled tensor.
+std::vector<std::uint8_t> row_of(const cudaqx::tensor<std::uint8_t> &t,
+                                 std::size_t i) {
+  std::vector<std::uint8_t> row(t.shape()[1]);
+  for (std::size_t j = 0; j < row.size(); ++j)
+    row[j] = t.at({i, j});
+  return row;
+}
+
+// Whether a correction is equivalent to a fault: the same detection events
+// and the same observables, so they differ by at most a stabilizer.
+bool equivalent(const pw_reference::shot &s,
+                const std::vector<std::uint8_t> &correction,
+                const std::vector<std::uint8_t> &fault) {
+  return syndrome_of(s, correction) == syndrome_of(s, fault) &&
+         observables_of(s, correction) == observables_of(s, fault);
+}
+
+// pymatching keeps the lighter of parallel edges, which boundary columns
+// can create.
+const cudaqx::heterogeneous_map matching{
+    {"merge_strategy", std::string{"smallest_weight"}}};
+
+// Every layout the single-fault test sweeps: the default A/B sizes, the
+// interior-commit layout of the same sizes, and both with truncate.
+std::vector<window_graph> swept_layouts() {
+  return {parallel_graph(layered(2, 1, 3)),
+          parallel_graph(layered(3, 2, 2)),
+          parallel_graph(interior_commit(3, 2, 2)),
+          parallel_graph(with_truncate(layered(2, 1, 3))),
+          parallel_graph(with_truncate(interior_commit(3, 2, 2))),
+          sliding_graph(2, 5)};
+}
+
+// Every window of g, at every shot length up to 30, as the reference and
+// the commitment schedule enumerate them: same instances, zones, ports,
+// imports, sends and producer instances.
+void expect_schedule_matches(const dem_chunks_spec &spec,
+                             const window_graph &g) {
+  const auto tmpl = std::make_shared<const experiment_template>(spec);
+  for (auto R = tmpl->min_rounds(); R <= 30; ++R) {
+    const parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const auto schedule = schedule_windows(tmpl, g.layers, g.edges, R);
+    const auto &windows = reference.windows();
+    SCOPED_TRACE("R=" + std::to_string(R));
+    ASSERT_EQ(windows.size(), schedule.windows.size());
+    for (std::size_t i = 0; i < windows.size(); ++i) {
+      const auto &w = windows[i];
+      const auto &s = schedule.windows[i];
+      SCOPED_TRACE(w.node + "[" + std::to_string(w.k) + "]");
+      EXPECT_EQ(w.node, s.node);
+      EXPECT_EQ(w.k, s.k);
+      EXPECT_EQ(w.rounds, s.rounds);
+      EXPECT_EQ(w.commit, s.commit);
+      EXPECT_EQ(w.buffers, s.buffers);
+      EXPECT_EQ(w.input_exists, s.input.exists);
+      EXPECT_EQ(w.output_exists, s.output.exists);
+      EXPECT_EQ(w.imports, s.output.imports);
+      EXPECT_EQ(w.inputs, s.inputs);
+      ASSERT_EQ(w.sends.size(), s.sends.size());
+      for (std::size_t j = 0; j < w.sends.size(); ++j) {
+        EXPECT_EQ(w.sends[j].id, s.sends[j].id);
+        EXPECT_EQ(w.sends[j].mode, s.sends[j].mode);
+        EXPECT_EQ(w.sends[j].rounds, s.sends[j].rounds);
+      }
+    } // end - for(i)
+  } // end - for(R)
+} // end - expect_schedule_matches()
+
+// The reference's windows and dependencies are the commitment schedule's,
+// which is built independently. next_only_spec has faults that reach the
+// next round without touching their own, which still sets the width of the
+// default sends and imports.
+TEST(ParallelWindowReference, WindowsMatchTheSchedule) {
+  for (const auto &spec : {arbitrary_memory_spec(5), next_only_spec()})
+    for (const auto &g : swept_layouts())
+      expect_schedule_matches(spec, g);
+}
+
+// The request of g's layer for node.
+const window_request &request_of(const window_graph &g,
+                                 const std::string &node) {
+  return std::find_if(g.layers.begin(), g.layers.end(),
+                      [&](const window_layer &l) { return l.node == node; })
+      ->request;
+}
+
+// The rows of column c of a dense matrix.
+std::vector<std::uint32_t> column_rows(const cudaqx::tensor<uint8_t> &m,
+                                       std::size_t c) {
+  std::vector<std::uint32_t> rows;
+  for (std::size_t r = 0; r < m.shape()[0]; ++r)
+    if (m.at({r, c}))
+      rows.push_back(static_cast<std::uint32_t>(r));
+  return rows;
+}
+
+// Every production window of g in an R-round shot, built by
+// window_from_dem_chunks(), against the reference's slice of the whole shot:
+// its rows, the decoder's columns over them with their priors, every shot
+// column's observables, and which of its own faults it commits.
+void expect_models_match(const std::shared_ptr<const experiment_template> &t,
+                         const window_graph &g, std::size_t R) {
+  const parallel_window_reference reference(t->spec(), g, R,
+                                            "single_error_lut");
+  const auto &s = reference.model();
+  const auto &windows = reference.windows();
+  SCOPED_TRACE("R=" + std::to_string(R));
+  for (std::size_t i = 0; i < windows.size(); ++i) {
+    const auto &rw = windows[i];
+    const auto w = window_from_dem_chunks(t, request_of(g, rw.node), rw.k, R);
+    const auto &h = w.model.detector_error_matrix;
+    const auto &o = w.model.observables_flips_matrix;
+    const auto &columns = reference.decoder_columns(i);
+    SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
+    ASSERT_EQ(w.num_own_rows, rw.num_own_rows);
+    ASSERT_EQ(h.shape()[0], rw.rows.size());
+    ASSERT_EQ(w.num_decoder_columns(), columns.size());
+    for (std::size_t c = 0; c < columns.size(); ++c) {
+      EXPECT_EQ(column_rows(h, c), columns[c]) << "column " << c;
+      EXPECT_EQ(w.model.error_rates[c], reference.priors(i)[c]) << c;
+    }
+    for (std::size_t c = 0; c < rw.columns.size(); ++c)
+      EXPECT_EQ(column_rows(o, c), s.o[rw.columns[c]]) << "column " << c;
+    for (std::size_t c = 0; c < rw.num_faults; ++c)
+      EXPECT_EQ(rw.committed[c] != 0,
+                c >= w.commit_columns.begin && c < w.commit_columns.end)
+          << "column " << c;
+  } // end - for(i)
+} // end - expect_models_match()
+
+// The production models agree with the reference's, which slices the whole
+// shot independently, for every layout and shot length up to 30. The
+// reference does not model the column options; the DecodingWindowColumns
+// tests check merged windows against these unmerged ones instead.
+TEST(ParallelWindowReference, ModelsMatchTheWindows) {
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3),
+        surface_memory_spec(3, 0.01)}) {
+    const auto tmpl = std::make_shared<const experiment_template>(spec);
+    for (const auto &g : swept_layouts())
+      for (auto R = tmpl->min_rounds(); R <= 30; ++R)
+        expect_models_match(tmpl, g, R);
+  }
+}
+
+// Every single detectable fault decodes to an equivalent correction, at
+// every shot length, with one single_error_lut per window, and every window
+// explains its input. This covers every straddler and every terminal clip.
+// rep5_spec has two faults with the same rows and different observables,
+// which no decoder can tell apart, so the sweep uses memories without them.
+TEST(ParallelWindowReference, SingleFaultsDecodeExactly) {
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3),
+        surface_memory_spec(3, 0.01)}) {
+    for (const auto &g : swept_layouts()) {
+      for (auto R = experiment_template(spec).min_rounds(); R <= 30; ++R) {
+        parallel_window_reference reference(spec, g, R, "single_error_lut");
+        const auto &s = reference.model();
+        SCOPED_TRACE("R=" + std::to_string(R));
+        for (std::size_t c = 0; c < s.h.size(); ++c) {
+          std::vector<std::uint8_t> fault(s.h.size(), 0);
+          if (s.h[c].empty())
+            continue;
+          fault[c] = 1;
+          const auto got = reference.decode(detectors_of(s, c));
+          EXPECT_TRUE(equivalent(s, got.errors, fault)) << "column " << c;
+          EXPECT_TRUE(got.satisfied) << "column " << c;
+        }
+      } // end - for(R)
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(ParallelWindowReference, SingleFaultsDecodeExactly)
+
+// Without either send, some single fault decodes wrongly in each layout, so
+// each send is needed for single faults to decode exactly. Without the
+// forward delta, a measurement error in A's last commit round reaches B's
+// first round, where a boundary data fault of B explains it a second time.
+// Without the backward residual, B's imports keep detection events A's
+// commit already explains, and B explains them again. PyMatching explains
+// whatever it is given; single_error_lut commits nothing for a pattern no
+// single column explains, which hides the missing residual.
+TEST(ParallelWindowReference, SendsAreNeeded) {
+  constexpr std::size_t R = 20; // two periods of each layout
+  const auto spec = surface_memory_spec(3, 0.01);
+  for (const auto &g : {parallel_graph(layered(2, 1, 3)),
+                        parallel_graph(interior_commit(3, 2, 2))}) {
+    parallel_window_reference reference(spec, g, R, "pymatching", matching);
+    const auto &s = reference.model();
+    for (const std::string send : {"forward", "backward"}) {
+      std::size_t wrong = 0;
+      for (std::size_t c = 0; c < s.h.size(); ++c) {
+        std::vector<std::uint8_t> fault(s.h.size(), 0);
+        const auto detectors = detectors_of(s, c);
+        fault[c] = 1;
+        EXPECT_TRUE(equivalent(s, reference.decode(detectors).errors, fault))
+            << "column " << c;
+        wrong +=
+            !equivalent(s, reference.decode(detectors, {send}).errors, fault);
+      }
+      EXPECT_GT(wrong, 0u) << "without " << send;
+    } // end - for(send)
+  } // end - for(g)
+} // end - TEST(ParallelWindowReference, SendsAreNeeded)
+
+// commit_window() on the production window, from the reference's detectors
+// and estimate, commits the reference's faults and gives its sends and frame
+// update, which the reference takes from the whole shot.
+void expect_commit_matches(const decoding_window &w,
+                           const pw_reference::reference_window &rw,
+                           const pw_reference::window_decode &d) {
+  auto estimate = d.estimate;
+  std::vector<std::size_t> committed;
+  estimate.resize(w.num_decoder_columns() + w.num_logical_error_columns, 0);
+  const auto out = commit_window(w, d.detectors, estimate);
+  for (std::size_t c = 0; c < rw.num_faults; ++c)
+    if (out.committed[c])
+      committed.push_back(rw.columns[c]);
+  ASSERT_EQ(committed, d.committed);
+  ASSERT_EQ(out.sends, d.sends);
+  ASSERT_EQ(out.frame, d.frame);
+}
+
+// On sampled shots where every window converged, the committed faults
+// reproduce every detection event of the shot (the soundness invariant),
+// and every window's solution explains its input (what verify_residual
+// checks). From the reference's detectors and estimate, every production
+// window commits the same faults and gives the same sends and frame update.
+TEST(ParallelWindowReference, SampledShotsAreSound) {
+  constexpr std::size_t R = 20;        // two periods of each layout
+  constexpr std::size_t shots = 10000; // enough to reach every window variant
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), surface_memory_spec(3, 0.02)}) {
+    const auto tmpl = std::make_shared<const experiment_template>(spec);
+    for (const auto &g : {parallel_graph(layered(3, 3, 9)),
+                          parallel_graph(interior_commit(3, 3, 9)),
+                          parallel_graph(with_truncate(layered(3, 3, 9)))}) {
+      parallel_window_reference reference(spec, g, R, "pymatching", matching);
+      const auto &s = reference.model();
+      const auto &windows = reference.windows();
+      const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+          s.dem.detector_error_matrix, shots, s.dem.error_rates, 11);
+      std::vector<decoding_window> production;
+      std::size_t checked = 0;
+      for (const auto &rw : windows)
+        production.push_back(
+            window_from_dem_chunks(tmpl, request_of(g, rw.node), rw.k, R));
+      for (std::size_t i = 0; i < shots; ++i) {
+        const auto syndrome = row_of(detectors, i);
+        const auto got = reference.decode(syndrome);
+        if (!got.converged)
+          continue;
+        ++checked;
+        ASSERT_EQ(syndrome_of(s, got.errors), syndrome) << "shot " << i;
+        ASSERT_TRUE(got.satisfied) << "shot " << i;
+        for (std::size_t j = 0; j < windows.size(); ++j)
+          ASSERT_NO_FATAL_FAILURE(
+              expect_commit_matches(production[j], windows[j], got.windows[j]))
+              << "shot " << i << ", window " << j;
+      }
+      EXPECT_EQ(checked, shots);
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(ParallelWindowReference, SampledShotsAreSound)
+
+// Windowed decoding agrees with monolithic matching on every shot with at
+// most one fault, and the two are right on the same shots but for a few: the
+// logical error rates, near 0.11 at d = 3 and 0.06 at d = 5, then differ by
+// at most 0.0033. The bound leaves room for samples that differ between
+// standard libraries; on this one the two disagree on at most 2 shots.
+TEST(ParallelWindowReference, TracksMonolithicMatching) {
+  constexpr std::size_t shots = 3000;     // a few hundred logical errors
+  constexpr std::size_t disagreeing = 10; // shots one decoder alone gets right
+  constexpr double p = 0.01;              // well below threshold
+  for (const std::size_t d : {3, 5}) {
+    const auto spec = surface_memory_spec(d, p);
+    const auto c = static_cast<std::int64_t>(d);
+    const std::size_t R = 8 * d + 1; // two periods of the layouts below
+    for (const auto &g : {parallel_graph(layered(c, c, 3 * c)),
+                          parallel_graph(interior_commit(c, c, 3 * c))}) {
+      parallel_window_reference reference(spec, g, R, "pymatching", matching);
+      const auto &s = reference.model();
+      const auto monolithic = make_decoder(s.h, s.row.back(), s.dem.error_rates,
+                                           "pymatching", matching);
+      const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+          s.dem.detector_error_matrix, shots, s.dem.error_rates, 13);
+      std::size_t windowed_wrong = 0;
+      std::size_t monolithic_wrong = 0;
+      std::size_t differ = 0;
+      for (std::size_t i = 0; i < shots; ++i) {
+        const auto syndrome = row_of(detectors, i);
+        const auto fault = row_of(errors, i);
+        const auto truth = observables_of(s, fault);
+        const auto windowed = reference.decode(syndrome).observables;
+        const auto out = monolithic->decode(
+            std::vector<float_t>(syndrome.begin(), syndrome.end()));
+        std::vector<std::uint8_t> matched(out.result.size());
+        for (std::size_t j = 0; j < matched.size(); ++j)
+          matched[j] = convert_soft_to_hard(out.result[j]);
+        const auto whole = observables_of(s, matched);
+        if (std::accumulate(fault.begin(), fault.end(), 0u) <= 1)
+          EXPECT_EQ(windowed, truth) << "d=" << d << " shot " << i;
+        windowed_wrong += windowed != truth;
+        monolithic_wrong += whole != truth;
+        differ += (windowed != truth) != (whole != truth);
+      } // end - for(i)
+      EXPECT_LE(differ, disagreeing)
+          << "d=" << d << ": windowed " << windowed_wrong << ", monolithic "
+          << monolithic_wrong << " of " << shots;
+    } // end - for(g)
+  } // end - for(d)
+} // end - TEST(ParallelWindowReference, TracksMonolithicMatching)
+
+// ---------------------------------------------------------------------------
+// Data artifact store
+// ---------------------------------------------------------------------------
+
+// Expect check() to throw std::logic_error mentioning text.
+template <typename Check>
+void expect_logic_error(Check &&check, const std::string &text) {
+  try {
+    check();
+    ADD_FAILURE() << "expected: " << text;
+  } catch (const std::logic_error &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+// sha256_hex() gives the FIPS 180-2 test vectors, and the lengths either side
+// of the block boundary where the length field moves to a second block.
+TEST(DataArtifactStore, Sha256MatchesTheStandardVectors) {
+  EXPECT_EQ(sha256_hex(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  EXPECT_EQ(sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  EXPECT_EQ(
+      sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  EXPECT_EQ(sha256_hex(std::string(1000000, 'a')),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+  EXPECT_EQ(sha256_hex(std::string(55, 'a')),
+            "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318");
+  EXPECT_EQ(sha256_hex(std::string(56, 'a')),
+            "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a");
+  EXPECT_EQ(sha256_hex(std::string(64, 'a')),
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+}
+
+// Changing any one field of a template or a window request changes its
+// canonical bytes, so no field is left out of the content.
+TEST(DataArtifactStore, EveryFieldIsContent) {
+  using spec_change = std::function<void(dem_chunks_spec &)>;
+  using request_change = std::function<void(window_request &)>;
+  const auto spec = arbitrary_memory_spec(5, true);
+  const auto request = layered(2, 2, 3).a;
+  const std::vector<spec_change> spec_changes{
+      [](auto &s) { s.num_rounds = 7; },
+      [](auto &s) { s.num_rounds.reset(); },
+      [](auto &s) { s.measurements_per_round = 4; },
+      [](auto &s) { s.phases_supply_D_sparse = true; },
+      [](auto &s) { s.observable_names = {"Z_L"}; },
+      [](auto &s) { s.connections.pop_back(); },
+      [](auto &s) { std::swap(s.seam.from_seam, s.seam.to_seam); },
+      [](auto &s) { s.phases[0].id = phase_name::dem_final; },
+      [](auto &s) { s.phases[0].spec.num_faults = 5; },
+      [](auto &s) { s.phases[0].spec.H_sparse = {0, 1, -1}; },
+      [](auto &s) {
+        s.phases[0].spec.seam_specs = {{seam_name::prev_round, {{0, -1}, {}}}};
+      },
+      [](auto &s) {
+        s.phases[0].spec.seam_specs = {
+            {seam_name::prev_round, {{0, -1}, {0, -1}}}};
+      },
+      [](auto &s) { s.phases[0].spec.O_sparse = {1, -1}; },
+      [](auto &s) { s.phases[0].spec.error_rates[0] = 0.03; },
+      [](auto &s) { s.phases[0].spec.D_sparse = {0, -1}; },
+      [](auto &s) { s.phases[0].spec.num_measurements = 5; },
+      [](auto &s) { s.phases[2].spec.m2o_sparse = {0, -1}; }};
+  const std::vector<request_change> request_changes{
+      [](auto &r) { r.period = 6; },
+      [](auto &r) { r.offset = 1; },
+      [](auto &r) { r.commit = round_range{0, 1}; },
+      [](auto &r) { r.buffers.pop_back(); },
+      [](auto &r) { r.input.disposition = port_disposition::closed; },
+      [](auto &r) { r.input.prior = 0.02; },
+      [](auto &r) { r.input.boundary = input_boundary::columns; },
+      [](auto &r) { r.output.disposition = port_disposition::closed; },
+      [](auto &r) { r.output.imports = round_range{4, 5}; },
+      [](auto &r) { r.sends[0].id = "ahead"; },
+      [](auto &r) { r.sends[0].mode = send_mode::delta; },
+      [](auto &r) { r.sends[0].rounds = {{2, 3}}; },
+      [](auto &r) { r.columns.merge_identical = true; },
+      [](auto &r) {
+        r.columns.conflicting_parallel = parallel_resolution::most_likely;
+      }};
+  std::set<std::string> seen{canonical_bytes(spec), canonical_bytes(request)};
+  for (const auto &change : spec_changes) {
+    auto changed = spec;
+    change(changed);
+    EXPECT_TRUE(seen.insert(canonical_bytes(changed)).second);
+  }
+  for (const auto &change : request_changes) {
+    auto changed = request;
+    change(changed);
+    EXPECT_TRUE(seen.insert(canonical_bytes(changed)).second);
+  }
+  EXPECT_EQ(canonical_bytes(spec), canonical_bytes(dem_chunks_spec(spec)));
+} // end - TEST(DataArtifactStore, EveryFieldIsContent)
+
+// Equal content is one entry and one handle; its record gives the kind and
+// the size and sha256 of the canonical bytes. Lookups return what was added.
+TEST(DataArtifactStore, EqualTemplatesShareOneEntry) {
+  data_artifact_store store;
+  const auto spec = arbitrary_memory_spec(5);
+  const auto first = store.add_template(spec);
+  const auto again = store.add_template(dem_chunks_spec(spec));
+  const auto other = store.add_template(rep5_spec());
+  const auto bytes = canonical_bytes(spec);
+  EXPECT_EQ(first, again);
+  EXPECT_NE(first, other);
+  EXPECT_EQ(store.find_template(spec), first);
+  ASSERT_EQ(store.records().size(), 2u);
+  EXPECT_EQ(
+      store.records()[0],
+      (data_artifact_record{"dem_chunks", bytes.size(), sha256_hex(bytes)}));
+  EXPECT_NE(store.records()[1].sha256, store.records()[0].sha256);
+  expect_logic_error([&] { store.find_template(single_round_spec()); },
+                     "data_artifact_store: no template");
+}
+
+// A Stim DEM is keyed by its text.
+TEST(DataArtifactStore, StimDemsAreKeyedByTheirText) {
+  data_artifact_store store;
+  const std::string text = "error(0.01) D0\n";
+  store.add_stim_dem(text);
+  store.add_stim_dem(std::string(text));
+  store.add_stim_dem("error(0.02) D0\n");
+  ASSERT_EQ(store.records().size(), 2u);
+  EXPECT_EQ(store.records()[0],
+            (data_artifact_record{"stim_dem", text.size(), sha256_hex(text)}));
+}
+
+// Every variant of a request is built once, at the first shot length that
+// has it, and equal requests from other nodes reuse it. Lookups never build:
+// a variant, request or template the store did not build is a logic error.
+TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
+  data_artifact_store store;
+  data_artifact_store other;
+  const auto tmpl = store.add_template(arbitrary_memory_spec(5));
+  const auto request = layered(2, 2, 3).a;
+  std::set<variant_key> keys;
+  store.add_windows(tmpl, request);
+  const auto added = store.records().size();
+  store.add_windows(tmpl, window_request(request));
+  EXPECT_EQ(store.records().size(), added);
+  for (auto R = tmpl->min_rounds();
+       R < variant_probe_rounds(*tmpl, request) + 2 * request.period; ++R) {
+    const auto instances = window_instances(request, R);
+    for (auto k = instances.begin; k < instances.end; ++k) {
+      const auto key = window_variant(*tmpl, request, k, R);
+      const auto w = store.find_window(*tmpl, request, key);
+      keys.insert(key);
+      ASSERT_NE(w, nullptr);
+      EXPECT_EQ(store.find_window(*tmpl, request, key), w);
+      EXPECT_NO_THROW(check_same_window_up_to_shift(
+          *w, window_from_dem_chunks(tmpl, request, k, R)));
+    }
+  } // end - for(R)
+  EXPECT_EQ(added, 1 + keys.size());
+  for (std::size_t i = 1; i < added; ++i)
+    EXPECT_EQ(store.records()[i].kind, "window");
+  expect_logic_error(
+      [&] { store.find_window(*tmpl, layered(2, 2, 3).b, *keys.begin()); },
+      "was not built at configuration time");
+  expect_logic_error(
+      [&] { store.find_window(*tmpl, request, variant_key{999, 999}); },
+      "was not built at configuration time");
+} // end - TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild)
+
+// A template is its content: an equal one built elsewhere finds the store's
+// windows, a zero's sign is not content, and a store that holds no template
+// with that content rejects it.
+TEST(DataArtifactStore, TemplatesAreTheirContent) {
+  data_artifact_store store;
+  data_artifact_store other;
+  auto spec = arbitrary_memory_spec(5);
+  auto negative = spec;
+  spec.phases[0].spec.error_rates[0] = 0.0;
+  negative.phases[0].spec.error_rates[0] = -0.0;
+  const auto tmpl = store.add_template(spec);
+  const auto twin = std::make_shared<const experiment_template>(negative);
+  const auto request = layered(2, 2, 3).a;
+  const auto key = window_variant(*tmpl, request, 1, 14);
+  store.add_windows(twin, request);
+  EXPECT_EQ(canonical_bytes(negative), canonical_bytes(spec));
+  EXPECT_EQ(store.add_template(negative), tmpl);
+  EXPECT_EQ(store.find_template(negative), tmpl);
+  EXPECT_EQ(store.find_window(*twin, request, key),
+            store.find_window(*tmpl, request, key));
+  EXPECT_EQ(store.records()[0].kind, "dem_chunks");
+  for (std::size_t i = 1; i < store.records().size(); ++i)
+    EXPECT_EQ(store.records()[i].kind, "window");
+  expect_logic_error([&] { other.add_windows(tmpl, request); },
+                     "no template with this content was added");
+  expect_logic_error([&] { other.find_window(*tmpl, request, key); },
+                     "no template with this content was added");
+} // end - TEST(DataArtifactStore, TemplatesAreTheirContent)
+
+// A stored window that holds the shot's readout round carries the
+// template's readout map, which a variant fixes since its key fixes where it
+// ends; every other window has none. wide_readout_spec's last phase has
+// m2o_sparse.
+TEST(DataArtifactStore, WindowsHoldingTheReadoutCarryM2o) {
+  data_artifact_store store;
+  const auto tmpl = store.add_template(wide_readout_spec());
+  std::size_t with_m2o = 0;
+  for (const auto &request : {layered(2, 2, 3).a, layered(2, 2, 3).b}) {
+    store.add_windows(tmpl, request);
+    for (auto R = tmpl->min_rounds(); R < variant_probe_rounds(*tmpl, request);
+         ++R) {
+      const auto instances = window_instances(request, R);
+      for (auto k = instances.begin; k < instances.end; ++k) {
+        const auto w = store.find_window(*tmpl, request,
+                                         window_variant(*tmpl, request, k, R));
+        const bool readout =
+            w->rounds.end == static_cast<std::int64_t>(w->shot_rounds);
+        SCOPED_TRACE("R=" + std::to_string(R) + " k=" + std::to_string(k));
+        EXPECT_EQ(w->m2o.has_value(), readout);
+        with_m2o += w->m2o.has_value();
+        EXPECT_NO_THROW(check_same_window_up_to_shift(
+            *w, window_from_dem_chunks(tmpl, request, k, R, readout)));
+      }
+    } // end - for(R)
+  } // end - for(request)
+  EXPECT_GT(with_m2o, 0u);
+} // end - TEST(DataArtifactStore, WindowsHoldingTheReadoutCarryM2o)
 
 } // namespace
 } // namespace cudaq::qec
