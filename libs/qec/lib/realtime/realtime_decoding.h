@@ -9,6 +9,7 @@
 #include "cudaq/qec/realtime/decoding_config.h"
 
 namespace cudaq::qec {
+class data_artifact_store;
 class decoding_task_graph;
 } // namespace cudaq::qec
 #include <cstdint>
@@ -55,6 +56,42 @@ prepare_decoder_params(
 __attribute__((visibility("default"))) cudaq::qec::decoder_init
 resolve_decoder_init(
     const cudaq::qec::decoding::config::decoder_config &decoder_config,
+    const std::filesystem::path &base_dir);
+
+/// Fill a data artifact store from a configuration: every template, named or
+/// inline, on a decoder entry or a task-graph node; every Stim DEM entry,
+/// with a file-backed one read and checked against its pinned sha256; and
+/// every window variant a window entry or an ingest layer needs. A layer
+/// builds its own request; while that equals the window entry it names, as
+/// parsing leaves it, the entry must be on the node's template. Callers
+/// include decoding_task_data_artifacts.h to use the store.
+///
+/// @param base_dir Directory a relative `stim_dem_path` resolves against, as
+/// for resolve_decoder_init().
+/// @throws std::runtime_error naming the entry, or the decoder and node, if a
+/// file cannot be read or does not match its sha256, an inline Stim DEM is
+/// pinned, a window entry's context or a layer's entry is not of the right
+/// kind or template, or a template or window cannot be built.
+/// @throws std::logic_error naming the same, if the store finds its own
+/// entries inconsistent, which no configuration causes.
+__attribute__((visibility("default"))) cudaq::qec::data_artifact_store
+fill_data_artifact_store(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
+    const std::filesystem::path &base_dir);
+
+/// A copy of `config` in which each decoder and task-graph node that names a
+/// pinned Stim DEM entry, by an unedited copy of its path, holds the entry's
+/// text in place of the path. Each pinned file is read once, here, and checked
+/// against its pin, so a model built from the copy is the one checked.
+///
+/// @param base_dir Directory a relative `stim_dem_path` resolves against, as
+/// for resolve_decoder_init().
+/// @throws std::runtime_error naming the entry if a pinned file cannot be read
+/// or does not match its sha256.
+__attribute__((visibility("default")))
+cudaq::qec::decoding::config::multi_decoder_config
+with_pinned_stim_dems(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
     const std::filesystem::path &base_dir);
 
 /// Construct and initialize one decoder for realtime use from already-resolved

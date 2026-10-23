@@ -17,8 +17,10 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <functional>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -573,5 +575,225 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
         check_parallel_columns(context, *requests.at(w.node), w,
                                schedule.num_rounds);
 } // end - validate_commitment()
+
+namespace {
+
+// Throws std::invalid_argument from validate_window_topology(), which the
+// graph builder runs.
+[[noreturn]] void reject_topology(const std::string &what) {
+  throw std::invalid_argument("from_topology: " + what);
+}
+
+// The request of `n`'s window port `port`, or null.
+const window_request *layer_request(const task_graph_node_config &n,
+                                    const std::string &port) {
+  for (const auto &w : n.windows)
+    if (w.layer == port)
+      return &w.request;
+  return nullptr;
+}
+
+// The nodes reachable from `id` along edges, in the order first reached.
+// The graph's output sink is not a node: each edge into it is a result of
+// its own, so two nodes that both feed it share nothing there.
+std::vector<std::string> downstream(const std::string &id,
+                                    const std::vector<task_graph_edge> &edges) {
+  std::vector<std::string> out;
+  std::vector<std::string> todo{id};
+  while (!todo.empty()) {
+    const auto at = todo.front();
+    todo.erase(todo.begin());
+    for (const auto &e : edges)
+      if (e.from_node == at && e.to_node != "output" &&
+          std::find(out.begin(), out.end(), e.to_node) == out.end()) {
+        out.push_back(e.to_node);
+        todo.push_back(e.to_node);
+      }
+  }
+  return out;
+}
+
+// The receive port index of "receive_<k>", or nothing for another name: k
+// is written in decimal without leading zeros, as the ports are named, and
+// at most 9 digits long, which no num_receives approaches and every size_t
+// holds.
+std::optional<std::size_t> receive_index(const std::string &port) {
+  const std::string prefix = "receive_";
+  std::size_t k = 0;
+  if (port.size() <= prefix.size() || port.compare(0, prefix.size(), prefix))
+    return std::nullopt;
+  const auto digits = port.substr(prefix.size());
+  if (digits.size() > 9 || (digits.size() > 1 && digits.front() == '0') ||
+      !std::all_of(digits.begin(), digits.end(),
+                   [](char c) { return c >= '0' && c <= '9'; }))
+    return std::nullopt;
+  for (const auto c : digits)
+    k = 10 * k + static_cast<std::size_t>(c - '0');
+  return k;
+}
+
+// A cycle of receives at index_offset 0 among `windows`, as the nodes along
+// it with the first repeated at the end, or empty if there is none. Each
+// such receive makes a window wait on another of its own index. A depth-first
+// search: `path` holds the nodes being visited, and a receive back onto it
+// closes a cycle.
+std::vector<std::string> same_index_cycle(
+    const std::map<std::string, const task_graph_node_config *> &windows,
+    const std::vector<task_graph_edge> &edges) {
+  std::vector<std::string> path;
+  std::set<std::string> done;
+  std::function<bool(const std::string &)> visit = [&](const std::string &id) {
+    path.push_back(id);
+    for (const auto &e : edges) {
+      if (e.from_node != id || !windows.count(e.to_node) ||
+          e.to_input == "input" || e.index_offset != 0 || done.count(e.to_node))
+        continue;
+      const auto on_path = std::find(path.begin(), path.end(), e.to_node);
+      if (on_path != path.end()) {
+        path.erase(path.begin(), on_path);
+        path.push_back(e.to_node);
+        return true;
+      }
+      if (visit(e.to_node))
+        return true;
+    }
+    path.pop_back();
+    done.insert(id);
+    return false;
+  };
+  for (const auto &[id, n] : windows)
+    if (!done.count(id) && visit(id))
+      return path;
+  return {};
+} // end - same_index_cycle()
+
+} // namespace
+
+// Shape first, so a mistake is named for what it is rather than as the
+// commitment failure it causes; then validate_commitment() per ingest node.
+void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
+                              const std::vector<task_graph_edge> &edges) {
+  std::map<std::string, const task_graph_node_config *> ingests;
+  std::map<std::string, const task_graph_node_config *> windows;
+  std::map<std::string, std::shared_ptr<const experiment_template>> templates;
+  std::map<std::string, std::pair<std::string, std::string>> fed_by;
+  std::map<std::string, std::vector<window_layer>> layers;
+  std::map<std::string, std::vector<task_graph_edge>> sends;
+  for (const auto &n : nodes) {
+    const auto *kind = find_task_graph_node_kind(n.kind);
+    if (kind && kind->name == "ingest")
+      ingests[n.id] = &n;
+    else if (kind && kind->name == "decode_window")
+      windows[n.id] = &n;
+  }
+  if (ingests.empty() && windows.empty())
+    return;
+
+  for (const auto &[id, n] : ingests) {
+    std::size_t fed = 0;
+    std::size_t other = 0;
+    for (const auto &e : edges) {
+      if (e.to_node != id)
+        continue;
+      if (e.from_node == "measurements" || e.from_node == "dets")
+        ++fed;
+      else
+        ++other;
+    }
+    if (fed != 1 || other != 0)
+      reject_topology("ingest node '" + id +
+                      "' must be fed by measurements alone");
+    if (!n->dem)
+      reject_topology("ingest node '" + id + "' has no dem_chunks template");
+    templates[id] = std::make_shared<const experiment_template>(*n->dem);
+    if (n->node_params.contains("read_logical") &&
+        n->node_params.get<bool>("read_logical") &&
+        templates[id]->readout().empty())
+      reject_topology("ingest node '" + id +
+                      "' reads the logical value, but its template's last "
+                      "phase has no m2o_sparse");
+  } // end - for(ingests)
+
+  for (const auto &[id, n] : windows) {
+    const auto num_receives =
+        n->node_params.contains("num_receives")
+            ? n->node_params.get<std::size_t>("num_receives")
+            : std::size_t{0};
+    for (const auto &e : edges) {
+      if (e.to_node != id)
+        continue;
+      const auto receive = receive_index(e.to_input);
+      if (e.to_input == "input") {
+        const auto ingest = ingests.find(e.from_node);
+        if (ingest == ingests.end() ||
+            !layer_request(*ingest->second, e.from_output))
+          reject_topology("decode_window node '" + id + "' is fed by '" +
+                          e.from_node + "." + e.from_output +
+                          "', which is not a window port of an ingest node");
+        if (fed_by.count(id))
+          reject_topology("decode_window node '" + id +
+                          "' is fed by more than one window port");
+        fed_by[id] = {e.from_node, e.from_output};
+      } else if (!receive) {
+        reject_topology("decode_window node '" + id + "' has no input '" +
+                        e.to_input + "'");
+      } else if (*receive >= num_receives) {
+        reject_topology("decode_window node '" + id + "' has num_receives " +
+                        std::to_string(num_receives) +
+                        ", so it has no input '" + e.to_input + "'");
+      } else if (!windows.count(e.from_node)) {
+        reject_topology("decode_window node '" + id + "' receives on '" +
+                        e.to_input + "' from '" + e.from_node +
+                        "', which is not a decode_window node");
+      } else if (e.index_offset > 0) {
+        reject_topology(describe(e) + " has a positive index_offset: a window "
+                                      "receives only from its own or earlier "
+                                      "instances");
+      }
+    } // end - for(e)
+    if (!fed_by.count(id))
+      reject_topology("decode_window node '" + id +
+                      "' needs an input from a window port of an ingest node");
+  } // end - for(windows)
+
+  // Receives at index_offset 0 that close a cycle leave every window on it
+  // waiting on its own index.
+  if (const auto cycle = same_index_cycle(windows, edges); !cycle.empty()) {
+    std::string nodes = "'" + cycle.front() + "'";
+    for (std::size_t i = 1; i < cycle.size(); ++i)
+      nodes += " -> '" + cycle[i] + "'";
+    reject_topology("decode_window receives at index_offset 0 form a cycle, " +
+                    nodes +
+                    ", so no window on it can start; give one of these "
+                    "receives a negative index_offset");
+  }
+
+  for (const auto &e : edges)
+    if (windows.count(e.to_node) && e.to_input != "input") {
+      const auto &from = fed_by.at(e.from_node).first;
+      const auto &to = fed_by.at(e.to_node).first;
+      if (from != to)
+        reject_topology(describe(e) + " joins the windows of ingest nodes '" +
+                        from + "' and '" + to + "'");
+      sends[to].push_back(e);
+    }
+  for (auto a = ingests.begin(); a != ingests.end(); ++a)
+    for (auto b = std::next(a); b != ingests.end(); ++b) {
+      if (*a->second->dem == *b->second->dem)
+        continue;
+      const auto from_b = downstream(b->first, edges);
+      for (const auto &node : downstream(a->first, edges))
+        if (std::find(from_b.begin(), from_b.end(), node) != from_b.end())
+          reject_topology("ingest nodes '" + a->first + "' and '" + b->first +
+                          "' have different templates but both reach '" + node +
+                          "'");
+    }
+
+  for (const auto &[id, fed] : fed_by)
+    layers[fed.first].push_back(
+        {id, fed.second, *layer_request(*ingests.at(fed.first), fed.second)});
+  for (const auto &[id, ingest_layers] : layers)
+    validate_commitment(templates.at(id), ingest_layers, sends[id]);
+} // end - validate_window_topology()
 
 } // namespace cudaq::qec

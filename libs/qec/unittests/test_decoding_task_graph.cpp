@@ -8336,6 +8336,124 @@ TEST(DecodingTaskGraph, XorCombineRunDisagreesOnUniqueTwoFaultSyndrome) {
   EXPECT_EQ(run_bits({1, 0, 0, 1}), (std::vector<uint8_t>{1}));
 }
 
+namespace {
+
+// Three single_window branches over one 4-detector chain, each reporting one
+// fault's flip -- fault j on branch j, by a depth-2 LUT -- into an xor with
+// num_inputs 3 on in_0, in_1 and in_2, plus `extra` edges.
+std::unique_ptr<decoding_task_graph> three_way_xor_graph(
+    std::size_t num_inputs = 3,
+    std::vector<task_graph_edge> edges = {{"x", "output", "sum", "in_0"},
+                                          {"y", "output", "sum", "in_1"},
+                                          {"z", "output", "sum", "in_2"}}) {
+  const auto h = sparse_binary_matrix::from_nested_csr(
+      4, 5, {{0, 1}, {1, 2}, {2, 3}, {3, 4}});
+  std::vector<task_graph_node_config> nodes;
+  task_graph_node_config sum;
+  for (const auto &[id, fault] : std::vector<std::pair<std::string, uint32_t>>{
+           {"x", 0}, {"y", 1}, {"z", 2}}) {
+    cudaqx::heterogeneous_map params;
+    task_graph_node_config n;
+    params.insert("lut_error_depth", 2);
+    n.id = id;
+    n.kind = "single_window";
+    n.d_sparse = {{0}, {1}, {2}, {3}};
+    n.o_sparse = {{fault}};
+    n.decoder_instance = get_decoder("multi_error_lut", h, std::move(params));
+    nodes.push_back(std::move(n));
+    edges.push_back({"measurements", "output", id, "input"});
+  }
+  sum.id = "sum";
+  sum.kind = "xor";
+  sum.node_params.insert("num_inputs", num_inputs);
+  nodes.push_back(std::move(sum));
+  edges.push_back({"sum", "output", "output", "input"});
+  return decoding_task_graph::from_topology(std::move(nodes), edges);
+} // end - three_way_xor_graph()
+
+// Syndromes of faults {0}, {1}, {2}, {0,1}, {0,2} and {1,2} on the chain,
+// and zero, with what an xor of the three branches gives: one input set,
+// then two.
+const std::vector<std::pair<std::vector<uint8_t>, uint8_t>> three_way_cases{
+    {{0, 0, 0, 0}, 0}, {{1, 0, 0, 0}, 1}, {{1, 1, 0, 0}, 1}, {{0, 1, 1, 0}, 1},
+    {{0, 1, 0, 0}, 0}, {{1, 1, 1, 0}, 0}, {{1, 0, 1, 0}, 0}};
+
+} // namespace
+
+// With num_inputs, xor takes in_0 ... in_{N-1} and XORs them all: a single
+// fault sets one input and two faults set two, so a fold that drops or
+// forwards an input, or ORs them, gives something else.
+TEST(DecodingTaskGraph, XorWithNumInputsFoldsEveryInput) {
+  auto graph = three_way_xor_graph();
+  for (const auto &[bits, want] : three_way_cases) {
+    measurement_results m;
+    m.bits = bits;
+    EXPECT_EQ(graph->run(m).bits, std::vector<uint8_t>{want})
+        << "syndrome " << int(bits[0]) << int(bits[1]) << int(bits[2])
+        << int(bits[3]);
+  }
+}
+
+// Streaming never fires the xor: each branch folds into the output by path
+// parity, so streaming gives what run() does.
+TEST(DecodingTaskGraph, XorWithNumInputsStreamsAsItRuns) {
+  auto graph = three_way_xor_graph();
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  for (const auto &[bits, want] : three_way_cases)
+    EXPECT_EQ(stream_shot(*graph, bits), want)
+        << "syndrome " << int(bits[0]) << int(bits[1]) << int(bits[2])
+        << int(bits[3]);
+}
+
+// num_inputs below 2 is rejected, by the kind's parameter check as other
+// kinds' are, and an xor with num_inputs has no ports a and b, nor one past
+// its last.
+TEST(DecodingTaskGraph, XorNumInputsNamesItsPorts) {
+  for (const std::size_t n : {std::size_t{0}, std::size_t{1}})
+    try {
+      three_way_xor_graph(n);
+      ADD_FAILURE() << "num_inputs " << n << " was accepted";
+    } catch (const std::exception &e) {
+      EXPECT_NE(std::string(e.what()).find("num_inputs must be at least 2"),
+                std::string::npos)
+          << e.what();
+    }
+  EXPECT_THROW(three_way_xor_graph(3, {{"x", "output", "sum", "a"},
+                                       {"y", "output", "sum", "in_1"},
+                                       {"z", "output", "sum", "in_2"}}),
+               std::invalid_argument);
+  EXPECT_THROW(three_way_xor_graph(3, {{"x", "output", "sum", "in_0"},
+                                       {"y", "output", "sum", "in_1"},
+                                       {"z", "output", "sum", "in_3"}}),
+               std::invalid_argument);
+}
+
+// num_inputs has a maximum, checked before any port is built: from C++, an
+// int -1 reads as the largest size_t, which would otherwise pass the minimum
+// and exhaust memory naming ports.
+TEST(DecodingTaskGraph, XorNumInputsHasAMaximum) {
+  const auto rejects = [](const auto num_inputs) {
+    std::vector<task_graph_node_config> nodes;
+    task_graph_node_config sum;
+    sum.id = "sum";
+    sum.kind = "xor";
+    sum.node_params.insert("num_inputs", num_inputs);
+    nodes.push_back(std::move(sum));
+    try {
+      decoding_task_graph::from_topology(
+          std::move(nodes), {{"sum", "output", "output", "input"}});
+      ADD_FAILURE() << "an xor of " << num_inputs << " inputs was built";
+    } catch (const std::exception &e) {
+      EXPECT_NE(std::string(e.what()).find("num_inputs must be at most 1024"),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(-1);
+  rejects(std::size_t{1025});
+}
+
 TEST(DecodingTaskGraph, FromTopologyRejectsAnEmptyGraph) {
   EXPECT_THROW(decoding_task_graph::from_topology({}), std::invalid_argument);
 }

@@ -8,6 +8,7 @@
 // topologies, so node construction, DEM expansion, and wire compilation each
 // exist once.
 
+#include "decoding_task_commitment.h"
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
@@ -672,8 +673,9 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
         "from_topology: edges are required for a graph with " +
         std::to_string(nodes.size()) +
         " nodes; they are inferred only for a single node");
-
-  auto i = std::make_unique<impl>();
+  // Every node's id, kind and parameters are checked before the windowed
+  // layout, which reads them, and that is checked whole before any node is
+  // built, so a mistake in it is reported as itself.
   std::unordered_set<std::string> seen_ids;
   for (auto &cfg : nodes) {
     if (cfg.id.empty())
@@ -688,8 +690,7 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     if (!kind)
       throw std::invalid_argument("from_topology: node '" + cfg.id +
                                   "' has unregistered kind '" + cfg.kind + "'");
-    const auto *factory = find_node_factory(cfg.kind);
-    if (!factory)
+    if (!find_node_factory(cfg.kind))
       throw std::invalid_argument("from_topology: node kind '" + kind->name +
                                   "' is registered but has no builder");
 
@@ -702,7 +703,14 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     decoding::config::validate_custom_args(*schema, cfg.node_params,
                                            "from_topology: node '" + cfg.id +
                                                "' parameters");
+  } // end - for(cfg)
+  if (!infer_edges)
+    validate_window_topology(nodes, edges);
 
+  auto i = std::make_unique<impl>();
+  for (auto &cfg : nodes) {
+    const auto *kind = find_task_graph_node_kind(cfg.kind);
+    const auto *factory = find_node_factory(cfg.kind);
     auto ctx = prepare_node(cfg, *kind);
     // The first node carrying a DEM owns the graph's D; a single-node graph
     // also exposes its O.  o_matrix() is not meaningful once outcomes are

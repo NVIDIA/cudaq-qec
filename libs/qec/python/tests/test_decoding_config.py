@@ -899,7 +899,8 @@ if __name__ == "__main__":
 # --- exported JSON Schema: the two model sources ----------------------------
 #
 # The schema must describe the language the runtime actually accepts. It keys
-# the DEM source on a NON-EMPTY stim_dem_path, matching resolve_decoder_init.
+# the DEM source on a NON-EMPTY stim_dem_path or stim_dem, matching
+# resolve_decoder_init.
 
 
 def _decoder_doc(**overrides):
@@ -941,6 +942,20 @@ def test_json_schema_rejects_both_sources():
 
 def test_json_schema_rejects_neither_source():
     assert not _schema_accepts(_decoder_doc())
+
+
+def test_json_schema_accepts_inline_dem_source():
+    assert _schema_accepts(_decoder_doc(stim_dem="error(0.1) D0 L0\n"))
+    # One word names a data_artifacts entry; the schema sees a string either
+    # way.
+    assert _schema_accepts(_decoder_doc(stim_dem="rep_stim"))
+
+
+def test_json_schema_rejects_both_dem_spellings():
+    assert not _schema_accepts(
+        _decoder_doc(stim_dem="error(0.1) D0 L0\n", stim_dem_path="model.dem"))
+    assert not _schema_accepts(
+        _decoder_doc(stim_dem="error(0.1) D0 L0\n", **_MATRIX_KEYS))
 
 
 def test_json_schema_treats_empty_dem_path_as_matrix_source():
@@ -1220,6 +1235,49 @@ def test_verify_residual_parser_and_schema_agree():
         assert not validator.is_valid(yaml.safe_load(text))
 
 
+def test_xor_num_inputs_parser_and_schema_agree():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    text = _PW_GRAPH_YAML.replace("type: xor",
+                                  "type: xor\n          num_inputs: 3")
+    assert "num_inputs: 3" in text
+    mdc = qec.multi_decoder_config.from_yaml_str(text)
+    sum_node = [n for n in mdc.decoders[0].task_graph.nodes if n.id == "sum"][0]
+    assert sum_node.node_params["num_inputs"] == 3
+    validator.validate(yaml.safe_load(text))
+    for low in ["0", "1"]:
+        bad = text.replace("num_inputs: 3", "num_inputs: " + low)
+        with pytest.raises(RuntimeError,
+                           match="xor: num_inputs must be at least 2"):
+            qec.multi_decoder_config.from_yaml_str(bad)
+        assert not validator.is_valid(yaml.safe_load(bad))
+    wide = text.replace("num_inputs: 3", "num_inputs: 2000")
+    with pytest.raises(RuntimeError,
+                       match="xor: num_inputs must be at most 1024"):
+        qec.multi_decoder_config.from_yaml_str(wide)
+    assert not validator.is_valid(yaml.safe_load(wide))
+
+
+def test_max_in_flight_parser_and_schema_agree():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    assert "max_in_flight: 4" in _PW_GRAPH_YAML
+    bad = _PW_GRAPH_YAML.replace("max_in_flight: 4", "max_in_flight: 0")
+    with pytest.raises(RuntimeError,
+                       match="decode_window: max_in_flight must be at least 1"):
+        qec.multi_decoder_config.from_yaml_str(bad)
+    assert not validator.is_valid(yaml.safe_load(bad))
+    validator.validate(yaml.safe_load(_PW_GRAPH_YAML))
+
+
 def test_experimental_window_request_is_writable():
     exp = qec.experimental
     request = exp.window_request()
@@ -1304,6 +1362,24 @@ def test_data_artifacts_resolve_references():
     assert layer.request == window_entry.window
     again = qec.multi_decoder_config.from_yaml_str(mdc.to_yaml_str())
     assert again.decoders[0].task_graph.nodes[0].windows[0].artifact == "pw_A"
+
+
+def test_data_artifacts_name_stim_dems():
+    yaml = """
+data_artifacts:
+  tiny:
+    stim_dem: "error(0.1) D0 L0\\nerror(0.1) D0 D1\\n"
+decoders:
+  - id: 0
+    type: multi_error_lut
+    stim_dem: tiny
+    D_sparse: [0, -1, 1, -1]
+"""
+    mdc = qec.multi_decoder_config.from_yaml_str(yaml)
+    decoder = mdc.decoders[0]
+    assert decoder.stim_dem_artifact == "tiny"
+    assert decoder.stim_dem == mdc.data_artifacts[0].stim_dem
+    assert decoder.stim_dem_path == ""
 
 
 def test_data_artifacts_validate_against_the_schema():
