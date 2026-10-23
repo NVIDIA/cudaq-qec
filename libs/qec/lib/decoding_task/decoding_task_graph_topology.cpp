@@ -8,6 +8,7 @@
 // topologies, so node construction, DEM expansion, and wire compilation each
 // exist once.
 
+#include "decoding_task_commitment.h"
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
@@ -672,6 +673,10 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
         "from_topology: edges are required for a graph with " +
         std::to_string(nodes.size()) +
         " nodes; they are inferred only for a single node");
+  // Windowed decoding is checked whole before any node is built, so a
+  // mistake in it is reported as itself.
+  if (!infer_edges)
+    validate_window_topology(nodes, edges);
 
   auto i = std::make_unique<impl>();
   std::unordered_set<std::string> seen_ids;

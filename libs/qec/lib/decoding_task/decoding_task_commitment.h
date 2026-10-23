@@ -15,6 +15,7 @@
 
 #include "decoding_task_decoding_window.h"
 #include "decoding_task_experiment_template.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include "cudaq/qec/decoding_task_graph_config.h"
 #include <cstddef>
 #include <cstdint>
@@ -94,5 +95,19 @@ std::size_t commitment_probe_rounds(const experiment_template &context,
 void validate_commitment(std::shared_ptr<const experiment_template> context,
                          const std::vector<window_layer> &layers,
                          const std::vector<task_graph_edge> &edges);
+
+/// Check a topology's windowed decoding before any node is built, and do
+/// nothing for a topology with no ingest or decode_window node. Every ingest
+/// node is fed by measurements alone and has a template, with a readout map
+/// when it reads the logical value. Every decode_window node is fed by one
+/// window port of an ingest node, which gives its layer, and receives only
+/// from decode_window nodes, on ports below its num_receives, from its own
+/// or earlier instances. Two ingest nodes are two shots: no send joins their
+/// windows, and ones with different templates reach no common node. Each
+/// ingest node's layers and sends then pass validate_commitment().
+/// @throws std::invalid_argument naming the node or edge, or as
+/// experiment_template and validate_commitment() do.
+void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
+                              const std::vector<task_graph_edge> &edges);
 
 } // namespace cudaq::qec
