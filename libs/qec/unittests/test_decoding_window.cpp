@@ -18,8 +18,9 @@
 // each send is needed, sampled shots are sound and the production windows
 // commit, send and update the frame as it does, the production windows,
 // received and decoded serially, decode as it does, and the logical error
-// rate tracks monolithic matching; receiving a send, and a window with
-// nothing to decode; and the data artifact store: sha256, canonical
+// rate tracks monolithic matching; receiving a send, a window with nothing
+// to decode, the decoder a window takes, and a decode step that allocates
+// nothing per shot; and the data artifact store: sha256, canonical
 // content, shared entries, templates as content, and lookups that never
 // build.
 
@@ -43,6 +44,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <numeric>
 #include <random>
 #include <set>
@@ -55,6 +57,44 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#endif
+
+// Whether a sanitizer runs this build. Its allocator replaces operator new,
+// aborts on a refused allocation instead of returning null, and reserves
+// address space of its own.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define WINDOW_TESTS_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define WINDOW_TESTS_SANITIZED 1
+#endif
+#endif
+#ifndef WINDOW_TESTS_SANITIZED
+#define WINDOW_TESTS_SANITIZED 0
+#endif
+
+#if !WINDOW_TESTS_SANITIZED
+namespace {
+// This thread's allocations while counting_allocations is set, so a test can
+// check that a per-shot call allocates nothing.
+thread_local bool counting_allocations = false;
+thread_local std::size_t allocations_counted = 0;
+} // namespace
+
+// The global allocation functions, counting; operator new[] and the nothrow
+// forms call these.
+void *operator new(std::size_t size) {
+  void *p = std::malloc(size == 0 ? 1 : size);
+  if (counting_allocations)
+    ++allocations_counted;
+  if (!p)
+    throw std::bad_alloc();
+  return p;
+}
+
+void operator delete(void *p) noexcept { std::free(p); }
+
+void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 #endif
 
 namespace cudaq::qec {
@@ -1501,20 +1541,9 @@ TEST(WindowModel, HoldsTheKernelForms) {
 // /proc to measure what the process already maps.
 #if defined(__linux__)
 
-// Whether a sanitizer runs this build. Its allocator aborts on a refused
-// allocation instead of returning null, and it reserves address space of its
-// own, so a capped address space proves nothing under it.
-#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
-constexpr bool sanitized = true;
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
-constexpr bool sanitized = true;
-#else
-constexpr bool sanitized = false;
-#endif
-#else
-constexpr bool sanitized = false;
-#endif
+// A capped address space proves nothing under a sanitizer, whose allocator
+// aborts on a refused allocation and reserves address space of its own.
+constexpr bool sanitized = WINDOW_TESTS_SANITIZED;
 
 // A repetition-code memory over n bits: n - 1 detectors a round.
 dem_chunks_spec repetition_memory_spec(std::size_t n) {
@@ -2454,7 +2483,8 @@ struct production_decode {
 // Every window of g in an R-round shot, built, received and decoded by the
 // production code alone, one at a time in the reference's order: a window's
 // detectors come from the shot by the template's offsets, and what its
-// producers sent arrives through receive_send().
+// producers sent arrives through receive_send(). Each window keeps one
+// workspace for every shot, as a node would.
 class production_windows {
 public:
   production_windows(const std::shared_ptr<const experiment_template> &t,
@@ -2470,12 +2500,12 @@ public:
           window_from_dem_chunks(t, request_of(g, s.node), s.k, R));
       decoders_.push_back(
           make_window_decoder(windows_.back(), decoder_name, params));
+      workspaces_.push_back(make_window_workspace(windows_.back()));
     }
   }
 
   // Each window's decode of one shot's detection events, in schedule order.
-  std::vector<production_decode>
-  decode(const std::vector<std::uint8_t> &shot) const {
+  std::vector<production_decode> decode(const std::vector<std::uint8_t> &shot) {
     std::vector<production_decode> out(windows_.size());
     for (const auto i : order_) {
       auto &d = out[i];
@@ -2495,7 +2525,9 @@ public:
         receive_send(windows_[i], windows_[p], send,
                      out[p].solution.outputs.sends.at(send), d.detectors);
       }
-      d.solution = solve_window(windows_[i], decoders_[i].get(), d.detectors);
+      solve_window(windows_[i], decoders_[i].get(), d.detectors,
+                   workspaces_[i]);
+      d.solution = workspaces_[i].solution;
     } // end - for(i)
     return out;
   } // end - decode()
@@ -2508,6 +2540,7 @@ private:
   std::map<std::pair<std::string, std::int64_t>, std::size_t> index_;
   std::vector<decoding_window> windows_;
   std::vector<std::unique_ptr<decoder>> decoders_;
+  std::vector<window_workspace> workspaces_;
 };
 
 // Each production window's decode equals the reference's bit for bit: its
@@ -2552,8 +2585,8 @@ TEST(ParallelWindowReference, ProductionDecodesSingleFaultsAlike) {
     for (const auto &g : swept_layouts()) {
       for (auto R = tmpl->min_rounds(); R <= 30; ++R) {
         parallel_window_reference reference(spec, g, R, "single_error_lut");
-        const production_windows production(tmpl, g, R, reference.order(),
-                                            "single_error_lut");
+        production_windows production(tmpl, g, R, reference.order(),
+                                      "single_error_lut");
         const auto &s = reference.model();
         SCOPED_TRACE("R=" + std::to_string(R));
         for (std::size_t c = 0; c < s.h.size(); ++c) {
@@ -2580,8 +2613,8 @@ TEST(ParallelWindowReference, ProductionDecodesSampledShotsAlike) {
                           parallel_graph(interior_commit(3, 3, 9)),
                           parallel_graph(with_truncate(layered(3, 3, 9)))}) {
       parallel_window_reference reference(spec, g, R, "pymatching", matching);
-      const production_windows production(tmpl, g, R, reference.order(),
-                                          "pymatching", matching);
+      production_windows production(tmpl, g, R, reference.order(), "pymatching",
+                                    matching);
       const auto &s = reference.model();
       const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
           s.dem.detector_error_matrix, shots, s.dem.error_rates, 17);
@@ -2641,9 +2674,12 @@ TEST(DecodingWindow, AWindowWithoutADecoderCommitsNothing) {
       std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
   const auto w = window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, 20);
   std::vector<std::uint8_t> detectors(w.model.h.num_rows(), 0);
-  const auto quiet = solve_window(w, nullptr, detectors);
+  auto ws = make_window_workspace(w);
+  solve_window(w, nullptr, detectors, ws);
+  const auto quiet = ws.solution;
   detectors[0] = 1;
-  const auto loud = solve_window(w, nullptr, detectors);
+  solve_window(w, nullptr, detectors, ws);
+  const auto loud = ws.solution;
   EXPECT_EQ(quiet.estimate, std::vector<std::uint8_t>(w.model.o.num_cols(), 0));
   EXPECT_TRUE(quiet.satisfied);
   EXPECT_FALSE(loud.satisfied);
@@ -2651,6 +2687,153 @@ TEST(DecodingWindow, AWindowWithoutADecoderCommitsNothing) {
             std::vector<std::uint8_t>(w.model.o.num_rows(), 0));
   EXPECT_NE(make_window_decoder(w, "single_error_lut"), nullptr);
 }
+
+// A decoder whose params make it misreport what a window decoder must be:
+// observables instead of fault columns, or one detector or column more than
+// the window has.
+class window_misfit_probe final : public decoder {
+public:
+  window_misfit_probe(decoder_init inputs,
+                      const cudaqx::heterogeneous_map &params)
+      : decoder(std::move(inputs),
+                decoder_output_request{params.get<bool>("observables", false)
+                                           ? decode_result_type::observables
+                                           : decode_result_type::errors}) {
+    syndrome_size += params.get<std::size_t>("extra_rows", 0);
+    block_size += params.get<std::size_t>("extra_columns", 0);
+  }
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    return {true, std::vector<float_t>(block_size, 0.0)};
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      window_misfit_probe,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request>,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<window_misfit_probe>(std::move(inputs), params);
+      })
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(window_misfit_probe)
+
+// A window's decoder must return fault columns, take the window's rows and
+// return its decoder columns; any other is rejected when it is made.
+TEST(DecodingWindow, MakeWindowDecoderRejectsADecoderThatDoesNotFit) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto w = window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, 20);
+  const auto rows = std::to_string(w.model.h.num_rows());
+  const auto columns = std::to_string(w.num_decoder_columns());
+  const auto made = [&](const cudaqx::heterogeneous_map &params) {
+    return
+        [&w, params] { make_window_decoder(w, "window_misfit_probe", params); };
+  };
+  EXPECT_NE(make_window_decoder(w, "window_misfit_probe"), nullptr);
+  expect_error(made({{"observables", true}}),
+               "make_window_decoder: decoder 'window_misfit_probe' returns "
+               "observables");
+  expect_error(made({{"extra_rows", std::size_t{1}}}),
+               "make_window_decoder: decoder 'window_misfit_probe' takes " +
+                   std::to_string(w.model.h.num_rows() + 1) +
+                   " detectors and returns " + columns,
+               "window 1 has " + rows + " rows and " + columns);
+  expect_error(made({{"extra_columns", std::size_t{1}}}),
+               "takes " + rows + " detectors and returns " +
+                   std::to_string(w.num_decoder_columns() + 1));
+} // end - TEST(DecodingWindow, MakeWindowDecoderRejectsADecoderThatDoesNotFit)
+
+// A workspace serves only a window of its own size: solving or committing on
+// another window's is rejected before anything is written.
+TEST(DecodingWindow, AWorkspaceServesOnlyItsOwnWindow) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto layers = layered(2, 2, 3);
+  const auto a = window_from_dem_chunks(tmpl, layers.a, 1, 20);
+  const auto b = window_from_dem_chunks(tmpl, layers.b, 1, 20);
+  const std::vector<std::uint8_t> detectors(a.model.h.num_rows(), 0);
+  auto a_ws = make_window_workspace(a);
+  auto b_ws = make_window_workspace(b);
+  ASSERT_NE(a.model.h.num_rows(), b.model.h.num_rows());
+  expect_error([&] { solve_window(a, nullptr, detectors, b_ws); },
+               "solve_window: the workspace is not sized for window 1");
+  expect_error([&] { commit_window(a, detectors, b_ws); },
+               "commit_window: the workspace is not sized for window 1");
+  // One value short of a send.
+  a_ws.solution.outputs.sends.back().pop_back();
+  expect_error([&] { commit_window(a, detectors, a_ws); },
+               "commit_window: the workspace is not sized for window 1");
+}
+
+// On a workspace sized beforehand, receiving a send, solving a window
+// without a decoder and committing allocate nothing, and solving with a
+// decoder allocates only what the decoder's own decode() does. The results
+// match a fresh workspace's, so nothing is left over from the last shot.
+TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot) {
+#if WINDOW_TESTS_SANITIZED
+  GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator new";
+#else
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto layers = layered(2, 2, 3);
+  const std::size_t R = 20;
+  const auto a = window_from_dem_chunks(tmpl, layers.a, 1, R);
+  const auto next_b = window_from_dem_chunks(tmpl, layers.b, 2, R);
+  const auto dec = make_window_decoder(a, "single_error_lut");
+  const std::vector<std::uint8_t> forward(a.sends[0].rows.size(), 1);
+  std::vector<std::uint8_t> b_detectors(next_b.model.h.num_rows(), 0);
+  std::vector<std::uint8_t> a_detectors(a.model.h.num_rows(), 0);
+  auto a_ws = make_window_workspace(a);
+  auto b_ws = make_window_workspace(next_b);
+  const auto allocations = [](const auto &run) {
+    allocations_counted = 0;
+    counting_allocations = true;
+    run();
+    counting_allocations = false;
+    return allocations_counted;
+  };
+  // The detectors fault column c of A flips.
+  const auto fault = [&](std::size_t c) {
+    std::vector<std::uint8_t> d(a.model.h.num_rows(), 0);
+    for (auto p = a.model.h.ptr()[c]; p < a.model.h.ptr()[c + 1]; ++p)
+      d[a.model.h.indices()[p]] = 1;
+    return d;
+  };
+  // ws holds what a fresh workspace's decode of the same detectors gives.
+  const auto expect_fresh = [](const decoding_window &w, decoder *d,
+                               const std::vector<std::uint8_t> &detectors,
+                               const window_workspace &ws) {
+    auto fresh = make_window_workspace(w);
+    solve_window(w, d, detectors, fresh);
+    EXPECT_EQ(ws.solution.estimate, fresh.solution.estimate);
+    EXPECT_EQ(ws.solution.satisfied, fresh.solution.satisfied);
+    EXPECT_EQ(ws.solution.outputs.committed, fresh.solution.outputs.committed);
+    EXPECT_EQ(ws.solution.outputs.sends, fresh.solution.outputs.sends);
+    EXPECT_EQ(ws.solution.outputs.frame, fresh.solution.outputs.frame);
+  };
+  // A first shot commits A's first commit column, leaving its estimate,
+  // sends and frame in the workspace.
+  a_detectors = fault(a.commit_columns.begin);
+  solve_window(a, dec.get(), a_detectors, a_ws);
+  ASSERT_EQ(a_ws.solution.outputs.committed[a.commit_columns.begin], 1);
+  // The next shot commits another.
+  a_detectors = fault(a.commit_columns.begin + 1);
+  const std::vector<float_t> syndrome(a_detectors.begin(), a_detectors.end());
+  const auto decoded = allocations([&] { (void)dec->decode(syndrome); });
+  EXPECT_EQ(
+      allocations([&] { receive_send(next_b, a, 0, forward, b_detectors); }),
+      0u);
+  EXPECT_EQ(
+      allocations([&] { solve_window(next_b, nullptr, b_detectors, b_ws); }),
+      0u);
+  EXPECT_EQ(allocations([&] { commit_window(next_b, b_detectors, b_ws); }), 0u);
+  EXPECT_EQ(allocations([&] { solve_window(a, dec.get(), a_detectors, a_ws); }),
+            decoded);
+  EXPECT_EQ(a_ws.solution.outputs.committed[a.commit_columns.begin], 0);
+  expect_fresh(a, dec.get(), a_detectors, a_ws);
+  expect_fresh(next_b, nullptr, b_detectors, b_ws);
+#endif
+} // end - TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot)
 
 // ---------------------------------------------------------------------------
 // Data artifact store

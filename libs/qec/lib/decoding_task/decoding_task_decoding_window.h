@@ -8,7 +8,8 @@
 // its zones, ports, imports, sends and measurement maps. A window request
 // (window_request.h) names a layer's windows relative to an anchor;
 // window_from_dem_chunks() builds window k of a shot. receive_send(),
-// solve_window() and commit_window() are the task's canonical workload.
+// solve_window() and commit_window() are the task's canonical workload, run
+// once per shot on a window_workspace sized beforehand.
 // Never included from a public header.
 
 #pragma once
@@ -228,7 +229,41 @@ void check_translation_invariance(
 /// distances this takes gigabytes.
 detector_error_model dense_model(const window_model &model);
 
-/// Commit @p estimate and compute the window's sends and frame update.
+/// One window's decode: the estimate, whether the decoder converged and the
+/// estimate explains the detectors, and the canonical workload's outputs.
+struct window_solution {
+  std::vector<std::uint8_t> estimate; ///< e, one per model column
+  bool converged = true;
+  bool satisfied = true; ///< H e = d over every row of the window
+  window_outputs outputs;
+};
+
+/// One window's per-shot buffers. make_window_workspace() sizes them once,
+/// at configuration time, and solve_window() and commit_window() reuse them
+/// on every shot, so they allocate nothing. Each decode in flight needs its
+/// own.
+struct window_workspace {
+  std::vector<float_t> syndrome;       ///< The decoder's input, one per row
+  std::vector<std::uint8_t> explained; ///< H e, one per row
+  std::vector<std::uint8_t> delta;     ///< H e', one per row
+  window_solution solution;            ///< The last decode
+};
+
+/// A workspace sized for @p window's rows, columns and sends.
+window_workspace make_window_workspace(const decoding_window &window);
+
+/// Commit @p ws.solution.estimate, and write the window's sends and frame
+/// update to @p ws.solution.outputs. Allocates nothing.
+/// @param detectors The window's detector values, one per model row.
+/// @param ws A workspace from make_window_workspace() for @p window.
+/// @throws std::invalid_argument if @p detectors has the wrong length or
+/// @p ws is not sized for @p window.
+void commit_window(const decoding_window &window,
+                   const std::vector<std::uint8_t> &detectors,
+                   window_workspace &ws);
+
+/// Commit @p estimate on a workspace of its own, which allocates; for tests
+/// and diagnostics.
 /// @param detectors The window's detector values, one per model row.
 /// @param estimate The decoder's estimate, one per model column.
 /// @throws std::invalid_argument if a vector has the wrong length.
@@ -240,7 +275,7 @@ window_outputs commit_window(const decoding_window &window,
 /// a delta flips the receiver's own rows of the send's rounds, and a
 /// residual sets the receiver's imported rows. Rows are matched through the
 /// shot, so the two windows must be of one shot on one template. Every row
-/// is checked before any is changed.
+/// is checked before any is changed. Allocates nothing.
 /// @param values The send's values, one per row of it.
 /// @param detectors The receiver's detectors, one per model row; updated.
 /// @throws std::invalid_argument if the windows are of different shots, the
@@ -251,29 +286,27 @@ void receive_send(const decoding_window &receiver,
                   const std::vector<std::uint8_t> &values,
                   std::vector<std::uint8_t> &detectors);
 
-/// One window's decode: the estimate, whether the decoder converged and the
-/// estimate explains the detectors, and the canonical workload's outputs.
-struct window_solution {
-  std::vector<std::uint8_t> estimate; ///< e, one per model column
-  bool converged = true;
-  bool satisfied = true; ///< H e = d over every row of the window
-  window_outputs outputs;
-};
-
 /// A decoder over @p window's model, @p name with @p params: H over the
 /// decoder's columns with their priors, returning fault columns. Null when
 /// the window has no rows or no decoder columns, so nothing to decode.
-/// @throws as get_decoder() does.
+/// @throws as get_decoder() does, and std::invalid_argument if the decoder
+/// returns observables, or does not take the window's rows and return its
+/// decoder columns.
 std::unique_ptr<decoder>
 make_window_decoder(const decoding_window &window, const std::string &name,
                     const cudaqx::heterogeneous_map &params = {});
 
 /// Decode @p window's @p detectors with @p dec, from make_window_decoder(),
-/// and commit the estimate. A null @p dec estimates no fault. Columns the
-/// decoder does not see, the logical-error ones, are never estimated.
-/// @throws std::invalid_argument if @p detectors has the wrong length, or
-/// the decoder returns the wrong number of columns.
-window_solution solve_window(const decoding_window &window, decoder *dec,
-                             const std::vector<std::uint8_t> &detectors);
+/// into @p ws.solution, and commit the estimate. A null @p dec estimates no
+/// fault. Columns the decoder does not see, the logical-error ones, are
+/// never estimated. Allocates nothing beyond what the decoder's decode()
+/// does.
+/// @param ws A workspace from make_window_workspace() for @p window.
+/// @throws std::invalid_argument if @p detectors has the wrong length, @p ws
+/// is not sized for @p window, or the decoder returns the wrong number of
+/// columns.
+void solve_window(const decoding_window &window, decoder *dec,
+                  const std::vector<std::uint8_t> &detectors,
+                  window_workspace &ws);
 
 } // namespace cudaq::qec
