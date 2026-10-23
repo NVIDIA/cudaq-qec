@@ -5,12 +5,14 @@
 
 // Test fixtures shared by the DEM, task-graph and window unit tests: small
 // dem_chunks_spec memory experiments with a repeating phase, so a test can
-// expand them to any number of rounds, and the window requests of the
-// parallel-window and sliding-window layouts.
+// expand them to any number of rounds, a phenomenological memory over any
+// CSS code, and the window requests of the parallel-window and
+// sliding-window layouts.
 
 #pragma once
 
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/sparse_binary_matrix.h"
 #include "cudaq/qec/window_request.h"
 #include <cstdint>
 #include <optional>
@@ -101,6 +103,55 @@ inline dem_chunks_spec multi_terminal_memory_spec(std::size_t rounds,
   } // end - for(i)
   return spec;
 } // end - multi_terminal_memory_spec()
+
+/// Phenomenological memory over a CSS code's Z checks @p hz, with logicals
+/// @p lz. Each round, every data qubit may flip (rate @p p_data), touching its
+/// checks in that round, and every check measurement may fail (rate
+/// @p p_meas), touching that check in that round and the next. The final
+/// readout round has data faults only.
+inline dem_chunks_spec
+phenomenological_memory_spec(const sparse_binary_matrix &hz,
+                             const sparse_binary_matrix &lz, double p_data,
+                             double p_meas) {
+  const auto checks = hz.to_nested_csr();
+  const auto logicals = lz.to_nested_csr();
+  const auto n = static_cast<std::int64_t>(hz.num_cols());
+  const auto m = static_cast<std::int64_t>(checks.size());
+  dem_chunks_spec spec;
+  dem_chunk_spec bulk;
+  dem_chunk_spec readout;
+  std::vector<std::int64_t> bulk_rows;
+  std::vector<std::int64_t> next_rows;
+  std::vector<std::int64_t> readout_rows;
+  std::vector<std::int64_t> observables;
+  for (std::int64_t i = 0; i < m; ++i) {
+    readout_rows.insert(readout_rows.end(), checks[i].begin(), checks[i].end());
+    readout_rows.push_back(-1);
+    bulk_rows.insert(bulk_rows.end(), checks[i].begin(), checks[i].end());
+    bulk_rows.insert(bulk_rows.end(), {n + i, -1});
+    next_rows.insert(next_rows.end(), {n + i, -1});
+  }
+  for (const auto &row : logicals) {
+    observables.insert(observables.end(), row.begin(), row.end());
+    observables.push_back(-1);
+  }
+  bulk.num_faults = n + m;
+  bulk.error_rates.assign(n, p_data);
+  bulk.error_rates.resize(n + m, p_meas);
+  bulk.O_sparse = observables;
+  bulk.seam_specs = {{seam_name::prev_round, {bulk_rows, {}}},
+                     {seam_name::next_round, {next_rows, {}}}};
+  readout.num_faults = n;
+  readout.error_rates.assign(n, p_data);
+  readout.O_sparse = observables;
+  readout.seam_specs = {{seam_name::prev_round, {readout_rows, {}}}};
+  spec.seam = {seam_name::next_round, seam_name::prev_round};
+  spec.phases = {{phase_name::dem_bulk, bulk},
+                 {phase_name::dem_final, readout}};
+  spec.connections = {{phase_name::dem_bulk, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_final}};
+  return spec;
+} // end - phenomenological_memory_spec()
 
 /// Every fault touches its own round only: the outgoing seam band is empty.
 inline dem_chunks_spec single_round_spec() {
