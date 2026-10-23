@@ -43,7 +43,9 @@ and a leading ``0`` for octal but no sign ``+`` and no ``_``, floats accept
 anything ``strtod`` accepts (``6e-05``, ``1.``, ``inf``, hex floats) but not
 ``_`` or YAML's ``.inf``, and booleans are exactly LLVM's set
 (``y yes true on`` / ``n no false off`` in their usual capitalisations, not
-``1``/``0``). Tags (``!!int``, ``!foo``) are ignored. Duplicate mapping keys
+``1``/``0``). A plain empty value or ``~`` is an empty sequence for a list
+field and an error for a number or boolean; ``~`` in a string field is the
+text ``~``. Tags (``!!int``, ``!foo``) are ignored. Duplicate mapping keys
 and YAML anchors/aliases are rejected; only the first document of a stream
 is read.
 This script loads every scalar as text and applies those rules while
@@ -67,6 +69,27 @@ except ImportError as exc:  # pragma: no cover - exercised by hand
 # --- YAML loading: raw scalars, no duplicates, no aliases -------------------
 
 
+class EmptyScalar(str):
+    """A plain (unquoted) empty value: ``key:`` with nothing after it.
+
+    llvm::yaml reads it as an empty sequence for a sequence field, as an
+    empty mapping for an optional mapping with a default (``transport``),
+    and rejects it for a scalar or required mapping field. A quoted empty
+    string is an ordinary string and is not marked.
+    """
+
+
+class PlainNull(str):
+    """A plain ``~``, ``null``, ``Null`` or ``NULL``.
+
+    llvm::yaml reads it as an empty sequence for a sequence field and as the
+    literal text for a string field; numbers, booleans and mappings reject it.
+    """
+
+
+_PLAIN_NULLS = {"~", "null", "Null", "NULL"}
+
+
 class RawLoader(yaml.SafeLoader):
     """``yaml.SafeLoader`` that mirrors the server's structural rules.
 
@@ -88,6 +111,11 @@ class RawLoader(yaml.SafeLoader):
         # Build by node kind only; resolvers and tags (``!!int``, ``!foo``)
         # do not take part, exactly like llvm::yaml.
         if isinstance(node, yaml.ScalarNode):
+            if node.style is None:  # plain scalar
+                if node.value == "":
+                    return EmptyScalar("")
+                if node.value in _PLAIN_NULLS:
+                    return PlainNull(node.value)
             return node.value
         if isinstance(node, yaml.SequenceNode):
             return [self.construct_object(child, True) for child in node.value]
@@ -106,12 +134,22 @@ class RawLoader(yaml.SafeLoader):
         return mapping
 
 
+_DIRECTIVE = re.compile(r"^%(\S+)")
+
+
 def load_yaml(text):
     """Parse ``text`` with ``RawLoader``: scalars are strings.
 
     Like ``llvm::yaml::Input``, only the first document of a stream is read;
-    anything after a ``---`` separator is ignored.
+    anything after a ``---`` separator is ignored. An unknown directive
+    (``%FOO``) is an error, as on the server; PyYAML would ignore it.
     """
+    for line in text.splitlines():
+        if line.startswith("---") or line.startswith("..."):
+            break
+        match = _DIRECTIVE.match(line)
+        if match and match.group(1) not in ("YAML", "TAG"):
+            raise yaml.YAMLError(f"unknown directive '%{match.group(1)}'")
     return next(yaml.load_all(text, Loader=RawLoader), None)
 
 
@@ -189,7 +227,7 @@ class LlvmScalars:
             return None
         if isinstance(text, (int, float)):
             return text
-        if not isinstance(text, str):
+        if not isinstance(text, str) or isinstance(text, EmptyScalar):
             return None
         if text == "":
             return 0.0
@@ -201,29 +239,45 @@ class LlvmScalars:
             return None
 
 
+def _is_empty_sequence_scalar(value):
+    return isinstance(value, (EmptyScalar, PlainNull))
+
+
 def _type_checker():
     base = jsonschema.Draft202012Validator.TYPE_CHECKER
     return base.redefine_many({
-        "integer": lambda _, v: LlvmScalars.integer(v) is not None,
-        "number": lambda _, v: LlvmScalars.number(v) is not None,
-        "boolean": lambda _, v: LlvmScalars.boolean(v) is not None,
+        "integer":
+            lambda _, v: LlvmScalars.integer(v) is not None,
+        "number":
+            lambda _, v: LlvmScalars.number(v) is not None,
+        "boolean":
+            lambda _, v: LlvmScalars.boolean(v) is not None,
+        # ``key:`` and ``key: ~`` are empty sequences to llvm::yaml.
+        "array":
+            lambda _, v: isinstance(v, list) or _is_empty_sequence_scalar(v),
+        # ``key:`` with nothing after it is an error for a string field.
+        "string":
+            lambda _, v: isinstance(v, str) and not isinstance(v, EmptyScalar),
     })
 
 
 def _bound(keyword, compare, describe):
+    lower = keyword in ("minimum", "exclusiveMinimum")
 
     def check(validator, limit, instance, schema):
         if not isinstance(instance,
                           (str, int, float)) or isinstance(instance, bool):
             return
-        if keyword.endswith("imum") and isinstance(
+        if lower and isinstance(
                 instance, str) and instance.startswith("-") and limit >= 0:
             # The field is unsigned on the server; its parser rejects the
             # sign outright, even for -0.
             yield jsonschema.ValidationError(
                 f"{instance!r} is negative but the field is unsigned")
             return
-        value = LlvmScalars.number(instance)
+        value = LlvmScalars.integer(instance)
+        if value is None:
+            value = LlvmScalars.number(instance)
         if value is None:
             return  # The type check reports it.
         if not compare(value, limit):
@@ -233,10 +287,34 @@ def _bound(keyword, compare, describe):
     return check
 
 
+def _lists_only(keyword):
+    """Run a list keyword only on real lists: a null-ish scalar standing in
+    for an empty sequence has no items to check."""
+    original = jsonschema.Draft202012Validator.VALIDATORS[keyword]
+
+    def check(validator, value, instance, schema):
+        if isinstance(instance, list):
+            yield from original(validator, value, instance, schema)
+
+    return check
+
+
 def _validator_class():
     return jsonschema.validators.extend(
         jsonschema.Draft202012Validator,
         validators={
+            "items":
+                _lists_only("items"),
+            "prefixItems":
+                _lists_only("prefixItems"),
+            "contains":
+                _lists_only("contains"),
+            "minItems":
+                _lists_only("minItems"),
+            "maxItems":
+                _lists_only("maxItems"),
+            "uniqueItems":
+                _lists_only("uniqueItems"),
             "minimum":
                 _bound("minimum", lambda v, m: v >= m,
                        "less than the minimum of"),
@@ -336,6 +414,158 @@ def _ints(value):
     return [] if any(v is None for v in out) else out
 
 
+# kMaxSyndromeMappingRows in decoder_rpc_limits.h; the parser refuses ids at
+# or above it.
+_MAX_SYNDROME_MAPPING_ROWS = 16
+
+
+def _is_int_list(value):
+    return isinstance(value, list) and all(
+        LlvmScalars.integer(v) is not None for v in value)
+
+
+def _number_list(value):
+    if _is_empty_sequence_scalar(value):
+        return []
+    if not isinstance(value, list):
+        return None
+    out = [LlvmScalars.number(v) for v in value]
+    return None if any(v is None for v in out) else out
+
+
+def dem_chunks_checks(chunks, who, where):
+    """The dem_chunks structure and dem_chunks_spec::validate(), as the parser
+    applies them. The exported schema types seam/connections/phases loosely,
+    so the shapes are checked here."""
+    problems = []
+
+    def fail(message):
+        problems.append((where, message))
+        return problems
+
+    if not isinstance(chunks, dict):
+        return fail(f"{who}: dem_chunks must be a mapping")
+
+    def check_endpoint_mapping(value, label):
+        if not isinstance(value, dict):
+            return f"{who}: dem_chunks.{label} must be a mapping with from and to"
+        unknown = set(value) - {"from", "to"}
+        if unknown:
+            return (f"{who}: unknown key '{sorted(unknown)[0]}' in "
+                    f"dem_chunks.{label}")
+        for key in ("from", "to"):
+            if key not in value:
+                return f"{who}: dem_chunks.{label} is missing '{key}'"
+            if not isinstance(value[key], str):
+                return f"{who}: dem_chunks.{label}.{key} must be a name"
+        return None
+
+    message = check_endpoint_mapping(chunks.get("seam"), "seam")
+    if message:
+        return fail(message)
+    connections = chunks.get("connections")
+    if not isinstance(connections, list):
+        return fail(f"{who}: dem_chunks.connections must be a list")
+    for index, conn in enumerate(connections):
+        message = check_endpoint_mapping(conn, f"connections[{index}]")
+        if message:
+            return fail(message)
+    if not connections:
+        return fail(f"Invalid dem_chunks for {who}: dem_chunks_spec: "
+                    "connections must not be empty")
+
+    phases = chunks.get("phases")
+    if not isinstance(phases, list):
+        return fail(f"{who}: dem_chunks.phases must be a list")
+    if not phases:
+        return fail(f"Invalid dem_chunks for {who}: dem_chunks_spec: phases "
+                    "must not be empty")
+    spec_keys = {
+        "num_faults", "H_sparse", "seam_specs", "O_sparse", "error_rates",
+        "D_sparse", "num_measurements"
+    }
+    for index, phase in enumerate(phases):
+        label = f"dem_chunks.phases[{index}]"
+        if not isinstance(phase, dict):
+            return fail(f"{who}: {label} must be a mapping with name and spec")
+        unknown = set(phase) - {"name", "spec"}
+        if unknown:
+            return fail(f"{who}: unknown key '{sorted(unknown)[0]}' in {label}")
+        if "name" not in phase or "spec" not in phase:
+            return fail(f"{who}: {label} needs both name and spec")
+        if not isinstance(phase["name"], str) or isinstance(
+                phase["name"], EmptyScalar):
+            return fail(f"{who}: {label}.name must be a name")
+        name = phase["name"]
+        spec = phase["spec"]
+        if not isinstance(spec, dict):
+            return fail(f"{who}: {label}.spec must be a mapping")
+        unknown = set(spec) - spec_keys
+        if unknown:
+            return fail(f"{who}: unknown key '{sorted(unknown)[0]}' in "
+                        f"{label}.spec")
+        for key in ("num_faults", "error_rates"):
+            if key not in spec:
+                return fail(f"{who}: {label}.spec is missing '{key}'")
+        num_faults = LlvmScalars.integer(spec["num_faults"])
+        if num_faults is None or num_faults < 0:
+            return fail(f"{who}: {label}.spec.num_faults must be an unsigned "
+                        "integer")
+        if num_faults == 0:
+            return fail(f"Invalid dem_chunks for {who}: dem_chunks.{name}."
+                        "num_faults must be positive")
+        rates = _number_list(spec["error_rates"])
+        if rates is None:
+            return fail(f"{who}: {label}.spec.error_rates must be a list of "
+                        "numbers")
+        if len(rates) != num_faults:
+            return fail(f"Invalid dem_chunks for {who}: dem_chunks.{name}."
+                        f"error_rates has {len(rates)} entries but "
+                        f"num_faults={num_faults}")
+        for r_index, rate in enumerate(rates):
+            if not 0.0 <= rate <= 1.0:
+                return fail(f"Invalid dem_chunks for {who}: dem_chunks.{name}."
+                            f"error_rates[{r_index}] out of [0,1]")
+        for key in ("H_sparse", "O_sparse", "D_sparse"):
+            if key in spec and not _is_int_list(spec[key]):
+                return fail(f"{who}: {label}.spec.{key} must be a list of "
+                            "integers")
+    return problems
+
+
+def syndrome_mapping_checks(rows, where):
+    """multi_decoder_config::validate_syndrome_mapping(), run by the parser."""
+    problems = []
+    if not isinstance(rows, list):
+        return problems  # The schema reports the type.
+    seen = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        row_id = LlvmScalars.integer(row.get("id"))
+        row_type = row.get("type", "bulk")
+        if row_type not in ("bulk", "final"):
+            problems.append(
+                (f"{where}/{index}", f"syndrome_mapping row {row_id} "
+                 f"has type \"{row_type}\", but the only round "
+                 "shapes are \"bulk\" and \"final\"."))
+            return problems
+        if row_id is None:
+            continue
+        if row_id in seen:
+            problems.append((f"{where}/{index}",
+                             f"Duplicate syndrome_mapping id {row_id}."))
+            return problems
+        seen.add(row_id)
+        if row_id >= _MAX_SYNDROME_MAPPING_ROWS:
+            problems.append(
+                (f"{where}/{index}", f"syndrome_mapping id {row_id} "
+                 "is out of range; ids must be below "
+                 f"{_MAX_SYNDROME_MAPPING_ROWS}."))
+            return problems
+    return problems
+
+
 def server_checks_for_decoder(decoder, where):
     """Cross-field rules the server enforces while parsing one decoder entry."""
     who = f"decoder {decoder.get('id', '?')}"
@@ -353,6 +583,8 @@ def server_checks_for_decoder(decoder, where):
     args = decoder.get("decoder_custom_args")
     rates = decoder.get("error_rate_vec") or (
         args.get("error_rate_vec") if isinstance(args, dict) else None) or []
+    if _is_empty_sequence_scalar(rates):
+        rates = []
     has_chunks = "dem_chunks" in decoder
     from_dem = bool(decoder.get("stim_dem_path"))
 
@@ -375,6 +607,9 @@ def server_checks_for_decoder(decoder, where):
 
     if has_chunks and not H:
         chunks = decoder.get("dem_chunks")
+        structural = dem_chunks_checks(chunks, who, where)
+        if structural:
+            return structural
         if isinstance(chunks, dict) and "num_rounds" in chunks:
             num_rounds = LlvmScalars.integer(chunks["num_rounds"])
             if num_rounds is not None and num_rounds < 2:
@@ -445,11 +680,18 @@ def server_checks(doc):
         if isinstance(decoder, dict):
             problems.extend(
                 server_checks_for_decoder(decoder, f"decoders/{index}"))
+    if "syndrome_mapping" in doc:
+        problems.extend(
+            syndrome_mapping_checks(doc["syndrome_mapping"],
+                                    "syndrome_mapping"))
     return problems
 
 
 def validate_document(doc, validator, allow_task_graph=False, known_types=None):
     """Return ``[(where, message), ...]`` for ``doc``; empty when it is valid."""
+    if isinstance(doc, dict) and isinstance(doc.get("transport"), EmptyScalar):
+        # ``transport:`` with nothing after it is the default (empty) section.
+        doc = dict(doc, transport={})
     problems = []
     if not allow_task_graph:
         for where in task_graph_locations(doc):

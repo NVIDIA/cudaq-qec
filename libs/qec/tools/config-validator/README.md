@@ -49,21 +49,27 @@ not zero, `H_sparse` and `D_sparse` rows (counted by `-1` terminators) must
 equal `syndrome_size`, `H_sparse`/`O_sparse` entries must be below
 `block_size`, no `D_sparse` row may be empty, and a form that derives a
 field (`dem_chunks`, `stim_dem_path`) rejects that field when it is also
-given.
+given. For the `dem_chunks` form the shape of `seam`, `connections` and
+`phases` (names, `spec` with `num_faults` and matching `error_rates` in
+[0, 1]) and the `syndrome_mapping` rules (unique ids below 16, `bulk` or
+`final`) are checked as the parser checks them.
 
 Not checked: per-decoder validation hooks (for example `sliding_window`'s
-`step_size` against `window_size`), DEM-chunk seam consistency, the
-`D_sparse` row count of a `stim_dem_path` decoder, and 32-bit overflow of
-`int32` parameters (the exported schema carries no integer widths). Those
-run only when the server loads the configuration, so a file that passes
-here may still be rejected at load. Task-graph configurations are reported
-as invalid unless `--allow-task-graph` is given.
+`step_size` against `window_size`), DEM-chunk seam consistency and the
+`phases_supply_D_sparse` rule, and the `D_sparse` row count of a
+`stim_dem_path` decoder. Those run only when the server loads the
+configuration, so a file that passes here may still be rejected at load.
+Task-graph configurations are reported as invalid unless
+`--allow-task-graph` is given.
 
 Known parser-level differences, all recorded as expected failures in the
-test suite: LLVM YAML accepts a tab after `:` or before a `#` comment and an
-empty flow-sequence entry (`[a,, b]`), PyYAML rejects all three. The
-exported schema says `cuda_device_id >= 0` while the server's parser accepts
-a negative value; the validator follows the schema.
+test suite: PyYAML rejects a tab after `:`, before a `#` comment or inside a
+flow collection, an empty flow-sequence entry (`[a,, b]`) and a repeated
+`%YAML` directive, all of which LLVM YAML accepts; LLVM YAML misreads a
+block scalar with an explicit indentation indicator (`|2`), which PyYAML
+parses. The test suite also runs a mutation fuzzer (random edits of valid
+documents, both parsers must agree); `CONFIG_VALIDATOR_FUZZ_N` sets how many
+documents it tries.
 
 ## Scalars: the server's rules, not PyYAML's
 
@@ -83,7 +89,12 @@ checking the schema. In practice:
   hex floats, `inf`, `nan`. Not `1_000.5`, not YAML's `.inf`/`.nan`.
 - Booleans: exactly `y yes true on` / `n no false off` in their usual
   capitalisations (`Yes`, `TRUE`, `Off`, ...). Not `1`/`0`, not `t`/`f`.
-- Duplicate mapping keys and YAML anchors/aliases are rejected.
+- A plain empty value (`key:`) or a plain `~`/`null` is an empty sequence
+  for a list field and an error for a number or boolean; in a string field
+  `~` is the text `~` and an empty value is an error.
+- Tags (`!!int`, `!foo`) are ignored; anchors are fine, aliases (`*a`) are
+  rejected; duplicate mapping keys are rejected; only the first document of
+  a stream is read; an unknown directive (`%FOO`) is an error.
 
 A plain `yaml.safe_load` follows YAML 1.1 instead: `6e-05` becomes a
 string, `on` a boolean, `010` an int but `0o10` a string, duplicates are
