@@ -5,12 +5,14 @@
 
 // The `parallel_window` pattern: written as one node, wired measurements ->
 // <id> -> output, it stands for the parallel-window graph of an ingest node,
-// two decode_window layers A and B, and their xor. It is registered so
-// configurations that use it parse and validate; expanding it is not
-// available yet.
+// two decode_window layers A and B, and their xor. Its kind registers the
+// parameters, so configurations that use it parse and validate, and the
+// graph builder lowers it into those nodes before anything is built.
 
+#include "decoding_task_parallel_window_pattern.h"
 #include "decoding_task_node_kind_registry.h"
 #include "decoding_task_window_kind_params.h"
+#include "cudaq/qec/decoder_config_schema.h"
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -77,10 +79,182 @@ const bool registered = [] {
       [](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
         throw std::invalid_argument(
             "task graph node '" + ctx.id +
-            "': the 'parallel_window' pattern is not available yet");
+            "': the 'parallel_window' pattern expands only as a node of the "
+            "graph, not inside an ensemble");
       });
   return true;
 }();
 
+// The largest prior of a fault that touches the next round's detectors, on
+// a shot that holds every pair of neighbouring phases: a round's outgoing
+// seam band holds the next round's rows its faults touch.
+double largest_crossing_prior(const experiment_template &t) {
+  const auto R = t.repeats() ? t.min_rounds() + 2 : t.min_rounds();
+  double largest = 0.0;
+  for (std::size_t r = 0; r + 1 < R; ++r) {
+    const auto &chunk = t.chunk(r, R);
+    const auto columns = chunk.H.to_nested_csc();
+    for (const auto &seam : chunk.seams) {
+      if (seam.id != t.spec().seam.from_seam)
+        continue;
+      for (std::size_t c = 0; c < columns.size(); ++c)
+        if (std::any_of(columns[c].begin(), columns[c].end(), [&](auto row) {
+              return row >= seam.row_begin && row < seam.row_end;
+            }))
+          largest = std::max(largest, chunk.error_rates[c]);
+    }
+  } // end - for(r)
+  return largest;
+} // end - largest_crossing_prior()
+
 } // namespace
+
+// Parameters are read as the schema has checked them: the round counts are
+// at least 1, and boundary_prior is not set with truncate.
+std::pair<experimental::window_request, experimental::window_request>
+parallel_window_requests(const cudaqx::heterogeneous_map &params,
+                         const experiment_template &context) {
+  using namespace experimental;
+  const auto c_a =
+      static_cast<std::int64_t>(params.get<std::size_t>("commit_rounds"));
+  const auto b =
+      static_cast<std::int64_t>(params.get<std::size_t>("buffer_rounds"));
+  const auto c_b = static_cast<std::int64_t>(params.get<std::size_t>(
+      "gap_rounds", static_cast<std::size_t>(c_a + 2 * b)));
+  const bool truncate =
+      params.get<std::string>("input_boundary", "columns") == "truncate";
+  window_request a;
+  window_request bb;
+  window_request::column_options columns;
+  columns.merge_identical = params.get<bool>("merge_identical", false);
+  columns.conflicting_parallel =
+      params.get<std::string>("conflicting_parallel", "reject") == "most_likely"
+          ? parallel_resolution::most_likely
+          : parallel_resolution::reject;
+
+  a.period = c_a + c_b;
+  a.commit = round_range{0, c_a};
+  a.buffers = {{-b, 0}, {c_a, c_a + b}};
+  a.input.disposition = port_disposition::open;
+  if (truncate) {
+    a.input.boundary = input_boundary::truncate;
+  } else if (params.contains("boundary_prior")) {
+    a.input.prior = params.get<double>("boundary_prior");
+  } else {
+    a.input.prior = largest_crossing_prior(context);
+    if (!(*a.input.prior > 0.0 && *a.input.prior < 1.0))
+      throw std::invalid_argument(
+          "parallel_window: no fault crosses into the next round with a "
+          "prior strictly between 0 and 1, so A's open input has no default "
+          "boundary_prior; set one");
+  }
+  a.output.disposition = port_disposition::open;
+  a.sends = {{"forward", std::nullopt, {}}, {"backward", std::nullopt, {}}};
+  a.columns = columns;
+
+  bb.period = c_a + c_b;
+  bb.offset = -c_b;
+  bb.commit = round_range{0, c_b};
+  bb.input.disposition = port_disposition::closed;
+  bb.output.disposition = port_disposition::closed;
+  bb.columns = columns;
+  return {a, bb};
+} // end - parallel_window_requests()
+
+bool is_parallel_window(const task_graph_node_config &cfg) {
+  const auto *kind = find_task_graph_node_kind(cfg.kind);
+  return kind && kind->name == "parallel_window";
+}
+
+// The parameters are checked first, as the builder checks every node's, so
+// a configuration built in code is held to the parsed one's rules. The
+// layers share the pattern's inner decoder recipe; each builds its own.
+void lower_parallel_window(task_graph_node_config cfg,
+                           std::vector<task_graph_node_config> &out,
+                           std::vector<task_graph_edge> &edges) {
+  const std::string id = cfg.id;
+  const std::string what = "from_topology: parallel_window '" + id + "'";
+  const std::string ingest = id + ".ingest", a = id + ".A", b = id + ".B",
+                    sum = id + ".sum";
+  const auto *schema = decoding::config::find_decoder_schema(
+      task_graph_node_schema_name("parallel_window"));
+  std::size_t inputs_seen = 0;
+  bool corrected = false;
+  task_graph_node_config ingest_cfg;
+  task_graph_node_config a_cfg;
+  task_graph_node_config b_cfg;
+  task_graph_node_config sum_cfg;
+  if (id.empty())
+    throw std::invalid_argument("from_topology: every node needs an id");
+  if (!schema)
+    throw std::logic_error(what + ": the pattern is registered without a "
+                                  "parameter schema");
+  decoding::config::materialize_default_args(*schema, cfg.node_params);
+  decoding::config::validate_custom_args(*schema, cfg.node_params,
+                                         what + " parameters");
+  if (!cfg.dem)
+    throw std::invalid_argument(what + " has no dem_chunks template");
+  const auto [request_a, request_b] =
+      parallel_window_requests(cfg.node_params, experiment_template(*cfg.dem));
+  corrected = cfg.node_params.get<std::string>("output", "corrected_logical") ==
+              "corrected_logical";
+
+  // The outer edges: exactly one into `input`, any number out of `output`.
+  for (auto &e : edges) {
+    if (e.to_node == id) {
+      if (e.to_input != "input")
+        throw std::invalid_argument(what + " has no input '" + e.to_input +
+                                    "'");
+      e.to_node = ingest;
+      ++inputs_seen;
+    }
+    if (e.from_node == id) {
+      if (e.from_output != "output")
+        throw std::invalid_argument(what + " has no output '" + e.from_output +
+                                    "'");
+      e.from_node = sum;
+    }
+  }
+  if (inputs_seen != 1)
+    throw std::invalid_argument(what + " needs exactly one edge into 'input'");
+
+  ingest_cfg.id = ingest;
+  ingest_cfg.kind = "ingest";
+  ingest_cfg.dem = std::move(cfg.dem);
+  ingest_cfg.windows = {{"A", request_a, ""}, {"B", request_b, ""}};
+  if (corrected)
+    ingest_cfg.node_params.insert("read_logical", true);
+  for (auto *layer : {&a_cfg, &b_cfg}) {
+    layer->kind = "decode_window";
+    layer->decoder_type = cfg.decoder_type;
+    layer->params = cfg.params;
+    if (cfg.node_params.contains("max_in_flight"))
+      layer->node_params.insert(
+          "max_in_flight", cfg.node_params.get<std::size_t>("max_in_flight"));
+    if (cfg.node_params.contains("verify_residual"))
+      layer->node_params.insert(
+          "verify_residual",
+          cfg.node_params.get<std::string>("verify_residual"));
+  }
+  a_cfg.id = a;
+  b_cfg.id = b;
+  b_cfg.node_params.insert("num_receives", std::size_t{2});
+  sum_cfg.id = sum;
+  sum_cfg.kind = "xor";
+  sum_cfg.node_params.insert("num_inputs", std::size_t{corrected ? 3 : 2});
+  out.push_back(std::move(ingest_cfg));
+  out.push_back(std::move(a_cfg));
+  out.push_back(std::move(b_cfg));
+  out.push_back(std::move(sum_cfg));
+
+  edges.push_back({ingest, "A", a, "input"});
+  edges.push_back({ingest, "B", b, "input"});
+  edges.push_back({a, "forward", b, "receive_0", -1});
+  edges.push_back({a, "backward", b, "receive_1"});
+  edges.push_back({a, "output", sum, "in_0"});
+  edges.push_back({b, "output", sum, "in_1"});
+  if (corrected)
+    edges.push_back({ingest, "logical", sum, "in_2"});
+} // end - lower_parallel_window()
+
 } // namespace cudaq::qec

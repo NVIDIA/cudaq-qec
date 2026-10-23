@@ -4359,23 +4359,43 @@ TEST(ParallelWindowPattern, ParsesThePatternForm) {
             std::string::npos);
 } // end - TEST(ParallelWindowPattern, ParsesThePatternForm)
 
-// Building the pattern says it is not available yet.
-TEST(ParallelWindowPattern, BuildingSaysThePatternIsNotAvailableYet) {
+// Building lowers the pattern into pw.ingest, pw.A, pw.B and pw.sum and
+// validates them as a hand-written graph, so the pattern is checked end to
+// end: corrected_logical needs the template's m2o_sparse, and two faults on
+// one detector with different observable effects are ambiguous. With
+// identical twins, or the pattern's conflicting_parallel resolving them in
+// its layers, the build reaches the kinds' own report.
+TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
   namespace cfg = cudaq::qec::decoding::config;
-  auto parsed = cfg::multi_decoder_config::from_yaml_str(pattern_yaml_with(
-      "      async_num_workers: 4\n      async_worker_cpus: [4, 5, 6, 7]\n",
-      ""));
-  parsed.decoders.at(0).dem_chunks->num_rounds = 12;
-  try {
-    cudaq::qec::decoding::host::build_task_graph(parsed.decoders.at(0));
-    ADD_FAILURE() << "the pattern built";
-  } catch (const std::exception &e) {
-    EXPECT_NE(std::string(e.what()).find(
-                  "the 'parallel_window' pattern is not available yet"),
-              std::string::npos)
-        << e.what();
-  }
-}
+  const auto unpooled = [](std::string yaml) {
+    const std::string pool =
+        "      async_num_workers: 4\n      async_worker_cpus: [4, 5, 6, 7]\n";
+    return yaml.replace(yaml.find(pool), pool.size(), "");
+  };
+  const auto corrections = unpooled(
+      pattern_yaml_with("output: corrected_logical", "output: corrections"));
+  auto twins = corrections;
+  for (auto at = twins.find("O_sparse: [0, -1]"); at != std::string::npos;
+       at = twins.find("O_sparse: [0, -1]", at))
+    twins.replace(at, 17, "O_sparse: [0, 1, -1]");
+  expect_build_error(
+      cfg::multi_decoder_config::from_yaml_str(unpooled(pattern_yaml())),
+      "from_topology: ingest node 'pw.ingest' reads the "
+      "logical value, but its template's last phase has no "
+      "m2o_sparse");
+  auto resolved = corrections;
+  resolved.replace(resolved.find("          max_in_flight: 4\n"), 0,
+                   "          conflicting_parallel: most_likely\n");
+  expect_build_error(cfg::multi_decoder_config::from_yaml_str(corrections),
+                     "validate_commitment: pw.A[0] (position 0, terminal 3) "
+                     "of the 3-round shot: commit column 0 (round 0) is "
+                     "parallel to column 1 (round 0), which has a different "
+                     "observable effect");
+  expect_build_error(cfg::multi_decoder_config::from_yaml_str(twins),
+                     "the 'ingest' kind is not available yet");
+  expect_build_error(cfg::multi_decoder_config::from_yaml_str(resolved),
+                     "the 'ingest' kind is not available yet");
+} // end - TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt)
 
 // Each bad pattern parameter is rejected when parsed, with its own message.
 TEST(ParallelWindowPattern, RejectsBadParameters) {

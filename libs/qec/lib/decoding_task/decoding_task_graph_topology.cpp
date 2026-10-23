@@ -12,6 +12,7 @@
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
+#include "decoding_task_parallel_window_pattern.h"
 #include "measurement_frame_lengths.h"
 #include "cudaq/qec/cancellation.h"
 #include "cudaq/qec/candidate_sink.h"
@@ -481,14 +482,16 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
   return wiring;
 }
 
-/// Rewrite every pattern entry of `nodes` into plain nodes, in place, so the
-/// result is in topological order whenever the input was.
+/// Rewrite every pattern entry of `nodes`, an ensemble or a parallel_window,
+/// into plain nodes, in place, so the result is in topological order
+/// whenever the input was. Only ensembles need wiring once built.
 std::vector<ensemble_wiring>
 lower_patterns(std::vector<task_graph_node_config> &nodes,
                std::vector<task_graph_edge> &edges) {
   std::vector<ensemble_wiring> wirings;
-  if (std::none_of(nodes.begin(), nodes.end(),
-                   [](const auto &cfg) { return cfg.ensemble.has_value(); }))
+  if (std::none_of(nodes.begin(), nodes.end(), [](const auto &cfg) {
+        return cfg.ensemble.has_value() || is_parallel_window(cfg);
+      }))
     return wirings;
   // A lone pattern gets the single-node wiring before it stops being one
   // node.
@@ -500,6 +503,8 @@ lower_patterns(std::vector<task_graph_node_config> &nodes,
   for (auto &cfg : nodes) {
     if (cfg.ensemble)
       wirings.push_back(lower_ensemble(std::move(cfg), lowered, edges));
+    else if (is_parallel_window(cfg))
+      lower_parallel_window(std::move(cfg), lowered, edges);
     else
       lowered.push_back(std::move(cfg));
   }

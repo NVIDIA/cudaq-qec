@@ -7,6 +7,7 @@
 #include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_graph_utils.h"
 #include "../lib/decoding_task/decoding_task_memory_window_node.h"
+#include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "../lib/decoding_task/decoding_task_predecoder_node.h"
 #include "../lib/decoding_task/decoding_task_window_node.h"
 #include "../lib/realtime/decode_target.h"
@@ -13866,5 +13867,194 @@ TEST(DecodingTaskGraph, StagedOutputRejectsMixedContributors) {
       std::string::npos)
       << graph->streaming_incompatibility_reason();
 }
+
+// ---------------------------------------------------------------------------
+// parallel_window pattern lowering
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Pattern node P over @p spec with @p params, fed by measurements and read
+// at the output, lowered.
+struct lowered_pattern {
+  std::vector<task_graph_node_config> nodes;
+  std::vector<task_graph_edge> edges{{"measurements", "output", "P", "input"},
+                                     {"P", "output", "output", "input"}};
+
+  lowered_pattern(const dem_chunks_spec &spec,
+                  cudaqx::heterogeneous_map params) {
+    task_graph_node_config cfg;
+    cfg.id = "P";
+    cfg.kind = "parallel_window";
+    cfg.dem = spec;
+    cfg.decoder_type = "single_error_lut";
+    cfg.params.insert("lut_size", std::size_t{7});
+    cfg.node_params = std::move(params);
+    lower_parallel_window(std::move(cfg), nodes, edges);
+  }
+};
+
+// Expect check() to throw an exception mentioning text.
+template <typename Check>
+void expect_lowering_error(Check &&check, const std::string &text) {
+  try {
+    check();
+    ADD_FAILURE() << "expected: " << text;
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+} // namespace
+
+// The pattern lowers into the hand-written parallel-window graph: P.ingest
+// with layers A and B reading the logical value, P.A and P.B with the
+// pattern's inner decoder and layer parameters, and P.sum over both layers
+// and the logical, with the edges between them and the outer edges moved
+// onto P.ingest and P.sum.
+TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
+  const auto spec = arbitrary_memory_spec(5);
+  auto layers = layered(3, 3, 9);
+  layers.a.input.prior = 0.04;
+  const lowered_pattern p(spec, {{"commit_rounds", std::size_t{3}},
+                                 {"buffer_rounds", std::size_t{3}},
+                                 {"gap_rounds", std::size_t{9}},
+                                 {"boundary_prior", 0.04},
+                                 {"max_in_flight", std::size_t{4}},
+                                 {"verify_residual", std::string("report")}});
+  ASSERT_EQ(p.nodes.size(), 4u);
+  const auto &ingest = p.nodes[0];
+  EXPECT_EQ(ingest.id, "P.ingest");
+  EXPECT_EQ(ingest.kind, "ingest");
+  EXPECT_EQ(ingest.dem, spec);
+  EXPECT_EQ(ingest.windows, (std::vector<experimental::ingest_window>{
+                                {"A", layers.a, ""}, {"B", layers.b, ""}}));
+  EXPECT_TRUE(ingest.node_params.get<bool>("read_logical"));
+  for (std::size_t i : {1, 2}) {
+    const auto &layer = p.nodes[i];
+    EXPECT_EQ(layer.id, i == 1 ? "P.A" : "P.B");
+    EXPECT_EQ(layer.kind, "decode_window");
+    EXPECT_FALSE(layer.dem.has_value());
+    EXPECT_EQ(layer.decoder_type, "single_error_lut");
+    EXPECT_EQ(layer.params.get<std::size_t>("lut_size"), 7u);
+    EXPECT_EQ(layer.node_params.get<std::size_t>("max_in_flight"), 4u);
+    EXPECT_EQ(layer.node_params.get<std::string>("verify_residual"), "report");
+    EXPECT_EQ(layer.node_params.contains("num_receives"), i == 2);
+  }
+  EXPECT_EQ(p.nodes[2].node_params.get<std::size_t>("num_receives"), 2u);
+  EXPECT_EQ(p.nodes[3].id, "P.sum");
+  EXPECT_EQ(p.nodes[3].kind, "xor");
+  EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 3u);
+  EXPECT_EQ(p.edges, (std::vector<task_graph_edge>{
+                         {"measurements", "output", "P.ingest", "input"},
+                         {"P.sum", "output", "output", "input"},
+                         {"P.ingest", "A", "P.A", "input"},
+                         {"P.ingest", "B", "P.B", "input"},
+                         {"P.A", "forward", "P.B", "receive_0", -1},
+                         {"P.A", "backward", "P.B", "receive_1"},
+                         {"P.A", "output", "P.sum", "in_0"},
+                         {"P.B", "output", "P.sum", "in_1"},
+                         {"P.ingest", "logical", "P.sum", "in_2"}}));
+} // end - TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph)
+
+// With output: corrections the ingest reads no logical value and P.sum takes
+// the two layers alone; gap_rounds defaults to commit_rounds + 2 buffer
+// rounds, and the column options and a truncated input reach the layers.
+TEST(ParallelWindowLowering, PassesTheOptionsOn) {
+  const lowered_pattern p(
+      arbitrary_memory_spec(5),
+      {{"commit_rounds", std::size_t{2}},
+       {"buffer_rounds", std::size_t{1}},
+       {"output", std::string("corrections")},
+       {"input_boundary", std::string("truncate")},
+       {"merge_identical", true},
+       {"conflicting_parallel", std::string("most_likely")}});
+  auto layers = layered(2, 1, 4);
+  layers.a.input = {experimental::port_disposition::open, std::nullopt,
+                    experimental::input_boundary::truncate};
+  for (auto *request : {&layers.a, &layers.b})
+    request->columns = {true, experimental::parallel_resolution::most_likely};
+  ASSERT_EQ(p.nodes.size(), 4u);
+  EXPECT_EQ(p.nodes[0].windows, (std::vector<experimental::ingest_window>{
+                                    {"A", layers.a, ""}, {"B", layers.b, ""}}));
+  EXPECT_FALSE(p.nodes[0].node_params.contains("read_logical"));
+  EXPECT_FALSE(p.nodes[1].node_params.contains("max_in_flight"));
+  EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 2u);
+  EXPECT_EQ(std::count_if(p.edges.begin(), p.edges.end(),
+                          [](const task_graph_edge &e) {
+                            return e.from_output == "logical";
+                          }),
+            0);
+} // end - TEST(ParallelWindowLowering, PassesTheOptionsOn)
+
+// Without boundary_prior, A's open input takes the largest prior of a
+// fault that crosses into the next round, whatever the priors of faults
+// that do not; with no such fault, the pattern asks for one.
+TEST(ParallelWindowLowering, DefaultsTheBoundaryPrior) {
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}}};
+  auto crossing = next_only_spec();
+  for (auto &phase : crossing.phases)
+    phase.spec.error_rates = {0.3, 0.3, 0.3, 0.3, 0.05};
+  const auto requests =
+      parallel_window_requests(params, experiment_template(crossing));
+  EXPECT_EQ(requests.first.input.prior, std::optional<double>{0.05});
+  expect_lowering_error(
+      [&] {
+        parallel_window_requests(params,
+                                 experiment_template(single_round_spec()));
+      },
+      "parallel_window: no fault crosses into the next round with a prior "
+      "strictly between 0 and 1");
+} // end - TEST(ParallelWindowLowering, DefaultsTheBoundaryPrior)
+
+// The pattern is wired measurements -> P -> output: one edge into its
+// input, and none into or out of another port. It needs a template and its
+// required parameters.
+TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}}};
+  const auto lower = [&](std::vector<task_graph_edge> edges,
+                         std::optional<dem_chunks_spec> dem,
+                         cudaqx::heterogeneous_map with) {
+    task_graph_node_config cfg;
+    std::vector<task_graph_node_config> nodes;
+    cfg.id = "P";
+    cfg.kind = "parallel_window";
+    cfg.dem = std::move(dem);
+    cfg.node_params = std::move(with);
+    lower_parallel_window(std::move(cfg), nodes, edges);
+  };
+  const auto spec = arbitrary_memory_spec(5);
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"},
+               {"measurements", "output", "P", "input"}},
+              spec, params);
+      },
+      "from_topology: parallel_window 'P' needs exactly one edge into "
+      "'input'");
+  expect_lowering_error(
+      [&] { lower({{"measurements", "output", "P", "side"}}, spec, params); },
+      "from_topology: parallel_window 'P' has no input 'side'");
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"},
+               {"P", "logical", "output", "input"}},
+              spec, params);
+      },
+      "from_topology: parallel_window 'P' has no output 'logical'");
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"}}, std::nullopt, params);
+      },
+      "from_topology: parallel_window 'P' has no dem_chunks template");
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"}}, spec,
+              {{"buffer_rounds", std::size_t{1}}});
+      },
+      "commit_rounds");
+} // end - TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern)
 
 } // namespace cudaq::qec
