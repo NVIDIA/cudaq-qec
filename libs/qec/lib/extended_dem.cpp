@@ -890,15 +890,27 @@ static void validate_observables(const dem_chunks_spec &spec) {
     if (rows != observables)
       fail("has " + std::to_string(rows) + " m2o_sparse rows for " +
            std::to_string(observables) + " observables");
-    if (!e.spec.num_measurements && !spec.measurements_per_round)
-      fail("carries m2o_sparse but neither it nor the spec sets a measurement "
-           "count (num_measurements / measurements_per_round)");
-    const uint64_t width = spec.measurements_of(e.spec);
+    // The readout round's measurements in the stream: its count when the
+    // phases supply D_sparse, else one per detector, the memory convention
+    // of dem_chunks_to_d_sparse(), which no declared count widens.
+    const bool mapped = spec.has_D_sparse();
+    uint64_t width = 0;
+    if (mapped) {
+      if (!e.spec.num_measurements && !spec.measurements_per_round)
+        fail("carries m2o_sparse but neither it nor the spec sets a "
+             "measurement count (num_measurements / measurements_per_round)");
+      width = spec.measurements_of(e.spec);
+    } else {
+      width = spec.detectors_of(e.spec, "dem_chunks." + e.id.name());
+    }
     const std::int64_t last = *std::max_element(m2o.begin(), m2o.end());
     if (last >= 0 && static_cast<uint64_t>(last) >= width)
       fail("m2o_sparse reads measurement " + std::to_string(last) +
            ", past the " + std::to_string(width) +
-           " measurements its round has");
+           " measurements its round has" +
+           (mapped ? ""
+                   : "; without D_sparse a round measures one bit per "
+                     "detector, so num_measurements cannot widen it"));
   } // end - for(e)
 } // end - validate_observables()
 

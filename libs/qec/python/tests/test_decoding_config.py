@@ -340,6 +340,8 @@ def qec_yaml_for(dc):
 
 
 # The rep5 chunk form with a wider readout round, its m2o_sparse, and a name.
+# The D_sparse rows say how each round's measurements form detectors; without
+# them every round measures one bit per detector.
 _REP5_READOUT_YAML = """decoders:
   - id: 0
     type: single_error_lut
@@ -353,11 +355,11 @@ _REP5_READOUT_YAML = """decoders:
       observable_names: [Z_L]
       phases:
         - name: init
-          spec: {num_faults: 9, H_sparse: [0,1,5,-1,1,2,6,-1,2,3,7,-1,3,4,8,-1], O_sparse: [0,-1], error_rates: [0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02]}
+          spec: {num_faults: 9, H_sparse: [0,1,5,-1,1,2,6,-1,2,3,7,-1,3,4,8,-1], O_sparse: [0,-1], error_rates: [0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02], D_sparse: [0,-1,1,-1,2,-1,3,-1]}
         - name: bulk
-          spec: {num_faults: 9, H_sparse: [0,1,5,-1,1,2,6,-1,2,3,7,-1,3,4,8,-1], O_sparse: [0,-1], error_rates: [0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02]}
+          spec: {num_faults: 9, H_sparse: [0,1,5,-1,1,2,6,-1,2,3,7,-1,3,4,8,-1], O_sparse: [0,-1], error_rates: [0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02], D_sparse: [0,4,-1,1,5,-1,2,6,-1,3,7,-1]}
         - name: final
-          spec: {num_faults: 5, H_sparse: [0,1,-1,1,2,-1,2,3,-1,3,4,-1], O_sparse: [0,-1], error_rates: [0.02,0.02,0.02,0.02,0.02], num_measurements: 5, m2o_sparse: [0,4,-1]}
+          spec: {num_faults: 5, H_sparse: [0,1,-1,1,2,-1,2,3,-1,3,4,-1], O_sparse: [0,-1], error_rates: [0.02,0.02,0.02,0.02,0.02], D_sparse: [0,4,5,-1,1,5,6,-1,2,6,7,-1,3,7,8,-1], num_measurements: 5, m2o_sparse: [0,4,-1]}
 """
 
 

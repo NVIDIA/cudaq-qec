@@ -1924,9 +1924,15 @@ TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase) {
   rep5_phase(past, phase_name::dem_final).m2o_sparse = {rep5_checks, -1};
   expect_rejected(past, "m2o_sparse reads measurement 4, past the 4");
 
+  // Without D_sparse the memory convention fixes the readout round's width,
+  // so the map needs no count; with D_sparse it does.
   auto uncounted = spec;
   uncounted.measurements_per_round.reset();
-  expect_rejected(uncounted, "measurement count");
+  EXPECT_NO_THROW(uncounted.validate());
+  auto mapped = rep5_spec_with_maps(3);
+  mapped.measurements_per_round.reset();
+  rep5_phase(mapped, phase_name::dem_final).m2o_sparse = {0, 3, -1};
+  expect_rejected(mapped, "measurement count");
 
   auto unterminated = spec;
   rep5_phase(unterminated, phase_name::dem_final).m2o_sparse = {0};
@@ -1993,17 +1999,32 @@ TEST(DemChunkSpec, DetectorsOfCountsTheIncomingSeamBand) {
   EXPECT_EQ(spec.detectors_of(narrow_out), 3u);
 }
 
-// A wider final round's own num_measurements bounds m2o_sparse.
+// A wider final round's own num_measurements bounds m2o_sparse, once
+// D_sparse rows say how the round's measurements form detectors.
 TEST(DemChunkSpec, ReadoutMapReadsAWiderFinalRound) {
-  auto spec = rep5_spec(3);
+  auto plain = rep5_spec(3);
+  auto spec = rep5_spec_with_maps(3);
   auto &final_spec = rep5_phase(spec, phase_name::dem_final);
-  spec.measurements_per_round = rep5_checks;
+  // Without D_sparse every round measures one bit per detector (the memory
+  // convention of dem_chunks_to_d_sparse()), so num_measurements cannot
+  // widen the readout round.
+  plain.measurements_per_round = rep5_checks;
+  rep5_phase(plain, phase_name::dem_final).num_measurements = rep5_checks + 1;
+  rep5_phase(plain, phase_name::dem_final).m2o_sparse = {0, 1, 2, 3, 4, -1};
+  expect_rejected(plain, "m2o_sparse reads measurement 4, past the 4 "
+                         "measurements its round has; without D_sparse");
+
+  // With D_sparse rows, the readout round is as wide as its count.
   final_spec.num_measurements = rep5_checks + 1;
+  final_spec.D_sparse.clear();
+  for (std::int64_t k = 0; k < rep5_checks; ++k)
+    final_spec.D_sparse.insert(final_spec.D_sparse.end(),
+                               {k, rep5_checks + k, rep5_checks + k + 1, -1});
   final_spec.m2o_sparse = {0, 1, 2, 3, 4, -1};
   EXPECT_NO_THROW(spec.validate());
   final_spec.m2o_sparse = {rep5_checks + 1, -1};
   expect_rejected(spec, "m2o_sparse reads measurement 5, past the 5");
-}
+} // end - TEST(DemChunkSpec, ReadoutMapReadsAWiderFinalRound)
 
 TEST(DemChunkSpec, NumFaultsMustFitUint32) {
   dem_chunk_spec spec;

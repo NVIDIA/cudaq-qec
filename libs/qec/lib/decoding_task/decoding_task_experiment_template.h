@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace cudaq::qec {
@@ -23,13 +24,15 @@ namespace cudaq::qec {
 /// phase, then suffix phases. Round r is chunk r; its detector rows are that
 /// chunk's to_seam band, so a fault touches at most its own round and the
 /// next. A spec without a repeating phase admits only its own chain length.
+/// Without D_sparse rows every round has the same detectors.
 class experiment_template {
 public:
   /// @param spec The experiment. num_rounds, when set on a repeating spec,
   /// must be one the spec admits; queries take their own shot length.
   /// @throws std::invalid_argument if the spec is invalid, if num_rounds is
-  /// below min_rounds(), if a chunk spans other than one round, or if a
-  /// suffix phase other than the last differs from bulk in measurement width.
+  /// below min_rounds(), if a chunk spans other than one round, if a suffix
+  /// phase other than the last differs from bulk in measurement width, or if
+  /// rounds differ in detectors without D_sparse rows.
   explicit experiment_template(dem_chunks_spec spec);
 
   /// The validated spec.
@@ -63,7 +66,9 @@ public:
   std::size_t row_offset(std::size_t r, std::size_t R) const;
   /// Fault columns before round r.
   std::size_t column_offset(std::size_t r, std::size_t R) const;
-  /// Measurements before round r. Throws if a phase has no measurement count.
+  /// Measurements before round r in the stream: each round's count when the
+  /// spec carries D_sparse rows, else one per detector (the memory
+  /// convention). Throws if a phase with D_sparse rows has no count.
   std::size_t measurement_offset(std::size_t r, std::size_t R) const;
 
 private:
@@ -73,10 +78,16 @@ private:
     extended_dem last;
     std::size_t rows = 0;
     std::size_t faults = 0;
-    std::optional<std::size_t> measurements;
+    std::optional<std::size_t> measurements; ///< Width in the stream
   };
   /// Throws if the spec does not admit an R-round shot, or if r > last.
   void check_round(std::size_t r, std::size_t last, std::size_t R) const;
+  /// Throws unless phase @p id's round and outgoing seam are as wide as the
+  /// first phase's round, recorded in @p uniform, which a spec without
+  /// D_sparse rows needs.
+  void check_uniform_round(
+      phase_id id, const phase_chunks &p,
+      std::optional<std::pair<phase_id, std::size_t>> &uniform) const;
   /// Sum of size(phase) over rounds [0, r) of an R-round shot.
   template <typename Size>
   std::size_t sum_before(std::size_t r, std::size_t R, Size size) const;

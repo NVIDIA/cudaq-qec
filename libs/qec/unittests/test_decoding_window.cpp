@@ -44,8 +44,10 @@ dem_chunks_spec repeating_only_spec() {
 
 // A surface-code-like tail: a penultimate phase whose outgoing seam reaches 2
 // of its 4 detectors, then a readout phase with 2 detectors and its own H.
+// Rounds of different widths need D_sparse rows: 4 measurements a round, and
+// 2 in the readout round, each detector differencing the round before.
 dem_chunks_spec narrow_readout_spec() {
-  auto spec = arbitrary_memory_spec(5);
+  auto spec = arbitrary_memory_spec(5, true);
   const auto after = phase_id::from_name("after0");
   dem_chunk_spec penultimate;
   dem_chunk_spec readout;
@@ -55,10 +57,14 @@ dem_chunks_spec narrow_readout_spec() {
   penultimate.seam_specs = {
       {seam_name::prev_round, {{0, -1, 1, -1, 2, -1, 3, -1}, {}}},
       {seam_name::next_round, {{0, -1, 1, -1}, {}}}};
+  penultimate.num_measurements = 4;
+  penultimate.D_sparse = {0, 4, -1, 1, 5, -1, 2, 6, -1, 3, 7, -1};
   readout.num_faults = 3;
   readout.error_rates.assign(3, 0.03);
   readout.O_sparse = {0, 2, -1};
   readout.seam_specs = {{seam_name::prev_round, {{0, 2, -1, 1, 2, -1}, {}}}};
+  readout.num_measurements = 2;
+  readout.D_sparse = {0, 4, -1, 1, 5, -1};
   spec.phases.back().spec = readout;
   spec.phases.push_back({after, penultimate});
   spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
@@ -67,6 +73,35 @@ dem_chunks_spec narrow_readout_spec() {
                       {after, phase_name::dem_final}};
   return spec;
 } // end - narrow_readout_spec()
+
+// A first round with 2 detectors, then rounds with 4. Each later detector k
+// differences measurement k of its round against measurement k of the round
+// before, where that round has one; the ramp phase reads the 2-wide first
+// round. Without D_sparse the rows and counts are cleared.
+dem_chunks_spec widening_spec(bool explicit_d) {
+  auto spec = arbitrary_memory_spec(5, true);
+  const auto ramp_id = phase_id::from_name("ramp");
+  auto ramp = spec.phases[1].spec;
+  auto &init = spec.phases[0].spec;
+  init.H_sparse.clear();
+  init.seam_specs = {
+      {seam_name::prev_round, {{0, -1, 1, -1}, {}}},
+      {seam_name::next_round, {{0, -1, 1, -1, 2, -1, 3, -1}, {}}}};
+  init.num_measurements = 2;
+  init.D_sparse = {0, -1, 1, -1};
+  ramp.D_sparse = {0, 2, -1, 1, 3, -1, 4, -1, 5, -1};
+  spec.phases.push_back({ramp_id, ramp});
+  spec.connections = {{phase_name::dem_init, ramp_id},
+                      {ramp_id, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_final}};
+  if (!explicit_d)
+    for (auto &phase : spec.phases) {
+      phase.spec.D_sparse.clear();
+      phase.spec.num_measurements.reset();
+    }
+  return spec;
+} // end - widening_spec()
 
 // The rep-5 chain without its self-loop: a fixed three-round shot.
 dem_chunks_spec linear_spec() {
@@ -197,8 +232,10 @@ TEST(ExperimentTemplate, RejectsSpecsItCannotExpand) {
   expect_error([&] { experiment_template{missing}; }, "'absent'");
 }
 
-// Measurement offsets follow each phase's width, the readout map is the last
-// phase's, and only the last suffix phase may differ from bulk in width.
+// Measurement offsets follow each phase's width in the stream, the readout
+// map is the last phase's, and only the last suffix phase may differ from
+// bulk in width. Without D_sparse a round measures one bit per detector,
+// the memory convention, whatever a declared count says.
 TEST(ExperimentTemplate, MeasurementWidthsAndReadout) {
   const experiment_template tmpl(wide_readout_spec());
   const experiment_template plain(arbitrary_memory_spec(5));
@@ -209,7 +246,12 @@ TEST(ExperimentTemplate, MeasurementWidthsAndReadout) {
   }
   EXPECT_EQ(tmpl.readout(), (std::vector<std::int64_t>{0, 2, 4, -1}));
   EXPECT_TRUE(plain.readout().empty());
-  expect_error([&] { plain.measurement_offset(1, 5); }, "no measurement count");
+  for (auto spec : {arbitrary_memory_spec(5), rep5_spec()}) {
+    spec.measurements_per_round = 7;
+    const experiment_template counted(spec);
+    for (std::size_t r = 0; r <= 5; ++r)
+      EXPECT_EQ(counted.measurement_offset(r, 5), counted.row_offset(r, 5));
+  }
 
   // A surface-code memory has two suffix phases: a bulk-width round, then a
   // wider readout. Only the readout, which FINAL identifies, may differ.
@@ -218,6 +260,32 @@ TEST(ExperimentTemplate, MeasurementWidthsAndReadout) {
   phase_of(tail, phase_id::from_name("terminal0")).num_measurements = 5;
   expect_error([&] { experiment_template{tail}; }, "precedes FINAL");
 } // end - TEST(ExperimentTemplate, MeasurementWidthsAndReadout)
+
+// Without D_sparse, detector k of a round differences measurement k of that
+// round and of the one before, so every round needs the same detectors, as
+// the whole-shot map dem_chunks_to_d_sparse() requires. A wider round would
+// read its own measurements as the previous round's, and a narrower one
+// leaves the whole-shot map undefined. With D_sparse rows both are fine.
+TEST(ExperimentTemplate, MemoryConventionNeedsUniformRounds) {
+  auto widening = widening_spec(false);
+  auto narrowing = narrow_readout_spec();
+  for (auto &phase : narrowing.phases) {
+    phase.spec.D_sparse.clear();
+    phase.spec.num_measurements.reset();
+  }
+  widening.num_rounds = 6;
+  narrowing.num_rounds = 6;
+  expect_error([&] { experiment_template{widening}; },
+               "experiment_template: without D_sparse rows",
+               "phase 'init' has 2 detectors a round, but its outgoing seam "
+               "reaches 4");
+  EXPECT_THROW(dem_chunks_to_d_sparse(widening), std::invalid_argument);
+  expect_error([&] { experiment_template{narrowing}; },
+               "experiment_template: without D_sparse rows");
+  EXPECT_THROW(dem_chunks_to_d_sparse(narrowing), std::invalid_argument);
+  EXPECT_NO_THROW(experiment_template{widening_spec(true)});
+  EXPECT_NO_THROW(experiment_template{narrow_readout_spec()});
+} // end - TEST(ExperimentTemplate, MemoryConventionNeedsUniformRounds)
 
 // ---------------------------------------------------------------------------
 // Decoding windows
@@ -693,11 +761,13 @@ std::vector<uint8_t> apply_map(const affine_map &map,
 
 // m2d applied to a shot's measurements gives the shot's detectors on the
 // window's own rows, then the virtual outcomes on the commit zone's outgoing
-// wire and on the output port, with or without explicit D rows.
+// wire and on the output port, with or without explicit D rows, and across
+// rounds that widen or narrow.
 TEST(DecodingWindow, M2dMatchesTheWholeShot) {
   std::mt19937 rng(11);
   for (const auto &spec :
-       {arbitrary_memory_spec(5, true), wide_readout_spec(), rep5_spec()}) {
+       {arbitrary_memory_spec(5, true), wide_readout_spec(), rep5_spec(),
+        narrow_readout_spec(), widening_spec(true)}) {
     const auto tmpl = std::make_shared<const experiment_template>(spec);
     for (std::size_t R = tmpl->min_rounds(); R <= 16; ++R) {
       auto fixed = spec;
@@ -802,6 +872,40 @@ TEST(DecodingWindow, M2oReadsTheReadoutRound) {
   expect_error([&] { window_from_dem_chunks(tmpl, b, 1, R, true); },
                "readout round");
 } // end - TEST(DecodingWindow, M2oReadsTheReadoutRound)
+
+// Without D_sparse the stream is detector-packed, so m2o reads the readout
+// round at its detector offsets, which is what the whole-shot memory
+// convention gives. A readout map past the round's detectors is rejected
+// when the spec is validated, even under a wider num_measurements, so
+// construction never meets one.
+TEST(DecodingWindow, M2oWithoutDSparseReadsTheDetectorPackedRound) {
+  auto spec = arbitrary_memory_spec(5);
+  phase_of(spec, phase_name::dem_final).m2o_sparse = {0, 3, -1};
+  const auto tmpl = std::make_shared<const experiment_template>(spec);
+  const std::size_t R = 9;
+  const auto b = layered(2, 2, 3).b;
+  const auto w =
+      window_from_dem_chunks(tmpl, b, window_instances(b, R).end - 1, R, true);
+  const auto first = tmpl->row_offset(w.rounds.begin, R);
+  const auto readout = tmpl->row_offset(R - 1, R) - first;
+  std::vector<uint8_t> m(w.num_measurements, 0);
+  ASSERT_TRUE(w.m2o.has_value());
+  ASSERT_EQ(w.num_measurements, tmpl->row_offset(R, R) - first);
+  ASSERT_EQ(readout + 4, w.num_measurements);
+  m[readout] = 1;
+  EXPECT_EQ(apply_map(*w.m2o, m), (std::vector<uint8_t>{1}));
+  m[readout + 3] = 1;
+  EXPECT_EQ(apply_map(*w.m2o, m), (std::vector<uint8_t>{0}));
+  m[readout + 1] = 1;
+  EXPECT_EQ(apply_map(*w.m2o, m), (std::vector<uint8_t>{0}));
+
+  spec.measurements_per_round = 4;
+  phase_of(spec, phase_name::dem_final).num_measurements = 5;
+  phase_of(spec, phase_name::dem_final).m2o_sparse = {0, 4, -1};
+  expect_error([&] { experiment_template{spec}; },
+               "m2o_sparse reads measurement 4, past the 4 measurements its "
+               "round has; without D_sparse");
+} // end - TEST(DecodingWindow, M2oWithoutDSparseReadsTheDetectorPackedRound)
 
 // The spec's invalid constructions are each rejected with their own message.
 TEST(DecodingWindow, RejectsInvalidRequests) {

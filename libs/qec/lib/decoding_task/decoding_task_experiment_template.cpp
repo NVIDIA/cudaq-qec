@@ -40,6 +40,7 @@ experiment_template::experiment_template(dem_chunks_spec spec)
     : spec_(std::move(spec)) {
   const auto to = spec_.seam.to_seam;
   const auto from = spec_.seam.from_seam;
+  std::optional<std::pair<phase_id, std::size_t>> uniform;
   spec_.validate();
   repeats_ = spec_.has_repeating_phase();
   if (repeats_) {
@@ -73,10 +74,17 @@ experiment_template::experiment_template(dem_chunks_spec spec)
                                   "' spans more than one round");
     p.rows = spec_.detectors_of(entry.spec, context);
     p.faults = p.inner.num_faults();
-    if (entry.spec.num_measurements || spec_.measurements_per_round)
+    // The round's width in the stream: its count with D_sparse rows, else
+    // one measurement per detector, the memory convention, which ignores
+    // any count.
+    if (!spec_.has_D_sparse())
+      p.measurements = p.rows;
+    else if (entry.spec.num_measurements || spec_.measurements_per_round)
       p.measurements = spec_.measurements_of(entry.spec);
     if (spans_two_rounds(p.inner, from))
       max_span_ = 1;
+    if (!spec_.has_D_sparse())
+      check_uniform_round(entry.id, p, uniform);
     phases_.emplace(entry.id, std::move(p));
   } // end - for(entry)
 
@@ -88,6 +96,34 @@ experiment_template::experiment_template(dem_chunks_spec spec)
           "experiment_template: suffix phase '" + suffix_[i].name() +
           "' precedes FINAL, so it needs the bulk measurement width");
 } // end - experiment_template::experiment_template()
+
+// Detector k of a round without D_sparse rows differences measurement k of
+// that round and of the one before, the memory convention of
+// dem_chunks_to_d_sparse(), which needs every seam band as wide as the first
+// phase's round. A wider round would read its own measurements as the
+// previous round's.
+void experiment_template::check_uniform_round(
+    phase_id id, const phase_chunks &p,
+    std::optional<std::pair<phase_id, std::size_t>> &uniform) const {
+  const auto from = spec_.seam.from_seam;
+  const std::size_t next =
+      p.inner.has_seam(from) ? p.inner.get_seam(from).num_rows() : 0;
+  const auto fail = [&](const std::string &what) {
+    throw std::invalid_argument(
+        "experiment_template: without D_sparse rows every round needs the "
+        "same detectors, so a round's measurements line up with the last "
+        "round's; phase '" +
+        id.name() + "' has " + std::to_string(p.rows) +
+        " detectors a round, but " + what);
+  };
+  if (!uniform)
+    uniform = std::pair{id, p.rows};
+  if (p.rows != uniform->second)
+    fail("phase '" + uniform->first.name() + "' has " +
+         std::to_string(uniform->second));
+  if (next != 0 && next != p.rows)
+    fail("its outgoing seam reaches " + std::to_string(next));
+} // end - experiment_template::check_uniform_round()
 
 // Rejects shot lengths the spec does not admit, and rounds past last. Checks
 // R first, so last = R - 1 cannot wrap unchecked.

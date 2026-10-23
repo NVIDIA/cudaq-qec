@@ -363,13 +363,11 @@ struct measurement_layout {
   std::vector<std::size_t> start; ///< Per round, then the end
 };
 
-// Without explicit D rows, each round measures its detectors (the memory
-// convention of dem_chunks_to_d_sparse()).
+// Round r's measurements in the stream; without D_sparse rows the template
+// gives one per detector, the memory convention of dem_chunks_to_d_sparse().
 std::size_t round_width(const experiment_template &t, std::int64_t r,
                         std::size_t R) {
-  if (t.spec().has_D_sparse())
-    return t.measurement_offset(r + 1, R) - t.measurement_offset(r, R);
-  return t.row_offset(r + 1, R) - t.row_offset(r, R);
+  return t.measurement_offset(r + 1, R) - t.measurement_offset(r, R);
 }
 
 // Lays out the measurements of rounds [s, e), after s's incoming wire.
@@ -401,6 +399,8 @@ affine_map build_m2d(const experiment_template &t, const decoding_window &w,
     const std::size_t prev_width = i == 0 ? m.v_in : m.width[i - 1];
     const auto detectors = t.row_offset(r + 1, R) - t.row_offset(r, R);
     const auto first_row = rows.size();
+    // The memory convention: the template gives every round the same
+    // detectors, so prev_start + j stays in the previous round.
     if (!t.spec().has_D_sparse()) {
       for (std::size_t j = 0; j < detectors; ++j) {
         auto &row = rows.emplace_back();

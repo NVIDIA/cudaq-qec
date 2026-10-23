@@ -315,11 +315,15 @@ struct dem_chunk_spec {
 
   /// Measurements this phase's round adds to the stream, when it differs from
   /// dem_chunks_spec::measurements_per_round (a final data readout, say).
+  /// Like that field, it applies when the phases carry D_sparse rows; without
+  /// them a round adds one measurement per detector.
   std::optional<uint64_t> num_measurements;
 
   /// Optional readout map, -1-terminated: one row per observable, listing
   /// the measurements of this phase's own round whose parity is the
-  /// observable's raw value. Only the last phase may carry it.
+  /// observable's raw value. Only the last phase may carry it. The round has
+  /// its measurement count when the phases carry D_sparse rows, else one
+  /// measurement per detector.
   std::vector<std::int64_t> m2o_sparse;
 
   /// True when nothing has been set.
@@ -517,7 +521,8 @@ struct dem_chunks_spec {
   /// Also checks that every connection names a phase with a spec, the phases
   /// agree on the observable count, observable_names has one unique name per
   /// observable, and only the last phase carries m2o_sparse, with one row per
-  /// observable inside its round.
+  /// observable inside its round: its measurement count with D_sparse, else
+  /// its detectors.
   /// @throws std::invalid_argument on the first violation.
   void validate() const;
 };

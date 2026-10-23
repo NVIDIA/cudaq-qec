@@ -2574,12 +2574,11 @@ std::string dem_chunks_yaml_with_readout(const std::string &phase,
 // m2o_sparse and observable_names round-trip and are in the schema.
 TEST(DecoderDemChunksYAMLTest, ReadoutMapAndNamesRoundTripAndAreInTheSchema) {
   namespace cfg = cudaq::qec::decoding::config;
-  auto yaml = dem_chunks_yaml_with_readout(
-      "final", "            num_measurements: 3\n"
-               "            m2o_sparse: [0, 2, -1]\n");
+  auto yaml = dem_chunks_yaml_with_readout("final",
+                                           "            m2o_sparse: [0, -1]\n");
   yaml.insert(yaml.find("      phases:"), "      observable_names: [Z_L]\n");
   auto parsed = cfg::multi_decoder_config::from_yaml_str(yaml);
-  const std::vector<std::int64_t> want{0, 2, -1};
+  const std::vector<std::int64_t> want{0, -1};
   const std::vector<std::string> names{"Z_L"};
   const auto emitted = parsed.to_yaml_str(200);
   const auto schema = cfg::decoder_config_json_schema();
