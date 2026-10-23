@@ -2646,7 +2646,7 @@ TEST(DecoderDemChunksYAMLTest, ReadoutMapAndNamesAreCheckedWhenParsed) {
 // Window requests
 // ---------------------------------------------------------------------------
 
-// The plan's hand-written layer A: c_A = b = 3, c_B = 9.
+// A hand-written parallel-window layer A: c_A = b = 3, c_B = 9.
 std::string window_a_yaml() {
   return R"(period: 12
 zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
@@ -2812,7 +2812,7 @@ TEST(WindowRequestYAML, RejectsInvalidRequests) {
           "the input prior must be strictly between 0 and 1");
 } // end - TEST(WindowRequestYAML, RejectsInvalidRequests)
 
-// The plan's hand-written parallel-window graph, with a two-input xor, over
+// A hand-written parallel-window graph, with a two-input xor, over
 // a streaming rep-code template. edit() changes the text before parsing.
 std::string pw_graph_yaml() {
   return R"(
@@ -2935,7 +2935,8 @@ TEST(TaskGraphWindowKinds, BuildingSaysTheKindsAreNotAvailableYet) {
 }
 
 // Misplaced or malformed windows, and a bad verify_residual, are each
-// rejected when parsed, with their own message.
+// rejected when parsed, with their own message. verify_residual takes no
+// boolean, which YAML tools would read as a non-string.
 TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters) {
   namespace cfg = cudaq::qec::decoding::config;
   const auto rejects = [](const std::string &yaml, const std::string &text) {
@@ -2967,6 +2968,12 @@ TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters) {
   rejects(
       pw_graph_yaml_with("verify_residual: report", "verify_residual: maybe"),
       "verify_residual");
+  for (const std::string value : {"false", "true"})
+    rejects(
+        pw_graph_yaml_with("verify_residual: report",
+                           "verify_residual: " + value),
+        "decode_window: verify_residual must be none, fail or report; got '" +
+            value + "'");
 } // end - TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters)
 
 // A layer missing a required key, or well formed but breaking a window
@@ -3028,8 +3035,9 @@ TEST(TaskGraphWindowKinds, IngestNeedsAWindow) {
 // data_artifacts
 // ---------------------------------------------------------------------------
 
-// A template, a Stim file pinned by its hash, and the plan's two window
-// requests, named once and referenced from a decoder and its ingest node.
+// A template, a Stim file pinned by its hash, and the parallel-window
+// layers' requests, named once and referenced from a decoder and its
+// ingest node.
 std::string artifacts_yaml() {
   return R"(
 data_artifacts:
@@ -3384,8 +3392,9 @@ TEST(ParallelWindowPattern, RejectsBadParameters) {
                      "parallel_window: max_in_flight must be at least 1");
   expect_parse_error(pattern_yaml_with("max_in_flight: 4",
                                        "max_in_flight: 4\n"
-                                       "          verify_residual: maybe"),
-                     "parallel_window: verify_residual must be");
+                                       "          verify_residual: true"),
+                     "parallel_window: verify_residual must be none, fail or "
+                     "report; got 'true'");
 } // end - TEST(ParallelWindowPattern, RejectsBadParameters)
 
 // Bad pool options are rejected when parsed, and the graph rejects set ones

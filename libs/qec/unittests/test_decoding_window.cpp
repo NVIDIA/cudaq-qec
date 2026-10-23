@@ -390,6 +390,129 @@ TEST(DecodingWindow, OpenInputAddsBoundaryColumns) {
   EXPECT_LE(w.commit_columns.end, first);
 } // end - TEST(DecodingWindow, OpenInputAddsBoundaryColumns)
 
+// A window's chain through the chunk adapter that presents dem_chunks as
+// EDEMs, written from its equations as sorted column lists. With to-seam
+// rows P, interior rows I, from-seam rows N and observable rows O, chunk r
+// is D = [P; I] F + [Id; 0] V_in, V_out = N F and L_out = L_in + O F, and
+// wiring chunk r's output to chunk r + 1's input gives
+// D_(r+1) = P_(r+1) F_(r+1) + N_r F_r. The chain has an input code block
+// when its input is open, and none at round 0. Template chunks have no
+// interior rows, so [P; I] is P.
+struct adapter_chain {
+  std::vector<std::vector<std::size_t>> d_from_f; ///< Per row: fault columns
+  std::vector<std::vector<std::size_t>> d_from_v; ///< Per row: V_in entries
+  std::vector<std::vector<std::size_t>> l_from_f; ///< Per observable
+  std::size_t num_v_in = 0;
+};
+
+// Reads each chunk's P, N and O bands; fault columns count from the first
+// chunk's.
+adapter_chain chunk_adapter(const experiment_template &t, round_range rounds,
+                            bool input_block, std::size_t R) {
+  adapter_chain out;
+  std::vector<std::vector<std::size_t>> incoming;
+  std::size_t first = 0;
+  const auto &seam = t.spec().seam;
+  out.l_from_f.resize(t.num_observables());
+  for (auto r = rounds.begin; r < rounds.end; ++r) {
+    const auto &chunk = t.chunk(r, R);
+    const auto h = chunk.H.to_nested_csr();
+    const auto o = chunk.O.to_nested_csr();
+    const auto &p = chunk.get_seam(seam.to_seam);
+    std::vector<std::vector<std::size_t>> outgoing;
+    EXPECT_EQ(chunk.num_interior_rows(), 0u);
+    for (auto i = p.row_begin; i < p.row_end; ++i) {
+      const auto j = i - p.row_begin;
+      auto &row = out.d_from_f.emplace_back();
+      auto &v = out.d_from_v.emplace_back();
+      for (const auto c : h[i])
+        row.push_back(first + c);
+      if (r > rounds.begin)
+        row.insert(row.end(), incoming[j].begin(), incoming[j].end());
+      if (r == rounds.begin && input_block)
+        v.push_back(j);
+      std::sort(row.begin(), row.end());
+    }
+    if (r == rounds.begin && input_block)
+      out.num_v_in = p.row_end - p.row_begin;
+    if (chunk.has_seam(seam.from_seam)) {
+      const auto &n = chunk.get_seam(seam.from_seam);
+      for (auto i = n.row_begin; i < n.row_end; ++i) {
+        auto &row = outgoing.emplace_back();
+        for (const auto c : h[i])
+          row.push_back(first + c);
+      }
+    }
+    for (std::size_t i = 0; i < o.size(); ++i)
+      for (const auto c : o[i])
+        out.l_from_f[i].push_back(first + c);
+    incoming = std::move(outgoing);
+    first += chunk.num_faults();
+  } // end - for(r)
+  return out;
+} // end - chunk_adapter()
+
+// The columns in [begin, end) where row r of a dense matrix is set,
+// counted from begin.
+std::vector<std::size_t> row_columns(const cudaqx::tensor<uint8_t> &m,
+                                     std::size_t r, std::size_t begin,
+                                     std::size_t end) {
+  std::vector<std::size_t> out;
+  for (auto c = begin; c < end; ++c)
+    if (m.at({r, c}))
+      out.push_back(c - begin);
+  return out;
+}
+
+// Adapter equivalence, for every variant of every layer the window tests
+// sweep: the open input's boundary columns are the adapter's input code
+// block, V_in through an identity onto the first round's rows and L_in
+// straight to L_out, and the window's O over its fault columns is the
+// chain's F -> L_out block, the frame update. Own rows match D over the
+// fault columns too.
+TEST(DecodingWindow, MatchesTheChunkAdapter) {
+  for (const auto &spec :
+       {rep5_spec(), arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3),
+        narrow_readout_spec()}) {
+    const auto tmpl = std::make_shared<const experiment_template>(spec);
+    const auto K = tmpl->num_observables();
+    for (auto R = tmpl->min_rounds(); R <= 25; ++R) {
+      SCOPED_TRACE("R=" + std::to_string(R));
+      for (const auto &request : sweep_requests()) {
+        const auto instances = window_instances(request, R);
+        for (auto k = instances.begin; k < instances.end; ++k) {
+          const auto w = window_from_dem_chunks(tmpl, request, k, R);
+          // Truncation has no adapter counterpart; the sweep has none.
+          const bool block =
+              w.input.exists && w.input.disposition == port_disposition::open;
+          ASSERT_EQ(w.num_crossing_columns, 0u);
+          const auto adapter = chunk_adapter(*tmpl, w.rounds, block, R);
+          const auto &h = w.model.detector_error_matrix;
+          const auto &o = w.model.observables_flips_matrix;
+          const auto F = w.num_fault_columns;
+          const auto V = w.num_virtual_outcome_columns;
+          SCOPED_TRACE("k=" + std::to_string(k));
+          ASSERT_EQ(w.num_own_rows, adapter.d_from_f.size());
+          ASSERT_EQ(V, adapter.num_v_in);
+          ASSERT_EQ(w.num_logical_error_columns, block ? K : 0);
+          for (std::size_t r = 0; r < w.num_own_rows; ++r) {
+            EXPECT_EQ(row_columns(h, r, 0, F), adapter.d_from_f[r]) << r;
+            EXPECT_EQ(row_columns(h, r, F, F + V), adapter.d_from_v[r]) << r;
+          }
+          for (std::size_t r = 0; r < h.shape()[0]; ++r)
+            EXPECT_TRUE(row_columns(h, r, F + V, h.shape()[1]).empty());
+          for (std::size_t i = 0; i < K; ++i) {
+            EXPECT_EQ(row_columns(o, i, 0, F), adapter.l_from_f[i]) << i;
+            EXPECT_EQ(row_columns(o, i, F, h.shape()[1]),
+                      block ? std::vector<std::size_t>{V + i}
+                            : std::vector<std::size_t>{});
+          }
+        } // end - for(k)
+      } // end - for(request)
+    } // end - for(R)
+  } // end - for(spec)
+} // end - TEST(DecodingWindow, MatchesTheChunkAdapter)
+
 // A closed input adds no columns: the previous chunk's straddlers arrive as
 // deltas. An open output keeps the last chunk's straddlers with their outside
 // rows omitted. Together they are get_pcm_for_rounds() without the start
@@ -1144,7 +1267,7 @@ TEST(WindowKernelForms, RoundTripWithoutLoss) {
 // Window schedule and commitment validation
 //
 // With one-round chunks, max_span() is at most 1 and every zone has a round,
-// so the plan's size conditions (b, c_A and c_B at least max_span()) hold
+// so the layout's size conditions (b, c_A and c_B at least max_span()) hold
 // for every valid request. The failure tests break the same conditions with
 // explicit sends and ports instead.
 // ---------------------------------------------------------------------------
@@ -1155,7 +1278,7 @@ struct window_graph {
   std::vector<task_graph_edge> edges;
 };
 
-// The plan's parallel-window graph: A[k-1].forward to B[k].receive_0 and
+// The parallel-window graph: A[k-1].forward to B[k].receive_0 and
 // A[k].backward to B[k].receive_1.
 window_graph parallel_graph(const layered_requests &requests) {
   window_graph g;
@@ -1173,9 +1296,8 @@ window_graph sliding_graph(std::int64_t step, std::int64_t size) {
   return g;
 }
 
-// The plan's interior-commit layout for the default sizes, with M = 1: A
-// commits c_a - 2 rounds between b + 1 buffer rounds, and B's gap grows to
-// c_b + 2.
+// The interior-commit layout for the default sizes, with M = 1: A commits
+// c_a - 2 rounds between b + 1 buffer rounds, and B's gap grows to c_b + 2.
 layered_requests interior_commit(std::int64_t c_a, std::int64_t b,
                                  std::int64_t c_b) {
   return layered(c_a - 2, b + 1, c_b + 2);

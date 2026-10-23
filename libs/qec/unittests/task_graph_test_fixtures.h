@@ -113,8 +113,8 @@ inline dem_chunks_spec single_round_spec() {
   return spec;
 }
 
-/// The parallel-window layers of the plan: A[k] buffers b rounds on each
-/// side of c_a commit rounds, and B[k] is the c_b-round gap before A[k].
+/// The parallel-window layers: A[k] buffers b rounds on each side of c_a
+/// commit rounds, and B[k] is the c_b-round gap before A[k].
 struct layered_requests {
   experimental::window_request a;
   experimental::window_request b;

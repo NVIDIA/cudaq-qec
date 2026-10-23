@@ -592,9 +592,8 @@ decoding_window place_window(std::shared_ptr<const experiment_template> context,
   return w;
 } // end - place_window()
 
-// Implements the plan's construction: place the window, stitch its chunks
-// and the imported ones, and slice the closed chain into the window's model
-// and maps.
+// Places the window, stitches its chunks and the imported ones, and slices
+// the closed chain into the window's model and maps.
 decoding_window
 window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
                        const window_request &request, std::int64_t k,

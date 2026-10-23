@@ -1166,6 +1166,29 @@ def test_ingest_windows_parse_into_experimental_requests():
     assert again.decoders[0].task_graph.nodes[0].windows[1].request == b
 
 
+def test_verify_residual_parser_and_schema_agree():
+    # none, fail and report are strings to every YAML reader. true and false,
+    # and YAML 1.1's on, off, yes and no, are booleans to the JSON schema's
+    # tools, so the parser rejects them too.
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    for value in ["none", "fail", "report"]:
+        text = _PW_GRAPH_YAML.replace("verify_residual: report",
+                                      "verify_residual: " + value)
+        qec.multi_decoder_config.from_yaml_str(text)
+        validator.validate(yaml.safe_load(text))
+    for value in ["false", "true", "off", "no"]:
+        text = _PW_GRAPH_YAML.replace("verify_residual: report",
+                                      "verify_residual: " + value)
+        with pytest.raises(RuntimeError, match="must be none, fail or report"):
+            qec.multi_decoder_config.from_yaml_str(text)
+        assert not validator.is_valid(yaml.safe_load(text))
+
+
 def test_experimental_window_request_is_writable():
     exp = qec.experimental
     request = exp.window_request()
