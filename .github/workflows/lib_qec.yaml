@@ -344,6 +344,12 @@ jobs:
         run: |
           tar xzf /tmp/qec-build-artifacts.tar.gz -C /
 
+      # The build linked against the DOCA libibverbs that CUDA-Q's
+      # install_devdeps.sh installs; the stock container's OFED libibverbs is
+      # too old for the resulting Python module to load.
+      - name: Install rdma-core runtime from DOCA
+        run: bash .github/workflows/scripts/install_doca_rdma_core.sh
+
       - name: Configure
         id: config
         run: |
@@ -441,6 +447,12 @@ jobs:
       - name: Extract build artifacts
         run: |
           tar xzf /tmp/qec-build-artifacts.tar.gz -C /
+
+      # The build linked against the DOCA libibverbs that CUDA-Q's
+      # install_devdeps.sh installs; the stock container's OFED libibverbs is
+      # too old for the resulting Python module to load.
+      - name: Install rdma-core runtime from DOCA
+        run: bash .github/workflows/scripts/install_doca_rdma_core.sh
 
       - name: Configure
         id: config

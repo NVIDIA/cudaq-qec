@@ -1,12 +1,7 @@
 #!/bin/sh
 
-# ============================================================================ #
-# Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2022 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Abort on error
 set -e
@@ -14,7 +9,7 @@ set -e
 # Note, you must run this script from the root of the repository.
 TOP_DIR=$(pwd)
 
-if [ ! -e Contributor_License_Agreement.md ]; then
+if [ ! -e LICENSE ] || [ ! -d libs/qec/python/metapackages ]; then
   echo "You must run this script from the root of the repository."
   exit 1
 fi
