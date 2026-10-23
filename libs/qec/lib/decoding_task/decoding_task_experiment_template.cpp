@@ -14,24 +14,17 @@
 
 namespace cudaq::qec {
 
-// Whether some fault of chunk c touches both its from_seam band (the next
-// round) and another row (its own round).
-static bool spans_two_rounds(const extended_dem &c, seam_id from) {
+// Whether some fault of chunk c touches its from_seam band, the next round,
+// whether or not it touches its own round too.
+static bool reaches_next_round(const extended_dem &c, seam_id from) {
   if (!c.has_seam(from))
     return false;
   const auto band = c.get_seam(from);
   const auto h = c.H.to_csc();
-  const auto next = [&](auto row) {
+  return std::any_of(h.indices().begin(), h.indices().end(), [&](auto row) {
     return row >= band.row_begin && row < band.row_end;
-  };
-  for (std::size_t j = 0; j < c.num_faults(); ++j) {
-    const auto begin = h.indices().begin() + h.ptr()[j];
-    const auto end = h.indices().begin() + h.ptr()[j + 1];
-    if (std::any_of(begin, end, next) && !std::all_of(begin, end, next))
-      return true;
-  }
-  return false;
-} // end - spans_two_rounds()
+  });
+}
 
 // Takes the phase layout from the spec, then builds each phase's chunk twice:
 // inside the shot, and ending it without from_seam. A spec without a
@@ -81,7 +74,7 @@ experiment_template::experiment_template(dem_chunks_spec spec)
       p.measurements = p.rows;
     else if (entry.spec.num_measurements || spec_.measurements_per_round)
       p.measurements = spec_.measurements_of(entry.spec);
-    if (spans_two_rounds(p.inner, from))
+    if (reaches_next_round(p.inner, from))
       max_span_ = 1;
     if (!spec_.has_D_sparse())
       check_uniform_round(entry.id, p, uniform);

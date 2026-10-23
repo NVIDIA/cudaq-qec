@@ -45,7 +45,8 @@ public:
   std::size_t suffix_rounds() const { return suffix_.size(); }
   /// Shortest shot the spec admits.
   std::size_t min_rounds() const { return min_rounds_; }
-  /// 1 if some fault touches two rounds, else 0.
+  /// Rounds a fault reaches past its own: 1 if some fault touches the next
+  /// round, else 0.
   std::size_t max_span() const { return max_span_; }
   /// Observables every phase carries.
   std::size_t num_observables() const { return num_observables_; }

@@ -113,6 +113,18 @@ inline dem_chunks_spec single_round_spec() {
   return spec;
 }
 
+/// single_round_spec with a fifth fault that flips only the next round's
+/// detector 0: it reaches the next round without touching its own.
+inline dem_chunks_spec next_only_spec() {
+  auto spec = single_round_spec();
+  for (auto &phase : spec.phases) {
+    phase.spec.num_faults = 5;
+    phase.spec.error_rates.assign(5, 0.02);
+    phase.spec.seam_specs[1].spec.H_sparse = {4, -1, -1, -1, -1};
+  }
+  return spec;
+}
+
 /// The parallel-window layers: A[k] buffers b rounds on each side of c_a
 /// commit rounds, and B[k] is the c_b-round gap before A[k].
 struct layered_requests {

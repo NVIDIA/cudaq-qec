@@ -206,6 +206,8 @@ TEST(ExperimentTemplate, ReportsItsShape) {
   EXPECT_EQ(bare.prefix_rounds() + bare.suffix_rounds(), 0u);
   EXPECT_EQ(bare.min_rounds(), 2u);
   EXPECT_EQ(experiment_template(single_round_spec()).max_span(), 0u);
+  // A fault that flips only the next round's detectors still reaches it.
+  EXPECT_EQ(experiment_template(next_only_spec()).max_span(), 1u);
 }
 
 // A spec without a repeating phase supports exactly its own length.
