@@ -2019,6 +2019,9 @@ TEST(DecoderSchemaTest, JsonSchemaExportReflectsRegistry) {
   // that overflows it fails offline exactly as it fails when parsed.
   EXPECT_NE(text.find("\"maximum\": 2147483647"), std::string::npos);
   EXPECT_NE(text.find("\"minimum\": -2147483648"), std::string::npos);
+  // Envelope: id is int64, cuda_device_id a non-negative int32.
+  EXPECT_NE(text.find("\"maximum\": 9223372036854775807"), std::string::npos);
+  EXPECT_NE(text.find("\"minimum\": -9223372036854775808"), std::string::npos);
 }
 
 TEST(DecoderConfigTest, NegativeCudaDeviceIdIsRejectedWhenParsed) {

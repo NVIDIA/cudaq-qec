@@ -2163,6 +2163,18 @@ def test_json_schema_bounds_int32_parameters():
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(
             _flat_doc("multi_error_lut", {"lut_error_depth": 2**31}), schema)
+    # Envelope integers carry their C++ width too.
+    envelope = schema["$defs"]["decoder_config"]["properties"]
+    assert envelope["id"] == {
+        "type": "integer",
+        "minimum": -2**63,
+        "maximum": 2**63 - 1
+    }
+    assert envelope["cuda_device_id"] == {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2**31 - 1
+    }
     # uint64 parameters keep only the lower bound (2**64 - 1 is not exactly
     # representable in JSON).
     window = schema["$defs"]["decoder_params"]["sliding_window"]["properties"][

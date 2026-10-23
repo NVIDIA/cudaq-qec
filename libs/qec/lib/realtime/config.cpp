@@ -2843,13 +2843,22 @@ std::string decoder_config_json_schema() {
 
   // The fixed decoder_config envelope; keep in sync with
   // MappingTraits<decoder_config> above.
+  // Envelope integers carry the width of their C++ field, like the int32
+  // parameters above, so overflow fails offline as it fails when parsed.
   llvm::json::Object config_properties{
-      {"id", llvm::json::Object{{"type", "integer"}}},
+      {"id",
+       llvm::json::Object{{"type", "integer"},
+                          {"minimum", std::numeric_limits<int64_t>::min()},
+                          {"maximum", std::numeric_limits<int64_t>::max()}}},
       {"type", llvm::json::Object{{"type", "string"}}},
       {"dispatch",
        llvm::json::Object{{"enum", llvm::json::Array{"host", "device_graph"}}}},
       {"cuda_device_id",
-       llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
+       llvm::json::Object{
+           {"type", "integer"},
+           {"minimum", 0},
+           {"maximum",
+            static_cast<int64_t>(std::numeric_limits<int32_t>::max())}}},
       {"block_size", llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
       {"syndrome_size",
        llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
