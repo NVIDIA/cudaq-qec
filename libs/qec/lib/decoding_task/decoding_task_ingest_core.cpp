@@ -186,6 +186,7 @@ ingest_core::ingest_core(std::shared_ptr<const experiment_template> context,
   ring_.assign(ring * max_rows_, 0);
   ring_rows_.assign(ring, 0);
   ring_round_.assign(ring, -1);
+  ring_first_row_.assign(ring, 0);
   ring_mask_ = ring - 1;
   for (std::size_t l = 0; l < layers_.size(); ++l) {
     pools_.emplace_back(layers_[l].max_views);
@@ -310,6 +311,8 @@ void ingest_core::form_detectors(std::size_t r) {
   }
   ring_rows_[slot] = rows;
   ring_round_[slot] = static_cast<std::int64_t>(r);
+  ring_first_row_[slot] = rows_formed_;
+  rows_formed_ += rows;
 } // end - form_detectors()
 
 // A FINAL record is split from its end: its last measurements, with any
@@ -456,6 +459,10 @@ const ingest_publication *ingest_core::poll() {
       view.variant =
           window_variant(*context_, request, k,
                          shot_rounds_ ? *shot_rounds_ : rounds_cut_ + 1);
+      view.first_row =
+          ring_first_row_[static_cast<std::size_t>(view.rounds.begin) &
+                          ring_mask_];
+      view.source = this;
       publication_.views[l] = &view;
     } // end - for(l)
     return &publication_;
@@ -481,6 +488,7 @@ std::span<const std::uint8_t> ingest_core::detectors(std::int64_t r) const {
   return {ring_.data() + slot * max_rows_, ring_rows_[slot]};
 }
 
+// Every index is handed over once FINAL fixes the last.
 bool ingest_core::done() const {
   return shot_rounds_ && next_index_ >= index_end_;
 }
@@ -494,6 +502,7 @@ void ingest_core::reset() {
   rounds_cut_ = 0;
   partial_ = 0;
   formed_ = 0;
+  rows_formed_ = 0;
   shot_rounds_.reset();
   next_index_ = *std::min_element(first_k_.begin(), first_k_.end());
   index_end_ = 0;
@@ -501,11 +510,13 @@ void ingest_core::reset() {
   failed_ = false;
 } // end - reset()
 
+// A malformed record leaves the shot unusable until reset().
 void ingest_core::fail(const std::string &what) {
   failed_ = true;
   throw std::invalid_argument("ingest: " + what);
 }
 
+// Input waits for reset() after a failure or after FINAL.
 void ingest_core::check_open() const {
   if (failed_)
     throw std::logic_error("ingest: reset() is needed after a failure");

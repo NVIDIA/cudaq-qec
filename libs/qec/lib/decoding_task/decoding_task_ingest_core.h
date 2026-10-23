@@ -25,6 +25,8 @@
 
 namespace cudaq::qec {
 
+class ingest_core;
+
 /// One layer of an ingest node: its windows' request, and how many of its
 /// views may be out at once.
 struct ingest_layer {
@@ -38,9 +40,11 @@ struct ingest_layer {
 struct window_view {
   std::size_t layer = 0; ///< Index into the ingest node's layers
   std::int64_t k = 0;
-  round_range rounds;   ///< The window's rounds, clipped to the shot
-  variant_key variant;  ///< Its model among the layer's variants
-  std::size_t slot = 0; ///< Its place in the layer's view pool
+  round_range rounds;        ///< The window's rounds, clipped to the shot
+  variant_key variant;       ///< Its model among the layer's variants
+  std::size_t first_row = 0; ///< Its first round's first row in the shot
+  const ingest_core *source = nullptr; ///< The core whose ring holds its rows
+  std::size_t slot = 0;                ///< Its place in the layer's view pool
 };
 
 /// Every layer's window k, handed over together.
@@ -190,6 +194,7 @@ private:
   std::vector<std::uint8_t> ring_;
   std::vector<std::size_t> ring_rows_;
   std::vector<std::int64_t> ring_round_;
+  std::vector<std::size_t> ring_first_row_; ///< Each round's first shot row
   std::size_t ring_mask_ = 0;
 
   // View pools, one per layer, and the publication poll() fills.
@@ -198,9 +203,10 @@ private:
   ingest_publication publication_;
 
   // The shot.
-  std::size_t rounds_cut_ = 0; ///< Complete rounds
-  std::size_t partial_ = 0;    ///< Measurements of the round being cut
-  std::size_t formed_ = 0;     ///< Rounds whose detectors are formed
+  std::size_t rounds_cut_ = 0;  ///< Complete rounds
+  std::size_t partial_ = 0;     ///< Measurements of the round being cut
+  std::size_t formed_ = 0;      ///< Rounds whose detectors are formed
+  std::size_t rows_formed_ = 0; ///< Their detectors
   std::optional<std::size_t> shot_rounds_;
   std::int64_t next_index_ = 0;
   std::int64_t index_end_ = 0; ///< Past the last index, once FINAL is taken

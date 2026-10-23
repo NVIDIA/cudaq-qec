@@ -73,6 +73,7 @@ set(DECODERS_SOURCES
   decoding_task/decoding_task_data_artifacts.cpp
   decoding_task/decoding_task_ingest_core.cpp
   decoding_task/decoding_task_ingest_node.cpp
+  decoding_task/decoding_task_decode_window_core.cpp
   decoding_task/decoding_task_decode_window_node.cpp
   decoding_task/decoding_task_parallel_window_pattern.cpp
   decoder_init.cpp

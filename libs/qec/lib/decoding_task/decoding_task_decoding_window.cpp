@@ -867,6 +867,25 @@ std::size_t variant_probe_rounds(const experiment_template &context,
       static_cast<std::size_t>(std::max<std::int64_t>(end, 0)));
 }
 
+// Keys in the order they first appear, shot length by shot length; a layer
+// has few, so a linear search finds a repeat.
+std::vector<variant_instance>
+variant_instances(const experiment_template &context,
+                  const window_request &request) {
+  std::vector<variant_instance> out;
+  for (auto R = context.min_rounds();
+       R < variant_probe_rounds(context, request); ++R) {
+    const auto instances = window_instances(request, R);
+    for (auto k = instances.begin; k < instances.end; ++k) {
+      const auto key = window_variant(context, request, k, R);
+      if (std::none_of(out.begin(), out.end(),
+                       [&](const variant_instance &v) { return v.key == key; }))
+        out.push_back({key, k, R});
+    }
+  }
+  return out;
+}
+
 // Compares in a fixed order, so the first mismatch named is deterministic:
 // rounds, zones, ports, sends, model, then the measurement maps.
 void check_same_window_up_to_shift(const decoding_window &a,

@@ -225,6 +225,23 @@ variant_key window_variant(const experiment_template &context,
 std::size_t variant_probe_rounds(const experiment_template &context,
                                  const window_request &request);
 
+/// Where a variant first appears: its key, and an instance and shot length
+/// that have it.
+struct variant_instance {
+  variant_key key;
+  std::int64_t k = 0;
+  std::size_t num_rounds = 0;
+};
+
+/// Every variant of @p request, each with the first shot length, from the
+/// shortest, and the first instance in it that has it, over the shots
+/// variant_probe_rounds() bounds.
+/// @throws std::invalid_argument as check_window_request() if the request
+/// is invalid.
+std::vector<variant_instance>
+variant_instances(const experiment_template &context,
+                  const window_request &request);
+
 /// Check that two windows are the same problem up to a shift of rounds.
 /// @throws std::invalid_argument naming the first field they differ in.
 void check_same_window_up_to_shift(const decoding_window &a,

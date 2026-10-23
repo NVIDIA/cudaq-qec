@@ -20,6 +20,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace cudaq::qec {
@@ -80,6 +81,14 @@ public:
   std::shared_ptr<const decoding_window>
   find_window(const experiment_template &context, const window_request &request,
               const variant_key &key) const;
+
+  /// Every window variant of @p request on the template with @p context's
+  /// content, with its key, in the order variant_instances() lists them,
+  /// without building any.
+  /// @throws std::logic_error if one was not built at configuration time.
+  std::vector<std::pair<variant_key, std::shared_ptr<const decoding_window>>>
+  find_windows(const experiment_template &context,
+               const window_request &request) const;
 
   /// Every entry, in the order it was added.
   const std::vector<data_artifact_record> &records() const { return records_; }

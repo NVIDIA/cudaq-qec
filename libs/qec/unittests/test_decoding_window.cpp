@@ -24,7 +24,12 @@
 // random, whose every window view is checked against the detectors the
 // closed model's D forms from the whole shot, with the raw logical value,
 // FINAL and record errors, a ring of fixed size that keeps what views out
-// need, and records that allocate nothing; and the data artifact store:
+// need, and records that allocate nothing; the decode_window core and the
+// serial pipeline: ingest and the cores, run on raw measurements with
+// windows from the store, decode as the reference does, bit for bit,
+// fires allocate nothing beyond their decoder, a missing residual leaves
+// the imports zero, and what is not a core's window is rejected; and the
+// data artifact store:
 // sha256, canonical content, shared entries, templates as content, and
 // lookups that never build.
 
@@ -33,6 +38,7 @@
 #include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_commitment.h"
 #include "../lib/decoding_task/decoding_task_data_artifacts.h"
+#include "../lib/decoding_task/decoding_task_decode_window_core.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
 #include "../lib/decoding_task/decoding_task_ingest_core.h"
@@ -2525,10 +2531,11 @@ void expect_decodes_match(const parallel_window_reference &reference,
     const auto &mine = got[i].solution;
     const auto &theirs = want.windows[i];
     std::vector<std::size_t> committed;
+    SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
+    ASSERT_EQ(mine.outputs.committed.size(), w.model.o.num_cols());
     for (std::size_t c = 0; c < rw.num_faults; ++c)
       if (mine.outputs.committed[c])
         committed.push_back(rw.columns[c]);
-    SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
     ASSERT_EQ(got[i].detectors, theirs.detectors);
     ASSERT_EQ(std::vector<std::uint8_t>(mine.estimate.begin(),
                                         mine.estimate.begin() +
@@ -2921,6 +2928,10 @@ void expect_view(const ingest_core &core, const shot &s,
   SCOPED_TRACE("layer " + std::to_string(view.layer) + ", window " +
                std::to_string(view.k));
   EXPECT_EQ(view.rounds, placed.rounds);
+  EXPECT_EQ(
+      view.first_row,
+      s.context->row_offset(static_cast<std::size_t>(view.rounds.begin), s.R));
+  EXPECT_EQ(view.source, &core);
   EXPECT_TRUE(view.variant == window_variant(*s.context, request, view.k, s.R));
   for (auto r = view.rounds.begin; r < view.rounds.end; ++r) {
     const auto got = core.detectors(r);
@@ -3231,6 +3242,399 @@ TEST(IngestCore, AllocatesNothingPerRecord) {
     EXPECT_EQ(allocations, 0u);
   } // end - for(spec)
 } // end - TEST(IngestCore, AllocatesNothingPerRecord)
+
+// ---------------------------------------------------------------------------
+// Decode window core and the serial pipeline
+// ---------------------------------------------------------------------------
+
+// Measurements whose detectors are @p detectors where a round's detector j
+// is its measurement j, XOR the round before's, as in the memory specs:
+// each round's measurement j is detector j XOR the round before's
+// measurement j, and measurements past a round's detectors are 0.
+std::vector<std::uint8_t>
+memory_measurements(const experiment_template &t, std::size_t R,
+                    const std::vector<std::uint8_t> &detectors) {
+  std::vector<std::uint8_t> m(t.measurement_offset(R, R), 0);
+  for (std::size_t r = 0; r < R; ++r) {
+    const auto row = t.row_offset(r, R);
+    const auto at = t.measurement_offset(r, R);
+    const auto before = r == 0 ? 0 : t.measurement_offset(r - 1, R);
+    for (std::size_t j = 0; j < t.row_offset(r + 1, R) - row; ++j)
+      m[at + j] = detectors[row + j] ^ (r == 0 ? 0 : m[before + j]);
+  }
+  return m;
+} // end - memory_measurements()
+
+// The readout round's measurements through the last phase's m2o_sparse.
+std::vector<std::uint8_t> raw_logical(const experiment_template &t,
+                                      std::size_t R,
+                                      const std::vector<std::uint8_t> &m) {
+  std::vector<std::uint8_t> out;
+  std::uint8_t value = 0;
+  for (const auto i : t.readout()) {
+    if (i == -1) {
+      out.push_back(value);
+      value = 0;
+    } else {
+      value ^= m.at(t.measurement_offset(R - 1, R) + i);
+    }
+  }
+  return out;
+} // end - raw_logical()
+
+// single_error_lut, counting what each decode() allocates into
+// decode_allocations, so a test can tell a fire's own allocations from its
+// decoder's.
+class allocation_counting_lut final : public decoder {
+public:
+  static inline std::size_t decode_allocations = 0;
+
+  allocation_counting_lut(decoder_init inputs, decoder_output_request output,
+                          const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(get_decoder("single_error_lut", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    decoder_result result;
+    decode_allocations +=
+        allocation_counter::during([&] { result = inner_->decode(syndrome); });
+    return result;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      allocation_counting_lut,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<allocation_counting_lut>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(allocation_counting_lut)
+
+// A windowed graph run without the executor, for shots of any length, with
+// its windows from a data artifact store: ingest takes a shot's
+// measurements in records of one period, and each index it hands over
+// fires its layers in g's order, each receiving the sends of the producer
+// instances its edges name. Every window's detectors and solution are kept.
+class serial_pipeline {
+public:
+  serial_pipeline(const dem_chunks_spec &spec, const window_graph &g,
+                  const std::string &decoder_name,
+                  const cudaqx::heterogeneous_map &params = {})
+      : graph_(g), context_(store_.add_template(spec)) {
+    std::vector<ingest_layer> layers;
+    for (const auto &layer : g.layers) {
+      store_.add_windows(context_, layer.request);
+      layers.push_back({layer.request, 2});
+      cores_.push_back(std::make_unique<decode_window_core>(
+          store_, context_, layer.request, decoder_name, params, 4));
+    }
+    ingest_ = std::make_unique<ingest_core>(context_, std::move(layers),
+                                            !context_->readout().empty());
+  } // end - serial_pipeline()
+
+  // Decodes one shot of measurements.
+  void run(const std::vector<std::uint8_t> &measurements) {
+    ingest_->reset();
+    decodes_.clear();
+    commits_.clear();
+    for (std::size_t at = 0; at < measurements.size();) {
+      const auto len =
+          std::min(ingest_->record_limit(), measurements.size() - at);
+      const bool final = at + len == measurements.size();
+      ASSERT_EQ(ingest_->enqueue(measurements.data() + at, len, final),
+                ingest_status::accepted);
+      at += len;
+      while (const auto *p = ingest_->poll())
+        fire_index(*p);
+    }
+    ASSERT_TRUE(ingest_->done());
+  } // end - run()
+
+  const std::shared_ptr<const experiment_template> &context() const {
+    return context_;
+  }
+  const ingest_core &ingest() const { return *ingest_; }
+  const decode_window_core &core(std::size_t l) const { return *cores_[l]; }
+  // Every window's decode, by node and instance.
+  const std::map<std::pair<std::string, std::int64_t>, production_decode> &
+  decodes() const {
+    return decodes_;
+  }
+  // Every window's commit zone, by node and instance.
+  const std::map<std::pair<std::string, std::int64_t>, round_range> &
+  commits() const {
+    return commits_;
+  }
+  // What the fires themselves allocated, the decoder's included.
+  std::size_t fire_allocations() const { return fire_allocations_; }
+
+private:
+  // Fires each layer's window of the index, in g's order, and releases its
+  // view once its rows are copied.
+  void fire_index(const ingest_publication &p) {
+    for (std::size_t l = 0; l < graph_.layers.size(); ++l) {
+      const auto *view = p.views[l];
+      std::vector<const window_send_value *> receives;
+      if (!view)
+        continue;
+      for (const auto &e : graph_.edges) {
+        if (e.to_node != graph_.layers[l].node)
+          continue;
+        const auto port = std::stoul(e.to_input.substr(8)); // "receive_k"
+        const auto &producer = *cores_[layer_of(e.from_node)];
+        const auto *f = producer.find(view->k + e.index_offset);
+        receives.resize(std::max(receives.size(), port + 1), nullptr);
+        receives[port] =
+            f ? &f->sends[producer.send_index(e.from_output)] : nullptr;
+      }
+      const auto slots = static_cast<std::int64_t>(cores_[l]->num_slots());
+      const auto slot =
+          static_cast<std::size_t>((view->k % slots + slots) % slots);
+      const window_fire *f = nullptr;
+      fire_allocations_ += allocation_counter::during(
+          [&] { f = &cores_[l]->fire(slot, *view, receives); });
+      decodes_[{graph_.layers[l].node, view->k}] = {
+          {f->detectors.begin(), f->detectors.end()}, *f->solution};
+      commits_[{graph_.layers[l].node, view->k}] = f->commit;
+      ingest_->release(*view);
+    } // end - for(l)
+  } // end - fire_index()
+
+  // The layer of node id.
+  std::size_t layer_of(const std::string &id) const {
+    for (std::size_t l = 0; l < graph_.layers.size(); ++l)
+      if (graph_.layers[l].node == id)
+        return l;
+    throw std::logic_error("no layer " + id);
+  }
+
+  window_graph graph_;
+  data_artifact_store store_;
+  std::shared_ptr<const experiment_template> context_;
+  std::unique_ptr<ingest_core> ingest_;
+  std::vector<std::unique_ptr<decode_window_core>> cores_;
+  std::map<std::pair<std::string, std::int64_t>, production_decode> decodes_;
+  std::map<std::pair<std::string, std::int64_t>, round_range> commits_;
+  std::size_t fire_allocations_ = 0;
+};
+
+// The pipeline, run on the measurements behind @p detectors, decodes as the
+// reference does, window by window and bit for bit, over the same commit
+// zones, and the frames it folds are the reference's.
+void expect_pipeline_matches(serial_pipeline &pipeline,
+                             parallel_window_reference &reference,
+                             const production_windows &production,
+                             const std::vector<std::uint8_t> &detectors,
+                             std::size_t R) {
+  const auto want = reference.decode(detectors);
+  std::vector<production_decode> got;
+  std::vector<std::uint8_t> frame(want.frame.size(), 0);
+  ASSERT_NO_FATAL_FAILURE(
+      pipeline.run(memory_measurements(*pipeline.context(), R, detectors)));
+  ASSERT_EQ(pipeline.decodes().size(), reference.windows().size());
+  for (const auto &rw : reference.windows()) {
+    got.push_back(pipeline.decodes().at({rw.node, rw.k}));
+    EXPECT_EQ(pipeline.commits().at({rw.node, rw.k}), rw.commit)
+        << rw.node << "[" << rw.k << "]";
+  }
+  ASSERT_NO_FATAL_FAILURE(
+      expect_decodes_match(reference, production, got, want));
+  for (const auto &d : got)
+    for (std::size_t j = 0; j < frame.size(); ++j)
+      frame[j] ^= d.solution.outputs.frame[j];
+  EXPECT_EQ(frame, want.frame);
+} // end - expect_pipeline_matches()
+
+// @p requests with every anchor @p by rounds later, so other windows
+// straddle round 0.
+layered_requests shifted(layered_requests requests, std::int64_t by) {
+  requests.a.offset += by;
+  requests.b.offset += by;
+  return requests;
+}
+
+// Ingest and the decode_window cores, run serially on raw measurements with
+// windows from the store, decode every single fault as the reference does,
+// window by window, for every layout and shot length up to 24, and with
+// the default layout a round earlier, whose first A window's commit zone
+// starts before the shot. One pipeline serves every length.
+TEST(DecodeWindowCore, PipelineDecodesSingleFaultsAsTheReference) {
+  auto layouts = swept_layouts();
+  layouts.push_back(parallel_graph(shifted(layered(2, 1, 3), -1)));
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3)}) {
+    for (const auto &g : layouts) {
+      serial_pipeline pipeline(spec, g, "single_error_lut");
+      for (auto R = pipeline.context()->min_rounds(); R <= 24; ++R) {
+        parallel_window_reference reference(spec, g, R, "single_error_lut");
+        const production_windows production(
+            pipeline.context(), g, R, reference.order(), "single_error_lut");
+        const auto &s = reference.model();
+        SCOPED_TRACE("R=" + std::to_string(R));
+        for (std::size_t c = 0; c < s.h.size(); ++c)
+          ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
+              pipeline, reference, production, detectors_of(s, c), R))
+              << "column " << c;
+      } // end - for(R)
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(DecodeWindowCore, PipelineDecodesSingleFaultsAsTheReference)
+
+// The same on sampled shots with PyMatching, where windows commit several
+// faults and send what they leave; the raw logical value is the readout
+// round's through m2o.
+TEST(DecodeWindowCore, PipelineDecodesSampledShotsAsTheReference) {
+  constexpr std::size_t R = 20;      // two periods of each layout
+  constexpr std::size_t shots = 500; // a hundred or so with several faults
+  for (const auto &spec : {arbitrary_memory_spec(5), wide_readout_spec()}) {
+    for (const auto &g : {parallel_graph(layered(3, 3, 9)),
+                          parallel_graph(with_truncate(layered(3, 3, 9)))}) {
+      serial_pipeline pipeline(spec, g, "pymatching", matching);
+      parallel_window_reference reference(spec, g, R, "pymatching", matching);
+      const production_windows production(
+          pipeline.context(), g, R, reference.order(), "pymatching", matching);
+      const auto &s = reference.model();
+      const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+          s.dem.detector_error_matrix, shots, s.dem.error_rates, 23);
+      for (std::size_t i = 0; i < shots; ++i) {
+        const auto syndrome = row_of(detectors, i);
+        ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
+            pipeline, reference, production, syndrome, R))
+            << "shot " << i;
+        EXPECT_EQ(
+            pipeline.ingest().logical(),
+            raw_logical(*pipeline.context(), R,
+                        memory_measurements(*pipeline.context(), R, syndrome)));
+      }
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(DecodeWindowCore, PipelineDecodesSampledShotsAsTheReference)
+
+// A fire allocates nothing beyond what its decoder's decode() does, over a
+// long shot with every kind of variant.
+TEST(DecodeWindowCore, FiresAllocateNothingBeyondTheDecoder) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(3, 3, 9));
+  constexpr std::size_t R = 60; // five periods: prefix, bulk and terminal
+  serial_pipeline pipeline(spec, g, "allocation_counting_lut");
+  const parallel_window_reference reference(spec, g, R, "single_error_lut");
+  allocation_counting_lut::decode_allocations = 0;
+  ASSERT_NO_FATAL_FAILURE(pipeline.run(memory_measurements(
+      *pipeline.context(), R, detectors_of(reference.model(), 37))));
+  EXPECT_GT(allocation_counting_lut::decode_allocations, 0u);
+  EXPECT_EQ(pipeline.fire_allocations(),
+            allocation_counting_lut::decode_allocations);
+} // end - TEST(DecodeWindowCore, FiresAllocateNothingBeyondTheDecoder)
+
+// An input from a producer instance that does not exist is empty: a window
+// fired without its residual has zero imported rows, whatever its slot
+// held before.
+TEST(DecodeWindowCore, AMissingResidualLeavesTheImportsZero) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  std::mt19937 rng(13);
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 2);
+  decode_window_core b(store, context, g.layers[1].request, "single_error_lut",
+                       {}, 2);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 4}, {g.layers[1].request, 4}}, false);
+  std::vector<std::uint8_t> m(context->measurement_offset(R, R));
+  for (auto &x : m)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  const ingest_publication *p = nullptr;
+  for (std::size_t at = 0; !p || !p->views[1]; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while ((p = ingest.poll()) && !p->views[1])
+      ;
+  }
+  const auto &fired = a.fire(0, *p->views[0], {});
+  const auto &residual = fired.sends[a.send_index("backward")];
+  const window_send_value *with[] = {nullptr, &residual};
+  const window_send_value *without[] = {nullptr, nullptr};
+  const auto imported = [&](const window_fire &f) {
+    return std::vector<std::uint8_t>(
+        f.detectors.end() - static_cast<std::ptrdiff_t>(residual.values.size()),
+        f.detectors.end());
+  };
+  ASSERT_NE(std::count(residual.values.begin(), residual.values.end(), 1), 0);
+  EXPECT_EQ(imported(b.fire(0, *p->views[1], with)),
+            std::vector<std::uint8_t>(residual.values.begin(),
+                                      residual.values.end()));
+  EXPECT_EQ(imported(b.fire(0, *p->views[1], without)),
+            std::vector<std::uint8_t>(residual.values.size(), 0));
+} // end - TEST(DecodeWindowCore, AMissingResidualLeavesTheImportsZero)
+
+// A fire takes only its own layer's windows into existing slots, and a
+// send only onto the rows its mode reaches in the receiving window.
+TEST(DecodeWindowCore, RejectsWhatIsNotItsWindow) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 2);
+  decode_window_core b(store, context, g.layers[1].request, "single_error_lut",
+                       {}, 2);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 4}, {g.layers[1].request, 4}}, false);
+  const auto m = memory_measurements(
+      *context, R, std::vector<std::uint8_t>(context->row_offset(R, R), 0));
+  std::vector<const window_view *> a_views;
+  std::vector<const window_view *> b_views;
+  // Records until A has three views out and B two, held.
+  for (std::size_t at = 0; a_views.size() < 3 || b_views.size() < 2;
+       at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll()) {
+      if (p->views[0])
+        a_views.push_back(p->views[0]);
+      if (p->views[1])
+        b_views.push_back(p->views[1]);
+    }
+  }
+  auto unknown = *a_views[0];
+  unknown.variant.position = 1000;
+  expect_error([&] { a.fire(2, *a_views[0], {}); },
+               "decode_window: slot 2 does not exist; there are 2");
+  expect_error([&] { a.fire(0, unknown, {}); },
+               "decode_window: window 0's variant is none of this layer's");
+  expect_error([&] { a.fire(0, *b_views.back(), {}); },
+               "decode_window: window " + std::to_string(b_views.back()->k) +
+                   "'s view holds other rows than the");
+  // A[k].backward is B[k]'s imports, before B[k + 1]'s rows.
+  ASSERT_EQ(b_views[1]->k, b_views[0]->k + 1);
+  const auto &fired =
+      a.fire(0, *a_views[static_cast<std::size_t>(b_views[0]->k)], {});
+  const window_send_value *misdirected[] = {
+      nullptr, &fired.sends[a.send_index("backward")]};
+  expect_error([&] { b.fire(0, *b_views[1], misdirected); },
+               "send 'backward' reaches shot row");
+  expect_error([&] { a.send_index("sideways"); },
+               "decode_window: the layer has no send 'sideways'");
+} // end - TEST(DecodeWindowCore, RejectsWhatIsNotItsWindow)
 
 // ---------------------------------------------------------------------------
 // Data artifact store
