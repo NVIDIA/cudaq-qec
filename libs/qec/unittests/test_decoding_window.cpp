@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <gtest/gtest.h>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
@@ -927,6 +928,19 @@ TEST(DecodingWindow, M2oWithoutDSparseReadsTheDetectorPackedRound) {
 } // end - TEST(DecodingWindow, M2oWithoutDSparseReadsTheDetectorPackedRound)
 
 // The spec's invalid constructions are each rejected with their own message.
+// The measurement maps index a window's measurements with 32 bits, so a
+// window whose rounds hold more is rejected before any index is formed,
+// rather than wrapping.
+TEST(DecodingWindow, RejectsMoreMeasurementsThanTheMapsIndex) {
+  auto spec = arbitrary_memory_spec(5, true);
+  for (auto &phase : spec.phases)
+    phase.spec.num_measurements = (std::uint64_t{1} << 32) + 1;
+  const auto tmpl = std::make_shared<const experiment_template>(spec);
+  expect_error([&] { window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, 12); },
+               "window_from_dem_chunks: window 1 holds",
+               "measurements, more than its maps can index");
+}
+
 TEST(DecodingWindow, RejectsInvalidRequests) {
   const auto tmpl =
       std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
@@ -990,6 +1004,22 @@ TEST(DecodingWindow, RejectsInvalidRequests) {
   r = layered(2, 2, 3).b;
   r.sends = {{"forward", std::nullopt, {}}};
   rejects(r, "forward send needs a buffer zone after the commit zone");
+  // Rounds and offsets lie within 2^31 of the anchor, so that the window
+  // arithmetic stays within int64.
+  constexpr std::int64_t far = std::int64_t{1} << 40;
+  r = good;
+  r.period = far;
+  rejects(r, "period " + std::to_string(far) + " is beyond");
+  r = good;
+  r.offset = -far;
+  rejects(r, "offset " + std::to_string(-far) + " is beyond");
+  r = good;
+  r.commit = round_range{0, far};
+  r.buffers = {};
+  rejects(r, "round " + std::to_string(far) + " is beyond");
+  r = good;
+  r.sends.push_back({"far", send_mode::delta, {{-far, 0}}});
+  rejects(r, "round " + std::to_string(-far) + " is beyond");
 
   // Only the instances window_instances() lists exist.
   const auto instances = window_instances(good, 12);
@@ -1855,6 +1885,25 @@ TEST(CommitmentSends, ProbesReachAProducerSeveralPeriodsBack) {
                "validate_commitment: edge W.forward -> W.receive_1 "
                "(index_offset -7)",
                "outside W[");
+}
+
+// The probe range and the schedule hold only offsets a shot can: an edge
+// reaching back more than 2^31 instances, the most negative int64 included,
+// is rejected instead of overflowing.
+TEST(CommitmentSends, RejectsAnIndexOffsetBeyondAnyShot) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  for (const auto offset :
+       {std::numeric_limits<std::int64_t>::min(), -(std::int64_t{1} << 40)}) {
+    auto g = sliding_graph(2, 5);
+    const auto text = "edge W.forward -> W.receive_1 (index_offset " +
+                      std::to_string(offset) + ") reaches back beyond";
+    g.edges.push_back({"W", "forward", "W", "receive_1", offset});
+    expect_error([&] { commitment_probe_rounds(*tmpl, g.layers, g.edges); },
+                 "commitment_probe_rounds: " + text);
+    expect_error([&] { schedule_windows(tmpl, g.layers, g.edges, 20); },
+                 "schedule_windows: " + text);
+  }
 }
 
 // One producer's send reaching a receiver twice, through two edges, would

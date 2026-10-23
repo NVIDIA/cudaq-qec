@@ -1097,11 +1097,15 @@ struct MappingTraits<cudaq::qec::task_graph_edge> {
     io.mapOptional("index_offset", edge.index_offset, std::int64_t{0});
     if (io.outputting())
       return;
-    // A window waits only on the same or an earlier index.
-    if (edge.index_offset > 0)
+    // A window waits only on the same or an earlier index, and no shot
+    // holds one further back than the request limit.
+    if (edge.index_offset > 0 ||
+        edge.index_offset < -cudaq::qec::experimental::window_round_limit)
       throw std::runtime_error(
           "edge " + from + " -> " + to + " has index_offset " +
-          std::to_string(edge.index_offset) + "; it must be zero or negative");
+          std::to_string(edge.index_offset) +
+          "; it must be zero or negative, and no less than -" +
+          std::to_string(cudaq::qec::experimental::window_round_limit));
     if (auto err =
             split_endpoint(from, edge.from_node, edge.from_output, "output");
         !err.empty())
@@ -2604,13 +2608,18 @@ llvm::json::Object task_graph_json_schema() {
     node["allOf"] = std::move(per_kind);
 
   // A window request, as an ingest node's `windows` holds it. Each helper
-  // returns a fresh object, since json::Value takes objects by move.
-  const auto rounds_pair = [] {
+  // returns a fresh object, since json::Value takes objects by move. Round
+  // values lie within window_round_limit of zero, as the request check has.
+  constexpr auto limit = cudaq::qec::experimental::window_round_limit;
+  const auto bounded = [](std::int64_t least, std::int64_t most) {
     return llvm::json::Object{
-        {"type", "array"},
-        {"items", llvm::json::Object{{"type", "integer"}}},
-        {"minItems", 2},
-        {"maxItems", 2}};
+        {"type", "integer"}, {"minimum", least}, {"maximum", most}};
+  };
+  const auto rounds_pair = [&] {
+    return llvm::json::Object{{"type", "array"},
+                              {"items", bounded(-limit, limit)},
+                              {"minItems", 2},
+                              {"maxItems", 2}};
   };
   const auto range_ref = [] {
     return llvm::json::Object{{"$ref", "#/$defs/round_range"}};
@@ -2629,10 +2638,16 @@ llvm::json::Object task_graph_json_schema() {
   llvm::json::Object range_map =
       closed_object(llvm::json::Object{{"rounds", rounds_pair()}});
   range_map["required"] = llvm::json::Array{"rounds"};
-  llvm::json::Object send = closed_object(
-      llvm::json::Object{{"id", llvm::json::Object{{"type", "string"}}},
-                         {"mode", one_of({"delta", "residual"})},
-                         {"rounds", range_ref()}});
+  // A send's rounds are one range, or a list of them.
+  llvm::json::Object send = closed_object(llvm::json::Object{
+      {"id", llvm::json::Object{{"type", "string"}}},
+      {"mode", one_of({"delta", "residual"})},
+      {"rounds",
+       llvm::json::Object{
+           {"oneOf", llvm::json::Array{
+                         range_ref(), llvm::json::Object{{"type", "array"},
+                                                         {"items", range_ref()},
+                                                         {"minItems", 1}}}}}}});
   send["required"] = llvm::json::Array{"id"};
   llvm::json::Object input = closed_object(llvm::json::Object{
       {"disposition", one_of({"open", "closed"})},
@@ -2650,8 +2665,8 @@ llvm::json::Object task_graph_json_schema() {
       {"merge_identical", llvm::json::Object{{"type", "boolean"}}},
       {"conflicting_parallel", one_of({"reject", "most_likely"})}});
   llvm::json::Object window_request = closed_object(llvm::json::Object{
-      {"period", llvm::json::Object{{"type", "integer"}, {"minimum", 1}}},
-      {"offset", llvm::json::Object{{"type", "integer"}}},
+      {"period", bounded(1, limit)},
+      {"offset", bounded(-limit, limit)},
       {"zones", std::move(zones)},
       {"ports",
        closed_object(llvm::json::Object{{"input", std::move(input)},
@@ -2726,7 +2741,10 @@ llvm::json::Object task_graph_json_schema() {
                 {"to",
                  llvm::json::Object{{"$ref", "#/$defs/task_graph_endpoint"}}},
                 {"index_offset",
-                 llvm::json::Object{{"type", "integer"}, {"maximum", 0}}}}},
+                 llvm::json::Object{
+                     {"type", "integer"},
+                     {"minimum", -cudaq::qec::experimental::window_round_limit},
+                     {"maximum", 0}}}}},
            {"required", llvm::json::Array{"from", "to"}},
            {"additionalProperties", false}}},
       {"task_graph_node", std::move(node)},

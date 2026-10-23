@@ -33,6 +33,7 @@ using experimental::port_disposition;
 using experimental::round_range;
 using experimental::send_mode;
 using experimental::window_request;
+using experimental::window_round_limit;
 
 /// Half-open model columns [begin, end).
 struct column_range {

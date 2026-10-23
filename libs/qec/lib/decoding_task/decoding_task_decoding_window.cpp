@@ -11,6 +11,7 @@
 
 #include "decoding_task_decoding_window.h"
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -66,12 +67,25 @@ std::vector<round_range> sorted_zones(const window_request &request) {
   return zones;
 }
 
-// Checks the period and the commit zone, which every query needs.
+// Rejects a value further than window_round_limit from zero, so window
+// arithmetic on it stays within int64.
+void check_within(std::int64_t value, const std::string &what) {
+  if (value > window_round_limit || value < -window_round_limit)
+    reject(what + " " + std::to_string(value) + " is beyond " +
+           std::to_string(window_round_limit) + " rounds, past any shot");
+}
+
+// Checks the period, the offset and the commit zone, which every query
+// needs.
 void check_anchor(const window_request &request) {
   if (request.period < 1)
     reject("period must be at least 1");
+  check_within(request.period, "period");
+  check_within(request.offset, "offset");
   if (!request.commit)
     reject("no commit zone");
+  check_within(request.commit->begin, "round");
+  check_within(request.commit->end, "round");
   if (request.commit->empty())
     reject("the commit zone is empty");
 }
@@ -97,6 +111,8 @@ void check_sends(const window_request &request, round_range window) {
                 return a.begin < b.begin;
               });
     for (std::size_t i = 0; i < rounds.size(); ++i) {
+      check_within(rounds[i].begin, "round");
+      check_within(rounds[i].end, "round");
       if (rounds[i].empty())
         reject(name + " has an empty round range");
       if (rounds[i].begin < window.begin || rounds[i].end > window.end)
@@ -116,9 +132,12 @@ void check_request(const window_request &request) {
   const auto &input = request.input;
   const auto &output = request.output;
   const round_range window{zones.front().begin, zones.back().end};
-  for (const auto &buffer : request.buffers)
+  for (const auto &buffer : request.buffers) {
+    check_within(buffer.begin, "round");
+    check_within(buffer.end, "round");
     if (buffer.empty())
       reject("a buffer zone is empty");
+  }
   for (std::size_t i = 1; i < zones.size(); ++i) {
     if (zones[i].begin < zones[i - 1].end)
       reject("zones overlap");
@@ -142,6 +161,8 @@ void check_request(const window_request &request) {
   if (input.prior && !(*input.prior > 0.0 && *input.prior < 1.0))
     reject("the input prior must be strictly between 0 and 1");
   if (output.imports) {
+    check_within(output.imports->begin, "round");
+    check_within(output.imports->end, "round");
     if (*output.disposition == port_disposition::open)
       reject("an open output imports nothing");
     if (output.imports->empty())
@@ -748,6 +769,15 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
 
   // Measurement maps.
   const auto layout = layout_measurements(t, w.rounds, num_rounds);
+  // The maps index measurements with 32 bits; check before any is formed.
+  if (layout.start.back() >
+      std::numeric_limits<sparse_binary_matrix::index_type>::max())
+    fail("window " + std::to_string(k) + " holds " +
+         std::to_string(layout.start.back()) +
+         " measurements, more than its maps can index (" +
+         std::to_string(
+             std::numeric_limits<sparse_binary_matrix::index_type>::max()) +
+         ")");
   w.num_virtual_outcomes = layout.v_in;
   w.num_measurements = layout.start.back() - layout.v_in;
   w.m2d = build_m2d(t, w, layout);

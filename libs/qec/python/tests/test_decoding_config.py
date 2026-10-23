@@ -1168,6 +1168,35 @@ def test_ingest_windows_parse_into_experimental_requests():
     assert again.decoders[0].task_graph.nodes[0].windows[1].request == b
 
 
+def test_send_rounds_parser_and_schema_agree():
+    # A send's rounds are one range, in either form, or a list of them; the
+    # parser and the JSON schema accept the same forms, and neither an empty
+    # list.
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    sends = "sends: [{id: forward}, {id: backward}]"
+    assert sends in _PW_GRAPH_YAML
+    for rounds in [
+            "[3, 5]", "{rounds: [3, 5]}", "[[-3, -2], [3, 5]]",
+            "[[-3, -2], {rounds: [3, 5]}]"
+    ]:
+        text = _PW_GRAPH_YAML.replace(
+            sends, "sends: [{id: forward}, {id: backward}, "
+            "{id: extra, mode: delta, rounds: " + rounds + "}]")
+        qec.multi_decoder_config.from_yaml_str(text)
+        validator.validate(yaml.safe_load(text))
+    empty = _PW_GRAPH_YAML.replace(
+        sends, "sends: [{id: forward}, {id: backward}, "
+        "{id: extra, mode: delta, rounds: []}]")
+    with pytest.raises(RuntimeError):
+        qec.multi_decoder_config.from_yaml_str(empty)
+    assert not validator.is_valid(yaml.safe_load(empty))
+
+
 def test_verify_residual_parser_and_schema_agree():
     # none, fail and report are strings to every YAML reader. true and false,
     # and YAML 1.1's on, off, yes and no, are booleans to the JSON schema's

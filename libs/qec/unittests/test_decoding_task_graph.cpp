@@ -2045,10 +2045,22 @@ decoders:
     EXPECT_NE(std::string(e.what()).find("index_offset"), std::string::npos)
         << e.what();
   }
+  try {
+    cfg::multi_decoder_config::from_yaml_str(
+        yaml(", index_offset: -4294967296"));
+    ADD_FAILURE() << "an index_offset beyond any shot parsed";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("no less than -2147483648"),
+              std::string::npos)
+        << e.what();
+  }
   const auto at = schema.find("\"index_offset\"");
   ASSERT_NE(at, std::string::npos);
-  EXPECT_NE(schema.find("\"maximum\": 0", at), std::string::npos)
-      << schema.substr(at, 120);
+  EXPECT_NE(schema.substr(at, 160).find("\"maximum\": 0"), std::string::npos)
+      << schema.substr(at, 160);
+  EXPECT_NE(schema.substr(at, 160).find("\"minimum\": -2147483648"),
+            std::string::npos)
+      << schema.substr(at, 160);
 } // end - TEST(DecodingTaskGraph, EdgeIndexOffsetRoundTripsThroughYaml)
 
 // No node joins its inputs by index yet, so the build rejects a non-zero

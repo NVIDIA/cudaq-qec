@@ -78,6 +78,19 @@ std::string describe(const task_graph_edge &e) {
   return out;
 }
 
+// Rejects, for @p what, an edge reaching further than window_round_limit
+// instances, which no shot holds, before any arithmetic on its offset.
+void check_index_offsets(const std::vector<task_graph_edge> &edges,
+                         const std::string &what) {
+  for (const auto &e : edges)
+    if (e.index_offset < -window_round_limit ||
+        e.index_offset > window_round_limit)
+      throw std::invalid_argument(
+          what + ": " + describe(e) + " reaches " +
+          (e.index_offset < 0 ? "back" : "forward") + " beyond " +
+          std::to_string(window_round_limit) + " instances, past any shot");
+}
+
 // " of the 6-round shot".
 std::string of_shot(std::size_t num_rounds) {
   return " of the " + std::to_string(num_rounds) + "-round shot";
@@ -450,6 +463,7 @@ schedule_windows(std::shared_ptr<const experiment_template> context,
   std::map<std::string, const window_layer *> by_node;
   if (!context)
     reject_schedule("no template");
+  check_index_offsets(edges, "schedule_windows");
   for (const auto &layer : layers) {
     experimental::check_window_request(layer.request);
     if (!by_node.emplace(layer.node, &layer).second)
@@ -499,12 +513,14 @@ schedule_windows(std::shared_ptr<const experiment_template> context,
 // The longest layer's variant probe, one period longer, so the probe shots
 // also hold the bulk around two consecutive bulk windows of every layer;
 // longer still by the periods the farthest edge reaches back, so that every
-// consumer variant meets its producer.
+// consumer variant meets its producer. Offsets and periods lie within
+// window_round_limit, so the sum stays within range.
 std::size_t commitment_probe_rounds(const experiment_template &context,
                                     const std::vector<window_layer> &layers,
                                     const std::vector<task_graph_edge> &edges) {
   std::size_t end = context.min_rounds() + 1;
   std::int64_t reach = 1;
+  check_index_offsets(edges, "commitment_probe_rounds");
   if (!context.repeats() || layers.empty())
     return end;
   const auto &first = layers.front();

@@ -106,10 +106,16 @@ struct ingest_window {
   bool operator==(const ingest_window &) const = default;
 };
 
+/// The farthest a request's rounds, period and offset, and an edge's
+/// index_offset, may lie from zero: far beyond any shot, and near enough
+/// that window arithmetic on them stays within int64.
+inline constexpr std::int64_t window_round_limit = std::int64_t{1} << 31;
+
 /// Check @p request against the window construction rules: a period of at
 /// least 1, one non-empty commit zone, disjoint contiguous zones, a
 /// disposition on each port, a valid prior, imports at the output wire, and
-/// well-formed sends.
+/// well-formed sends. Every round, the period and the offset lie within
+/// window_round_limit of zero.
 /// @throws std::invalid_argument naming the first rule the request breaks.
 void check_window_request(const window_request &request);
 
