@@ -156,17 +156,24 @@ class GeneratorCliTest(unittest.TestCase):
         decoders = document["decoders"]
         self.assertEqual([decoder["id"] for decoder in decoders],
                          list(range(patches)))
+        worker_key = None
         for decoder in decoders:
             self.assertEqual(decoder["dem_chunks"], "memory_model")
             graph = decoder["task_graph"]
             if workers is None:
                 self.assertEqual(set(graph), {"nodes", "edges"})
             else:
+                worker_keys = {"pool_threads", "async_num_workers"} & set(graph)
+                self.assertEqual(len(worker_keys), 1)
+                active_key = next(iter(worker_keys))
+                if worker_key is None:
+                    worker_key = active_key
+                self.assertEqual(active_key, worker_key)
                 self.assertEqual(
                     set(graph),
-                    {"nodes", "edges", "async_streaming", "async_num_workers"})
+                    {"nodes", "edges", "async_streaming", worker_key})
                 self.assertIs(graph["async_streaming"], True)
-                self.assertEqual(graph["async_num_workers"], workers)
+                self.assertEqual(graph[worker_key], workers)
             self.assertEqual(graph["edges"], [
                 {
                     "from": "measurements",
@@ -190,9 +197,9 @@ class GeneratorCliTest(unittest.TestCase):
                 self.assertNotIn("gap_rounds", node)
             else:
                 self.assertEqual(node["gap_rounds"], gap)
-            if workers is None:
-                self.assertNotIn("async_num_workers", graph)
             self.assertNotIn("async_worker_cpus", graph)
+            self.assertNotIn("pool_affinity", graph)
+            self.assertNotIn("async_max_in_flight_records", graph)
         connections = model["connections"]
         connected = {connection["to"] for connection in connections}
         outgoing = {connection["from"] for connection in connections}
@@ -440,6 +447,7 @@ class GeneratorCliTest(unittest.TestCase):
                     node = decoder["task_graph"]["nodes"][0]
                     self.assertNotIn("workers_per_graph", node)
                     self.assertNotIn("async_num_workers", node)
+                    self.assertNotIn("pool_threads", node)
                     self.assertEqual(node["inner"],
                                      {"type": "single_error_lut"})
 
@@ -477,6 +485,35 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertIs(inner["straddle_end_round"], False)
         self.assertEqual(inner["inner_decoder_name"], "multi_error_lut")
         self.assertEqual(inner["inner_decoder_params"], {"lut_error_depth": 2})
+
+    def test_explicit_pymatching_merge_policy_is_preserved_for_every_patch(
+            self):
+        self.require_public_api()
+        for policy in ("smallest_weight", "independent"):
+            with self.subTest(policy=policy):
+                working = self.case_directory()
+                result = run_program(GENERATOR,
+                                     *generation_options(
+                                         decoder="pymatching",
+                                         **{"logical-qubits": 2}),
+                                     f"--decoder-arg=merge_strategy={policy}",
+                                     cwd=working)
+                if (result.returncode != 0 and
+                        "decoder is not registered in this QEC build: pymatching"
+                        in result.stderr):
+                    self.assertEqual(list(working.iterdir()), [])
+                    self.skipTest("PyMatching plugin is not installed")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual({path.name for path in working.iterdir()},
+                                 {"server.yaml"})
+                document = yaml.safe_load((working / "server.yaml").read_text())
+                self.assert_server(document, patches=2)
+                for decoder in document["decoders"]:
+                    self.assertEqual(decoder["task_graph"]["nodes"][0]["inner"],
+                                     {
+                                         "type": "pymatching",
+                                         "merge_strategy": policy,
+                                     })
 
     def test_bad_decoder_arguments_and_backend_name_leave_no_output(self):
         for arguments in (

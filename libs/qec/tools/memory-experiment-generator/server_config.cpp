@@ -253,7 +253,10 @@ Options execution_options(std::optional<std::uint64_t> workers) {
   validate_worker_count(workers);
   Options result;
   if (workers) {
-    if constexpr (requires { result.async_num_workers; }) {
+    if constexpr (requires { result.pool_threads; }) {
+      result.async_streaming = true;
+      result.pool_threads = static_cast<std::size_t>(*workers);
+    } else if constexpr (requires { result.async_num_workers; }) {
       result.async_streaming = true;
       result.async_num_workers = static_cast<std::size_t>(*workers);
     } else {

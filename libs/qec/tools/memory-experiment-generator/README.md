@@ -20,7 +20,7 @@ In a full QEC build configured with CUDA-Q, Stim and realtime configuration:
 cmake --build build --target memory-experiment-generator
 build/bin/memory-experiment-generator \
   --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
-  --decoder-arg=merge_strategy=independent
+  --decoder-arg=merge_strategy=smallest_weight
 ```
 
 This is Justin's distance-three reference. A/B commit and buffer widths
@@ -35,13 +35,22 @@ For a longer experiment with two independent patches:
 ```sh
 build/bin/memory-experiment-generator \
   --distance=5 --rounds=1000 --basis=X --logical-qubits=2 \
-  --decoder=pymatching
+  --decoder=pymatching --decoder-arg=merge_strategy=smallest_weight
 ```
+
+Select PyMatching's merge policy explicitly: its error-output default,
+`disallow`, can reject the parallel boundary edges in an A window. The examples
+use `smallest_weight`; the generator preserves the selected policy rather than
+changing decoder defaults. Window-level tests cover explicit policies, but do
+not establish the accuracy or performance of the complete decoding graph.
 
 To request four pool workers for each of those two patch graphs, add
 `--workers-per-graph=4`. The generated configuration sets `async_streaming: true`
-and `async_num_workers: 4` on each graph, and the command reports eight configured
-workers in total, excluding the additional coordinator thread for each graph.
+and the framework's per-graph worker count to four. It uses `pool_threads` when
+the linked framework provides that executor interface, otherwise the experimental
+window configuration's `async_num_workers` field; it never emits both. The command
+reports eight configured workers in total, excluding the additional coordinator
+thread for each graph.
 This is a per-graph setting, not a shared process-wide core budget or CPU
 reservation. The framework must support the worker-pool runtime to execute it.
 
@@ -124,6 +133,11 @@ before preparation.
 The same configuration structure is used for each decoder; its name and
 schema-typed parameters differ. Configuration emission does not qualify a
 decoder's fault-output capability, A/B accuracy or parallel execution.
+The current checks do not construct inner decoders against the actual A/B
+window models. That validation must use the framework's authoritative pattern
+lowering when available, requesting fault-column outputs and checking the
+concrete model and parameters. A tiny or whole-shot model is not a substitute
+for those windows; the generator does not maintain a backend-name whitelist.
 When a worker count is supplied, every independent patch receives that same
 per-graph count. The total is checked for overflow before model preparation and
 reported explicitly; no allocation across graphs is invented. Omitting the
@@ -240,6 +254,10 @@ patches, typed decoder arguments, malformed detector maps, default geometry,
 shared generator/server configuration lookup, safe publication and rejection of
 removed output/replay/bundle flags. Per-graph worker tests check exact policy
 round trips, independent patches, unchanged defaults and checked worker totals.
+PyMatching tests check explicit merge-policy preservation and, when the public
+window model is available, fault estimates and committed effects on Justin's
+X/Z reference windows. They use the framework's existing model and commit
+helpers, not a tool-owned scheduler.
 Base-framework tests check explicit unavailability; positive configuration tests
 require the public pattern.
 

@@ -56,9 +56,12 @@ server_config_options reference_options() {
 
 template <typename Options>
 void expect_worker_policy(const Options &options, std::uint64_t workers) {
-  if constexpr (requires { options.async_num_workers; }) {
-    auto expected = Options{};
-    expected.async_streaming = true;
+  auto expected = Options{};
+  expected.async_streaming = true;
+  if constexpr (requires { options.pool_threads; }) {
+    expected.pool_threads = static_cast<std::size_t>(workers);
+    EXPECT_EQ(options, expected);
+  } else if constexpr (requires { options.async_num_workers; }) {
     expected.async_num_workers = static_cast<std::size_t>(workers);
     EXPECT_EQ(options, expected);
   } else {
@@ -70,10 +73,10 @@ template <typename Config>
 void expect_worker_policy_tampering_rejected(Config value,
                                              const dem_chunks_spec &model,
                                              std::uint64_t workers) {
-  if constexpr (requires {
-                  value.decoders.back().task_graph->options.async_num_workers;
-                }) {
-    auto &options = value.decoders.back().task_graph->options;
+  auto &options = value.decoders.back().task_graph->options;
+  if constexpr (
+      requires { options.pool_threads; } ||
+      requires { options.async_num_workers; }) {
     const auto expected = options;
     const auto reject = [&] {
       EXPECT_THROW(validate_server_config(value.to_yaml_str(), model,
@@ -81,14 +84,37 @@ void expect_worker_policy_tampering_rejected(Config value,
                    std::runtime_error);
       options = expected;
     };
-    options.async_num_workers.reset();
-    reject();
-    options.async_num_workers = static_cast<std::size_t>(workers + 1);
-    reject();
+    if constexpr (requires { options.pool_threads; }) {
+      options.pool_threads = 0;
+      reject();
+      options.pool_threads = static_cast<std::size_t>(workers + 1);
+      reject();
+      if constexpr (requires { options.async_num_workers; }) {
+        options.async_num_workers = static_cast<std::size_t>(workers);
+        reject();
+      }
+    } else {
+      options.async_num_workers.reset();
+      reject();
+      options.async_num_workers = static_cast<std::size_t>(workers + 1);
+      reject();
+    }
     options.async_streaming = false;
     reject();
-    options.async_worker_cpus.push_back(0);
+    options.async_queue_capacity = 4;
     reject();
+    if constexpr (requires { options.pool_affinity; }) {
+      options.pool_affinity.push_back(0);
+      reject();
+    }
+    if constexpr (requires { options.async_worker_cpus; }) {
+      options.async_worker_cpus.push_back(0);
+      reject();
+    }
+    if constexpr (requires { options.async_max_in_flight_records; }) {
+      options.async_max_in_flight_records = 2;
+      reject();
+    }
     options.async_coordinator_cpu = 0;
     reject();
   } else {
@@ -251,6 +277,9 @@ TEST(MemoryExperimentServerConfig,
   EXPECT_EQ(yaml.find("async_streaming"), std::string::npos);
   EXPECT_EQ(yaml.find("async_num_workers"), std::string::npos);
   EXPECT_EQ(yaml.find("async_worker_cpus"), std::string::npos);
+  EXPECT_EQ(yaml.find("pool_threads"), std::string::npos);
+  EXPECT_EQ(yaml.find("pool_affinity"), std::string::npos);
+  EXPECT_EQ(yaml.find("async_max_in_flight_records"), std::string::npos);
   const auto value = config::multi_decoder_config::from_yaml_str(yaml);
   ASSERT_EQ(value.syndrome_mapping.size(), 2);
   EXPECT_EQ(value.syndrome_mapping[0].id, 0);
