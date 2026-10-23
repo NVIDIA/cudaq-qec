@@ -7,12 +7,15 @@
 // problem statement of one decode task, as in the EDEM window specification:
 // its zones, ports, imports, sends and measurement maps. A window request
 // (window_request.h) names a layer's windows relative to an anchor;
-// window_from_dem_chunks() builds window k of a shot. Never included from a
-// public header.
+// window_from_dem_chunks() builds window k of a shot. receive_send(),
+// solve_window() and commit_window() are the task's canonical workload.
+// Never included from a public header.
 
 #pragma once
 
+#include "cuda-qx/core/heterogeneous_map.h"
 #include "decoding_task_experiment_template.h"
+#include "cudaq/qec/decoder.h"
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/sparse_binary_matrix.h"
 #include "cudaq/qec/window_request.h"
@@ -232,5 +235,45 @@ detector_error_model dense_model(const window_model &model);
 window_outputs commit_window(const decoding_window &window,
                              const std::vector<std::uint8_t> &detectors,
                              const std::vector<std::uint8_t> &estimate);
+
+/// Apply send @p send of window @p sender to window @p receiver's detectors:
+/// a delta flips the receiver's own rows of the send's rounds, and a
+/// residual sets the receiver's imported rows. Rows are matched through the
+/// shot, so the two windows must be of one shot on one template. Every row
+/// is checked before any is changed.
+/// @param values The send's values, one per row of it.
+/// @param detectors The receiver's detectors, one per model row; updated.
+/// @throws std::invalid_argument if the windows are of different shots, the
+/// sender has no such send, a vector has the wrong length, or a row of the
+/// send is not one the receiver takes in the send's mode.
+void receive_send(const decoding_window &receiver,
+                  const decoding_window &sender, std::size_t send,
+                  const std::vector<std::uint8_t> &values,
+                  std::vector<std::uint8_t> &detectors);
+
+/// One window's decode: the estimate, whether the decoder converged and the
+/// estimate explains the detectors, and the canonical workload's outputs.
+struct window_solution {
+  std::vector<std::uint8_t> estimate; ///< e, one per model column
+  bool converged = true;
+  bool satisfied = true; ///< H e = d over every row of the window
+  window_outputs outputs;
+};
+
+/// A decoder over @p window's model, @p name with @p params: H over the
+/// decoder's columns with their priors, returning fault columns. Null when
+/// the window has no rows or no decoder columns, so nothing to decode.
+/// @throws as get_decoder() does.
+std::unique_ptr<decoder>
+make_window_decoder(const decoding_window &window, const std::string &name,
+                    const cudaqx::heterogeneous_map &params = {});
+
+/// Decode @p window's @p detectors with @p dec, from make_window_decoder(),
+/// and commit the estimate. A null @p dec estimates no fault. Columns the
+/// decoder does not see, the logical-error ones, are never estimated.
+/// @throws std::invalid_argument if @p detectors has the wrong length, or
+/// the decoder returns the wrong number of columns.
+window_solution solve_window(const decoding_window &window, decoder *dec,
+                             const std::vector<std::uint8_t> &detectors);
 
 } // namespace cudaq::qec

@@ -16,8 +16,10 @@
 // columns; the serial parallel-window reference: its windows match the
 // schedule and its models the production ones, single faults decode exactly,
 // each send is needed, sampled shots are sound and the production windows
-// commit, send and update the frame as it does, and the logical error rate
-// tracks monolithic matching; and the data artifact store: sha256, canonical
+// commit, send and update the frame as it does, the production windows,
+// received and decoded serially, decode as it does, and the logical error
+// rate tracks monolithic matching; receiving a send, and a window with
+// nothing to decode; and the data artifact store: sha256, canonical
 // content, shared entries, templates as content, and lookups that never
 // build.
 
@@ -2380,6 +2382,229 @@ TEST(ParallelWindowReference, TracksMonolithicMatching) {
     } // end - for(g)
   } // end - for(d)
 } // end - TEST(ParallelWindowReference, TracksMonolithicMatching)
+
+// The shot rows of a window's model rows: its own rounds' rows, then its
+// imports', as the template lays out the shot.
+std::vector<std::size_t> shot_rows(const decoding_window &w) {
+  const auto &t = *w.context;
+  const auto R = w.shot_rounds;
+  std::vector<std::size_t> rows;
+  for (auto r = t.row_offset(w.rounds.begin, R);
+       r < t.row_offset(w.rounds.end, R); ++r)
+    rows.push_back(r);
+  if (!w.output.imports.empty())
+    for (auto r = t.row_offset(w.output.imports.begin, R);
+         r < t.row_offset(w.output.imports.end, R); ++r)
+      rows.push_back(r);
+  return rows;
+}
+
+// One production window's decode, with the detectors it decoded.
+struct production_decode {
+  std::vector<std::uint8_t> detectors;
+  window_solution solution;
+};
+
+// Every window of g in an R-round shot, built, received and decoded by the
+// production code alone, one at a time in the reference's order: a window's
+// detectors come from the shot by the template's offsets, and what its
+// producers sent arrives through receive_send().
+class production_windows {
+public:
+  production_windows(const std::shared_ptr<const experiment_template> &t,
+                     const window_graph &g, std::size_t R,
+                     const std::vector<std::size_t> &order,
+                     const std::string &decoder_name,
+                     const cudaqx::heterogeneous_map &params = {})
+      : schedule_(schedule_windows(t, g.layers, g.edges, R)), order_(order) {
+    for (std::size_t i = 0; i < schedule_.windows.size(); ++i) {
+      const auto &s = schedule_.windows[i];
+      index_[{s.node, s.k}] = i;
+      windows_.push_back(
+          window_from_dem_chunks(t, request_of(g, s.node), s.k, R));
+      decoders_.push_back(
+          make_window_decoder(windows_.back(), decoder_name, params));
+    }
+  }
+
+  // Each window's decode of one shot's detection events, in schedule order.
+  std::vector<production_decode>
+  decode(const std::vector<std::uint8_t> &shot) const {
+    std::vector<production_decode> out(windows_.size());
+    for (const auto i : order_) {
+      auto &d = out[i];
+      for (const auto row : shot_rows(windows_[i]))
+        d.detectors.push_back(shot[row]);
+      for (const auto &input : schedule_.windows[i].inputs) {
+        if (!input.exists)
+          continue;
+        const auto p = index_.at({input.from_node, input.k});
+        const auto &sends = windows_[p].sends;
+        const auto send = static_cast<std::size_t>(
+            std::find_if(sends.begin(), sends.end(),
+                         [&](const window_send &x) {
+                           return x.id == input.from_output;
+                         }) -
+            sends.begin());
+        receive_send(windows_[i], windows_[p], send,
+                     out[p].solution.outputs.sends.at(send), d.detectors);
+      }
+      d.solution = solve_window(windows_[i], decoders_[i].get(), d.detectors);
+    } // end - for(i)
+    return out;
+  } // end - decode()
+
+  const std::vector<decoding_window> &windows() const { return windows_; }
+
+private:
+  window_schedule schedule_;
+  std::vector<std::size_t> order_;
+  std::map<std::pair<std::string, std::int64_t>, std::size_t> index_;
+  std::vector<decoding_window> windows_;
+  std::vector<std::unique_ptr<decoder>> decoders_;
+};
+
+// Each production window's decode equals the reference's bit for bit: its
+// detectors after receiving, its estimate over the decoder's columns,
+// convergence and H e = d, and the faults it commits, its sends and its frame
+// update.
+void expect_decodes_match(const parallel_window_reference &reference,
+                          const production_windows &production,
+                          const std::vector<production_decode> &got,
+                          const pw_reference::result &want) {
+  for (std::size_t i = 0; i < got.size(); ++i) {
+    const auto &rw = reference.windows()[i];
+    const auto &w = production.windows()[i];
+    const auto &mine = got[i].solution;
+    const auto &theirs = want.windows[i];
+    std::vector<std::size_t> committed;
+    for (std::size_t c = 0; c < rw.num_faults; ++c)
+      if (mine.outputs.committed[c])
+        committed.push_back(rw.columns[c]);
+    SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
+    ASSERT_EQ(got[i].detectors, theirs.detectors);
+    ASSERT_EQ(std::vector<std::uint8_t>(mine.estimate.begin(),
+                                        mine.estimate.begin() +
+                                            w.num_decoder_columns()),
+              theirs.estimate);
+    ASSERT_EQ(mine.converged, theirs.converged);
+    ASSERT_EQ(mine.satisfied, theirs.satisfied);
+    ASSERT_EQ(committed, theirs.committed);
+    ASSERT_EQ(mine.outputs.sends, theirs.sends);
+    ASSERT_EQ(mine.outputs.frame, theirs.frame);
+  } // end - for(i)
+} // end - expect_decodes_match()
+
+// The production windows, decoded serially with their own decoders, decode
+// every single fault as the reference does, window by window, for every
+// layout and shot length up to 30.
+TEST(ParallelWindowReference, ProductionDecodesSingleFaultsAlike) {
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3),
+        surface_memory_spec(3, 0.01)}) {
+    const auto tmpl = std::make_shared<const experiment_template>(spec);
+    for (const auto &g : swept_layouts()) {
+      for (auto R = tmpl->min_rounds(); R <= 30; ++R) {
+        parallel_window_reference reference(spec, g, R, "single_error_lut");
+        const production_windows production(tmpl, g, R, reference.order(),
+                                            "single_error_lut");
+        const auto &s = reference.model();
+        SCOPED_TRACE("R=" + std::to_string(R));
+        for (std::size_t c = 0; c < s.h.size(); ++c) {
+          const auto detectors = detectors_of(s, c);
+          ASSERT_NO_FATAL_FAILURE(expect_decodes_match(
+              reference, production, production.decode(detectors),
+              reference.decode(detectors)))
+              << "column " << c;
+        }
+      } // end - for(R)
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(ParallelWindowReference, ProductionDecodesSingleFaultsAlike)
+
+// The same on sampled shots with PyMatching, where windows commit several
+// faults and send what they leave.
+TEST(ParallelWindowReference, ProductionDecodesSampledShotsAlike) {
+  constexpr std::size_t R = 20;       // two periods of each layout
+  constexpr std::size_t shots = 2000; // a few hundred with several faults
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), surface_memory_spec(3, 0.02)}) {
+    const auto tmpl = std::make_shared<const experiment_template>(spec);
+    for (const auto &g : {parallel_graph(layered(3, 3, 9)),
+                          parallel_graph(interior_commit(3, 3, 9)),
+                          parallel_graph(with_truncate(layered(3, 3, 9)))}) {
+      parallel_window_reference reference(spec, g, R, "pymatching", matching);
+      const production_windows production(tmpl, g, R, reference.order(),
+                                          "pymatching", matching);
+      const auto &s = reference.model();
+      const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+          s.dem.detector_error_matrix, shots, s.dem.error_rates, 17);
+      for (std::size_t i = 0; i < shots; ++i) {
+        const auto syndrome = row_of(detectors, i);
+        ASSERT_NO_FATAL_FAILURE(expect_decodes_match(
+            reference, production, production.decode(syndrome),
+            reference.decode(syndrome)))
+            << "shot " << i;
+      }
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(ParallelWindowReference, ProductionDecodesSampledShotsAlike)
+
+// A send reaches its receiver only on the rows it is meant for: a delta on
+// its own rows and a residual on its imports, in the same shot, one value per
+// row. Delivered to the wrong window, or with the wrong values, it is
+// rejected.
+TEST(DecodingWindow, ReceiveSendRejectsRowsItCannotTake) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto layers = layered(2, 2, 3);
+  const std::size_t R = 20;
+  const auto a = window_from_dem_chunks(tmpl, layers.a, 1, R);
+  const auto b = window_from_dem_chunks(tmpl, layers.b, 1, R);
+  const auto next_b = window_from_dem_chunks(tmpl, layers.b, 2, R);
+  const auto other_shot = window_from_dem_chunks(tmpl, layers.b, 2, R + 1);
+  const std::vector<std::uint8_t> forward(a.sends[0].rows.size(), 1);
+  const std::vector<std::uint8_t> backward(a.sends[1].rows.size(), 1);
+  auto detectors = std::vector<std::uint8_t>(next_b.model.h.num_rows(), 0);
+  ASSERT_EQ(a.sends[0].id, "forward");
+  ASSERT_EQ(a.sends[1].id, "backward");
+  // A[1].forward reaches B[2]'s own rows; A[1].backward is B[1]'s imports.
+  receive_send(next_b, a, 0, forward, detectors);
+  EXPECT_EQ(std::count(detectors.begin(), detectors.end(), 1),
+            static_cast<std::ptrdiff_t>(forward.size()));
+  detectors.assign(b.model.h.num_rows(), 0);
+  receive_send(b, a, 1, backward, detectors);
+  EXPECT_EQ(std::count(detectors.begin(), detectors.end(), 1),
+            static_cast<std::ptrdiff_t>(backward.size()));
+  EXPECT_THROW(receive_send(b, a, 0, forward, detectors),
+               std::invalid_argument);
+  EXPECT_THROW(receive_send(next_b, a, 1, backward, detectors),
+               std::invalid_argument);
+  EXPECT_THROW(receive_send(next_b, a, 0, {1}, detectors),
+               std::invalid_argument);
+  EXPECT_THROW(receive_send(other_shot, a, 0, forward, detectors),
+               std::invalid_argument);
+  EXPECT_THROW(receive_send(next_b, a, 2, forward, detectors),
+               std::invalid_argument);
+} // end - TEST(DecodingWindow, ReceiveSendRejectsRowsItCannotTake)
+
+// A window with nothing to decode has no decoder: its estimate is zero, it
+// commits nothing, and it explains its detectors only when they are zero.
+TEST(DecodingWindow, AWindowWithoutADecoderCommitsNothing) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto w = window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, 20);
+  std::vector<std::uint8_t> detectors(w.model.h.num_rows(), 0);
+  const auto quiet = solve_window(w, nullptr, detectors);
+  detectors[0] = 1;
+  const auto loud = solve_window(w, nullptr, detectors);
+  EXPECT_EQ(quiet.estimate, std::vector<std::uint8_t>(w.model.o.num_cols(), 0));
+  EXPECT_TRUE(quiet.satisfied);
+  EXPECT_FALSE(loud.satisfied);
+  EXPECT_EQ(loud.outputs.frame,
+            std::vector<std::uint8_t>(w.model.o.num_rows(), 0));
+  EXPECT_NE(make_window_decoder(w, "single_error_lut"), nullptr);
+}
 
 // ---------------------------------------------------------------------------
 // Data artifact store
