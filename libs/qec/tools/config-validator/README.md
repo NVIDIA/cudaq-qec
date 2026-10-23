@@ -42,13 +42,28 @@ for a usage or schema error. Each problem names the location in the document
 
 Checked: key names and placement, value types, which model form a decoder
 entry uses (`H_sparse`/`O_sparse`/`D_sparse`, `dem_chunks`, or
-`stim_dem_path`), and the parameter names of each decoder type.
+`stim_dem_path`), the parameter names of each decoder type, and the
+cross-field rules the server applies while parsing: the five flat-form
+fields must all be present, `H_sparse` must not be empty and `block_size`
+not zero, `H_sparse` and `D_sparse` rows (counted by `-1` terminators) must
+equal `syndrome_size`, `H_sparse`/`O_sparse` entries must be below
+`block_size`, no `D_sparse` row may be empty, and a form that derives a
+field (`dem_chunks`, `stim_dem_path`) rejects that field when it is also
+given.
 
-Not checked: cross-field rules (matrix row counts against `syndrome_size`,
-seam widths between DEM chunks) and per-decoder validation hooks. Those run
-only when the server loads the configuration, so a file that passes here may
-still be rejected at load. Task-graph configurations are reported as invalid
-unless `--allow-task-graph` is given.
+Not checked: per-decoder validation hooks (for example `sliding_window`'s
+`step_size` against `window_size`), DEM-chunk seam consistency, the
+`D_sparse` row count of a `stim_dem_path` decoder, and 32-bit overflow of
+`int32` parameters (the exported schema carries no integer widths). Those
+run only when the server loads the configuration, so a file that passes
+here may still be rejected at load. Task-graph configurations are reported
+as invalid unless `--allow-task-graph` is given.
+
+Known parser-level differences, all recorded as expected failures in the
+test suite: LLVM YAML accepts a tab after `:` or before a `#` comment and an
+empty flow-sequence entry (`[a,, b]`), PyYAML rejects all three. The
+exported schema says `cuda_device_id >= 0` while the server's parser accepts
+a negative value; the validator follows the schema.
 
 ## Scalars: the server's rules, not PyYAML's
 

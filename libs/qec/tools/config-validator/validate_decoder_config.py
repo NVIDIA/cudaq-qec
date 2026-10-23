@@ -22,11 +22,14 @@ and 2 for a usage or schema error.
 
 What is checked: key names and their placement, value types, which model
 form a decoder entry uses (flat ``H_sparse``/``O_sparse``/``D_sparse``
-matrices, ``dem_chunks``, or ``stim_dem_path``), and the parameter names of
-each decoder type. What cannot be checked here: cross-field rules (matrix
-row counts against ``syndrome_size``, seam widths between DEM chunks) and
-the per-decoder ``validate`` hooks. Those run only when the server loads the
-configuration, so a file that passes here may still be rejected at load.
+matrices, ``dem_chunks``, or ``stim_dem_path``), the parameter names of each
+decoder type, and the cross-field rules the server applies while parsing
+(required fields per form, ``H_sparse``/``D_sparse`` row counts against
+``syndrome_size``, matrix entries below ``block_size``, fields a form
+derives and therefore forbids). What cannot be checked here: the per-decoder
+``validate`` hooks, DEM-chunk seam consistency, and anything that needs the
+constructed decoder. Those run only when the server loads the configuration,
+so a file that passes here may still be rejected at load.
 
 Task-graph configurations (a decoder entry with a ``task_graph`` block) are
 reported as invalid unless ``--allow-task-graph`` is given.
@@ -40,7 +43,9 @@ and a leading ``0`` for octal but no sign ``+`` and no ``_``, floats accept
 anything ``strtod`` accepts (``6e-05``, ``1.``, ``inf``, hex floats) but not
 ``_`` or YAML's ``.inf``, and booleans are exactly LLVM's set
 (``y yes true on`` / ``n no false off`` in their usual capitalisations, not
-``1``/``0``). Duplicate mapping keys and YAML anchors/aliases are rejected.
+``1``/``0``). Tags (``!!int``, ``!foo``) are ignored. Duplicate mapping keys
+and YAML anchors/aliases are rejected; only the first document of a stream
+is read.
 This script loads every scalar as text and applies those rules while
 checking the schema, so its verdicts match the server's for scalars.
 """
@@ -65,9 +70,10 @@ except ImportError as exc:  # pragma: no cover - exercised by hand
 class RawLoader(yaml.SafeLoader):
     """``yaml.SafeLoader`` that mirrors the server's structural rules.
 
-    Every plain scalar stays a string (the server types scalars by the field
-    they land in, see ``LlvmScalars``), duplicate mapping keys are an error,
-    and anchors/aliases are an error.
+    Every scalar stays a string whatever its spelling or tag (the server
+    types scalars by the field they land in, see ``LlvmScalars``, and ignores
+    tags), duplicate mapping keys are an error, and anchors/aliases are an
+    error.
     """
 
     def compose_node(self, parent, index):
@@ -78,21 +84,26 @@ class RawLoader(yaml.SafeLoader):
                 "configuration parser", event.start_mark)
         return super().compose_node(parent, index)
 
-    def construct_mapping(self, node, deep=False):
-        seen = set()
-        for key_node, _ in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            if key in seen:
+    def construct_object(self, node, deep=False):
+        # Build by node kind only; resolvers and tags (``!!int``, ``!foo``)
+        # do not take part, exactly like llvm::yaml.
+        if isinstance(node, yaml.ScalarNode):
+            return node.value
+        if isinstance(node, yaml.SequenceNode):
+            return [self.construct_object(child, True) for child in node.value]
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, True)
+            if not isinstance(key, str):
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping", node.start_mark,
+                    "mapping keys must be scalars", key_node.start_mark)
+            if key in mapping:
                 raise yaml.constructor.ConstructorError(
                     "while constructing a mapping", node.start_mark,
                     f"duplicated mapping key '{key}'", key_node.start_mark)
-            seen.add(key)
-        return super().construct_mapping(node, deep=deep)
-
-
-# Drop every implicit resolver (int, float, bool, null, timestamp, ...): a
-# plain scalar is tagged as a string, exactly like a quoted one.
-RawLoader.yaml_implicit_resolvers = {}
+            mapping[key] = self.construct_object(value_node, True)
+        return mapping
 
 
 def load_yaml(text):
@@ -309,6 +320,134 @@ def unknown_type_locations(doc, known_types):
             yield f"decoders/{index}", type_name
 
 
+# --- the server's parse-time cross-field checks -----------------------------
+#
+# llvm::yaml's MappingTraits<decoder_config> runs these right after reading a
+# decoder entry, so they are part of parsing and the offline validator applies
+# them too. They are a transcription of that code and use its wording. Only
+# the per-decoder validate hooks and the checks that need the constructed
+# decoder (D row count against a Stim model, DEM chunk seams) stay server-only.
+
+
+def _ints(value):
+    if not isinstance(value, list):
+        return []
+    out = [LlvmScalars.integer(v) for v in value]
+    return [] if any(v is None for v in out) else out
+
+
+def server_checks_for_decoder(decoder, where):
+    """Cross-field rules the server enforces while parsing one decoder entry."""
+    who = f"decoder {decoder.get('id', '?')}"
+    problems = []
+
+    def fail(message):
+        problems.append((where, message))
+        return problems
+
+    H = _ints(decoder.get("H_sparse"))
+    O = _ints(decoder.get("O_sparse"))
+    D = _ints(decoder.get("D_sparse"))
+    block_size = LlvmScalars.integer(decoder.get("block_size", "0")) or 0
+    syndrome_size = LlvmScalars.integer(decoder.get("syndrome_size", "0")) or 0
+    args = decoder.get("decoder_custom_args")
+    rates = decoder.get("error_rate_vec") or (
+        args.get("error_rate_vec") if isinstance(args, dict) else None) or []
+    has_chunks = "dem_chunks" in decoder
+    from_dem = bool(decoder.get("stim_dem_path"))
+
+    if "task_graph" in decoder:
+        if not has_chunks and not H:
+            return fail(f"{who}: task_graph requires either dem_chunks or "
+                        "H_sparse to supply the DEM")
+        if not H:
+            return problems  # Chunk form carries its own DEM.
+
+    if has_chunks and from_dem:
+        return fail(f"dem_chunks and stim_dem_path must not both be set for "
+                    f"{who}; each describes the whole DEM on its own.")
+
+    def reject_derived(key, present, source):
+        if present:
+            fail(f"{key} must not be set for {who} because it is derived from "
+                 f"{source}. Remove it, or describe the whole experiment with "
+                 f"H_sparse instead of {source}.")
+
+    if has_chunks and not H:
+        chunks = decoder.get("dem_chunks")
+        if isinstance(chunks, dict) and "num_rounds" in chunks:
+            num_rounds = LlvmScalars.integer(chunks["num_rounds"])
+            if num_rounds is not None and num_rounds < 2:
+                fail(f"dem_chunks.num_rounds must be at least 2 for {who}; "
+                     f"got {num_rounds}.")
+        reject_derived("block_size", block_size != 0, "dem_chunks")
+        reject_derived("syndrome_size", syndrome_size != 0, "dem_chunks")
+        reject_derived("O_sparse", bool(O), "dem_chunks")
+        reject_derived("D_sparse", bool(D), "dem_chunks")
+        reject_derived("error_rate_vec", bool(rates), "dem_chunks")
+        if problems:
+            return problems
+    elif from_dem:
+        reject_derived("H_sparse", bool(H), "stim_dem_path")
+        reject_derived("O_sparse", bool(O), "stim_dem_path")
+        reject_derived("error_rate_vec", bool(rates), "stim_dem_path")
+        if problems:
+            return problems
+        if not D:
+            return fail(f"D_sparse is required for {who} alongside "
+                        "stim_dem_path, which describes the DEM but not the "
+                        "detectors this decoder is sent.")
+    else:
+        missing = [
+            k for k in ("block_size", "syndrome_size", "H_sparse", "O_sparse",
+                        "D_sparse") if k not in decoder
+        ]
+        if missing:
+            return fail(f"{who} is missing required field(s): "
+                        f"{', '.join(missing)}. A flat DEM names block_size, "
+                        "syndrome_size, H_sparse, O_sparse and D_sparse "
+                        "together; use dem_chunks to describe the same DEM one "
+                        "round at a time, or stim_dem_path to name the model "
+                        "text itself, instead.")
+        if not H and syndrome_size > 0:
+            return fail(f"H_sparse is required for {who} unless dem_chunks is "
+                        "present, which describes the same DEM one round at a "
+                        "time instead.")
+        if block_size == 0 and H:
+            return fail(f"block_size is required for {who}")
+        rows = H.count(-1)
+        if rows != syndrome_size:
+            return fail("Number of rows in H_sparse vector is not equal to "
+                        f"syndrome_size: {rows} != {syndrome_size}")
+
+    for name, matrix in (("H_sparse", H), ("O_sparse", O)):
+        for value in matrix:
+            if value < -1 or (value >= 0 and value >= block_size):
+                return fail(f"Value in {name} vector is out of range: {value}")
+
+    if D:
+        rows = D.count(-1)
+        if not from_dem and rows != syndrome_size:
+            return fail("Number of rows in D_sparse vector is not equal to "
+                        f"syndrome_size: {rows} != {syndrome_size}")
+        if D[0] == -1 or any(a == -1 and b == -1 for a, b in zip(D, D[1:])):
+            return fail(f"D_sparse row is empty for {who}")
+    return problems
+
+
+def server_checks(doc):
+    """Apply ``server_checks_for_decoder`` to every decoder of ``doc``."""
+    problems = []
+    decoders = doc.get("decoders") if isinstance(doc, dict) else None
+    if not isinstance(decoders, list):
+        return problems
+    for index, decoder in enumerate(decoders):
+        if isinstance(decoder, dict):
+            problems.extend(
+                server_checks_for_decoder(decoder, f"decoders/{index}"))
+    return problems
+
+
 def validate_document(doc, validator, allow_task_graph=False, known_types=None):
     """Return ``[(where, message), ...]`` for ``doc``; empty when it is valid."""
     problems = []
@@ -341,6 +480,10 @@ def validate_document(doc, validator, allow_task_graph=False, known_types=None):
         if any(where == p or where.startswith(p + "/") for p in skip_prefixes):
             continue
         problems.append((where, best.message))
+    if not problems:
+        # The server runs its cross-field checks on a document that parsed;
+        # do the same, so a type error is reported before a shape error.
+        problems.extend(server_checks(doc))
     return problems
 
 

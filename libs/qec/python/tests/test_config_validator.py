@@ -473,6 +473,350 @@ def _corpus_cases():
         "empty document":
             "",
     }
+    cases.update(_more_cases())
+    return cases
+
+
+_LUT = _BASE.replace("type: {type}", "type: multi_error_lut").replace(
+    "{args}", "      lut_error_depth: {v}\n")
+_DEM = _doc().replace(
+    "    H_sparse: [0, -1, 1, -1, 2, -1]\n    O_sparse: [0, -1, 1, -1, 2, -1]\n",
+    "    stim_dem_path: /no/such/file.dem\n").replace(
+        "      error_rate_vec: [0.1, 0.1, 0.1]\n", "")
+_SW_NESTED = _doc(type="sliding_window",
+                  args="      inner_decoder_name: pymatching\n"
+                  "      window_size: 2\n      step_size: 1\n"
+                  "      error_rate_vec: [0.1, 0.1, 0.1]\n{inner}")
+
+
+def _h(new):
+    return _doc().replace("H_sparse: [0, -1, 1, -1, 2, -1]", f"H_sparse: {new}")
+
+
+def _o(new):
+    return _doc().replace("O_sparse: [0, -1, 1, -1, 2, -1]", f"O_sparse: {new}")
+
+
+def _d(new):
+    return _doc().replace("D_sparse: [0, -1, 1, -1, 2, -1]", f"D_sparse: {new}")
+
+
+def _env(extra):
+    return _doc().replace("    block_size: 3\n", f"    block_size: 3\n{extra}")
+
+
+def _more_cases():
+    second = _doc().split("decoders:\n")[1]
+    cases = {
+        # encodings and layout
+        "CRLF line endings":
+            _doc().replace("\n", "\r\n"),
+        "CR line endings":
+            _doc().replace("\n", "\r"),
+        "UTF-8 BOM":
+            "\ufeff" + _doc(),
+        "CRLF and BOM":
+            "\ufeff" + _doc().replace("\n", "\r\n"),
+        "trailing spaces":
+            _doc().replace("type: pymatching", "type: pymatching   "),
+        "space before colon":
+            _doc().replace("block_size: 3", "block_size : 3"),
+        "no space after colon":
+            _doc().replace("block_size: 3", "block_size:3"),
+        "comment after value":
+            _doc().replace("block_size: 3", "block_size: 3  # three"),
+        "hash inside scalar":
+            _doc(ms="smallest#weight"),
+        "tab after colon":
+            _doc().replace("block_size: 3", "block_size:\t3"),
+        "tab before comment":
+            _doc().replace("block_size: 3", "block_size: 3\t# c"),
+        "form feed":
+            _doc().replace("block_size: 3", "block_size: 3\f"),
+        "nbsp indentation":
+            _doc().replace("    type:", "\u00a0\u00a0\u00a0\u00a0type:"),
+        "unicode in string":
+            _doc(ms="smallest_weight_é"),
+        "YAML 1.1 directive":
+            "%YAML 1.1\n---\n" + _doc(),
+        "YAML 1.2 directive":
+            "%YAML 1.2\n---\n" + _doc(),
+        "leading document marker":
+            "---\n" + _doc(),
+        "trailing end marker":
+            _doc() + "...\n",
+        "second document is garbage":
+            _doc() + "---\nnot: valid\n",
+        "flow mapping args":
+            _doc(
+                args=
+                "      {merge_strategy: smallest_weight, error_rate_vec: [0.1, 0.1, 0.1]}\n"
+            ),
+        "block sequence H_sparse":
+            _h("\n      - 0\n      - -1\n      - 1\n      - -1\n      - 2\n      - -1"
+              ),
+        "dash at key column":
+            _doc().replace("decoders:\n  - id: 0",
+                           "decoders:\n- id: 0").replace("\n    ", "\n  "),
+        "block literal string":
+            _doc().replace("merge_strategy: smallest_weight",
+                           "merge_strategy: |\n        smallest_weight"),
+        "block folded string":
+            _doc().replace("merge_strategy: smallest_weight",
+                           "merge_strategy: >-\n        smallest_weight"),
+        "double-quoted escape":
+            _doc().replace("merge_strategy: smallest_weight",
+                           'merge_strategy: "smallest\\x5fweight"'),
+        "single-quoted apostrophe":
+            _doc(ms="'it''s'"),
+        "complex key":
+            _env("    ? [a, b]\n    : c\n"),
+        "quoted key with trailing space":
+            _doc().replace("block_size: 3", "'block_size ': 3"),
+        "numeric key":
+            _env("    5: x\n"),
+        # tags: the server ignores them
+        "tag !!int on quoted":
+            _doc(block_size="!!int '3'"),
+        "tag !!str on number":
+            _doc(block_size="!!str 3"),
+        "tag !!int on octal":
+            _doc(block_size="!!int 010"),
+        "tag !!float":
+            _doc(erv="!!float 6e-05"),
+        "tag !!str in float list":
+            _doc(erv="!!str 6e-05"),
+        "tag !!bool in string field":
+            _doc(ms="!!bool yes"),
+        "tag !!timestamp in string":
+            _doc(ms="!!timestamp 2026-01-01"),
+        "tag !!binary in string":
+            _doc(ms="!!binary aGVsbG8="),
+        "tag !!null in string":
+            _doc(ms="!!null ''"),
+        "tag !!seq on list":
+            _h("!!seq [0, -1, 1, -1, 2, -1]"),
+        "tag !!map on args":
+            _doc().replace("decoder_custom_args:\n",
+                           "decoder_custom_args: !!map\n"),
+        "local tag on scalar":
+            _doc(block_size="!foo 3"),
+        "local tag on mapping":
+            _doc().replace("decoder_custom_args:\n",
+                           "decoder_custom_args: !foo\n"),
+        "tag !!set in string field":
+            _doc(ms="!!set {a, b}"),
+        "tag !!omap on list":
+            _h("!!omap [a: 1]"),
+        # flat form: required fields, empty and zero values
+        "block_size absent":
+            _doc().replace("    block_size: 3\n", ""),
+        "block_size 0":
+            _doc(block_size="0"),
+        "block_size 00":
+            _doc(block_size="00"),
+        "syndrome_size absent":
+            _doc().replace("    syndrome_size: 3\n", ""),
+        "syndrome_size 0":
+            _doc().replace("syndrome_size: 3", "syndrome_size: 0"),
+        "H_sparse absent":
+            _doc().replace("    H_sparse: [0, -1, 1, -1, 2, -1]\n", ""),
+        "H_sparse []":
+            _h("[]"),
+        "H_sparse empty value":
+            _h(""),
+        "H_sparse scalar":
+            _h("5"),
+        "H_sparse nested":
+            _h("[[0, -1], [1, -1]]"),
+        "H_sparse as string":
+            _h("'0 -1 1 -1 2 -1'"),
+        "O_sparse absent":
+            _doc().replace("    O_sparse: [0, -1, 1, -1, 2, -1]\n", ""),
+        "O_sparse []":
+            _o("[]"),
+        "D_sparse []":
+            _d("[]"),
+        "error_rate_vec []":
+            _doc(erv="").replace("[, 0.1, 0.1]", "[]"),
+        "error_rate_vec absent":
+            _doc().replace("      error_rate_vec: [0.1, 0.1, 0.1]\n", ""),
+        "error_rate_vec top-level only":
+            _doc().replace(
+                "      error_rate_vec: [0.1, 0.1, 0.1]\n", ""
+            ).replace(
+                "    decoder_custom_args:",
+                "    error_rate_vec: [0.1, 0.1, 0.1]\n    decoder_custom_args:"
+            ),
+        "error_rate_vec both places":
+            _doc().replace(
+                "    decoder_custom_args:",
+                "    error_rate_vec: [0.1, 0.1, 0.1]\n    decoder_custom_args:"
+            ),
+        "H and error_rate_vec both []":
+            _h("[]").replace("[0.1, 0.1, 0.1]", "[]"),
+        # flat form: shape rules
+        "H rows 2 of 3":
+            _h("[0, -1, 1, -1]"),
+        "H rows 4 of 3":
+            _h("[0, -1, 1, -1, 2, -1, 0, -1]"),
+        "H column 3 of block 3":
+            _h("[0, -1, 1, -1, 3, -1]"),
+        "H without trailing -1":
+            _h("[0, -1, 1, -1, 2]"),
+        "H empty row":
+            _h("[-1, 1, -1, 2, -1]"),
+        "H duplicate column":
+            _h("[0, 0, -1, 1, -1, 2, -1]"),
+        "H entry 1e0":
+            _h("[0, -1, 1e0, -1, 2, -1]"),
+        "H entry 0x1":
+            _h("[0, -1, 0x1, -1, 2, -1]"),
+        "H entries quoted":
+            _h("['0', '-1', '1', '-1', '2', '-1']"),
+        "O rows 2":
+            _o("[0, -1, 1, -1]"),
+        "O rows 5":
+            _o("[0, -1, 1, -1, 2, -1, 0, -1, 1, -1]"),
+        "O column 3 of block 3":
+            _o("[0, -1, 1, -1, 3, -1]"),
+        "D rows 2":
+            _d("[0, -1, 1, -1]"),
+        "D rows 5":
+            _d("[0, -1, 1, -1, 2, -1, 0, -1, 1, -1]"),
+        "D column 7":
+            _d("[0, -1, 1, -1, 7, -1]"),
+        "D first row empty":
+            _d("[-1, 1, -1, 2, -1]"),
+        "D middle row empty":
+            _d("[0, -1, -1, 2, -1]"),
+        "error_rate_vec length 2":
+            _doc().replace("[0.1, 0.1, 0.1]", "[0.1, 0.1]"),
+        "error_rate_vec length 4":
+            _doc().replace("[0.1, 0.1, 0.1]", "[0.1, 0.1, 0.1, 0.1]"),
+        "error rate 1.5":
+            _doc(erv="1.5"),
+        "error rate -0.1":
+            _doc(erv="-0.1"),
+        "syndrome_size 2 with 3 rows":
+            _doc().replace("syndrome_size: 3", "syndrome_size: 2"),
+        "block_size 2 with column 2":
+            _doc(block_size="2"),
+        "block_size 10":
+            _doc(block_size="10"),
+        "block_size 1 with column 1":
+            _doc(block_size="1"),
+        # stim_dem_path form
+        "dem path form":
+            _DEM,
+        "dem path without sizes":
+            _DEM.replace("    block_size: 3\n    syndrome_size: 3\n", ""),
+        "dem path with error_rate_vec":
+            _DEM.replace(
+                "      merge_strategy: smallest_weight\n",
+                "      merge_strategy: smallest_weight\n      error_rate_vec: [0.1]\n"
+            ),
+        "dem path with H_sparse":
+            _DEM.replace(
+                "    stim_dem_path: /no/such/file.dem\n",
+                "    stim_dem_path: /no/such/file.dem\n    H_sparse: [0, -1, 1, -1, 2, -1]\n"
+            ),
+        "dem path without D_sparse":
+            _DEM.replace("    D_sparse: [0, -1, 1, -1, 2, -1]\n", ""),
+        "dem path and dem_chunks":
+            _DEM.replace(
+                "    stim_dem_path: /no/such/file.dem\n",
+                "    stim_dem_path: /no/such/file.dem\n    dem_chunks: {seam: {}, connections: [], phases: []}\n"
+            ),
+        "stim_dem_path tilde":
+            _env("    stim_dem_path: ~\n"),
+        "stim_dem_path empty":
+            _env("    stim_dem_path: ''\n"),
+        # envelope fields
+        "dispatch bogus":
+            _env("    dispatch: gpu\n"),
+        "dispatch quoted":
+            _env("    dispatch: 'host'\n"),
+        "cuda_device_id -1":
+            _env("    cuda_device_id: -1\n"),
+        "cuda_device_id 0":
+            _env("    cuda_device_id: 0\n"),
+        "id float":
+            _doc(id="0.0"),
+        "id huge":
+            _doc(id="99999999999"),
+        "id absent":
+            _doc().replace("  - id: 0\n", "  -\n"),
+        "type bool-looking":
+            _doc(type="true"),
+        # several decoders, transport
+        "duplicate decoder id":
+            _doc() + second,
+        "two decoders":
+            _doc() + second.replace("id: 0", "id: 1"),
+        "three decoders":
+            _doc() + second + second.replace("id: 0", "id: 1"),
+        "empty decoders":
+            "decoders: []\n",
+        "decoders missing":
+            "transport:\n  provider: udp\n",
+        "transport ok":
+            _doc() + "transport:\n  provider: udp\n  args: [a, 1, 'x']\n",
+        "transport bad key":
+            _doc() + "transport:\n  provder: udp\n",
+        "transport args scalar":
+            _doc() + "transport:\n  args: a\n",
+        # nested parameter sections, int32 parameters
+        "sw nested ok":
+            _SW_NESTED.format(
+                inner=
+                "      inner_decoder_params:\n        merge_strategy: smallest_weight\n"
+            ),
+        "sw nested typo":
+            _SW_NESTED.format(
+                inner=
+                "      inner_decoder_params:\n        merge_stratgey: smallest_weight\n"
+            ),
+        "sw nested number as string":
+            _SW_NESTED.format(
+                inner="      inner_decoder_params:\n        merge_strategy: 5\n"
+            ),
+        "sw unknown inner name":
+            _SW_NESTED.format(inner=""
+                             ).replace("inner_decoder_name: pymatching",
+                                       "inner_decoder_name: pymatchnig"),
+        "sw window_size 2^31":
+            _SW_NESTED.format(inner="").replace("window_size: 2",
+                                                "window_size: 2147483648"),
+        "sw window_size 2^63":
+            _SW_NESTED.format(inner=""
+                             ).replace("window_size: 2",
+                                       "window_size: 9223372036854775808"),
+        "sw window_size -1":
+            _SW_NESTED.format(inner="").replace("window_size: 2",
+                                                "window_size: -1"),
+        "sw window_size 0":
+            _SW_NESTED.format(inner="").replace("window_size: 2",
+                                                "window_size: 0"),
+        "sw step_size above window":
+            _SW_NESTED.format(inner="").replace("step_size: 1", "step_size: 5"),
+        "lut_error_depth 1":
+            _LUT.replace("{v}", "1").replace("{id}",
+                                             "0").replace("{block_size}", "3"),
+        "lut_error_depth int32 max":
+            _LUT.replace("{v}", "2147483647").replace("{id}", "0").replace(
+                "{block_size}", "3"),
+        "lut_error_depth int32 max + 1":
+            _LUT.replace("{v}", "2147483648").replace("{id}", "0").replace(
+                "{block_size}", "3"),
+        "lut_error_depth -1":
+            _LUT.replace("{v}", "-1").replace("{id}",
+                                              "0").replace("{block_size}", "3"),
+        "lut_error_depth quoted":
+            _LUT.replace("{v}",
+                         "'2'").replace("{id}",
+                                        "0").replace("{block_size}", "3"),
+    }
     return cases
 
 
@@ -488,13 +832,29 @@ def _corpus():
     ]
 
 
-# Syntax the two YAML parsers disagree on. Each is a document PyYAML refuses
-# to parse at all while LLVM YAML is lenient; the validator then reports a
-# YAML error where the server would load the file. Not scalar rules, and
-# not something a well-formed file contains.
+# Documents on which the validator and the server are known to disagree.
+# Each is recorded as an expected failure so the gap stays visible.
 _SYNTAX_DIFFERENCES = {
-    "double comma": "LLVM YAML tolerates an empty flow-sequence entry "
-                    "(`[a,, b]`); PyYAML rejects it",
+    "tab after colon":
+        "LLVM YAML accepts a tab as separator whitespace after ':'; PyYAML "
+        "rejects it",
+    "tab before comment":
+        "LLVM YAML accepts a tab before a '#' comment; PyYAML rejects it",
+    "double comma":
+        "LLVM YAML tolerates an empty flow-sequence entry (`[a,, b]`); PyYAML "
+        "rejects it",
+    "cuda_device_id -1":
+        "the exported schema says cuda_device_id >= 0 while the parser reads "
+        "it as a plain int and accepts negatives; one of the two should change",
+    "lut_error_depth int32 max + 1":
+        "the exported schema carries no integer widths, so int32 overflow is "
+        "only caught by the server",
+    "sw window_size 0":
+        "sliding_window validate hook (step_size within 1..window_size), "
+        "server-only",
+    "sw step_size above window":
+        "sliding_window validate hook (step_size within 1..window_size), "
+        "server-only",
 }
 
 
