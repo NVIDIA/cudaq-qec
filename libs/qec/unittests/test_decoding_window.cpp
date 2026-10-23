@@ -11,14 +11,17 @@
 // conflicts; variant keys and translation invariance; the kernel's forms;
 // the window schedule and commitment validation: row finalization (F1-F4)
 // checked against the built windows, each failure's own message, send and
-// receive matching, and ambiguous parallel commit columns; and the serial
+// receive matching, and ambiguous parallel commit columns; the serial
 // parallel-window reference: its windows match the schedule, single faults
 // decode exactly, the sends are needed, sampled shots are sound, and the
-// logical error rate tracks monolithic matching.
+// logical error rate tracks monolithic matching; and the data artifact
+// store: sha256, canonical content, shared entries, and lookups that never
+// build.
 
 #include "parallel_window_reference.h"
 #include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_commitment.h"
+#include "../lib/decoding_task/decoding_task_data_artifacts.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
 #include "cudaq/qec/code.h"
@@ -28,6 +31,7 @@
 #include "cudaq/qec/pcm_utils.h"
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
@@ -2202,6 +2206,203 @@ TEST(ParallelWindowReference, TracksMonolithicMatching) {
     } // end - for(g)
   } // end - for(d)
 } // end - TEST(ParallelWindowReference, TracksMonolithicMatching)
+
+// ---------------------------------------------------------------------------
+// Data artifact store
+// ---------------------------------------------------------------------------
+
+// Expect check() to throw std::logic_error mentioning text.
+template <typename Check>
+void expect_logic_error(Check &&check, const std::string &text) {
+  try {
+    check();
+    ADD_FAILURE() << "expected: " << text;
+  } catch (const std::logic_error &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+// sha256_hex() gives the FIPS 180-2 test vectors, and the lengths either side
+// of the block boundary where the length field moves to a second block.
+TEST(DataArtifactStore, Sha256MatchesTheStandardVectors) {
+  EXPECT_EQ(sha256_hex(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  EXPECT_EQ(sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  EXPECT_EQ(
+      sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  EXPECT_EQ(sha256_hex(std::string(1000000, 'a')),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+  EXPECT_EQ(sha256_hex(std::string(55, 'a')),
+            "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318");
+  EXPECT_EQ(sha256_hex(std::string(56, 'a')),
+            "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a");
+  EXPECT_EQ(sha256_hex(std::string(64, 'a')),
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+}
+
+// Changing any one field of a template or a window request changes its
+// canonical bytes, so no field is left out of the content.
+TEST(DataArtifactStore, EveryFieldIsContent) {
+  using spec_change = std::function<void(dem_chunks_spec &)>;
+  using request_change = std::function<void(window_request &)>;
+  const auto spec = arbitrary_memory_spec(5, true);
+  const auto request = layered(2, 2, 3).a;
+  const std::vector<spec_change> spec_changes{
+      [](auto &s) { s.num_rounds = 7; },
+      [](auto &s) { s.num_rounds.reset(); },
+      [](auto &s) { s.measurements_per_round = 4; },
+      [](auto &s) { s.phases_supply_D_sparse = true; },
+      [](auto &s) { s.observable_names = {"Z_L"}; },
+      [](auto &s) { s.connections.pop_back(); },
+      [](auto &s) { std::swap(s.seam.from_seam, s.seam.to_seam); },
+      [](auto &s) { s.phases[0].id = phase_name::dem_final; },
+      [](auto &s) { s.phases[0].spec.num_faults = 5; },
+      [](auto &s) { s.phases[0].spec.H_sparse = {0, 1, -1}; },
+      [](auto &s) {
+        s.phases[0].spec.seam_specs = {{seam_name::prev_round, {{0, -1}, {}}}};
+      },
+      [](auto &s) {
+        s.phases[0].spec.seam_specs = {
+            {seam_name::prev_round, {{0, -1}, {0, -1}}}};
+      },
+      [](auto &s) { s.phases[0].spec.O_sparse = {1, -1}; },
+      [](auto &s) { s.phases[0].spec.error_rates[0] = 0.03; },
+      [](auto &s) { s.phases[0].spec.D_sparse = {0, -1}; },
+      [](auto &s) { s.phases[0].spec.num_measurements = 5; },
+      [](auto &s) { s.phases[2].spec.m2o_sparse = {0, -1}; }};
+  const std::vector<request_change> request_changes{
+      [](auto &r) { r.period = 6; },
+      [](auto &r) { r.offset = 1; },
+      [](auto &r) { r.commit = round_range{0, 1}; },
+      [](auto &r) { r.buffers.pop_back(); },
+      [](auto &r) { r.input.disposition = port_disposition::closed; },
+      [](auto &r) { r.input.prior = 0.02; },
+      [](auto &r) { r.input.boundary = input_boundary::columns; },
+      [](auto &r) { r.output.disposition = port_disposition::closed; },
+      [](auto &r) { r.output.imports = round_range{4, 5}; },
+      [](auto &r) { r.sends[0].id = "ahead"; },
+      [](auto &r) { r.sends[0].mode = send_mode::delta; },
+      [](auto &r) { r.sends[0].rounds = {{2, 3}}; },
+      [](auto &r) { r.columns.merge_identical = true; },
+      [](auto &r) {
+        r.columns.conflicting_parallel = parallel_resolution::most_likely;
+      }};
+  std::set<std::string> seen{canonical_bytes(spec), canonical_bytes(request)};
+  for (const auto &change : spec_changes) {
+    auto changed = spec;
+    change(changed);
+    EXPECT_TRUE(seen.insert(canonical_bytes(changed)).second);
+  }
+  for (const auto &change : request_changes) {
+    auto changed = request;
+    change(changed);
+    EXPECT_TRUE(seen.insert(canonical_bytes(changed)).second);
+  }
+  EXPECT_EQ(canonical_bytes(spec), canonical_bytes(dem_chunks_spec(spec)));
+} // end - TEST(DataArtifactStore, EveryFieldIsContent)
+
+// Equal content is one entry and one handle; its record gives the kind and
+// the size and sha256 of the canonical bytes. Lookups return what was added.
+TEST(DataArtifactStore, EqualTemplatesShareOneEntry) {
+  data_artifact_store store;
+  const auto spec = arbitrary_memory_spec(5);
+  const auto first = store.add_template(spec);
+  const auto again = store.add_template(dem_chunks_spec(spec));
+  const auto other = store.add_template(rep5_spec());
+  const auto bytes = canonical_bytes(spec);
+  EXPECT_EQ(first, again);
+  EXPECT_NE(first, other);
+  EXPECT_EQ(store.find_template(spec), first);
+  ASSERT_EQ(store.records().size(), 2u);
+  EXPECT_EQ(
+      store.records()[0],
+      (data_artifact_record{"dem_chunks", bytes.size(), sha256_hex(bytes)}));
+  EXPECT_NE(store.records()[1].sha256, store.records()[0].sha256);
+  expect_logic_error([&] { store.find_template(single_round_spec()); },
+                     "data_artifact_store: no template");
+}
+
+// A Stim DEM is keyed by its text.
+TEST(DataArtifactStore, StimDemsAreKeyedByTheirText) {
+  data_artifact_store store;
+  const std::string text = "error(0.01) D0\n";
+  store.add_stim_dem(text);
+  store.add_stim_dem(std::string(text));
+  store.add_stim_dem("error(0.02) D0\n");
+  ASSERT_EQ(store.records().size(), 2u);
+  EXPECT_EQ(store.records()[0],
+            (data_artifact_record{"stim_dem", text.size(), sha256_hex(text)}));
+}
+
+// Every variant of a request is built once, at the first shot length that
+// has it, and equal requests from other nodes reuse it. Lookups never build:
+// a variant, request or template the store did not build is a logic error.
+TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
+  data_artifact_store store;
+  data_artifact_store other;
+  const auto tmpl = store.add_template(arbitrary_memory_spec(5));
+  const auto request = layered(2, 2, 3).a;
+  std::set<variant_key> keys;
+  store.add_windows(tmpl, request);
+  const auto added = store.records().size();
+  store.add_windows(tmpl, window_request(request));
+  EXPECT_EQ(store.records().size(), added);
+  for (auto R = tmpl->min_rounds();
+       R < variant_probe_rounds(*tmpl, request) + 2 * request.period; ++R) {
+    const auto instances = window_instances(request, R);
+    for (auto k = instances.begin; k < instances.end; ++k) {
+      const auto key = window_variant(*tmpl, request, k, R);
+      const auto w = store.find_window(*tmpl, request, key);
+      keys.insert(key);
+      ASSERT_NE(w, nullptr);
+      EXPECT_EQ(store.find_window(*tmpl, request, key), w);
+      EXPECT_NO_THROW(check_same_window_up_to_shift(
+          *w, window_from_dem_chunks(tmpl, request, k, R)));
+    }
+  } // end - for(R)
+  EXPECT_EQ(added, 1 + keys.size());
+  for (std::size_t i = 1; i < added; ++i)
+    EXPECT_EQ(store.records()[i].kind, "window");
+  expect_logic_error(
+      [&] { store.find_window(*tmpl, layered(2, 2, 3).b, *keys.begin()); },
+      "was not built at configuration time");
+  expect_logic_error(
+      [&] { store.find_window(*tmpl, request, variant_key{999, 999}); },
+      "was not built at configuration time");
+  expect_logic_error([&] { other.add_windows(tmpl, request); },
+                     "not one of this store's templates");
+} // end - TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild)
+
+// A stored window that holds the shot's readout round carries the
+// template's readout map, which a variant fixes since its key fixes where it
+// ends; every other window has none. wide_readout_spec's last phase has
+// m2o_sparse.
+TEST(DataArtifactStore, WindowsHoldingTheReadoutCarryM2o) {
+  data_artifact_store store;
+  const auto tmpl = store.add_template(wide_readout_spec());
+  std::size_t with_m2o = 0;
+  for (const auto &request : {layered(2, 2, 3).a, layered(2, 2, 3).b}) {
+    store.add_windows(tmpl, request);
+    for (auto R = tmpl->min_rounds(); R < variant_probe_rounds(*tmpl, request);
+         ++R) {
+      const auto instances = window_instances(request, R);
+      for (auto k = instances.begin; k < instances.end; ++k) {
+        const auto w = store.find_window(*tmpl, request,
+                                         window_variant(*tmpl, request, k, R));
+        const bool readout =
+            w->rounds.end == static_cast<std::int64_t>(w->shot_rounds);
+        SCOPED_TRACE("R=" + std::to_string(R) + " k=" + std::to_string(k));
+        EXPECT_EQ(w->m2o.has_value(), readout);
+        with_m2o += w->m2o.has_value();
+        EXPECT_NO_THROW(check_same_window_up_to_shift(
+            *w, window_from_dem_chunks(tmpl, request, k, R, readout)));
+      }
+    } // end - for(R)
+  } // end - for(request)
+  EXPECT_GT(with_m2o, 0u);
+} // end - TEST(DataArtifactStore, WindowsHoldingTheReadoutCarryM2o)
 
 } // namespace
 } // namespace cudaq::qec

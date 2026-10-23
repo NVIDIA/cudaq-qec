@@ -5,6 +5,7 @@
 
 #include "SessionRegistry.h"
 #include "task_graph_test_fixtures.h"
+#include "../lib/decoding_task/decoding_task_data_artifacts.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
 #include "../lib/realtime/realtime_decoding.h"
 #include "../lib/realtime/window_request_yaml.h"
@@ -24,6 +25,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <unistd.h>
 
@@ -3393,6 +3395,248 @@ TEST(DataArtifactsYAML, AStandaloneDecoderCannotNameAnEntry) {
         << e.what();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Data artifact store, filled from a configuration
+// ---------------------------------------------------------------------------
+
+// The Stim DEM artifacts_yaml() names as dems/rep.dem, and the placeholder
+// sha256 it pins the file to.
+constexpr const char *rep_dem_text = "error(0.01) D0\n";
+constexpr const char *placeholder_pin =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+// A temporary directory holding dems/rep.dem, removed on destruction.
+class ScopedArtifactDir {
+public:
+  ScopedArtifactDir() {
+    // Qualified by pid, as ScopedDemFile is, since ctest runs binaries
+    // concurrently.
+    static int counter = 0;
+    dir_ = std::filesystem::temp_directory_path() /
+           ("cudaqx_artifacts_" + std::to_string(::getpid()) + "_" +
+            std::to_string(counter++));
+    std::filesystem::create_directories(dir_ / "dems");
+    std::ofstream(dir_ / "dems" / "rep.dem") << rep_dem_text;
+  }
+  ~ScopedArtifactDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(dir_, ec);
+  }
+  const std::filesystem::path &path() const { return dir_; }
+
+private:
+  std::filesystem::path dir_;
+};
+
+// artifacts_yaml() with dems/rep.dem pinned to its real sha256.
+std::string pinned_artifacts_yaml() {
+  return artifacts_yaml_with(placeholder_pin,
+                             cudaq::qec::sha256_hex(rep_dem_text));
+}
+
+// A store's records of one kind.
+std::vector<cudaq::qec::data_artifact_record>
+records_of(const cudaq::qec::data_artifact_store &store,
+           const std::string &kind) {
+  std::vector<cudaq::qec::data_artifact_record> out;
+  for (const auto &record : store.records())
+    if (record.kind == kind)
+      out.push_back(record);
+  return out;
+}
+
+// The distinct variant keys of request on tmpl, over the shot lengths that
+// hold every key.
+std::set<cudaq::qec::variant_key>
+variant_keys(const cudaq::qec::experiment_template &tmpl,
+             const cudaq::qec::experimental::window_request &request) {
+  std::set<cudaq::qec::variant_key> keys;
+  for (auto R = tmpl.min_rounds();
+       R < cudaq::qec::variant_probe_rounds(tmpl, request); ++R) {
+    const auto instances = cudaq::qec::window_instances(request, R);
+    for (auto k = instances.begin; k < instances.end; ++k)
+      keys.insert(cudaq::qec::window_variant(tmpl, request, k, R));
+  }
+  return keys;
+}
+
+// Filling holds the template once, though the decoder and both window
+// entries name it; the Stim DEM, read from its file and checked against its
+// pin; and every variant of both window entries, which the ingest node's
+// layers name again.
+TEST(DataArtifactStore, FillsFromTheConfig) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto config =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  const auto store =
+      cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+  const auto &artifacts = config.data_artifacts;
+  const auto tmpl = store.find_template(*config.decoders.at(0).dem_chunks);
+  std::size_t variants = 0;
+  ASSERT_EQ(artifacts.size(), 4u);
+  EXPECT_EQ(tmpl, store.find_template(*artifacts[2].dem_chunks));
+  EXPECT_EQ(records_of(store, "dem_chunks").size(), 1u);
+  EXPECT_EQ(records_of(store, "stim_dem"),
+            (std::vector<cudaq::qec::data_artifact_record>{
+                {"stim_dem", std::string(rep_dem_text).size(),
+                 cudaq::qec::sha256_hex(rep_dem_text)}}));
+  for (const auto &entry : {artifacts[0], artifacts[1]}) {
+    const auto keys = variant_keys(*tmpl, *entry.window);
+    variants += keys.size();
+    for (const auto &key : keys)
+      EXPECT_NE(store.find_window(*tmpl, *entry.window, key), nullptr);
+  }
+  EXPECT_EQ(records_of(store, "window").size(), variants);
+} // end - TEST(DataArtifactStore, FillsFromTheConfig)
+
+// Two decoders naming one template, and a third writing the same content
+// inline, share one entry and one handle.
+TEST(DataArtifactStore, DecodersNamingOneTemplateShareIt) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const std::string tmpl = R"(
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+)";
+  const auto decoder = [](int id, const std::string &dem_chunks) {
+    return "  - id: " + std::to_string(id) + "\n    dem_chunks:" + dem_chunks +
+           R"(    task_graph:
+      nodes:
+        - {id: w, type: single_window, inner: {type: single_error_lut}}
+      edges:
+        - {from: measurements, to: w}
+        - {from: w, to: output}
+)";
+  };
+  const auto config = cfg::multi_decoder_config::from_yaml_str(
+      "data_artifacts:\n  t:\n    dem_chunks:" + tmpl + "decoders:\n" +
+      decoder(0, " t\n") + decoder(1, " t\n") + decoder(2, tmpl));
+  const auto store = cudaq::qec::decoding::host::fill_data_artifact_store(
+      config, std::filesystem::current_path());
+  const auto shared = store.find_template(*config.decoders.at(0).dem_chunks);
+  EXPECT_EQ(store.records().size(), 1u);
+  EXPECT_EQ(store.find_template(*config.decoders.at(1).dem_chunks), shared);
+  EXPECT_EQ(store.find_template(*config.decoders.at(2).dem_chunks), shared);
+} // end - TEST(DataArtifactStore, DecodersNamingOneTemplateShareIt)
+
+// By name and inline, a configuration fills a store with the same template
+// and window entries, in the same order; the by-name file adds its Stim DEM.
+TEST(DataArtifactStore, ByNameFillsWhatInlineFills) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto by_name = cudaq::qec::decoding::host::fill_data_artifact_store(
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml()),
+      dir.path());
+  const auto inline_form = cudaq::qec::decoding::host::fill_data_artifact_store(
+      cfg::multi_decoder_config::from_yaml_str(pw_graph_yaml()), dir.path());
+  for (const auto *kind : {"dem_chunks", "window"})
+    EXPECT_EQ(records_of(by_name, kind), records_of(inline_form, kind)) << kind;
+  EXPECT_TRUE(records_of(inline_form, "stim_dem").empty());
+}
+
+// A file that does not match its pin is rejected, naming the entry, the file
+// and both hashes, and so is a missing file. Without a pin, any bytes do.
+TEST(DataArtifactStore, RejectsAFileThatDoesNotMatchItsSha256) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto fill = [&](const std::string &yaml) {
+    cudaq::qec::decoding::host::fill_data_artifact_store(
+        cfg::multi_decoder_config::from_yaml_str(yaml), dir.path());
+  };
+  const auto rejects = [&](const std::string &yaml, const std::string &text) {
+    try {
+      fill(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(artifacts_yaml(),
+          "data_artifacts.rep_stim: dems/rep.dem has sha256 " +
+              cudaq::qec::sha256_hex(rep_dem_text) + ", but the entry pins " +
+              placeholder_pin);
+  EXPECT_NO_THROW(fill(artifacts_yaml_with(
+      "    sha256: " + std::string(placeholder_pin) + "\n", "")));
+  std::filesystem::remove(dir.path() / "dems" / "rep.dem");
+  rejects(pinned_artifacts_yaml(), "data_artifacts.rep_stim");
+} // end - TEST(DataArtifactStore, RejectsAFileThatDoesNotMatchItsSha256)
+
+// A configuration built in code skips the parser's checks, so filling checks
+// a window entry's context itself: an empty one, one naming no entry, and
+// one naming an entry that is not a template are each rejected, naming the
+// window entry.
+TEST(DataArtifactStore, RejectsAWindowWhoseContextIsNotATemplate) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  const std::vector<std::pair<std::string, std::string>> cases{
+      {"", "a window entry needs a context naming a dem_chunks entry"},
+      {"nowhere", "context 'nowhere' is not a dem_chunks entry"},
+      {"rep_stim", "context 'rep_stim' is not a dem_chunks entry"}};
+  ASSERT_EQ(parsed.data_artifacts.at(0).name, "pw_A");
+  for (const auto &[context, text] : cases) {
+    auto config = parsed;
+    config.data_artifacts[0].context = context;
+    try {
+      cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find("data_artifacts.pw_A: " + text),
+                std::string::npos)
+          << e.what();
+    }
+  }
+} // end - TEST(DataArtifactStore, RejectsAWindowWhoseContextIsNotATemplate)
+
+// An ingest layer that names a window entry is built on the node's template,
+// so that entry's context must be the same template; one on another
+// template is rejected, naming the layer, the entry and its context, and so
+// is a layer naming an entry that is not a window. With the same template,
+// the layer reuses the entry's variants.
+TEST(DataArtifactStore, RejectsALayerWhoseEntryIsOnAnotherTemplate) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  auto config = parsed;
+  config.decoders.at(0).dem_chunks->phases.at(0).spec.error_rates.at(0) = 0.02;
+  try {
+    cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+    ADD_FAILURE() << "a layer was built on another template";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "decoder 0, node 'ingest', layer 'A': window entry 'pw_A' "
+                  "is built on 'rep_memory', a different template from the "
+                  "node's"),
+              std::string::npos)
+        << e.what();
+  }
+  config = parsed;
+  config.decoders.at(0).task_graph->nodes.at(0).windows.at(0).artifact =
+      "rep_stim";
+  try {
+    cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+    ADD_FAILURE() << "a layer named an entry that is not a window";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("layer 'A': 'rep_stim' is not a "
+                                         "window entry"),
+              std::string::npos)
+        << e.what();
+  }
+  const auto store =
+      cudaq::qec::decoding::host::fill_data_artifact_store(parsed, dir.path());
+  EXPECT_EQ(records_of(store, "dem_chunks").size(), 1u);
+} // end - TEST(DataArtifactStore, RejectsALayerWhoseEntryIsOnAnotherTemplate)
 
 // ---------------------------------------------------------------------------
 // parallel_window pattern and pool options

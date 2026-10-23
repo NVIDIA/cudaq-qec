@@ -15,6 +15,7 @@
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fmt/core.h>
@@ -938,5 +939,148 @@ void reset_decoder(std::size_t decoder_id) {
   target.pin_device();
   target.reset();
 }
+
+namespace {
+
+using node_spec = config::decoder_config::task_graph_spec::node_spec;
+
+// Calls visit on every node, including those inside ensemble members.
+template <typename Visit>
+void for_each_node(const std::vector<node_spec> &nodes, Visit &&visit) {
+  for (const auto &node : nodes) {
+    visit(node);
+    if (node.ensemble)
+      for (const auto &member : node.ensemble->members)
+        for_each_node(member.nodes, visit);
+  }
+}
+
+// Runs step, giving a construction error the place it came from.
+template <typename Step>
+void at(const std::string &where, Step &&step) {
+  try {
+    step();
+  } catch (const std::invalid_argument &e) {
+    throw std::runtime_error(where + ": " + e.what());
+  }
+}
+
+} // namespace
+
+// Templates first, so window entries and ingest layers find their context;
+// then Stim DEMs, a file-backed one checked against its pin; then every
+// window variant.
+cudaq::qec::data_artifact_store
+fill_data_artifact_store(const config::multi_decoder_config &config,
+                         const std::filesystem::path &base_dir) {
+  cudaq::qec::data_artifact_store store;
+  const auto entry_name = [](const config::data_artifact &entry) {
+    return "data_artifacts." + entry.name;
+  };
+  const auto decoder_name = [](const config::decoder_config &decoder) {
+    return "decoder " + std::to_string(decoder.id);
+  };
+  for (const auto &entry : config.data_artifacts)
+    if (entry.dem_chunks)
+      at(entry_name(entry), [&] { store.add_template(*entry.dem_chunks); });
+  for (const auto &decoder : config.decoders) {
+    if (decoder.dem_chunks)
+      at(decoder_name(decoder),
+         [&] { store.add_template(*decoder.dem_chunks); });
+    if (decoder.task_graph)
+      for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
+        if (node.dem_chunks)
+          at(decoder_name(decoder) + ", node '" + node.id + "'",
+             [&] { store.add_template(*node.dem_chunks); });
+      });
+  }
+
+  for (const auto &entry : config.data_artifacts) {
+    std::filesystem::path path(entry.stim_dem_path);
+    std::string text = entry.stim_dem;
+    if (entry.stim_dem_path.empty()) {
+      if (!text.empty())
+        store.add_stim_dem(text);
+      continue;
+    }
+    if (path.is_relative())
+      path = std::filesystem::absolute(base_dir / path).lexically_normal();
+    text = read_stim_dem_file(path, entry_name(entry));
+    const auto actual = cudaq::qec::sha256_hex(text);
+    std::string pinned = entry.sha256;
+    std::transform(pinned.begin(), pinned.end(), pinned.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    if (!pinned.empty() && pinned != actual)
+      throw std::runtime_error(entry_name(entry) + ": " + entry.stim_dem_path +
+                               " has sha256 " + actual +
+                               ", but the entry pins " + entry.sha256);
+    store.add_stim_dem(text);
+  } // end - for(entry)
+
+  for (const auto &entry : config.data_artifacts) {
+    if (!entry.window)
+      continue;
+    const auto context =
+        std::find_if(config.data_artifacts.begin(), config.data_artifacts.end(),
+                     [&](const config::data_artifact &e) {
+                       return e.name == entry.context;
+                     });
+    // Parsing checks the context, but a configuration built in code has not
+    // been parsed.
+    if (entry.context.empty())
+      throw std::runtime_error(entry_name(entry) +
+                               ": a window entry needs a context naming a "
+                               "dem_chunks entry");
+    if (context == config.data_artifacts.end() || !context->dem_chunks)
+      throw std::runtime_error(entry_name(entry) + ": context '" +
+                               entry.context + "' is not a dem_chunks entry");
+    at(entry_name(entry), [&] {
+      store.add_windows(store.find_template(*context->dem_chunks),
+                        *entry.window);
+    });
+  }
+  for (const auto &decoder : config.decoders) {
+    if (!decoder.task_graph)
+      continue;
+    for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
+      const auto where = decoder_name(decoder) + ", node '" + node.id + "'";
+      const auto &spec = node.dem_chunks ? node.dem_chunks : decoder.dem_chunks;
+      if (node.windows.empty())
+        return;
+      if (!spec)
+        throw std::runtime_error(where + " has windows but no dem_chunks "
+                                         "template");
+      for (const auto &layer : node.windows) {
+        const auto layer_where = where + ", layer '" + layer.layer + "'";
+        const auto tmpl = store.find_template(*spec);
+        // A layer naming a window entry is built on the node's template, so
+        // the entry must be on that template too; the window-entry pass has
+        // already checked its context.
+        if (!layer.artifact.empty()) {
+          const auto entry = std::find_if(config.data_artifacts.begin(),
+                                          config.data_artifacts.end(),
+                                          [&](const config::data_artifact &e) {
+                                            return e.name == layer.artifact;
+                                          });
+          if (entry == config.data_artifacts.end() || !entry->window)
+            throw std::runtime_error(layer_where + ": '" + layer.artifact +
+                                     "' is not a window entry");
+          const auto context = std::find_if(
+              config.data_artifacts.begin(), config.data_artifacts.end(),
+              [&](const config::data_artifact &e) {
+                return e.name == entry->context;
+              });
+          if (store.find_template(*context->dem_chunks) != tmpl)
+            throw std::runtime_error(layer_where + ": window entry '" +
+                                     layer.artifact + "' is built on '" +
+                                     entry->context +
+                                     "', a different template from the node's");
+        }
+        at(layer_where, [&] { store.add_windows(tmpl, layer.request); });
+      } // end - for(layer)
+    });
+  } // end - for(decoder)
+  return store;
+} // end - fill_data_artifact_store()
 
 } // namespace cudaq::qec::decoding::host
