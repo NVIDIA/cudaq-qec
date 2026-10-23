@@ -1,7 +1,7 @@
 .. _decoding-server:
 
-Decoding Server
-===============
+Deploying the Decoding Server with Docker
+=========================================
 
 The CUDA-Q QEC decoding server runs classical decoders independently of the
 program controlling a quantum processor (QPU). A runtime sends measurements to
@@ -324,6 +324,61 @@ three rounds and CNOT error probability 0.001, using three decoders:
    * - ``sliding_window``
      - CPU sliding window with PyMatching, window size 3, and step size 1.
        Here the window covers the three-round shot.
+
+How the circuit uses the server
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Each shot prepares one logical qubit in the logical-zero state, measures
+three stabilizer rounds, and measures the data qubits in the Z basis. The
+program sends each measurement group to decoder 0, then uses the returned
+logical correction to update the parity of the final readout.
+
+The following excerpts come from the
+`complete packaged program <https://github.com/NVIDIA/cudaq-qec/blob/8e69945cb2d123d9ad53dc96c1cf992d77dc8bcd/libs/qec/unittests/realtime/app_examples/surface_code-1.cpp#L583>`__.
+The build commands below compile that complete source, including register
+allocation, code setup, noise configuration, and the host entry point.
+
+The shot kernel first resets its decoder:
+
+.. code-block:: cpp
+
+   cudaq::qec::decoding::reset_decoder(decoder_ids[i]);
+
+Its ``memory_circuit`` kernel prepares the patch and submits raw measurements:
+
+.. code-block:: cpp
+
+   patch logical(data, xstab_anc, zstab_anc);
+   state_prep(logical);
+
+   auto syndrome = stab_round(logical, x_stabilizers, z_stabilizers);
+   cudaq::qec::decoding::enqueue_syndromes(decoder_id, syndrome);
+   for (std::size_t r = 1; r < num_rounds; r++) {
+     auto s = stab_round(logical, x_stabilizers, z_stabilizers);
+     cudaq::qec::decoding::enqueue_syndromes(decoder_id, s);
+   }
+
+   auto data_meas = mz(data);
+   cudaq::qec::decoding::enqueue_syndromes(decoder_id, data_meas);
+
+The server's configured ``D_sparse`` map converts these measurements to
+detectors. After computing the measured logical parity ``obs`` from
+``data_meas``, the shot kernel reads and applies the predicted observable flip:
+
+.. code-block:: cpp
+
+   auto correction = cudaq::qec::decoding::get_corrections(
+       static_cast<std::uint64_t>(decoder_ids[i]), num_observables,
+       /*reset=*/false);
+   if (correction[0]) {
+     obs = !obs;
+     num_corrections++;
+   }
+
+For three rounds, each shot sends one reset, four measurement groups (three
+stabilizer rounds and the final data readout), and one correction request.
+That gives the 600 server requests expected for 100 shots below. The correction
+updates the reported logical observable; it is not a physical-qubit error mask.
 
 Build the packaged client once
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
