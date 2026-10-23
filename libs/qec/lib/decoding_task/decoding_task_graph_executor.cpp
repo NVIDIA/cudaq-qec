@@ -6,6 +6,9 @@
 /// @file
 ///
 /// Shared event-driven execution for one-shot and streaming task graphs.
+/// Every graph walk runs inside a record context, which owns the event store
+/// and every value the record moves between nodes. The scheduler lets several
+/// streaming records execute at once while each node still sees them in order.
 
 #include "decoding_task_graph_impl.h"
 #include "../hardware_guards.h"
@@ -14,22 +17,45 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <tuple>
+
+// CPU pause hint for spin loops, as cudaq-realtime defines it.
+#ifndef CUDAQ_REALTIME_CPU_RELAX
+#if defined(__x86_64__)
+#include <xmmintrin.h>
+#define CUDAQ_REALTIME_CPU_RELAX() _mm_pause()
+#elif defined(__aarch64__)
+#define CUDAQ_REALTIME_CPU_RELAX() __asm__ volatile("yield" ::: "memory")
+#else
+#define CUDAQ_REALTIME_CPU_RELAX()                                             \
+  do {                                                                         \
+  } while (0)
+#endif
+#endif
 
 namespace cudaq::qec {
 
 namespace {
 
 constexpr std::size_t no_event = std::numeric_limits<std::size_t>::max();
+constexpr std::int64_t no_index = std::numeric_limits<std::int64_t>::min();
+
+// Hand-offs between the dispatcher and workers usually complete within a few
+// microseconds, far less than a park and wake. Spin that long first while a
+// session has records in flight; idle sessions park at once.
+constexpr std::size_t kHandoffSpinPauseIters = 4096;
 
 enum class graph_event_kind : uint8_t {
   one_shot,
   streaming_raw,
   streaming_edge,
   streaming_flush,
-  streaming_flush_release
+  streaming_flush_release,
+  streaming_indexed_fire
 };
 
 struct graph_event {
@@ -38,18 +64,23 @@ struct graph_event {
   compiled_wire wire{};
   std::size_t offset = 0;
   std::size_t root = no_event;
+  std::int64_t index =
+      no_index; ///< publication index, when the producer has one
+  std::size_t entry = no_event; ///< join-table entry an indexed fire consumes
 };
 
 } // namespace
 
-// One bounded store drives every graph execution mode. Event slots remain
-// alive until their causal subtree drains; this provides publication leases
-// and lets a later reconvergent branch wait for an earlier branch without
-// delaying work in an unrelated component.
-struct decoding_task_graph::impl::event_runtime {
+// Everything one record moves between nodes or reads back from a node after a
+// fire lives here, so concurrently executing records never share data.
+struct decoding_task_graph::impl::record_context {
+  enum class phase : uint8_t { idle, one_shot, enqueue, flush };
+
   struct slot {
     graph_event event;
     graph_event continuation;
+    std::size_t pool_slot = no_event; ///< replica a running delivery holds
+    bool releases_pool = false;       ///< last delivery: hand the replica back
     std::size_t parent = no_event;
     std::size_t blocked_by = no_event;
     std::size_t first_child = no_event;
@@ -68,97 +99,361 @@ struct decoding_task_graph::impl::event_runtime {
     bool running = false;
     bool self_done = false;
     bool wait_for_siblings = false;
-    bool holds_node_lease = false;
     bool has_continuation = false;
   };
 
-  explicit event_runtime(impl &owner, std::size_t capacity)
-      : owner(owner), slots(capacity), node_busy(owner.nodes.size(), 0),
+  std::vector<slot> slots;
+  std::vector<std::size_t> free_slots;
+  std::vector<int32_t> dependency_remaining;
+  std::vector<std::size_t> root_nodes;
+  std::vector<uint8_t> root_done;
+  // Edge deliveries received per topology node in this record.
+  std::vector<std::size_t> deliveries_seen;
+  // Producer outputs copied at publication, indexed by compiled_wire::id.
+  std::vector<edge_value> wire_values;
+  std::vector<uint8_t> wire_valid;
+  // Node state captured at publication, indexed by streaming node.
+  std::vector<std::vector<uint8_t>> node_corrections;
+  std::vector<std::optional<streaming_task_graph_node::committed_coverage>>
+      node_coverage;
+  std::vector<uint8_t> node_snapshotted;
+  // Set when node_corrections holds a delta to XOR in rather than a copy.
+  std::vector<uint8_t> node_delta;
+  // Deltas of staged nodes, each with the commit interval it covers, in the
+  // order their fires finished; folded in round order when the record retires.
+  struct staged_delta {
+    streaming_task_graph_node::committed_coverage coverage;
+    std::vector<uint8_t> bits;
+  };
+  std::vector<std::vector<staged_delta>> staged;
+  // Replica of each pooled node leased to this record, or no_event.
+  std::vector<std::size_t> pool_replica;
+  std::vector<std::uint32_t> node_published;
+  // Release accounting, indexed by streaming node: live events targeting
+  // the node and whether this record has handed the node on.
+  std::vector<std::uint32_t> node_live;
+  std::vector<uint8_t> node_released;
+  std::size_t occupied = 0;
+  std::size_t next_sequence = 0;
+  std::size_t ready_head = no_event;
+  std::size_t ready_tail = no_event;
+  std::atomic<bool> fired{false};
+  bool complete = false;
+  bool gated = false;
+  bool in_use = false;
+  uint64_t sequence = 0;
+  phase kind = phase::idle;
+  // Record payload.
+  const uint8_t *syndrome = nullptr;
+  std::size_t len = 0;
+  std::optional<round_type> type;
+  const edge_value *measurement = nullptr;
+  // Asynchronous record bookkeeping: which public operation this context
+  // belongs to and whether retiring it completes that operation.
+  uint64_t ring_sequence = 0;
+  bool closes_record = false;
+  bool finish_flush = false;
+};
+
+// One bounded event store per record context drives every execution mode.
+// Event slots remain alive until their causal subtree drains, so a later
+// reconvergent branch can wait for an earlier branch without delaying work in
+// an unrelated component. Across contexts, a node runs records in sequence
+// order: a context releases a node once it can create no more events for it,
+// which hands the node's turn to the next record.
+struct decoding_task_graph::impl::record_scheduler {
+  using context = record_context;
+  using phase = record_context::phase;
+  using slot = record_context::slot;
+  struct join_entry;
+
+  record_scheduler(impl &owner, std::size_t context_count,
+                   std::size_t event_capacity)
+      : owner(owner), contexts(context_count), node_busy(owner.nodes.size(), 0),
+        node_turn(owner.streaming_nodes.size(), 0),
+        pool_free(owner.streaming_nodes.size()),
+        replica_busy(owner.streaming_nodes.size()),
+        joins(owner.streaming_nodes.size()),
+        join_offsets(owner.streaming_nodes.size()),
+        join_required(owner.streaming_nodes.size()),
+        fire_inputs(owner.streaming_nodes.size()),
         has_waiting_workers(owner.parallel_pool->num_threads() > 1) {
-    free_slots.reserve(capacity);
-    root_nodes.reserve(owner.streaming_nodes.size());
-    root_done.reserve(owner.streaming_nodes.size());
-    for (std::size_t i = capacity; i-- > 0;)
-      free_slots.push_back(i);
+    const auto N = owner.nodes.size();
+    const auto M = owner.streaming_nodes.size();
+    // Join leads, in topological order: how far past the newest published
+    // index an indexed node can fire (f) or have an entry created (e).
+    std::vector<std::int64_t> fire_lead(M, 0), entry_lead(M, 0);
+    for (std::size_t si = 0; si < M; ++si) {
+      const auto copies = owner.streaming_nodes[si].replicas.size();
+      const bool indexed = this->indexed(si);
+      if (copies <= 1 && !indexed)
+        continue;
+      copy_outputs = true;
+      for (std::size_t r = copies; r-- > 0;)
+        pool_free[si].push_back(r);
+      replica_busy[si].assign(copies, 0);
+      if (!indexed)
+        continue;
+      const auto node_idx = owner.streaming_nodes[si].node_index;
+      const auto inputs = owner.node_input_counts[node_idx];
+      join_offsets[si].assign(inputs, 0);
+      join_required[si].assign(inputs, 0);
+      for (std::size_t i = 0; i < inputs; ++i)
+        join_required[si][i] =
+            owner.streaming_nodes[si].indexed.front()->requires_input(i);
+      std::int64_t f = std::numeric_limits<std::int64_t>::max(), e = 0;
+      for (const auto producer : owner.streaming_producers[si]) {
+        const auto from = owner.streaming_nodes[producer].node_index;
+        for (const auto *wires : {&owner.streaming_wires_from[from],
+                                  &owner.completion_wires_from[from]})
+          for (const auto &wire : *wires)
+            if (wire.to_node == node_idx) {
+              join_offsets[si][static_cast<std::size_t>(wire.to_slot)] =
+                  wire.index_offset;
+              const auto lead = fire_lead[producer] - wire.index_offset;
+              f = std::min(f, lead);
+              e = std::max(e, lead);
+            }
+      }
+      fire_lead[si] = f == std::numeric_limits<std::int64_t>::max() ? 0 : f;
+      entry_lead[si] = e;
+      // Entries exist only for published values or in-flight producer
+      // outputs: the records in flight bound how far publication runs ahead.
+      const auto capacity =
+          context_count + static_cast<std::size_t>(e) + copies;
+      joins[si].clear();
+      for (std::size_t i = 0; i < capacity; ++i)
+        add_join_entry(si);
+      fire_inputs[si].assign(copies,
+                             std::vector<const edge_value *>(
+                                 owner.node_input_counts[node_idx], nullptr));
+    }
+    for (std::size_t k = 0; k < owner.output_stagers.size(); ++k) {
+      auto &stager = owner.output_stagers[k];
+      if (!stager.enabled)
+        continue;
+      // Every pending interval is a published delta of a record that has
+      // not retired, or of an entry its join table held for one.
+      std::size_t capacity = 1;
+      for (const auto si : owner.output_streaming_nodes[k])
+        capacity += context_count + (this->indexed(si) ? joins[si].size() : 0) +
+                    owner.streaming_nodes[si].replicas.size();
+      stager.capacity = capacity;
+      stager.pending.reserve(capacity);
+    }
+    if (context_count > 1)
+      copy_outputs = true;
+    for (auto &c : contexts) {
+      c.slots.resize(event_capacity);
+      c.free_slots.reserve(event_capacity);
+      c.root_nodes.reserve(M);
+      c.root_done.reserve(M);
+      c.deliveries_seen.assign(N, 0);
+      c.wire_values.resize(owner.streaming_value_wire_count);
+      c.wire_valid.assign(owner.streaming_value_wire_count, 0);
+      c.node_corrections.resize(M);
+      for (std::size_t si = 0; si < M; ++si)
+        c.node_corrections[si].assign(
+            owner.streaming_nodes[si].capability->num_observables(), 0);
+      c.node_coverage.assign(M, std::nullopt);
+      c.node_snapshotted.assign(M, 0);
+      c.node_delta.assign(M, 0);
+      c.staged.assign(M, {});
+      c.pool_replica.assign(M, no_event);
+      c.node_published.assign(M, 0);
+      c.node_live.assign(M, 0);
+      c.node_released.assign(M, 0);
+      for (std::size_t i = event_capacity; i-- > 0;)
+        c.free_slots.push_back(i);
+    }
+    active.reserve(context_count);
   }
 
-  void reset() {
-    auto lock = lock_runtime();
-    // Successful sweeps retire and clear every occupied slot. Rebuild the
-    // free list only after failure leaves queued events behind; the common
-    // path therefore does no work proportional to the conservative capacity.
-    if (occupied != 0 || running != 0 || free_slots.size() != slots.size()) {
-      free_slots.clear();
-      for (std::size_t i = slots.size(); i-- > 0;) {
-        slots[i] = {};
-        free_slots.push_back(i);
+  // ----- Context lifecycle -------------------------------------------------
+
+  context *try_acquire_locked() {
+    for (auto &c : contexts)
+      if (!c.in_use) {
+        c.in_use = true;
+        reset(c);
+        return &c;
       }
-      std::fill(node_busy.begin(), node_busy.end(), uint8_t{0});
+    return nullptr;
+  }
+
+  context &acquire() {
+    auto lock = lock_runtime();
+    auto *c = try_acquire_locked();
+    if (!c)
+      throw std::logic_error("decoding_task_graph: no free record context");
+    return *c;
+  }
+
+  void reset(context &c) {
+    // Successful walks retire and clear every occupied slot. Rebuild the free
+    // list only after failure leaves queued events behind; the common path
+    // therefore does no work proportional to the conservative capacity.
+    if (c.occupied != 0 || c.free_slots.size() != c.slots.size()) {
+      c.free_slots.clear();
+      for (std::size_t i = c.slots.size(); i-- > 0;) {
+        c.slots[i] = {};
+        c.free_slots.push_back(i);
+      }
     }
-    root_nodes.clear();
-    root_done.clear();
-    occupied = 0;
-    running = 0;
-    next_sequence = 0;
-    ready_head = no_event;
-    ready_tail = no_event;
+    c.root_nodes.clear();
+    c.root_done.clear();
+    std::fill(c.deliveries_seen.begin(), c.deliveries_seen.end(), 0);
+    std::fill(c.wire_valid.begin(), c.wire_valid.end(), 0);
+    std::fill(c.node_snapshotted.begin(), c.node_snapshotted.end(), 0);
+    std::fill(c.node_delta.begin(), c.node_delta.end(), 0);
+    for (auto &deltas : c.staged)
+      deltas.clear();
+    for (std::size_t si = 0; si < c.node_corrections.size(); ++si)
+      if (pooled(si) || indexed(si))
+        std::fill(c.node_corrections[si].begin(), c.node_corrections[si].end(),
+                  uint8_t{0});
+    std::fill(c.pool_replica.begin(), c.pool_replica.end(), no_event);
+    std::fill(c.node_published.begin(), c.node_published.end(), 0);
+    std::fill(c.node_live.begin(), c.node_live.end(), 0);
+    std::fill(c.node_released.begin(), c.node_released.end(), 0);
+    c.occupied = 0;
+    c.next_sequence = 0;
+    c.ready_head = no_event;
+    c.ready_tail = no_event;
+    c.fired.store(false, std::memory_order_relaxed);
+    c.complete = false;
+    c.gated = false;
+    c.sequence = 0;
+    c.kind = phase::idle;
+    c.syndrome = nullptr;
+    c.len = 0;
+    c.type.reset();
+    c.measurement = nullptr;
+    c.ring_sequence = 0;
+    c.closes_record = false;
+    c.finish_flush = false;
+  }
+
+  void release_locked(context &c) {
+    active.erase(std::remove(active.begin(), active.end(), &c), active.end());
+    c.in_use = false;
+    c.kind = phase::idle;
+  }
+
+  void release(context &c) {
+    auto lock = lock_runtime();
+    release_locked(c);
+  }
+
+  // Drop every context after a cancelled or failed session.
+  void discard_all() {
+    auto lock = lock_runtime();
+    active.clear();
+    for (auto &c : contexts) {
+      c.in_use = false;
+      reset(c);
+    }
+    std::fill(node_busy.begin(), node_busy.end(), uint8_t{0});
+    for (std::size_t si = 0; si < pool_free.size(); ++si)
+      if (pooled(si) || indexed(si)) {
+        pool_free[si].clear();
+        for (std::size_t r = owner.streaming_nodes[si].replicas.size();
+             r-- > 0;)
+          pool_free[si].push_back(r);
+        std::fill(replica_busy[si].begin(), replica_busy[si].end(), 0);
+      }
+    for (auto &table : joins)
+      for (auto &entry : table)
+        entry.used = false;
     stop = false;
     error = nullptr;
   }
 
-  void push_raw_roots() {
+  // Begin a streaming session: records are numbered from zero and every node
+  // waits for record zero first.
+  void begin_session() {
+    auto lock = lock_runtime();
+    std::fill(node_turn.begin(), node_turn.end(), uint64_t{0});
+    next_record = 0;
+    session_done = false;
+    stop = false;
+    error = nullptr;
+  }
+
+  // ----- Event population --------------------------------------------------
+
+  void push_raw_roots(context &c) {
     auto lock = lock_runtime();
     for (std::size_t node = 0; node < owner.streaming_nodes.size(); ++node)
       if (owner.streaming_node_has_raw_input[node])
-        root_nodes.push_back(node);
-    root_done.resize(root_nodes.size());
-    std::fill(root_done.begin(), root_done.end(), uint8_t{0});
-    for (std::size_t root = 0; root < root_nodes.size(); ++root)
+        c.root_nodes.push_back(node);
+    c.root_done.resize(c.root_nodes.size());
+    std::fill(c.root_done.begin(), c.root_done.end(), uint8_t{0});
+    for (std::size_t root = 0; root < c.root_nodes.size(); ++root)
       push_locked(
-          {graph_event_kind::streaming_raw, root_nodes[root], {}, 0, root});
+          c,
+          {graph_event_kind::streaming_raw, c.root_nodes[root], {}, 0, root});
   }
 
-  void configure_dependencies(const std::vector<int32_t> &counts) {
+  void configure_dependencies(context &c, const std::vector<int32_t> &counts) {
     auto lock = lock_runtime();
-    dependency_remaining = counts;
+    c.dependency_remaining = counts;
   }
 
-  void configure_flush(const std::vector<int32_t> &counts) {
+  void configure_flush(context &c, const std::vector<int32_t> &counts) {
     auto lock = lock_runtime();
-    dependency_remaining = counts;
+    c.dependency_remaining = counts;
     for (std::size_t node = 0; node < counts.size(); ++node)
       if (counts[node] == 0)
-        root_nodes.push_back(node);
-    root_done.resize(root_nodes.size());
-    std::fill(root_done.begin(), root_done.end(), uint8_t{0});
-    for (std::size_t root = 0; root < root_nodes.size(); ++root)
+        c.root_nodes.push_back(node);
+    c.root_done.resize(c.root_nodes.size());
+    std::fill(c.root_done.begin(), c.root_done.end(), uint8_t{0});
+    for (std::size_t root = 0; root < c.root_nodes.size(); ++root)
       push_locked(
-          {graph_event_kind::streaming_flush, root_nodes[root], {}, 0, root});
+          c,
+          {graph_event_kind::streaming_flush, c.root_nodes[root], {}, 0, root});
   }
 
-  std::size_t push(graph_event event, std::size_t parent = no_event,
+  // Make a populated context eligible for execution. Nodes this record never
+  // touches are handed on immediately so later records need not wait.
+  void activate(context &c, bool gated) {
+    auto lock = lock_runtime();
+    c.gated = gated;
+    if (gated) {
+      c.sequence = next_record++;
+      for (std::size_t si = 0; si < owner.streaming_nodes.size(); ++si)
+        try_release_locked(c, si);
+    }
+    active.push_back(&c);
+    if (c.occupied == 0)
+      mark_complete_locked(c);
+    notify_workers();
+  }
+
+  std::size_t push(context &c, graph_event event, std::size_t parent = no_event,
                    std::size_t blocked_by = no_event,
                    bool wait_for_siblings = false) {
     auto lock = lock_runtime();
-    const auto id = push_locked(event, parent, blocked_by, wait_for_siblings);
+    const auto id =
+        push_locked(c, event, parent, blocked_by, wait_for_siblings);
     notify_workers();
     return id;
   }
 
-  void release_dependencies(const std::vector<std::size_t> &nodes,
+  void release_dependencies(context &c, const std::vector<std::size_t> &nodes,
                             graph_event_kind kind) {
     auto lock = lock_runtime();
     if (stop)
       return;
     bool made_ready = false;
     for (const auto node : nodes) {
-      if (node >= dependency_remaining.size() ||
-          dependency_remaining[node] <= 0) {
+      if (node >= c.dependency_remaining.size() ||
+          c.dependency_remaining[node] <= 0) {
         throw std::logic_error(
             "decoding_task_graph: event dependency underflow");
       }
-      if (--dependency_remaining[node] == 0) {
-        push_locked({kind, node});
+      if (--c.dependency_remaining[node] == 0) {
+        push_locked(c, {kind, node});
         made_ready = true;
       }
     }
@@ -166,42 +461,114 @@ struct decoding_task_graph::impl::event_runtime {
       notify_workers();
   }
 
-  void set_continuation(std::size_t id, graph_event event) {
+  void set_continuation(context &c, std::size_t id, graph_event event) {
     auto lock = lock_runtime();
-    if (stop || id >= slots.size() || !slots[id].occupied)
+    if (stop || id >= c.slots.size() || !c.slots[id].occupied)
       return;
-    if (slots[id].has_continuation) {
+    if (c.slots[id].has_continuation) {
       throw std::logic_error(
           "decoding_task_graph: event already has a continuation");
     }
-    slots[id].continuation = event;
-    slots[id].has_continuation = true;
+    c.slots[id].continuation = event;
+    c.slots[id].has_continuation = true;
   }
 
-  void require_dependencies_complete(const char *message) {
+  void require_dependencies_complete(context &c, const char *message) {
     auto lock = lock_runtime();
-    if (std::any_of(dependency_remaining.begin(), dependency_remaining.end(),
+    if (std::any_of(c.dependency_remaining.begin(),
+                    c.dependency_remaining.end(),
                     [](int32_t count) { return count != 0; }))
       throw std::logic_error(message);
   }
 
-  bool publish_streaming(std::size_t parent, std::size_t root,
-                         std::size_t producer) {
+  // ----- Streaming publication --------------------------------------------
+
+  // Capture what a node exposes after it ran, while this record still holds
+  // the node. Retirement folds the capture into the graph-level result in
+  // record order, so a node already serving a later record cannot leak into
+  // an earlier record's publication.
+  void snapshot_node(context &c, std::size_t si,
+                     const streaming_task_graph_node *capability = nullptr) {
+    if (!capability)
+      capability = owner.streaming_nodes[si].capability;
+    if (si < owner.streaming_node_staged.size() &&
+        owner.streaming_node_staged[si]) {
+      // Each publication is one delta over one commit interval; the record
+      // hands them to the output stagers when it retires.
+      const auto coverage = capability->streaming_coverage();
+      if (!coverage)
+        return; // nothing to fold from this publication
+      const auto n = capability->num_observables();
+      const uint8_t *delta = capability->corrections();
+      auto lock = lock_runtime();
+      auto &entry = c.staged[si].emplace_back();
+      entry.coverage = *coverage;
+      if (delta)
+        entry.bits.assign(delta, delta + n);
+      else
+        entry.bits.assign(n, 0);
+      c.node_snapshotted[si] = 1;
+      return;
+    }
+    if (pooled(si) || indexed(si)) {
+      // The replica's corrections were cleared before this delivery, so they
+      // hold only this fire's delta. Deliveries of one record to a pooled node
+      // may overlap on different replicas, so fold under the lock.
+      auto lock = lock_runtime();
+      auto &dst = c.node_corrections[si];
+      if (const uint8_t *delta = capability->corrections())
+        for (std::size_t i = 0; i < dst.size(); ++i)
+          dst[i] ^= delta[i];
+      c.node_delta[si] = 1;
+      c.node_snapshotted[si] = 1;
+      return;
+    }
+    auto &dst = c.node_corrections[si];
+    if (!dst.empty())
+      if (const uint8_t *src = capability->corrections())
+        std::copy(src, src + dst.size(), dst.begin());
+    c.node_coverage[si] = capability->streaming_coverage();
+    c.node_snapshotted[si] = 1;
+  }
+
+  bool publish_streaming(context &c, std::size_t parent, std::size_t root,
+                         std::size_t producer,
+                         const streaming_task_graph_node *capability = nullptr,
+                         std::int64_t index = no_index) {
     const auto node_idx = owner.streaming_nodes[producer].node_index;
+    if (!capability)
+      capability = owner.streaming_nodes[producer].capability;
+    if (index == no_index)
+      index = capability->published_index().value_or(no_index);
+    snapshot_node(c, producer, capability);
     {
       auto lock = lock_runtime();
-      owner.record_streaming_publication(node_idx);
+      ++c.node_published[producer];
     }
-    publish_wires(parent, root, owner.streaming_wires_from[node_idx]);
-    publish_wires(parent, root, owner.completion_wires_from[node_idx]);
+    // Copy outputs now: a later record may run the producer before the
+    // consumer's delivery event executes. With one context none can, so the
+    // consumer reads the output in place instead; a graph with a fire pool
+    // always copies.
+    if (copy_outputs)
+      for (const auto &wire : owner.streaming_wires_from[node_idx]) {
+        const auto *value = capability->streaming_output(wire.from_slot);
+        const auto wire_id = static_cast<std::size_t>(wire.id);
+        if (value)
+          c.wire_values[wire_id] = *value;
+        c.wire_valid[wire_id] = value != nullptr;
+      }
+    publish_wires(c, parent, root, owner.streaming_wires_from[node_idx], index);
+    publish_wires(c, parent, root, owner.completion_wires_from[node_idx],
+                  index);
     return true;
   }
 
-  void publish_wires(std::size_t parent, std::size_t root,
-                     const std::vector<compiled_wire> &wires) {
+  void publish_wires(context &c, std::size_t parent, std::size_t root,
+                     const std::vector<compiled_wire> &wires,
+                     std::int64_t index = no_index) {
+    if (wires.empty())
+      return;
     auto lock = lock_runtime();
-    slots[parent].holds_node_lease =
-        slots[parent].holds_node_lease || !wires.empty();
     for (const auto &wire : wires) {
       const auto consumer =
           static_cast<std::size_t>(owner.streaming_by_node[wire.to_node]);
@@ -209,10 +576,12 @@ struct decoding_task_graph::impl::event_runtime {
       std::size_t blocker_sequence = 0;
       // Direct children are stored in declared wire order. A later branch
       // waits only when its transitive descendants intersect an earlier
-      // branch; disjoint fan-out remains immediately runnable.
-      for (std::size_t earlier = slots[parent].first_child; earlier != no_event;
-           earlier = slots[earlier].next_sibling) {
-        const auto &candidate = slots[earlier];
+      // branch; disjoint fan-out remains immediately runnable. An indexed
+      // consumer accepts its inputs in any order, so it never waits.
+      for (std::size_t earlier = c.slots[parent].first_child;
+           earlier != no_event && !indexed(consumer);
+           earlier = c.slots[earlier].next_sibling) {
+        const auto &candidate = c.slots[earlier];
         if (candidate.event.kind != graph_event_kind::streaming_edge)
           continue;
         if (branches_overlap(candidate.event.node, consumer) &&
@@ -221,90 +590,299 @@ struct decoding_task_graph::impl::event_runtime {
           blocker_sequence = candidate.sequence;
         }
       }
-      push_locked({graph_event_kind::streaming_edge, consumer, wire, 0, root},
-                  parent, blocker);
+      graph_event event{graph_event_kind::streaming_edge, consumer, wire, 0,
+                        root};
+      event.index = index;
+      push_locked(c, event, parent, blocker);
     }
-    if (!wires.empty())
-      notify_workers();
+    notify_workers();
   }
 
-  bool deliver_streaming_edge(std::size_t id, const graph_event &event) {
-    const auto producer =
-        static_cast<std::size_t>(owner.streaming_by_node[event.wire.from_node]);
-    auto *producer_node = owner.streaming_nodes[producer].capability;
-    auto *consumer_node = owner.streaming_nodes[event.node].capability;
+  const edge_value *delivered_value(const context &c,
+                                    const graph_event &event) const {
     const auto from = static_cast<std::size_t>(event.wire.from_node);
     const auto from_slot = static_cast<std::size_t>(event.wire.from_slot);
     // The implicit `done` output is the constant completion marker.
     const auto *marker = &owner.node_outputs[from][from_slot];
-    const auto *value = marker->get_if<completion>()
-                            ? marker
-                            : producer_node->streaming_output(from_slot);
+    if (marker->get_if<completion>())
+      return marker;
+    if (!copy_outputs)
+      return owner.streaming_nodes[owner.streaming_by_node[from]]
+          .capability->streaming_output(from_slot);
+    if (event.wire.id >= 0 &&
+        c.wire_valid[static_cast<std::size_t>(event.wire.id)])
+      return &c.wire_values[static_cast<std::size_t>(event.wire.id)];
+    return nullptr;
+  }
+
+  // File one delivery under the consumer instance it addresses. The entry is
+  // complete once every input is present or known to be absent; the fire it
+  // queues belongs to the record whose delivery completed it.
+  void deliver_indexed(context &c, std::size_t id, const graph_event &event) {
+    const auto si = event.node;
+    const auto &node = owner.streaming_nodes[si];
+    if (event.index == no_index)
+      throw std::logic_error(
+          "decoding_task_graph: node " + std::to_string(node.node_index) +
+          " joins its inputs by index but received an unindexed value from "
+          "node " +
+          std::to_string(event.wire.from_node));
+    const auto k = event.index - event.wire.index_offset;
+    const auto slot = static_cast<std::size_t>(event.wire.to_slot);
+    const auto *value = delivered_value(c, event);
+    auto lock = lock_runtime();
+    if (k < 0)
+      return; // instances are numbered from 0
+    auto &table = joins[si];
+    std::size_t index = table.size();
+    for (std::size_t i = 0; i < table.size() && index == table.size(); ++i)
+      if (table[i].used && table[i].k == k)
+        index = i;
+    const bool fresh = index == table.size();
+    if (fresh) {
+      for (std::size_t i = 0; i < table.size() && index == table.size(); ++i)
+        if (!table[i].used)
+          index = i;
+      // The preallocation covers one publication per producer per record;
+      // a record carrying several rounds can publish more, so grow instead
+      // of failing. A deque keeps entries in use where they are.
+      if (index == table.size())
+        add_join_entry(si);
+    }
+    auto *entry = &table[index];
+    if (fresh) {
+      entry->used = true;
+      entry->k = k;
+      entry->pending = 0;
+      for (std::size_t i = 0; i < entry->state.size(); ++i) {
+        // A producer index below 0 never publishes.
+        const bool absent = k + join_offsets[si][i] < 0;
+        if (absent && join_required[si][i]) {
+          entry->used = false;
+          return; // an instance without a required input does not exist
+        }
+        entry->state[i] = absent ? join_entry::absent : join_entry::missing;
+        entry->pending += !absent;
+      }
+    }
+    if (entry->state[slot] == join_entry::present)
+      throw std::logic_error("decoding_task_graph: node " +
+                             std::to_string(node.node_index) + " input " +
+                             std::to_string(slot) + " of instance " +
+                             std::to_string(k) + " was delivered twice");
+    if (entry->state[slot] == join_entry::missing)
+      --entry->pending;
+    if (value) {
+      entry->inputs[slot] = *value;
+      entry->state[slot] = join_entry::present;
+    } else {
+      entry->state[slot] = join_entry::absent;
+    }
+    if (entry->pending != 0)
+      return;
+    queue_indexed_fire_locked(c, id, si, index, event.root);
+    notify_workers();
+  }
+
+  void queue_indexed_fire_locked(context &c, std::size_t parent, std::size_t si,
+                                 std::size_t entry, std::size_t root) {
+    graph_event fire{graph_event_kind::streaming_indexed_fire, si, {}, 0, root};
+    fire.index = joins[si][entry].k;
+    fire.entry = entry;
+    push_locked(c, fire, parent);
+  }
+
+  // The shot has ended and every producer of the node has finished, so no
+  // pending input will arrive: instances with their required inputs fire
+  // with the rest absent, and the others never existed.
+  void resolve_joins_locked(context &c, std::size_t parent, std::size_t si,
+                            std::size_t root) {
+    auto &table = joins[si];
+    for (std::size_t index = 0; index < table.size(); ++index) {
+      auto &entry = table[index];
+      if (!entry.used || entry.pending == 0)
+        continue;
+      bool exists = true;
+      for (std::size_t i = 0; i < entry.state.size(); ++i)
+        if (entry.state[i] == join_entry::missing && join_required[si][i])
+          exists = false;
+      if (!exists) {
+        entry.used = false;
+        continue;
+      }
+      for (auto &state : entry.state)
+        if (state == join_entry::missing)
+          state = join_entry::absent;
+      entry.pending = 0;
+      queue_indexed_fire_locked(c, parent, si, index, root);
+    }
+  }
+
+  // Whether no event of any record other than `self`'s flush still targets
+  // the indexed node: its producers' deliveries have all been filed and its
+  // own fires have all finished.
+  bool indexed_quiescent_locked(const context &self, std::size_t si) const {
+    for (const auto *c : active) {
+      auto live = c->node_live[si];
+      if (c == &self)
+        --live; // the flush event asking
+      if (live != 0)
+        return false;
+    }
+    return true;
+  }
+
+  // Run instance k on the replica claimed at dispatch, with the entry's
+  // inputs, then free the entry.
+  bool execute_indexed_fire(context &c, std::size_t id,
+                            const graph_event &event) {
+    const auto si = event.node;
+    const auto &node = owner.streaming_nodes[si];
+    const auto replica = c.slots[id].pool_slot;
+    auto &entry = joins[si][event.entry];
+    auto &inputs = fire_inputs[si][replica];
+    for (std::size_t i = 0; i < inputs.size(); ++i)
+      inputs[i] =
+          entry.state[i] == join_entry::present ? &entry.inputs[i] : nullptr;
+    auto *capability = node.replicas[replica];
+    capability->clear_corrections(); // its corrections become this delta
+    const bool fired = node.indexed[replica]->fire(event.index, inputs);
+    {
+      auto lock = lock_runtime();
+      entry.used = false;
+    }
+    if (fired)
+      (void)publish_streaming(c, id, event.root, si, capability, event.index);
+    else
+      publish_wires(c, id, event.root,
+                    owner.completion_wires_from[node.node_index], event.index);
+    return fired;
+  }
+
+  bool deliver_streaming_edge(context &c, std::size_t id,
+                              const graph_event &event) {
+    if (indexed(event.node)) {
+      deliver_indexed(c, id, event);
+      return false;
+    }
+    const auto consumer =
+        static_cast<std::size_t>(owner.streaming_nodes[event.node].node_index);
+    const bool pool = pooled(event.node);
+    // A pooled consumer is the replica this record leased at its first
+    // delivery. Clearing first makes its corrections this fire's delta.
+    auto *consumer_node = pool ? owner.streaming_nodes[event.node]
+                                     .replicas[c.pool_replica[event.node]]
+                               : owner.streaming_nodes[event.node].capability;
+    if (pool)
+      consumer_node->clear_corrections();
+    const auto *value = delivered_value(c, event);
     const bool fired =
         value && consumer_node->enqueue_edge_value(*value, event.wire.to_slot);
     if (fired)
-      (void)publish_streaming(id, event.root, event.node);
+      (void)publish_streaming(c, id, event.root, event.node, consumer_node);
     // An edge-fed node completes the window after its last delivery.
-    const auto consumer =
-        static_cast<std::size_t>(owner.streaming_nodes[event.node].node_index);
-    if (++owner.streaming_deliveries_seen[consumer] ==
+    if (++c.deliveries_seen[consumer] ==
         owner.streaming_wires_to_count[consumer]) {
-      owner.streaming_deliveries_seen[consumer] = 0;
+      c.deliveries_seen[consumer] = 0;
+      if (pool)
+        c.slots[id].releases_pool = true;
       if (!fired)
-        publish_wires(id, event.root, owner.completion_wires_from[consumer]);
+        publish_wires(c, id, event.root, owner.completion_wires_from[consumer]);
     }
     return fired;
   }
 
-  template <typename Handler>
-  void run(int cuda_device_id, Handler &&handler) {
+  // ----- Event handlers ----------------------------------------------------
+
+  void execute(context &c, std::size_t id, const graph_event &event) {
+    switch (event.kind) {
+    case graph_event_kind::one_shot:
+      execute_one_shot(c, event);
+      return;
+    case graph_event_kind::streaming_raw:
+      execute_raw(c, id, event);
+      return;
+    case graph_event_kind::streaming_edge:
+      if (deliver_streaming_edge(c, id, event))
+        c.fired.store(true, std::memory_order_relaxed);
+      return;
+    case graph_event_kind::streaming_flush:
+      execute_flush(c, id, event);
+      return;
+    case graph_event_kind::streaming_flush_release:
+      release_dependencies(c, owner.streaming_dependents[event.node],
+                           graph_event_kind::streaming_flush);
+      return;
+    case graph_event_kind::streaming_indexed_fire:
+      if (execute_indexed_fire(c, id, event))
+        c.fired.store(true, std::memory_order_relaxed);
+      return;
+    }
+    throw std::logic_error("decoding_task_graph: unexpected graph event");
+  }
+
+  // The final predecessor publishes a dependent while holding the runtime
+  // lock, so all predecessor output writes happen before the dependent is
+  // dispatched.
+  void execute_one_shot(context &c, const graph_event &event) {
+    const auto node = event.node;
+    auto &inputs = owner.parallel_node_inputs[node];
+    for (const auto &wire : owner.wires_to[node])
+      inputs[static_cast<std::size_t>(wire.to_slot)] =
+          wire.from_node < 0
+              ? *c.measurement
+              : owner.node_outputs[static_cast<std::size_t>(wire.from_node)]
+                                  [static_cast<std::size_t>(wire.from_slot)];
+    owner.nodes[node]->execute_indexed(inputs, owner.node_outputs[node]);
+    release_dependencies(c, owner.dependents[node], graph_event_kind::one_shot);
+  }
+
+  void execute_raw(context &c, std::size_t id, const graph_event &event) {
+    auto &node = *owner.streaming_nodes[event.node].capability;
+    const auto limit =
+        c.type ? node.raw_chunk_limit() : node.untagged_chunk_limit();
+    const auto take =
+        limit ? std::min(*limit, c.len - event.offset) : c.len - event.offset;
+    const auto *chunk = c.syndrome ? c.syndrome + event.offset : nullptr;
+    const auto next = event.offset + take;
+    const auto chunk_type = c.type == round_type::FINAL && next == c.len
+                                ? round_type::FINAL
+                                : round_type::BULK;
+    const bool fired = c.type ? node.enqueue(chunk, take, chunk_type)
+                              : node.enqueue_untagged(chunk, take);
+    if (fired)
+      c.fired.store(publish_streaming(c, id, event.root, event.node),
+                    std::memory_order_relaxed);
+    else if (chunk_type == round_type::FINAL)
+      snapshot_node(c, event.node); // a FINAL round may commit coverage
+    if (next < c.len && take != 0)
+      set_continuation(
+          c, id,
+          {graph_event_kind::streaming_raw, event.node, {}, next, event.root});
+  }
+
+  void execute_flush(context &c, std::size_t id, const graph_event &event) {
+    if (indexed(event.node)) {
+      auto lock = lock_runtime();
+      resolve_joins_locked(c, id, event.node, event.root);
+    }
+    if (owner.streaming_nodes[event.node].capability->flush())
+      c.fired.store(publish_streaming(c, id, event.root, event.node),
+                    std::memory_order_relaxed);
+    else if (!pooled(event.node) && !indexed(event.node))
+      snapshot_node(c, event.node); // a pooled copy holds only its last delta
+    push(c, {graph_event_kind::streaming_flush_release, event.node}, id,
+         no_event, /*wait_for_siblings=*/true);
+  }
+
+  // ----- Worker loops ------------------------------------------------------
+
+  // Run one context to completion with every pool worker, the caller
+  // included. Used by the synchronous streaming and one-shot paths.
+  void run_single(context &c, int cuda_device_id) {
     owner.parallel_pool->run_workers([&](std::size_t /*worker_id*/) {
-      std::size_t active_id = no_event;
-      try {
-        detail_affinity::CudaDeviceGuard device_guard(cuda_device_id);
-        while (true) {
-          std::size_t id = no_event;
-          graph_event event;
-          {
-            auto lock = lock_runtime();
-            while (id == no_event) {
-              if (stop) {
-                if (running == 0)
-                  return;
-                wake.wait(lock);
-                continue;
-              }
-              if (occupied == 0)
-                return;
-              id = select_ready_locked();
-              if (id == no_event) {
-                if (!has_waiting_workers)
-                  throw std::logic_error(
-                      "decoding_task_graph: event queue stalled");
-                wake.wait(lock);
-                continue;
-              }
-            }
-            auto &selected = slots[id];
-            selected.running = true;
-            selected.queued = false;
-            ++running;
-            const auto node = serialized_node(selected.event);
-            if (node != no_event)
-              node_busy[node] = 1;
-            event = selected.event;
-          }
-
-          active_id = id;
-          handler(*this, id, event);
-          finish(id);
-          active_id = no_event;
-        }
-      } catch (...) {
-        fail(active_id, std::current_exception());
-      }
+      execute_loop(cuda_device_id, [&] { return c.occupied == 0; });
     });
-
     std::exception_ptr first_error;
     {
       auto lock = lock_runtime();
@@ -314,7 +892,73 @@ struct decoding_task_graph::impl::event_runtime {
       std::rethrow_exception(first_error);
   }
 
-private:
+  // Run an asynchronous session: worker zero only admits and retires records,
+  // every other worker executes node events until the dispatcher ends the
+  // session.
+  void run_session(int cuda_device_id) {
+    spin_while_active = true;
+    owner.parallel_pool->run_workers([&](std::size_t worker_id) {
+      if (worker_id == 0)
+        owner.dispatch_async_session();
+      else
+        execute_loop(cuda_device_id, [&] { return session_done; });
+    });
+    spin_while_active = false;
+  }
+
+  template <typename Until>
+  void execute_loop(int cuda_device_id, Until &&until) {
+    context *active_context = nullptr;
+    std::size_t active_id = no_event;
+    try {
+      detail_affinity::CudaDeviceGuard device_guard(cuda_device_id);
+      while (true) {
+        context *c = nullptr;
+        std::size_t id = no_event;
+        graph_event event;
+        {
+          auto lock = lock_runtime();
+          while (id == no_event) {
+            if (stop) {
+              if (running == 0)
+                return;
+              wake.wait(lock);
+              continue;
+            }
+            if (until())
+              return;
+            std::tie(c, id) = select_ready_locked();
+            if (id == no_event) {
+              if (!has_waiting_workers)
+                throw std::logic_error(
+                    "decoding_task_graph: event queue stalled");
+              if (!spin_for_ready(lock))
+                wake.wait(lock);
+              continue;
+            }
+          }
+          auto &selected = c->slots[id];
+          selected.running = true;
+          selected.queued = false;
+          ++running;
+          claim_locked(*c, selected);
+          event = selected.event;
+        }
+
+        active_context = c;
+        active_id = id;
+        execute(*c, id, event);
+        finish(*c, id);
+        active_context = nullptr;
+        active_id = no_event;
+      }
+    } catch (...) {
+      fail(active_context, active_id, std::current_exception());
+    }
+  }
+
+  // ----- Dispatcher support ------------------------------------------------
+
   std::unique_lock<std::mutex> lock_runtime() {
     std::unique_lock<std::mutex> lock(mutex, std::defer_lock);
     if (has_waiting_workers)
@@ -322,301 +966,518 @@ private:
     return lock;
   }
 
-  std::size_t push_locked(graph_event event, std::size_t parent = no_event,
+  // Oldest active context, if it has finished executing.
+  context *oldest_complete_locked() {
+    if (active.empty() || !active.front()->complete)
+      return nullptr;
+    return active.front();
+  }
+
+  void request_stop_locked() {
+    stop = true;
+    notify_workers();
+  }
+
+  void wait_until_idle_locked(std::unique_lock<std::mutex> &lock) {
+    while (running != 0)
+      wake.wait(lock);
+  }
+
+  void end_session_locked() {
+    session_done = true;
+    notify_workers();
+  }
+
+  void notify_workers() {
+    if (!has_waiting_workers)
+      return;
+    ready_generation.fetch_add(1, std::memory_order_release);
+    wake.notify_all();
+  }
+
+private:
+  // Spin briefly for a scheduler change before parking. Returns true when one
+  // happened, so the caller re-selects instead of waiting.
+  bool spin_for_ready(std::unique_lock<std::mutex> &lock) {
+    if (!spin_while_active)
+      return false;
+    const auto seen = ready_generation.load(std::memory_order_acquire);
+    lock.unlock();
+    bool changed = false;
+    for (std::size_t spin = 0; spin < kHandoffSpinPauseIters && !changed;
+         ++spin) {
+      changed = ready_generation.load(std::memory_order_acquire) != seen;
+      if (!changed)
+        CUDAQ_REALTIME_CPU_RELAX();
+    }
+    lock.lock();
+    return changed || ready_generation.load(std::memory_order_acquire) != seen;
+  }
+
+  std::size_t push_locked(context &c, graph_event event,
+                          std::size_t parent = no_event,
                           std::size_t blocked_by = no_event,
                           bool wait_for_siblings = false) {
     if (stop)
       return no_event;
     if (parent != no_event &&
-        (parent >= slots.size() || !slots[parent].occupied)) {
+        (parent >= c.slots.size() || !c.slots[parent].occupied)) {
       throw std::logic_error(
           "decoding_task_graph: event parent is no longer active");
     }
     if (blocked_by != no_event &&
-        (blocked_by >= slots.size() || !slots[blocked_by].occupied)) {
+        (blocked_by >= c.slots.size() || !c.slots[blocked_by].occupied)) {
       throw std::logic_error(
           "decoding_task_graph: event blocker is no longer active");
     }
-    if (free_slots.empty())
+    if (c.free_slots.empty())
       throw std::logic_error(
           "decoding_task_graph: bounded event store overflow");
-    const auto id = free_slots.back();
-    free_slots.pop_back();
-    auto &created = slots[id];
+    const auto id = c.free_slots.back();
+    c.free_slots.pop_back();
+    auto &created = c.slots[id];
     created = {};
     created.event = event;
     created.parent = parent;
     created.blocked_by = blocked_by;
-    created.sequence = next_sequence++;
+    created.sequence = c.next_sequence++;
     created.wait_for_siblings = wait_for_siblings;
     created.occupied = true;
-    ++occupied;
+    ++c.occupied;
+    const auto target = release_target(event);
+    if (target != no_event)
+      ++c.node_live[target];
     if (parent != no_event) {
-      auto &ancestor = slots[parent];
+      auto &ancestor = c.slots[parent];
       created.previous_sibling = ancestor.last_child;
       if (ancestor.last_child == no_event)
         ancestor.first_child = id;
       else
-        slots[ancestor.last_child].next_sibling = id;
+        c.slots[ancestor.last_child].next_sibling = id;
       ancestor.last_child = id;
       ++ancestor.pending_children;
     }
     if (blocked_by != no_event) {
-      auto &blocker = slots[blocked_by];
+      auto &blocker = c.slots[blocked_by];
       if (blocker.last_blocked_waiter == no_event)
         blocker.first_blocked_waiter = id;
       else
-        slots[blocker.last_blocked_waiter].next_blocked_waiter = id;
+        c.slots[blocker.last_blocked_waiter].next_blocked_waiter = id;
       blocker.last_blocked_waiter = id;
     }
     if (blocked_by == no_event && (!wait_for_siblings || parent == no_event))
-      enqueue_locked(id);
+      enqueue_locked(c, id);
     return id;
   }
 
-  void enqueue_locked(std::size_t id) {
-    auto &candidate = slots[id];
+  void enqueue_locked(context &c, std::size_t id) {
+    auto &candidate = c.slots[id];
     if (!candidate.occupied || candidate.queued || candidate.running)
       return;
     candidate.queued = true;
-    candidate.previous_ready = ready_tail;
+    candidate.previous_ready = c.ready_tail;
     candidate.next_ready = no_event;
-    if (ready_tail == no_event)
-      ready_head = id;
+    if (c.ready_tail == no_event)
+      c.ready_head = id;
     else
-      slots[ready_tail].next_ready = id;
-    ready_tail = id;
+      c.slots[c.ready_tail].next_ready = id;
+    c.ready_tail = id;
   }
 
-  void notify_workers() {
-    if (has_waiting_workers)
-      wake.notify_all();
-  }
-
-  void remove_ready_locked(std::size_t id) {
-    auto &candidate = slots[id];
+  void remove_ready_locked(context &c, std::size_t id) {
+    auto &candidate = c.slots[id];
     if (candidate.previous_ready == no_event)
-      ready_head = candidate.next_ready;
+      c.ready_head = candidate.next_ready;
     else
-      slots[candidate.previous_ready].next_ready = candidate.next_ready;
+      c.slots[candidate.previous_ready].next_ready = candidate.next_ready;
     if (candidate.next_ready == no_event)
-      ready_tail = candidate.previous_ready;
+      c.ready_tail = candidate.previous_ready;
     else
-      slots[candidate.next_ready].previous_ready = candidate.previous_ready;
+      c.slots[candidate.next_ready].previous_ready = candidate.previous_ready;
     candidate.previous_ready = no_event;
     candidate.next_ready = no_event;
   }
 
+  // Topology node whose state the event mutates; it may not run concurrently
+  // with another event on the same node.
   std::size_t serialized_node(const graph_event &event) const {
-    if (event.kind == graph_event_kind::streaming_flush_release)
+    if (event.kind == graph_event_kind::streaming_flush_release ||
+        event.kind == graph_event_kind::streaming_indexed_fire)
       return no_event;
     if (event.kind == graph_event_kind::one_shot)
       return event.node;
     if (event.node >= owner.streaming_nodes.size())
       return no_event;
+    // A delivery to a pooled node holds one replica, not the node; one to an
+    // indexed node only files a value under the lock.
+    if (event.kind == graph_event_kind::streaming_edge &&
+        (pooled(event.node) || indexed(event.node)))
+      return no_event;
     return static_cast<std::size_t>(
         owner.streaming_nodes[event.node].node_index);
   }
 
-  bool roots_overlap(std::size_t earlier, std::size_t later) const {
-    if (earlier >= root_nodes.size() || later >= root_nodes.size())
+  bool pooled(std::size_t si) const {
+    return owner.streaming_nodes[si].replicas.size() > 1;
+  }
+  bool indexed(std::size_t si) const {
+    return !owner.streaming_nodes[si].indexed.empty();
+  }
+
+  // Events whose target keeps no state between fires need no record order.
+  bool targets_pool(const graph_event &event) const {
+    return event.kind != graph_event_kind::one_shot &&
+           event.node < owner.streaming_nodes.size() &&
+           (pooled(event.node) || indexed(event.node));
+  }
+
+  bool is_pool_delivery(const graph_event &event) const {
+    return event.kind == graph_event_kind::streaming_edge &&
+           targets_pool(event) && !indexed(event.node);
+  }
+
+  // Mark what a dispatched event holds: its node, or one replica of a pooled
+  // node. A record leases a replica at its first delivery and keeps it until
+  // its last, so a multi-input consumer sees all of a record's inputs on one
+  // copy.
+  void claim_locked(context &c, slot &selected) {
+    if (selected.event.kind == graph_event_kind::streaming_indexed_fire) {
+      // Leased per fire, not per record: fires of one node overlap freely.
+      const auto si = selected.event.node;
+      selected.pool_slot = pool_free[si].back();
+      pool_free[si].pop_back();
+      replica_busy[si][selected.pool_slot] = 1;
+      selected.releases_pool = true;
+      return;
+    }
+    if (is_pool_delivery(selected.event)) {
+      const auto si = selected.event.node;
+      if (c.pool_replica[si] == no_event) {
+        c.pool_replica[si] = pool_free[si].back();
+        pool_free[si].pop_back();
+      }
+      selected.pool_slot = c.pool_replica[si];
+      replica_busy[si][selected.pool_slot] = 1;
+      return;
+    }
+    const auto node = serialized_node(selected.event);
+    if (node != no_event)
+      node_busy[node] = 1;
+  }
+
+  void unclaim_locked(context &c, slot &done) {
+    if (done.pool_slot != no_event) {
+      const auto si = done.event.node;
+      replica_busy[si][done.pool_slot] = 0;
+      if (done.releases_pool) {
+        pool_free[si].push_back(done.pool_slot);
+        if (c.pool_replica[si] == done.pool_slot)
+          c.pool_replica[si] = no_event;
+        done.releases_pool = false;
+      }
+      done.pool_slot = no_event;
+      return;
+    }
+    const auto node = serialized_node(done.event);
+    if (node != no_event)
+      node_busy[node] = 0;
+  }
+
+  // Streaming node the event counts against for release. Unlike
+  // serialized_node this includes flush releases, which create flush events
+  // for dependents and so must finish before their node is handed on.
+  std::size_t release_target(const graph_event &event) const {
+    if (event.kind == graph_event_kind::one_shot ||
+        event.node >= owner.streaming_nodes.size())
+      return no_event;
+    return event.node;
+  }
+
+  bool roots_overlap(const context &c, std::size_t earlier,
+                     std::size_t later) const {
+    if (earlier >= c.root_nodes.size() || later >= c.root_nodes.size())
       return false;
-    return branches_overlap(root_nodes[earlier], root_nodes[later]);
+    return branches_overlap(c.root_nodes[earlier], c.root_nodes[later]);
   }
 
   bool branches_overlap(std::size_t left, std::size_t right) const {
     return owner.streaming_overlap[left][right] != 0;
   }
 
-  bool root_is_ready(const graph_event &event, const slot &candidate) const {
+  bool root_is_ready(const context &c, const graph_event &event,
+                     const slot &candidate) const {
     if (event.root == no_event || candidate.parent == no_event)
       return true;
     for (std::size_t root = 0; root < event.root; ++root)
-      if (!root_done[root] && roots_overlap(root, event.root))
+      if (!c.root_done[root] && roots_overlap(c, root, event.root))
         return false;
     return true;
   }
 
-  std::size_t select_ready_locked() {
-    for (std::size_t id = ready_head; id != no_event;
-         id = slots[id].next_ready) {
-      const auto &candidate = slots[id];
+  std::pair<context *, std::size_t> select_ready_locked() {
+    for (auto *c : active) {
+      const auto id = select_ready_locked(*c);
+      if (id != no_event)
+        return {c, id};
+    }
+    return {nullptr, no_event};
+  }
+
+  std::size_t select_ready_locked(context &c) {
+    for (std::size_t id = c.ready_head; id != no_event;
+         id = c.slots[id].next_ready) {
+      const auto &candidate = c.slots[id];
       const auto node = serialized_node(candidate.event);
-      const bool inherits_lease =
-          node != no_event && node_busy[node] && candidate.parent != no_event &&
-          slots[candidate.parent].holds_node_lease &&
-          candidate.wait_for_siblings &&
-          serialized_node(slots[candidate.parent].event) == node;
-      const bool owns_lease =
-          node != no_event && node_busy[node] && candidate.holds_node_lease;
-      if ((node != no_event && node_busy[node] && !inherits_lease &&
-           !owns_lease) ||
-          !root_is_ready(candidate.event, candidate))
+      if (node != no_event && node_busy[node])
         continue;
-      if (inherits_lease)
-        slots[candidate.parent].holds_node_lease = false;
-      remove_ready_locked(id);
+      if (is_pool_delivery(candidate.event)) {
+        // Needs this record's replica to be idle, or a free one to lease.
+        const auto si = candidate.event.node;
+        const auto leased = c.pool_replica[si];
+        if (leased == no_event ? pool_free[si].empty()
+                               : replica_busy[si][leased] != 0)
+          continue;
+      }
+      if (candidate.event.kind == graph_event_kind::streaming_indexed_fire &&
+          pool_free[candidate.event.node].empty())
+        continue;
+      // Resolving an indexed node's pending instances needs every delivery
+      // to it, from any record, filed first.
+      if (candidate.event.kind == graph_event_kind::streaming_flush &&
+          indexed(candidate.event.node) &&
+          !indexed_quiescent_locked(c, candidate.event.node))
+        continue;
+      // A pooled node keeps no state, so its records need no order.
+      if (c.gated && !targets_pool(candidate.event)) {
+        const auto target = release_target(candidate.event);
+        if (target != no_event && node_turn[target] != c.sequence)
+          continue;
+      }
+      if (!root_is_ready(c, candidate.event, candidate))
+        continue;
+      remove_ready_locked(c, id);
       return id;
     }
     return no_event;
   }
 
-  void finish(std::size_t id) {
+  // Hand node `si` to the next record once this record can create no more
+  // events for it: every producer has been handed on and nothing targeting
+  // the node is queued or running.
+  void try_release_locked(context &c, std::size_t si) {
+    if (!c.gated || c.node_released[si] || c.node_live[si] != 0)
+      return;
+    for (const auto producer : owner.streaming_producers[si])
+      if (!c.node_released[producer])
+        return;
+    c.node_released[si] = 1;
+    node_turn[si] = c.sequence + 1;
+    for (const auto dependent : owner.streaming_dependents[si])
+      try_release_locked(c, dependent);
+  }
+
+  void mark_complete_locked(context &c) {
+    c.complete = true;
+    if (c.gated)
+      owner.wake_async_stream();
+  }
+
+  void finish(context &c, std::size_t id) {
     auto lock = lock_runtime();
     if (stop) {
-      if (id < slots.size() && slots[id].running) {
-        slots[id].running = false;
-        const auto node = serialized_node(slots[id].event);
-        if (node != no_event)
-          node_busy[node] = 0;
+      if (id < c.slots.size() && c.slots[id].running) {
+        c.slots[id].running = false;
+        unclaim_locked(c, c.slots[id]);
       }
       if (running != 0)
         --running;
       notify_workers();
       return;
     }
-    auto &completed = slots[id];
-    const auto node = serialized_node(completed.event);
-    if (node != no_event && !completed.holds_node_lease)
-      node_busy[node] = 0;
+    auto &completed = c.slots[id];
+    unclaim_locked(c, completed);
     completed.running = false;
     completed.self_done = true;
     if (running != 0)
       --running;
+    if (!completed.has_continuation) {
+      const auto target = release_target(completed.event);
+      if (target != no_event && --c.node_live[target] == 0)
+        try_release_locked(c, target);
+    }
     if (completed.pending_children == 0)
-      complete_or_continue_locked(id);
+      complete_or_continue_locked(c, id);
     else if (completed.pending_children == 1)
-      enqueue_sibling_waiter_locked(id);
+      enqueue_sibling_waiter_locked(c, id);
     notify_workers();
   }
 
-  void complete_or_continue_locked(std::size_t id) {
-    if (!slots[id].has_continuation) {
-      retire_locked(id);
+  void complete_or_continue_locked(context &c, std::size_t id) {
+    if (!c.slots[id].has_continuation) {
+      retire_locked(c, id);
       return;
     }
-    auto &continued = slots[id];
+    auto &continued = c.slots[id];
     continued.event = continued.continuation;
     continued.continuation = {};
     continued.has_continuation = false;
     continued.blocked_by = no_event;
-    continued.sequence = next_sequence++;
+    continued.sequence = c.next_sequence++;
     continued.queued = false;
     continued.running = false;
     continued.self_done = false;
     continued.wait_for_siblings = false;
-    enqueue_locked(id);
+    enqueue_locked(c, id);
   }
 
-  void retire_locked(std::size_t id) {
-    auto &completed = slots[id];
+  void retire_locked(context &c, std::size_t id) {
+    auto &completed = c.slots[id];
     const auto parent = completed.parent;
     const auto root = completed.event.root;
-    const auto node = serialized_node(completed.event);
 
     // Release deterministic branch successors before this slot is recycled.
     std::size_t waiting = completed.first_blocked_waiter;
     while (waiting != no_event) {
-      const auto next = slots[waiting].next_blocked_waiter;
-      slots[waiting].blocked_by = no_event;
-      slots[waiting].next_blocked_waiter = no_event;
-      if (!slots[waiting].wait_for_siblings)
-        enqueue_locked(waiting);
+      const auto next = c.slots[waiting].next_blocked_waiter;
+      c.slots[waiting].blocked_by = no_event;
+      c.slots[waiting].next_blocked_waiter = no_event;
+      if (!c.slots[waiting].wait_for_siblings)
+        enqueue_locked(c, waiting);
       waiting = next;
     }
 
-    if (completed.holds_node_lease && node != no_event)
-      node_busy[node] = 0;
     if (parent != no_event) {
-      auto &ancestor = slots[parent];
+      auto &ancestor = c.slots[parent];
       if (completed.previous_sibling == no_event)
         ancestor.first_child = completed.next_sibling;
       else
-        slots[completed.previous_sibling].next_sibling = completed.next_sibling;
+        c.slots[completed.previous_sibling].next_sibling =
+            completed.next_sibling;
       if (completed.next_sibling == no_event)
         ancestor.last_child = completed.previous_sibling;
       else
-        slots[completed.next_sibling].previous_sibling =
+        c.slots[completed.next_sibling].previous_sibling =
             completed.previous_sibling;
     }
     completed = {};
-    free_slots.push_back(id);
-    if (occupied != 0)
-      --occupied;
+    c.free_slots.push_back(id);
+    if (c.occupied != 0)
+      --c.occupied;
     if (parent == no_event) {
-      if (root != no_event && root < root_done.size())
-        root_done[root] = 1;
+      if (root != no_event && root < c.root_done.size())
+        c.root_done[root] = 1;
+      if (c.occupied == 0)
+        mark_complete_locked(c);
       notify_workers();
       return;
     }
 
-    auto &ancestor = slots[parent];
+    auto &ancestor = c.slots[parent];
     if (ancestor.pending_children == 0)
       throw std::logic_error(
           "decoding_task_graph: event child counter underflow");
     --ancestor.pending_children;
     if (ancestor.self_done && ancestor.pending_children == 1)
-      enqueue_sibling_waiter_locked(parent);
+      enqueue_sibling_waiter_locked(c, parent);
     if (ancestor.self_done && ancestor.pending_children == 0)
-      complete_or_continue_locked(parent);
+      complete_or_continue_locked(c, parent);
   }
 
-  void enqueue_sibling_waiter_locked(std::size_t parent) {
-    for (std::size_t waiting = slots[parent].first_child; waiting != no_event;
-         waiting = slots[waiting].next_sibling)
-      if (slots[waiting].wait_for_siblings &&
-          slots[waiting].blocked_by == no_event) {
-        if (serialized_node(slots[waiting].event) == no_event &&
-            slots[parent].holds_node_lease) {
-          const auto node = serialized_node(slots[parent].event);
-          if (node != no_event)
-            node_busy[node] = 0;
-          slots[parent].holds_node_lease = false;
-        }
-        enqueue_locked(waiting);
-      }
+  void enqueue_sibling_waiter_locked(context &c, std::size_t parent) {
+    for (std::size_t waiting = c.slots[parent].first_child; waiting != no_event;
+         waiting = c.slots[waiting].next_sibling)
+      if (c.slots[waiting].wait_for_siblings &&
+          c.slots[waiting].blocked_by == no_event)
+        enqueue_locked(c, waiting);
   }
 
-  void fail(std::size_t id, std::exception_ptr failure) noexcept {
+  void fail(context *c, std::size_t id, std::exception_ptr failure) noexcept {
     auto lock = lock_runtime();
     if (!error)
       error = std::move(failure);
     stop = true;
-    if (id < slots.size() && slots[id].running) {
-      slots[id].running = false;
-      const auto node = serialized_node(slots[id].event);
-      if (node != no_event)
-        node_busy[node] = 0;
+    if (c && id < c->slots.size() && c->slots[id].running) {
+      c->slots[id].running = false;
+      unclaim_locked(*c, c->slots[id]);
     }
     if (running != 0)
       --running;
     notify_workers();
+    if (c && c->gated)
+      owner.wake_async_stream();
   }
 
+public:
   impl &owner;
-  std::vector<slot> slots;
-  std::vector<std::size_t> free_slots;
-  std::vector<uint8_t> node_busy;
-  std::vector<int32_t> dependency_remaining;
-  std::vector<std::size_t> root_nodes;
-  std::vector<uint8_t> root_done;
+  std::vector<context> contexts;
+  std::vector<context *> active;   // oldest record first
+  std::vector<uint8_t> node_busy;  // by topology node
+  std::vector<uint64_t> node_turn; // by streaming node: record it serves next
+  // By streaming node: free replicas, and which replicas are running.
+  std::vector<std::vector<std::size_t>> pool_free;
+  std::vector<std::vector<uint8_t>> replica_busy;
+  // Executor-held joins of indexed nodes: one table per streaming node,
+  // entries keyed by instance, inputs copied in as they arrive.
+  struct join_entry {
+    enum : uint8_t { missing = 0, present = 1, absent = 2 };
+    std::int64_t k = 0;
+    bool used = false;
+    std::size_t pending = 0;
+    std::vector<edge_value> inputs;
+    std::vector<uint8_t> state;
+  };
+  std::vector<std::deque<join_entry>> joins;
+  // By streaming node and input slot: the edge's index offset, and whether
+  // an instance exists only if that input is delivered.
+  std::vector<std::vector<std::int64_t>> join_offsets;
+  std::vector<std::vector<uint8_t>> join_required;
+
+  join_entry &add_join_entry(std::size_t si) {
+    const auto inputs =
+        owner.node_input_counts[owner.streaming_nodes[si].node_index];
+    auto &entry = joins[si].emplace_back();
+    entry.inputs.resize(inputs);
+    entry.state.assign(inputs, 0);
+    return entry;
+  }
+  // Per-replica scratch for the input pointers handed to fire().
+  std::vector<std::vector<std::vector<const edge_value *>>> fire_inputs;
+  // Whether publication copies outputs into the record (several contexts,
+  // or a fire pool).
+  bool copy_outputs = false;
   const bool has_waiting_workers;
   std::mutex mutex;
   std::condition_variable wake;
-  std::size_t occupied = 0;
+  std::atomic<uint64_t> ready_generation{0};
   std::size_t running = 0;
-  std::size_t next_sequence = 0;
-  std::size_t ready_head = no_event;
-  std::size_t ready_tail = no_event;
+  uint64_t next_record = 0;
   bool stop = false;
+  bool session_done = false;
+  // Workers spin before parking only inside an asynchronous session, where
+  // the dispatcher hands them records continuously.
+  bool spin_while_active = false;
   std::exception_ptr error;
 };
 
-// Construct empty graph state before the private event runtime is complete.
+// Construct empty graph state before the private scheduler type is complete.
 decoding_task_graph::impl::impl() = default;
 
-void decoding_task_graph::impl::prepare_event_runtime(std::size_t capacity) {
-  runtime = std::make_unique<event_runtime>(*this, capacity);
+void decoding_task_graph::impl::prepare_event_runtime(std::size_t context_count,
+                                                      bool dispatcher_thread) {
+  // Width-one graphs still use the same event loop, with the caller as the
+  // sole worker, so execution semantics do not depend on pool width. An
+  // asynchronous dispatcher does no node work, so it gets a thread of its own.
+  scheduler.reset();
+  parallel_pool = std::make_unique<detail::thread_pool>(
+      pool_width + (dispatcher_thread ? 1 : 0), pool_worker_cpus,
+      detail::thread_pool::AffinityPolicy::RoundRobin);
+  // Causal ancestors remain resident until their descendants drain. This
+  // linear multiple covers all simultaneously live frontier, publication,
+  // continuation, and flush descriptors without hot-path allocation.
+  const auto event_capacity =
+      std::max<std::size_t>(64, 16 * (nodes.size() + streaming_wire_count + 1));
+  scheduler =
+      std::make_unique<record_scheduler>(*this, context_count, event_capacity);
 }
 
 // Keep both the persistent event workers and asynchronous coordinator inside
@@ -646,84 +1507,76 @@ int decoding_task_graph::impl::resolve_cuda_device_id() const {
   return resolved;
 }
 
+// Fold one retired record's captured node state into the graph-level view the
+// progress model reads. Generations advance here, in record order.
+void decoding_task_graph::impl::apply_record_context(record_context &c) {
+  for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
+    if (si < streaming_node_staged.size() && streaming_node_staged[si]) {
+      for (const auto &delta : c.staged[si])
+        for (const auto k : streaming_node_outputs[si])
+          stage_delta(k, delta.coverage, delta.bits);
+      c.staged[si].clear();
+    } else if (c.node_snapshotted[si]) {
+      auto &latest = latest_node_corrections[si];
+      const auto &captured = c.node_corrections[si];
+      if (c.node_delta[si]) {
+        for (std::size_t i = 0; i < latest.size(); ++i)
+          latest[i] ^= captured[i];
+        std::fill(c.node_corrections[si].begin(), c.node_corrections[si].end(),
+                  uint8_t{0});
+      } else {
+        std::copy(captured.begin(), captured.end(), latest.begin());
+      }
+      latest_node_coverage[si] = c.node_coverage[si];
+    }
+    streaming_node_generations[si] += c.node_published[si];
+  }
+}
+
 bool decoding_task_graph::impl::enqueue_sweep(const uint8_t *syndrome,
                                               std::size_t len,
                                               std::optional<round_type> type,
                                               int cuda_device_id) {
   require_streaming_support("enqueue_syndrome");
-  runtime->reset();
-
-  runtime->push_raw_roots();
-
-  std::atomic<bool> fired{false};
-  runtime->run(cuda_device_id, [&](event_runtime &loop, std::size_t id,
-                                   const graph_event &event) {
-    if (event.kind == graph_event_kind::streaming_raw) {
-      auto &node = *streaming_nodes[event.node].capability;
-      const auto limit =
-          type ? node.raw_chunk_limit() : node.untagged_chunk_limit();
-      const auto take =
-          limit ? std::min(*limit, len - event.offset) : len - event.offset;
-      const auto *chunk = syndrome ? syndrome + event.offset : nullptr;
-      const auto next = event.offset + take;
-      const auto chunk_type = type == round_type::FINAL && next == len
-                                  ? round_type::FINAL
-                                  : round_type::BULK;
-      if (type ? node.enqueue(chunk, take, chunk_type)
-               : node.enqueue_untagged(chunk, take))
-        fired.store(loop.publish_streaming(id, event.root, event.node),
-                    std::memory_order_relaxed);
-      if (next < len && take != 0)
-        loop.set_continuation(id, {graph_event_kind::streaming_raw,
-                                   event.node,
-                                   {},
-                                   next,
-                                   event.root});
-      return;
-    }
-
-    if (event.kind != graph_event_kind::streaming_edge)
-      throw std::logic_error("decoding_task_graph: unexpected enqueue event");
-    if (loop.deliver_streaming_edge(id, event))
-      fired.store(true, std::memory_order_relaxed);
-  });
-  return fired.load(std::memory_order_relaxed);
+  auto &c = scheduler->acquire();
+  c.kind = record_context::phase::enqueue;
+  c.syndrome = syndrome;
+  c.len = len;
+  c.type = type;
+  scheduler->push_raw_roots(c);
+  scheduler->activate(c, /*gated=*/false);
+  try {
+    scheduler->run_single(c, cuda_device_id);
+  } catch (...) {
+    scheduler->discard_all();
+    throw;
+  }
+  apply_record_context(c);
+  const bool fired = c.fired.load(std::memory_order_relaxed);
+  scheduler->release(c);
+  return fired;
 }
 
 bool decoding_task_graph::impl::flush_sweep(int cuda_device_id) {
-  runtime->reset();
-  runtime->configure_flush(streaming_predecessor_counts);
-
-  std::atomic<bool> fired{false};
-  runtime->run(cuda_device_id, [&](event_runtime &loop, std::size_t id,
-                                   const graph_event &event) {
-    if (event.kind == graph_event_kind::streaming_edge) {
-      if (loop.deliver_streaming_edge(id, event))
-        fired.store(true, std::memory_order_relaxed);
-      return;
-    }
-    if (event.kind == graph_event_kind::streaming_flush_release) {
-      loop.release_dependencies(streaming_dependents[event.node],
-                                graph_event_kind::streaming_flush);
-      return;
-    }
-    if (event.kind != graph_event_kind::streaming_flush)
-      throw std::logic_error("decoding_task_graph: unexpected flush event");
-
-    if (streaming_nodes[event.node].capability->flush())
-      fired.store(loop.publish_streaming(id, event.root, event.node),
-                  std::memory_order_relaxed);
-    loop.push({graph_event_kind::streaming_flush_release, event.node}, id,
-              no_event, /*wait_for_siblings=*/true);
-  });
-  runtime->require_dependencies_complete(
-      "decoding_task_graph: streaming flush dependency queue stalled");
-  return fired.load(std::memory_order_relaxed);
+  auto &c = scheduler->acquire();
+  c.kind = record_context::phase::flush;
+  scheduler->configure_flush(c, streaming_predecessor_counts);
+  scheduler->activate(c, /*gated=*/false);
+  try {
+    scheduler->run_single(c, cuda_device_id);
+    scheduler->require_dependencies_complete(
+        c, "decoding_task_graph: streaming flush dependency queue stalled");
+  } catch (...) {
+    scheduler->discard_all();
+    throw;
+  }
+  apply_record_context(c);
+  const bool fired = c.fired.load(std::memory_order_relaxed);
+  scheduler->release(c);
+  return fired;
 }
 
-// Execute one graph shot through the same event loop used by streaming. The
-// final predecessor publishes a dependent while holding the runtime lock, so
-// all predecessor output writes happen before the dependent is dispatched.
+// Execute one graph shot through the same event loop used by streaming.
 logical_outcome decoding_task_graph::impl::run_dag_parallel(
     const measurement_results &measurements, const char *who,
     int cuda_device_id) {
@@ -733,7 +1586,7 @@ logical_outcome decoding_task_graph::impl::run_dag_parallel(
 
   require_single_output(who);
   sink_wires = &wires_to.back();
-  if (parallel_pool == nullptr || runtime == nullptr)
+  if (parallel_pool == nullptr || scheduler == nullptr)
     throw std::logic_error(
         "decoding_task_graph: parallel runtime was not compiled");
   if (predecessor_counts.size() != node_count ||
@@ -742,31 +1595,244 @@ logical_outcome decoding_task_graph::impl::run_dag_parallel(
         "decoding_task_graph: malformed compiled dependency graph");
   }
 
-  runtime->reset();
-  runtime->configure_dependencies(predecessor_counts);
+  auto &c = scheduler->acquire();
+  c.kind = record_context::phase::one_shot;
+  c.measurement = &measurement_value;
+  scheduler->configure_dependencies(c, predecessor_counts);
   for (const std::size_t node : source_nodes)
-    runtime->push({graph_event_kind::one_shot, node});
-
-  runtime->run(cuda_device_id, [&](event_runtime &loop, std::size_t /*id*/,
-                                   const graph_event &event) {
-    const auto node = event.node;
-    auto &inputs = parallel_node_inputs[node];
-    for (const auto &wire : wires_to[node])
-      inputs[static_cast<std::size_t>(wire.to_slot)] =
-          wire.from_node < 0
-              ? measurement_value
-              : node_outputs[static_cast<std::size_t>(wire.from_node)]
-                            [static_cast<std::size_t>(wire.from_slot)];
-    nodes[node]->execute_indexed(inputs, node_outputs[node]);
-    loop.release_dependencies(dependents[node], graph_event_kind::one_shot);
-  });
-  runtime->require_dependencies_complete(
-      "decoding_task_graph: one-shot dependency queue stalled");
+    scheduler->push(c, {graph_event_kind::one_shot, node});
+  scheduler->activate(c, /*gated=*/false);
+  try {
+    scheduler->run_single(c, cuda_device_id);
+    scheduler->require_dependencies_complete(
+        c, "decoding_task_graph: one-shot dependency queue stalled");
+  } catch (...) {
+    scheduler->discard_all();
+    throw;
+  }
+  scheduler->release(c);
 
   const compiled_wire &sink_wire = sink_wires->front();
   return node_outputs[static_cast<std::size_t>(sink_wire.from_node)]
                      [static_cast<std::size_t>(sink_wire.from_slot)]
                          .get<logical_outcome>();
 } // end - decoding_task_graph::impl::run_dag_parallel()
+
+// ----- Asynchronous session ------------------------------------------------
+
+// Retire the oldest record context in sequence order: fold its captures into
+// the graph-level result and, when it ends a public operation, publish the
+// same progress model the synchronous path produces.
+void decoding_task_graph::impl::retire_record_context(record_context &c) {
+  auto &state = async_streaming;
+  auto &result = streaming_result_state;
+  const bool begins_operation =
+      c.kind == record_context::phase::enqueue || c.finish_flush;
+  if (begins_operation) {
+    result.operation_completed = false;
+    retiring_generation = result.generation;
+    retiring_revision = result.result_revision;
+  }
+  apply_record_context(c);
+  const bool flush = c.kind == record_context::phase::flush;
+  if (flush)
+    finalized = true;
+  refresh_streaming_progress(flush);
+  if (!c.closes_record && !c.finish_flush) {
+    compose_streaming_values();
+    return;
+  }
+  result.operation_completed =
+      result.generation > retiring_generation ||
+      (flush && result.generation > 0 &&
+       result.status == task_graph_streaming_status::complete);
+  compose_streaming_values();
+  if (c.finish_flush) {
+    publish_async_stream_snapshot();
+    return;
+  }
+  if (result.operation_completed)
+    ++result.completed_operations;
+  // Most public operations only fill a window and leave every observable and
+  // status unchanged. Avoid serializing with readers and copying an identical
+  // snapshot for those no-op operations. FINAL still publishes its terminal
+  // status even for an empty shot.
+  const bool operation_pulse_changed =
+      state.result_snapshot.operation_completed != result.operation_completed;
+  if (result.result_revision != retiring_revision || operation_pulse_changed ||
+      flush)
+    publish_async_stream_snapshot();
+  const auto completed = c.ring_sequence + 1;
+  state.completed.store(completed, std::memory_order_release);
+  if (state.completion_waiters.load(std::memory_order_acquire) != 0)
+    state.completed.notify_all();
+}
+
+void decoding_task_graph::impl::run_async_session() {
+  scheduler->begin_session();
+  scheduler->run_session(async_streaming.cuda_device_id);
+}
+
+// Worker zero of an asynchronous session. Admits ring records into free
+// contexts as soon as they are published, retires finished contexts in order,
+// and ends the session on finish, cancel, or failure. It performs no node
+// work itself, so admission latency is independent of decoder cost.
+void decoding_task_graph::impl::dispatch_async_session() {
+  auto &state = async_streaming;
+  auto &S = *scheduler;
+  uint64_t admitted = state.completed.load(std::memory_order_acquire);
+  uint64_t observed_epoch = state.wake_epoch.load(std::memory_order_acquire);
+  bool flush_admitted = false;
+  bool final_pending = false;
+  std::exception_ptr failure;
+
+  const auto fail_session = [&](std::exception_ptr error) {
+    if (!failure)
+      failure = std::move(error);
+    auto lock = S.lock_runtime();
+    S.request_stop_locked();
+  };
+
+  while (true) {
+    bool progressed = false;
+    {
+      auto lock = S.lock_runtime();
+      if (S.stop) {
+        S.wait_until_idle_locked(lock);
+        if (!failure)
+          failure = S.error;
+        S.end_session_locked();
+        lock.unlock();
+        if (failure)
+          handle_async_stream_error(failure);
+        S.discard_all();
+        return;
+      }
+    }
+    if (state.cancel_requested.load(std::memory_order_acquire)) {
+      auto lock = S.lock_runtime();
+      S.request_stop_locked();
+      continue;
+    }
+
+    // Retire finished records, oldest first.
+    while (true) {
+      record_context *c = nullptr;
+      {
+        auto lock = S.lock_runtime();
+        c = S.oldest_complete_locked();
+      }
+      if (!c)
+        break;
+      try {
+        retire_record_context(*c);
+      } catch (...) {
+        fail_session(std::current_exception());
+        break;
+      }
+      S.release(*c);
+      progressed = true;
+    }
+    if (failure)
+      continue;
+
+    // Admit published records.
+    while (admitted < state.submitted.load(std::memory_order_acquire)) {
+      auto lock = S.lock_runtime();
+      auto *c = S.try_acquire_locked();
+      if (!c)
+        break;
+      auto &slot = state.slots[admitted % state.capacity];
+      c->kind = record_context::phase::enqueue;
+      c->syndrome = slot.syndrome.data();
+      c->len = slot.len;
+      c->type = slot.type;
+      c->ring_sequence = admitted;
+      c->closes_record = slot.type != round_type::FINAL;
+      if (slot.type == round_type::FINAL)
+        final_pending = true;
+      lock.unlock();
+      try {
+        S.push_raw_roots(*c);
+      } catch (...) {
+        fail_session(std::current_exception());
+        break;
+      }
+      S.activate(*c, /*gated=*/true);
+      ++admitted;
+      progressed = true;
+    }
+    if (failure)
+      continue;
+
+    // A FINAL record's flush follows it as its own gated context; the record
+    // completes when the flush retires. A finish without FINAL flushes once
+    // every record has retired.
+    const bool finishing =
+        state.finish_requested.load(std::memory_order_acquire) &&
+        admitted >= state.finish_target;
+    bool wants_flush = false;
+    if (final_pending && !flush_admitted)
+      wants_flush = true;
+    else if (finishing && !flush_admitted && !finalized &&
+             state.flush_requested.load(std::memory_order_relaxed)) {
+      auto lock = S.lock_runtime();
+      wants_flush = S.active.empty();
+    }
+    if (wants_flush) {
+      auto lock = S.lock_runtime();
+      if (auto *c = S.try_acquire_locked()) {
+        c->kind = record_context::phase::flush;
+        c->ring_sequence = admitted - 1;
+        c->closes_record = final_pending;
+        c->finish_flush = !final_pending;
+        lock.unlock();
+        try {
+          S.configure_flush(*c, streaming_predecessor_counts);
+        } catch (...) {
+          fail_session(std::current_exception());
+          continue;
+        }
+        S.activate(*c, /*gated=*/true);
+        flush_admitted = true;
+        progressed = true;
+      }
+    }
+
+    if (finishing) {
+      auto lock = S.lock_runtime();
+      const bool flush_settled =
+          flush_admitted || finalized ||
+          !state.flush_requested.load(std::memory_order_relaxed);
+      if (S.active.empty() && flush_settled) {
+        S.end_session_locked();
+        return;
+      }
+    }
+
+    if (progressed)
+      continue;
+    bool in_flight = false;
+    {
+      auto lock = S.lock_runtime();
+      in_flight = !S.active.empty();
+    }
+    wait_for_async_wake(
+        observed_epoch,
+        [&] {
+          // Unadmitted records are work only if a context can take them;
+          // otherwise a completion, which bumps the epoch, must come first.
+          auto lock = S.lock_runtime();
+          if (S.stop || S.oldest_complete_locked() != nullptr)
+            return true;
+          return admitted < state.submitted.load(std::memory_order_acquire) &&
+                 std::any_of(
+                     S.contexts.begin(), S.contexts.end(),
+                     [](const auto &c) { return !c.in_use; });
+        },
+        in_flight ? std::max(state.spin_pause_iters, kHandoffSpinPauseIters)
+                  : state.spin_pause_iters);
+  }
+}
 
 } // namespace cudaq::qec

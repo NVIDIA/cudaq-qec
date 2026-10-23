@@ -17,6 +17,7 @@
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/logger.h"
 
 #include <algorithm>
 #include <limits>
@@ -639,7 +640,52 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
                                options.async_coordinator_cpu,
                                options.async_spin_pause_iters);
     i->async_streaming.enabled = true;
+    // Worker settings apply to asynchronous graphs only: the pool's owned
+    // threads run fires there, and the coordinator is the calling thread.
+    if (options.async_num_workers) {
+      if (*options.async_num_workers == 0)
+        throw std::invalid_argument(
+            "task_graph_options: async_num_workers must be at least 1");
+      i->pool_width = *options.async_num_workers;
+    }
+    // Sharing a core can be deliberate, so it is a warning, not an error.
+    for (std::size_t a = 0; a < options.async_worker_cpus.size(); ++a) {
+      const int cpu = options.async_worker_cpus[a];
+      if (cpu == options.async_coordinator_cpu)
+        CUDA_QEC_WARN("task graph: async_worker_cpus includes the "
+                      "coordinator's CPU {}",
+                      cpu);
+      for (std::size_t b = 0; b < a; ++b)
+        if (options.async_worker_cpus[b] == cpu) {
+          CUDA_QEC_WARN("task graph: async_worker_cpus lists CPU {} twice",
+                        cpu);
+          break;
+        }
+    }
+    i->pool_worker_cpus.assign(options.async_worker_cpus.begin(),
+                               options.async_worker_cpus.end());
+    std::size_t pooled_fires = 0;
+    for (const auto &entry : i->streaming_nodes)
+      if (entry.replicas.size() > 1)
+        pooled_fires += entry.replicas.size();
+    if (pooled_fires > i->pool_width)
+      CUDA_QEC_WARN("task graph: {} fire-pool copies but {} async workers; "
+                    "some copies can never run concurrently",
+                    pooled_fires, i->pool_width);
+    if (!i->pool_worker_cpus.empty() &&
+        i->pool_worker_cpus.size() < i->pool_width)
+      CUDA_QEC_WARN("task graph: {} async_worker_cpus for {} workers; the "
+                    "pool is reduced to one worker per CPU",
+                    i->pool_worker_cpus.size(), i->pool_width);
   }
+  // Built once, after the options it depends on have been validated. The
+  // parked coordinator cannot start a session before assembly returns. An
+  // asynchronous graph gets one record context per queue slot, so every
+  // accepted record is admitted at once.
+  if (i->nodes.size() > 1 || !i->streaming_nodes.empty())
+    i->prepare_event_runtime(
+        options.async_streaming ? options.async_queue_capacity : 1,
+        /*dispatcher_thread=*/options.async_streaming);
   return std::unique_ptr<decoding_task_graph>(
       new decoding_task_graph(std::move(i)));
 }
@@ -696,6 +742,14 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
                                            "from_topology: node '" + cfg.id +
                                                "' parameters");
 
+    if (cfg.max_in_flight == 0)
+      throw std::invalid_argument("from_topology: node '" + cfg.id +
+                                  "' has max_in_flight 0");
+    if (cfg.max_in_flight > 1 && cfg.decoder_instance)
+      throw std::invalid_argument(
+          "from_topology: node '" + cfg.id +
+          "' runs as a fire pool, so each copy needs its own inner decoder; "
+          "give decoder_type instead of a built decoder");
     auto ctx = prepare_node(cfg, *kind);
     // The first node carrying a DEM owns the graph's D; a single-node graph
     // also exposes its O.  o_matrix() is not meaningful once outcomes are
@@ -709,8 +763,19 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     if (!node)
       throw std::logic_error("from_topology: node kind '" + kind->name +
                              "' built nothing for node '" + cfg.id + "'");
+    if (cfg.max_in_flight > 1 && !node->supports_fire_pool())
+      throw std::invalid_argument("from_topology: node '" + cfg.id +
+                                  "' of kind '" + kind->name +
+                                  "' keeps state across deliveries and "
+                                  "cannot run as a fire pool");
+    std::vector<std::unique_ptr<task_graph_node>> replicas;
+    for (std::size_t r = 1; r < cfg.max_in_flight; ++r) {
+      auto replica_ctx = prepare_node(cfg, *kind);
+      replicas.push_back((*factory)(replica_ctx));
+    }
     i->node_ids.push_back(cfg.id);
     i->nodes.push_back(std::move(node));
+    i->node_replicas.push_back(std::move(replicas));
   }
 
   wire_patterns(patterns, i->node_ids, i->nodes, edges);

@@ -287,6 +287,42 @@ def test_async_streaming_uses_existing_api_with_large_input():
     graph.clear_corrections()
 
 
+def test_async_concurrent_records_match_synchronous_graph():
+    options = qec.TaskGraphOptions()
+    options.async_streaming = True
+    options.async_queue_capacity = 4
+    assert options.async_num_workers is None
+    options.async_num_workers = 2
+    assert options.async_num_workers == 2
+    assert options.async_worker_cpus == []
+    options.async_worker_cpus = [0, 1]
+    assert options.async_worker_cpus == [0, 1]
+    options.async_worker_cpus = []
+    synchronous = qec.DecodingTaskGraph.from_spec(_streaming_spec(),
+                                                  "single_error_lut")
+    asynchronous = qec.DecodingTaskGraph.from_spec(_streaming_spec(),
+                                                   "single_error_lut",
+                                                   options=options)
+    per_round = synchronous.get_num_msyn_per_round()
+    rounds = [bytes(per_round) for _ in range(9)]
+    for data in rounds[:-1]:
+        synchronous.enqueue_syndrome(data)
+        asynchronous.enqueue_syndrome(data)
+    synchronous.enqueue_syndrome(rounds[-1], qec.round_type.FINAL)
+    asynchronous.enqueue_syndrome(rounds[-1], qec.round_type.FINAL)
+    expected = synchronous.streaming_result()
+    actual = asynchronous.streaming_result()
+    assert actual.generation == expected.generation
+    assert bytes(actual.values) == bytes(expected.values)
+    assert actual.status == expected.status
+
+    options.async_worker_cpus = [-1]
+    with pytest.raises(ValueError):
+        qec.DecodingTaskGraph.from_spec(_streaming_spec(),
+                                        "single_error_lut",
+                                        options=options)
+
+
 def _guarded_graph(async_streaming=False):
     node = qec.TaskGraphNodeConfig()
     node.id = "guarded"

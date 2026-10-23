@@ -11,6 +11,7 @@
 #include "cudaq/qec/decoding_task_types.h"
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -40,6 +41,8 @@ struct compiled_wire {
   int from_slot; ///< index into that node's outputs vector
   int to_node;   ///< index into nodes[]; -1 = "output" sink
   int to_slot;   ///< index into that node's inputs vector
+  int id = -1;   ///< per-record value buffer for a streaming wire; -1 = none
+  std::int64_t index_offset = 0; ///< consumer k reads producer k + offset
 };
 
 /// Optional per-round streaming capability. DAG-only nodes do not implement it.
@@ -60,6 +63,17 @@ public:
   virtual std::optional<committed_coverage> streaming_coverage() const {
     return std::nullopt;
   }
+  /// Coverage end meaning the whole shot: such a publication is folded into
+  /// a staged output only at FINAL, once every round before it is committed.
+  static constexpr std::uint64_t whole_shot =
+      std::numeric_limits<std::uint64_t>::max();
+  /// Opt-in: every publication reports, through streaming_coverage(), the
+  /// exact commit interval its corrections() delta covers, or no coverage
+  /// when it carries no delta; publications may arrive in any round order.
+  /// An output whose contributors all opt in is staged: the graph folds
+  /// their deltas in round order behind a frontier, and the output's
+  /// coverage is [0, frontier).
+  virtual bool exact_interval_coverage() const { return false; }
   /// Accumulate one raw chunk.  `type` is FINAL only on the chunk that ends a
   /// FINAL round -- the last piece of it this node receives -- and BULK
   /// otherwise.  flush() follows a FINAL round either way, so a kind that
@@ -153,6 +167,12 @@ public:
   /// same data cancels it out.  Default: nothing withheld.
   virtual bool flush() { return false; }
 
+  /// Index of the values the node has just published, for consumers that join
+  /// their inputs by index (see indexed_join_node). Default: unindexed.
+  virtual std::optional<std::int64_t> published_index() const {
+    return std::nullopt;
+  }
+
   /// Called once per incoming streaming edge by compile_wires(). This validates
   /// constraints local to one input; derive_streaming_schedule() validates
   /// relationships among multiple input schedules and declares their resulting
@@ -178,6 +198,29 @@ public:
   }
   virtual void release_graph(void *graph_resources) { (void)graph_resources; }
   virtual decoder *inner_decoder() const = 0;
+};
+
+/// Optional capability: a streaming node that joins its inputs by index
+/// rather than by record. Input `slot` of instance k comes from its
+/// producer's instance k + `index_offset` of that edge; the executor holds
+/// the join and fires the node once every input of k is present or known to
+/// be absent. Such a node keeps no state between fires and publishes with k.
+///
+/// Instances are numbered from 0. An input whose producer index would be
+/// negative is absent. At the end of a shot, once every producer has
+/// finished, a pending instance fires with its remaining optional inputs
+/// absent; one still missing a required input never existed and is dropped.
+class indexed_join_node {
+public:
+  virtual ~indexed_join_node() = default;
+  /// Whether an instance exists only if input `slot` is delivered. An absent
+  /// optional input is delivered to fire() as nullptr.
+  virtual bool requires_input(std::size_t slot) const = 0;
+  /// Run instance k. `inputs[i]` is input i's value or nullptr. True when the
+  /// fire produced outputs, which the executor reads back through
+  /// streaming_output() and corrections().
+  virtual bool fire(std::int64_t k,
+                    const std::vector<const edge_value *> &inputs) = 0;
 };
 
 /// Core DAG node contract. Optional execution modes are exposed as capabilities
@@ -232,6 +275,13 @@ public:
   /// Capability queries. A null pointer means this node does not support that
   /// execution mode; no sentinel dimensions or no-op implementations needed.
   virtual streaming_task_graph_node *streaming() { return nullptr; }
+  /// An indexed node also implements streaming() for its schedule and types.
+  virtual indexed_join_node *indexed_join() { return nullptr; }
+  /// Whether the graph may run this node as a fire pool: it builds
+  /// `max_in_flight` copies and runs them concurrently, one record each.
+  /// Only a node whose result depends on nothing but the current delivery
+  /// may, so a kind that carries state across deliveries overrides this.
+  virtual bool supports_fire_pool() const { return true; }
   virtual decoder_backed_task_graph_node *decoder_backed() { return nullptr; }
   virtual const decoder_backed_task_graph_node *decoder_backed() const {
     return nullptr;

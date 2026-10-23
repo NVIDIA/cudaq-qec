@@ -10,7 +10,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace cudaq::qec {
 
@@ -25,6 +28,9 @@ struct task_graph_edge {
   std::string from_output = "output"; ///< named output on from_node
   std::string to_node;                ///< node id, or "output"
   std::string to_input = "input";     ///< named input on to_node
+  /// Consumer instance k reads producer instance k + index_offset, between
+  /// nodes that join their inputs by index. Zero or negative.
+  std::int64_t index_offset = 0;
 
   bool operator==(const task_graph_edge &) const = default;
 };
@@ -32,6 +38,8 @@ struct task_graph_edge {
 /// Construction-time execution policy for a decoding task graph.
 struct task_graph_options {
   /// Process streaming records on the graph's persistent coordinator thread.
+  /// Records then overlap: a later record runs ahead on nodes that finished
+  /// the earlier ones, with `async_queue_capacity` records in flight at most.
   bool async_streaming = false;
   /// Maximum public enqueue operations queued or executing. Must be nonzero
   /// when asynchronous.
@@ -43,6 +51,17 @@ struct task_graph_options {
   /// Pause iterations before an active coordinator parks for more input.
   /// Zero disables spinning.
   std::size_t async_spin_pause_iters = 0;
+  /// Pool threads that run node fires in an asynchronous graph, not counting
+  /// the coordinator. Unset sizes the pool from the graph: its parallel
+  /// width, including every fire pool's copies, capped by hardware
+  /// concurrency. Must be at least one when set. Synchronous graphs ignore
+  /// it.
+  std::optional<std::size_t> async_num_workers;
+  /// CPUs those threads are pinned to, round-robin (Linux only). Empty
+  /// inherits the process's affinity. A CPU listed twice, or shared with
+  /// `async_coordinator_cpu` or another decoder's asynchronous graph, is a
+  /// warning. Synchronous graphs ignore it.
+  std::vector<int> async_worker_cpus;
   bool operator==(const task_graph_options &) const = default;
 };
 

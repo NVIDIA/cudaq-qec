@@ -102,14 +102,13 @@ class ensemble_fanout_node : public task_graph_node,
 public:
   ensemble_fanout_node(const std::string &strategy,
                        const cudaqx::heterogeneous_map &params)
-      : selection_(make_selection_strategy(strategy, params)),
-        observer_([selection = selection_](const candidate &c) {
-          selection.offer(c);
-        }) {
+      : factory_(find_selection_strategy(strategy)), params_(params) {
+    // Fail at build time on bad parameters; each run builds its own.
+    (void)factory_(params_);
     out_.emplace_back(edge_value{});
-    out_.emplace_back(sink_);
+    out_.emplace_back(candidate_sink{});
     out_.emplace_back(cancellation_token{});
-    out_.emplace_back(selection_);
+    out_.emplace_back(ensemble_selection{});
   }
 
   void execute_indexed(const std::vector<edge_value> &inputs,
@@ -178,20 +177,24 @@ public:
   }
 
 private:
-  /// Start a run: a fresh cancellation source, the strategy and selection
-  /// reset, the sink emptied. The previous run's members have all finished.
+  /// Start a run with handles of its own: a new sink, cancellation source,
+  /// strategy, and selection. A run that is still concluding downstream keeps
+  /// the ones it was handed, so runs may overlap.
   void arm() const {
     cancellation_source source;
-    sink_.reset(observer_);
-    selection_.begin(source, sink_);
+    candidate_sink sink;
+    ensemble_selection selection(factory_(params_));
+    sink.reset([selection](const candidate &c) { selection.offer(c); });
+    selection.begin(source, sink);
+    out_[1] = std::move(sink);
     out_[2] = source.get_token();
+    out_[3] = std::move(selection);
   }
 
   mutable std::optional<edge_value_type> data_type_;
-  candidate_sink sink_;
-  ensemble_selection selection_;
-  candidate_sink::observer observer_;
-  /// Outputs parallel to outputs(); refilled in place per run.
+  selection_strategy_factory factory_;
+  cudaqx::heterogeneous_map params_;
+  /// Outputs parallel to outputs(); refilled per run.
   mutable std::vector<edge_value> out_;
   bool fired_ = false;
 };

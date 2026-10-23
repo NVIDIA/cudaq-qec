@@ -203,6 +203,11 @@ struct task_graph_node_config {
   std::string kind = default_task_graph_node_kind;
   /// The kind's own parameters: window_size, step_size, guards, ...
   cudaqx::heterogeneous_map node_params;
+  /// Copies of this node that may fire at once in asynchronous streaming,
+  /// each on its own record. Above one, the kind must keep no state across
+  /// deliveries (`task_graph_node::supports_fire_pool`) and build its inner
+  /// decoder from `decoder_type`, since every copy needs one.
+  std::size_t max_in_flight = 1;
 
   /// DEM for this node. When absent, `d_sparse`/`o_sparse` below supply the
   /// matrices directly.
@@ -312,9 +317,11 @@ struct task_graph_streaming_result {
 /// threads, collect one `run_async` before starting the next, and do not
 /// overlap streaming with one-shot calls. Overlap is detected rather than
 /// serialised -- an overlapping call throws `std::logic_error`. An
-/// async-streaming graph instead has one internal coordinator as its sole
-/// node-state mutator; its public streaming calls provide copied input and
-/// coherent snapshots.
+/// async-streaming graph instead has one internal coordinator that dispatches
+/// records to pool workers; its public streaming calls provide copied input
+/// and coherent snapshots. Records overlap, up to `async_queue_capacity` at
+/// once, but each node still sees them in order and every value a record
+/// moves between nodes is buffered per record.
 class decoding_task_graph {
 public:
   /// Construct from an already-built decoder and D/O in nested-row form.
@@ -509,6 +516,10 @@ public:
   /// Whether the compiled graph supports incremental streaming execution.
   /// A false result does not affect run(), run_all(), or other batch APIs.
   bool supports_streaming() const noexcept;
+
+  /// Threads an asynchronous graph owns: its coordinator and the pool workers
+  /// that run fires. Zero for a synchronous graph.
+  std::size_t async_thread_count() const noexcept;
 
   /// Empty when supports_streaming() is true; otherwise the first deterministic
   /// build-time reason streaming execution is unavailable.
