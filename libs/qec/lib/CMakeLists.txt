@@ -71,6 +71,7 @@ set(DECODERS_SOURCES
   decoding_task/decoding_task_decoding_window.cpp
   decoding_task/decoding_task_ingest_node.cpp
   decoding_task/decoding_task_decode_window_node.cpp
+  decoding_task/decoding_task_parallel_window_pattern.cpp
   decoder_init.cpp
   decoder_config_payload.cpp
   decoder_config_schema.cpp

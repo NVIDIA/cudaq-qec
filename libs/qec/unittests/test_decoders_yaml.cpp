@@ -3242,6 +3242,181 @@ TEST(DataArtifactsYAML, AStandaloneDecoderCannotNameAnEntry) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// parallel_window pattern and pool options
+// ---------------------------------------------------------------------------
+
+// The reference's pattern form: one node, wired measurements -> pw -> output,
+// with the pool's threads pinned.
+std::string pattern_yaml() {
+  return R"(
+decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      async_streaming: true
+      async_coordinator_cpu: 2
+      async_num_workers: 4
+      async_worker_cpus: [4, 5, 6, 7]
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          output: corrected_logical
+          max_in_flight: 4
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+)";
+}
+
+// pattern_yaml() with `from` replaced by `to`.
+std::string pattern_yaml_with(const std::string &from, const std::string &to) {
+  auto yaml = pattern_yaml();
+  const auto at = yaml.find(from);
+  if (at == std::string::npos)
+    throw std::logic_error("pattern_yaml has no '" + from + "'");
+  return yaml.replace(at, from.size(), to);
+}
+
+// Expect parsing yaml to fail with a message containing text.
+void expect_parse_error(const std::string &yaml, const std::string &text) {
+  namespace cfg = cudaq::qec::decoding::config;
+  try {
+    cfg::multi_decoder_config::from_yaml_str(yaml);
+    ADD_FAILURE() << "expected: " << text;
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+// The pattern's parameters and the pool options parse, and the document
+// round-trips; unset options are not written.
+TEST(ParallelWindowPattern, ParsesThePatternForm) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(pattern_yaml());
+  const auto &graph = *parsed.decoders.at(0).task_graph;
+  const auto &params = graph.nodes.at(0).node_params.map();
+  EXPECT_EQ(graph.nodes.at(0).type, "parallel_window");
+  EXPECT_EQ(params.get<std::size_t>("commit_rounds"), 3u);
+  EXPECT_EQ(params.get<std::size_t>("buffer_rounds"), 3u);
+  EXPECT_EQ(params.get<std::size_t>("gap_rounds"), 9u);
+  EXPECT_EQ(params.get<std::string>("output"), "corrected_logical");
+  EXPECT_EQ(params.get<std::size_t>("max_in_flight"), 4u);
+  EXPECT_EQ(graph.options.async_num_workers, std::optional<std::size_t>{4});
+  EXPECT_EQ(graph.options.async_worker_cpus, (std::vector<int>{4, 5, 6, 7}));
+  const auto emitted = parsed.to_yaml_str(200);
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+
+  auto plain = cfg::multi_decoder_config::from_yaml_str(pattern_yaml_with(
+      "      async_num_workers: 4\n      async_worker_cpus: [4, 5, 6, 7]\n",
+      ""));
+  EXPECT_FALSE(plain.decoders.at(0).task_graph->options.async_num_workers);
+  EXPECT_EQ(plain.to_yaml_str(200).find("async_num_workers"),
+            std::string::npos);
+  EXPECT_EQ(plain.to_yaml_str(200).find("async_worker_cpus"),
+            std::string::npos);
+} // end - TEST(ParallelWindowPattern, ParsesThePatternForm)
+
+// Building the pattern says it is not available yet.
+TEST(ParallelWindowPattern, BuildingSaysThePatternIsNotAvailableYet) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(pattern_yaml_with(
+      "      async_num_workers: 4\n      async_worker_cpus: [4, 5, 6, 7]\n",
+      ""));
+  parsed.decoders.at(0).dem_chunks->num_rounds = 12;
+  try {
+    cudaq::qec::decoding::host::build_task_graph(parsed.decoders.at(0));
+    ADD_FAILURE() << "the pattern built";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "the 'parallel_window' pattern is not available yet"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+// Each bad pattern parameter is rejected when parsed, with its own message.
+TEST(ParallelWindowPattern, RejectsBadParameters) {
+  expect_parse_error(pattern_yaml_with("          commit_rounds: 3\n", ""),
+                     "commit_rounds");
+  expect_parse_error(pattern_yaml_with("buffer_rounds: 3", "buffer_rounds: 0"),
+                     "parallel_window: buffer_rounds must be at least 1");
+  expect_parse_error(pattern_yaml_with("gap_rounds: 9", "gap_rounds: 0"),
+                     "parallel_window: gap_rounds must be at least 1");
+  expect_parse_error(
+      pattern_yaml_with("output: corrected_logical", "output: everything"),
+      "parallel_window: output must be corrected_logical or corrections");
+  expect_parse_error(pattern_yaml_with("gap_rounds: 9",
+                                       "gap_rounds: 9\n"
+                                       "          boundary_prior: 1.5"),
+                     "parallel_window: boundary_prior must be strictly "
+                     "between 0 and 1");
+  expect_parse_error(pattern_yaml_with("gap_rounds: 9",
+                                       "gap_rounds: 9\n"
+                                       "          boundary_prior: 0.01\n"
+                                       "          input_boundary: truncate"),
+                     "parallel_window: boundary_prior is for input_boundary "
+                     "columns");
+  expect_parse_error(
+      pattern_yaml_with("gap_rounds: 9", "gap_rounds: 9\n"
+                                         "          input_boundary: sideways"),
+      "parallel_window: input_boundary must be columns or truncate");
+  expect_parse_error(pattern_yaml_with("gap_rounds: 9",
+                                       "gap_rounds: 9\n"
+                                       "          conflicting_parallel: any"),
+                     "parallel_window: conflicting_parallel must be reject "
+                     "or most_likely");
+  expect_parse_error(pattern_yaml_with("max_in_flight: 4", "max_in_flight: 0"),
+                     "parallel_window: max_in_flight must be at least 1");
+  expect_parse_error(pattern_yaml_with("max_in_flight: 4",
+                                       "max_in_flight: 4\n"
+                                       "          verify_residual: maybe"),
+                     "parallel_window: verify_residual must be");
+} // end - TEST(ParallelWindowPattern, RejectsBadParameters)
+
+// Bad pool options are rejected when parsed, and the graph rejects set ones
+// until the pool applies them.
+TEST(TaskGraphPoolOptions, AreCheckedAndNotAppliedYet) {
+  expect_parse_error(
+      pattern_yaml_with("async_num_workers: 4", "async_num_workers: 0"),
+      "task_graph.async_num_workers must be at least 1");
+  expect_parse_error(pattern_yaml_with("[4, 5, 6, 7]", "[4, -5]"),
+                     "task_graph.async_worker_cpus has negative CPU -5");
+  expect_parse_error(pattern_yaml_with("[4, 5, 6, 7]", "[4, 5, 4]"),
+                     "task_graph.async_worker_cpus lists CPU 4 twice");
+  expect_parse_error(pattern_yaml_with("[4, 5, 6, 7]", "[2, 5]"),
+                     "task_graph.async_worker_cpus includes CPU 2, which "
+                     "async_coordinator_cpu uses");
+
+  cudaq::qec::task_graph_options options;
+  std::vector<cudaq::qec::task_graph_node_config> nodes(1);
+  nodes[0].id = "x";
+  nodes[0].kind = "xor";
+  options.async_num_workers = 2;
+  try {
+    cudaq::qec::decoding_task_graph::from_topology(std::move(nodes), {},
+                                                   options);
+    ADD_FAILURE() << "a graph took async_num_workers";
+  } catch (const std::invalid_argument &e) {
+    EXPECT_NE(std::string(e.what()).find("not applied yet"), std::string::npos)
+        << e.what();
+  }
+} // end - TEST(TaskGraphPoolOptions, AreCheckedAndNotAppliedYet)
+
 // The chunk form stays the authoritative source, carrying the closed model
 // expand_dem_chunks() would write for any decoder that reads matrices.
 TEST(ResolveDecoderInputs, ChunkFormCarriesItsClosedModelForAMatrixDecoder) {

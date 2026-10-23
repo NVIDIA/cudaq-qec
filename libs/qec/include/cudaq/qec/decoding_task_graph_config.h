@@ -11,7 +11,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace cudaq::qec {
 
@@ -47,6 +49,13 @@ struct task_graph_options {
   /// Pause iterations before an active coordinator parks for more input.
   /// Zero disables spinning.
   std::size_t async_spin_pause_iters = 0;
+  /// Pool threads that run fires in an asynchronous graph, not counting the
+  /// coordinator; unset sizes the pool from the graph. A graph rejects it
+  /// until the pool applies it.
+  std::optional<std::size_t> async_num_workers;
+  /// CPUs for those pool threads, assigned round-robin; empty inherits the
+  /// process's affinity. A graph rejects it until the pool applies it.
+  std::vector<int> async_worker_cpus;
   bool operator==(const task_graph_options &) const = default;
 };
 

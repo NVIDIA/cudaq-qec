@@ -10,20 +10,13 @@
 // available yet.
 
 #include "decoding_task_node_kind_registry.h"
+#include "decoding_task_window_kind_params.h"
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 namespace cudaq::qec {
 namespace {
-
-/// Accepted values of verify_residual: off (false), fail the node on a
-/// solution that does not satisfy its detectors (fail, or true), or complete
-/// the shot and report it open (report).
-bool is_verify_residual(const std::string &value) {
-  return value == "false" || value == "true" || value == "fail" ||
-         value == "report";
-}
 
 /// num_receives creates the ports receive_0 ... receive_{n-1};
 /// max_in_flight bounds the windows decoding at once.
@@ -34,15 +27,8 @@ decoding::config::decoder_schema decode_window_params() {
   schema.params.push_back({"max_in_flight", param_kind::uint64});
   schema.params.push_back({"verify_residual", param_kind::string});
   schema.validate = [](const cudaqx::heterogeneous_map &p) {
-    if (p.contains("max_in_flight") && p.get<std::size_t>("max_in_flight") == 0)
-      throw std::runtime_error("decode_window: max_in_flight must be at "
-                               "least 1");
-    if (p.contains("verify_residual") &&
-        !is_verify_residual(p.get<std::string>("verify_residual")))
-      throw std::runtime_error(
-          "decode_window: verify_residual must be false, fail (or true), or "
-          "report; got '" +
-          p.get<std::string>("verify_residual") + "'");
+    check_max_in_flight(p, "decode_window");
+    check_verify_residual(p, "decode_window");
   };
   return schema;
 }

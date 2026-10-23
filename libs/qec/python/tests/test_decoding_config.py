@@ -1266,6 +1266,67 @@ def test_data_artifacts_validate_against_the_schema():
         validator.validate(two_kinds)
 
 
+_PATTERN_YAML = """decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      async_streaming: true
+      async_coordinator_cpu: 2
+      async_worker_cpus: [4, 5, 6, 7]
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          output: corrected_logical
+          max_in_flight: 4
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+"""
+
+
+def test_parallel_window_pattern_and_pool_options_parse():
+    mdc = qec.multi_decoder_config.from_yaml_str(_PATTERN_YAML)
+    graph = mdc.decoders[0].task_graph
+    assert graph.nodes[0].type == "parallel_window"
+    assert graph.options.async_worker_cpus == [4, 5, 6, 7]
+    assert graph.options.async_num_workers is None
+    options = qec.TaskGraphOptions()
+    options.async_num_workers = 3
+    options.async_worker_cpus = [1, 2]
+    assert options.async_num_workers == 3
+
+
+def test_parallel_window_pattern_validates_against_the_schema():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    validator.validate(yaml.safe_load(_PATTERN_YAML))
+    missing = yaml.safe_load(_PATTERN_YAML)
+    del missing["decoders"][0]["task_graph"]["nodes"][0]["commit_rounds"]
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(missing)
+    repeated = yaml.safe_load(_PATTERN_YAML)
+    repeated["decoders"][0]["task_graph"]["async_worker_cpus"] = [4, 4]
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(repeated)
+
+
 # A DEM whose detector coordinates carry the colour a colour-code decoder
 # needs. Those annotations have no home in detector_error_model, so a decoder
 # that reads them can only be built from the text -- which is what `stim_dem`
