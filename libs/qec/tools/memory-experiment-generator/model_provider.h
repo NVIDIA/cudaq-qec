@@ -56,6 +56,15 @@ void validate_preparation_request(const preparation_request &request);
 void validate_prepared_model(const preparation_request &request,
                              const prepared_model &model);
 
+/// Check the public terminal-phase readout against independently validated
+/// raw-logical support. Preparation tests on older frameworks may omit the
+/// public metadata; server configuration generation requires it. Does not
+/// expand the horizon or assume a particular endpoint phase name.
+void validate_final_readout(
+    const dem_chunks_spec &chunks,
+    const std::vector<std::vector<std::uint64_t>> &readout,
+    bool required = false);
+
 /// Check that distinct characterization depths can each exercise the retained
 /// prefix, repeated bulk and suffix within the model's measurement layout.
 /// Depths record producer provenance; they need not equal this build's choices.
@@ -70,7 +79,7 @@ void validate_characterization_provenance(const dem_chunks_spec &chunks,
 std::unique_ptr<code> create_experiment_code(const experiment_spec &spec);
 
 /// Canonical final-readout support from the code's basis-specific observable
-/// matrix. Shared by preparation, sampling and bundle validation; these are
+/// matrix. Shared by preparation, sampling and model validation; these are
 /// measurement indices, not fault-observable columns.
 std::vector<std::vector<std::uint64_t>>
 final_readout_support(const cudaqx::tensor<std::uint8_t> &observables);

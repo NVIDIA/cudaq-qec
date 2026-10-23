@@ -14,6 +14,7 @@
 
 namespace cudaq::qec::memory_experiment {
 
+/// Qualification-only sample; not part of the installed generator interface.
 struct raw_replay_shot {
   std::uint64_t patch;
   std::uint64_t shot;

@@ -6,114 +6,23 @@
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
-#include "bundle.h"
-#include "manifest.h"
 #include "model_provider.h"
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/experiments.h"
 #include "cudaq/qec/noise_model.h"
 #include "cudaq/qec/realtime/decoding_config.h"
-#include <cmath>
+#include <algorithm>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <gtest/gtest.h>
-#include <iterator>
 #include <limits>
-#include <llvm/ADT/SmallString.h>
-#include <llvm/ADT/StringExtras.h>
-#include <llvm/Support/FileSystem.h>
-#include <llvm/Support/SHA256.h>
-#include <llvm/Support/raw_ostream.h>
 #include <map>
 #include <stdexcept>
-#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace cudaq::qec::memory_experiment {
 namespace {
-
-struct temporary_bundle_directory {
-  std::filesystem::path path;
-
-  temporary_bundle_directory() {
-    llvm::SmallString<128> temporary;
-    if (const auto error = llvm::sys::fs::createUniqueDirectory(
-            "cudaq-memory-bundle", temporary))
-      throw std::runtime_error(error.message());
-    path = temporary.str().str();
-  }
-
-  ~temporary_bundle_directory() {
-    std::error_code ignored;
-    std::filesystem::remove_all(path, ignored);
-  }
-};
-
-std::string read_test_text(const std::filesystem::path &path) {
-  std::ifstream input(path);
-  return std::string((std::istreambuf_iterator<char>(input)),
-                     std::istreambuf_iterator<char>());
-}
-
-void write_test_text(const std::filesystem::path &path,
-                     const std::string &text) {
-  std::ofstream output;
-  output.exceptions(std::ios::badbit | std::ios::failbit);
-  output.open(path);
-  output << text;
-}
-
-manifest::document read_test_manifest(const std::filesystem::path &path) {
-  return manifest::from_yaml(read_test_text(path));
-}
-
-void write_test_manifest(const std::filesystem::path &path,
-                         const manifest::document &value) {
-  write_test_text(path, manifest::to_yaml(value));
-}
-
-enum class yaml_field_mutation { unknown, missing, duplicate };
-
-std::string mutate_yaml_field(const std::string &yaml,
-                              const std::string &section,
-                              const std::string &key,
-                              yaml_field_mutation mutation) {
-  const auto section_begin = section.empty() ? 0 : yaml.find(section + ':');
-  if (section_begin == std::string::npos)
-    throw std::runtime_error("missing test YAML section");
-  const auto field = yaml.find(key + ':', section_begin);
-  if (field == std::string::npos)
-    throw std::runtime_error("missing test YAML field");
-  const auto previous = yaml.rfind('\n', field);
-  const auto begin = previous == std::string::npos ? 0 : previous + 1;
-  const auto newline = yaml.find('\n', field);
-  if (newline == std::string::npos)
-    throw std::runtime_error("unterminated test YAML field");
-  const auto past_last = newline + 1;
-  auto changed = yaml;
-  switch (mutation) {
-  case yaml_field_mutation::unknown:
-    changed.insert(begin, yaml.substr(begin, field - begin) +
-                              "unsupported_field: true\n");
-    break;
-  case yaml_field_mutation::missing:
-    changed.erase(begin, past_last - begin);
-    break;
-  case yaml_field_mutation::duplicate:
-    changed.insert(begin, yaml.substr(begin, past_last - begin));
-    break;
-  }
-  return changed;
-}
-
-std::string test_digest(const std::string &text) {
-  const auto hash = llvm::SHA256::hash(llvm::ArrayRef<std::uint8_t>(
-      reinterpret_cast<const std::uint8_t *>(text.data()), text.size()));
-  return llvm::toHex(llvm::ArrayRef<std::uint8_t>(hash), true);
-}
 
 using fault_signature =
     std::pair<std::vector<std::size_t>, std::vector<std::size_t>>;
@@ -296,13 +205,66 @@ TEST(MemoryExperimentProvider, PreparedGeometryIsCheckedAgainstCode) {
   }
 }
 
-TEST(MemoryExperimentBundle, VersionOneAcceptsSaneCharacterizationProvenance) {
+TEST(MemoryExperimentProvider, PublicReadoutAgreesWithTerminalMeasurements) {
+  for (const auto basis : {memory_basis::x, memory_basis::z}) {
+    const preparation_request request{{"surface_code", 3, 26, 1, basis}};
+    const auto model = prepare_model(request);
+    EXPECT_NO_THROW(validate_final_readout(model.chunks, model.final_m2o));
+    // Member-dependent checks keep internal model tests useful with public
+    // builds predating terminal readout metadata, without inventing a schema.
+    [&]<typename Spec>(Spec chunks) {
+      if constexpr (requires { chunks.phases.front().spec.m2o_sparse; }) {
+        ASSERT_NO_THROW(validate_final_readout(chunks, model.final_m2o, true));
+        const auto found = std::find_if(
+            chunks.phases.begin(), chunks.phases.end(),
+            [](const auto &phase) { return !phase.spec.m2o_sparse.empty(); });
+        ASSERT_NE(found, chunks.phases.end());
+        const auto old_id = found->id;
+        const auto renamed = phase_id::from_name("readout_endpoint");
+        found->id = renamed;
+        for (auto &connection : chunks.connections) {
+          if (connection.from_phase == old_id)
+            connection.from_phase = renamed;
+          if (connection.to_phase == old_id)
+            connection.to_phase = renamed;
+        }
+        EXPECT_NO_THROW(validate_final_readout(chunks, model.final_m2o, true));
+        const auto expected = found->spec.m2o_sparse;
+        auto with_unused_phase = chunks;
+        auto unused = with_unused_phase.phases.front();
+        unused.id = phase_id::from_name("unused_phase");
+        unused.spec.m2o_sparse.clear();
+        with_unused_phase.phases.insert(with_unused_phase.phases.begin(),
+                                        std::move(unused));
+        EXPECT_NO_THROW(
+            validate_final_readout(with_unused_phase, model.final_m2o, true));
+        found->spec.m2o_sparse.clear();
+        // Optional readout metadata is insufficient for server configuration.
+        EXPECT_NO_THROW(validate_final_readout(chunks, model.final_m2o));
+        EXPECT_THROW(validate_final_readout(chunks, model.final_m2o, true),
+                     std::invalid_argument);
+        found->spec.m2o_sparse = expected;
+        found->spec.m2o_sparse.front() = model.final_measurements;
+        EXPECT_THROW(validate_final_readout(chunks, model.final_m2o),
+                     std::invalid_argument);
+        found->spec.m2o_sparse = expected;
+        auto &other = chunks.phases.front();
+        ASSERT_NE(other.id, renamed);
+        other.spec.m2o_sparse = expected;
+        EXPECT_THROW(validate_final_readout(chunks, model.final_m2o),
+                     std::invalid_argument);
+      } else {
+        EXPECT_THROW(validate_final_readout(chunks, model.final_m2o, true),
+                     std::invalid_argument);
+      }
+    }(model.chunks);
+  }
+}
+
+TEST(MemoryExperimentProvider, AcceptsSaneBoundedCharacterizationProvenance) {
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
   const auto original = prepare_model(request);
-  temporary_bundle_directory temporary;
-  // Provenance records how a producer established repetition. A schema-v1
-  // reader must not require today's 12/13 choice, adjacency or even/odd pair.
   for (const auto &[characterization, validation] :
        std::vector<std::pair<std::uint64_t, std::uint64_t>>{{16, 17},
                                                             {14, 19}}) {
@@ -310,25 +272,13 @@ TEST(MemoryExperimentBundle, VersionOneAcceptsSaneCharacterizationProvenance) {
     model.characterization_rounds = characterization;
     model.validation_rounds = validation;
     EXPECT_NO_THROW(validate_prepared_model(request, model));
-    const auto output = temporary.path / std::to_string(characterization);
-    EXPECT_NO_THROW(write_model_bundle(request, model, {}, output));
-    const auto metadata = read_test_manifest(output / "manifest.yaml");
-    EXPECT_EQ(metadata.model.characterization_rounds, characterization);
-    EXPECT_EQ(metadata.model.validation_rounds, validation);
-    EXPECT_EQ(metadata.schema_version, 1);
-    EXPECT_NO_THROW(validate_model_bundle(output));
   }
 }
 
-TEST(MemoryExperimentBundle, RejectsDegenerateCharacterizationProvenance) {
+TEST(MemoryExperimentProvider, RejectsDegenerateCharacterizationProvenance) {
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
   const auto original = prepare_model(request);
-  temporary_bundle_directory temporary;
-  const auto output = temporary.path / "bundle";
-  write_model_bundle(request, original, {}, output);
-  const auto path = output / "manifest.yaml";
-  const auto original_metadata = read_test_manifest(path);
   const auto too_short = original.chunks.minimum_rounds() - 1;
   const auto maximum = std::numeric_limits<std::uint64_t>::max();
   for (const auto &[characterization, validation] :
@@ -345,342 +295,84 @@ TEST(MemoryExperimentBundle, RejectsDegenerateCharacterizationProvenance) {
     model.characterization_rounds = characterization;
     model.validation_rounds = validation;
     EXPECT_THROW(validate_prepared_model(request, model), std::exception);
-    auto metadata = original_metadata;
-    metadata.model.characterization_rounds = characterization;
-    metadata.model.validation_rounds = validation;
-    write_test_manifest(path, metadata);
-    EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
   }
-  for (const auto &key : {"characterization_rounds", "validation_rounds"}) {
-    auto yaml = manifest::to_yaml(original_metadata);
-    const auto begin = yaml.find(std::string(key) + ':');
-    ASSERT_NE(begin, std::string::npos);
-    const auto value = yaml.find(':', begin) + 1;
-    const auto end = yaml.find('\n', value);
-    ASSERT_NE(end, std::string::npos);
-    yaml.replace(value, end - value, " -1");
-    write_test_text(path, yaml);
-    EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
-  }
-  write_test_manifest(path, original_metadata);
-  EXPECT_NO_THROW(validate_model_bundle(output));
 }
 
-TEST(MemoryExperimentBundle, InvalidManifestValuesHaveOneDiagnosticContract) {
-  const preparation_request request{
-      {"surface_code", 3, 26, 1, memory_basis::z}};
-  const auto model = prepare_model(request);
-  temporary_bundle_directory temporary;
-  const auto output = temporary.path / "bundle";
-  write_model_bundle(request, model, {}, output);
-  const auto manifest_path = output / "manifest.yaml";
-  const auto original = read_test_manifest(manifest_path);
-  std::vector<manifest::document> invalid(4, original);
-  invalid[0].experiment.distance = 4;
-  invalid[1].experiment.rounds = std::numeric_limits<std::uint64_t>::max();
-  invalid[2].delivery.batch_rounds = 0;
-  invalid[3].model.characterization_rounds = 0;
-  constexpr std::string_view prefix = "invalid model bundle: ";
-  for (const auto &metadata : invalid) {
-    write_test_manifest(manifest_path, metadata);
-    try {
-      validate_model_bundle(output);
-      FAIL() << "invalid manifest was accepted";
-    } catch (const std::runtime_error &error) {
-      const std::string_view message(error.what());
-      EXPECT_TRUE(message.starts_with(prefix)) << message;
-      EXPECT_EQ(message.find(prefix, prefix.size()), std::string_view::npos)
-          << message;
-    }
-  }
-  write_test_manifest(manifest_path, original);
-  EXPECT_NO_THROW(validate_model_bundle(output));
-}
-
-TEST(MemoryExperimentBundle, SelfValidationFailureRetainsCompletedOutput) {
-  const preparation_request request{
-      {"surface_code", 3, 26, 1, memory_basis::z}};
-  auto model = prepare_model(request);
-  // A second empty observable preserves the chunk topology, but disagrees
-  // with this independent patch's one raw-logical readout. This makes the
-  // completed bundle fail self-validation without racing filesystem access.
-  for (auto &phase : model.chunks.phases)
-    phase.spec.O_sparse.push_back(-1);
-  ASSERT_NO_THROW(validate_prepared_model(request, model));
-  temporary_bundle_directory temporary;
-  const auto output = temporary.path / "retained";
-  try {
-    write_model_bundle(request, model, {.replay_shots = 1}, output);
-    FAIL() << "bundle with inconsistent observable count was accepted";
-  } catch (const std::runtime_error &error) {
-    const std::string message(error.what());
-    EXPECT_TRUE(message.starts_with(
-        "model bundle written but failed self-validation: "))
-        << message;
-    EXPECT_NE(message.find(output.string()), std::string::npos);
-    EXPECT_NE(message.find("phase fault-observable count"), std::string::npos)
-        << message;
-  }
-  ASSERT_TRUE(std::filesystem::is_regular_file(output / "manifest.yaml"));
-  ASSERT_TRUE(std::filesystem::is_regular_file(output / "model.yaml"));
-  ASSERT_TRUE(std::filesystem::is_regular_file(output / "raw-0-0.txt"));
-  const auto metadata = read_test_manifest(output / "manifest.yaml");
-  EXPECT_EQ(metadata.model.sha256,
-            test_digest(read_test_text(output / "model.yaml")));
-  ASSERT_TRUE(metadata.replay.has_value());
-  ASSERT_EQ(metadata.replay->files.size(), 1);
-  const auto raw = read_test_text(output / "raw-0-0.txt");
-  EXPECT_FALSE(raw.empty());
-  EXPECT_EQ(metadata.replay->files.front().sha256, test_digest(raw));
-  EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
-}
-
-TEST(MemoryExperimentBundle, RejectsExtraModelYamlDocumentsEvenWithValidHash) {
-  const preparation_request request{
-      {"surface_code", 3, 26, 1, memory_basis::z}};
-  const auto model = prepare_model(request);
-  temporary_bundle_directory temporary;
-  const auto output = temporary.path / "bundle";
-  write_model_bundle(request, model, {}, output);
-  const auto model_path = output / "model.yaml";
-  const auto manifest_path = output / "manifest.yaml";
-  const auto original_yaml = read_test_text(model_path);
-  const auto original_metadata = read_test_manifest(manifest_path);
-  for (const auto &yaml :
-       {std::string("---\n") + original_yaml, original_yaml + "---\n",
-        original_yaml + "---\n[]\n", original_yaml + original_yaml}) {
-    write_test_text(model_path, yaml);
-    auto metadata = original_metadata;
-    metadata.model.sha256 = test_digest(yaml);
-    write_test_manifest(manifest_path, metadata);
-    EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
-  }
-  write_test_text(model_path, original_yaml);
-  write_test_manifest(manifest_path, original_metadata);
-  EXPECT_NO_THROW(validate_model_bundle(output));
-}
-
-TEST(MemoryExperimentManifest, ExactProbabilityIntegersAndBitStringsRoundTrip) {
-  // Exercise metadata scalar representation independently of circuit analysis
-  // or model validation, including bit strings wider than the present fixture.
-  manifest::document metadata;
-  metadata.schema_version = 1;
-  metadata.kind = "cudaq-qec-memory-model-bundle";
-  metadata.status = "model_prepared_graph_pending";
-  metadata.experiment = {"surface_code", 3, 26, "Z", 1};
-  metadata.layout = {"cudaq_memory_circuit/v1", 8, 9, 27, 217, 17};
-  metadata.delivery = {3, 8, 24, 2, 25};
-  metadata.model = {"model.yaml", std::string(64, '0'), 12, 13};
-  metadata.normalization = {true, "independent canonical mechanisms"};
-  metadata.noise = {"cnot_depolarization", 0.001};
-  metadata.final_m2o = {{0, 1, 2}};
-  metadata.provenance = {"test-version", "test-revision"};
-  metadata.validation = {true, false, false, false};
-  const auto maximum = std::numeric_limits<std::uint64_t>::max();
-  metadata.replay = manifest::replay_metadata{
-      "playback-static-source/v1",
-      1,
-      maximum,
-      {{0, 0, maximum, "raw-0-0.txt", std::string(64, '0'), "0010"}},
-      false};
-  for (const auto probability :
-       {std::nextafter(0.001, 1.0), std::numeric_limits<double>::denorm_min(),
-        std::numeric_limits<double>::min(), std::nextafter(1.0, 0.0),
-        0.12345678901234567}) {
-    metadata.noise.probability = probability;
-    const auto yaml = manifest::to_yaml(metadata);
-    const auto parsed = manifest::from_yaml(yaml);
-    EXPECT_EQ(parsed.noise.probability, probability);
-    ASSERT_TRUE(parsed.replay.has_value());
-    EXPECT_EQ(parsed.replay->base_seed, maximum);
-    ASSERT_EQ(parsed.replay->files.size(), 1);
-    EXPECT_EQ(parsed.replay->files[0].seed, maximum);
-    EXPECT_EQ(parsed.replay->files[0].raw_logical, "0010");
-    EXPECT_NE(yaml.find("'0010'"), std::string::npos);
-    EXPECT_FALSE(parsed.validation.graph_generated);
-    EXPECT_FALSE(parsed.validation.graph_constructed);
-    EXPECT_FALSE(parsed.validation.replayed);
-  }
-  metadata.replay.reset();
-  const auto without_replay = manifest::to_yaml(metadata);
-  EXPECT_EQ(without_replay.find("\nreplay:"), std::string::npos);
-  EXPECT_FALSE(manifest::from_yaml(without_replay).replay.has_value());
-}
-
-TEST(MemoryExperimentManifest,
-     RejectsMalformedUnknownDuplicateAndExtraDocuments) {
-  const auto valid = manifest::to_yaml(manifest::document{});
-  EXPECT_NO_THROW(manifest::from_yaml(valid));
-  for (const auto &invalid :
-       {std::string{}, std::string("---\n"), std::string("[]\n"),
-        std::string("schema_version: [\n"), std::string("---\n") + valid,
-        valid + "---\n", valid + valid})
-    EXPECT_THROW(manifest::from_yaml(invalid), std::runtime_error);
-  EXPECT_THROW(
-      manifest::from_yaml(mutate_yaml_field(valid, "", "schema_version",
-                                            yaml_field_mutation::duplicate)),
-      std::runtime_error);
-  EXPECT_THROW(
-      manifest::from_yaml(mutate_yaml_field(valid, "noise", "probability",
-                                            yaml_field_mutation::unknown)),
-      std::runtime_error);
-  EXPECT_THROW(manifest::from_yaml(mutate_yaml_field(
-                   valid, "model", "path", yaml_field_mutation::missing)),
-               std::runtime_error);
-}
-
-TEST(MemoryExperimentBundle,
-     WrongInRangeReadoutSupportIsRejectedWithoutReplay) {
-  llvm::SmallString<128> temporary;
-  ASSERT_FALSE(
-      llvm::sys::fs::createUniqueDirectory("cudaq-memory-bundle", temporary));
-  struct cleanup_directory {
-    std::filesystem::path path;
-    ~cleanup_directory() {
-      std::error_code ignored;
-      std::filesystem::remove_all(path, ignored);
-    }
-  } cleanup{temporary.str().str()};
+TEST(MemoryExperimentProvider, RejectsWrongReadoutAndObservableCount) {
   for (const auto basis : {memory_basis::x, memory_basis::z}) {
     const preparation_request request{{"surface_code", 3, 26, 1, basis}};
     const auto model = prepare_model(request);
     auto wrong = model;
     wrong.final_m2o = {{0}};
     ASSERT_NE(wrong.final_m2o, model.final_m2o);
-    const auto name = basis == memory_basis::x ? "x" : "z";
-    const auto rejected = cleanup.path / (std::string(name) + "-rejected");
-    EXPECT_THROW(write_model_bundle(request, wrong, {}, rejected),
-                 std::runtime_error);
-    // This disagreement is found after publication, so retain the completed
-    // files for inspection rather than treating them as incomplete writes.
-    EXPECT_TRUE(std::filesystem::is_regular_file(rejected / "model.yaml"));
-    EXPECT_TRUE(std::filesystem::is_regular_file(rejected / "manifest.yaml"));
-    EXPECT_THROW(validate_model_bundle(rejected), std::runtime_error);
-
-    const auto output = cleanup.path / name;
-    write_model_bundle(request, model, {}, output);
-    const auto manifest_path = output / "manifest.yaml";
-    auto metadata = read_test_manifest(manifest_path);
-    metadata.final_m2o = {{0}};
-    write_test_manifest(manifest_path, metadata);
-    EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
+    EXPECT_THROW(validate_prepared_model(request, wrong),
+                 std::invalid_argument);
+    wrong = model;
+    for (auto &phase : wrong.chunks.phases)
+      phase.spec.O_sparse.push_back(-1);
+    EXPECT_THROW(validate_prepared_model(request, wrong),
+                 std::invalid_argument);
   }
 }
 
-TEST(MemoryExperimentBundle, PreparationIdentityIsCheckedBeforePublication) {
+TEST(MemoryExperimentProvider, PreparationIdentityRejectsAccidentalReuse) {
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
   const auto model = prepare_model(request);
-  ASSERT_TRUE(model.preparation.has_value());
-  temporary_bundle_directory temporary;
   std::vector<preparation_request> mismatched(5, request);
-  mismatched[0].cnot_error_rate = 0.002;
-  mismatched[1].decompose_errors = false;
+  mismatched[0].experiment.distance = 5;
+  mismatched[1].experiment.rounds = 27;
   mismatched[2].experiment.basis = memory_basis::x;
-  mismatched[3].experiment.distance = 5;
-  mismatched[4].experiment.rounds = 27;
-  for (std::size_t i = 0; i < mismatched.size(); ++i) {
-    const auto output = temporary.path / std::to_string(i);
-    EXPECT_THROW(validate_prepared_model(mismatched[i], model),
-                 std::invalid_argument);
-    EXPECT_THROW(write_model_bundle(mismatched[i], model, {}, output),
-                 std::invalid_argument);
-    EXPECT_FALSE(std::filesystem::exists(output));
-  }
+  mismatched[3].cnot_error_rate = 0.002;
+  mismatched[4].decompose_errors = false;
+  for (const auto &other : mismatched)
+    EXPECT_THROW(validate_prepared_model(other, model), std::invalid_argument);
   auto unbound = model;
   unbound.preparation.reset();
-  EXPECT_THROW(
-      write_model_bundle(request, unbound, {}, temporary.path / "unbound"),
-      std::invalid_argument);
-  EXPECT_FALSE(std::filesystem::exists(temporary.path / "unbound"));
+  EXPECT_THROW(validate_prepared_model(request, unbound),
+               std::invalid_argument);
   auto replicated = request;
   replicated.experiment.logical_qubits = 4;
   EXPECT_NO_THROW(validate_prepared_model(replicated, model));
-  EXPECT_NO_THROW(
-      write_model_bundle(replicated, model, {}, temporary.path / "replicated"));
 }
 
-TEST(MemoryExperimentBundle,
-     VersionOneRejectsUnknownMissingAndDuplicateManifestFields) {
+TEST(MemoryExperimentProvider, PublicModelYamlRoundtripsBothBases) {
+  namespace config = cudaq::qec::decoding::config;
+  for (const auto basis : {memory_basis::x, memory_basis::z}) {
+    const preparation_request request{{"surface_code", 3, 26, 1, basis}};
+    const auto model = prepare_model(request);
+    const auto yaml = config::dem_chunks_to_yaml_str(model.chunks);
+    EXPECT_EQ(config::dem_chunks_from_yaml_str(yaml), model.chunks);
+  }
+}
+
+TEST(MemoryExperimentProvider, RejectsMalformedDetectorMapsBeforePublication) {
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
-  const auto model = prepare_model(request);
-  temporary_bundle_directory temporary;
-  const auto output = temporary.path / "bundle";
-  write_model_bundle(request, model, {.batch_rounds = 3, .replay_shots = 1},
-                     output);
-  const auto path = output / "manifest.yaml";
-  const auto original = read_test_text(path);
-  const std::vector<std::pair<std::string, std::string>> fields{
-      {"", "schema_version"},
-      {"experiment", "code_family"},
-      {"layout", "convention"},
-      {"delivery", "batch_rounds"},
-      {"model", "path"},
-      {"normalization", "decompose_errors"},
-      {"noise", "kind"},
-      {"provenance", "qec_version"},
-      {"validation", "phase_model_roundtrip"},
-      {"replay", "format"},
-      {"files", "shot"}};
-  for (const auto &[section, key] : fields) {
-    for (const auto mutation :
-         {yaml_field_mutation::unknown, yaml_field_mutation::missing,
-          yaml_field_mutation::duplicate}) {
-      write_test_text(path,
-                      mutate_yaml_field(original, section, key, mutation));
-      EXPECT_THROW(validate_model_bundle(output), std::runtime_error)
-          << "invalid field in " << section;
+  const auto original = prepare_model(request);
+  constexpr std::int64_t invalid_measurement_index = 1000000;
+  for (const auto remove_row : {true, false}) {
+    auto invalid = original;
+    const auto connection = std::find_if(
+        invalid.chunks.connections.begin(), invalid.chunks.connections.end(),
+        [](const auto &entry) { return entry.from_phase == entry.to_phase; });
+    ASSERT_NE(connection, invalid.chunks.connections.end());
+    const auto phase = std::find_if(
+        invalid.chunks.phases.begin(), invalid.chunks.phases.end(),
+        [&](const auto &entry) { return entry.id == connection->from_phase; });
+    ASSERT_NE(phase, invalid.chunks.phases.end());
+    auto &rows = phase->spec.D_sparse;
+    if (remove_row) {
+      const auto terminator = std::find(rows.begin(), rows.end(), -1);
+      ASSERT_NE(terminator, rows.end());
+      rows.erase(rows.begin(), terminator + 1);
+    } else {
+      const auto index = std::find_if(rows.begin(), rows.end(),
+                                      [](auto value) { return value >= 0; });
+      ASSERT_NE(index, rows.end());
+      *index = invalid_measurement_index;
     }
-  }
-  write_test_text(path, original);
-  EXPECT_NO_THROW(validate_model_bundle(output));
-}
-
-TEST(MemoryExperimentBundle,
-     ReplayValidationStreamsAcrossRecordAndBufferEdges) {
-  const preparation_request request{
-      {"surface_code", 3, 1024, 1, memory_basis::z}};
-  const auto model = prepare_model(request);
-  temporary_bundle_directory temporary;
-  for (const auto batch :
-       {std::uint64_t{3}, std::uint64_t{512}, std::uint64_t{1025}}) {
-    const auto output = temporary.path / std::to_string(batch);
-    write_model_bundle(request, model,
-                       {.batch_rounds = batch, .replay_shots = 1}, output);
-    const auto manifest_path = output / "manifest.yaml";
-    const auto original = read_test_manifest(manifest_path);
-    const auto raw_path = output / "raw-0-0.txt";
-    std::ifstream input(raw_path, std::ios::binary);
-    const std::string raw((std::istreambuf_iterator<char>(input)), {});
-    ASSERT_GT(raw.size(), 8192);
-    ASSERT_EQ(raw.back(), '\n');
-    input.close();
-    const auto replace_raw = [&](const std::string &replacement) {
-      {
-        std::ofstream rewritten(raw_path, std::ios::binary);
-        rewritten << replacement;
-        ASSERT_TRUE(rewritten.good());
-      }
-      auto metadata = original;
-      ASSERT_TRUE(metadata.replay.has_value());
-      ASSERT_EQ(metadata.replay->files.size(), 1);
-      metadata.replay->files[0].sha256 = test_digest(replacement);
-      write_test_manifest(manifest_path, metadata);
-    };
-    // An absent final newline was accepted by the original v1 reader.
-    replace_raw(raw.substr(0, raw.size() - 1));
-    EXPECT_NO_THROW(validate_model_bundle(output));
-    auto malformed = raw;
-    malformed[4096] = 'x';
-    replace_raw(malformed);
-    EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
-    replace_raw(raw + "\n");
-    EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
-    replace_raw(raw.substr(0, raw.size() - 2) + "\n");
-    EXPECT_THROW(validate_model_bundle(output), std::runtime_error);
-    replace_raw(raw);
-    EXPECT_NO_THROW(validate_model_bundle(output));
+    EXPECT_THROW(validate_prepared_model(request, invalid), std::exception);
   }
 }
 

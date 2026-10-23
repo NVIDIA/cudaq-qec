@@ -22,6 +22,7 @@
 namespace cudaq::qec::memory_experiment {
 namespace {
 
+// Qualification sampling shares the CUDA-Q process-wide random state.
 std::mutex sampling_mutex;
 
 } // namespace

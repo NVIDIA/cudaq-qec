@@ -18,7 +18,11 @@ add_dependencies(CUDAQXQECUnitTests test_memory_experiment_generator)
 gtest_discover_tests(test_memory_experiment_generator PROPERTIES LABELS "qec")
 
 if(TARGET memory-experiment-generator)
-  add_executable(test_memory_model_provider test_model_provider.cpp test_raw_replay.cpp)
+  add_executable(test_memory_model_provider
+    test_model_provider.cpp
+    raw_replay.cpp
+    test_raw_replay.cpp
+    test_server_config.cpp)
   target_link_directories(test_memory_model_provider PRIVATE ${CUDAQ_INSTALL_DIR}/lib)
   target_link_libraries(test_memory_model_provider PRIVATE
     GTest::gtest_main cudaq-qec-memory-experiment-provider
@@ -27,9 +31,16 @@ if(TARGET memory-experiment-generator)
   gtest_discover_tests(test_memory_model_provider PROPERTIES LABELS "qec")
   find_package(Python COMPONENTS Interpreter QUIET)
   if(Python_Interpreter_FOUND)
+    set(memory_generator_cli_args
+      --generator=$<TARGET_FILE:memory-experiment-generator>)
+    if(TARGET decoding_server)
+      list(APPEND memory_generator_cli_args
+        --decoding-server=$<TARGET_FILE:decoding_server>)
+      add_dependencies(CUDAQXQECUnitTests decoding_server)
+    endif()
     add_test(NAME memory_experiment_generator_cli
       COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py
-        --generator=$<TARGET_FILE:memory-experiment-generator>)
+        ${memory_generator_cli_args})
     set_tests_properties(memory_experiment_generator_cli PROPERTIES
       LABELS "qec"
       SKIP_RETURN_CODE 77

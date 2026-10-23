@@ -26,8 +26,7 @@ endif()
 
 add_library(cudaq-qec-memory-experiment-provider STATIC
   model_provider.cpp
-  raw_replay.cpp
-  bundle.cpp)
+  server_config.cpp)
 target_link_libraries(cudaq-qec-memory-experiment-provider PUBLIC
   cudaq-qec-memory-experiment-spec
   cudaq-qec

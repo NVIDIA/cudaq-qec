@@ -1,13 +1,16 @@
 # Memory-experiment generator (draft)
 
-This public tool prepares a reusable Surface Code memory model and optional
-chronological raw replay inputs. **Executable A/B task-graph YAML generation
-is pending the public parallel-window and executor interfaces.** No global or
-sliding-window substitute is emitted.
+This public tool prepares a bounded Surface Code model and writes one
+`server.yaml` containing the framework's public `parallel_window`
+configuration. Experiment and decoder parameters are command-line inputs.
+The framework owns A/B construction, fault ownership, routing and scheduling;
+the tool does not implement a second scheduler or substitute a global or
+sliding-window algorithm.
 
-Experiment parameters are command-line inputs. Both the generated model
-(`model.yaml`) and its metadata (`manifest.yaml`) use YAML; optional raw
-measurement records are plain-text files. No JSON output is generated.
+A QEC build providing the public parallel-window configuration, named model
+artifacts and terminal-readout metadata is required. Older builds fail before
+circuit preparation or output creation. **Parsing and configuration validation
+do not establish that the target runtime can execute the pattern.**
 
 ## Build and run
 
@@ -16,200 +19,216 @@ In a full QEC build configured with CUDA-Q, Stim and realtime configuration:
 ```sh
 cmake --build build --target memory-experiment-generator
 build/bin/memory-experiment-generator \
-  --distance=3 --rounds=26 --basis=Z --logical-qubits=1 \
-  --batch-rounds=3 --output=/tmp/memory-d3-r26
-build/bin/memory-experiment-generator --validate-bundle=/tmp/memory-d3-r26
+  --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
+  --decoder-arg=merge_strategy=independent
 ```
 
-The output directory must not exist, and its parent must exist. Existing
-files, directories and symlinks are never overwritten. Failures return a
-diagnostic and nonzero exit code; incomplete writes remove only the directory
-created by that invocation. The manifest is written last as the completion
-marker. If subsequent self-validation fails, all written files are retained
-and the diagnostic identifies the bundle for inspection.
-Do not modify a bundle concurrently with generation or validation.
+This is Justin's distance-three reference. A/B commit and buffer widths
+default to distance, so the emitted pattern contains `commit_rounds: 3`
+and `buffer_rounds: 3`. The gap is omitted unless explicitly supplied,
+leaving its rule to the framework. Tracy's pattern documents that rule as
+`commit_rounds + 2 * buffer_rounds`, giving 9 for this profile; the draft
+configuration interface does not yet implement the runtime expansion.
 
-With `--replay-shots=N`, the tool simulates N noisy experiment shots per
-logical qubit and writes their measurement records: extraction-round bits
-followed by the final data-qubit readout. These provide repeatable inputs for
-offline decoder testing without quantum hardware. No measurements are
-simulated by default. Sampling uses the public `sample_memory_circuit_raw`
-API with the Stim backend, not a second circuit implementation:
+For a longer experiment with two independent patches:
 
 ```sh
 build/bin/memory-experiment-generator \
-  --distance=3 --rounds=26 --basis=X --logical-qubits=2 \
-  --batch-rounds=3 --replay-shots=4 --seed=100 \
-  --output=/tmp/memory-d3-r26-inputs
+  --distance=5 --rounds=1000 --basis=X --logical-qubits=2 \
+  --decoder=pymatching
 ```
 
-Experiment inputs are command-line arguments in `--name=value` form; no
-YAML or JSON input file is required or accepted. `--help` requires no model
-preparation. The current preparation policy decomposes circuit errors into
-independent mechanisms.
+These examples are separate configurations. Retain or move an existing
+configuration before generating another; the tool never replaces it.
+
+## Shared configuration location
+
+There is no generator output argument. The generator and standalone
+`decoding_server` use the same tools-private path resolver:
+
+1. A nonempty `CUDAQ_QEC_DECODER_CONFIG` selects the deployment's configuration
+   file, using the environment setting already recognized by the server service.
+2. Otherwise, both use `server.yaml` in their working directory.
+
+The default therefore follows the container image's `WORKDIR` and also works
+outside Docker without requiring write access to an installation or system
+directory. Deployments can set the existing environment variable once for
+both processes, for example when mounting a configuration volume; it is not a
+per-experiment CLI input. Relative environment paths resolve from the process
+working directory. Both processes must use the same working directory or
+deployment setting.
+
+The server no longer requires `--config`. Its existing explicit
+`--config=PATH` remains available and takes precedence for compatibility with
+other configurations. The in-process service's configuration precedence is
+unchanged; it does not acquire implicit file loading.
+
+Once the target runtime supports the generated pattern, the matching launch
+is simply:
+
+```sh
+build/bin/decoding_server
+```
+
+The only generated file contains its shared model and all independent patch
+entries. A separate model file, manifest, measurement sample or JSON file is
+not needed. The destination parent must exist. Existing files, directories and
+symlinks are never overwritten. Model and exact YAML round-trip validation
+finish before publication; a uniquely reserved sibling holds the incomplete
+write, then the completed file is published atomically without replacement.
+Failures remove only that invocation's temporary file. Concurrent generators
+cannot overwrite each other's result.
+
+## Inputs
+
+Arguments use `--name=value` form; there is no JSON or YAML input format.
+`--help` does not prepare a model.
 
 | Input | Meaning / default |
 |---|---|
 | `--code` | `surface_code`; other families are rejected in this draft |
 | `--distance` | Required odd Surface Code distance, at least 3 |
-| `--rounds` | Required extraction-cycle count, excluding data readout |
+| `--rounds` | Required finite extraction-cycle count, excluding terminal data readout |
 | `--basis` | Required `X` or `Z` preparation/readout basis |
 | `--logical-qubits` | Independent patches sharing one model; default 1 |
 | `--error-rate` | CNOT two-qubit depolarization probability; default 0.001, strictly between 0 and 1 |
-| `--batch-rounds` | Extraction cycles per regular replay record; default 1 |
-| `--replay-shots` | Simulated experiment shots per logical-qubit patch, saved as measurement records for offline testing; default 0 |
-| `--seed` | Positive base CUDA-Q sampling seed; default 1 (zero means unseeded in CUDA-Q and is rejected when sampling) |
+| `--decoder` | Required installed inner decoder name |
+| `--commit-rounds` | Optional positive A-layer commit width; defaults to distance |
+| `--buffer-rounds` | Optional positive A-layer buffer width; defaults to distance |
+| `--gap-rounds` | Optional positive B-layer gap override; omitted otherwise |
+| `--decoder-arg` | Repeatable `PATH=VALUE`, typed by the registered decoder schema |
 
-This is not a general circuit/noise-model parser. Additional providers can
-reuse the specification, record layout and bundle interfaces. The tool-local
-interfaces are not installed as new SDK APIs.
+Window geometry belongs to the A/B scheduling scheme, not to an individual
+decoder's parameters. Every `parallel_window` configuration requires commit
+and buffer widths irrespective of its inner algorithm. The Surface Code
+generator supplies those fields; users need not enter them for each decoder.
+Geometry overrides tune the same A/B scheme, not a different algorithm.
 
-The executable installs through `qec-tools` and needs the existing QEC and
-CUDA-Q runtime dependencies. Circuit characterization needs full QEC, CUDA-Q
-and Stim; this target is skipped in decoders-only builds. Pure layout code
-does not need a CUDA-Q runtime or GPU. Building the server alone does not
-acquire circuit-generation dependencies.
+Decoder arguments are validated through the selected decoder's registered
+schema, not a tool-owned decoder whitelist. Dotted paths select nested leaves,
+for example `--decoder-arg=global_decoder_params.max_errors=2`. Booleans are
+`true` or `false`; numeric values must be finite and fully consumed. Double
+vectors use commas (`0.1,0.2`); matrices use semicolon-separated rows
+(`0.1,0.2;0.3,0.4`). Quote shell-sensitive values. Strings retain their literal
+value. Unknown or duplicate arguments and missing required parameters fail
+before preparation.
 
-Full-QEC release archives include this executable through the existing
-`qec-tools` packaging component, as they do the playback emulator. It remains
-a model/sample generator, not an executable A/B graph generator.
+The same configuration structure is used for each decoder; its name and
+schema-typed parameters differ. Configuration emission does not qualify a
+decoder's fault-output capability, A/B accuracy or parallel execution.
+Worker-count and affinity flags are not exposed while executor interfaces are
+being reconciled. Independent patches must not silently multiply a process-wide
+core budget.
 
-## Bundle contract
+## Server configuration and deployment
 
-`manifest.yaml` is a versioned tool-owned contract (`schema_version: 1`), not
-a server configuration. It records experiment/layout/batching metadata,
-noise, normalization, QEC build identity and model SHA-256. `model.yaml` uses
-the existing typed `dem_chunks` mapping in standalone form, not a fabricated
-decoder entry. Phase probabilities survive serialization exactly.
+The YAML embeds one compact model in `data_artifacts`; artifact names are
+references within that document, not file paths. Each patch has a distinct
+decoder ID and one `parallel_window` pattern, with the same recipe and
+geometry. Output is explicitly `corrections`, not the corrected raw logical
+value. Existing consumers may XOR corrections with their own raw readout.
 
-The four mappings remain distinct:
+The mappings remain distinct:
 
 - D / m2d maps chronological measurements to detectors.
-- H maps independent faults to detector effects.
+- H maps faults to detector effects.
 - Phase O maps faults to logical flips.
-- `final_m2o` maps final data-readout measurements to the raw logical value.
+- Terminal `m2o_sparse` maps final data measurements to the raw logical value.
 
-Validation checks hashes, code geometry/readout support, widths, probabilities,
-seams, horizons and delivery counts. Seam validation expands only a bounded
-phase chain, not the long requested duration. Hashes detect alteration; they
-are not signatures or proof of circuit origin. Provenance identifies the
-linked QEC build; its repository revision does not describe uncommitted edits.
-Version-one manifests are single YAML mapping documents with required fields;
-unknown, duplicate or missing fields are rejected. Numeric and boolean scalars
-follow the existing QEC YAML parser's conventions. Before publication and
-sampling, the prepared model is checked
-against its preparation identity, including code, basis, duration, noise and
-normalization. Independent patch counts may reuse the same model. This guards
-against accidental metadata/model mismatches; it is not authentication of an
-externally supplied bundle.
+The public serializer and parser must preserve the model, geometry and decoder
+parameters exactly, including floating-point vectors and matrices. Bounded
+validation checks seams, detector-map rows and indices, widths, probabilities,
+horizons, code geometry and raw-logical support before writing.
 
-Optional `raw-PATCH-SHOT.txt` files use the existing playback static-source
-format: binary regular batches, then one terminal batch. Metadata records
-patch, shot, SHA-256, seed and raw logical value. Seeds are assigned as
-`base_seed + patch * shots_per_patch + shot`, with overflow checks. Sampling
-is serialized around CUDA-Q global random state. Reproducibility is for the
-same backend/build, not guaranteed across versions. Validation checks record
-lengths/content, terminal presence and raw-logical parity.
-The optional `replay` metadata section is omitted when no shots are sampled.
+Pass-through syndrome mapping ID 0 is BULK; ID 1 is FINAL. A producer must select
+the terminal mapping correctly. Packet batching and transport-control schedules
+are not model geometry.
 
-**Raw logical values are not expected corrections or an accuracy oracle.**
-The bundle reports `graph_generated: false`, `graph_constructed: false`,
-`replayed: false`, and raw inputs `decoded: false`. It contains no server YAML,
-playback control schedule or decoder-result oracle. Decoder recipes, A/B
-geometry, output composition and core-budget fields belong to the forthcoming
-framework adapter, not guessed fields in this model-only format.
+This draft leaves transport and worker policy unset. It does not yet render a
+qualified CPU RoCE/GPU RoCE deployment or adapt the FPGA producer protocol.
+GPU RoCE transport and GPU decoder dispatch are different choices; host A/B
+decoding must not be switched to device dispatch merely to select a wire.
 
-## Counts and coordinates
+Raw samples, seeds, replay schedules and result-oracle records belong to the
+qualification workflow. The production CLI does not sample measurements.
+Tests retain the public `sample_memory_circuit_raw` sampler and record/batch
+helpers. Raw logical values alone are not expected corrections or an accuracy
+oracle.
+
+Internal UDP assessment is not customer RoCE/FPGA qualification. Installed
+two-process replay needs an executable A/B runtime, a transport-specific
+schedule, correctly tagged FINAL input and independent expected results.
+Real FPGA qualification also needs producer framing, mapping IDs, patch routing
+and lifecycle. A successful YAML parse is not evidence that these work.
+
+## Counts and bounded preparation
 
 T counts extraction cycles, excluding the distinct terminal readout input
-round. There are T+1 raw rounds. Actual D determines detector rows and
-lookback; endpoint detector counts, including the basis-dependent readout
-layer, need not equal regular detector counts.
+round. There are T+1 raw rounds. Actual D determines detector rows and lookback;
+endpoint counts, including the basis-dependent readout layer, need not equal
+regular counts.
 
-Justin's distance-three reference has `26 * 8 + 9 = 217` measurements.
-Three-cycle batching yields eight 24-bit batches and a terminal batch of
-`2 * 8 + 9 = 25` bits. With its D mapping, B0 needs raw rounds `[2,12)`
-(80 bits) and A2 needs `[20,27)` (57 bits). Its A/B commits tile the detector
-horizon exactly; it does not exercise a terminal commit remainder or prove
-parallel execution.
+Justin's reference has `26 * 8 + 9 = 217` measurements. The layout test groups
+these as eight 24-bit batches and a terminal batch of `2 * 8 + 9 = 25` bits.
+B0 needs raw rounds `[2,12)` (80 bits); A2 needs `[20,27)` (57 bits). The
+fixture tiles exactly and exercises both experiment edges, but not a terminal
+commit remainder or actual A/B execution.
 
-Record arithmetic also handles unaligned lengths, exact batches and batches
-larger than the shot. Packet granularity never rounds duration or changes the
-model. Provider minimum-length restrictions are checked separately. Multiple
-logical qubits are independent patches, not lattice surgery, and do not imply
-an execution pool per patch.
-
-## Bounded preparation and supported scope
-
-The current provider characterizes 12 and 13 extraction cycles through
-`decoder_context_from_memory_circuit`, comparing prefix, bulk, suffix,
-probabilities, measurement maps and raw-logical support before retargeting.
-These bounded depths leave margin beyond the transient endpoints and include
-both even and odd horizons. They are preparation-policy choices recorded as
-provenance, not schema-version constraints: version-one bundles accept other
-distinct, representable depths with enough rounds to establish a repeating bulk.
-Stored phases and model preparation do not grow with requested T. This uses
-the known repeating public Surface Code circuit; comparing two depths is not
-a proof of periodicity for arbitrary circuits.
+The provider characterizes 12 and 13 extraction cycles using the public
+`decoder_context_from_memory_circuit` API. It compares retained phases,
+probabilities, measurement maps and readout support before retargeting.
+These fixed depths leave margin beyond transient endpoints and check even and
+odd horizons. They are provenance, not schema constraints. Preparation and
+stored phases do not grow with requested T; code construction grows with
+distance. No process address-space cap is imposed. This relies on the known
+repeating Surface Code circuit, not inferred periodicity for arbitrary circuits.
 
 The public `memory_dem_chunks_from_decoder_inputs` helper is promoted from
-the Surface Code example. Its documented restrictions are round-major
-detectors; D lookback of at most one raw round; faults touching at most two
-adjacent detector rounds; independent fault IDs; at most 64 observables; and
-a verified repeating bulk. Prefix/suffix transients are retained. Identical
-H/O mechanisms merge with independent XOR probabilities. Unsupported faults
-fail rather than being dropped or replaced by fictitious faults.
+the Surface Code example. It requires round-major detectors, D lookback of at
+most one raw round, faults touching at most two adjacent detector rounds,
+independent fault IDs, at most 64 observables and a repeating bulk. It retains
+transient phases and merges identical H/O mechanisms with independent XOR
+probabilities. Unsupported faults fail instead of being dropped or replaced.
 
-The current provider requires at least four extraction cycles. Shorter shots
-fail explicitly, without rounding. Zero-noise/zero-fault phases await public
-framework dimension-preservation support. Probability 1 is rejected before
-the current circuit-analysis backend, which cannot handle that boundary.
-Dimensions and coordinate arithmetic are checked before allocation; code
-preparation still grows with distance. No process address-space cap is imposed.
+At least four extraction cycles are required; shorter shots fail without
+rounding. Zero-noise/zero-fault phases await public framework
+dimension-preservation support; probability 1 is rejected before circuit
+analysis. Generated `beforeN`, `bulk` and `afterN` phase names are preserved,
+not hardcoded executor bindings. Multiple logical qubits mean independent
+patches, not lattice surgery.
 
-The promoted splitter reports invalid inputs with `std::invalid_argument` and
-unrepresentable dimensions with `std::overflow_error`, rather than the example's
-previous catch-all `std::runtime_error`. Generated `beforeN`, `bulk` and `afterN`
-phase names describe retained model phases; they are not bindings to future
-executor phase names. The framework adapter must resolve that correspondence.
+This CLI takes a finite cycle count. An open model alone does not implement an
+unknown-duration producer, terminal flush or admission policy.
 
-Optional raw sampling executes and retains one whole shot, so its time and
-transient memory grow with T. Shots stream to the writer one at a time;
-patches/shots grow output size. Preparation time is not decoder tail latency.
-Replay-file validation reads fixed 4 KiB chunks and checks framing, SHA-256 and
-readout parity in one pass, without retaining a shot or a transport batch.
-The manifest and model are still retained; manifest metadata grows with the
-number of replay files. No artificial process address-space limit is imposed.
+## Build scope and verification
 
-## Verification and remaining integration
+The executable installs through `qec-tools`, with existing QEC and CUDA-Q
+runtime dependencies, and is included in full-QEC release archives. Circuit
+characterization requires full QEC, CUDA-Q and Stim, so the target is skipped
+in decoders-only builds. Building the server does not acquire those
+dependencies. Tool-local interfaces are not new installed SDK APIs.
 
 ```sh
 python3 -m pip install -r libs/qec/unittests/memory-experiment-generator/requirements.txt
-cmake --build build --target test_memory_dem_chunks test_memory_model_provider
+cmake --build build --target memory-experiment-generator test_memory_dem_chunks test_memory_model_provider decoding_server
 ctest --test-dir build \
   -R 'MemoryDemChunks|MemoryExperiment|MemoryRecord|memory_experiment_generator_cli' \
   --output-on-failure
 ```
 
-PyYAML is needed only by the black-box Python tests. The installed C++ tool
-uses the library's existing LLVM YAML support and has no Python dependency.
-If PyYAML is absent, CTest reports the CLI suite as skipped with installation
-instructions. CI installs it in the workflow before running tests. The CLI
-suite has a five-minute timeout; measured runtime belongs in the qualification
-record, not a claim that every supported platform finishes at the same speed.
+PyYAML is a black-box test dependency only; the installed C++ tool has no
+Python dependency. CTest reports missing PyYAML as a skip with installation
+instructions; CI installs it before testing. CLI tests have a five-minute
+timeout, with measured runtime recorded separately.
 
-Tests cover Justin's raw layout, awkward batches, invalid/overflow inputs,
-synthetic phase mappings, exact YAML round trips, independent full-circuit
-comparisons, billion-round retargeting, multi-patch sampling, deterministic
-seeds, artifact corruption and safe output handling. CLI tests cover unknown
-and duplicate options, invalid values, mode separation and failure before
-output publication. Model comparisons do not
-establish A/B-versus-global decoder accuracy.
+Tests cover bounded/full-circuit agreement, Justin's layout, awkward batches,
+overflow and invalid inputs, exact round trips, huge horizons, independent
+patches, typed decoder arguments, malformed detector maps, default geometry,
+shared generator/server configuration lookup, safe publication and rejection of
+removed output/replay/bundle flags. Base-framework tests check explicit
+unavailability; positive configuration tests require the public pattern.
 
-Remaining integration is A/B YAML emission through the public
-node/ownership/coverage and executor interfaces, real construction on the
-target install, an agreed correction-versus-logical output contract, a
-playback schedule/oracle and installed two-process replay. Same-plan
-serial/parallel correctness, seam faults, sustained worker overlap, logical
-accuracy and cores-versus-capacity/tail-latency qualification are separate
-gates; model/input tests cannot establish those results.
+Actual graph construction, same-plan serial/parallel correctness, seam faults,
+sustained overlap, sampled logical accuracy, installed replay and
+cores-versus-capacity/tail-latency measurements remain runtime gates. Model and
+configuration tests do not establish those results.

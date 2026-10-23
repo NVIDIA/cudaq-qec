@@ -8,9 +8,12 @@
 
 #include "model_provider.h"
 #include "cudaq/qec/code.h"
+#include "cudaq/qec/decoder_init.h"
+#include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/experiments.h"
 #include "cudaq/qec/memory_dem_chunks.h"
 #include "cudaq/qec/noise_model.h"
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -20,6 +23,85 @@
 
 namespace cudaq::qec::memory_experiment {
 namespace {
+
+// Keep model preparation usable with public frameworks that predate terminal
+// readout metadata. Server emission separately requires the registered public
+// parallel-window interface; no substitute schema or scheduler is installed.
+template <typename Phase>
+bool same_public_readout(const Phase &left, const Phase &right) {
+  if constexpr (requires { left.m2o_sparse; })
+    return left.m2o_sparse == right.m2o_sparse;
+  return true;
+}
+
+template <typename Spec>
+bool same_observable_names(const Spec &left, const Spec &right) {
+  if constexpr (requires { left.observable_names; })
+    return left.observable_names == right.observable_names;
+  return true;
+}
+
+phase_id terminal_phase(const dem_chunks_spec &chunks) {
+  // Phase declarations may contain unused entries. Resolve the endpoint of
+  // the actual connection chain, never the first disconnected declaration.
+  // The public chain query needs a closed horizon, so use its minimum rather
+  // than allocating an entry for every round in the requested experiment.
+  auto bounded = chunks;
+  bounded.num_rounds = std::max<std::uint64_t>(2, chunks.minimum_rounds());
+  return bounded.phase_sequence().back();
+}
+
+std::vector<std::int64_t>
+sparse_readout(const std::vector<std::vector<std::uint64_t>> &readout) {
+  std::vector<std::int64_t> result;
+  for (const auto &row : readout) {
+    for (const auto measurement : row) {
+      if (measurement > std::numeric_limits<std::int64_t>::max())
+        throw std::overflow_error(
+            "memory experiment: readout index exceeds int64 coordinates");
+      result.push_back(static_cast<std::int64_t>(measurement));
+    }
+    result.push_back(-1);
+  }
+  return result;
+}
+
+template <typename Spec, typename Mapping>
+void attach_readout(Spec &chunks, const Mapping &readout,
+                    std::size_t first_measurement) {
+  if constexpr (requires { chunks.phases.front().spec.m2o_sparse; }) {
+    const auto last = terminal_phase(chunks);
+    for (auto &phase : chunks.phases)
+      if (phase.id == last)
+        phase.spec.m2o_sparse = m2o_sparse(readout, first_measurement);
+  }
+}
+
+template <typename Spec>
+void check_public_readout(
+    const Spec &chunks, const std::vector<std::vector<std::uint64_t>> &readout,
+    bool required) {
+  if constexpr (requires { chunks.phases.front().spec.m2o_sparse; }) {
+    const auto last = terminal_phase(chunks);
+    const auto expected = sparse_readout(readout);
+    for (const auto &phase : chunks.phases) {
+      const auto &actual = phase.spec.m2o_sparse;
+      if (phase.id == last) {
+        if ((!actual.empty() || required) && actual != expected)
+          throw std::invalid_argument(
+              "memory experiment: terminal m2o_sparse disagrees with "
+              "raw-logical support");
+      } else if (!actual.empty()) {
+        throw std::invalid_argument("memory experiment: m2o_sparse is only "
+                                    "valid on the terminal phase");
+      }
+    }
+  } else if (required) {
+    throw std::invalid_argument(
+        "memory experiment: this framework does not support terminal "
+        "m2o_sparse metadata");
+  }
+}
 
 void validate_code_geometry(const experiment_spec &spec) {
   validate_experiment_spec(spec);
@@ -38,7 +120,7 @@ void validate_code_geometry(const experiment_spec &spec) {
 bool same_phase(const dem_chunk_spec &left, const dem_chunk_spec &right) {
   if (left.num_faults != right.num_faults || left.H_sparse != right.H_sparse ||
       left.seam_specs != right.seam_specs || left.O_sparse != right.O_sparse ||
-      left.D_sparse != right.D_sparse ||
+      left.D_sparse != right.D_sparse || !same_public_readout(left, right) ||
       left.num_measurements != right.num_measurements ||
       left.error_rates.size() != right.error_rates.size())
     return false;
@@ -53,6 +135,7 @@ bool same_phases(const dem_chunks_spec &left, const dem_chunks_spec &right) {
   if (left.seam != right.seam || left.connections != right.connections ||
       left.measurements_per_round != right.measurements_per_round ||
       left.phases_supply_D_sparse != right.phases_supply_D_sparse ||
+      !same_observable_names(left, right) ||
       left.phases.size() != right.phases.size())
     return false;
   // num_rounds intentionally differs; every retained phase must agree.
@@ -94,6 +177,7 @@ prepared_model characterize(const code &surface, operation prep,
       relative.push_back(measurement - final_begin);
     }
   }
+  attach_readout(result.chunks, inputs.m2o, final_begin);
   return result;
 }
 
@@ -167,9 +251,49 @@ void validate_prepared_model(const preparation_request &request,
       model.chunks.num_rounds != actual.rounds + 1)
     throw std::invalid_argument("memory experiment: prepared model geometry or "
                                 "horizon is inconsistent");
+  if (model.final_m2o != readout_support)
+    throw std::invalid_argument(
+        "memory experiment: raw-logical map disagrees with code and basis");
+  for (const auto &phase : model.chunks.phases)
+    if (std::count(phase.spec.O_sparse.begin(), phase.spec.O_sparse.end(),
+                   std::int64_t{-1}) != readout_support.size())
+      throw std::invalid_argument(
+          "memory experiment: prepared phase fault-observable count "
+          "disagrees with raw-logical count");
+  model.chunks.validate();
+  if (!model.chunks.has_D_sparse() ||
+      model.chunks.measurements_per_round != regular)
+    throw std::invalid_argument(
+        "memory experiment: prepared model requires per-phase detector "
+        "maps with the regular measurement width");
+  // Exercise both seams and a second bulk visit without expanding the shot.
+  // In particular, phase validation alone does not bound D rows or indices.
+  (void)model.chunks.repeating_rounds();
+  auto bounded = model.chunks;
+  const auto minimum = std::max<std::uint64_t>(2, bounded.minimum_rounds());
+  if (minimum == std::numeric_limits<std::uint64_t>::max())
+    throw std::overflow_error(
+        "memory experiment: representative phase chain exceeds round range");
+  bounded.num_rounds = minimum + 1;
+  const auto sequence = bounded.phase_sequence();
+  for (std::size_t round = 0; round < sequence.size(); ++round)
+    if (bounded.measurements_of(bounded.get_phase(sequence[round])) !=
+        (round + 1 == sequence.size() ? data : regular))
+      throw std::invalid_argument(
+          "memory experiment: phase measurement width disagrees with "
+          "the raw record layout");
+  (void)decoder_init::from_dem_chunks(bounded);
+  (void)dem_chunks_to_d_sparse(bounded);
   validate_characterization_provenance(model.chunks, regular, data,
                                        model.characterization_rounds,
                                        model.validation_rounds);
+  validate_final_readout(model.chunks, model.final_m2o);
+}
+
+void validate_final_readout(
+    const dem_chunks_spec &chunks,
+    const std::vector<std::vector<std::uint64_t>> &readout, bool required) {
+  check_public_readout(chunks, readout, required);
 }
 
 void validate_characterization_provenance(const dem_chunks_spec &chunks,
