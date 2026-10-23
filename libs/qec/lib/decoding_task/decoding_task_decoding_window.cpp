@@ -5,13 +5,14 @@
 
 // Decoding windows built from dem_chunks: request validation, instance
 // ranges, window placement, construction from a locally closed chain with
-// its commit columns' parallel conflicts, and the canonical workload's
-// commit, sends and frame update. Models stay sparse throughout, since a
-// window at a large distance would take gigabytes as dense matrices.
-// Construction runs at configuration time and may allocate; nothing here is
-// on the hot path.
+// its commit columns' parallel conflicts, and the canonical workload:
+// receiving sends, decoding, and the commit, sends and frame update. Models
+// stay sparse throughout, since a window at a large distance would take
+// gigabytes as dense matrices. Construction runs at configuration time and may
+// allocate; nothing here is on the hot path.
 
 #include "decoding_task_decoding_window.h"
+#include "cudaq/qec/decoder_init.h"
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -993,5 +994,110 @@ window_outputs commit_window(const decoding_window &window,
   }
   return out;
 } // end - commit_window()
+
+// Rows are matched through the shot: the sender's rows count from its first
+// round, the receiver's own rows from its own, and its imported rows follow
+// them, counted from its first imported round.
+void receive_send(const decoding_window &receiver,
+                  const decoding_window &sender, std::size_t send,
+                  const std::vector<std::uint8_t> &values,
+                  std::vector<std::uint8_t> &detectors) {
+  std::vector<std::size_t> rows;
+  const auto reject = [](const std::string &what) {
+    throw std::invalid_argument("receive_send: " + what);
+  };
+  if (!receiver.context || receiver.context != sender.context ||
+      receiver.shot_rounds != sender.shot_rounds)
+    reject("the windows are not of one shot on one template");
+  if (send >= sender.sends.size())
+    reject("window " + std::to_string(sender.k) + " has no send " +
+           std::to_string(send));
+  const auto &s = sender.sends[send];
+  if (values.size() != s.rows.size() ||
+      detectors.size() != receiver.model.h.num_rows())
+    reject("send '" + s.id + "' has " + std::to_string(s.rows.size()) +
+           " rows and its receiver " +
+           std::to_string(receiver.model.h.num_rows()) + ", given " +
+           std::to_string(values.size()) + " values and " +
+           std::to_string(detectors.size()) + " detectors");
+  const auto &t = *receiver.context;
+  const auto R = receiver.shot_rounds;
+  const auto imports = receiver.output.imports;
+  const auto sender_first = t.row_offset(sender.rounds.begin, R);
+  const auto own_first = t.row_offset(receiver.rounds.begin, R);
+  const auto import_first =
+      imports.empty() ? 0 : t.row_offset(imports.begin, R);
+  const auto import_end = imports.empty() ? 0 : t.row_offset(imports.end, R);
+  for (const auto r : s.rows) {
+    const auto row = sender_first + r;
+    const bool own =
+        row >= own_first && row - own_first < receiver.num_own_rows;
+    const bool imported = row >= import_first && row < import_end;
+    if (s.mode == send_mode::delta && own)
+      rows.push_back(row - own_first);
+    else if (s.mode == send_mode::residual && imported)
+      rows.push_back(receiver.num_own_rows + row - import_first);
+    else
+      reject("send '" + s.id + "' of window " + std::to_string(sender.k) +
+             " reaches shot row " + std::to_string(row) + ", which window " +
+             std::to_string(receiver.k) + " does not take as a " +
+             (s.mode == send_mode::delta ? "delta" : "residual"));
+  } // end - for(r)
+  for (std::size_t i = 0; i < rows.size(); ++i)
+    if (s.mode == send_mode::delta)
+      detectors[rows[i]] ^= values[i] & 1;
+    else
+      detectors[rows[i]] = values[i] & 1;
+} // end - receive_send()
+
+// H keeps only the decoder's columns, so its priors are the leading ones.
+std::unique_ptr<decoder>
+make_window_decoder(const decoding_window &window, const std::string &name,
+                    const cudaqx::heterogeneous_map &params) {
+  const auto columns = window.num_decoder_columns();
+  const auto &priors = window.model.priors;
+  if (window.model.h.num_rows() == 0 || columns == 0)
+    return nullptr;
+  return get_decoder(
+      name,
+      decoder_init(
+          window.model.h, std::nullopt,
+          std::vector<double>(priors.begin(), priors.begin() + columns)),
+      decoder_output_request{decode_result_type::errors}, params);
+}
+
+// The decoder's soft result is made hard. H e is formed from H's columns,
+// which are the decoder's, and compared with the detectors.
+window_solution solve_window(const decoding_window &window, decoder *dec,
+                             const std::vector<std::uint8_t> &detectors) {
+  window_solution out;
+  const auto &h = window.model.h;
+  std::vector<std::uint8_t> explained(h.num_rows(), 0);
+  if (detectors.size() != h.num_rows())
+    throw std::invalid_argument(
+        "solve_window: expected " + std::to_string(h.num_rows()) +
+        " detectors, got " + std::to_string(detectors.size()));
+  out.estimate.assign(window.model.o.num_cols(), 0);
+  if (dec) {
+    const auto result =
+        dec->decode(std::vector<float_t>(detectors.begin(), detectors.end()));
+    if (result.result.size() != h.num_cols())
+      throw std::invalid_argument("solve_window: the decoder returned " +
+                                  std::to_string(result.result.size()) +
+                                  " columns for a window of " +
+                                  std::to_string(h.num_cols()));
+    out.converged = result.converged;
+    for (std::size_t c = 0; c < h.num_cols(); ++c)
+      out.estimate[c] = convert_soft_to_hard(result.result[c]);
+  }
+  for (std::size_t c = 0; c < h.num_cols(); ++c)
+    if (out.estimate[c])
+      for (auto p = h.ptr()[c]; p < h.ptr()[c + 1]; ++p)
+        explained[h.indices()[p]] ^= 1;
+  for (std::size_t r = 0; r < explained.size(); ++r)
+    out.satisfied = out.satisfied && explained[r] == (detectors[r] & 1);
+  out.outputs = commit_window(window, detectors, out.estimate);
+  return out;
+} // end - solve_window()
 
 } // namespace cudaq::qec
