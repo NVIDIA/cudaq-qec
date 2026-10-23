@@ -438,6 +438,7 @@ struct dem_chunks_spec {
 
   /// The detector rows @p phase's round contributes when closed: its to_seam
   /// band and interior rows. Builds the phase's chunk on each call.
+  /// @param phase The DEM chunk phase whose detector rows are counted.
   /// @param context Prefix for error messages, as for dem_chunk_from_spec().
   /// @throws std::invalid_argument if the phase is inconsistent.
   uint64_t detectors_of(const dem_chunk_spec &phase,
