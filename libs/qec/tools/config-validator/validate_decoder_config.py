@@ -31,10 +31,18 @@ configuration, so a file that passes here may still be rejected at load.
 Task-graph configurations (a decoder entry with a ``task_graph`` block) are
 reported as invalid unless ``--allow-task-graph`` is given.
 
-Numbers are read with YAML 1.2 rules, which is what the server's LLVM YAML
-parser applies: ``6e-05`` and ``1e3`` are floats. PyYAML's default YAML 1.1
-resolver reads those spellings as strings, which is why a stock
-``yaml.safe_load`` must not be used for these files.
+Scalars are read the way the server's LLVM YAML parser reads them, which is
+not how PyYAML reads them by default. The server takes every scalar as raw
+text and converts it according to the type of the field it lands in, so
+quoting does not matter (``'3'`` is a valid integer, ``yes`` in a string
+field is the string ``yes``), integers accept ``0x``/``0b``/``0o`` prefixes
+and a leading ``0`` for octal but no sign ``+`` and no ``_``, floats accept
+anything ``strtod`` accepts (``6e-05``, ``1.``, ``inf``, hex floats) but not
+``_`` or YAML's ``.inf``, and booleans are exactly LLVM's set
+(``y yes true on`` / ``n no false off`` in their usual capitalisations, not
+``1``/``0``). Duplicate mapping keys and YAML anchors/aliases are rejected.
+This script loads every scalar as text and applies those rules while
+checking the schema, so its verdicts match the server's for scalars.
 """
 
 import argparse
@@ -51,26 +59,197 @@ except ImportError as exc:  # pragma: no cover - exercised by hand
                      "pip install pyyaml jsonschema\n")
     sys.exit(2)
 
-# YAML 1.2 core schema float: an optional sign, digits with an optional
-# fraction (or a bare fraction), and an optional exponent. The mantissa does
-# not need a dot, unlike YAML 1.1. Integers are still resolved first by
-# PyYAML's own int resolver because it was registered earlier.
-_YAML12_FLOAT = re.compile(
-    r"""^[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)
-                               (?:[eE][-+]?[0-9]+)?$""", re.X)
+# --- YAML loading: raw scalars, no duplicates, no aliases -------------------
 
 
-class Yaml12Loader(yaml.SafeLoader):
-    """``yaml.SafeLoader`` with YAML 1.2 float resolution."""
+class RawLoader(yaml.SafeLoader):
+    """``yaml.SafeLoader`` that mirrors the server's structural rules.
+
+    Every plain scalar stays a string (the server types scalars by the field
+    they land in, see ``LlvmScalars``), duplicate mapping keys are an error,
+    and anchors/aliases are an error.
+    """
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.events.AliasEvent):
+            event = self.peek_event()
+            raise yaml.constructor.ConstructorError(
+                None, None, "YAML aliases are not supported by the decoder "
+                "configuration parser", event.start_mark)
+        return super().compose_node(parent, index)
+
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping", node.start_mark,
+                    f"duplicated mapping key '{key}'", key_node.start_mark)
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
 
 
-Yaml12Loader.add_implicit_resolver("tag:yaml.org,2002:float", _YAML12_FLOAT,
-                                   list("-+.0123456789"))
+# Drop every implicit resolver (int, float, bool, null, timestamp, ...): a
+# plain scalar is tagged as a string, exactly like a quoted one.
+RawLoader.yaml_implicit_resolvers = {}
 
 
 def load_yaml(text):
-    """Parse ``text`` as a YAML document with YAML 1.2 number rules."""
-    return yaml.load(text, Loader=Yaml12Loader)
+    """Parse ``text`` with ``RawLoader``: scalars are strings.
+
+    Like ``llvm::yaml::Input``, only the first document of a stream is read;
+    anything after a ``---`` separator is ignored.
+    """
+    return next(yaml.load_all(text, Loader=RawLoader), None)
+
+
+# --- scalar conversion rules of the server (LLVM YAML ScalarTraits) --------
+
+
+class LlvmScalars:
+    """Convert raw scalar text like ``llvm::yaml`` does, or return ``None``."""
+
+    TRUE = {
+        "y", "Y", "yes", "Yes", "YES", "true", "True", "TRUE", "on", "On", "ON"
+    }
+    FALSE = {
+        "n", "N", "no", "No", "NO", "false", "False", "FALSE", "off", "Off",
+        "OFF"
+    }
+
+    # What strtod consumes in full: decimal, hex float, inf/infinity, nan.
+    _FLOAT = re.compile(
+        r"""^[+-]?(?:
+              (?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?
+            | 0[xX](?:[0-9a-fA-F]+\.?[0-9a-fA-F]*|\.[0-9a-fA-F]+)(?:[pP][+-]?[0-9]+)?
+            | inf(?:inity)?
+            | nan
+            )$""", re.X | re.I)
+
+    @classmethod
+    def boolean(cls, text):
+        if isinstance(text, bool):
+            return text
+        if not isinstance(text, str):
+            return None
+        if text in cls.TRUE:
+            return True
+        if text in cls.FALSE:
+            return False
+        return None
+
+    @classmethod
+    def integer(cls, text):
+        """``StringRef::getAsInteger(0)``: auto radix, ``-`` but no ``+``."""
+        if isinstance(text, bool):
+            return None
+        if isinstance(text, int):
+            return text
+        if not isinstance(text, str):
+            return None
+        negative = text.startswith("-")
+        digits = text[1:] if negative else text
+        radix = 10
+        if digits[:2] in ("0x", "0X"):
+            digits, radix = digits[2:], 16
+        elif digits[:2] in ("0b", "0B"):
+            digits, radix = digits[2:], 2
+        elif digits.startswith("0o"):
+            digits, radix = digits[2:], 8
+        elif len(digits) > 1 and digits[0] == "0" and digits[1].isdigit():
+            digits, radix = digits[1:], 8
+        if not digits or not re.fullmatch(r"[0-9a-fA-F]+", digits):
+            return None
+        try:
+            value = int(digits, radix)
+        except ValueError:
+            return None
+        value = -value if negative else value
+        # Widest C++ targets are 64-bit; anything beyond overflows there.
+        if value > 2**64 - 1 or value < -2**63:
+            return None
+        return value
+
+    @classmethod
+    def number(cls, text):
+        """``StringRef::getAsDouble``: strtod that must consume everything."""
+        if isinstance(text, bool):
+            return None
+        if isinstance(text, (int, float)):
+            return text
+        if not isinstance(text, str):
+            return None
+        if text == "":
+            return 0.0
+        if not cls._FLOAT.match(text):
+            return None
+        try:
+            return float.fromhex(text) if "x" in text.lower() else float(text)
+        except ValueError:
+            return None
+
+
+def _type_checker():
+    base = jsonschema.Draft202012Validator.TYPE_CHECKER
+    return base.redefine_many({
+        "integer": lambda _, v: LlvmScalars.integer(v) is not None,
+        "number": lambda _, v: LlvmScalars.number(v) is not None,
+        "boolean": lambda _, v: LlvmScalars.boolean(v) is not None,
+    })
+
+
+def _bound(keyword, compare, describe):
+
+    def check(validator, limit, instance, schema):
+        if not isinstance(instance,
+                          (str, int, float)) or isinstance(instance, bool):
+            return
+        if keyword.endswith("imum") and isinstance(
+                instance, str) and instance.startswith("-") and limit >= 0:
+            # The field is unsigned on the server; its parser rejects the
+            # sign outright, even for -0.
+            yield jsonschema.ValidationError(
+                f"{instance!r} is negative but the field is unsigned")
+            return
+        value = LlvmScalars.number(instance)
+        if value is None:
+            return  # The type check reports it.
+        if not compare(value, limit):
+            yield jsonschema.ValidationError(
+                f"{instance!r} is {describe} {limit}")
+
+    return check
+
+
+def _validator_class():
+    return jsonschema.validators.extend(
+        jsonschema.Draft202012Validator,
+        validators={
+            "minimum":
+                _bound("minimum", lambda v, m: v >= m,
+                       "less than the minimum of"),
+            "maximum":
+                _bound("maximum", lambda v, m: v <= m,
+                       "greater than the maximum of"),
+            "exclusiveMinimum":
+                _bound("exclusiveMinimum", lambda v, m: v > m,
+                       "less than or equal to the minimum of"),
+            "exclusiveMaximum":
+                _bound("exclusiveMaximum", lambda v, m: v < m,
+                       "greater than or equal to the maximum of"),
+        },
+        type_checker=_type_checker())
+
+
+def make_validator(schema):
+    """A jsonschema validator for ``schema`` with the server's scalar rules."""
+    cls = _validator_class()
+    cls.check_schema(schema)
+    return cls(schema)
+
+
+# --- schema handling ----------------------------------------------------------
 
 
 def schema_from_installed_package():
@@ -92,6 +271,14 @@ def forbid_task_graph(schema):
     return schema
 
 
+def known_decoder_types(schema):
+    """Decoder ``type`` names whose parameters the schema describes."""
+    return set(schema.get("$defs", {}).get("decoder_params", {}))
+
+
+# --- document checks ----------------------------------------------------------
+
+
 def task_graph_locations(doc):
     """Yield the document paths of decoder entries that use a task graph."""
     decoders = doc.get("decoders") if isinstance(doc, dict) else None
@@ -102,18 +289,13 @@ def task_graph_locations(doc):
             yield f"decoders/{index}"
 
 
-def known_decoder_types(schema):
-    """Decoder ``type`` names whose parameters the schema describes."""
-    return set(schema.get("$defs", {}).get("decoder_params", {}))
-
-
 def unknown_type_locations(doc, known_types):
     """Yield ``(path, type)`` for decoders whose type the schema does not know.
 
-    The schema lets such a decoder carry no ``decoder_custom_args`` at all,
-    and jsonschema then reports that by dumping the whole args mapping. Only
-    decoders that do carry args are reported here; the plain schema error
-    covers the rest.
+    The server rejects a ``decoder_custom_args`` section, even an empty one,
+    for a type with no registered parameter schema; jsonschema would report
+    that by dumping the whole args mapping. Decoders without the section are
+    left to the schema.
     """
     decoders = doc.get("decoders") if isinstance(doc, dict) else None
     if not isinstance(decoders, list):
@@ -123,7 +305,7 @@ def unknown_type_locations(doc, known_types):
             continue
         type_name = decoder.get("type")
         if (isinstance(type_name, str) and type_name not in known_types and
-                decoder.get("decoder_custom_args")):
+                "decoder_custom_args" in decoder):
             yield f"decoders/{index}", type_name
 
 
@@ -162,13 +344,10 @@ def validate_document(doc, validator, allow_task_graph=False, known_types=None):
     return problems
 
 
-def validate_file(path, validator, allow_task_graph=False, known_types=None):
-    """Validate one file; returns the problem list (empty when valid)."""
+def validate_text(text, validator, allow_task_graph=False, known_types=None):
+    """Validate one YAML document given as text; returns the problem list."""
     try:
-        with open(path, encoding="utf-8") as handle:
-            doc = load_yaml(handle.read())
-    except OSError as exc:
-        return [("<file>", str(exc))]
+        doc = load_yaml(text)
     except yaml.YAMLError as exc:
         detail = " ".join(line.strip() for line in str(exc).splitlines())
         return [("<yaml>", f"not valid YAML: {detail}")]
@@ -176,6 +355,19 @@ def validate_file(path, validator, allow_task_graph=False, known_types=None):
         return [("<root>", "the document must be a mapping with a "
                  "'decoders' list")]
     return validate_document(doc, validator, allow_task_graph, known_types)
+
+
+def validate_file(path, validator, allow_task_graph=False, known_types=None):
+    """Validate one file; returns the problem list (empty when valid)."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        return [("<file>", str(exc))]
+    return validate_text(text, validator, allow_task_graph, known_types)
+
+
+# --- command line -------------------------------------------------------------
 
 
 def build_parser():
@@ -231,11 +423,10 @@ def main(argv=None):
                          "entries will be reported as unexpected keys\n")
 
     try:
-        jsonschema.Draft202012Validator.check_schema(schema)
+        validator = make_validator(schema)
     except jsonschema.SchemaError as exc:
         sys.stderr.write(f"not a valid JSON Schema: {exc.message}\n")
         return 2
-    validator = jsonschema.Draft202012Validator(schema)
 
     if args.export_schema:
         with open(args.export_schema, "w", encoding="utf-8") as handle:

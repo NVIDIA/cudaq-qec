@@ -3,8 +3,10 @@
 """Tests for libs/qec/tools/config-validator/validate_decoder_config.py.
 
 The validator is a standalone script (pyyaml + jsonschema, no cudaq_qec
-import on the validating machine). These tests load it as a module and run
-it against the schema exported by this installation.
+import on the validating machine). These tests load it as a module, run it
+against the schema exported by this installation, and -- the part that
+matters -- compare its verdicts with the server's own parser
+(``multi_decoder_config.from_yaml_str``) on a corpus of documents.
 """
 
 import importlib.util
@@ -63,13 +65,7 @@ def _run(tool, capsys, *argv):
     return status, capsys.readouterr().out
 
 
-def test_yaml12_floats_without_a_dot_in_the_mantissa(tool):
-    # PyYAML's YAML 1.1 resolver would read 6e-05 and 1e3 as strings; the
-    # server's LLVM YAML parser and this loader read them as floats.
-    doc = tool.load_yaml("v: [6e-05, 6.0e-05, 1e3, .5, 0.1, 7, -2]")
-    assert doc["v"] == [6e-05, 6e-05, 1000.0, 0.5, 0.1, 7, -2]
-    assert all(isinstance(x, float) for x in doc["v"][:5])
-    assert all(isinstance(x, int) for x in doc["v"][5:])
+# --- command line behaviour -------------------------------------------------
 
 
 def test_valid_config_passes(tool, schema_file, tmp_path, capsys):
@@ -81,6 +77,8 @@ def test_valid_config_passes(tool, schema_file, tmp_path, capsys):
 
 def test_scientific_notation_error_rates_pass(tool, schema_file, tmp_path,
                                               capsys):
+    # PyYAML's YAML 1.1 resolver reads 6e-05 as a string; the server's LLVM
+    # YAML parser reads it as a float, and so must the validator.
     text = _GOOD_YAML.replace("[0.1, 0.1, 0.1]", "[6e-05, 6e-05, 1e-3]")
     path = _write(tmp_path, "sci.yml", text)
     status, out = _run(tool, capsys, "--schema", str(schema_file), path)
@@ -108,8 +106,8 @@ def test_wrong_type_is_reported(tool, schema_file, tmp_path, capsys):
 
 def test_unknown_decoder_type_with_args_is_explained(tool, schema_file,
                                                      tmp_path, capsys):
-    # A type the schema does not know may carry no args; jsonschema would
-    # only say the args mapping "has too many properties". Name the cause.
+    # A type the schema does not know may carry no args section at all;
+    # jsonschema would only say the args mapping "has too many properties".
     text = _GOOD_YAML.replace("type: pymatching", "type: pymatchnig")
     path = _write(tmp_path, "unknown.yml", text)
     status, out = _run(tool, capsys, "--schema", str(schema_file), path)
@@ -182,3 +180,348 @@ def test_mixed_results_exit_nonzero_and_report_each_file(
     assert f"{good}: OK\n" in out
     assert f"{bad}: FAIL\n" in out
     assert "D_sparse_matrix" in out
+
+
+# --- scalar rules: the validator reads scalars like llvm::yaml --------------
+
+
+def test_scalars_are_loaded_as_text(tool):
+    doc = tool.load_yaml("a: 6e-05\nb: yes\nc: ~\nd: '3'\ne: 010\n")
+    assert doc == {"a": "6e-05", "b": "yes", "c": "~", "d": "3", "e": "010"}
+
+
+@pytest.mark.parametrize("text, value", [
+    ("3", 3),
+    ("'3'", "3"),
+    ("010", 8),
+    ("0o10", 8),
+    ("0x1f", 31),
+    ("0X1f", 31),
+    ("0b11", 3),
+    ("-1", -1),
+    ("00", 0),
+    ("18446744073709551615", 2**64 - 1),
+])
+def test_integer_rule_accepts(tool, text, value):
+    scalar = tool.load_yaml(f"v: {text}")["v"]
+    assert tool.LlvmScalars.integer(scalar) == (value if isinstance(value, int)
+                                                else int(value))
+
+
+@pytest.mark.parametrize("text", [
+    "+3", "0O10", "0x", "", "1.", "3.0", "1e3", "1_000", "1:30", " 3 ",
+    "18446744073709551616", "three", "yes"
+])
+def test_integer_rule_rejects(tool, text):
+    assert tool.LlvmScalars.integer(text) is None
+
+
+@pytest.mark.parametrize("text, value", [
+    ("6e-05", 6e-05),
+    ("1e3", 1000.0),
+    (".5", 0.5),
+    ("1.", 1.0),
+    ("1.e3", 1000.0),
+    ("+.5e-3", 0.0005),
+    ("0x10", 16.0),
+    ("0x1p-3", 0.125),
+    ("010", 10.0),
+    ("1", 1.0),
+    ("-0.0", -0.0),
+    ("", 0.0),
+])
+def test_number_rule_accepts(tool, text, value):
+    assert tool.LlvmScalars.number(text) == value
+
+
+def test_number_rule_accepts_inf_and_nan(tool):
+    import math
+    assert tool.LlvmScalars.number("inf") == math.inf
+    assert tool.LlvmScalars.number("-Inf") == -math.inf
+    assert math.isnan(tool.LlvmScalars.number("nan"))
+    assert tool.LlvmScalars.number("1e400") == math.inf
+
+
+@pytest.mark.parametrize("text",
+                         ["1_000.5", ".inf", ".nan", "yes", "1e", ".e3", "1,5"])
+def test_number_rule_rejects(tool, text):
+    assert tool.LlvmScalars.number(text) is None
+
+
+def test_boolean_rule_is_llvm_parsebool(tool):
+    yes = [
+        "y", "Y", "yes", "Yes", "YES", "true", "True", "TRUE", "on", "On", "ON"
+    ]
+    no = [
+        "n", "N", "no", "No", "NO", "false", "False", "FALSE", "off", "Off",
+        "OFF"
+    ]
+    assert all(tool.LlvmScalars.boolean(t) is True for t in yes)
+    assert all(tool.LlvmScalars.boolean(t) is False for t in no)
+    for t in ["1", "0", "t", "f", "T", "yEs", "", "~", "null"]:
+        assert tool.LlvmScalars.boolean(t) is None
+
+
+def test_duplicate_keys_and_aliases_are_rejected(tool):
+    import yaml
+    with pytest.raises(yaml.YAMLError, match="duplicated mapping key"):
+        tool.load_yaml("a: 1\nb: 2\na: 3\n")
+    with pytest.raises(yaml.YAMLError, match="aliases are not supported"):
+        tool.load_yaml("a: &x [1]\nb: *x\n")
+
+
+# --- differential test: validator verdict == server parser verdict ----------
+#
+# Every document below goes through the validator and through
+# multi_decoder_config.from_yaml_str, the parser the decoding server uses.
+# Both must accept or both must reject. from_yaml_str also runs the
+# per-decoder validate hooks; cases that only a hook rejects would show up
+# here as a disagreement, so the corpus is built from structural and scalar
+# variations, which is what the validator claims to cover.
+
+_BASE = """decoders:
+  - id: {id}
+    type: {type}
+    block_size: {block_size}
+    syndrome_size: 3
+    H_sparse: [0, -1, 1, -1, 2, -1]
+    O_sparse: [0, -1, 1, -1, 2, -1]
+    D_sparse: [0, -1, 1, -1, 2, -1]
+    decoder_custom_args:
+{args}"""
+
+_PM_ARGS = ("      merge_strategy: {ms}\n"
+            "      error_rate_vec: [{erv}, 0.1, 0.1]\n")
+_CH_ARGS = "      return_weight: {b}\n"
+
+
+def _doc(id="0",
+         type="pymatching",
+         block_size="3",
+         ms="smallest_weight",
+         erv="0.1",
+         args=None):
+    if args is None:
+        args = _PM_ARGS.format(ms=ms, erv=erv)
+    return _BASE.format(id=id, type=type, block_size=block_size, args=args)
+
+
+def _corpus_cases():
+    cases = {
+        "baseline":
+            _doc(),
+        # floats (error_rate_vec)
+        "float 6e-05":
+            _doc(erv="6e-05"),
+        "float 1e3":
+            _doc(erv="1e3"),
+        "float .5":
+            _doc(erv=".5"),
+        "float 1.":
+            _doc(erv="1."),
+        "float +.5e-3":
+            _doc(erv="+.5e-3"),
+        "float quoted":
+            _doc(erv="'0.1'"),
+        "float int":
+            _doc(erv="1"),
+        "float 0x10":
+            _doc(erv="0x10"),
+        "float hex p":
+            _doc(erv="0x1p-3"),
+        "float inf":
+            _doc(erv="inf"),
+        "float nan":
+            _doc(erv="nan"),
+        "float 1_000.5":
+            _doc(erv="1_000.5"),
+        "float .inf":
+            _doc(erv=".inf"),
+        "float .nan":
+            _doc(erv=".nan"),
+        "float yes":
+            _doc(erv="yes"),
+        "float 1e":
+            _doc(erv="1e"),
+        "float .e3":
+            _doc(erv=".e3"),
+        # unsigned integers (block_size)
+        "int 010":
+            _doc(block_size="010"),
+        "int 0o10":
+            _doc(block_size="0o10"),
+        "int 0O10":
+            _doc(block_size="0O10"),
+        "int 0x10":
+            _doc(block_size="0x10"),
+        "int 0b11":
+            _doc(block_size="0b11"),
+        "int quoted":
+            _doc(block_size="'3'"),
+        "int +3":
+            _doc(block_size="+3"),
+        "int -1":
+            _doc(block_size="-1"),
+        "int -0":
+            _doc(block_size="-0"),
+        "int 1_000":
+            _doc(block_size="1_000"),
+        "int 1e3":
+            _doc(block_size="1e3"),
+        "int 3.0":
+            _doc(block_size="3.0"),
+        "int 1.":
+            _doc(block_size="1."),
+        "int 1:30":
+            _doc(block_size="1:30"),
+        "int uint64 max":
+            _doc(block_size="18446744073709551615"),
+        "int uint64 max + 1":
+            _doc(block_size="18446744073709551616"),
+        "int spaces":
+            _doc(block_size="' 3 '"),
+        "int empty":
+            _doc(block_size="''"),
+        # signed integers (id)
+        "id -1":
+            _doc(id="-1"),
+        "id +1":
+            _doc(id="+1"),
+        "id quoted":
+            _doc(id="'7'"),
+        # strings (merge_strategy, type)
+        "str on":
+            _doc(ms="on"),
+        "str ~":
+            _doc(ms="~"),
+        "str null":
+            _doc(ms="null"),
+        "str 123":
+            _doc(ms="123"),
+        "str 1e3":
+            _doc(ms="1e3"),
+        "str empty":
+            _doc(ms="''"),
+        "type yes":
+            _doc(type="yes"),
+        # booleans (chromobius return_weight)
+        **{
+            f"bool {b}": _doc(type="chromobius", args=_CH_ARGS.format(b=b)) for b in [
+                "true", "True", "TRUE", "yes", "Yes", "YES", "y", "Y", "on", "On", "ON", "false", "no", "n", "off", "Off", "'yes'", "1", "0", "t", "T", "yEs", "~", "null", "''"
+            ]
+        },
+        # structure
+        "dup key":
+            _doc().replace("    syndrome_size: 3\n",
+                           "    syndrome_size: 3\n    block_size: 4\n"),
+        "dup key in args":
+            _doc(args=_PM_ARGS.format(ms="smallest_weight", erv="0.1") +
+                 "      merge_strategy: smallest_weight\n"),
+        "alias":
+            _doc().replace("H_sparse: [0, -1, 1, -1, 2, -1]",
+                           "H_sparse: &m [0, -1, 1, -1, 2, -1]").replace(
+                               "O_sparse: [0, -1, 1, -1, 2, -1]",
+                               "O_sparse: *m"),
+        "merge key":
+            "base: &b\n  merge_strategy: smallest_weight\n" +
+            _doc(args="      <<: *b\n      error_rate_vec: [0.1, 0.1, 0.1]\n"),
+        "tab indentation":
+            _doc().replace("    type:", "\ttype:"),
+        "args {}":
+            _doc(args="      {}\n"),
+        "args ~":
+            _doc(args="").replace("decoder_custom_args:\n",
+                                  "decoder_custom_args: ~\n"),
+        "args empty value":
+            _doc(args=""),
+        "unknown top key":
+            _doc().replace("decoders:", "extra: 1\ndecoders:"),
+        "document marker":
+            _doc() + "---\n",
+        "trailing comma":
+            _doc().replace("[0.1, 0.1, 0.1]", "[0.1, 0.1, 0.1,]"),
+        "double comma":
+            _doc().replace("[0.1, 0.1, 0.1]", "[0.1,, 0.1, 0.1]"),
+        "sparse float":
+            _doc().replace("H_sparse: [0, -1, 1, -1, 2, -1]",
+                           "H_sparse: [0, -1, 1.0, -1, 2, -1]"),
+        "sparse -2":
+            _doc().replace("H_sparse: [0, -1, 1, -1, 2, -1]",
+                           "H_sparse: [0, -2, 1, -1, 2, -1]"),
+        "missing D_sparse":
+            _doc().replace("    D_sparse: [0, -1, 1, -1, 2, -1]\n", ""),
+        "missing type":
+            _doc().replace("    type: pymatching\n", ""),
+        "typo in args":
+            _doc().replace("merge_strategy", "merge_stratgey"),
+        "typo in envelope":
+            _doc().replace("D_sparse", "D_sparse_matrix"),
+        "unknown type with args":
+            _doc(type="pymatchnig"),
+        "unknown type, args {}":
+            _doc(type="pymatchnig", args="      {}\n"),
+        "window_size string":
+            _doc(type="sliding_window",
+                 args="      inner_decoder_name: pymatching\n"
+                 "      window_size: two\n"),
+        "sliding_window missing inner":
+            _doc(type="sliding_window", args="      window_size: 2\n"),
+        "decoders not a list":
+            "decoders: 3\n",
+        "root is a list":
+            "- decoders: []\n",
+        "empty document":
+            "",
+    }
+    return cases
+
+
+def _corpus():
+    cases = _corpus_cases()
+    return [
+        pytest.param(label,
+                     text,
+                     marks=pytest.mark.xfail(reason=_SYNTAX_DIFFERENCES[label],
+                                             strict=True))
+        if label in _SYNTAX_DIFFERENCES else (label, text)
+        for label, text in sorted(cases.items())
+    ]
+
+
+# Syntax the two YAML parsers disagree on. Each is a document PyYAML refuses
+# to parse at all while LLVM YAML is lenient; the validator then reports a
+# YAML error where the server would load the file. Not scalar rules, and
+# not something a well-formed file contains.
+_SYNTAX_DIFFERENCES = {
+    "double comma": "LLVM YAML tolerates an empty flow-sequence entry "
+                    "(`[a,, b]`); PyYAML rejects it",
+}
+
+
+def _server_accepts(text):
+    try:
+        qec.multi_decoder_config.from_yaml_str(text)
+        return True
+    except Exception:  # The binding raises RuntimeError / ValueError.
+        return False
+
+
+@pytest.fixture(scope="module")
+def live_validator(tool):
+    schema = json.loads(qec.decoder_config_json_schema())
+    schema = tool.forbid_task_graph(schema)
+    return tool.make_validator(schema), tool.known_decoder_types(schema)
+
+
+@pytest.mark.parametrize("label, text", _corpus())
+def test_validator_agrees_with_server_parser(tool, live_validator, label, text):
+    validator, known = live_validator
+    problems = tool.validate_text(text, validator, False, known)
+    assert (not problems) == _server_accepts(text), (
+        f"{label}: validator says {'OK' if not problems else problems}, "
+        f"server says {'OK' if _server_accepts(text) else 'reject'}")
+
+
+def test_corpus_has_both_outcomes(live_validator, tool):
+    verdicts = {_server_accepts(text) for text in _corpus_cases().values()}
+    assert verdicts == {True, False}

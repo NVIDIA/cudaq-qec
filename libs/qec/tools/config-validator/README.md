@@ -50,12 +50,33 @@ only when the server loads the configuration, so a file that passes here may
 still be rejected at load. Task-graph configurations are reported as invalid
 unless `--allow-task-graph` is given.
 
-## Numbers
+## Scalars: the server's rules, not PyYAML's
 
-The script reads numbers with YAML 1.2 rules, matching the server's LLVM
-YAML parser: `6e-05` and `1e3` are floats. A plain `yaml.safe_load` follows
-YAML 1.1 and reads those spellings as strings, which the schema then rejects
-as "not of type 'number'". Use the script, or its `Yaml12Loader`, rather than
-`yaml.safe_load` when feeding these files to other tooling.
-`check-jsonschema` (which parses YAML with ruamel.yaml, a YAML 1.2 parser)
-is also fine.
+The server parses with LLVM YAML, which takes every scalar as raw text and
+converts it by the type of the field it lands in. The script does the same:
+it loads every scalar as text and applies LLVM's conversion rules while
+checking the schema. In practice:
+
+- Quoting does not matter: `'3'` is a valid integer, `'true'` a valid
+  boolean, and `yes`, `~`, `123` in a string field are the strings `yes`,
+  `~`, `123`.
+- Integers: decimal, `0x`/`0X` hex, `0b` binary, `0o` octal (lowercase only),
+  a leading `0` means octal (`010` is 8). A `-` sign is accepted where the
+  schema allows negatives, `+` never is. No `_`, no exponent, no decimal
+  point, at most 64 bits.
+- Floats: whatever `strtod` accepts in full: `6e-05`, `1.`, `1.e3`, `.5`,
+  hex floats, `inf`, `nan`. Not `1_000.5`, not YAML's `.inf`/`.nan`.
+- Booleans: exactly `y yes true on` / `n no false off` in their usual
+  capitalisations (`Yes`, `TRUE`, `Off`, ...). Not `1`/`0`, not `t`/`f`.
+- Duplicate mapping keys and YAML anchors/aliases are rejected.
+
+A plain `yaml.safe_load` follows YAML 1.1 instead: `6e-05` becomes a
+string, `on` a boolean, `010` an int but `0o10` a string, duplicates are
+silently merged. Do not feed these files to the schema through
+`yaml.safe_load`. `check-jsonschema` (ruamel.yaml, YAML 1.2) gets the
+common numeric spellings right but still differs from the server on
+quoting, booleans and duplicates.
+
+The test suite (`libs/qec/python/tests/test_config_validator.py`) runs a
+corpus of such documents through both this script and the server's parser
+(`multi_decoder_config.from_yaml_str`) and requires the verdicts to agree.

@@ -216,12 +216,14 @@ installation that has ``cudaq_qec``:
    pip install pyyaml jsonschema
    python3 validate_decoder_config.py --schema decoder_config.schema.json my_config.yaml
 
-The script reads numbers with YAML 1.2 rules, as the server's LLVM YAML
-parser does, so ``6e-05`` is a float. A plain ``yaml.safe_load`` follows
-YAML 1.1 and reads that spelling as a string, which the schema then rejects;
-do not feed these files to the schema through ``yaml.safe_load``. Task-graph
-configurations are reported as invalid unless ``--allow-task-graph`` is
-given. See the ``README.md`` next to the script for details.
+The script reads scalars the way the server's LLVM YAML parser does: every
+scalar is text, converted by the type of the field it lands in, so ``6e-05``
+is a float, ``'3'`` is an integer and ``on`` in a string field stays a
+string. A plain ``yaml.safe_load`` follows YAML 1.1 instead (``6e-05``
+becomes a string, ``on`` a boolean), so do not feed these files to the
+schema through ``yaml.safe_load``. Task-graph configurations are reported as
+invalid unless ``--allow-task-graph`` is given. See the ``README.md`` next
+to the script for the full list of rules.
 
 ``cuda_device_id`` pins a GPU-accelerated decoder (e.g. ``nv-qldpc-decoder``
 or ``trt_decoder``) to a specific CUDA device. The same knob is available as
