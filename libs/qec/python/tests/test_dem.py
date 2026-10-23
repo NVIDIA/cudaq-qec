@@ -1085,6 +1085,48 @@ def test_dem_chunk_spec_round_trips_through_attributes():
     assert spec.get_phase(qec.SeamId("final")).num_faults == 5
 
 
+def _with_readout(spec, phase, m2o):
+    """Set m2o_sparse on the named phase of spec and return spec."""
+    phases = spec.phases
+    for entry in phases:
+        if entry.id == qec.SeamId(phase):
+            entry.spec.m2o_sparse = m2o
+    spec.phases = phases
+    spec.measurements_per_round = REP5_CHECKS
+    return spec
+
+
+def test_dem_chunks_spec_detectors_of():
+    spec = _rep5_spec()
+    for e in spec.phases:
+        assert spec.detectors_of(e.spec) == REP5_CHECKS
+
+
+def test_dem_chunk_spec_m2o_sparse():
+    s = qec.DemChunkSpec()
+    assert s.m2o_sparse == []
+    s.m2o_sparse = [0, 2, -1]
+    assert s.m2o_sparse == [0, 2, -1]
+    assert not s.is_empty()
+
+
+def test_dem_chunks_spec_readout_map_and_observable_names():
+    spec = _with_readout(_rep5_spec(3), "final", [0, 3, -1])
+    spec.observable_names = ["Z_L"]
+    spec.validate()
+    assert spec.num_observables() == 1
+    assert spec.get_phase(qec.SeamId("final")).m2o_sparse == [0, 3, -1]
+    assert spec.observable_names == ["Z_L"]
+
+    spec.observable_names = ["Z_L", "X_L"]
+    with pytest.raises(ValueError, match="observable_names"):
+        spec.validate()
+    with pytest.raises(ValueError, match="only the last phase"):
+        _with_readout(_rep5_spec(3), "bulk", [0, -1]).validate()
+    with pytest.raises(ValueError, match="past the 4"):
+        _with_readout(_rep5_spec(3), "final", [REP5_CHECKS, -1]).validate()
+
+
 def test_dem_chunks_from_spec_expands_to_round_count():
     for rounds in range(3, 8):
         spec = _rep5_spec(rounds)
