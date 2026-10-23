@@ -203,6 +203,26 @@ automatically. Schema ``validate`` hooks are arbitrary code and cannot be
 represented in JSON Schema, so a file that passes the exported schema may
 still be rejected by a hook when the configuration is parsed.
 
+A ready-made validator for machines that have neither a GPU nor CUDA-Q QEC
+installed ships in ``libs/qec/tools/config-validator/``. It needs only
+``pyyaml`` and ``jsonschema``; the schema file is exported once from an
+installation that has ``cudaq_qec``:
+
+.. code-block:: bash
+
+   # On a machine with cudaq_qec installed:
+   python3 validate_decoder_config.py --export-schema decoder_config.schema.json
+   # On any machine:
+   pip install pyyaml jsonschema
+   python3 validate_decoder_config.py --schema decoder_config.schema.json my_config.yaml
+
+The script reads numbers with YAML 1.2 rules, as the server's LLVM YAML
+parser does, so ``6e-05`` is a float. A plain ``yaml.safe_load`` follows
+YAML 1.1 and reads that spelling as a string, which the schema then rejects;
+do not feed these files to the schema through ``yaml.safe_load``. Task-graph
+configurations are reported as invalid unless ``--allow-task-graph`` is
+given. See the ``README.md`` next to the script for details.
+
 ``cuda_device_id`` pins a GPU-accelerated decoder (e.g. ``nv-qldpc-decoder``
 or ``trt_decoder``) to a specific CUDA device. The same knob is available as
 a construction parameter in C++ and Python (for example,
