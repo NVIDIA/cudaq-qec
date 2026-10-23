@@ -12605,6 +12605,243 @@ TEST(DecodingTaskGraph, ConcurrentRecordsMatchSynchronousGraphKinds) {
   }
 }
 
+/// One fire of an indexed join, as the test kind below records it.
+struct index_fire {
+  std::int64_t k;
+  int a; ///< input a's bit
+  int b; ///< input b's bit, or -1 when absent
+};
+static std::mutex index_fires_mutex;
+static std::vector<index_fire> index_fires;
+
+/// Indexed one-byte probes. `tag` relays its input and publishes with the
+/// index of its own fire ordinal, and publishes nothing from `limit` on.
+/// `join` joins `a` (offset 0, required) and `b` (offset -1 from the edge) by
+/// index: instance k pairs a[k] with b[k - 1] and has no `b` at k = 0. It
+/// records every fire.
+class index_probe_node : public task_graph_node,
+                         public streaming_task_graph_node,
+                         public indexed_join_node {
+public:
+  index_probe_node(std::string id, std::string mode, std::int64_t limit,
+                   std::size_t hold_ms, int hold_bit,
+                   std::shared_ptr<pipeline_probe> probe)
+      : id_(std::move(id)), mode_(std::move(mode)), limit_(limit),
+        hold_(hold_ms), hold_bit_(hold_bit), probe_(std::move(probe)) {
+    logical_outcome output;
+    output.bits = {0};
+    output.converged = true;
+    value_out_ = edge_value{std::move(output)};
+  }
+
+  streaming_task_graph_node *streaming() override { return this; }
+  indexed_join_node *indexed_join() override {
+    return mode_ == "join" ? this : nullptr;
+  }
+
+  // indexed_join_node
+  bool requires_input(std::size_t slot) const override { return slot == 0; }
+  bool fire(std::int64_t k,
+            const std::vector<const edge_value *> &inputs) override {
+    const int a = inputs[0]->get<logical_outcome>().bits[0];
+    const int b = inputs[1] ? inputs[1]->get<logical_outcome>().bits[0] : -1;
+    {
+      std::lock_guard<std::mutex> lock(index_fires_mutex);
+      index_fires.push_back({k, a, b});
+    }
+    probe_->log(id_, static_cast<std::size_t>(k));
+    if (hold_) {
+      probe_->pool_enter();
+      std::this_thread::sleep_for(std::chrono::milliseconds(hold_));
+      probe_->pool_exit();
+    }
+    const uint8_t out = static_cast<uint8_t>(b < 0 ? a : (a ^ b));
+    value_out_.get<logical_outcome>().bits[0] = out;
+    correction_ ^= out;
+    published_ = k;
+    valid_ = true;
+    return true;
+  }
+
+  // streaming_task_graph_node
+  bool enqueue(const uint8_t *, std::size_t, round_type) override {
+    return false;
+  }
+  bool enqueue_edge_value(const edge_value &value, std::size_t) override {
+    const uint8_t bit = value.get<logical_outcome>().bits[0];
+    probe_->log(id_, records_);
+    if (static_cast<std::int64_t>(records_) >= limit_) {
+      ++records_;
+      return false;
+    }
+    if (hold_ && (hold_bit_ < 0 || bit == hold_bit_))
+      std::this_thread::sleep_for(std::chrono::milliseconds(hold_));
+    value_out_.get<logical_outcome>().bits[0] = bit;
+    published_ = static_cast<std::int64_t>(records_++);
+    valid_ = true;
+    return true;
+  }
+  std::optional<std::int64_t> published_index() const override {
+    return published_;
+  }
+  const uint8_t *corrections() const override { return &correction_; }
+  void clear_corrections() override { correction_ = 0; }
+  void reset_streaming_state() override {
+    correction_ = 0;
+    valid_ = false;
+    records_ = 0;
+    published_ = 0;
+  }
+  std::size_t num_msyn_per_decode() const override { return 0; }
+  std::size_t num_msyn_per_round() const override { return 1; }
+  std::size_t num_observables() const override {
+    return mode_ == "join" ? 1 : 0;
+  }
+  bool supports_streaming_input(std::size_t slot) const override {
+    return slot < (mode_ == "join" ? 2u : 1u);
+  }
+  std::optional<window_spec> derive_streaming_schedule(
+      std::size_t output_slot,
+      const std::vector<input_schedule> &inputs) const override {
+    if (output_slot != 0 || inputs.empty())
+      return std::nullopt;
+    return inputs[0].schedule;
+  }
+  std::optional<edge_value_type> output_type(std::size_t slot) const override {
+    return slot == 0 ? std::optional{edge_value_type("logical_outcome")}
+                     : std::nullopt;
+  }
+  std::optional<std::size_t>
+  output_value_size(std::size_t slot) const override {
+    return slot == 0 ? std::optional<std::size_t>{1} : std::nullopt;
+  }
+  bool accepts_input_type(std::size_t slot,
+                          edge_value_type type) const override {
+    return supports_streaming_input(slot) &&
+           (type == edge_value_type("logical_outcome") ||
+            type == edge_value_type("measurement_results"));
+  }
+  const edge_value *streaming_output(std::size_t slot) const override {
+    return slot == 0 && valid_ ? &value_out_ : nullptr;
+  }
+  void execute_indexed(const std::vector<edge_value> &inputs,
+                       std::vector<edge_value> &outputs) const override {
+    outputs[0] = inputs[0];
+  }
+  std::vector<std::string> inputs() const override {
+    return mode_ == "join" ? std::vector<std::string>{"a", "b"}
+                           : std::vector<std::string>{"input"};
+  }
+  std::vector<std::string> outputs() const override { return {"output"}; }
+
+private:
+  std::string id_;
+  std::string mode_;
+  std::int64_t limit_;
+  std::size_t hold_;
+  int hold_bit_;
+  std::shared_ptr<pipeline_probe> probe_;
+  uint8_t correction_ = 0;
+  bool valid_ = false;
+  std::size_t records_ = 0;
+  std::int64_t published_ = 0;
+  edge_value value_out_;
+};
+
+static const bool index_probe_registered = [] {
+  task_graph_node_kind_spec spec;
+  spec.name = "test_index_probe";
+  spec.requires_decoder = false;
+  spec.requires_dem = false;
+  decoding::config::decoder_schema schema;
+  using decoding::config::param_kind;
+  schema.params.push_back({"mode", param_kind::string, /*required=*/true});
+  schema.params.push_back({"limit", param_kind::int32, /*required=*/false});
+  schema.params.push_back({"hold_ms", param_kind::uint64, /*required=*/false});
+  schema.params.push_back({"hold_bit", param_kind::int32, /*required=*/false});
+  register_node_kind(
+      std::move(spec), std::move(schema), [](node_build_context &ctx) {
+        return std::make_unique<index_probe_node>(
+            ctx.id, ctx.node_params->get<std::string>("mode"),
+            ctx.node_params->get<int>("limit", 1 << 30),
+            ctx.node_params->get<std::size_t>("hold_ms", 0),
+            ctx.node_params->get<int>("hold_bit", -1), active_pipeline_probe);
+      });
+  return true;
+}();
+
+static task_graph_node_config index_node(std::string id, std::string mode,
+                                         int limit = 1 << 30,
+                                         std::size_t hold_ms = 0,
+                                         int hold_bit = -1,
+                                         std::size_t max_in_flight = 1) {
+  task_graph_node_config config;
+  config.id = std::move(id);
+  config.kind = "test_index_probe";
+  config.node_params.insert("mode", std::move(mode));
+  config.node_params.insert("limit", limit);
+  config.node_params.insert("hold_ms", hold_ms);
+  config.node_params.insert("hold_bit", hold_bit);
+  config.max_in_flight = max_in_flight;
+  return config;
+}
+
+// measurements -> A -> {T, R} -> J, where T and R tag their publications
+// with their fire ordinal and J joins a = T[k] with b = R[k - 1]. T stops
+// publishing at `limit`.
+static std::unique_ptr<decoding_task_graph>
+make_indexed_join_graph(const std::shared_ptr<pipeline_probe> &probe,
+                        task_graph_options options, int limit = 1 << 30,
+                        std::size_t join_copies = 1, std::size_t r_hold = 0,
+                        int r_hold_bit = -1) {
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "tag", limit));
+  nodes.push_back(index_node("R", "tag", 1 << 30, r_hold, r_hold_bit));
+  nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, join_copies));
+  return decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "T", "input"},
+       {"A", "output", "R", "input"},
+       {"T", "output", "J", "a"},
+       {"R", "output", "J", "b", /*index_offset=*/-1},
+       {"J", "output", "output", "input"}},
+      options);
+}
+
+/// Every recorded fire of J pairs record k with record k - 1.
+static void expect_indexed_pairs(const std::vector<uint8_t> &records,
+                                 std::size_t expected_fires) {
+  std::lock_guard<std::mutex> lock(index_fires_mutex);
+  ASSERT_EQ(index_fires.size(), expected_fires);
+  std::vector<bool> seen(expected_fires, false);
+  for (const auto &fire : index_fires) {
+    ASSERT_GE(fire.k, 0);
+    ASSERT_LT(static_cast<std::size_t>(fire.k), expected_fires);
+    EXPECT_FALSE(seen[fire.k]) << "instance " << fire.k << " fired twice";
+    seen[fire.k] = true;
+    EXPECT_EQ(fire.a, records[fire.k]) << "instance " << fire.k;
+    if (fire.k == 0)
+      EXPECT_EQ(fire.b, -1) << "instance 0 has no b";
+    else
+      EXPECT_EQ(fire.b, records[fire.k - 1]) << "instance " << fire.k;
+  }
+}
+
+static uint8_t expected_join_parity(const std::vector<uint8_t> &records,
+                                    std::size_t fires) {
+  uint8_t parity = 0;
+  for (std::size_t k = 0; k < fires; ++k)
+    parity ^= k == 0 ? records[0] : (records[k] ^ records[k - 1]);
+  return parity;
+}
+
 // ---------------------------------------------------------------------------
 // Fire pools
 // ---------------------------------------------------------------------------
@@ -12742,6 +12979,174 @@ TEST(DecodingTaskGraph, FirePoolRejectsStatefulKindsAndBuiltDecoders) {
                     {"P", "output", "output", "input"}},
                    {}),
                std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------
+// Indexed joins
+// ---------------------------------------------------------------------------
+
+TEST(DecodingTaskGraph, IndexedJoinPairsInstancesAcrossRecords) {
+  ASSERT_TRUE(index_probe_registered);
+  for (const std::size_t copies : {1u, 2u}) {
+    auto probe = std::make_shared<pipeline_probe>();
+    auto graph = make_indexed_join_graph(
+        probe, {.async_streaming = true, .async_queue_capacity = 8},
+        /*limit=*/1 << 30, copies);
+    ASSERT_TRUE(graph->supports_streaming())
+        << graph->streaming_incompatibility_reason();
+    const std::vector<uint8_t> records = {1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1};
+    for (std::size_t i = 0; i + 1 < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1);
+    EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+    expect_indexed_pairs(records, records.size());
+    const auto result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.values[0], expected_join_parity(records, records.size()))
+        << "copies=" << copies;
+  }
+}
+
+TEST(DecodingTaskGraph, IndexedJoinDiscardsInstancesMissingRequiredInput) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_indexed_join_graph(
+      probe, {.async_streaming = true, .async_queue_capacity = 8},
+      /*limit=*/5);
+  const auto records = pipeline_records(8);
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  // R still delivers b for instances 5.., but their required a never comes,
+  // so those entries are dropped at the end of the shot without firing.
+  expect_indexed_pairs(records, 5);
+  EXPECT_EQ(graph->streaming_result().values[0],
+            expected_join_parity(records, 5));
+}
+
+TEST(DecodingTaskGraph, IndexedJoinToleratesLateSecondInput) {
+  if (std::thread::hardware_concurrency() < 4)
+    GTEST_SKIP() << "overlap needs at least four CPU threads";
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  // R is slow on records carrying 1, so b[k - 1] often arrives after a[k]
+  // and later instances complete before earlier ones.
+  auto graph = make_indexed_join_graph(
+      probe, {.async_streaming = true, .async_queue_capacity = 16},
+      /*limit=*/1 << 30, /*join_copies=*/4, /*r_hold=*/15, /*r_hold_bit=*/1);
+  const std::vector<uint8_t> records = {1, 1, 0, 1, 0, 0, 1, 1, 1, 0};
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  expect_indexed_pairs(records, records.size());
+  EXPECT_EQ(graph->streaming_result().values[0],
+            expected_join_parity(records, records.size()));
+}
+
+TEST(DecodingTaskGraph, IndexedJoinMatchesSynchronousGraph) {
+  ASSERT_TRUE(index_probe_registered);
+  const std::vector<uint8_t> records = {0, 1, 1, 0, 1, 0, 0, 1, 1, 1};
+  auto sync_probe = std::make_shared<pipeline_probe>();
+  auto synchronous = make_indexed_join_graph(sync_probe, {});
+  std::vector<uint8_t> sync_values;
+  for (std::size_t i = 0; i + 1 < records.size(); ++i) {
+    (void)synchronous->enqueue_syndrome(&records[i], 1);
+    sync_values.push_back(synchronous->streaming_result().values[0]);
+  }
+  (void)synchronous->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+  sync_values.push_back(synchronous->streaming_result().values[0]);
+  expect_indexed_pairs(records, records.size());
+
+  auto async_probe = std::make_shared<pipeline_probe>();
+  auto asynchronous = make_indexed_join_graph(
+      async_probe, {.async_streaming = true, .async_queue_capacity = 4},
+      /*limit=*/1 << 30, /*join_copies=*/2);
+  for (std::size_t i = 0; i + 1 < records.size(); ++i) {
+    (void)asynchronous->enqueue_syndrome(&records[i], 1);
+    EXPECT_EQ(asynchronous->streaming_result().values[0], sync_values[i])
+        << "record " << i;
+  }
+  (void)asynchronous->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+  EXPECT_EQ(asynchronous->streaming_result().values[0], sync_values.back());
+  expect_indexed_pairs(records, records.size());
+}
+
+TEST(DecodingTaskGraph, IndexOffsetIsValidatedAtBuild) {
+  ASSERT_TRUE(index_probe_registered);
+  active_pipeline_probe = std::make_shared<pipeline_probe>();
+  const auto build = [](std::int64_t offset, bool indexed_consumer) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(indexed_consumer ? index_node("J", "join")
+                                     : pipeline_node("J", "join"));
+    return decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"A", "output", "J", "b", offset},
+         {"J", "output", "output", "input"}},
+        {});
+  };
+  EXPECT_THROW(build(1, true), std::invalid_argument);   // positive offset
+  EXPECT_THROW(build(-1, false), std::invalid_argument); // not an indexed join
+  EXPECT_NO_THROW(build(0, false));
+
+  // An indexed node feeding a node that joins by record is a conflict: the
+  // consumer would see instances out of order.
+  {
+    active_pipeline_probe = std::make_shared<pipeline_probe>();
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("R", "tag"));
+    nodes.push_back(index_node("J", "join"));
+    nodes.push_back(pipeline_node("D", "pass"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"A", "output", "R", "input"},
+         {"T", "output", "J", "a"},
+         {"R", "output", "J", "b", -1},
+         {"J", "output", "D", "input"},
+         {"D", "output", "output", "input"}},
+        {});
+    EXPECT_FALSE(graph->supports_streaming());
+    EXPECT_NE(graph->streaming_incompatibility_reason().find("by index"),
+              std::string::npos)
+        << graph->streaming_incompatibility_reason();
+  }
+
+  // An indexed node fed raw measurements is a streaming conflict.
+  std::vector<task_graph_node_config> raw;
+  raw.push_back(index_node("J", "join"));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(raw),
+                                         {{"measurements", "output", "J", "a"},
+                                          {"measurements", "output", "J", "b"},
+                                          {"J", "output", "output", "input"}},
+                                         {});
+  EXPECT_FALSE(graph->supports_streaming());
+}
+
+TEST(DecodingTaskGraph, IndexedJoinHandlesManyInstancesPerRecord) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  // Records of four rounds publish four instances each from T and R, more
+  // than the join table's per-record preallocation; it grows as needed.
+  auto graph = make_indexed_join_graph(
+      probe, {.async_streaming = true, .async_queue_capacity = 2},
+      /*limit=*/1 << 30, /*join_copies=*/2);
+  std::vector<uint8_t> rounds;
+  for (int i = 0; i < 40; ++i)
+    rounds.push_back(static_cast<uint8_t>((i * 7 + 3) % 5 < 2));
+  for (std::size_t r = 0; r + 4 < rounds.size(); r += 4)
+    graph->enqueue_syndrome(&rounds[r], 4);
+  EXPECT_TRUE(graph->enqueue_syndrome(&rounds[36], 4, round_type::FINAL));
+  expect_indexed_pairs(rounds, rounds.size());
+  EXPECT_EQ(graph->streaming_result().values[0],
+            expected_join_parity(rounds, rounds.size()));
 }
 
 } // namespace cudaq::qec

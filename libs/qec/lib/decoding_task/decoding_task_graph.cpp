@@ -280,9 +280,20 @@ void decoding_task_graph::impl::compile_wires() {
           node_ids[tn] + "') violates topological order");
 
     validate_core_edge(nodes, e, fn, fs, tn, ts, output_type_at(fn, fs));
+    if (e.index_offset > 0)
+      throw std::invalid_argument(
+          "compile_wires: edge " + e.from_node + "." + e.from_output + " -> " +
+          e.to_node + "." + e.to_input + " has index_offset " +
+          std::to_string(e.index_offset) + "; it must be zero or negative");
+    if (e.index_offset != 0 && (tn < 0 || !nodes[tn]->indexed_join()))
+      throw std::invalid_argument(
+          "compile_wires: edge " + e.from_node + "." + e.from_output + " -> " +
+          e.to_node + "." + e.to_input + " has index_offset " +
+          std::to_string(e.index_offset) + ", but node '" + e.to_node +
+          "' does not join its inputs by index");
 
     const int group = (tn < 0) ? static_cast<int>(N) : tn;
-    wires_to[group].push_back({fn, fs, tn, ts});
+    wires_to[group].push_back({fn, fs, tn, ts, -1, e.index_offset});
     wires.push_back(wires_to[group].back());
   }
 
@@ -340,11 +351,16 @@ void decoding_task_graph::impl::compile_wires() {
   for (std::size_t i = 0; i < N; ++i) {
     if (auto *streaming = nodes[i]->streaming()) {
       std::vector<streaming_task_graph_node *> replicas{streaming};
+      std::vector<indexed_join_node *> indexed{nodes[i]->indexed_join()};
       if (i < node_replicas.size())
-        for (auto &replica : node_replicas[i])
+        for (auto &replica : node_replicas[i]) {
           replicas.push_back(replica->streaming());
-      streaming_nodes.push_back(
-          {static_cast<int>(i), streaming, std::move(replicas)});
+          indexed.push_back(replica->indexed_join());
+        }
+      if (!indexed.front())
+        indexed.clear();
+      streaming_nodes.push_back({static_cast<int>(i), streaming,
+                                 std::move(replicas), std::move(indexed)});
       streaming_by_node[i] = static_cast<int>(streaming_nodes.size() - 1);
     }
   }
@@ -559,6 +575,15 @@ void decoding_task_graph::impl::compile_wires() {
         record_streaming_conflict("node '" + node_ids[w.to_node] +
                                   "' has no streaming input on slot '" +
                                   node_input_names[w.to_node][w.to_slot] + "'");
+      // An indexed node's instances complete in any order, so a consumer
+      // that sees records in order would read them out of order.
+      const auto &producer = streaming_nodes[streaming_by_node[w.from_node]];
+      if (!is_done_slot(w.from_node, w.from_slot) &&
+          !producer.indexed.empty() && consumer.indexed.empty())
+        record_streaming_conflict("node '" + node_ids[w.to_node] +
+                                  "' joins its inputs by record but node '" +
+                                  node_ids[w.from_node] +
+                                  "' publishes them by index");
     }
 
     // Classify every input edge to a streaming node. enqueue() has one implicit
@@ -790,13 +815,15 @@ void decoding_task_graph::impl::compile_wires() {
     // many more workers than the antichain width accounts for.
     for (std::size_t si = 0; si < M; ++si) {
       const auto copies = streaming_nodes[si].replicas.size();
-      if (copies <= 1)
+      const bool indexed = !streaming_nodes[si].indexed.empty();
+      if (copies <= 1 && !indexed)
         continue;
       if (streaming_node_has_raw_input[si])
         record_streaming_conflict("node '" +
                                   node_ids[streaming_nodes[si].node_index] +
-                                  "' runs as a fire pool and cannot take "
-                                  "raw measurements");
+                                  (indexed ? "' joins its inputs by index"
+                                           : "' runs as a fire pool") +
+                                  " and cannot take raw measurements");
       streaming_parallel_width += copies - 1;
     }
 

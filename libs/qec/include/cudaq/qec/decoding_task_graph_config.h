@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace cudaq::qec {
@@ -28,6 +29,9 @@ struct task_graph_edge {
   std::string from_output = "output"; ///< named output on from_node
   std::string to_node;                ///< node id, or "output"
   std::string to_input = "input";     ///< named input on to_node
+  /// Consumer instance k reads producer instance k + index_offset, between
+  /// nodes that join their inputs by index. Zero or negative.
+  std::int64_t index_offset = 0;
 
   bool operator==(const task_graph_edge &) const = default;
 };

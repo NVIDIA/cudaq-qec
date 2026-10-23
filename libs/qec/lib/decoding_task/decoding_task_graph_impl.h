@@ -38,6 +38,9 @@ struct decoding_task_graph::impl {
     streaming_task_graph_node *capability; ///< same as replicas[0]
     /// Every copy of the node; more than one makes it a fire pool.
     std::vector<streaming_task_graph_node *> replicas;
+    /// The copies' index-join capability, parallel to replicas; null when
+    /// the node joins by record.
+    std::vector<indexed_join_node *> indexed;
   };
 
   // Nodes in topological execution order.
