@@ -206,6 +206,11 @@ struct task_graph_node_config {
   std::string kind = default_task_graph_node_kind;
   /// The kind's own parameters: window_size, step_size, guards, ...
   cudaqx::heterogeneous_map node_params;
+  /// Copies of this node that may fire at once in asynchronous streaming,
+  /// each on its own record. Above one, the kind must keep no state across
+  /// deliveries (`task_graph_node::supports_fire_pool`) and build its inner
+  /// decoder from `decoder_type`, since every copy needs one.
+  std::size_t max_in_flight = 1;
 
   /// DEM for this node. When absent, `d_sparse`/`o_sparse` below supply the
   /// matrices directly.

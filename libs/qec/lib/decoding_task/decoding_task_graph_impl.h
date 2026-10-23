@@ -35,11 +35,15 @@ struct decoding_task_graph::impl {
 
   struct compiled_streaming_node {
     int node_index;
-    streaming_task_graph_node *capability;
+    streaming_task_graph_node *capability; ///< same as replicas[0]
+    /// Every copy of the node; more than one makes it a fire pool.
+    std::vector<streaming_task_graph_node *> replicas;
   };
 
   // Nodes in topological execution order.
   std::vector<std::unique_ptr<task_graph_node>> nodes;
+  // Extra copies of nodes[n] for a fire pool (max_in_flight - 1 of them).
+  std::vector<std::vector<std::unique_ptr<task_graph_node>>> node_replicas;
 
   // --- Build-time only (cleared after compile_wires()) ---
   std::vector<std::string> node_ids; // parallel to nodes[]

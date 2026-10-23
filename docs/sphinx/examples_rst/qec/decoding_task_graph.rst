@@ -286,6 +286,49 @@ coordinator polling briefly before it parks; zero, the default, disables
 spinning. Reserve that CPU from producer and worker affinity masks when using
 this low-latency policy.
 
+Fire pools
+++++++++++
+
+Any node whose result depends only on the current delivery can run as a
+*fire pool*: set ``max_in_flight`` on its entry and the graph builds that many
+copies of the node, each with its own inner decoder, and lets records fire on
+different copies at once instead of holding the node to one record at a time.
+A record leases one copy for all of its deliveries, outputs are copied out of
+the copy before anything downstream runs, and each fire's correction delta is
+folded into the node's accumulated corrections when its record retires, so
+results equal serial execution. Kinds that carry state across deliveries
+(``sliding_window``, ``memory_window``, ``predecoder``, ``streaming``) reject
+``max_in_flight`` above one at build, as does a node given a prebuilt decoder
+instance, since every copy needs its own. A pooled node wired to raw
+``measurements`` is a streaming conflict.
+
+The option applies to any eligible kind. A kind that decodes one
+self-contained window per delivery, such as ``decode_window``, is the natural
+user:
+
+.. code-block:: yaml
+
+   decoders:
+     - id: 0
+       task_graph:
+         nodes:
+           - id: ingest
+             type: ingest
+           - id: A
+             type: decode_window
+             max_in_flight: 4          # four fires of A may run at once
+             inner: {type: pymatching}
+         edges:
+           - {from: measurements, to: ingest}
+           - {from: ingest.A, to: A}
+           - {from: A, to: output}
+         async_streaming: true
+         async_queue_capacity: 16
+       dem_chunks: { ... }
+
+Overlap needs ``async_streaming``; a synchronous graph runs one fire at a
+time. The default pool grows by ``max_in_flight - 1`` workers per pooled node.
+
 Multi-node graphs (combine)
 ++++++++++++++++++++++++++++
 

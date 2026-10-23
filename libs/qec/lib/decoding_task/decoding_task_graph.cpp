@@ -339,7 +339,12 @@ void decoding_task_graph::impl::compile_wires() {
   streaming_by_node.assign(N, -1);
   for (std::size_t i = 0; i < N; ++i) {
     if (auto *streaming = nodes[i]->streaming()) {
-      streaming_nodes.push_back({static_cast<int>(i), streaming});
+      std::vector<streaming_task_graph_node *> replicas{streaming};
+      if (i < node_replicas.size())
+        for (auto &replica : node_replicas[i])
+          replicas.push_back(replica->streaming());
+      streaming_nodes.push_back(
+          {static_cast<int>(i), streaming, std::move(replicas)});
       streaming_by_node[i] = static_cast<int>(streaming_nodes.size() - 1);
     }
   }
@@ -781,6 +786,19 @@ void decoding_task_graph::impl::compile_wires() {
           }
     if (M > 0)
       streaming_parallel_width = maximum_parallel_width(streaming_dependents);
+    // A pooled node fires once per copy concurrently, so the pool needs that
+    // many more workers than the antichain width accounts for.
+    for (std::size_t si = 0; si < M; ++si) {
+      const auto copies = streaming_nodes[si].replicas.size();
+      if (copies <= 1)
+        continue;
+      if (streaming_node_has_raw_input[si])
+        record_streaming_conflict("node '" +
+                                  node_ids[streaming_nodes[si].node_index] +
+                                  "' runs as a fire pool and cannot take "
+                                  "raw measurements");
+      streaming_parallel_width += copies - 1;
+    }
 
     streaming_node_generations.assign(M, 0);
     streaming_output_fire_ordinals.assign(num_sinks, 0);
@@ -1235,6 +1253,7 @@ const uint8_t *decoding_task_graph::get_obs_corrections() const {
   // One streaming node owning the whole buffer returns its corrections in
   // place, no copy.
   if (g.streaming_nodes.size() == 1 &&
+      g.streaming_nodes[0].replicas.size() == 1 &&
       g.streaming_nodes[0].capability->num_observables() == g.n_obs &&
       g.streaming_node_output_offsets[0].size() == 1 &&
       g.streaming_node_output_offsets[0][0] == 0)
@@ -1269,7 +1288,8 @@ void decoding_task_graph::clear_corrections() {
   // overlap buffer so the next stride still decodes the correct frame.
   impl_->finalized = false;
   for (const auto &entry : impl_->streaming_nodes)
-    entry.capability->clear_corrections();
+    for (auto *replica : entry.replicas)
+      replica->clear_corrections();
   impl_->clear_latest_node_corrections();
   impl_->consume_streaming_result();
   if (impl_->async_streaming.enabled) {
@@ -1286,11 +1306,17 @@ void decoding_task_graph::reset_decoder() {
   impl_->invalidate_async_stream_snapshot();
   impl_->finalized = false;
   impl_->async_streaming.needs_reset = false;
-  for (auto &node : impl_->nodes)
-    if (auto *decoder_backed = node->decoder_backed())
+  const auto reset_node = [](task_graph_node &node) {
+    if (auto *decoder_backed = node.decoder_backed())
       decoder_backed->reset_decoder();
-    else if (auto *streaming = node->streaming())
+    else if (auto *streaming = node.streaming())
       streaming->reset_streaming_state();
+  };
+  for (auto &node : impl_->nodes)
+    reset_node(*node);
+  for (auto &replicas : impl_->node_replicas)
+    for (auto &replica : replicas)
+      reset_node(*replica);
   impl_->reset_streaming_progress();
   if (impl_->async_streaming.enabled) {
     std::lock_guard<std::mutex> lock(impl_->async_streaming.snapshot_mutex);

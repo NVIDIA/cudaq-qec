@@ -131,6 +131,7 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("id", &task_graph_node_config::id)
       .def_rw("kind", &task_graph_node_config::kind)
       .def_rw("node_params", &task_graph_node_config::node_params)
+      .def_rw("max_in_flight", &task_graph_node_config::max_in_flight)
       .def_rw("dem", &task_graph_node_config::dem)
       .def_rw("d_sparse", &task_graph_node_config::d_sparse)
       .def_rw("o_sparse", &task_graph_node_config::o_sparse)

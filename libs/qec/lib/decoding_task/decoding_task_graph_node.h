@@ -236,6 +236,11 @@ public:
   /// Capability queries. A null pointer means this node does not support that
   /// execution mode; no sentinel dimensions or no-op implementations needed.
   virtual streaming_task_graph_node *streaming() { return nullptr; }
+  /// Whether the graph may run this node as a fire pool: it builds
+  /// `max_in_flight` copies and runs them concurrently, one record each.
+  /// Only a node whose result depends on nothing but the current delivery
+  /// may, so a kind that carries state across deliveries overrides this.
+  virtual bool supports_fire_pool() const { return true; }
   virtual decoder_backed_task_graph_node *decoder_backed() { return nullptr; }
   virtual const decoder_backed_task_graph_node *decoder_backed() const {
     return nullptr;

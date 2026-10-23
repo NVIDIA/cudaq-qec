@@ -12078,6 +12078,15 @@ public:
     pairs_.emplace_back(a, b);
   }
 
+  /// Pooled fires report entry and exit so a test can read the peak overlap.
+  void pool_enter() {
+    const auto now = pool_in_flight_.fetch_add(1) + 1;
+    auto peak = pool_high_water_.load();
+    while (now > peak && !pool_high_water_.compare_exchange_weak(peak, now)) {
+    }
+  }
+  void pool_exit() { pool_in_flight_.fetch_sub(1); }
+  std::size_t pool_high_water() const { return pool_high_water_.load(); }
   std::vector<std::pair<uint8_t, uint8_t>> pairs() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return pairs_;
@@ -12095,6 +12104,8 @@ private:
   std::condition_variable release_;
   std::vector<std::pair<std::string, std::size_t>> events_;
   std::vector<std::pair<uint8_t, uint8_t>> pairs_;
+  std::atomic<std::size_t> pool_in_flight_{0};
+  std::atomic<std::size_t> pool_high_water_{0};
   std::string blocked_node_;
   std::size_t blocked_record_ = std::numeric_limits<std::size_t>::max();
   bool blocking_ = false;
@@ -12111,8 +12122,10 @@ class pipeline_probe_node : public task_graph_node,
                             public streaming_task_graph_node {
 public:
   pipeline_probe_node(std::string id, std::string mode,
-                      std::shared_ptr<pipeline_probe> probe)
-      : id_(std::move(id)), mode_(std::move(mode)), probe_(std::move(probe)) {
+                      std::shared_ptr<pipeline_probe> probe,
+                      std::size_t hold_ms = 0, int hold_bit = -1)
+      : id_(std::move(id)), mode_(std::move(mode)), probe_(std::move(probe)),
+        hold_(hold_ms), hold_bit_(hold_bit) {
     logical_outcome output;
     output.bits = {0};
     output.converged = true;
@@ -12145,6 +12158,15 @@ public:
     const auto record = records_++;
     probe_->log(id_, record);
     probe_->maybe_block(id_, record);
+    // Optional delay, for every record or only those carrying `hold_bit`;
+    // a delaying node reports entry and exit so tests can read its peak
+    // overlap.
+    if (hold_) {
+      probe_->pool_enter();
+      if (hold_bit_ < 0 || bit == hold_bit_)
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold_));
+      probe_->pool_exit();
+    }
     correction_ ^= value_out_.get<logical_outcome>().bits[0];
     valid_ = true;
     return true;
@@ -12213,6 +12235,8 @@ private:
   std::string id_;
   std::string mode_;
   std::shared_ptr<pipeline_probe> probe_;
+  std::size_t hold_;
+  int hold_bit_;
   uint8_t correction_ = 0;
   bool valid_ = false;
   std::size_t received_ = 0;
@@ -12229,21 +12253,57 @@ static const bool pipeline_probe_registered = [] {
   decoding::config::decoder_schema schema;
   schema.params.push_back(
       {"mode", decoding::config::param_kind::string, /*required=*/true});
+  schema.params.push_back(
+      {"hold_ms", decoding::config::param_kind::uint64, /*required=*/false});
+  schema.params.push_back(
+      {"hold_bit", decoding::config::param_kind::int32, /*required=*/false});
   register_node_kind(std::move(spec), std::move(schema),
                      [](node_build_context &ctx) {
                        return std::make_unique<pipeline_probe_node>(
                            ctx.id, ctx.node_params->get<std::string>("mode"),
-                           active_pipeline_probe);
+                           active_pipeline_probe,
+                           ctx.node_params->get<std::size_t>("hold_ms", 0),
+                           ctx.node_params->get<int>("hold_bit", -1));
                      });
   return true;
 }();
 
-static task_graph_node_config pipeline_node(std::string id, std::string mode) {
+static task_graph_node_config pipeline_node(std::string id, std::string mode,
+                                            std::size_t hold_ms = 0,
+                                            int hold_bit = -1,
+                                            std::size_t max_in_flight = 1) {
   task_graph_node_config config;
   config.id = std::move(id);
   config.kind = "test_pipeline_probe";
   config.node_params.insert("mode", std::move(mode));
+  config.node_params.insert("hold_ms", hold_ms);
+  config.node_params.insert("hold_bit", hold_bit);
+  config.max_in_flight = max_in_flight;
   return config;
+}
+
+// measurements -> A -> {P, C} -> D, where P is a relay run as a fire pool of
+// `slots` copies and C inverts. D sees (v, v ^ 1) for every record, so a
+// pooled fire delivered to the wrong record shows up as an inconsistent pair.
+static std::unique_ptr<decoding_task_graph>
+make_pooled_diamond_graph(const std::shared_ptr<pipeline_probe> &probe,
+                          task_graph_options options, std::size_t slots,
+                          std::size_t hold_ms = 0, int hold_bit = -1) {
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(pipeline_node("P", "pass", hold_ms, hold_bit, slots));
+  nodes.push_back(pipeline_node("C", "invert"));
+  nodes.push_back(pipeline_node("D", "join"));
+  return decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "P", "input"},
+       {"A", "output", "C", "input"},
+       {"P", "output", "D", "a"},
+       {"C", "output", "D", "b"},
+       {"D", "output", "output", "input"}},
+      options);
 }
 
 // measurements -> A -> {B, C} -> D, where C inverts. D sees (v, v ^ 1) for
@@ -12543,6 +12603,145 @@ TEST(DecodingTaskGraph, ConcurrentRecordsMatchSynchronousGraphKinds) {
                                          std::move(async_right), options));
     compare(build_residual_graph(), build_residual_graph(options));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Fire pools
+// ---------------------------------------------------------------------------
+
+TEST(DecodingTaskGraph, FirePoolRunsFiresConcurrently) {
+  if (std::thread::hardware_concurrency() < 4)
+    GTEST_SKIP() << "overlapping fires need at least four CPU threads";
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_pooled_diamond_graph(
+      probe, {.async_streaming = true, .async_queue_capacity = 8},
+      /*slots=*/4, /*hold_ms=*/40);
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const auto records = pipeline_records(4);
+  for (const auto &record : records)
+    EXPECT_FALSE(graph->enqueue_syndrome(&record, 1));
+  const uint8_t last = 1;
+  EXPECT_TRUE(graph->enqueue_syndrome(&last, 1, round_type::FINAL));
+  // Four 40 ms fires on four slots overlap; serialised they would not.
+  EXPECT_GE(probe->pool_high_water(), 2u);
+  auto all = records;
+  all.push_back(last);
+  expect_consistent_pairs(probe->pairs(), all);
+  const auto result = graph->streaming_result();
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+  EXPECT_EQ(result.generation, 5u);
+  // D's bit flips on every record (v ^ (v ^ 1) == 1): five records, odd.
+  EXPECT_EQ(result.values[0], 1u);
+}
+
+TEST(DecodingTaskGraph, FirePoolSlotsBoundConcurrency) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_pooled_diamond_graph(
+      probe, {.async_streaming = true, .async_queue_capacity = 8},
+      /*slots=*/1, /*hold_ms=*/10);
+  const auto records = pipeline_records(6);
+  for (const auto &record : records)
+    graph->enqueue_syndrome(&record, 1);
+  const uint8_t last = 0;
+  EXPECT_TRUE(graph->enqueue_syndrome(&last, 1, round_type::FINAL));
+  EXPECT_EQ(probe->pool_high_water(), 1u);
+  EXPECT_EQ(probe->count("P"), 7u);
+}
+
+TEST(DecodingTaskGraph, FirePoolDeliversEachFireToItsOwnRecord) {
+  if (std::thread::hardware_concurrency() < 4)
+    GTEST_SKIP() << "overlapping fires need at least four CPU threads";
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  // Records with bit 1 are slow at P, so P finishes records out of order.
+  // D, which is stateful, must still see record r's pair for record r.
+  auto graph = make_pooled_diamond_graph(
+      probe, {.async_streaming = true, .async_queue_capacity = 16},
+      /*slots=*/4, /*hold_ms=*/30, /*hold_bit=*/1);
+  const std::vector<uint8_t> records = {1, 0, 1, 0, 0, 1, 0, 0};
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  expect_consistent_pairs(probe->pairs(), records);
+  const auto seen = probe->records("D");
+  ASSERT_EQ(seen.size(), records.size());
+  for (std::size_t i = 0; i < seen.size(); ++i)
+    EXPECT_EQ(seen[i], i);
+  EXPECT_EQ(graph->streaming_result().generation, records.size());
+}
+
+TEST(DecodingTaskGraph, FirePoolMatchesSynchronousGraph) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto sync_probe = std::make_shared<pipeline_probe>();
+  auto synchronous = make_pooled_diamond_graph(sync_probe, {}, /*slots=*/4);
+  auto async_probe = std::make_shared<pipeline_probe>();
+  auto asynchronous = make_pooled_diamond_graph(
+      async_probe, {.async_streaming = true, .async_queue_capacity = 8},
+      /*slots=*/4, /*hold_ms=*/2);
+  const std::vector<uint8_t> records = {1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1};
+  for (std::size_t i = 0; i + 1 < records.size(); ++i) {
+    (void)synchronous->enqueue_syndrome(&records[i], 1);
+    (void)asynchronous->enqueue_syndrome(&records[i], 1);
+    EXPECT_EQ(asynchronous->streaming_result().values,
+              synchronous->streaming_result().values)
+        << "record " << i;
+  }
+  (void)synchronous->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+  (void)asynchronous->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+  const auto expected = synchronous->streaming_result();
+  const auto actual = asynchronous->streaming_result();
+  EXPECT_EQ(actual.values, expected.values);
+  EXPECT_EQ(actual.generation, expected.generation);
+  EXPECT_EQ(actual.status, expected.status);
+  // P's accumulated corrections are the XOR of its inputs (six ones).
+  EXPECT_EQ(expected.generation, records.size());
+}
+
+TEST(DecodingTaskGraph, FirePoolRejectsRawInput) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  active_pipeline_probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source", 0, -1, /*max_in_flight=*/2));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "output", "input"}},
+      {});
+  EXPECT_FALSE(graph->supports_streaming());
+  EXPECT_NE(graph->streaming_incompatibility_reason().find("fire pool"),
+            std::string::npos)
+      << graph->streaming_incompatibility_reason();
+}
+
+TEST(DecodingTaskGraph, FirePoolRejectsStatefulKindsAndBuiltDecoders) {
+  task_graph_node_config node;
+  node.id = "w";
+  node.kind = "sliding_window";
+  node.dem = rep5_spec(5);
+  node.decoder_type = "single_error_lut";
+  node.node_params.insert("window_size", std::size_t{5});
+  node.node_params.insert("step_size", std::size_t{3});
+  node.max_in_flight = 2;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(std::move(node));
+  EXPECT_THROW(decoding_task_graph::from_topology(std::move(nodes), {}, {}),
+               std::invalid_argument);
+
+  ASSERT_TRUE(pipeline_probe_registered);
+  active_pipeline_probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> zero;
+  zero.push_back(pipeline_node("A", "source"));
+  zero.push_back(pipeline_node("P", "pass", 0, -1, /*max_in_flight=*/0));
+  EXPECT_THROW(decoding_task_graph::from_topology(
+                   std::move(zero),
+                   {{"measurements", "output", "A", "input"},
+                    {"A", "output", "P", "input"},
+                    {"P", "output", "output", "input"}},
+                   {}),
+               std::invalid_argument);
 }
 
 } // namespace cudaq::qec

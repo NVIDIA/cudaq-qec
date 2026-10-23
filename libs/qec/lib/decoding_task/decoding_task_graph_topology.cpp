@@ -706,6 +706,14 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
                                            "from_topology: node '" + cfg.id +
                                                "' parameters");
 
+    if (cfg.max_in_flight == 0)
+      throw std::invalid_argument("from_topology: node '" + cfg.id +
+                                  "' has max_in_flight 0");
+    if (cfg.max_in_flight > 1 && cfg.decoder_instance)
+      throw std::invalid_argument(
+          "from_topology: node '" + cfg.id +
+          "' runs as a fire pool, so each copy needs its own inner decoder; "
+          "give decoder_type instead of a built decoder");
     auto ctx = prepare_node(cfg, *kind);
     // The first node carrying a DEM owns the graph's D; a single-node graph
     // also exposes its O.  o_matrix() is not meaningful once outcomes are
@@ -719,8 +727,19 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     if (!node)
       throw std::logic_error("from_topology: node kind '" + kind->name +
                              "' built nothing for node '" + cfg.id + "'");
+    if (cfg.max_in_flight > 1 && !node->supports_fire_pool())
+      throw std::invalid_argument("from_topology: node '" + cfg.id +
+                                  "' of kind '" + kind->name +
+                                  "' keeps state across deliveries and "
+                                  "cannot run as a fire pool");
+    std::vector<std::unique_ptr<task_graph_node>> replicas;
+    for (std::size_t r = 1; r < cfg.max_in_flight; ++r) {
+      auto replica_ctx = prepare_node(cfg, *kind);
+      replicas.push_back((*factory)(replica_ctx));
+    }
     i->node_ids.push_back(cfg.id);
     i->nodes.push_back(std::move(node));
+    i->node_replicas.push_back(std::move(replicas));
   }
 
   wire_patterns(patterns, i->node_ids, i->nodes, edges);

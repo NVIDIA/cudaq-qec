@@ -386,6 +386,9 @@ static void validate_task_graph(const decoder_config &config) {
   for (const auto &node : tg.nodes) {
     if (node.id.empty())
       throw std::runtime_error(who + ": every task_graph node needs an id");
+    if (node.max_in_flight == 0)
+      throw std::runtime_error(who + ": task_graph node '" + node.id +
+                               "' has max_in_flight 0");
     // compile_wires() resolves edges through an id map, which would silently
     // collapse a repeated id onto one node.
     if (std::find(ids.begin(), ids.end(), node.id) != ids.end())
@@ -1070,6 +1073,10 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       io.mapOptional("stim_dem_path", node.stim_dem_path);
       return;
     }
+    if (key == "max_in_flight") {
+      io.mapOptional("max_in_flight", node.max_in_flight);
+      return;
+    }
     if (key == "inner") {
       auto &args = node.decoder_custom_args.map();
       inner_form inner{&node.inner_type, &args};
@@ -1168,6 +1175,8 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       io.mapRequired("stim_dem", node.stim_dem);
     if (!node.stim_dem_path.empty())
       io.mapRequired("stim_dem_path", node.stim_dem_path);
+    if (node.max_in_flight != 1)
+      io.mapRequired("max_in_flight", node.max_in_flight);
     if (!node.node_params.empty()) {
       const auto *schema = cudaq::qec::task_graph_node_params_schema(node.type);
       if (!schema)
@@ -2208,6 +2217,8 @@ std::string decoder_config_json_schema() {
       {"syndrome_size",
        llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
       {"stim_dem_path", llvm::json::Object{{"type", "string"}}},
+      {"max_in_flight",
+       llvm::json::Object{{"type", "integer"}, {"minimum", 1}, {"default", 1}}},
       {"H_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"O_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"D_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},

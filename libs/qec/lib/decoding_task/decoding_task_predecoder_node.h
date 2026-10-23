@@ -82,6 +82,8 @@ public:
   ~predecoder_node() override;
 
   streaming_task_graph_node *streaming() override { return this; }
+  /// Windows and carry span deliveries, so copies would each see a part.
+  bool supports_fire_pool() const override { return false; }
   decoder_backed_task_graph_node *decoder_backed() override { return this; }
   const decoder_backed_task_graph_node *decoder_backed() const override {
     return this;

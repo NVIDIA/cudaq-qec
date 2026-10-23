@@ -76,6 +76,8 @@ struct decoding_task_graph::impl::record_context {
   struct slot {
     graph_event event;
     graph_event continuation;
+    std::size_t pool_slot = no_event; ///< replica a running delivery holds
+    bool releases_pool = false;       ///< last delivery: hand the replica back
     std::size_t parent = no_event;
     std::size_t blocked_by = no_event;
     std::size_t first_child = no_event;
@@ -112,6 +114,10 @@ struct decoding_task_graph::impl::record_context {
   std::vector<std::optional<streaming_task_graph_node::committed_coverage>>
       node_coverage;
   std::vector<uint8_t> node_snapshotted;
+  // Set when node_corrections holds a delta to XOR in rather than a copy.
+  std::vector<uint8_t> node_delta;
+  // Replica of each pooled node leased to this record, or no_event.
+  std::vector<std::size_t> pool_replica;
   std::vector<std::uint32_t> node_published;
   // Release accounting, indexed by streaming node: live events targeting
   // the node and whether this record has handed the node on.
@@ -154,10 +160,22 @@ struct decoding_task_graph::impl::record_scheduler {
                    std::size_t event_capacity)
       : owner(owner), contexts(context_count), node_busy(owner.nodes.size(), 0),
         node_turn(owner.streaming_nodes.size(), 0),
-        copy_outputs(context_count > 1),
+        pool_free(owner.streaming_nodes.size()),
+        replica_busy(owner.streaming_nodes.size()),
         has_waiting_workers(owner.parallel_pool->num_threads() > 1) {
     const auto N = owner.nodes.size();
     const auto M = owner.streaming_nodes.size();
+    for (std::size_t si = 0; si < M; ++si) {
+      const auto copies = owner.streaming_nodes[si].replicas.size();
+      if (copies <= 1)
+        continue;
+      copy_outputs = true;
+      for (std::size_t r = copies; r-- > 0;)
+        pool_free[si].push_back(r);
+      replica_busy[si].assign(copies, 0);
+    }
+    if (context_count > 1)
+      copy_outputs = true;
     for (auto &c : contexts) {
       c.slots.resize(event_capacity);
       c.free_slots.reserve(event_capacity);
@@ -172,6 +190,8 @@ struct decoding_task_graph::impl::record_scheduler {
             owner.streaming_nodes[si].capability->num_observables(), 0);
       c.node_coverage.assign(M, std::nullopt);
       c.node_snapshotted.assign(M, 0);
+      c.node_delta.assign(M, 0);
+      c.pool_replica.assign(M, no_event);
       c.node_published.assign(M, 0);
       c.node_live.assign(M, 0);
       c.node_released.assign(M, 0);
@@ -217,6 +237,12 @@ struct decoding_task_graph::impl::record_scheduler {
     std::fill(c.deliveries_seen.begin(), c.deliveries_seen.end(), 0);
     std::fill(c.wire_valid.begin(), c.wire_valid.end(), 0);
     std::fill(c.node_snapshotted.begin(), c.node_snapshotted.end(), 0);
+    std::fill(c.node_delta.begin(), c.node_delta.end(), 0);
+    for (std::size_t si = 0; si < c.node_corrections.size(); ++si)
+      if (pooled(si))
+        std::fill(c.node_corrections[si].begin(), c.node_corrections[si].end(),
+                  uint8_t{0});
+    std::fill(c.pool_replica.begin(), c.pool_replica.end(), no_event);
     std::fill(c.node_published.begin(), c.node_published.end(), 0);
     std::fill(c.node_live.begin(), c.node_live.end(), 0);
     std::fill(c.node_released.begin(), c.node_released.end(), 0);
@@ -258,6 +284,14 @@ struct decoding_task_graph::impl::record_scheduler {
       reset(c);
     }
     std::fill(node_busy.begin(), node_busy.end(), uint8_t{0});
+    for (std::size_t si = 0; si < pool_free.size(); ++si)
+      if (pooled(si)) {
+        pool_free[si].clear();
+        for (std::size_t r = owner.streaming_nodes[si].replicas.size();
+             r-- > 0;)
+          pool_free[si].push_back(r);
+        std::fill(replica_busy[si].begin(), replica_busy[si].end(), 0);
+      }
     stop = false;
     error = nullptr;
   }
@@ -380,8 +414,23 @@ struct decoding_task_graph::impl::record_scheduler {
   // the node. Retirement folds the capture into the graph-level result in
   // record order, so a node already serving a later record cannot leak into
   // an earlier record's publication.
-  void snapshot_node(context &c, std::size_t si) {
-    const auto *capability = owner.streaming_nodes[si].capability;
+  void snapshot_node(context &c, std::size_t si,
+                     const streaming_task_graph_node *capability = nullptr) {
+    if (!capability)
+      capability = owner.streaming_nodes[si].capability;
+    if (pooled(si)) {
+      // The replica's corrections were cleared before this delivery, so they
+      // hold only this fire's delta. Deliveries of one record to a pooled node
+      // may overlap on different replicas, so fold under the lock.
+      auto lock = lock_runtime();
+      auto &dst = c.node_corrections[si];
+      if (const uint8_t *delta = capability->corrections())
+        for (std::size_t i = 0; i < dst.size(); ++i)
+          dst[i] ^= delta[i];
+      c.node_delta[si] = 1;
+      c.node_snapshotted[si] = 1;
+      return;
+    }
     auto &dst = c.node_corrections[si];
     if (!dst.empty())
       if (const uint8_t *src = capability->corrections())
@@ -390,18 +439,22 @@ struct decoding_task_graph::impl::record_scheduler {
     c.node_snapshotted[si] = 1;
   }
 
-  bool publish_streaming(context &c, std::size_t parent, std::size_t root,
-                         std::size_t producer) {
+  bool
+  publish_streaming(context &c, std::size_t parent, std::size_t root,
+                    std::size_t producer,
+                    const streaming_task_graph_node *capability = nullptr) {
     const auto node_idx = owner.streaming_nodes[producer].node_index;
-    const auto *capability = owner.streaming_nodes[producer].capability;
-    snapshot_node(c, producer);
+    if (!capability)
+      capability = owner.streaming_nodes[producer].capability;
+    snapshot_node(c, producer, capability);
     {
       auto lock = lock_runtime();
       ++c.node_published[producer];
     }
     // Copy outputs now: a later record may run the producer before the
     // consumer's delivery event executes. With one context none can, so the
-    // consumer reads the output in place instead.
+    // consumer reads the output in place instead; a graph with a fire pool
+    // always copies.
     if (copy_outputs)
       for (const auto &wire : owner.streaming_wires_from[node_idx]) {
         const auto *value = capability->streaming_output(wire.from_slot);
@@ -467,16 +520,25 @@ struct decoding_task_graph::impl::record_scheduler {
                               const graph_event &event) {
     const auto consumer =
         static_cast<std::size_t>(owner.streaming_nodes[event.node].node_index);
-    auto *consumer_node = owner.streaming_nodes[event.node].capability;
+    const bool pool = pooled(event.node);
+    // A pooled consumer is the replica this record leased at its first
+    // delivery. Clearing first makes its corrections this fire's delta.
+    auto *consumer_node = pool ? owner.streaming_nodes[event.node]
+                                     .replicas[c.pool_replica[event.node]]
+                               : owner.streaming_nodes[event.node].capability;
+    if (pool)
+      consumer_node->clear_corrections();
     const auto *value = delivered_value(c, event);
     const bool fired =
         value && consumer_node->enqueue_edge_value(*value, event.wire.to_slot);
     if (fired)
-      (void)publish_streaming(c, id, event.root, event.node);
+      (void)publish_streaming(c, id, event.root, event.node, consumer_node);
     // An edge-fed node completes the window after its last delivery.
     if (++c.deliveries_seen[consumer] ==
         owner.streaming_wires_to_count[consumer]) {
       c.deliveries_seen[consumer] = 0;
+      if (pool)
+        c.slots[id].releases_pool = true;
       if (!fired)
         publish_wires(c, id, event.root, owner.completion_wires_from[consumer]);
     }
@@ -552,8 +614,8 @@ struct decoding_task_graph::impl::record_scheduler {
     if (owner.streaming_nodes[event.node].capability->flush())
       c.fired.store(publish_streaming(c, id, event.root, event.node),
                     std::memory_order_relaxed);
-    else
-      snapshot_node(c, event.node); // a FINAL flush may still commit coverage
+    else if (!pooled(event.node))
+      snapshot_node(c, event.node); // a pooled copy holds only its last delta
     push(c, {graph_event_kind::streaming_flush_release, event.node}, id,
          no_event, /*wait_for_siblings=*/true);
   }
@@ -624,7 +686,7 @@ struct decoding_task_graph::impl::record_scheduler {
           selected.running = true;
           selected.queued = false;
           ++running;
-          claim_locked(selected);
+          claim_locked(*c, selected);
           event = selected.event;
         }
 
@@ -790,18 +852,61 @@ private:
       return event.node;
     if (event.node >= owner.streaming_nodes.size())
       return no_event;
+    // A delivery to a pooled node holds one replica, not the node.
+    if (event.kind == graph_event_kind::streaming_edge && pooled(event.node))
+      return no_event;
     return static_cast<std::size_t>(
         owner.streaming_nodes[event.node].node_index);
   }
 
-  // Mark the node a dispatched event holds.
-  void claim_locked(slot &selected) {
+  bool pooled(std::size_t si) const {
+    return owner.streaming_nodes[si].replicas.size() > 1;
+  }
+
+  // Events whose target keeps no state between fires need no record order.
+  bool targets_pool(const graph_event &event) const {
+    return event.kind != graph_event_kind::one_shot &&
+           event.node < owner.streaming_nodes.size() && pooled(event.node);
+  }
+
+  bool is_pool_delivery(const graph_event &event) const {
+    return event.kind == graph_event_kind::streaming_edge &&
+           targets_pool(event);
+  }
+
+  // Mark what a dispatched event holds: its node, or one replica of a pooled
+  // node. A record leases a replica at its first delivery and keeps it until
+  // its last, so a multi-input consumer sees all of a record's inputs on one
+  // copy.
+  void claim_locked(context &c, slot &selected) {
+    if (is_pool_delivery(selected.event)) {
+      const auto si = selected.event.node;
+      if (c.pool_replica[si] == no_event) {
+        c.pool_replica[si] = pool_free[si].back();
+        pool_free[si].pop_back();
+      }
+      selected.pool_slot = c.pool_replica[si];
+      replica_busy[si][selected.pool_slot] = 1;
+      return;
+    }
     const auto node = serialized_node(selected.event);
     if (node != no_event)
       node_busy[node] = 1;
   }
 
-  void unclaim_locked(slot &done) {
+  void unclaim_locked(context &c, slot &done) {
+    if (done.pool_slot != no_event) {
+      const auto si = done.event.node;
+      replica_busy[si][done.pool_slot] = 0;
+      if (done.releases_pool) {
+        pool_free[si].push_back(done.pool_slot);
+        if (c.pool_replica[si] == done.pool_slot)
+          c.pool_replica[si] = no_event;
+        done.releases_pool = false;
+      }
+      done.pool_slot = no_event;
+      return;
+    }
     const auto node = serialized_node(done.event);
     if (node != no_event)
       node_busy[node] = 0;
@@ -854,7 +959,16 @@ private:
       const auto node = serialized_node(candidate.event);
       if (node != no_event && node_busy[node])
         continue;
-      if (c.gated) {
+      if (is_pool_delivery(candidate.event)) {
+        // Needs this record's replica to be idle, or a free one to lease.
+        const auto si = candidate.event.node;
+        const auto leased = c.pool_replica[si];
+        if (leased == no_event ? pool_free[si].empty()
+                               : replica_busy[si][leased] != 0)
+          continue;
+      }
+      // A pooled node keeps no state, so its records need no order.
+      if (c.gated && !targets_pool(candidate.event)) {
         const auto target = release_target(candidate.event);
         if (target != no_event && node_turn[target] != c.sequence)
           continue;
@@ -893,7 +1007,7 @@ private:
     if (stop) {
       if (id < c.slots.size() && c.slots[id].running) {
         c.slots[id].running = false;
-        unclaim_locked(c.slots[id]);
+        unclaim_locked(c, c.slots[id]);
       }
       if (running != 0)
         --running;
@@ -901,7 +1015,7 @@ private:
       return;
     }
     auto &completed = c.slots[id];
-    unclaim_locked(completed);
+    unclaim_locked(c, completed);
     completed.running = false;
     completed.self_done = true;
     if (running != 0)
@@ -1004,7 +1118,7 @@ private:
     stop = true;
     if (c && id < c->slots.size() && c->slots[id].running) {
       c->slots[id].running = false;
-      unclaim_locked(c->slots[id]);
+      unclaim_locked(*c, c->slots[id]);
     }
     if (running != 0)
       --running;
@@ -1019,9 +1133,12 @@ public:
   std::vector<context *> active;   // oldest record first
   std::vector<uint8_t> node_busy;  // by topology node
   std::vector<uint64_t> node_turn; // by streaming node: record it serves next
-  // Whether publication copies outputs into the record: with one context a
-  // consumer can read the producer's output in place.
-  const bool copy_outputs;
+  // By streaming node: free replicas, and which replicas are running.
+  std::vector<std::vector<std::size_t>> pool_free;
+  std::vector<std::vector<uint8_t>> replica_busy;
+  // Whether publication copies outputs into the record (several contexts,
+  // or a fire pool).
+  bool copy_outputs = false;
   const bool has_waiting_workers;
   std::mutex mutex;
   std::condition_variable wake;
@@ -1088,8 +1205,16 @@ int decoding_task_graph::impl::resolve_cuda_device_id() const {
 void decoding_task_graph::impl::apply_record_context(record_context &c) {
   for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
     if (c.node_snapshotted[si]) {
-      std::copy(c.node_corrections[si].begin(), c.node_corrections[si].end(),
-                latest_node_corrections[si].begin());
+      auto &latest = latest_node_corrections[si];
+      const auto &captured = c.node_corrections[si];
+      if (c.node_delta[si]) {
+        for (std::size_t i = 0; i < latest.size(); ++i)
+          latest[i] ^= captured[i];
+        std::fill(c.node_corrections[si].begin(), c.node_corrections[si].end(),
+                  uint8_t{0});
+      } else {
+        std::copy(captured.begin(), captured.end(), latest.begin());
+      }
       latest_node_coverage[si] = c.node_coverage[si];
     }
     streaming_node_generations[si] += c.node_published[si];

@@ -24,6 +24,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
+#include <regex>
 #include <stdexcept>
 #include <unistd.h>
 
@@ -3130,6 +3131,41 @@ TEST(DecoderNodeModelTest, RejectsCoordinatorCpuBelowSentinel) {
   EXPECT_THROW(
       (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
           yaml),
+      std::runtime_error);
+}
+
+TEST(DecoderNodeModelTest, NodeMaxInFlightParsesRoundTripsAndRejectsZero) {
+  ScopedDemFile dem;
+  auto yaml =
+      node_model_yaml("          stim_dem_path: " + dem.path().string() + "\n");
+  const std::string node_marker = "        - id: w\n";
+  const auto node_at = yaml.find(node_marker);
+  ASSERT_NE(node_at, std::string::npos);
+  yaml.insert(node_at + node_marker.size(), "          max_in_flight: 3\n");
+  const auto config = parse_one(yaml);
+  ASSERT_TRUE(config.task_graph.has_value());
+  ASSERT_EQ(config.task_graph->nodes.size(), 1u);
+  EXPECT_EQ(config.task_graph->nodes.front().max_in_flight, 3u);
+
+  cudaq::qec::decoding::config::multi_decoder_config multi_config;
+  multi_config.decoders.push_back(config);
+  const auto emitted = multi_config.to_yaml_str(200);
+  EXPECT_TRUE(std::regex_search(emitted, std::regex("max_in_flight: +3")))
+      << emitted;
+  const auto round_tripped =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          emitted);
+  EXPECT_EQ(
+      round_tripped.decoders.front().task_graph->nodes.front().max_in_flight,
+      3u);
+
+  auto zero =
+      node_model_yaml("          stim_dem_path: " + dem.path().string() + "\n");
+  zero.insert(zero.find(node_marker) + node_marker.size(),
+              "          max_in_flight: 0\n");
+  EXPECT_THROW(
+      (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          zero),
       std::runtime_error);
 }
 
