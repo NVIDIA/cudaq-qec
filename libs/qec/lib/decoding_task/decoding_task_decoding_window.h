@@ -95,6 +95,16 @@ struct affine_map {
   std::vector<std::size_t> output_sizes;
 };
 
+/// A window's model in the forms a decode kernel uses. Columns are fault
+/// columns, then boundary or crossing columns, then logical-error columns;
+/// rows are the window's own, then its imported ones. The logical-error
+/// columns touch no detector, so H stops before them.
+struct window_model {
+  sparse_binary_matrix h;     ///< Rows by the decoder's columns, canonical CSC
+  sparse_binary_matrix o;     ///< Observables by every column, canonical CSC
+  std::vector<double> priors; ///< One per column
+};
+
 /// A window decode problem; mirrors the EDEM window spec. Built from
 /// dem_chunks in this release.
 struct decoding_window {
@@ -111,7 +121,7 @@ struct decoding_window {
   /// for an open input one virtual-outcome column per input seam detector,
   /// or the truncated crossing columns, then one logical-error column per
   /// observable.
-  detector_error_model model;
+  window_model model;
   std::size_t num_own_rows = 0;
   std::size_t num_fault_columns = 0;
   std::size_t num_virtual_outcome_columns = 0;
@@ -210,20 +220,10 @@ void check_translation_invariance(
     std::shared_ptr<const experiment_template> context,
     const window_request &request);
 
-/// The forms a decode kernel uses: H over the decoder's columns as canonical
-/// CSC, and O and the priors over every column.
-struct window_kernel_forms {
-  sparse_binary_matrix h;
-  sparse_binary_matrix o;
-  std::vector<double> priors;
-};
-
-/// Convert a window's model to the kernel's forms.
-window_kernel_forms kernel_forms(const decoding_window &window);
-
-/// Convert the kernel's forms back to a model; the columns the decoder does
-/// not see have no H entries.
-detector_error_model model_from_kernel_forms(const window_kernel_forms &forms);
+/// A window's model as dense matrices, for tests and diagnostics: H spans
+/// every column, with no entries in the logical-error columns. At large
+/// distances this takes gigabytes.
+detector_error_model dense_model(const window_model &model);
 
 /// Commit @p estimate and compute the window's sends and frame update.
 /// @param detectors The window's detector values, one per model row.
