@@ -48,10 +48,13 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <sys/resource.h>
-#include <unistd.h>
 #include <utility>
 #include <vector>
+
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 
 namespace cudaq::qec {
 namespace {
@@ -1493,6 +1496,25 @@ TEST(WindowModel, HoldsTheKernelForms) {
   } // end - for(truncate)
 } // end - TEST(WindowModel, HoldsTheKernelForms)
 
+// The large-window test caps its own address space, which needs Linux's
+// /proc to measure what the process already maps.
+#if defined(__linux__)
+
+// Whether a sanitizer runs this build. Its allocator aborts on a refused
+// allocation instead of returning null, and it reserves address space of its
+// own, so a capped address space proves nothing under it.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+constexpr bool sanitized = true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+constexpr bool sanitized = true;
+#else
+constexpr bool sanitized = false;
+#endif
+#else
+constexpr bool sanitized = false;
+#endif
+
 // A repetition-code memory over n bits: n - 1 detectors a round.
 dem_chunks_spec repetition_memory_spec(std::size_t n) {
   using index = sparse_binary_matrix::index_type;
@@ -1517,23 +1539,43 @@ std::size_t mapped_bytes() {
 // An A window over a 3000-bit repetition memory: 10 rounds of 2999 rows and
 // 5999 fault columns, then 2999 boundary columns and 1 logical-error column.
 // That is about 2 GB as a dense H and a few megabytes sparse, and it builds
-// within a little address space beyond what the process maps.
+// within a little address space beyond what the process maps. The child
+// lowers only its soft limit, which needs no privilege, and proves the limit
+// refuses a dense H before building; its exit code says which step failed:
+// 1 the shape, 2 setting the limit, 3 a limit that admits the dense H.
 TEST(DecodingWindowDeathTest, BuildsLargeWindowsSparsely) {
+  if (sanitized)
+    GTEST_SKIP() << "a sanitizer's allocator aborts on a refused allocation";
   constexpr std::size_t bits = 3000;          // 2999 detectors a round
   constexpr std::size_t headroom = 256 << 20; // under a seventh of dense H
+  constexpr std::size_t rows = 10 * (bits - 1);
+  constexpr std::size_t columns = 10 * (2 * bits - 1) + bits;
   const auto tmpl =
       std::make_shared<const experiment_template>(repetition_memory_spec(bits));
   const auto request = layered(4, 3, 6).a;
   const auto build = [&] {
-    const rlimit limit{mapped_bytes() + headroom, RLIM_INFINITY};
-    setrlimit(RLIMIT_AS, &limit);
+    rlimit limit{};
+    void *dense = nullptr;
+    if (getrlimit(RLIMIT_AS, &limit) != 0)
+      std::exit(2);
+    limit.rlim_cur =
+        std::min<rlim_t>(mapped_bytes() + headroom, limit.rlim_max);
+    if (setrlimit(RLIMIT_AS, &limit) != 0)
+      std::exit(2);
+    dense = std::malloc(rows * columns);
+    if (dense) {
+      std::free(dense);
+      std::exit(3);
+    }
     const auto w = window_from_dem_chunks(tmpl, request, 1, 40);
-    const bool shape = w.model.h.num_rows() == 10 * (bits - 1) &&
-                       w.model.o.num_cols() == 10 * (2 * bits - 1) + bits;
-    std::exit(shape ? 0 : 1);
+    std::exit(w.model.h.num_rows() == rows && w.model.o.num_cols() == columns
+                  ? 0
+                  : 1);
   };
   EXPECT_EXIT(build(), testing::ExitedWithCode(0), "");
-}
+} // end - TEST(DecodingWindowDeathTest, BuildsLargeWindowsSparsely)
+
+#endif // defined(__linux__)
 
 // ---------------------------------------------------------------------------
 // Window schedule and commitment validation
