@@ -8,8 +8,11 @@
 // its commit columns' parallel conflicts, and the canonical workload:
 // receiving sends, decoding, and the commit, sends and frame update. Models
 // stay sparse throughout, since a window at a large distance would take
-// gigabytes as dense matrices. Construction runs at configuration time and may
-// allocate; nothing here is on the hot path.
+// gigabytes as dense matrices. Construction, decoders and workspaces are made
+// at configuration time and may allocate. The canonical workload runs once
+// per shot: on a workspace made beforehand, receive_send(), solve_window()
+// and commit_window() allocate nothing, beyond what the decoder's own
+// decode() does.
 
 #include "decoding_task_decoding_window.h"
 #include "cudaq/qec/decoder_init.h"
@@ -957,52 +960,117 @@ detector_error_model dense_model(const window_model &model) {
   return dense;
 } // end - dense_model()
 
+// Each send's values are sized by its rows, so commit_window() writes every
+// one in place.
+window_workspace make_window_workspace(const decoding_window &window) {
+  window_workspace ws;
+  const auto rows = window.model.h.num_rows();
+  const auto columns = window.model.o.num_cols();
+  auto &out = ws.solution.outputs;
+  ws.syndrome.assign(rows, 0);
+  ws.explained.assign(rows, 0);
+  ws.delta.assign(rows, 0);
+  ws.solution.estimate.assign(columns, 0);
+  out.committed.assign(columns, 0);
+  out.frame.assign(window.model.o.num_rows(), 0);
+  for (const auto &send : window.sends)
+    out.sends.emplace_back(send.rows.size(), 0);
+  return ws;
+} // end - make_window_workspace()
+
+namespace {
+
+// Throws std::invalid_argument, for @p what, unless @p ws is sized for
+// @p window. Takes a C string so that a passing check allocates nothing.
+void check_workspace(const decoding_window &window, const window_workspace &ws,
+                     const char *what) {
+  const auto rows = window.model.h.num_rows();
+  const auto columns = window.model.o.num_cols();
+  const auto &out = ws.solution.outputs;
+  bool fits = ws.syndrome.size() == rows && ws.explained.size() == rows &&
+              ws.delta.size() == rows &&
+              ws.solution.estimate.size() == columns &&
+              out.committed.size() == columns &&
+              out.frame.size() == window.model.o.num_rows() &&
+              out.sends.size() == window.sends.size();
+  for (std::size_t i = 0; fits && i < window.sends.size(); ++i)
+    fits = out.sends[i].size() == window.sends[i].rows.size();
+  if (!fits)
+    throw std::invalid_argument(std::string(what) +
+                                ": the workspace is not sized for window " +
+                                std::to_string(window.k));
+} // end - check_workspace()
+
+} // namespace
+
 // e' masks every column outside the commit zone. The committed columns'
 // rows give each send's delta, to which a residual adds the window's
-// detectors, and their observables give the frame update.
-window_outputs commit_window(const decoding_window &window,
-                             const std::vector<std::uint8_t> &detectors,
-                             const std::vector<std::uint8_t> &estimate) {
-  window_outputs out;
+// detectors, and their observables give the frame update. Every buffer is
+// the workspace's, cleared before use.
+void commit_window(const decoding_window &window,
+                   const std::vector<std::uint8_t> &detectors,
+                   window_workspace &ws) {
   const auto &h = window.model.h;
   const auto &o = window.model.o;
   const auto commit = window.commit_columns;
-  std::vector<std::uint8_t> delta(h.num_rows(), 0);
-  if (detectors.size() != h.num_rows() || estimate.size() != o.num_cols())
+  const auto &estimate = ws.solution.estimate;
+  auto &out = ws.solution.outputs;
+  if (detectors.size() != h.num_rows())
     throw std::invalid_argument(
         "commit_window: expected " + std::to_string(h.num_rows()) +
-        " detectors and " + std::to_string(o.num_cols()) + " estimates, got " +
-        std::to_string(detectors.size()) + " and " +
-        std::to_string(estimate.size()));
-  out.committed.assign(estimate.size(), 0);
-  out.frame.assign(o.num_rows(), 0);
+        " detectors, got " + std::to_string(detectors.size()));
+  check_workspace(window, ws, "commit_window");
+  std::fill(ws.delta.begin(), ws.delta.end(), 0);
+  std::fill(out.committed.begin(), out.committed.end(), 0);
+  std::fill(out.frame.begin(), out.frame.end(), 0);
   for (auto c = commit.begin; c < commit.end; ++c) {
     out.committed[c] = estimate[c] & 1;
     if (!out.committed[c])
       continue;
     for (auto p = h.ptr()[c]; p < h.ptr()[c + 1]; ++p)
-      delta[h.indices()[p]] ^= 1;
+      ws.delta[h.indices()[p]] ^= 1;
     for (auto p = o.ptr()[c]; p < o.ptr()[c + 1]; ++p)
       out.frame[o.indices()[p]] ^= 1;
   }
-  for (const auto &send : window.sends) {
-    auto &values = out.sends.emplace_back();
-    for (const auto r : send.rows)
-      values.push_back(send.mode == send_mode::residual
-                           ? static_cast<std::uint8_t>(detectors[r] ^ delta[r])
-                           : delta[r]);
+  for (std::size_t i = 0; i < window.sends.size(); ++i) {
+    const auto &send = window.sends[i];
+    auto &values = out.sends[i];
+    for (std::size_t j = 0; j < send.rows.size(); ++j) {
+      const auto r = send.rows[j];
+      values[j] = send.mode == send_mode::residual
+                      ? static_cast<std::uint8_t>(detectors[r] ^ ws.delta[r])
+                      : ws.delta[r];
+    }
   }
-  return out;
+} // end - commit_window()
+
+// The estimate goes in a workspace of its own.
+window_outputs commit_window(const decoding_window &window,
+                             const std::vector<std::uint8_t> &detectors,
+                             const std::vector<std::uint8_t> &estimate) {
+  auto ws = make_window_workspace(window);
+  if (detectors.size() != window.model.h.num_rows() ||
+      estimate.size() != ws.solution.estimate.size())
+    throw std::invalid_argument(
+        "commit_window: expected " + std::to_string(window.model.h.num_rows()) +
+        " detectors and " + std::to_string(ws.solution.estimate.size()) +
+        " estimates, got " + std::to_string(detectors.size()) + " and " +
+        std::to_string(estimate.size()));
+  ws.solution.estimate = estimate;
+  commit_window(window, detectors, ws);
+  return std::move(ws.solution.outputs);
 } // end - commit_window()
 
 // Rows are matched through the shot: the sender's rows count from its first
 // round, the receiver's own rows from its own, and its imported rows follow
-// them, counted from its first imported round.
+// them, counted from its first imported round. The first pass checks every
+// row and the second applies them, so no list of rows is kept.
 void receive_send(const decoding_window &receiver,
                   const decoding_window &sender, std::size_t send,
                   const std::vector<std::uint8_t> &values,
                   std::vector<std::uint8_t> &detectors) {
-  std::vector<std::size_t> rows;
+  // No receiver row: larger than any row index.
+  constexpr auto none = std::numeric_limits<std::size_t>::max();
   const auto reject = [](const std::string &what) {
     throw std::invalid_argument("receive_send: " + what);
   };
@@ -1028,59 +1096,84 @@ void receive_send(const decoding_window &receiver,
   const auto import_first =
       imports.empty() ? 0 : t.row_offset(imports.begin, R);
   const auto import_end = imports.empty() ? 0 : t.row_offset(imports.end, R);
-  for (const auto r : s.rows) {
+  // The receiver's row for row r of the send, or none if the receiver does
+  // not take it in the send's mode.
+  const auto receiver_row = [&](std::size_t r) -> std::size_t {
     const auto row = sender_first + r;
-    const bool own =
-        row >= own_first && row - own_first < receiver.num_own_rows;
-    const bool imported = row >= import_first && row < import_end;
-    if (s.mode == send_mode::delta && own)
-      rows.push_back(row - own_first);
-    else if (s.mode == send_mode::residual && imported)
-      rows.push_back(receiver.num_own_rows + row - import_first);
-    else
+    if (s.mode == send_mode::delta && row >= own_first &&
+        row - own_first < receiver.num_own_rows)
+      return row - own_first;
+    if (s.mode == send_mode::residual && row >= import_first &&
+        row < import_end)
+      return receiver.num_own_rows + row - import_first;
+    return none;
+  };
+  for (const auto r : s.rows)
+    if (receiver_row(r) == none)
       reject("send '" + s.id + "' of window " + std::to_string(sender.k) +
-             " reaches shot row " + std::to_string(row) + ", which window " +
-             std::to_string(receiver.k) + " does not take as a " +
+             " reaches shot row " + std::to_string(sender_first + r) +
+             ", which window " + std::to_string(receiver.k) +
+             " does not take as a " +
              (s.mode == send_mode::delta ? "delta" : "residual"));
-  } // end - for(r)
-  for (std::size_t i = 0; i < rows.size(); ++i)
+  for (std::size_t i = 0; i < s.rows.size(); ++i)
     if (s.mode == send_mode::delta)
-      detectors[rows[i]] ^= values[i] & 1;
+      detectors[receiver_row(s.rows[i])] ^= values[i] & 1;
     else
-      detectors[rows[i]] = values[i] & 1;
+      detectors[receiver_row(s.rows[i])] = values[i] & 1;
 } // end - receive_send()
 
 // H keeps only the decoder's columns, so its priors are the leading ones.
+// dem_chunks carry no error_ids, so there are none to pass. The decoder is
+// checked as the memory window checks its own: it must return fault
+// columns, and take the window's rows and return its decoder columns.
 std::unique_ptr<decoder>
 make_window_decoder(const decoding_window &window, const std::string &name,
                     const cudaqx::heterogeneous_map &params) {
   const auto columns = window.num_decoder_columns();
+  const auto rows = window.model.h.num_rows();
   const auto &priors = window.model.priors;
-  if (window.model.h.num_rows() == 0 || columns == 0)
+  std::unique_ptr<decoder> dec;
+  if (rows == 0 || columns == 0)
     return nullptr;
-  return get_decoder(
-      name,
-      decoder_init(
-          window.model.h, std::nullopt,
-          std::vector<double>(priors.begin(), priors.begin() + columns)),
-      decoder_output_request{decode_result_type::errors}, params);
-}
+  dec = get_decoder(name,
+                    decoder_init(window.model.h, std::nullopt,
+                                 std::vector<double>(priors.begin(),
+                                                     priors.begin() + columns)),
+                    decoder_output_request{decode_result_type::errors}, params);
+  if (dec->get_result_type() != decode_result_type::errors)
+    throw std::invalid_argument("make_window_decoder: decoder '" + name +
+                                "' returns observables; a window needs its "
+                                "fault columns");
+  if (dec->get_syndrome_size() != rows || dec->get_block_size() != columns)
+    throw std::invalid_argument(
+        "make_window_decoder: decoder '" + name + "' takes " +
+        std::to_string(dec->get_syndrome_size()) + " detectors and returns " +
+        std::to_string(dec->get_block_size()) + " columns, but window " +
+        std::to_string(window.k) + " has " + std::to_string(rows) +
+        " rows and " + std::to_string(columns) + " decoder columns");
+  return dec;
+} // end - make_window_decoder()
 
 // The decoder's soft result is made hard. H e is formed from H's columns,
-// which are the decoder's, and compared with the detectors.
-window_solution solve_window(const decoding_window &window, decoder *dec,
-                             const std::vector<std::uint8_t> &detectors) {
-  window_solution out;
+// which are the decoder's, and compared with the detectors. The decoder's
+// input, H e and the solution are the workspace's, cleared before use.
+void solve_window(const decoding_window &window, decoder *dec,
+                  const std::vector<std::uint8_t> &detectors,
+                  window_workspace &ws) {
   const auto &h = window.model.h;
-  std::vector<std::uint8_t> explained(h.num_rows(), 0);
+  auto &out = ws.solution;
   if (detectors.size() != h.num_rows())
     throw std::invalid_argument(
         "solve_window: expected " + std::to_string(h.num_rows()) +
         " detectors, got " + std::to_string(detectors.size()));
-  out.estimate.assign(window.model.o.num_cols(), 0);
+  check_workspace(window, ws, "solve_window");
+  std::fill(out.estimate.begin(), out.estimate.end(), 0);
+  std::fill(ws.explained.begin(), ws.explained.end(), 0);
+  out.converged = true;
+  out.satisfied = true;
   if (dec) {
-    const auto result =
-        dec->decode(std::vector<float_t>(detectors.begin(), detectors.end()));
+    std::copy(detectors.begin(), detectors.end(), ws.syndrome.begin());
+    const auto result = dec->decode(ws.syndrome);
     if (result.result.size() != h.num_cols())
       throw std::invalid_argument("solve_window: the decoder returned " +
                                   std::to_string(result.result.size()) +
@@ -1093,11 +1186,10 @@ window_solution solve_window(const decoding_window &window, decoder *dec,
   for (std::size_t c = 0; c < h.num_cols(); ++c)
     if (out.estimate[c])
       for (auto p = h.ptr()[c]; p < h.ptr()[c + 1]; ++p)
-        explained[h.indices()[p]] ^= 1;
-  for (std::size_t r = 0; r < explained.size(); ++r)
-    out.satisfied = out.satisfied && explained[r] == (detectors[r] & 1);
-  out.outputs = commit_window(window, detectors, out.estimate);
-  return out;
+        ws.explained[h.indices()[p]] ^= 1;
+  for (std::size_t r = 0; r < ws.explained.size(); ++r)
+    out.satisfied = out.satisfied && ws.explained[r] == (detectors[r] & 1);
+  commit_window(window, detectors, ws);
 } // end - solve_window()
 
 } // namespace cudaq::qec
