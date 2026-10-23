@@ -184,7 +184,8 @@ void decoding_task_graph::impl::require_streaming_support(
 void decoding_task_graph::impl::compile_wires() {
   const auto N = nodes.size();
   std::size_t one_shot_parallel_width = 1;
-  std::size_t streaming_wire_count = 0;
+  streaming_wire_count = 0;
+  streaming_value_wire_count = 0;
   wires_to.assign(N + 1, {});
   node_input_counts.resize(N);
   node_outputs.resize(N);
@@ -534,18 +535,19 @@ void decoding_task_graph::impl::compile_wires() {
     streaming_wires_from.assign(N, {});
     completion_wires_from.assign(N, {});
     streaming_wires_to_count.assign(N, 0);
-    streaming_deliveries_seen.assign(N, 0);
     // Walked in declared edge order: a producer publishes to its consumers in
     // that order, which is what the event tree's sibling blocking assumes.
-    for (const auto &w : wires) {
+    for (auto w : wires) {
       if (w.from_node < 0 || w.to_node < 0 ||
           streaming_by_node[w.from_node] < 0 ||
           streaming_by_node[w.to_node] < 0)
         continue; // not an edge between two streaming nodes
-      (is_done_slot(w.from_node, w.from_slot)
-           ? completion_wires_from
-           : streaming_wires_from)[w.from_node]
-          .push_back(w);
+      if (is_done_slot(w.from_node, w.from_slot)) {
+        completion_wires_from[w.from_node].push_back(w);
+      } else {
+        w.id = static_cast<int>(streaming_value_wire_count++);
+        streaming_wires_from[w.from_node].push_back(w);
+      }
       ++streaming_wires_to_count[w.to_node];
       const auto &consumer = streaming_nodes[streaming_by_node[w.to_node]];
       if (!consumer.capability->supports_streaming_input(w.to_slot))
@@ -742,6 +744,7 @@ void decoding_task_graph::impl::compile_wires() {
     // reachability for blocking follows value wires only.
     std::vector<std::vector<std::size_t>> value_dependents(M);
     streaming_dependents.assign(M, {});
+    streaming_producers.assign(M, {});
     streaming_predecessor_counts.assign(M, 0);
     for (std::size_t si = 0; si < M; ++si) {
       const auto node_idx = streaming_nodes[si].node_index;
@@ -751,6 +754,7 @@ void decoding_task_graph::impl::compile_wires() {
         const auto producer_si =
             static_cast<std::size_t>(streaming_by_node[wire.from_node]);
         streaming_dependents[producer_si].push_back(si);
+        streaming_producers[si].push_back(producer_si);
         if (!is_done_slot(wire.from_node, wire.from_slot))
           value_dependents[producer_si].push_back(si);
         ++streaming_predecessor_counts[si];
@@ -780,6 +784,11 @@ void decoding_task_graph::impl::compile_wires() {
 
     streaming_node_generations.assign(M, 0);
     streaming_output_fire_ordinals.assign(num_sinks, 0);
+    latest_node_corrections.resize(M);
+    for (std::size_t si = 0; si < M; ++si)
+      latest_node_corrections[si].assign(
+          streaming_nodes[si].capability->num_observables(), 0);
+    latest_node_coverage.assign(M, std::nullopt);
     reset_streaming_progress();
   }
 
@@ -788,20 +797,7 @@ void decoding_task_graph::impl::compile_wires() {
         std::max(one_shot_parallel_width, streaming_parallel_width);
     const auto hardware_threads =
         std::max<std::size_t>(1, std::thread::hardware_concurrency());
-    const auto pool_threads = std::min(max_parallel_width, hardware_threads);
-    // Width-one graphs still use the same event loop, with the caller as the
-    // sole worker, so execution semantics do not depend on pool width.
-    if (N > 1 || !streaming_nodes.empty())
-      parallel_pool = std::make_unique<detail::thread_pool>(pool_threads);
-    if (parallel_pool) {
-      // Causal ancestors remain resident until their descendants drain.
-      // This linear multiple covers all simultaneously live frontier,
-      // publication, continuation, and flush descriptors without hot-path
-      // allocation.
-      const auto event_capacity =
-          std::max<std::size_t>(64, 16 * (N + streaming_wire_count + 1));
-      prepare_event_runtime(event_capacity);
-    }
+    pool_width = std::min(max_parallel_width, hardware_threads);
   }
 
   node_ids.clear();
@@ -913,12 +909,6 @@ struct pending_async_run {
 // ---------------------------------------------------------------------------
 
 // Count publications per streaming node; output barriers consume these counts.
-void decoding_task_graph::impl::record_streaming_publication(int node_idx) {
-  const int streaming_idx = streaming_by_node[node_idx];
-  if (streaming_idx >= 0)
-    ++streaming_node_generations[static_cast<std::size_t>(streaming_idx)];
-}
-
 // Publish each output through the slowest contributor, then derive the exact
 // round range represented by that generation from its compiled schedule.
 void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
@@ -947,8 +937,7 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
       std::optional<streaming_task_graph_node::committed_coverage> exact;
       std::size_t exact_count = 0;
       for (const auto si : contributors) {
-        const auto coverage =
-            streaming_nodes[si].capability->streaming_coverage();
+        const auto coverage = latest_node_coverage[si];
         if (!coverage)
           continue;
         ++exact_count;
@@ -990,9 +979,7 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
                output_streaming_schedules[k].end_guard > 0 &&
                std::none_of(contributors.begin(), contributors.end(),
                             [&](auto si) {
-                              return streaming_nodes[si]
-                                  .capability->streaming_coverage()
-                                  .has_value();
+                              return latest_node_coverage[si].has_value();
                             })) {
       // A guarded tail is operational progress even when it projects to no
       // fault columns and flush() therefore has no correction bytes to XOR.
@@ -1069,6 +1056,9 @@ void decoding_task_graph::impl::reset_streaming_progress() {
   std::fill(streaming_output_fire_ordinals.begin(),
             streaming_output_fire_ordinals.end(), 0);
   std::fill(result.values.begin(), result.values.end(), uint8_t{0});
+  clear_latest_node_corrections();
+  std::fill(latest_node_coverage.begin(), latest_node_coverage.end(),
+            std::nullopt);
   for (auto &output : result.outputs) {
     output.generation = 0;
     output.coverage_begin_round = 0;
@@ -1092,16 +1082,19 @@ void decoding_task_graph::impl::fail_streaming_progress(
     ++result.result_revision;
 }
 
+void decoding_task_graph::impl::clear_latest_node_corrections() {
+  for (auto &corrections : latest_node_corrections)
+    std::fill(corrections.begin(), corrections.end(), uint8_t{0});
+}
+
 // Materialize the current parity-folded values beside their progress metadata.
 void decoding_task_graph::impl::compose_streaming_values() const {
   auto &values = streaming_result_state.values;
   std::fill(values.begin(), values.end(), uint8_t{0});
   for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
-    const auto &node = *streaming_nodes[si].capability;
-    const uint8_t *corrections = node.corrections();
-    const auto width = node.num_observables();
+    const auto &corrections = latest_node_corrections[si];
     for (const auto offset : streaming_node_output_offsets[si])
-      for (std::size_t i = 0; i < width; ++i)
+      for (std::size_t i = 0; i < corrections.size(); ++i)
         values[offset + i] ^= corrections[i];
   }
 }
@@ -1277,6 +1270,7 @@ void decoding_task_graph::clear_corrections() {
   impl_->finalized = false;
   for (const auto &entry : impl_->streaming_nodes)
     entry.capability->clear_corrections();
+  impl_->clear_latest_node_corrections();
   impl_->consume_streaming_result();
   if (impl_->async_streaming.enabled) {
     std::lock_guard<std::mutex> lock(impl_->async_streaming.snapshot_mutex);
@@ -1297,8 +1291,6 @@ void decoding_task_graph::reset_decoder() {
       decoder_backed->reset_decoder();
     else if (auto *streaming = node->streaming())
       streaming->reset_streaming_state();
-  std::fill(impl_->streaming_deliveries_seen.begin(),
-            impl_->streaming_deliveries_seen.end(), std::size_t{0});
   impl_->reset_streaming_progress();
   if (impl_->async_streaming.enabled) {
     std::lock_guard<std::mutex> lock(impl_->async_streaming.snapshot_mutex);

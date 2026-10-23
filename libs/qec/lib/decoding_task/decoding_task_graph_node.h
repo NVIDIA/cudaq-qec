@@ -43,6 +43,7 @@ struct compiled_wire {
   int from_slot; ///< index into that node's outputs vector
   int to_node;   ///< index into nodes[]; -1 = "output" sink
   int to_slot;   ///< index into that node's inputs vector
+  int id = -1;   ///< per-record value buffer for a streaming wire; -1 = none
 };
 
 /// Optional per-round streaming capability. DAG-only nodes do not implement it.

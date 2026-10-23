@@ -264,19 +264,19 @@ selection_strategy_registration::~selection_strategy_registration() {
     registry().erase(it);
 }
 
+selection_strategy_factory find_selection_strategy(const std::string &name) {
+  std::lock_guard<std::mutex> lock(registry_mutex());
+  auto it = registry().find(name);
+  if (it == registry().end())
+    throw std::invalid_argument("selection strategy '" + name +
+                                "' is not registered");
+  return it->second.factory;
+}
+
 std::unique_ptr<selection_strategy>
 make_selection_strategy(const std::string &name,
                         const cudaqx::heterogeneous_map &params) {
-  selection_strategy_factory factory;
-  {
-    std::lock_guard<std::mutex> lock(registry_mutex());
-    auto it = registry().find(name);
-    if (it == registry().end())
-      throw std::invalid_argument("selection strategy '" + name +
-                                  "' is not registered");
-    factory = it->second.factory;
-  }
-  return factory(params);
+  return find_selection_strategy(name)(params);
 }
 
 std::vector<std::string> registered_selection_strategies() {

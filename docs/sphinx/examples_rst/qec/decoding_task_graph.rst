@@ -270,15 +270,21 @@ before consuming the result. Each public enqueue remains one queue record, so
 inner streaming decoders observe the same call boundaries as synchronous
 graphs.
 
+In an asynchronous graph, records overlap: the coordinator admits every
+accepted record at once, up to ``async_queue_capacity``, and a later record
+runs ahead on nodes that have finished the earlier ones. Each node still
+processes records in order and results are identical to serial execution;
+only when work runs changes. The coordinator itself runs no node work, so
+ingestion never waits behind a decode.
+
 Decoder-server YAML exposes the same policy as ``task_graph.async_streaming``,
 with optional ``async_queue_capacity``, ``async_coordinator_cpu``, and
 ``async_spin_pause_iters`` fields. A nonnegative coordinator CPU requests
 Linux thread affinity and fails graph construction if it cannot be honored.
-It pins the coordinator thread only; decoder-pool workers keep their own
-configured affinity.
-The spin count keeps an active coordinator polling briefly before it parks;
-zero, the default, disables spinning. Reserve that CPU from producer and
-decoder-worker affinity masks when using this low-latency policy.
+It pins the coordinator thread only. The spin count keeps an active
+coordinator polling briefly before it parks; zero, the default, disables
+spinning. Reserve that CPU from producer and worker affinity masks when using
+this low-latency policy.
 
 Multi-node graphs (combine)
 ++++++++++++++++++++++++++++

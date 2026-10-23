@@ -35,6 +35,8 @@ struct task_graph_edge {
 /// Construction-time execution policy for a decoding task graph.
 struct task_graph_options {
   /// Process streaming records on the graph's persistent coordinator thread.
+  /// Records then overlap: a later record runs ahead on nodes that finished
+  /// the earlier ones, with `async_queue_capacity` records in flight at most.
   bool async_streaming = false;
   /// Maximum public enqueue operations queued or executing. Must be nonzero
   /// when asynchronous.

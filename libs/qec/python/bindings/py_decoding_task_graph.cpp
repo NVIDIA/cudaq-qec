@@ -220,7 +220,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       "With TaskGraphOptions.async_streaming enabled, BULK enqueue calls\n"
       "return False after copying input; streaming_result() waits for "
       "accepted\n"
-      "input and returns its completion state.\n"
+      "input and returns its completion state. Records overlap: a later\n"
+      "record runs ahead on nodes that finished the earlier ones.\n"
       "Tagging the last round round_type.FINAL commits what a guarded window\n"
       "withheld; it is the only way to end a stream.")
       .def_static("from_spec", &decoding_task_graph::from_spec, nb::arg("spec"),

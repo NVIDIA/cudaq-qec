@@ -19,18 +19,23 @@
 #include <future>
 #include <stdexcept>
 
+// CPU pause hint for spin loops, as cudaq-realtime defines it.
+#ifndef CUDAQ_REALTIME_CPU_RELAX
+#if defined(__x86_64__)
+#include <xmmintrin.h>
+#define CUDAQ_REALTIME_CPU_RELAX() _mm_pause()
+#elif defined(__aarch64__)
+#define CUDAQ_REALTIME_CPU_RELAX() __asm__ volatile("yield" ::: "memory")
+#else
+#define CUDAQ_REALTIME_CPU_RELAX()                                             \
+  do {                                                                         \
+  } while (0)
+#endif
+#endif
+
 #if defined(__linux__)
 #include <pthread.h>
 #include <sched.h>
-#endif
-
-#if defined(__x86_64__) || defined(_M_X64)
-#include <immintrin.h>
-#define CUDAQ_QEC_ASYNC_CPU_RELAX() _mm_pause()
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#define CUDAQ_QEC_ASYNC_CPU_RELAX() asm volatile("yield" ::: "memory")
-#else
-#define CUDAQ_QEC_ASYNC_CPU_RELAX() ((void)0)
 #endif
 
 namespace cudaq::qec {
@@ -38,19 +43,6 @@ namespace cudaq::qec {
 namespace {
 
 constexpr int kAsyncFinishSpinPauseIters = 4096;
-
-// Keep an active coordinator hot for a bounded interval. Waiting
-// sessions still park, so an idle prepared graph consumes no CPU.
-bool spin_for_async_wake(std::atomic<uint64_t> &wake_epoch,
-                         uint64_t observed_epoch,
-                         std::size_t pause_iters) noexcept {
-  for (std::size_t spin = 0; spin < pause_iters; ++spin) {
-    if (wake_epoch.load(std::memory_order_acquire) != observed_epoch)
-      return true;
-    CUDAQ_QEC_ASYNC_CPU_RELAX();
-  }
-  return false;
-}
 
 // Release the single-producer publication guard and wake a lifecycle operation
 // that is waiting for an in-progress enqueue to finish.
@@ -78,9 +70,17 @@ void notify_completion_waiters(
     completed.notify_all();
 }
 
+// Records usually retire within microseconds of each other, so spin briefly
+// before the kernel-backed wait: a park and wake would otherwise dominate a
+// producer that is only one slot ahead of the workers.
 void wait_for_completion_change(std::atomic<uint64_t> &completed,
                                 std::atomic<std::uint32_t> &completion_waiters,
                                 uint64_t observed) noexcept {
+  for (int spin = 0; spin < kAsyncFinishSpinPauseIters; ++spin) {
+    if (completed.load(std::memory_order_acquire) != observed)
+      return;
+    CUDAQ_REALTIME_CPU_RELAX();
+  }
   completion_waiters.fetch_add(1, std::memory_order_acq_rel);
   if (completed.load(std::memory_order_acquire) == observed)
     completed.wait(observed, std::memory_order_acquire);
@@ -96,13 +96,26 @@ void wait_until_inactive(std::atomic<bool> &active,
   for (int spin = 0; spin < pause_iters; ++spin) {
     if (!active.load(std::memory_order_acquire))
       return;
-    CUDAQ_QEC_ASYNC_CPU_RELAX();
+    CUDAQ_REALTIME_CPU_RELAX();
   }
   while (active.load(std::memory_order_acquire))
     active.wait(true, std::memory_order_acquire);
 }
 
 } // namespace
+
+// Keep an active coordinator hot for a bounded interval. Waiting
+// sessions still park, so an idle prepared graph consumes no CPU.
+bool decoding_task_graph::impl::spin_for_async_wake(
+    uint64_t observed_epoch, std::size_t pause_iters) const noexcept {
+  const auto &state = async_streaming;
+  for (std::size_t spin = 0; spin < pause_iters; ++spin) {
+    if (state.wake_epoch.load(std::memory_order_acquire) != observed_epoch)
+      return true;
+    CUDAQ_REALTIME_CPU_RELAX();
+  }
+  return false;
+}
 
 // Advance a monotonic event counter before notifying the coordinator. Unlike a
 // notification alone, the counter prevents an event from being missed if it
@@ -217,10 +230,10 @@ void decoding_task_graph::impl::invalidate_async_stream_snapshot() {
   state.snapshot_valid = false;
 }
 
-// Consume accepted records in sequence order on the graph's sole streaming
-// state-mutator thread. Lifecycle requests are handled only between node calls:
-// cancellation cannot interrupt a decoder, while finish drains and optionally
-// flushes.
+// Run each session on the graph's persistent coordinator thread. Inside a
+// session the coordinator only dispatches: pool workers execute node events
+// for several records at once while every node still sees them in order.
+// Lifecycle requests are handled between sessions and by the dispatcher.
 void decoding_task_graph::impl::async_stream_loop() noexcept {
   auto &state = async_streaming;
   uint64_t observed_epoch = 0;
@@ -235,100 +248,50 @@ void decoding_task_graph::impl::async_stream_loop() noexcept {
     state.active.store(false, std::memory_order_release);
     state.active.notify_all();
   };
+  const auto cancel = [&state, &deactivate] {
+    state.needs_reset = true;
+    state.completed.store(state.submitted.load(std::memory_order_acquire),
+                          std::memory_order_release);
+    notify_completion_waiters(state.completed, state.completion_waiters);
+    deactivate();
+  };
 
   while (true) {
-    if (state.active.load(std::memory_order_acquire) &&
-        spin_for_async_wake(state.wake_epoch, observed_epoch,
-                            state.spin_pause_iters)) {
-      observed_epoch = state.wake_epoch.load(std::memory_order_acquire);
-    } else {
-      // The exchange acquires the latest producer publication before checking
-      // the queue. A producer that observes this advertisement clears it and
-      // performs the one required wake.
-      state.coordinator_waiting.exchange(true, std::memory_order_acq_rel);
-      const bool work_ready =
-          state.active.load(std::memory_order_acquire) &&
-          state.completed.load(std::memory_order_acquire) <
-              state.submitted.load(std::memory_order_acquire);
-      if (!work_ready &&
-          state.wake_epoch.load(std::memory_order_acquire) == observed_epoch)
-        state.wake_epoch.wait(observed_epoch, std::memory_order_acquire);
-      state.coordinator_waiting.store(false, std::memory_order_release);
-      observed_epoch = state.wake_epoch.load(std::memory_order_acquire);
-    }
+    wait_for_async_wake(
+        observed_epoch,
+        [&state] {
+          return state.active.load(std::memory_order_acquire) &&
+                 state.completed.load(std::memory_order_acquire) <
+                     state.submitted.load(std::memory_order_acquire);
+        },
+        state.spin_pause_iters);
     if (state.shutdown.load(std::memory_order_acquire))
       return;
     if (!state.active.load(std::memory_order_acquire))
       continue;
 
     if (state.cancel_requested.load(std::memory_order_acquire)) {
-      state.needs_reset = true;
-      state.completed.store(state.submitted.load(std::memory_order_acquire),
-                            std::memory_order_release);
-      notify_completion_waiters(state.completed, state.completion_waiters);
-      deactivate();
+      cancel();
       continue;
     }
 
-    try {
-      uint64_t completed = state.completed.load(std::memory_order_acquire);
-      while (completed < state.submitted.load(std::memory_order_acquire)) {
-        if (state.cancel_requested.load(std::memory_order_acquire))
-          break;
-        auto &slot = state.slots[completed % state.capacity];
-        detail_affinity::CudaDeviceGuard device_guard(state.cuda_device_id);
-        const auto prior_revision = streaming_result_state.result_revision;
-        (void)process_streaming_record(slot.syndrome.data(), slot.len,
-                                       slot.type);
-        state.result_changed |=
-            streaming_result_state.result_revision != prior_revision;
-        state.operation_completed = streaming_result_state.operation_completed;
-        if (state.operation_completed)
-          ++streaming_result_state.completed_operations;
-        // Most public operations only fill a window and leave every observable
-        // and status unchanged. Avoid serializing with readers and copying an
-        // identical snapshot for those no-op operations. FINAL still publishes
-        // its terminal status even for an empty shot.
-        const bool operation_pulse_changed =
-            state.result_snapshot.operation_completed !=
-            streaming_result_state.operation_completed;
-        if (state.result_changed || operation_pulse_changed ||
-            slot.type == round_type::FINAL)
-          publish_async_stream_snapshot();
-        state.operation_completed = false;
-        state.result_changed = false;
-        ++completed;
-        state.completed.store(completed, std::memory_order_release);
-        notify_completion_waiters(state.completed, state.completion_waiters);
+    // A failed session keeps its graph exclusivity until finish or cancel,
+    // so a producer cannot resume on a graph in an unknown state.
+    if (!state.failed.load(std::memory_order_acquire)) {
+      try {
+        run_async_session();
+      } catch (...) {
+        handle_async_stream_error(std::current_exception());
       }
-    } catch (...) {
-      handle_async_stream_error(std::current_exception());
-    }
-
-    if (state.cancel_requested.load(std::memory_order_acquire)) {
-      state.needs_reset = true;
-      state.completed.store(state.submitted.load(std::memory_order_acquire),
-                            std::memory_order_release);
-      notify_completion_waiters(state.completed, state.completion_waiters);
-      deactivate();
-      continue;
+      if (state.cancel_requested.load(std::memory_order_acquire)) {
+        cancel();
+        continue;
+      }
     }
 
     if (state.finish_requested.load(std::memory_order_acquire) &&
-        state.completed.load(std::memory_order_acquire) >=
-            state.finish_target) {
-      if (state.flush_requested.load(std::memory_order_relaxed) &&
-          !state.failed.load(std::memory_order_acquire) && !finalized) {
-        try {
-          detail_affinity::CudaDeviceGuard device_guard(state.cuda_device_id);
-          (void)finish_streaming_record();
-          publish_async_stream_snapshot();
-        } catch (...) {
-          handle_async_stream_error(std::current_exception());
-        }
-      }
+        state.completed.load(std::memory_order_acquire) >= state.finish_target)
       deactivate();
-    }
   }
 }
 
@@ -463,8 +426,6 @@ void decoding_task_graph::impl::begin_async_streaming(int cuda_device_id) {
     state.finish_requested.store(false, std::memory_order_relaxed);
     state.flush_requested.store(false, std::memory_order_relaxed);
     state.cancel_requested.store(false, std::memory_order_relaxed);
-    state.operation_completed = false;
-    state.result_changed = false;
     state.active.store(true, std::memory_order_release);
     state.accepting.store(true, std::memory_order_release);
     g.wake_async_stream();

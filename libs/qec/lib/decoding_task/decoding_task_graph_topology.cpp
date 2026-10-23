@@ -643,6 +643,13 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
                                options.async_spin_pause_iters);
     i->async_streaming.enabled = true;
   }
+  // The parked coordinator cannot start a session before assembly returns. An
+  // asynchronous graph gets one record context per queue slot, so every
+  // accepted record is admitted at once.
+  if (i->nodes.size() > 1 || !i->streaming_nodes.empty())
+    i->prepare_event_runtime(
+        options.async_streaming ? options.async_queue_capacity : 1,
+        /*dispatcher_thread=*/options.async_streaming);
   return std::unique_ptr<decoding_task_graph>(
       new decoding_task_graph(std::move(i)));
 }
