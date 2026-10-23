@@ -1255,6 +1255,11 @@ def test_xor_num_inputs_parser_and_schema_agree():
                            match="xor: num_inputs must be at least 2"):
             qec.multi_decoder_config.from_yaml_str(bad)
         assert not validator.is_valid(yaml.safe_load(bad))
+    wide = text.replace("num_inputs: 3", "num_inputs: 2000")
+    with pytest.raises(RuntimeError,
+                       match="xor: num_inputs must be at most 1024"):
+        qec.multi_decoder_config.from_yaml_str(wide)
+    assert not validator.is_valid(yaml.safe_load(wide))
 
 
 def test_max_in_flight_parser_and_schema_agree():

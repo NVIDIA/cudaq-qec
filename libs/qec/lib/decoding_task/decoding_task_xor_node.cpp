@@ -16,8 +16,9 @@ xor_node::xor_node() : inputs_{"a", "b"} {}
 
 // Ports in_0 ... in_{N-1}, so N need not be known to name them.
 xor_node::xor_node(std::size_t num_inputs) {
-  if (num_inputs < 2)
-    throw std::invalid_argument("xor: num_inputs must be at least 2, not " +
+  if (num_inputs < 2 || num_inputs > max_inputs)
+    throw std::invalid_argument("xor: num_inputs must be from 2 to " +
+                                std::to_string(max_inputs) + ", not " +
                                 std::to_string(num_inputs));
   for (std::size_t i = 0; i < num_inputs; ++i)
     inputs_.push_back("in_" + std::to_string(i));
@@ -29,7 +30,7 @@ xor_node::~xor_node() = default;
 namespace {
 
 /// The kind's one parameter: how many inputs, when not the two of a and b.
-/// Its minimum of 2 is declared with the kind.
+/// Its bounds are declared with the kind.
 decoding::config::decoder_schema xor_params() {
   decoding::config::decoder_schema schema;
   schema.params.push_back({"num_inputs", decoding::config::param_kind::uint64});
@@ -47,6 +48,7 @@ const bool registered = [] {
   spec.requires_decoder = false;
   spec.requires_dem = false;
   spec.parameter_minimums = {{"num_inputs", 2}};
+  spec.parameter_maximums = {{"num_inputs", xor_node::max_inputs}};
   register_node_kind(std::move(spec), xor_params(),
                      [](node_build_context &ctx) {
                        const auto *p = ctx.node_params;

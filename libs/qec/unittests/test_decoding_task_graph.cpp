@@ -8429,6 +8429,31 @@ TEST(DecodingTaskGraph, XorNumInputsNamesItsPorts) {
                std::invalid_argument);
 }
 
+// num_inputs has a maximum, checked before any port is built: from C++, an
+// int -1 reads as the largest size_t, which would otherwise pass the minimum
+// and exhaust memory naming ports.
+TEST(DecodingTaskGraph, XorNumInputsHasAMaximum) {
+  const auto rejects = [](const auto num_inputs) {
+    std::vector<task_graph_node_config> nodes;
+    task_graph_node_config sum;
+    sum.id = "sum";
+    sum.kind = "xor";
+    sum.node_params.insert("num_inputs", num_inputs);
+    nodes.push_back(std::move(sum));
+    try {
+      decoding_task_graph::from_topology(
+          std::move(nodes), {{"sum", "output", "output", "input"}});
+      ADD_FAILURE() << "an xor of " << num_inputs << " inputs was built";
+    } catch (const std::exception &e) {
+      EXPECT_NE(std::string(e.what()).find("num_inputs must be at most 1024"),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(-1);
+  rejects(std::size_t{1025});
+}
+
 TEST(DecodingTaskGraph, FromTopologyRejectsAnEmptyGraph) {
   EXPECT_THROW(decoding_task_graph::from_topology({}), std::invalid_argument);
 }

@@ -593,6 +593,8 @@ const window_request *layer_request(const task_graph_node_config &n,
 }
 
 // The nodes reachable from `id` along edges, in the order first reached.
+// The graph's output sink is not a node: each edge into it is a result of
+// its own, so two nodes that both feed it share nothing there.
 std::vector<std::string> downstream(const std::string &id,
                                     const std::vector<task_graph_edge> &edges) {
   std::vector<std::string> out;
@@ -601,7 +603,7 @@ std::vector<std::string> downstream(const std::string &id,
     const auto at = todo.front();
     todo.erase(todo.begin());
     for (const auto &e : edges)
-      if (e.from_node == at &&
+      if (e.from_node == at && e.to_node != "output" &&
           std::find(out.begin(), out.end(), e.to_node) == out.end()) {
         out.push_back(e.to_node);
         todo.push_back(e.to_node);
@@ -610,16 +612,23 @@ std::vector<std::string> downstream(const std::string &id,
   return out;
 }
 
-// The receive port index of "receive_<k>", or nothing for another name.
+// The receive port index of "receive_<k>", or nothing for another name: k
+// is written in decimal without leading zeros, as the ports are named, and
+// at most 9 digits long, which no num_receives approaches and every size_t
+// holds.
 std::optional<std::size_t> receive_index(const std::string &port) {
   const std::string prefix = "receive_";
+  std::size_t k = 0;
   if (port.size() <= prefix.size() || port.compare(0, prefix.size(), prefix))
     return std::nullopt;
   const auto digits = port.substr(prefix.size());
-  if (!std::all_of(digits.begin(), digits.end(),
+  if (digits.size() > 9 || (digits.size() > 1 && digits.front() == '0') ||
+      !std::all_of(digits.begin(), digits.end(),
                    [](char c) { return c >= '0' && c <= '9'; }))
     return std::nullopt;
-  return std::stoul(digits);
+  for (const auto c : digits)
+    k = 10 * k + static_cast<std::size_t>(c - '0');
+  return k;
 }
 
 } // namespace
@@ -661,7 +670,8 @@ void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
     if (!n->dem)
       reject_topology("ingest node '" + id + "' has no dem_chunks template");
     templates[id] = std::make_shared<const experiment_template>(*n->dem);
-    if (n->node_params.get<bool>("read_logical", false) &&
+    if (n->node_params.contains("read_logical") &&
+        n->node_params.get<bool>("read_logical") &&
         templates[id]->readout().empty())
       reject_topology("ingest node '" + id +
                       "' reads the logical value, but its template's last "
@@ -670,7 +680,9 @@ void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
 
   for (const auto &[id, n] : windows) {
     const auto num_receives =
-        n->node_params.get<std::size_t>("num_receives", 0);
+        n->node_params.contains("num_receives")
+            ? n->node_params.get<std::size_t>("num_receives")
+            : std::size_t{0};
     for (const auto &e : edges) {
       if (e.to_node != id)
         continue;
