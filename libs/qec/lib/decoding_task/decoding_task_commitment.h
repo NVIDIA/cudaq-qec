@@ -40,6 +40,7 @@ struct window_dependency {
   std::int64_t k = 0; ///< The producer instance
   std::string to_input;
   bool exists = false; ///< An absent producer gives an empty input
+  bool operator==(const window_dependency &) const = default;
 };
 
 /// One window instance of a shot: what it decodes and what it waits for.
@@ -74,6 +75,8 @@ schedule_windows(std::shared_ptr<const experiment_template> context,
 /// The shot lengths validate_commitment() checks: [min_rounds(), end).
 /// They cover every prefix and terminal variant of every layer, and two
 /// bulk periods.
+/// @throws std::invalid_argument naming the operation if a request is
+/// invalid or the layers' periods differ.
 std::size_t commitment_probe_rounds(const experiment_template &context,
                                     const std::vector<window_layer> &layers);
 

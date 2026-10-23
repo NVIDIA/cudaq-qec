@@ -55,6 +55,7 @@ struct window_port {
   input_boundary boundary = input_boundary::columns; ///< An open input's
   double prior = 0.0;  ///< An open input's boundary-column prior
   round_range imports; ///< A closed output's imported rounds
+  bool operator==(const window_port &) const = default;
 };
 
 /// Why a commit column's parallel column, one with the same rows in the
@@ -81,6 +82,7 @@ struct window_send {
   send_mode mode = send_mode::delta;
   std::vector<round_range> rounds;
   std::vector<std::size_t> rows;
+  bool operator==(const window_send &) const = default;
 };
 
 /// An affine map over GF(2): output = matrix * input + offset. The inputs
@@ -142,6 +144,15 @@ struct decoding_window {
 /// @throws std::invalid_argument if the request has no commit zone or a
 /// period below 1.
 index_range window_instances(const window_request &request,
+                             std::size_t num_rounds);
+
+/// The rounds, zones, ports and sends of window @p k of @p request in a
+/// @p num_rounds round shot: window_from_dem_chunks() without the model and
+/// the maps, so it stitches no chunks.
+/// @throws std::invalid_argument as window_from_dem_chunks(), except for
+/// m2o.
+decoding_window place_window(std::shared_ptr<const experiment_template> context,
+                             const window_request &request, std::int64_t k,
                              std::size_t num_rounds);
 
 /// Build window @p k of @p request in a @p num_rounds round shot.

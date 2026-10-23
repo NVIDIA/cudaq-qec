@@ -5,12 +5,15 @@
 
 // Test fixtures shared by the DEM, task-graph and window unit tests: small
 // dem_chunks_spec memory experiments with a repeating phase, so a test can
-// expand them to any number of rounds.
+// expand them to any number of rounds, and the window requests of the
+// parallel-window and sliding-window layouts.
 
 #pragma once
 
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/window_request.h"
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -98,5 +101,57 @@ inline dem_chunks_spec multi_terminal_memory_spec(std::size_t rounds,
   } // end - for(i)
   return spec;
 } // end - multi_terminal_memory_spec()
+
+/// Every fault touches its own round only: the outgoing seam band is empty.
+inline dem_chunks_spec single_round_spec() {
+  auto spec = arbitrary_memory_spec(5);
+  for (auto &phase : spec.phases) {
+    phase.spec.seam_specs = {{seam_name::prev_round, {phase.spec.H_sparse, {}}},
+                             {seam_name::next_round, {{-1, -1, -1, -1}, {}}}};
+    phase.spec.H_sparse.clear();
+  }
+  return spec;
+}
+
+/// The parallel-window layers of the plan: A[k] buffers b rounds on each
+/// side of c_a commit rounds, and B[k] is the c_b-round gap before A[k].
+struct layered_requests {
+  experimental::window_request a;
+  experimental::window_request b;
+};
+
+/// A and B windows for commit c_a, buffer b and gap c_b.
+inline layered_requests layered(std::int64_t c_a, std::int64_t b,
+                                std::int64_t c_b) {
+  using experimental::port_disposition;
+  layered_requests out;
+  const std::int64_t period = c_a + c_b;
+  out.a.period = period;
+  out.a.commit = experimental::round_range{0, c_a};
+  out.a.buffers = {{-b, 0}, {c_a, c_a + b}};
+  out.a.input = {port_disposition::open, 0.01};
+  out.a.output = {port_disposition::open, std::nullopt};
+  out.a.sends = {{"forward", std::nullopt, {}}, {"backward", std::nullopt, {}}};
+  out.b.period = period;
+  out.b.offset = -c_b;
+  out.b.commit = experimental::round_range{0, c_b};
+  out.b.input = {port_disposition::closed, std::nullopt};
+  out.b.output = {port_disposition::closed, std::nullopt};
+  return out;
+} // end - layered()
+
+/// A sequential sliding window: commit step rounds, then look ahead.
+inline experimental::window_request sliding(std::int64_t step,
+                                            std::int64_t size) {
+  using experimental::port_disposition;
+  experimental::window_request w;
+  w.period = step;
+  w.commit = experimental::round_range{0, step};
+  w.buffers = {{step, size}};
+  w.input = {port_disposition::closed, std::nullopt};
+  w.output = {port_disposition::open, std::nullopt};
+  w.sends = {{"forward", std::nullopt, {}}};
+  return w;
+}
 
 } // namespace cudaq::qec

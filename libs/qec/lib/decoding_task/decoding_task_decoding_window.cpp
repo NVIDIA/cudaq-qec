@@ -4,9 +4,10 @@
  */
 
 // Decoding windows built from dem_chunks: request validation, instance
-// ranges, window construction from a locally stitched chain, and the
-// canonical workload's commit, sends and frame update. Construction runs at
-// configuration time and may allocate; nothing here is on the hot path.
+// ranges, window placement, construction from a locally stitched chain with
+// its commit columns' parallel conflicts, and the canonical workload's
+// commit, sends and frame update. Construction runs at configuration time
+// and may allocate; nothing here is on the hot path.
 
 #include "decoding_task_decoding_window.h"
 #include <algorithm>
@@ -306,6 +307,54 @@ group_fault_columns(const detector_error_model &closed, std::size_t first,
   return groups;
 } // end - group_fault_columns()
 
+// Each commit column's first parallel column, by index, that lets the
+// decoder's choice between them change the commitment or the logical. A
+// column touching no row of the window is never chosen, and a twin in the
+// same zone with the same full rows and observable effect is no conflict.
+// zone and the closed chain's columns are the unmerged fault columns, the
+// window's first at closed column first.
+std::vector<parallel_columns>
+find_parallel_conflicts(const decoding_window &w,
+                        const detector_error_model &closed, std::size_t first,
+                        const std::vector<std::size_t> &zone) {
+  std::vector<parallel_columns> out;
+  std::vector<std::vector<std::size_t>> rows(w.num_decoder_columns());
+  std::map<std::vector<std::size_t>, std::vector<std::size_t>> by_rows;
+  const auto h = view(w.model.detector_error_matrix);
+  const auto o = view(w.model.observables_flips_matrix);
+  const auto closed_h = view(closed.detector_error_matrix);
+  const auto &sources = w.fault_column_sources;
+  for (std::size_t r = 0; r < h.rows; ++r)
+    for (std::size_t c = 0; c < rows.size(); ++c)
+      if (h(r, c))
+        rows[c].push_back(r);
+  for (std::size_t c = 0; c < rows.size(); ++c)
+    if (!rows[c].empty())
+      by_rows[rows[c]].push_back(c);
+  for (auto c = w.commit_columns.begin; c < w.commit_columns.end; ++c) {
+    if (rows[c].empty())
+      continue;
+    const auto source = sources[c].front();
+    for (const auto other : by_rows.at(rows[c])) {
+      std::optional<parallel_conflict> conflict;
+      if (other >= w.num_fault_columns)
+        conflict = parallel_conflict::boundary;
+      else if (zone[sources[other].front()] != zone[source])
+        conflict = parallel_conflict::other_zone;
+      else if (column_bits(closed_h, first + sources[other].front()) !=
+               column_bits(closed_h, first + source))
+        conflict = parallel_conflict::outside_rows;
+      else if (column_bits(o, other) != column_bits(o, c))
+        conflict = parallel_conflict::observable;
+      if (!conflict)
+        continue;
+      out.push_back({c, other, *conflict});
+      break;
+    } // end - for(other)
+  } // end - for(c)
+  return out;
+} // end - find_parallel_conflicts()
+
 // The measurement layout of a window's rounds: each round's width and where
 // its measurements start among the map's inputs, after v_in.
 struct measurement_layout {
@@ -454,17 +503,14 @@ index_range window_instances(const window_request &request,
   return out;
 }
 
-// Implements the plan's construction: clip the zones, build the ports and
-// sends, stitch the window's chunks and the imported ones, and slice the
-// closed chain into the window's model and maps.
-decoding_window
-window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
-                       const window_request &request, std::int64_t k,
-                       std::size_t num_rounds, bool with_m2o) {
+// Clips the zones, builds the ports, and places the sends, whose rows count
+// from the window's first round.
+decoding_window place_window(std::shared_ptr<const experiment_template> context,
+                             const window_request &request, std::int64_t k,
+                             std::size_t num_rounds) {
   decoding_window w;
-  std::vector<extended_dem> chunks;
   if (!context)
-    fail("no template");
+    throw std::invalid_argument("place_window: no template");
   const auto &t = *context;
   const auto R = static_cast<std::int64_t>(num_rounds);
   const auto anchor = request.offset + k * request.period;
@@ -483,8 +529,9 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
   w.shot_rounds = num_rounds;
   w.commit = clip(*request.commit);
   if (w.commit.empty())
-    fail("window " + std::to_string(k) + " has no commit round in a " +
-         std::to_string(R) + "-round shot");
+    throw std::invalid_argument("place_window: window " + std::to_string(k) +
+                                " has no commit round in a " +
+                                std::to_string(R) + "-round shot");
   w.rounds = w.commit;
   for (const auto &buffer : request.buffers) {
     const auto clipped = clip(buffer);
@@ -505,16 +552,65 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
   w.output.exists = e < R;
   w.output.disposition = *request.output.disposition;
   w.input.boundary = request.input.boundary.value_or(input_boundary::columns);
+  if (w.input.exists && w.input.disposition == port_disposition::open &&
+      w.input.boundary == input_boundary::columns)
+    w.input.prior = *request.input.prior;
+  if (w.output.exists && w.output.disposition == port_disposition::closed)
+    w.output.imports = clip(request.output.imports.value_or(
+        round_range{relative_end, relative_end + m_span}));
+  const auto row = [&](std::int64_t r) {
+    return t.row_offset(r, num_rounds) - t.row_offset(s, num_rounds);
+  };
+
+  // Sends: the defaults cover the first max_span() rounds of their zone.
+  for (const auto &request_send : request.sends) {
+    window_send send;
+    std::vector<round_range> rounds = request_send.rounds;
+    send.id = request_send.id;
+    send.mode = request_send.mode.value_or(
+        send.id == "backward" ? send_mode::residual : send_mode::delta);
+    if (is_default_send(request_send)) {
+      const auto first = send.id == "forward" ? trailing_buffer(request)->begin
+                                              : request.commit->begin;
+      rounds = {{first, first + m_span}};
+    }
+    std::sort(rounds.begin(), rounds.end(),
+              [](const round_range &a, const round_range &b) {
+                return a.begin < b.begin;
+              });
+    for (const auto &relative : rounds) {
+      const auto clipped = clip(relative);
+      if (clipped.empty())
+        continue;
+      send.rounds.push_back(clipped);
+      for (auto i = row(clipped.begin); i < row(clipped.end); ++i)
+        send.rows.push_back(i);
+    }
+    w.sends.push_back(std::move(send));
+  } // end - for(request_send)
+
+  return w;
+} // end - place_window()
+
+// Implements the plan's construction: place the window, stitch its chunks
+// and the imported ones, and slice the closed chain into the window's model
+// and maps.
+decoding_window
+window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
+                       const window_request &request, std::int64_t k,
+                       std::size_t num_rounds, bool with_m2o) {
+  auto w = place_window(context, request, k, num_rounds);
+  std::vector<extended_dem> chunks;
+  const auto &t = *context;
+  const auto R = static_cast<std::int64_t>(num_rounds);
+  const auto m_span = static_cast<std::int64_t>(t.max_span());
+  const auto s = w.rounds.begin;
+  const auto e = w.rounds.end;
   const bool open_input =
       w.input.exists && w.input.disposition == port_disposition::open;
   const bool truncated =
       open_input && w.input.boundary == input_boundary::truncate;
   const bool boundary_columns = open_input && !truncated;
-  if (boundary_columns)
-    w.input.prior = *request.input.prior;
-  if (w.output.exists && w.output.disposition == port_disposition::closed)
-    w.output.imports = clip(request.output.imports.value_or(
-        round_range{relative_end, relative_end + m_span}));
 
   // Rows and columns, relative to round s. The chain starts at round lo: s,
   // or the round before it, whose crossing faults a truncated input keeps;
@@ -623,32 +719,7 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
   for (std::size_t o = 0; o < K; ++o)
     model_o(o, F + V + C + o) = 1;
 
-  // Sends: the defaults cover the first max_span() rounds of their zone.
-  for (const auto &request_send : request.sends) {
-    window_send send;
-    std::vector<round_range> rounds = request_send.rounds;
-    send.id = request_send.id;
-    send.mode = request_send.mode.value_or(
-        send.id == "backward" ? send_mode::residual : send_mode::delta);
-    if (is_default_send(request_send)) {
-      const auto first = send.id == "forward" ? trailing_buffer(request)->begin
-                                              : request.commit->begin;
-      rounds = {{first, first + m_span}};
-    }
-    std::sort(rounds.begin(), rounds.end(),
-              [](const round_range &a, const round_range &b) {
-                return a.begin < b.begin;
-              });
-    for (const auto &relative : rounds) {
-      const auto clipped = clip(relative);
-      if (clipped.empty())
-        continue;
-      send.rounds.push_back(clipped);
-      for (auto i = row(clipped.begin); i < row(clipped.end); ++i)
-        send.rows.push_back(i);
-    }
-    w.sends.push_back(std::move(send));
-  } // end - for(request_send)
+  w.parallel_conflicts = find_parallel_conflicts(w, closed, col_shift, zone);
 
   // Measurement maps.
   const auto layout = layout_measurements(t, w.rounds, num_rounds);

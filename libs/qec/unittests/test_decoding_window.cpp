@@ -7,10 +7,14 @@
 // dem_chunks: per-round phases, chunks and offsets against an expanded shot;
 // window rows, columns, ports, sends and measurement maps against a dense
 // slice of the whole shot; the window spec's nine-SEC example; the spec's
-// invalid constructions; the column-handling options; variant keys and
-// translation invariance; and the kernel's forms.
+// invalid constructions; the column-handling options and parallel-column
+// conflicts; variant keys and translation invariance; the kernel's forms;
+// and the window schedule and commitment validation: row finalization
+// (F1-F4) checked against the built windows, each failure's own message,
+// send and receive matching, and ambiguous parallel commit columns.
 
 #include "task_graph_test_fixtures.h"
+#include "../lib/decoding_task/decoding_task_commitment.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
 #include "cudaq/qec/dem_chunks_memory.h"
@@ -24,6 +28,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cudaq::qec {
@@ -34,17 +39,6 @@ dem_chunks_spec repeating_only_spec() {
   auto spec = arbitrary_memory_spec(5);
   spec.phases = {spec.phases[1]};
   spec.connections = {{phase_name::dem_bulk, phase_name::dem_bulk}};
-  return spec;
-}
-
-// Every fault touches its own round only: the outgoing seam band is empty.
-dem_chunks_spec single_round_spec() {
-  auto spec = arbitrary_memory_spec(5);
-  for (auto &phase : spec.phases) {
-    phase.spec.seam_specs = {{seam_name::prev_round, {phase.spec.H_sparse, {}}},
-                             {seam_name::next_round, {{-1, -1, -1, -1}, {}}}};
-    phase.spec.H_sparse.clear();
-  }
   return spec;
 }
 
@@ -101,14 +95,17 @@ dem_chunks_spec wide_readout_spec() {
   return spec;
 }
 
-// Expect check() to throw std::invalid_argument mentioning text.
-template <typename Check>
-void expect_error(Check &&check, const std::string &text) {
+// Expect check() to throw std::invalid_argument mentioning every text.
+template <typename Check, typename... Texts>
+void expect_error(Check &&check, const Texts &...texts) {
+  const std::vector<std::string> expected{std::string(texts)...};
   try {
     check();
-    ADD_FAILURE() << "expected: " << text;
+    ADD_FAILURE() << "expected: " << expected.front();
   } catch (const std::invalid_argument &e) {
-    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+    for (const auto &text : expected)
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
   }
 }
 
@@ -225,43 +222,6 @@ TEST(ExperimentTemplate, MeasurementWidthsAndReadout) {
 // ---------------------------------------------------------------------------
 // Decoding windows
 // ---------------------------------------------------------------------------
-
-// The parallel-window layers of the plan: A[k] buffers b rounds on each side
-// of c_a commit rounds, and B[k] is the c_b-round gap before A[k].
-struct layered_requests {
-  window_request a;
-  window_request b;
-};
-
-// A and B windows for commit c_a, buffer b and gap c_b.
-layered_requests layered(std::int64_t c_a, std::int64_t b, std::int64_t c_b) {
-  layered_requests out;
-  const std::int64_t period = c_a + c_b;
-  out.a.period = period;
-  out.a.commit = round_range{0, c_a};
-  out.a.buffers = {{-b, 0}, {c_a, c_a + b}};
-  out.a.input = {port_disposition::open, 0.01};
-  out.a.output = {port_disposition::open, std::nullopt};
-  out.a.sends = {{"forward", std::nullopt, {}}, {"backward", std::nullopt, {}}};
-  out.b.period = period;
-  out.b.offset = -c_b;
-  out.b.commit = round_range{0, c_b};
-  out.b.input = {port_disposition::closed, std::nullopt};
-  out.b.output = {port_disposition::closed, std::nullopt};
-  return out;
-} // end - layered()
-
-// A sequential sliding window: commit step rounds, then look ahead.
-window_request sliding(std::int64_t step, std::int64_t size) {
-  window_request w;
-  w.period = step;
-  w.commit = round_range{0, step};
-  w.buffers = {{step, size}};
-  w.input = {port_disposition::closed, std::nullopt};
-  w.output = {port_disposition::open, std::nullopt};
-  w.sends = {{"forward", std::nullopt, {}}};
-  return w;
-}
 
 // Every layer of every layout the window tests sweep.
 std::vector<window_request> sweep_requests() {
@@ -942,6 +902,58 @@ TEST(DecodingWindowColumns, MostLikelyKeepsTheMoreLikelyResponse) {
   check(spec, 19, 0.03 + 0.04 - 2 * 0.03 * 0.04);
 } // end - TEST(DecodingWindowColumns, MostLikelyKeepsTheMoreLikelyResponse)
 
+// Each commit column's first conflicting parallel column. In the commit zone
+// of rounds 5 and 6, faults 2 and 3 have the same full rows, but only 2
+// flips the observable; 0 and 1 are identical, which is no conflict.
+// most_likely merges the pairs, and merge_identical alone does not.
+TEST(DecodingWindowColumns, ParallelConflictsNameTheObservableCase) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(duplicate_columns_spec());
+  const auto observable = parallel_conflict::observable;
+  const std::vector<parallel_columns> expected{{18, 19, observable},
+                                               {19, 18, observable},
+                                               {26, 27, observable},
+                                               {27, 26, observable}};
+  auto request = layered(2, 2, 3).a;
+  const auto unmerged = [](const decoding_window &w) {
+    std::vector<parallel_columns> out;
+    for (const auto &p : w.parallel_conflicts)
+      out.push_back({w.fault_column_sources[p.commit_column].front(),
+                     w.fault_column_sources[p.other_column].front(),
+                     p.conflict});
+    return out;
+  };
+  EXPECT_EQ(window_from_dem_chunks(tmpl, request, 1, 14).parallel_conflicts,
+            expected);
+  request.columns.merge_identical = true;
+  EXPECT_EQ(unmerged(window_from_dem_chunks(tmpl, request, 1, 14)), expected);
+  request.columns.conflicting_parallel = parallel_resolution::most_likely;
+  EXPECT_TRUE(
+      window_from_dem_chunks(tmpl, request, 1, 14).parallel_conflicts.empty());
+} // end - TEST(DecodingWindowColumns, ParallelConflictsNameTheObservableCase)
+
+// Without a trailing buffer, the commit zone ends at the open output:
+// faults 4 and 5 of round 6 agree on the window's rows, but 4 also flips
+// round 7's detector 2.
+TEST(DecodingWindowColumns, ParallelConflictsNameRowsOutsideTheWindow) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(duplicate_columns_spec());
+  const auto observable = parallel_conflict::observable;
+  const auto outside = parallel_conflict::outside_rows;
+  auto request = layered(2, 2, 3).a;
+  request.buffers = {{-2, 0}};
+  request.sends = {{"backward", std::nullopt, {}}};
+  const auto w = window_from_dem_chunks(tmpl, request, 1, 14);
+  ASSERT_EQ(w.rounds, (round_range{3, 7}));
+  EXPECT_EQ(w.parallel_conflicts,
+            (std::vector<parallel_columns>{{18, 19, observable},
+                                           {19, 18, observable},
+                                           {26, 27, observable},
+                                           {27, 26, observable},
+                                           {28, 29, outside},
+                                           {29, 28, outside}}));
+}
+
 // boundary: truncate replaces the open input's boundary columns with the
 // previous chunk's crossing faults, restricted to the window's rows, with
 // their own priors and never committed: get_pcm_for_rounds() with the start
@@ -1127,5 +1139,495 @@ TEST(WindowKernelForms, RoundTripWithoutLoss) {
       EXPECT_EQ(column_of(w, c), column_of(decoding_window{.model = back}, c));
   } // end - for(truncate)
 } // end - TEST(WindowKernelForms, RoundTripWithoutLoss)
+
+// ---------------------------------------------------------------------------
+// Window schedule and commitment validation
+//
+// With one-round chunks, max_span() is at most 1 and every zone has a round,
+// so the plan's size conditions (b, c_A and c_B at least max_span()) hold
+// for every valid request. The failure tests break the same conditions with
+// explicit sends and ports instead.
+// ---------------------------------------------------------------------------
+
+// Window layers and the send edges between them.
+struct window_graph {
+  std::vector<window_layer> layers;
+  std::vector<task_graph_edge> edges;
+};
+
+// The plan's parallel-window graph: A[k-1].forward to B[k].receive_0 and
+// A[k].backward to B[k].receive_1.
+window_graph parallel_graph(const layered_requests &requests) {
+  window_graph g;
+  g.layers = {{"A", "a", requests.a}, {"B", "b", requests.b}};
+  g.edges = {{"A", "forward", "B", "receive_0", -1},
+             {"A", "backward", "B", "receive_1", 0}};
+  return g;
+}
+
+// A sliding window whose forward delta feeds its next instance.
+window_graph sliding_graph(std::int64_t step, std::int64_t size) {
+  window_graph g;
+  g.layers = {{"W", "w", sliding(step, size)}};
+  g.edges = {{"W", "forward", "W", "receive_0", -1}};
+  return g;
+}
+
+// The plan's interior-commit layout for the default sizes, with M = 1: A
+// commits c_a - 2 rounds between b + 1 buffer rounds, and B's gap grows to
+// c_b + 2.
+layered_requests interior_commit(std::int64_t c_a, std::int64_t b,
+                                 std::int64_t c_b) {
+  return layered(c_a - 2, b + 1, c_b + 2);
+}
+
+// Both layers resolve observable conflicts by the more likely column.
+window_graph with_most_likely(window_graph g) {
+  for (auto &layer : g.layers)
+    layer.request.columns.conflicting_parallel =
+        parallel_resolution::most_likely;
+  return g;
+}
+
+// A's input truncates the previous round's crossing faults.
+layered_requests with_truncate(layered_requests requests) {
+  requests.a.input = {port_disposition::open, std::nullopt,
+                      input_boundary::truncate};
+  return requests;
+}
+
+// Calls validate_commitment() on a fresh template of spec.
+void validate(const dem_chunks_spec &spec, const window_graph &g) {
+  validate_commitment(std::make_shared<const experiment_template>(spec),
+                      g.layers, g.edges);
+}
+
+// ---------------------------------------------------------------------------
+// Schedule
+// ---------------------------------------------------------------------------
+
+// Whether window k of request has a commit round in an R-round shot,
+// computed from the anchor alone.
+bool has_commit(const window_request &request, std::int64_t k, std::int64_t R) {
+  const auto anchor = request.offset + k * request.period;
+  return std::max<std::int64_t>(0, anchor + request.commit->begin) <
+         std::min<std::int64_t>(R, anchor + request.commit->end);
+}
+
+// For every shot length, the schedule lists exactly the windows with a
+// commit round, by layer then k, with the built window's zones, ports and
+// sends, its variant, and one dependency per incoming edge on producer
+// instance k + index_offset.
+TEST(WindowSchedule, MatchesAnIndependentEnumeration) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  for (const auto &g :
+       {parallel_graph(layered(2, 2, 3)), sliding_graph(2, 5)}) {
+    for (auto R = tmpl->min_rounds(); R <= 30; ++R) {
+      const auto schedule = schedule_windows(tmpl, g.layers, g.edges, R);
+      const auto shot = static_cast<std::int64_t>(R);
+      std::size_t i = 0;
+      SCOPED_TRACE("R=" + std::to_string(R));
+      EXPECT_EQ(schedule.num_rounds, R);
+      for (const auto &layer : g.layers) {
+        for (std::int64_t k = -10; k < 40; ++k) {
+          std::vector<window_dependency> inputs;
+          if (!has_commit(layer.request, k, shot))
+            continue;
+          ASSERT_LT(i, schedule.windows.size());
+          const auto &s = schedule.windows[i++];
+          const auto w = window_from_dem_chunks(tmpl, layer.request, k, R);
+          EXPECT_EQ(s.node, layer.node);
+          EXPECT_EQ(s.k, k);
+          EXPECT_EQ(s.variant, window_variant(*tmpl, layer.request, k, R));
+          EXPECT_EQ(s.rounds, w.rounds);
+          EXPECT_EQ(s.commit, w.commit);
+          EXPECT_EQ(s.buffers, w.buffers);
+          EXPECT_EQ(s.input, w.input);
+          EXPECT_EQ(s.output, w.output);
+          EXPECT_EQ(s.sends, w.sends);
+          for (const auto &e : g.edges) {
+            if (e.to_node != layer.node)
+              continue;
+            const auto producer = std::find_if(
+                g.layers.begin(), g.layers.end(),
+                [&](const window_layer &l) { return l.node == e.from_node; });
+            const auto j = k + e.index_offset;
+            inputs.push_back({e.from_node, e.from_output, j, e.to_input,
+                              has_commit(producer->request, j, shot)});
+          }
+          EXPECT_EQ(s.inputs, inputs);
+        } // end - for(k)
+      } // end - for(layer)
+      EXPECT_EQ(i, schedule.windows.size());
+    } // end - for(R)
+  } // end - for(g)
+} // end - TEST(WindowSchedule, MatchesAnIndependentEnumeration)
+
+// A repeated node, an edge naming a node that is not a layer or a send its
+// producer lacks, and an invalid request are rejected.
+TEST(WindowSchedule, RejectsUnknownNamesAndInvalidRequests) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  auto g = parallel_graph(layered(2, 2, 3));
+  const auto schedule = [&] { schedule_windows(tmpl, g.layers, g.edges, 10); };
+  g.layers[1].node = "A";
+  expect_error(schedule, "schedule_windows", "node 'A' is repeated");
+  g = parallel_graph(layered(2, 2, 3));
+  g.edges[0].from_node = "ingest";
+  expect_error(schedule, "schedule_windows",
+               "edge ingest.forward -> B.receive_0", "not a window layer");
+  g = parallel_graph(layered(2, 2, 3));
+  g.edges[1].from_output = "sideways";
+  expect_error(schedule, "schedule_windows", "A has no send 'sideways'");
+  g = parallel_graph(layered(2, 2, 3));
+  g.layers[1].request.commit.reset();
+  expect_error(schedule, "window request: no commit zone");
+}
+
+// The probe shots hold every variant key that any longer shot has, for
+// every layer.
+TEST(WindowSchedule, ProbeRoundsCoverEveryVariant) {
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3)}) {
+    const experiment_template tmpl(spec);
+    for (const auto &requests :
+         {layered(2, 1, 3), layered(3, 2, 2), interior_commit(3, 2, 2)}) {
+      const auto g = parallel_graph(requests);
+      const auto probe = commitment_probe_rounds(tmpl, g.layers);
+      const auto period = static_cast<std::size_t>(requests.a.period);
+      for (const auto &layer : g.layers) {
+        std::set<variant_key> early;
+        std::set<variant_key> late;
+        for (auto R = tmpl.min_rounds(); R < probe + 4 * period; ++R) {
+          const auto instances = window_instances(layer.request, R);
+          for (auto k = instances.begin; k < instances.end; ++k) {
+            const auto key = window_variant(tmpl, layer.request, k, R);
+            late.insert(key);
+            if (R < probe)
+              early.insert(key);
+          }
+        }
+        EXPECT_EQ(early, late) << layer.node;
+      } // end - for(layer)
+    } // end - for(requests)
+  } // end - for(spec)
+} // end - TEST(WindowSchedule, ProbeRoundsCoverEveryVariant)
+
+// Layers of one graph share a period; a chain without a repeating phase
+// admits one shot length.
+TEST(WindowSchedule, ProbeRoundsNeedOnePeriod) {
+  const experiment_template tmpl(arbitrary_memory_spec(5));
+  auto g = parallel_graph(layered(2, 2, 3));
+  auto chain = rep5_spec();
+  g.layers[1].request.period = 4;
+  expect_error([&] { commitment_probe_rounds(tmpl, g.layers); },
+               "commitment_probe_rounds", "periods 5 and 4");
+  chain.connections.erase(chain.connections.begin() + 1);
+  chain.num_rounds.reset();
+  const experiment_template fixed(chain);
+  EXPECT_EQ(
+      commitment_probe_rounds(fixed, parallel_graph(layered(1, 1, 1)).layers),
+      fixed.min_rounds() + 1);
+}
+
+// ---------------------------------------------------------------------------
+// Row finalization
+// ---------------------------------------------------------------------------
+
+// For every probe shot, read off the built windows' models: every row that
+// a fault touches has exactly one finalizer, a window holding the row whose
+// columns on it are all commit columns, and every detectable fault column
+// of the shot is committed exactly once. validate_commitment() accepts it.
+void expect_sound(const dem_chunks_spec &spec, const window_graph &g) {
+  const auto tmpl = std::make_shared<const experiment_template>(spec);
+  const auto probe = commitment_probe_rounds(*tmpl, g.layers);
+  EXPECT_NO_THROW(validate_commitment(tmpl, g.layers, g.edges));
+  for (auto R = tmpl->min_rounds(); R < probe; ++R) {
+    auto fixed = spec;
+    fixed.num_rounds = R;
+    const auto shot = dem_close_all(dem_chunks_from_spec(fixed));
+    const auto &h = shot.detector_error_matrix;
+    std::vector<int> finalizers(h.shape()[0], 0);
+    std::vector<int> commits(h.shape()[1], 0);
+    SCOPED_TRACE("R=" + std::to_string(R));
+    for (const auto &layer : g.layers) {
+      const auto instances = window_instances(layer.request, R);
+      for (auto k = instances.begin; k < instances.end; ++k) {
+        const auto w = window_from_dem_chunks(tmpl, layer.request, k, R);
+        const auto &model = w.model.detector_error_matrix;
+        const auto first_row = tmpl->row_offset(w.rounds.begin, R);
+        const auto first_column = tmpl->column_offset(w.rounds.begin, R);
+        for (std::size_t i = 0; i < model.shape()[0]; ++i) {
+          std::size_t columns = 0;
+          bool all_commit = true;
+          for (std::size_t c = 0; c < w.num_decoder_columns(); ++c) {
+            if (!model.at({i, c}))
+              continue;
+            ++columns;
+            all_commit = all_commit && c >= w.commit_columns.begin &&
+                         c < w.commit_columns.end;
+          }
+          const auto row = i < w.num_own_rows
+                               ? first_row + i
+                               : tmpl->row_offset(w.output.imports.begin, R) +
+                                     i - w.num_own_rows;
+          if (columns > 0 && all_commit)
+            ++finalizers[row];
+        } // end - for(i)
+        for (auto c = w.commit_columns.begin; c < w.commit_columns.end; ++c)
+          for (const auto source : w.fault_column_sources[c])
+            ++commits[first_column + source];
+      } // end - for(k)
+    } // end - for(layer)
+    for (std::size_t r = 0; r < h.shape()[0]; ++r) {
+      bool touched = false;
+      for (std::size_t c = 0; c < h.shape()[1]; ++c)
+        touched = touched || h.at({r, c});
+      if (touched)
+        EXPECT_EQ(finalizers[r], 1) << "row " << r;
+    }
+    for (std::size_t c = 0; c < h.shape()[1]; ++c) {
+      bool detectable = false;
+      for (std::size_t r = 0; r < h.shape()[0]; ++r)
+        detectable = detectable || h.at({r, c});
+      if (detectable)
+        EXPECT_EQ(commits[c], 1) << "column " << c;
+    }
+  } // end - for(R)
+} // end - expect_sound()
+
+// F1-F4 hold for the default A/B layout and the interior-commit layout,
+// with and without truncate, on the memory fixtures.
+TEST(Commitment, ParallelWindowLayoutsFinalizeEveryRowOnce) {
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3)}) {
+    for (const auto &requests :
+         {layered(2, 1, 3), layered(3, 2, 2), layered(2, 3, 1),
+          interior_commit(3, 2, 2), interior_commit(4, 2, 1)}) {
+      SCOPED_TRACE("c_a=" + std::to_string(requests.a.commit->end) +
+                   " period=" + std::to_string(requests.a.period));
+      expect_sound(spec, parallel_graph(requests));
+      expect_sound(spec, parallel_graph(with_truncate(requests)));
+    }
+  }
+}
+
+// A sliding window finalizes its commit zone, its forward delta reaching
+// the next instance's first round.
+TEST(Commitment, SlidingWindowFinalizesEveryRowOnce) {
+  for (const auto &[step, size] :
+       std::vector<std::pair<std::int64_t, std::int64_t>>{
+           {1, 2}, {2, 5}, {3, 4}})
+    expect_sound(arbitrary_memory_spec(5), sliding_graph(step, size));
+}
+
+// F1: B with an open input has a boundary column on its first round, where
+// A[k-1] has its trailing buffer, so no window finalizes the round.
+TEST(Commitment, RejectsARowWithoutAFinalizer) {
+  auto requests = layered(2, 2, 3);
+  requests.b.input = {port_disposition::open, 0.01};
+  expect_error(
+      [&] { validate(arbitrary_memory_spec(5), parallel_graph(requests)); },
+      "validate_commitment: F1: row", "has no finalizer; held by A[");
+}
+
+// F1: without a leading buffer, and with a closed input, A[k] finalizes its
+// first commit round, which B[k] imports and finalizes too.
+TEST(Commitment, RejectsARowWithTwoFinalizers) {
+  auto requests = layered(2, 2, 3);
+  requests.a.buffers = {{2, 4}};
+  requests.a.input = {port_disposition::closed, std::nullopt};
+  expect_error(
+      [&] { validate(arbitrary_memory_spec(5), parallel_graph(requests)); },
+      "validate_commitment: F1: row", "has 2 finalizers: A[1], B[1]");
+}
+
+// F2: a layer importing a round that no window commits finalizes the round's
+// rows, but the round's own faults touch them uncommitted.
+TEST(Commitment, RejectsAFaultNoWindowCommits) {
+  window_graph g;
+  window_request w;
+  w.period = 3;
+  w.commit = round_range{0, 2};
+  w.input = {port_disposition::closed, std::nullopt};
+  w.output = {port_disposition::closed, round_range{2, 3}};
+  g.layers = {{"W", "w", w}};
+  expect_error([&] { validate(arbitrary_memory_spec(5), g); },
+               "validate_commitment: F2: row 8 (round 2) of the 3-round shot, "
+               "finalized by W[0]: fault 8 (round 2)",
+               "committed by no window");
+}
+
+// F3: without the receive_1 edge, A[k] commits faults on the rows B[k]
+// imports and finalizes but sends it nothing; without receive_0, the same
+// holds for A[k-1] and B[k]'s first round.
+TEST(Commitment, RejectsAMissingSendEdge) {
+  auto g = parallel_graph(layered(2, 2, 3));
+  g.edges.pop_back();
+  expect_error([&] { validate(arbitrary_memory_spec(5), g); },
+               "validate_commitment: F3: row", "finalized by B[1]",
+               "A[1] commits fault", "no send of A[1] to B[1] covers round 5");
+  g = parallel_graph(layered(2, 2, 3));
+  g.edges.erase(g.edges.begin());
+  expect_error([&] { validate(arbitrary_memory_spec(5), g); },
+               "validate_commitment: F3: row", "finalized by B[1]",
+               "A[0] commits fault", "no send of A[0] to B[1] covers round 2");
+}
+
+// F4: a second layer commits a round the sliding window commits, and sends
+// it a delta there, so every row still has one finalizer and sees every
+// commit on it. Every fault touches its own round only.
+TEST(Commitment, RejectsAFaultCommittedTwice) {
+  auto g = sliding_graph(2, 3);
+  window_request d;
+  d.period = 2;
+  d.offset = 1;
+  d.commit = round_range{0, 1};
+  d.input = {port_disposition::open, 0.01};
+  d.output = {port_disposition::open, std::nullopt};
+  d.sends = {{"delta", send_mode::delta, {{0, 1}}}};
+  g.layers.push_back({"D", "d", d});
+  g.edges.push_back({"D", "delta", "W", "receive_1", 0});
+  expect_error([&] { validate(single_round_spec(), g); },
+               "validate_commitment: F4: fault 4 (round 1)",
+               "committed by 2 windows: W[0], D[0]");
+}
+
+// ---------------------------------------------------------------------------
+// Sends and receives
+// ---------------------------------------------------------------------------
+
+// A forward delta moved into A's commit zone lands before B[k+1]'s rounds.
+TEST(CommitmentSends, RejectsADeltaOutsideTheReceiversRounds) {
+  auto requests = layered(2, 2, 3);
+  requests.a.sends[0] = {"forward", send_mode::delta, {{1, 2}}};
+  expect_error(
+      [&] { validate(arbitrary_memory_spec(5), parallel_graph(requests)); },
+      "validate_commitment: edge A.forward -> B.receive_0 (index_offset -1)",
+      "A[0]'s delta 'forward' reaches round 1, outside B[1]'s rounds [2, 3)");
+}
+
+// Without index_offset: -1, B[k] reads A[k]'s forward delta, which lies
+// past B[k]'s rounds.
+TEST(CommitmentSends, RejectsAForwardEdgeWithoutItsIndexOffset) {
+  auto g = parallel_graph(layered(2, 2, 3));
+  g.edges[0].index_offset = 0;
+  expect_error([&] { validate(arbitrary_memory_spec(5), g); },
+               "validate_commitment: edge A.forward -> B.receive_0",
+               "A[1]'s delta 'forward' reaches round 7, outside B[1]'s "
+               "rounds [2, 5)");
+}
+
+// A backward residual must cover exactly the receiver's imports: one moved
+// into A's leading buffer, and one shorter than the imports, are rejected.
+TEST(CommitmentSends, RejectsAResidualThatDiffersFromTheImports) {
+  auto requests = layered(2, 2, 3);
+  requests.a.sends[1] = {"backward", send_mode::residual, {{-1, 0}}};
+  expect_error(
+      [&] { validate(arbitrary_memory_spec(5), parallel_graph(requests)); },
+      "validate_commitment: edge A.backward -> B.receive_1",
+      "A[1]'s residual 'backward' covers rounds [4, 5), but B[1] imports "
+      "[5, 6); round 4 differs");
+  requests = layered(2, 2, 3);
+  requests.b.output = {port_disposition::closed, round_range{3, 5}};
+  expect_error(
+      [&] { validate(arbitrary_memory_spec(5), parallel_graph(requests)); },
+      "A[1]'s residual 'backward' covers rounds [5, 6), but B[1] imports "
+      "[5, 7); round 6 differs");
+}
+
+// Imports take their values from exactly one residual.
+TEST(CommitmentSends, RejectsTwoResidualsForOneImport) {
+  auto g = parallel_graph(layered(2, 2, 3));
+  g.edges.push_back({"A", "backward", "B", "receive_2", 0});
+  expect_error([&] { validate(arbitrary_memory_spec(5), g); },
+               "validate_commitment: B[1] of the",
+               "imports rounds [5, 6) but receives 2 residuals");
+}
+
+// ---------------------------------------------------------------------------
+// Parallel columns
+// ---------------------------------------------------------------------------
+
+// Fault 4 flips only the next round's detector 3, and fault 5 only its own
+// round's: fault 4 of round r and fault 5 of round r + 1 are twins with the
+// same full rows. Without twins, only fault 5 is added.
+dem_chunks_spec twin_spec(bool twins) {
+  auto spec = arbitrary_memory_spec(5);
+  const std::vector<std::int64_t> own{0, -1, 1, -1, 2, -1, 3, 5, -1};
+  const std::vector<std::int64_t> next{0, -1, 1, -1, 2, -1, 3, 4, -1};
+  const std::vector<std::int64_t> own_only{0, -1, 1, -1, 2, -1, 3, 4, -1};
+  for (auto &phase : spec.phases) {
+    phase.spec.H_sparse.clear();
+    phase.spec.num_faults = twins ? 6 : 5;
+    phase.spec.error_rates.assign(phase.spec.num_faults, 0.02);
+    phase.spec.seam_specs = {
+        {seam_name::prev_round, {twins ? own : own_only, {}}}};
+    if (phase.id != phase_name::dem_final)
+      phase.spec.seam_specs.push_back(
+          {seam_name::next_round,
+           {twins ? next
+                  : std::vector<std::int64_t>{0, -1, 1, -1, 2, -1, 3, -1},
+            {}}});
+  }
+  return spec;
+} // end - twin_spec()
+
+// A commit column parallel to a buffer column with the same rows is the
+// spec's merge case: the decoder's choice between them changes what is
+// committed.
+TEST(CommitmentParallel, RejectsATwinInAnotherZone) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(twin_spec(true));
+  const auto w = window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, 14);
+  // Rounds 3-8, six faults a round: round 5's fault 5 is round 4's fault
+  // 4, and round 6's fault 4 is round 7's fault 5. Round 5's fault 4 and
+  // round 6's fault 5 are twins in the commit zone, which is allowed.
+  EXPECT_EQ(
+      w.parallel_conflicts,
+      (std::vector<parallel_columns>{{17, 10, parallel_conflict::other_zone},
+                                     {22, 29, parallel_conflict::other_zone}}));
+  expect_error(
+      [&] { validate(twin_spec(true), parallel_graph(layered(2, 2, 3))); },
+      "validate_commitment: A[0]", "commit column", "in another zone");
+}
+
+// Boundary-column twins of buffer columns are accepted. Without a leading
+// buffer, a commit column's boundary or truncated twin is rejected.
+TEST(CommitmentParallel, AcceptsBoundaryTwinsOfBufferColumns) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(twin_spec(false));
+  auto requests = layered(2, 2, 3);
+  const auto w = window_from_dem_chunks(tmpl, requests.a, 1, 14);
+  const auto &h = w.model.detector_error_matrix;
+  // Round 3's fault 4 has the same rows as boundary column 3.
+  for (std::size_t r = 0; r < h.shape()[0]; ++r)
+    EXPECT_EQ(h.at({r, 4}), h.at({r, w.num_fault_columns + 3}));
+  EXPECT_TRUE(w.parallel_conflicts.empty());
+  expect_sound(twin_spec(false), parallel_graph(requests));
+
+  requests.a.buffers = {{2, 4}};
+  for (const auto &a : {requests.a, with_truncate(requests).a}) {
+    const auto edge = window_from_dem_chunks(tmpl, a, 1, 14);
+    EXPECT_EQ(edge.parallel_conflicts,
+              (std::vector<parallel_columns>{{4, edge.num_fault_columns + 3,
+                                              parallel_conflict::boundary}}));
+    expect_error(
+        [&] { validate(twin_spec(false), parallel_graph({a, requests.b})); },
+        "validate_commitment: A[", "a boundary or truncated column");
+  }
+} // end - TEST(CommitmentParallel, AcceptsBoundaryTwinsOfBufferColumns)
+
+// Rep-5's faults 0 and 5 have the same full rows, but 0 flips the
+// observable: reject fails, and most_likely keeps the more likely.
+TEST(CommitmentParallel, MostLikelyResolvesAnObservableConflict) {
+  const auto g = parallel_graph(layered(2, 2, 3));
+  expect_error([&] { validate(rep5_spec(), g); }, "validate_commitment: A[0]",
+               "different observable effect",
+               "conflicting_parallel: most_likely");
+  expect_sound(rep5_spec(), with_most_likely(g));
+}
+
 } // namespace
 } // namespace cudaq::qec
