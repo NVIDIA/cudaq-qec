@@ -591,8 +591,12 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
     // Stim DEM text stands in for this node's H when the decoder's model needs
     // annotations the matrices cannot carry, so it is from_topology() that
     // builds the decoder either way -- the flat form's usual shortcut of
-    // pre-building one from the entry-level H would ignore the text.
-    if (node.dem.has_value() || !ns.stim_dem.empty() ||
+    // pre-building one from the entry-level H would ignore the text. A kind
+    // that reads no DEM builds its decoders from what it receives, a window
+    // model per window, so it too takes only the decoder's name and
+    // parameters: a decoder built here from the whole shot would go unused,
+    // and a failure building it would hide the graph's own errors.
+    if (!kind->requires_dem || node.dem.has_value() || !ns.stim_dem.empty() ||
         !ns.stim_dem_path.empty()) {
       node.decoder_type = decoder_type;
       // Both spellings reach the builder as text, so from_topology() and

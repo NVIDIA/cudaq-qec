@@ -67,7 +67,9 @@ struct task_graph_node_kind_spec {
   /// (an `inner:` block or a plugin-valued `type`). An `xor` node does not.
   bool requires_decoder = true;
   /// Whether the kind needs a DEM (`dem_chunks` or flat matrices) to build its
-  /// D and O matrices.
+  /// D and O matrices. A kind that wraps a decoder but reads no DEM builds
+  /// its decoders itself, from what it receives, so configuration gives it
+  /// the decoder's name and parameters rather than a built decoder.
   bool requires_dem = true;
   /// Optional policy describing the inner decoder's outputs. When absent, the
   /// output preserves the original observable-model policy: a decoder given O

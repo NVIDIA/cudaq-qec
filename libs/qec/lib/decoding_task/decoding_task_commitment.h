@@ -102,9 +102,11 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
 /// when it reads the logical value. Every decode_window node is fed by one
 /// window port of an ingest node, which gives its layer, and receives only
 /// from decode_window nodes, on ports below its num_receives, from its own
-/// or earlier instances. Two ingest nodes are two shots: no send joins their
-/// windows, and ones with different templates reach no common node. Each
-/// ingest node's layers and sends then pass validate_commitment().
+/// or earlier instances; the receives from the same instance close no
+/// cycle, in which a window would wait on itself. Two ingest nodes are two
+/// shots: no send joins their windows, and ones with different templates
+/// reach no common node. Each ingest node's layers and sends then pass
+/// validate_commitment().
 /// @throws std::invalid_argument naming the node or edge, or as
 /// experiment_template and validate_commitment() do.
 void validate_window_topology(const std::vector<task_graph_node_config> &nodes,

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -631,6 +632,41 @@ std::optional<std::size_t> receive_index(const std::string &port) {
   return k;
 }
 
+// A cycle of receives at index_offset 0 among `windows`, as the nodes along
+// it with the first repeated at the end, or empty if there is none. Each
+// such receive makes a window wait on another of its own index. A depth-first
+// search: `path` holds the nodes being visited, and a receive back onto it
+// closes a cycle.
+std::vector<std::string> same_index_cycle(
+    const std::map<std::string, const task_graph_node_config *> &windows,
+    const std::vector<task_graph_edge> &edges) {
+  std::vector<std::string> path;
+  std::set<std::string> done;
+  std::function<bool(const std::string &)> visit = [&](const std::string &id) {
+    path.push_back(id);
+    for (const auto &e : edges) {
+      if (e.from_node != id || !windows.count(e.to_node) ||
+          e.to_input == "input" || e.index_offset != 0 || done.count(e.to_node))
+        continue;
+      const auto on_path = std::find(path.begin(), path.end(), e.to_node);
+      if (on_path != path.end()) {
+        path.erase(path.begin(), on_path);
+        path.push_back(e.to_node);
+        return true;
+      }
+      if (visit(e.to_node))
+        return true;
+    }
+    path.pop_back();
+    done.insert(id);
+    return false;
+  };
+  for (const auto &[id, n] : windows)
+    if (!done.count(id) && visit(id))
+      return path;
+  return {};
+} // end - same_index_cycle()
+
 } // namespace
 
 // Shape first, so a mistake is named for what it is rather than as the
@@ -719,6 +755,18 @@ void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
       reject_topology("decode_window node '" + id +
                       "' needs an input from a window port of an ingest node");
   } // end - for(windows)
+
+  // Receives at index_offset 0 that close a cycle leave every window on it
+  // waiting on its own index.
+  if (const auto cycle = same_index_cycle(windows, edges); !cycle.empty()) {
+    std::string nodes = "'" + cycle.front() + "'";
+    for (std::size_t i = 1; i < cycle.size(); ++i)
+      nodes += " -> '" + cycle[i] + "'";
+    reject_topology("decode_window receives at index_offset 0 form a cycle, " +
+                    nodes +
+                    ", so no window on it can start; give one of these "
+                    "receives a negative index_offset");
+  }
 
   for (const auto &e : edges)
     if (windows.count(e.to_node) && e.to_input != "input") {

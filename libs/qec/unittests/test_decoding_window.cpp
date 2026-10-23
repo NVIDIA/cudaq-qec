@@ -81,10 +81,23 @@ thread_local bool counting_allocations = false;
 thread_local std::size_t allocations_counted = 0;
 } // namespace
 
-// The global allocation functions, counting; operator new[] and the nothrow
-// forms call these.
+// The global allocation functions, plain and aligned, counting; operator
+// new[] and the nothrow forms call these.
 void *operator new(std::size_t size) {
   void *p = std::malloc(size == 0 ? 1 : size);
+  if (counting_allocations)
+    ++allocations_counted;
+  if (!p)
+    throw std::bad_alloc();
+  return p;
+}
+
+// aligned_alloc takes a size that is a whole number of alignments.
+void *operator new(std::size_t size, std::align_val_t align) {
+  const auto alignment = static_cast<std::size_t>(align);
+  const auto rounded =
+      (std::max(size, std::size_t{1}) + alignment - 1) / alignment * alignment;
+  void *p = std::aligned_alloc(alignment, rounded);
   if (counting_allocations)
     ++allocations_counted;
   if (!p)
@@ -95,6 +108,12 @@ void *operator new(std::size_t size) {
 void operator delete(void *p) noexcept { std::free(p); }
 
 void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+
+void operator delete(void *p, std::align_val_t) noexcept { std::free(p); }
+
+void operator delete(void *p, std::size_t, std::align_val_t) noexcept {
+  std::free(p);
+}
 #endif
 
 namespace cudaq::qec {
@@ -2765,10 +2784,38 @@ TEST(DecodingWindow, AWorkspaceServesOnlyItsOwnWindow) {
                "commit_window: the workspace is not sized for window 1");
 }
 
+#if !WINDOW_TESTS_SANITIZED
+// Decodes with @p inner, counting what each of its decode() calls
+// allocates, so a test can tell its caller's allocations from the decoder's
+// own in the same call.
+class allocation_counting_decoder final : public decoder {
+public:
+  allocation_counting_decoder(const decoding_window &window,
+                              std::unique_ptr<decoder> inner)
+      : decoder(decoder_init(window.model.h)), inner_(std::move(inner)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    const auto before = allocations_counted;
+    auto result = inner_->decode(syndrome);
+    last_decode_allocations_ = allocations_counted - before;
+    return result;
+  }
+
+  std::size_t last_decode_allocations() const {
+    return last_decode_allocations_;
+  }
+
+private:
+  std::unique_ptr<decoder> inner_;
+  std::size_t last_decode_allocations_ = 0;
+};
+#endif
+
 // On a workspace sized beforehand, receiving a send, solving a window
 // without a decoder and committing allocate nothing, and solving with a
-// decoder allocates only what the decoder's own decode() does. The results
-// match a fresh workspace's, so nothing is left over from the last shot.
+// decoder allocates only what the decoder's own decode() does in that call.
+// The results match a fresh workspace's, so nothing is left over from the
+// last shot.
 TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot) {
 #if WINDOW_TESTS_SANITIZED
   GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator new";
@@ -2779,7 +2826,8 @@ TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot) {
   const std::size_t R = 20;
   const auto a = window_from_dem_chunks(tmpl, layers.a, 1, R);
   const auto next_b = window_from_dem_chunks(tmpl, layers.b, 2, R);
-  const auto dec = make_window_decoder(a, "single_error_lut");
+  allocation_counting_decoder dec(a,
+                                  make_window_decoder(a, "single_error_lut"));
   const std::vector<std::uint8_t> forward(a.sends[0].rows.size(), 1);
   std::vector<std::uint8_t> b_detectors(next_b.model.h.num_rows(), 0);
   std::vector<std::uint8_t> a_detectors(a.model.h.num_rows(), 0);
@@ -2811,15 +2859,20 @@ TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot) {
     EXPECT_EQ(ws.solution.outputs.sends, fresh.solution.outputs.sends);
     EXPECT_EQ(ws.solution.outputs.frame, fresh.solution.outputs.frame);
   };
+  // The counter sees plain and aligned allocations alike.
+  ASSERT_EQ(allocations([] {
+              constexpr std::align_val_t line{64}; // a cache line
+              ::operator delete(::operator new(8));
+              ::operator delete(::operator new(8, line), line);
+            }),
+            2u);
   // A first shot commits A's first commit column, leaving its estimate,
   // sends and frame in the workspace.
   a_detectors = fault(a.commit_columns.begin);
-  solve_window(a, dec.get(), a_detectors, a_ws);
+  solve_window(a, &dec, a_detectors, a_ws);
   ASSERT_EQ(a_ws.solution.outputs.committed[a.commit_columns.begin], 1);
   // The next shot commits another.
   a_detectors = fault(a.commit_columns.begin + 1);
-  const std::vector<float_t> syndrome(a_detectors.begin(), a_detectors.end());
-  const auto decoded = allocations([&] { (void)dec->decode(syndrome); });
   EXPECT_EQ(
       allocations([&] { receive_send(next_b, a, 0, forward, b_detectors); }),
       0u);
@@ -2827,10 +2880,12 @@ TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot) {
       allocations([&] { solve_window(next_b, nullptr, b_detectors, b_ws); }),
       0u);
   EXPECT_EQ(allocations([&] { commit_window(next_b, b_detectors, b_ws); }), 0u);
-  EXPECT_EQ(allocations([&] { solve_window(a, dec.get(), a_detectors, a_ws); }),
-            decoded);
+  // Counted first, so that the decoder's count read next is this call's.
+  const auto solved =
+      allocations([&] { solve_window(a, &dec, a_detectors, a_ws); });
+  EXPECT_EQ(solved, dec.last_decode_allocations());
   EXPECT_EQ(a_ws.solution.outputs.committed[a.commit_columns.begin], 0);
-  expect_fresh(a, dec.get(), a_detectors, a_ws);
+  expect_fresh(a, &dec, a_detectors, a_ws);
   expect_fresh(next_b, nullptr, b_detectors, b_ws);
 #endif
 } // end - TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot)
