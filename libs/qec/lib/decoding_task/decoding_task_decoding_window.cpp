@@ -179,23 +179,6 @@ void check_request(const window_request &request) {
   check_sends(request, window);
 } // end - check_request()
 
-// The rounds a window's model reads, relative to its anchor: from the round
-// before its first (v_in, and a truncated input's crossing faults) to the
-// end of the chunks it stitches. Past that it reads only whether the end
-// round exists, which decides the last chunk's outgoing seam and the output
-// port.
-round_range model_reach(const experiment_template &t,
-                        const window_request &request) {
-  const auto zones = sorted_zones(request);
-  const auto m = static_cast<std::int64_t>(t.max_span());
-  const auto end = zones.back().end;
-  auto imports_end = end;
-  if (request.output.disposition == port_disposition::closed)
-    imports_end =
-        request.output.imports ? request.output.imports->end : end + m;
-  return {zones.front().begin - 1, std::max(end + m, imports_end)};
-}
-
 // The first k whose model reads no prefix round.
 std::int64_t first_bulk_index(const experiment_template &t,
                               const window_request &request) {
@@ -557,6 +540,33 @@ affine_map build_m2o(const experiment_template &t, const decoding_window &w,
 
 void experimental::check_window_request(const window_request &request) {
   check_request(request);
+}
+
+// Zones are disjoint, so the least first round and the greatest end bound
+// them without sorting.
+round_range zone_span(const window_request &request) {
+  round_range span = *request.commit;
+  for (const auto &buffer : request.buffers) {
+    span.begin = std::min(span.begin, buffer.begin);
+    span.end = std::max(span.end, buffer.end);
+  }
+  return span;
+}
+
+// The rounds a window's model reads, relative to its anchor: from the round
+// before its first (v_in, and a truncated input's crossing faults) to the
+// end of the chunks it stitches. Past that it reads only whether the end
+// round exists, which decides the last chunk's outgoing seam and the output
+// port.
+round_range model_reach(const experiment_template &t,
+                        const window_request &request) {
+  const auto span = zone_span(request);
+  const auto m = static_cast<std::int64_t>(t.max_span());
+  auto imports_end = span.end;
+  if (request.output.disposition == port_disposition::closed)
+    imports_end =
+        request.output.imports ? request.output.imports->end : span.end + m;
+  return {span.begin - 1, std::max(span.end + m, imports_end)};
 }
 
 // The first k whose clipped commit zone ends after round 0, to the first

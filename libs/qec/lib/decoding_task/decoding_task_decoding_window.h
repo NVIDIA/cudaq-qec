@@ -155,6 +155,19 @@ struct decoding_window {
   }
 };
 
+/// The rounds @p request's windows span, relative to their anchor: from
+/// the first zone's first round to the last zone's end. Allocates nothing.
+/// @p request must have a commit zone; check_window_request() checks that.
+round_range zone_span(const window_request &request);
+
+/// The rounds the model of a window of @p request reads, relative to its
+/// anchor: from the round before its first, whose measurements give v_in,
+/// to the end of the chunks it stitches. A window whose reach meets the
+/// shot's prefix or its end has a prefix or terminal variant. Allocates
+/// nothing.
+round_range model_reach(const experiment_template &t,
+                        const window_request &request);
+
 /// The instances k of @p request whose commit zone, clipped to the shot,
 /// is non-empty in a @p num_rounds round shot.
 /// @throws std::invalid_argument if the request has no commit zone or a
