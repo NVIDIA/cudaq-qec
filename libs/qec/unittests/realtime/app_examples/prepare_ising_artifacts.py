@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Prepare the Ising bundle used by surface_code-4-yaml.
 
 The default mode exports the gated Fast model as a d7/T7/Z/XV CUDA-QX bundle.
