@@ -1249,9 +1249,28 @@ def test_xor_num_inputs_parser_and_schema_agree():
     sum_node = [n for n in mdc.decoders[0].task_graph.nodes if n.id == "sum"][0]
     assert sum_node.node_params["num_inputs"] == 3
     validator.validate(yaml.safe_load(text))
-    with pytest.raises(RuntimeError, match="num_inputs must be at least 2"):
-        qec.multi_decoder_config.from_yaml_str(
-            text.replace("num_inputs: 3", "num_inputs: 1"))
+    for low in ["0", "1"]:
+        bad = text.replace("num_inputs: 3", "num_inputs: " + low)
+        with pytest.raises(RuntimeError,
+                           match="xor: num_inputs must be at least 2"):
+            qec.multi_decoder_config.from_yaml_str(bad)
+        assert not validator.is_valid(yaml.safe_load(bad))
+
+
+def test_max_in_flight_parser_and_schema_agree():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    assert "max_in_flight: 4" in _PW_GRAPH_YAML
+    bad = _PW_GRAPH_YAML.replace("max_in_flight: 4", "max_in_flight: 0")
+    with pytest.raises(RuntimeError,
+                       match="decode_window: max_in_flight must be at least 1"):
+        qec.multi_decoder_config.from_yaml_str(bad)
+    assert not validator.is_valid(yaml.safe_load(bad))
+    validator.validate(yaml.safe_load(_PW_GRAPH_YAML))
 
 
 def test_experimental_window_request_is_writable():

@@ -2681,14 +2681,21 @@ llvm::json::Object task_graph_json_schema() {
           {"not", llvm::json::Object{{"required", llvm::json::Array{key}}}}});
     const auto *spec = cudaq::qec::find_task_graph_node_kind(kind);
     llvm::json::Array spellings{kind};
-    if (spec)
+    // The kind's own minimums, which its parameter validation checks.
+    llvm::json::Object minimums;
+    if (spec) {
       for (const auto &alias : spec->aliases)
         spellings.push_back(alias);
+      for (const auto &[key, least] : spec->parameter_minimums)
+        minimums[key] = llvm::json::Object{{"minimum", least}};
+    }
     llvm::json::Object then_clause;
     if (!required.empty())
       then_clause["required"] = std::move(required);
     if (!forbidden.empty())
       then_clause["allOf"] = std::move(forbidden);
+    if (!minimums.empty())
+      then_clause["properties"] = std::move(minimums);
     if (then_clause.empty())
       continue;
     per_kind.push_back(llvm::json::Object{

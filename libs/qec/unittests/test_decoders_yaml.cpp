@@ -3035,6 +3035,54 @@ TEST(TaskGraphWindowKinds, ParsesThePlansParallelWindowGraph) {
       << emitted;
 } // end - TEST(TaskGraphWindowKinds, ParsesThePlansParallelWindowGraph)
 
+// A kind's parameter minimums are checked by its parameter validation and
+// published in its clause of the JSON schema, so the two agree. A minimum
+// for a key the kind does not declare as a uint64 parameter is rejected.
+TEST(NodeKindMinimums, AreCheckedAndPublished) {
+  namespace cfg = cudaq::qec::decoding::config;
+  cudaq::qec::task_graph_node_kind_spec spec;
+  cfg::decoder_schema params;
+  cudaqx::heterogeneous_map low;
+  cudaqx::heterogeneous_map enough;
+  spec.name = "minimum_probe";
+  spec.requires_decoder = false;
+  spec.requires_dem = false;
+  spec.parameter_minimums = {{"count", 3}};
+  params.params.push_back({"count", cfg::param_kind::uint64});
+  params.params.push_back({"label", cfg::param_kind::string});
+  low.insert("count", std::size_t{2});
+  enough.insert("count", std::size_t{3});
+  cudaq::qec::register_task_graph_node_kind(spec, params);
+  const auto *schema = cfg::find_decoder_schema(
+      cudaq::qec::task_graph_node_schema_name("minimum_probe"));
+  const auto json = cfg::decoder_config_json_schema();
+  ASSERT_NE(schema, nullptr);
+  try {
+    schema->validate(low);
+    ADD_FAILURE() << "a count below its minimum was accepted";
+  } catch (const std::runtime_error &e) {
+    EXPECT_EQ(std::string(e.what()), "minimum_probe: count must be at least 3");
+  }
+  EXPECT_NO_THROW(schema->validate(enough));
+  EXPECT_NE(json.find("\"minimum\": 3"), std::string::npos);
+  cudaq::qec::unregister_task_graph_node_kind("minimum_probe");
+  for (const std::string key : {"missing", "label"}) {
+    auto bad = spec;
+    bad.parameter_minimums = {{key, 1}};
+    try {
+      cudaq::qec::register_task_graph_node_kind(bad, params);
+      cudaq::qec::unregister_task_graph_node_kind("minimum_probe");
+      ADD_FAILURE() << "a minimum for " << key << " was accepted";
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find("'" + key +
+                                           "', which is not one of its uint64 "
+                                           "parameters"),
+                std::string::npos)
+          << e.what();
+    }
+  }
+} // end - TEST(NodeKindMinimums, AreCheckedAndPublished)
+
 // pw_graph_yaml() with a length for build_task_graph() to expand, both of
 // each round's faults flipping the observable, and `from` replaced by `to`.
 // pw_graph_yaml()'s faults touch the same detector with different

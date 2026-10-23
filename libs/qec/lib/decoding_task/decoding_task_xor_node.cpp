@@ -29,13 +29,10 @@ xor_node::~xor_node() = default;
 namespace {
 
 /// The kind's one parameter: how many inputs, when not the two of a and b.
+/// Its minimum of 2 is declared with the kind.
 decoding::config::decoder_schema xor_params() {
   decoding::config::decoder_schema schema;
   schema.params.push_back({"num_inputs", decoding::config::param_kind::uint64});
-  schema.validate = [](const cudaqx::heterogeneous_map &p) {
-    if (p.contains("num_inputs") && p.get<std::size_t>("num_inputs") < 2)
-      throw std::runtime_error("xor: num_inputs must be at least 2");
-  };
   return schema;
 }
 
@@ -49,6 +46,7 @@ const bool registered = [] {
   spec.aliases = {"XOR", "Xor"};
   spec.requires_decoder = false;
   spec.requires_dem = false;
+  spec.parameter_minimums = {{"num_inputs", 2}};
   register_node_kind(std::move(spec), xor_params(),
                      [](node_build_context &ctx) {
                        const auto *p = ctx.node_params;
