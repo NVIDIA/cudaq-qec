@@ -94,6 +94,9 @@ struct task_graph_node_kind_spec {
   /// the check to the kind's parameter validation, and the JSON schema
   /// publishes each one in the kind's clause, so the two agree.
   std::map<std::string, std::uint64_t> parameter_minimums;
+  /// Greatest values of the kind's uint64 parameters, by key, checked and
+  /// published as the minimums are.
+  std::map<std::string, std::uint64_t> parameter_maximums;
   /// Optional policy deciding whether the inner decoder needs the DEM's
   /// observable model. An absent policy means yes. When the policy returns
   /// false, the topology withholds O and leaves projection to the node.

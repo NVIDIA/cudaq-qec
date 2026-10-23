@@ -22,10 +22,16 @@ namespace cudaq::qec {
 /// asynchronous decode, affinity, or graph dispatch.
 class xor_node : public task_graph_node {
 public:
+  /// The most inputs an xor takes. Far wider than any graph folds; it stops
+  /// a mistyped count from exhausting memory naming ports before any edge is
+  /// checked.
+  static constexpr std::size_t max_inputs = 1024;
+
   /// The two-input xor, on `a` and `b`, as combine() wires it.
   xor_node();
   /// An xor of @p num_inputs inputs, on `in_0` ... `in_{num_inputs-1}`.
-  /// @throws std::invalid_argument if @p num_inputs is below 2.
+  /// @throws std::invalid_argument if @p num_inputs is below 2 or above
+  /// max_inputs.
   explicit xor_node(std::size_t num_inputs);
   ~xor_node() override;
 

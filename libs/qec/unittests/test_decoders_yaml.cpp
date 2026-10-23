@@ -2947,7 +2947,8 @@ std::string three_input_sum_yaml(const std::string &num_inputs) {
                       "        - {from: ingest.logical, to: sum.in_2}\n");
 }
 
-// xor's num_inputs parses and round-trips, and below 2 it is rejected.
+// xor's num_inputs parses and round-trips, and below 2 or above 1024 it is
+// rejected.
 TEST(XorNumInputs, ParsesAndIsChecked) {
   namespace cfg = cudaq::qec::decoding::config;
   auto parsed =
@@ -2969,6 +2970,15 @@ TEST(XorNumInputs, ParsesAndIsChecked) {
           std::string::npos)
           << e.what();
     }
+  try {
+    cfg::multi_decoder_config::from_yaml_str(three_input_sum_yaml("2000"));
+    ADD_FAILURE() << "num_inputs 2000 was accepted";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(
+        std::string(e.what()).find("xor: num_inputs must be at most 1024"),
+        std::string::npos)
+        << e.what();
+  }
 }
 
 // The layers parse into the ingest node, sorted by name, as the window
@@ -3131,6 +3141,11 @@ TEST(TaskGraphWindowKinds, BuildingValidatesTheWindowsFirst) {
   rejects("to: B.receive_1}", "to: B.receive_2}",
           "decode_window node 'B' has num_receives 2, so it has no input "
           "'receive_2'");
+  rejects("to: B.receive_1}", "to: B.receive_01}",
+          "decode_window node 'B' has no input 'receive_01'");
+  rejects("to: B.receive_1}", "to: B.receive_99999999999999999999}",
+          "decode_window node 'B' has no input "
+          "'receive_99999999999999999999'");
   rejects("        - {from: A.backward, to: B.receive_1}\n", "",
           "validate_commitment: F3: ");
   rejects(", index_offset: -1}", "}", "reaches round");
@@ -3182,6 +3197,56 @@ TEST(TaskGraphWindowKinds, BuildingRejectsMixedShots) {
                      "ingest nodes 'ingest' and 'ingest2' have different "
                      "templates but both reach 'sum'");
 } // end - TEST(TaskGraphWindowKinds, BuildingRejectsMixedShots)
+
+// Two ingest nodes with different templates may share a graph as long as
+// their windows meet in no node: graph outputs are separate results, not a
+// node they share. Each pipeline validates on its own, so the build reaches
+// the kinds' own report.
+TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto config = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
+  auto &decoder = config.decoders.at(0);
+  auto &graph = *decoder.task_graph;
+  const auto nodes = graph.nodes;
+  const auto edges = graph.edges;
+  const auto renamed = [](const std::string &id) {
+    return id == "measurements" || id == "output" ? id : id + "2";
+  };
+  for (auto node : nodes) {
+    node.id = renamed(node.id);
+    if (node.id == "ingest2") {
+      node.dem_chunks = *decoder.dem_chunks;
+      node.dem_chunks->phases.at(0).spec.error_rates.at(0) = 0.02;
+    }
+    graph.nodes.push_back(node);
+  }
+  for (auto edge : edges) {
+    edge.from_node = renamed(edge.from_node);
+    edge.to_node = renamed(edge.to_node);
+    graph.edges.push_back(edge);
+  }
+  expect_build_error(config, "the 'ingest' kind is not available yet");
+} // end - TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs)
+
+// Node ids and parameter types are checked before the window layout, which
+// reads both: a repeated id is named as such, and a parameter of the wrong
+// type is not read as its default.
+TEST(TaskGraphWindowKinds, BuildingChecksIdsAndParametersFirst) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
+  auto repeated = parsed;
+  auto mistyped = parsed;
+  for (auto &node : repeated.decoders.at(0).task_graph->nodes)
+    if (node.id == "sum")
+      node.id = "A";
+  for (auto &node : mistyped.decoders.at(0).task_graph->nodes)
+    if (node.id == "B") {
+      node.node_params.map().insert("num_receives", 2.0);
+    }
+  expect_build_error(repeated, "duplicate node id 'A'");
+  expect_build_error(mistyped, "Key 'num_receives' in from_topology: node 'B' "
+                               "parameters does not hold a non-negative int");
+}
 
 // Misplaced or malformed windows, and a bad verify_residual, are each
 // rejected when parsed, with their own message. verify_residual takes no

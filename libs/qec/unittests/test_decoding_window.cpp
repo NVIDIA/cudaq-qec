@@ -52,6 +52,7 @@
 #include <vector>
 
 #if defined(__linux__)
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
@@ -1541,8 +1542,10 @@ std::size_t mapped_bytes() {
 // That is about 2 GB as a dense H and a few megabytes sparse, and it builds
 // within a little address space beyond what the process maps. The child
 // lowers only its soft limit, which needs no privilege, and proves the limit
-// refuses a dense H before building; its exit code says which step failed:
-// 1 the shape, 2 setting the limit, 3 a limit that admits the dense H.
+// refuses a dense H before building, by reserving that much address space:
+// an mmap the compiler cannot remove, as it may an unused malloc. Its exit
+// code says which step failed: 1 the shape, 2 setting the limit, 3 a limit
+// that admits the dense H.
 TEST(DecodingWindowDeathTest, BuildsLargeWindowsSparsely) {
   if (sanitized)
     GTEST_SKIP() << "a sanitizer's allocator aborts on a refused allocation";
@@ -1555,16 +1558,17 @@ TEST(DecodingWindowDeathTest, BuildsLargeWindowsSparsely) {
   const auto request = layered(4, 3, 6).a;
   const auto build = [&] {
     rlimit limit{};
-    void *dense = nullptr;
+    void *dense = MAP_FAILED;
     if (getrlimit(RLIMIT_AS, &limit) != 0)
       std::exit(2);
     limit.rlim_cur =
         std::min<rlim_t>(mapped_bytes() + headroom, limit.rlim_max);
     if (setrlimit(RLIMIT_AS, &limit) != 0)
       std::exit(2);
-    dense = std::malloc(rows * columns);
-    if (dense) {
-      std::free(dense);
+    dense = mmap(nullptr, rows * columns, PROT_NONE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (dense != MAP_FAILED) {
+      munmap(dense, rows * columns);
       std::exit(3);
     }
     const auto w = window_from_dem_chunks(tmpl, request, 1, 40);
