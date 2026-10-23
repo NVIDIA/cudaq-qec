@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
+#include <regex>
 #include <set>
 #include <stdexcept>
 #include <unistd.h>
@@ -4525,6 +4526,331 @@ TEST(DecoderNodeModelTest, TheBuilderTreatsTheTwoSpellingsIdentically) {
     cfg::finalize_decoders();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Stim DEMs named in data_artifacts
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// data_artifacts holding kStimDem by file, as by_file, pinned to `pin` when
+/// one is given, and inline, as inline_text; then `rest`.
+std::string stim_artifacts_yaml(const std::string &dem_path,
+                                const std::string &rest,
+                                const std::string &pin = {}) {
+  return "data_artifacts:\n"
+         "  by_file:\n"
+         "    stim_dem_path: " +
+         dem_path + "\n" + (pin.empty() ? "" : "    sha256: " + pin + "\n") +
+         "  inline_text:\n"
+         "    stim_dem: |\n" +
+         indent_lines(kStimDem, 6) + rest;
+}
+
+/// A DEM-form decoder whose stim_dem holds `model`, an entry's name or text,
+/// then `extra` keys.
+std::string stim_dem_decoder(const std::string &model, int id = 0,
+                             const std::string &extra = {}) {
+  return "  - id: " + std::to_string(id) +
+         "\n"
+         "    type: multi_error_lut\n"
+         "    stim_dem: " +
+         model +
+         "\n"
+         "    D_sparse: [0, -1, 1, -1, 2, -1, 3, -1]\n" +
+         extra;
+}
+
+/// Whether `yaml` writes `key: value`, as the emitter aligns and quotes it.
+bool writes(const std::string &yaml, const std::string &key,
+            const std::string &value) {
+  return std::regex_search(yaml, std::regex(key + ":\\s+'?" + value + "'?\\n"));
+}
+
+/// Text without its leading and trailing whitespace, which a YAML block
+/// scalar need not keep as the file has it.
+std::string trimmed(const std::string &text) {
+  const auto begin = text.find_first_not_of(" \n");
+  const auto end = text.find_last_not_of(" \n");
+  return begin == std::string::npos ? std::string{}
+                                    : text.substr(begin, end - begin + 1);
+}
+
+} // namespace
+
+// A decoder's stim_dem with no whitespace names an entry: a file-backed one
+// gives it the entry's path, an inline one the entry's text. The name is
+// kept, so the document writes it back and round-trips, and each decoder
+// resolves to the model its file form resolves to.
+TEST(StimDemReferences, DecodersNameEntries) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  const auto cwd = std::filesystem::current_path();
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(stim_artifacts_yaml(
+      dem.path(), "decoders:\n" + stim_dem_decoder("by_file") +
+                      stim_dem_decoder("inline_text", 1)));
+  const auto &by_file = parsed.decoders.at(0);
+  const auto &by_text = parsed.decoders.at(1);
+  const auto emitted = parsed.to_yaml_str(200);
+  const auto reference = cudaq::qec::decoding::host::resolve_decoder_init(
+      parse_one(dem_form_yaml(dem.path())), cwd);
+  EXPECT_EQ(by_file.stim_dem_artifact, "by_file");
+  EXPECT_EQ(by_file.stim_dem_path, dem.path());
+  EXPECT_TRUE(by_file.stim_dem.empty());
+  EXPECT_EQ(by_text.stim_dem_artifact, "inline_text");
+  EXPECT_EQ(by_text.stim_dem, parsed.data_artifacts.at(1).stim_dem);
+  EXPECT_TRUE(by_text.stim_dem_path.empty());
+  EXPECT_TRUE(writes(emitted, "stim_dem", "by_file")) << emitted;
+  EXPECT_TRUE(writes(emitted, "stim_dem", "inline_text")) << emitted;
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+  for (const auto *decoder : {&by_file, &by_text}) {
+    const auto inputs =
+        cudaq::qec::decoding::host::resolve_decoder_init(*decoder, cwd);
+    ASSERT_TRUE(inputs.has_stim_dem());
+    EXPECT_EQ(trimmed(inputs.stim_dem()), trimmed(reference.stim_dem()));
+    EXPECT_EQ(inputs.num_error_mechanisms(), reference.num_error_mechanisms());
+  }
+} // end - TEST(StimDemReferences, DecodersNameEntries)
+
+// A decoder's stim_dem holds the model text as a node's does, and like a
+// node's it excludes stim_dem_path.
+TEST(StimDemReferences, DecodersTakeStimDemText) {
+  ScopedServerDemFile dem;
+  cudaq::qec::decoding::config::multi_decoder_config written;
+  const auto text = "|\n" + indent_lines(kStimDem, 6);
+  const auto config = parse_one("decoders:\n" + stim_dem_decoder(text));
+  const auto inputs = cudaq::qec::decoding::host::resolve_decoder_init(
+      config, std::filesystem::current_path());
+  EXPECT_TRUE(config.stim_dem_artifact.empty());
+  EXPECT_EQ(trimmed(config.stim_dem), trimmed(kStimDem));
+  ASSERT_TRUE(inputs.has_stim_dem());
+  EXPECT_EQ(inputs.num_detectors(), 4u);
+  written.decoders.push_back(config);
+  EXPECT_EQ(parse_one(written.to_yaml_str(200)), config);
+  expect_parse_error(
+      "decoders:\n" +
+          stim_dem_decoder(text, 0, "    stim_dem_path: " + dem.path() + "\n"),
+      "sets both stim_dem and stim_dem_path");
+}
+
+// A node's stim_dem names an entry the same way.
+TEST(StimDemReferences, NodesNameEntries) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  for (const std::string name : {"by_file", "inline_text"}) {
+    auto parsed = cfg::multi_decoder_config::from_yaml_str(stim_artifacts_yaml(
+        dem.path(), node_model_yaml("          stim_dem: " + name + "\n")));
+    const auto &node = parsed.decoders.at(0).task_graph->nodes.at(0);
+    const auto &entry = parsed.data_artifacts.at(name == "by_file" ? 0 : 1);
+    const auto emitted = parsed.to_yaml_str(200);
+    EXPECT_EQ(node.stim_dem_artifact, name);
+    EXPECT_EQ(node.stim_dem, entry.stim_dem);
+    EXPECT_EQ(node.stim_dem_path, entry.stim_dem_path);
+    EXPECT_TRUE(writes(emitted, "stim_dem", name)) << emitted;
+    EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+        << emitted;
+  }
+}
+
+// A stim_dem with no whitespace names an entry, so one that names none, or
+// names an entry of another kind, is rejected, as is a name outside a
+// document with data_artifacts, or one whose file meets a stim_dem_path of
+// its own.
+TEST(StimDemReferences, RejectsBadNames) {
+  ScopedServerDemFile dem;
+  const auto with = [&](const std::string &decoders) {
+    return stim_artifacts_yaml(dem.path(), "decoders:\n" + decoders);
+  };
+  const auto window_entry = stim_artifacts_yaml(
+      dem.path(),
+      "  rep_memory:\n"
+      "    dem_chunks:\n"
+      "      seam: {from: next_round, to: prev_round}\n"
+      "      connections: [{from: bulk, to: bulk}]\n"
+      "      phases:\n"
+      "        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], "
+      "O_sparse: [0, -1], error_rates: [0.01, 0.01]}}\n"
+      "decoders:\n" +
+          stim_dem_decoder("rep_memory"));
+  expect_parse_error(with(stim_dem_decoder("nowhere")),
+                     "decoder 0 stim_dem names data_artifacts entry "
+                     "'nowhere', which does not exist");
+  expect_parse_error(window_entry, "'rep_memory' is a dem_chunks entry, not "
+                                   "a Stim DEM entry");
+  expect_parse_error(
+      with(stim_dem_decoder("by_file", 0,
+                            "    stim_dem_path: " + dem.path() + "\n")),
+      "sets both stim_dem and stim_dem_path");
+  try {
+    cudaq::qec::decoding::config::decoder_config::from_yaml_str(
+        "id: 0\ntype: multi_error_lut\nstim_dem: by_file\n"
+        "D_sparse: [0, -1]\n");
+    ADD_FAILURE() << "a standalone decoder resolved a name";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("outside a multi_decoder_config"),
+              std::string::npos)
+        << e.what();
+  }
+} // end - TEST(StimDemReferences, RejectsBadNames)
+
+// A name's error names its node, and keys arrive in no fixed order, so a
+// node without an id is reported as such rather than as node ''.
+TEST(StimDemReferences, NodesWithoutAnIdAreReportedAsSuch) {
+  for (const std::string key : {"stim_dem", "dem_chunks"})
+    expect_parse_error(R"(
+decoders:
+  - id: 0
+    task_graph:
+      nodes:
+        - )" + key + R"(: nowhere
+          type: sliding_window
+          inner: {type: sample_decoder}
+)",
+                       "every task_graph node needs an id");
+}
+
+// with_pinned_stim_dems() gives each decoder and node that names a pinned
+// file entry the entry's text, read once and checked against the pin, in
+// place of its path, so the model built is the one checked. A name of an
+// unpinned entry, and a copy edited after parsing, keep their paths.
+TEST(StimDemReferences, PinnedModelsAreReadOnce) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  const auto pin = cudaq::qec::sha256_hex(kStimDem);
+  const auto yaml = [&](const std::string &with) {
+    return stim_artifacts_yaml(dem.path(),
+                               "decoders:\n" + stim_dem_decoder("by_file") +
+                                   stim_dem_decoder("by_file", 1),
+                               with);
+  };
+  auto config = cfg::multi_decoder_config::from_yaml_str(yaml(pin));
+  auto unpinned = cfg::multi_decoder_config::from_yaml_str(yaml(""));
+  auto bad = cfg::multi_decoder_config::from_yaml_str(yaml(placeholder_pin));
+  config.decoders.at(1).stim_dem_path = dem.path() + ".copy";
+  const auto pinned = cudaq::qec::decoding::host::with_pinned_stim_dems(
+      config, std::filesystem::current_path());
+  const auto kept = cudaq::qec::decoding::host::with_pinned_stim_dems(
+      unpinned, std::filesystem::current_path());
+  EXPECT_EQ(pinned.decoders.at(0).stim_dem, kStimDem);
+  EXPECT_TRUE(pinned.decoders.at(0).stim_dem_path.empty());
+  EXPECT_EQ(pinned.decoders.at(0).stim_dem_artifact, "by_file");
+  EXPECT_EQ(pinned.decoders.at(1), config.decoders.at(1));
+  EXPECT_EQ(pinned.data_artifacts, config.data_artifacts);
+  EXPECT_EQ(kept, unpinned);
+  try {
+    cudaq::qec::decoding::host::with_pinned_stim_dems(
+        bad, std::filesystem::current_path());
+    ADD_FAILURE() << "a file that does not match its pin was read";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("data_artifacts.by_file: " +
+                                         dem.path() + " has sha256 " + pin),
+              std::string::npos)
+        << e.what();
+  }
+} // end - TEST(StimDemReferences, PinnedModelsAreReadOnce)
+
+// A node that names a pinned entry is built from the checked text too.
+TEST(StimDemReferences, PinnedNodeModelsAreReadOnce) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  const auto config =
+      cfg::multi_decoder_config::from_yaml_str(stim_artifacts_yaml(
+          dem.path(), node_model_yaml("          stim_dem: by_file\n"),
+          cudaq::qec::sha256_hex(kStimDem)));
+  const auto pinned = cudaq::qec::decoding::host::with_pinned_stim_dems(
+      config, std::filesystem::current_path());
+  const auto &node = pinned.decoders.at(0).task_graph->nodes.at(0);
+  EXPECT_EQ(node.stim_dem, kStimDem);
+  EXPECT_TRUE(node.stim_dem_path.empty());
+  EXPECT_EQ(node.stim_dem_artifact, "by_file");
+}
+
+// The decoding server builds its decoders without configure_decoders(), and
+// checks pins the same way.
+TEST(StimDemReferences, TheServerChecksPins) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedDemFile dem;
+  const auto base = dem.path().parent_path();
+  const auto yaml = [&](const std::string &pin) {
+    return "data_artifacts:\n"
+           "  tiny:\n"
+           "    stim_dem_path: " +
+           dem.path().filename().string() + "\n    sha256: " + pin +
+           "\n"
+           "decoders:\n"
+           "  - id: 0\n"
+           "    type: d_capture_decoder\n"
+           "    stim_dem: tiny\n"
+           "    D_sparse: [0, -1, 1, -1]\n";
+  };
+  cudaq::qec::decoding_server::SessionRegistry rejected;
+  cudaq::qec::decoding_server::SessionRegistry accepted;
+  EXPECT_THROW(
+      rejected.load_from_config(
+          cfg::multi_decoder_config::from_yaml_str(yaml(placeholder_pin)),
+          "test", base),
+      std::runtime_error);
+  EXPECT_NO_THROW(
+      accepted.load_from_config(cfg::multi_decoder_config::from_yaml_str(
+                                    yaml(cudaq::qec::sha256_hex(kTinyDem))),
+                                "test", base));
+}
+
+// As for dem_chunks, an edit made after parsing is written inline, since the
+// name no longer describes the copy.
+TEST(StimDemReferences, EditsAfterParsingAreWrittenInline) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(stim_artifacts_yaml(
+      dem.path(), "decoders:\n" + stim_dem_decoder("by_file")));
+  parsed.decoders.at(0).stim_dem_path = "other.dem";
+  const auto emitted = parsed.to_yaml_str(200);
+  EXPECT_FALSE(writes(emitted, "stim_dem", "by_file")) << emitted;
+  EXPECT_TRUE(writes(emitted, "stim_dem_path", "other.dem")) << emitted;
+}
+
+// Configuring a decoder that names a pinned entry reads the entry's file, so
+// the pin is checked first. Once configured, entries' paths are absolute like
+// the decoders', and the names are still written back.
+TEST(StimDemReferences, ConfigureChecksPinsAndKeepsNames) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedDemFile dem;
+  const auto base = dem.path().parent_path();
+  const auto file = dem.path().filename().string();
+  const auto yaml = [&](const std::string &pin) {
+    return "data_artifacts:\n"
+           "  tiny:\n"
+           "    stim_dem_path: " +
+           file + "\n    sha256: " + pin +
+           "\n"
+           "decoders:\n"
+           "  - id: 0\n"
+           "    type: d_capture_decoder\n"
+           "    stim_dem: tiny\n"
+           "    D_sparse: [0, -1, 1, -1]\n";
+  };
+  auto bad = cfg::multi_decoder_config::from_yaml_str(yaml(placeholder_pin));
+  auto good = cfg::multi_decoder_config::from_yaml_str(
+      yaml(cudaq::qec::sha256_hex(kTinyDem)));
+  try {
+    cfg::configure_decoders(bad, base);
+    ADD_FAILURE() << "a file that does not match its pin was configured";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("data_artifacts.tiny: " + file +
+                                         " has sha256 " +
+                                         cudaq::qec::sha256_hex(kTinyDem)),
+              std::string::npos)
+        << e.what();
+  }
+  ASSERT_EQ(cfg::configure_decoders(good, base), 0);
+  EXPECT_TRUE(std::filesystem::path(good.data_artifacts.at(0).stim_dem_path)
+                  .is_absolute());
+  EXPECT_EQ(good.decoders.at(0).stim_dem_path,
+            good.data_artifacts.at(0).stim_dem_path);
+  EXPECT_TRUE(writes(good.to_yaml_str(200), "stim_dem", "tiny"));
+  cfg::finalize_decoders();
+} // end - TEST(StimDemReferences, ConfigureChecksPinsAndKeepsNames)
 
 TEST(DecoderDemFormTest, JsonSchemaAcceptsDemFormAlongsideTheOtherTwo) {
   const auto schema =

@@ -2133,7 +2133,9 @@ void expect_models_match(const std::shared_ptr<const experiment_template> &t,
 } // end - expect_models_match()
 
 // The production models agree with the reference's, which slices the whole
-// shot independently, for every layout and shot length up to 30.
+// shot independently, for every layout and shot length up to 30. The
+// reference does not model the column options; the DecodingWindowColumns
+// tests check merged windows against these unmerged ones instead.
 TEST(ParallelWindowReference, ModelsMatchTheWindows) {
   for (const auto &spec :
        {arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3),

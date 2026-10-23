@@ -22,6 +22,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -642,11 +643,12 @@ std::vector<std::string> artifact_kinds(const data_artifact_t &entry) {
   return kinds;
 }
 
-/// The entry @p name names, which must hold @p kind; @p where names the
-/// reference in messages.
+/// The entry @p name names, which must hold one of @p kinds; @p what names
+/// them, and @p where the reference, in messages.
 const data_artifact_t &find_artifact(llvm::yaml::IO &io,
                                      const std::string &name,
-                                     const std::string &kind,
+                                     const std::vector<std::string> &kinds,
+                                     const std::string &what,
                                      const std::string &where) {
   const auto *context =
       static_cast<const config_parse_context *>(io.getContext());
@@ -658,11 +660,12 @@ const data_artifact_t &find_artifact(llvm::yaml::IO &io,
   const auto *entry = named_artifact(*context->artifacts, name);
   if (!entry)
     throw std::runtime_error(prefix + ", which does not exist");
-  const auto kinds = artifact_kinds(*entry);
-  if (kinds.size() != 1 || kinds.front() != kind)
+  const auto held = artifact_kinds(*entry);
+  if (held.size() != 1 ||
+      std::find(kinds.begin(), kinds.end(), held.front()) == kinds.end())
     throw std::runtime_error(prefix + ", but '" + name + "' is a " +
-                             (kinds.empty() ? "kindless" : kinds.front()) +
-                             " entry, not a " + kind + " entry");
+                             (held.empty() ? "kindless" : held.front()) +
+                             " entry, not a " + what + " entry");
   return *entry;
 }
 
@@ -1292,7 +1295,64 @@ static void map_dem_chunks(IO &io,
     return;
   }
   artifact = form->name;
-  spec = *find_artifact(io, artifact, "dem_chunks", where).dem_chunks;
+  spec = *find_artifact(io, artifact, {"dem_chunks"}, "dem_chunks", where)
+              .dem_chunks;
+}
+
+/// The error for a decoder or node given its model both inline and by file.
+static std::runtime_error both_stim_forms(const std::string &where) {
+  return std::runtime_error(
+      where + " sets both stim_dem and stim_dem_path; the model comes in "
+              "exactly one form, inline or by file");
+}
+
+/// Resolves a stim_dem that names a data_artifacts entry: any value with no
+/// whitespace, which Stim model text always has. The name is kept in @p
+/// artifact, and @p text or
+/// @p path becomes a copy of the entry's text or path.
+static void resolve_stim_dem(IO &io, std::string &text, std::string &path,
+                             std::string &artifact, const std::string &where) {
+  if (text.empty() || text.find_first_of(" \t\r\n") != std::string::npos)
+    return;
+  artifact = std::move(text);
+  text.clear();
+  const auto &entry = find_artifact(io, artifact, {"stim_dem", "stim_dem_path"},
+                                    "Stim DEM", where + " stim_dem");
+  if (!entry.stim_dem_path.empty() && !path.empty())
+    throw both_stim_forms(where);
+  text = entry.stim_dem;
+  if (!entry.stim_dem_path.empty())
+    path = entry.stim_dem_path;
+}
+
+/// Writes a model that names an entry as the name while its copy still
+/// equals the entry, as for dem_chunks, and otherwise inline.
+static void write_stim_dem(IO &io, std::string &text, std::string &path,
+                           std::string &artifact) {
+  const auto *entry = written_entry(io, artifact);
+  const bool unedited = entry && (!text.empty() || !path.empty()) &&
+                        entry->stim_dem == text && entry->stim_dem_path == path;
+  if (unedited || (text.empty() && path.empty() && !artifact.empty())) {
+    io.mapRequired("stim_dem", artifact);
+    return;
+  }
+  if (!text.empty())
+    io.mapRequired("stim_dem", text);
+  if (!path.empty())
+    io.mapRequired("stim_dem_path", path);
+}
+
+/// Maps a decoder entry's model keys: stim_dem_path, and stim_dem, which
+/// holds the model text or names a data_artifacts entry.
+static void map_stim_dem(IO &io, std::string &text, std::string &path,
+                         std::string &artifact, const std::string &where) {
+  if (io.outputting()) {
+    write_stim_dem(io, text, path, artifact);
+    return;
+  }
+  io.mapOptional("stim_dem_path", path, std::string{});
+  io.mapOptional("stim_dem", text, std::string{});
+  resolve_stim_dem(io, text, path, artifact, where);
 }
 
 /// A window layer's value: a request, or the name of a data_artifacts window
@@ -1464,7 +1524,8 @@ struct CustomMappingTraits<windows_form> {
             cudaq::qec::window_yaml::request_from_form(value.request);
       } else {
         window.artifact = value.name;
-        window.request = *find_artifact(io, value.name, "window", where).window;
+        window.request =
+            *find_artifact(io, value.name, {"window"}, "window", where).window;
       }
     } catch (const std::invalid_argument &e) {
       throw std::runtime_error(where + ": " + e.what());
@@ -1492,6 +1553,17 @@ template <>
 struct CustomMappingTraits<task_graph_spec_t::node_spec> {
   using node_spec = task_graph_spec_t::node_spec;
 
+  // Keys arrive in no fixed order, and the errors of a reference or a window
+  // name their node, so the id is read first; a node without one is reported
+  // as such.
+  static std::string node_where(IO &io, node_spec &node) {
+    if (node.id.empty())
+      io.mapOptional("id", node.id);
+    if (node.id.empty())
+      throw std::runtime_error("every task_graph node needs an id");
+    return "task_graph node '" + node.id + "'";
+  }
+
   static void inputOne(IO &io, StringRef key, node_spec &node) {
     if (key == "id") {
       io.mapRequired("id", node.id);
@@ -1503,11 +1575,12 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
     }
     if (key == "dem_chunks") {
       map_dem_chunks(io, node.dem_chunks, node.dem_chunks_artifact,
-                     "task_graph node '" + node.id + "'");
+                     node_where(io, node));
       return;
     }
     if (key == "windows") {
       windows_form form{&node.windows, &node.id};
+      node_where(io, node);
       io.mapRequired("windows", form);
       return;
     }
@@ -1531,11 +1604,17 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       io.mapOptional("syndrome_size", node.syndrome_size);
       return;
     }
+    // A name read first may already have set the path, which a later
+    // stim_dem_path would silently replace.
     if (key == "stim_dem") {
       io.mapOptional("stim_dem", node.stim_dem);
+      resolve_stim_dem(io, node.stim_dem, node.stim_dem_path,
+                       node.stim_dem_artifact, node_where(io, node));
       return;
     }
     if (key == "stim_dem_path") {
+      if (!node.stim_dem_path.empty())
+        throw both_stim_forms(node_where(io, node));
       io.mapOptional("stim_dem_path", node.stim_dem_path);
       return;
     }
@@ -1566,8 +1645,8 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
           cudaq::qec::decoding::config::find_decoder_schema(type_value);
       if (!schema)
         throw std::runtime_error(
-            "task_graph node '" + node.id +
-            "' sets decoder_custom_args but no parameter schema is registered "
+            node_where(io, node) +
+            " sets decoder_custom_args but no parameter schema is registered "
             "for type '" +
             type_value +
             "'; a node whose type is a node kind passes its decoder arguments "
@@ -1638,10 +1717,8 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       io.mapRequired("block_size", node.block_size);
     if (node.syndrome_size != 0)
       io.mapRequired("syndrome_size", node.syndrome_size);
-    if (!node.stim_dem.empty())
-      io.mapRequired("stim_dem", node.stim_dem);
-    if (!node.stim_dem_path.empty())
-      io.mapRequired("stim_dem_path", node.stim_dem_path);
+    write_stim_dem(io, node.stim_dem, node.stim_dem_path,
+                   node.stim_dem_artifact);
     if (!node.node_params.empty()) {
       const auto *schema = cudaq::qec::task_graph_node_params_schema(node.type);
       if (!schema)
@@ -1814,7 +1891,8 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
     // written in.
     const bool emitting_flat_form =
         io.outputting() &&
-        !((config.dem_chunks.has_value() || !config.stim_dem_path.empty()) &&
+        !((config.dem_chunks.has_value() || !config.stim_dem_path.empty() ||
+           !config.stim_dem.empty()) &&
           config.H_sparse.empty());
     if (emitting_flat_form) {
       io.mapRequired("block_size", config.block_size);
@@ -1836,7 +1914,9 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
       io.mapOptional("error_rate_vec", config.error_rate_vec);
     map_dem_chunks(io, config.dem_chunks, config.dem_chunks_artifact,
                    "decoder " + std::to_string(config.id));
-    io.mapOptional("stim_dem_path", config.stim_dem_path, std::string{});
+    map_stim_dem(io, config.stim_dem, config.stim_dem_path,
+                 config.stim_dem_artifact,
+                 "decoder " + std::to_string(config.id));
 
     // Convert decoder_custom_args through the schema registered for this
     // decoder type. error_rate_vec is a reserved compatibility alias: accept
@@ -1938,11 +2018,17 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
     const bool chunk_form =
         config.dem_chunks.has_value() && config.H_sparse.empty();
 
-    // DEM form when a Stim model file is named. The decoder is built from that
-    // text and derives its own dimensions and observable mapping, so the
-    // checks below that compare against syndrome_size do not apply to it; the
-    // D row count is checked against the constructed decoder instead.
-    const bool from_dem = !config.stim_dem_path.empty();
+    // DEM form when a Stim model is given, inline or by file. The decoder is
+    // built from that text and derives its own dimensions and observable
+    // mapping, so the checks below that compare against syndrome_size do not
+    // apply to it; the D row count is checked against the constructed decoder
+    // instead.
+    const bool from_dem =
+        !config.stim_dem_path.empty() || !config.stim_dem.empty();
+    const char *dem_key =
+        config.stim_dem_path.empty() ? "stim_dem" : "stim_dem_path";
+    if (!config.stim_dem_path.empty() && !config.stim_dem.empty())
+      throw both_stim_forms("decoder " + std::to_string(config.id));
 
     // Both forms at once is legal but lopsided: H_sparse wins and the chunk
     // spec never runs. expand_dem_chunks() produces exactly this state, so it
@@ -1962,10 +2048,10 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
     // and unlike the flat form there is no precedence between them to fall
     // back on, so a document naming both has to be rejected outright.
     if (config.dem_chunks.has_value() && from_dem)
-      throw std::runtime_error(
-          "dem_chunks and stim_dem_path must not both be set for decoder " +
-          std::to_string(config.id) +
-          "; each describes the whole DEM on its own.");
+      throw std::runtime_error(std::string("dem_chunks and ") + dem_key +
+                               " must not both be set for decoder " +
+                               std::to_string(config.id) +
+                               "; each describes the whole DEM on its own.");
 
     // Whichever form is in play derives these from the model it names;
     // accepting them here would let a config disagree with itself.
@@ -1995,10 +2081,9 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
       reject_derived("error_rate_vec", !config.error_rate_vec.empty(),
                      "dem_chunks");
     } else if (from_dem) {
-      reject_derived("H_sparse", !config.H_sparse.empty(), "stim_dem_path");
-      reject_derived("O_sparse", !config.O_sparse.empty(), "stim_dem_path");
-      reject_derived("error_rate_vec", !config.error_rate_vec.empty(),
-                     "stim_dem_path");
+      reject_derived("H_sparse", !config.H_sparse.empty(), dem_key);
+      reject_derived("O_sparse", !config.O_sparse.empty(), dem_key);
+      reject_derived("error_rate_vec", !config.error_rate_vec.empty(), dem_key);
       // D_sparse is the one model field the DEM text does not carry: it maps
       // detectors onto the syndrome bits this decoder is sent. Its row count is
       // checked against the constructed decoder's detector count, which is only
@@ -2006,8 +2091,9 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
       if (!io.outputting() && config.D_sparse.empty())
         throw std::runtime_error(
             "D_sparse is required for decoder " + std::to_string(config.id) +
-            " alongside stim_dem_path, which describes the DEM but not the "
-            "detectors this decoder is sent.");
+            " alongside " + dem_key +
+            ", which describes the DEM but not the detectors this decoder is "
+            "sent.");
     } else {
       // A flat document spells out its whole DEM, so every one of these fields
       // has to be there. They are mapOptional only because the other two forms
@@ -2029,8 +2115,9 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
               " is missing required field(s): " + missing +
               ". A flat DEM names block_size, syndrome_size, H_sparse, "
               "O_sparse and D_sparse together; use dem_chunks "
-              "to describe the same DEM one round at a time, or stim_dem_path "
-              "to name the model text itself, instead.");
+              "to describe the same DEM one round at a time, or stim_dem or "
+              "stim_dem_path to give the model text itself, inline or by "
+              "file, instead.");
       } // end - if(!io.outputting())
 
       if (config.H_sparse.empty() && config.syndrome_size > 0)
@@ -2811,6 +2898,34 @@ llvm::json::Object task_graph_json_schema() {
   };
 }
 
+// Properties that leave both Stim model keys empty, for the DEM forms that
+// take neither.
+llvm::json::Object no_stim_dem() {
+  return llvm::json::Object{
+      {"stim_dem", llvm::json::Object{{"maxLength", 0}}},
+      {"stim_dem_path", llvm::json::Object{{"maxLength", 0}}}};
+}
+
+// A schema matching an object that has any of @p keys.
+llvm::json::Object any_required(std::initializer_list<const char *> keys) {
+  llvm::json::Array any;
+  for (const auto *key : keys)
+    any.push_back(llvm::json::Object{{"required", llvm::json::Array{key}}});
+  return llvm::json::Object{{"anyOf", std::move(any)}};
+}
+
+// The DEM form with its model in @p key, nonempty, beside D_sparse, and
+// @p other, the other spelling, empty.
+llvm::json::Object stim_dem_form(const char *key, const char *other) {
+  return llvm::json::Object{
+      {"required", llvm::json::Array{key, "D_sparse"}},
+      {"properties",
+       llvm::json::Object{{key, llvm::json::Object{{"minLength", 1}}},
+                          {other, llvm::json::Object{{"maxLength", 0}}}}},
+      {"not",
+       any_required({"H_sparse", "O_sparse", "error_rate_vec", "dem_chunks"})}};
+}
+
 } // namespace
 
 std::string decoder_config_json_schema() {
@@ -2834,6 +2949,8 @@ std::string decoder_config_json_schema() {
       {"syndrome_size",
        llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
       {"stim_dem_path", llvm::json::Object{{"type", "string"}}},
+      // Model text, or, with no whitespace, a data_artifacts entry's name.
+      {"stim_dem", llvm::json::Object{{"type", "string"}}},
       {"H_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"O_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"D_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
@@ -3056,64 +3173,27 @@ std::string decoder_config_json_schema() {
            {"properties", std::move(config_properties)},
            {"required", llvm::json::Array{"id"}},
            // The DEM is described flat, as repeated phases, or as a nonempty
-           // Stim model path. Expanded chunk configurations retain dem_chunks
-           // beside their flat fields, so that combination belongs to the
-           // flat branch. The other derived-field exclusions mirror the YAML
-           // parser exactly.
+           // Stim model, by path or inline (or as a name with no whitespace,
+           // which the schema cannot tell from text). Expanded chunk
+           // configurations retain dem_chunks beside their flat fields, so
+           // that combination belongs to the flat branch. A model given both
+           // ways matches no branch. The other derived-field exclusions
+           // mirror the YAML parser exactly.
            {"oneOf",
             llvm::json::Array{
                 llvm::json::Object{
                     {"required", llvm::json::Array{"H_sparse", "block_size",
                                                    "syndrome_size", "O_sparse",
                                                    "D_sparse"}},
-                    {"properties",
-                     llvm::json::Object{
-                         {"stim_dem_path",
-                          llvm::json::Object{{"maxLength", 0}}}}}},
+                    {"properties", no_stim_dem()}},
                 llvm::json::Object{
                     {"required", llvm::json::Array{"dem_chunks"}},
-                    {"properties", llvm::json::Object{{"stim_dem_path",
-                                                       llvm::json::Object{
-                                                           {"maxLength", 0}}}}},
+                    {"properties", no_stim_dem()},
                     {"not",
-                     llvm::json::Object{
-                         {"anyOf",
-                          llvm::json::Array{
-                              llvm::json::Object{
-                                  {"required",
-                                   llvm::json::Array{"block_size"}}},
-                              llvm::json::Object{
-                                  {"required",
-                                   llvm::json::Array{"syndrome_size"}}},
-                              llvm::json::Object{
-                                  {"required", llvm::json::Array{"H_sparse"}}},
-                              llvm::json::Object{
-                                  {"required", llvm::json::Array{"O_sparse"}}},
-                              llvm::json::Object{
-                                  {"required", llvm::json::Array{"D_sparse"}}},
-                              llvm::json::Object{
-                                  {"required",
-                                   llvm::json::Array{"error_rate_vec"}}}}}}}},
-                llvm::json::Object{
-                    {"required",
-                     llvm::json::Array{"stim_dem_path", "D_sparse"}},
-                    {"properties", llvm::json::Object{{"stim_dem_path",
-                                                       llvm::json::Object{
-                                                           {"minLength", 1}}}}},
-                    {"not",
-                     llvm::json::Object{
-                         {"anyOf",
-                          llvm::json::Array{
-                              llvm::json::Object{
-                                  {"required", llvm::json::Array{"H_sparse"}}},
-                              llvm::json::Object{
-                                  {"required", llvm::json::Array{"O_sparse"}}},
-                              llvm::json::Object{
-                                  {"required",
-                                   llvm::json::Array{"error_rate_vec"}}},
-                              llvm::json::Object{
-                                  {"required",
-                                   llvm::json::Array{"dem_chunks"}}}}}}}}}},
+                     any_required({"block_size", "syndrome_size", "H_sparse",
+                                   "O_sparse", "D_sparse", "error_rate_vec"})}},
+                stim_dem_form("stim_dem_path", "stim_dem"),
+                stim_dem_form("stim_dem", "stim_dem_path")}},
            {"additionalProperties", false},
            {"allOf", std::move(dispatch)}}},
       {"decoder_params", std::move(decoder_params)},

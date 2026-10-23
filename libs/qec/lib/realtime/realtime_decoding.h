@@ -79,6 +79,21 @@ fill_data_artifact_store(
     const cudaq::qec::decoding::config::multi_decoder_config &config,
     const std::filesystem::path &base_dir);
 
+/// A copy of `config` in which each decoder and task-graph node that names a
+/// pinned Stim DEM entry, by an unedited copy of its path, holds the entry's
+/// text in place of the path. Each pinned file is read once, here, and checked
+/// against its pin, so a model built from the copy is the one checked.
+///
+/// @param base_dir Directory a relative `stim_dem_path` resolves against, as
+/// for resolve_decoder_init().
+/// @throws std::runtime_error naming the entry if a pinned file cannot be read
+/// or does not match its sha256.
+__attribute__((visibility("default")))
+cudaq::qec::decoding::config::multi_decoder_config
+with_pinned_stim_dems(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
+    const std::filesystem::path &base_dir);
+
 /// Construct and initialize one decoder for realtime use from already-resolved
 /// inputs. The returned decoder is fully configured with its ID and D matrix,
 /// but is not installed in a process-global registry or attached to a worker
