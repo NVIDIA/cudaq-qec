@@ -81,6 +81,7 @@ struct decoding_task_graph::impl {
   // concurrency. The caller is worker zero; an asynchronous graph adds one
   // thread so its dispatching coordinator never does node work.
   std::size_t pool_width = 1;
+  std::vector<std::int32_t> pool_worker_cpus;
   std::unique_ptr<detail::thread_pool> parallel_pool;
 
   // Preallocated record contexts and the scheduler that runs them. Their

@@ -1430,7 +1430,8 @@ void decoding_task_graph::impl::prepare_event_runtime(std::size_t context_count,
   // asynchronous dispatcher does no node work, so it gets a thread of its own.
   scheduler.reset();
   parallel_pool = std::make_unique<detail::thread_pool>(
-      pool_width + (dispatcher_thread ? 1 : 0));
+      pool_width + (dispatcher_thread ? 1 : 0), pool_worker_cpus,
+      detail::thread_pool::AffinityPolicy::RoundRobin);
   // Causal ancestors remain resident until their descendants drain. This
   // linear multiple covers all simultaneously live frontier, publication,
   // continuation, and flush descriptors without hot-path allocation.

@@ -189,7 +189,9 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("async_coordinator_cpu",
               &task_graph_options::async_coordinator_cpu)
       .def_rw("async_spin_pause_iters",
-              &task_graph_options::async_spin_pause_iters);
+              &task_graph_options::async_spin_pause_iters)
+      .def_rw("async_num_workers", &task_graph_options::async_num_workers)
+      .def_rw("async_worker_cpus", &task_graph_options::async_worker_cpus);
 
   // -------------------------------------------------------------------------
   // DecodingTaskGraph

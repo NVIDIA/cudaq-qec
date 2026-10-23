@@ -27,6 +27,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <thread>
 
 // Optional syndrome capture callback for --save_syndrome feature
 namespace {
@@ -607,6 +608,48 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
   return node;
 }
 
+/// Warn when the configuration's asynchronous graphs compete for CPUs: two
+/// pin the same core, or together they need more threads than the machine
+/// has. Either can be deliberate, so neither is an error.
+void warn_async_graph_contention(
+    const std::vector<cudaq::qec::decoding::config::decoder_config> &configs) {
+  struct async_graph {
+    std::int64_t id;
+    std::set<int> cpus;
+    std::size_t threads;
+  };
+  std::vector<async_graph> graphs;
+  for (const auto &cfg : configs) {
+    if (!cfg.task_graph || !cfg.task_graph->options.async_streaming)
+      continue;
+    const auto &options = cfg.task_graph->options;
+    async_graph g{cfg.id, {}, g_task_graphs[cfg.id]->async_thread_count()};
+    if (options.async_coordinator_cpu >= 0)
+      g.cpus.insert(options.async_coordinator_cpu);
+    g.cpus.insert(options.async_worker_cpus.begin(),
+                  options.async_worker_cpus.end());
+    graphs.push_back(std::move(g));
+  }
+  for (std::size_t a = 0; a < graphs.size(); ++a)
+    for (std::size_t b = a + 1; b < graphs.size(); ++b)
+      for (const int cpu : graphs[a].cpus)
+        if (graphs[b].cpus.count(cpu))
+          CUDA_QEC_WARN("decoders {} and {} both pin CPU {}", graphs[a].id,
+                        graphs[b].id, cpu);
+  std::size_t total = 0;
+  std::string per_graph;
+  for (const auto &g : graphs) {
+    total += g.threads;
+    per_graph += fmt::format("{}decoder {}: {}", per_graph.empty() ? "" : ", ",
+                             g.id, g.threads);
+  }
+  const std::size_t hardware_threads = std::thread::hardware_concurrency();
+  if (total > hardware_threads)
+    CUDA_QEC_WARN("the asynchronous task graphs need {} threads on a machine "
+                  "with {} ({})",
+                  total, hardware_threads, per_graph);
+}
+
 /// Build the graph a `task_graph:` configuration describes.
 ///
 /// Both forms end up in the same place: a list of node configs and edges handed
@@ -776,6 +819,7 @@ int configure_decoders(
     CUDA_QEC_WARN("Error initializing decoders: {}", e.what());
     return 4;
   }
+  warn_async_graph_contention(decoder_configs);
 
   // Seeded with the pass-through BULK row: a document declaring only a `final`
   // row must keep the id every producer sends.

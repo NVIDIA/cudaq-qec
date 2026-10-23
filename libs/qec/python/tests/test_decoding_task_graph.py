@@ -296,6 +296,13 @@ def test_async_concurrent_records_match_synchronous_graph():
     options = qec.TaskGraphOptions()
     options.async_streaming = True
     options.async_queue_capacity = 4
+    assert options.async_num_workers is None
+    options.async_num_workers = 2
+    assert options.async_num_workers == 2
+    assert options.async_worker_cpus == []
+    options.async_worker_cpus = [0, 1]
+    assert options.async_worker_cpus == [0, 1]
+    options.async_worker_cpus = []
     synchronous = qec.DecodingTaskGraph.from_spec(_streaming_spec(),
                                                   "single_error_lut")
     asynchronous = qec.DecodingTaskGraph.from_spec(_streaming_spec(),
@@ -313,6 +320,12 @@ def test_async_concurrent_records_match_synchronous_graph():
     assert actual.generation == expected.generation
     assert bytes(actual.values) == bytes(expected.values)
     assert actual.status == expected.status
+
+    options.async_worker_cpus = [-1]
+    with pytest.raises(ValueError):
+        qec.DecodingTaskGraph.from_spec(_streaming_spec(),
+                                        "single_error_lut",
+                                        options=options)
 
 
 def _guarded_graph(async_streaming=False):

@@ -1363,6 +1363,10 @@ std::size_t decoding_task_graph::get_num_observables() const {
   return impl_->n_obs;
 }
 
+std::size_t decoding_task_graph::async_thread_count() const noexcept {
+  return impl_->async_streaming.enabled ? impl_->pool_width + 1 : 0;
+}
+
 bool decoding_task_graph::supports_streaming() const noexcept {
   return impl_->streaming_conflict.empty();
 }

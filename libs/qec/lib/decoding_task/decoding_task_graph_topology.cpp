@@ -20,6 +20,7 @@
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/logger.h"
 
 #include <algorithm>
 #include <limits>
@@ -642,8 +643,46 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
                                options.async_coordinator_cpu,
                                options.async_spin_pause_iters);
     i->async_streaming.enabled = true;
+    // Worker settings apply to asynchronous graphs only: the pool's owned
+    // threads run fires there, and the coordinator is the calling thread.
+    if (options.async_num_workers) {
+      if (*options.async_num_workers == 0)
+        throw std::invalid_argument(
+            "task_graph_options: async_num_workers must be at least 1");
+      i->pool_width = *options.async_num_workers;
+    }
+    // Sharing a core can be deliberate, so it is a warning, not an error.
+    for (std::size_t a = 0; a < options.async_worker_cpus.size(); ++a) {
+      const int cpu = options.async_worker_cpus[a];
+      if (cpu == options.async_coordinator_cpu)
+        CUDA_QEC_WARN("task graph: async_worker_cpus includes the "
+                      "coordinator's CPU {}",
+                      cpu);
+      for (std::size_t b = 0; b < a; ++b)
+        if (options.async_worker_cpus[b] == cpu) {
+          CUDA_QEC_WARN("task graph: async_worker_cpus lists CPU {} twice",
+                        cpu);
+          break;
+        }
+    }
+    i->pool_worker_cpus.assign(options.async_worker_cpus.begin(),
+                               options.async_worker_cpus.end());
+    std::size_t pooled_fires = 0;
+    for (const auto &entry : i->streaming_nodes)
+      if (entry.replicas.size() > 1)
+        pooled_fires += entry.replicas.size();
+    if (pooled_fires > i->pool_width)
+      CUDA_QEC_WARN("task graph: {} fire-pool copies but {} async workers; "
+                    "some copies can never run concurrently",
+                    pooled_fires, i->pool_width);
+    if (!i->pool_worker_cpus.empty() &&
+        i->pool_worker_cpus.size() < i->pool_width)
+      CUDA_QEC_WARN("task graph: {} async_worker_cpus for {} workers; the "
+                    "pool is reduced to one worker per CPU",
+                    i->pool_worker_cpus.size(), i->pool_width);
   }
-  // The parked coordinator cannot start a session before assembly returns. An
+  // Built once, after the options it depends on have been validated. The
+  // parked coordinator cannot start a session before assembly returns. An
   // asynchronous graph gets one record context per queue slot, so every
   // accepted record is admitted at once.
   if (i->nodes.size() > 1 || !i->streaming_nodes.empty())

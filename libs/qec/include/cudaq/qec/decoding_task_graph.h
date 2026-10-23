@@ -520,6 +520,10 @@ public:
   /// A false result does not affect run(), run_all(), or other batch APIs.
   bool supports_streaming() const noexcept;
 
+  /// Threads an asynchronous graph owns: its coordinator and the pool workers
+  /// that run fires. Zero for a synchronous graph.
+  std::size_t async_thread_count() const noexcept;
+
   /// Empty when supports_streaming() is true; otherwise the first deterministic
   /// build-time reason streaming execution is unavailable.
   const std::string &streaming_incompatibility_reason() const noexcept;

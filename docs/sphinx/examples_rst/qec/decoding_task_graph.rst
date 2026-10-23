@@ -278,13 +278,29 @@ only when work runs changes. The coordinator itself runs no node work, so
 ingestion never waits behind a decode.
 
 Decoder-server YAML exposes the same policy as ``task_graph.async_streaming``,
-with optional ``async_queue_capacity``, ``async_coordinator_cpu``, and
-``async_spin_pause_iters`` fields. A nonnegative coordinator CPU requests
-Linux thread affinity and fails graph construction if it cannot be honored.
-It pins the coordinator thread only. The spin count keeps an active
-coordinator polling briefly before it parks; zero, the default, disables
-spinning. Reserve that CPU from producer and worker affinity masks when using
-this low-latency policy.
+with optional ``async_queue_capacity``, ``async_coordinator_cpu``,
+``async_spin_pause_iters``, ``async_num_workers``, and ``async_worker_cpus``
+fields. A nonnegative coordinator CPU requests Linux thread affinity and fails
+graph construction if it cannot be honored. It pins the coordinator thread
+only. The spin count keeps an active coordinator polling briefly before it
+parks; zero, the default, disables spinning. Reserve that CPU from producer
+and worker affinity masks when using this low-latency policy.
+
+``async_num_workers`` sets how many pool threads run node fires in an
+asynchronous graph, not counting the coordinator. Unset, the default, picks
+the graph's parallel width, including every fire pool's copies, capped by
+hardware concurrency; the build warns when the count is below the pooled
+copies. ``async_worker_cpus`` pins those threads round-robin to the listed
+CPUs (Linux only); it is empty by default, so node work inherits the
+process's affinity. Synchronous graphs ignore both.
+
+Pools are per graph: each decoder's asynchronous graph has its own coordinator
+and workers, so a configuration with several runs the sum of their threads.
+Sharing a core can be deliberate, so contention is reported, not rejected: the
+build warns when ``async_worker_cpus`` lists a CPU twice or includes
+``async_coordinator_cpu``, and configuring the decoders warns when two
+asynchronous graphs pin the same CPU, naming both decoders, or when together
+they need more threads than the machine has, naming each graph's count.
 
 Fire pools
 ++++++++++
@@ -327,7 +343,8 @@ user:
        dem_chunks: { ... }
 
 Overlap needs ``async_streaming``; a synchronous graph runs one fire at a
-time. The default pool grows by ``max_in_flight - 1`` workers per pooled node.
+time. The default pool grows by ``max_in_flight - 1`` workers per pooled node,
+so ``async_num_workers`` is only needed to cap or widen that.
 
 Multi-node graphs (combine)
 ++++++++++++++++++++++++++++

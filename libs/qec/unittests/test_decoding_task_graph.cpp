@@ -9479,6 +9479,34 @@ TEST(DecodingTaskGraph, AsyncStreamingPinsItsCoordinatorWhenRequested) {
   EXPECT_EQ(pinned_threads(), before + 1);
   ASSERT_TRUE(graph->enqueue_syndrome(&zero, 1, round_type::FINAL));
   EXPECT_NE(observed->load(std::memory_order_acquire), -1);
+
+  // async_worker_cpus pins the workers, so the decode lands on that CPU. The
+  // coordinator is left unpinned: the two lists may not share a CPU.
+  graph.reset();
+  observed->store(-1);
+  auto pinned_graph = std::make_unique<decoding_task_graph>(
+      std::make_unique<coordinator_cpu_probe_decoder>(
+          sparse_binary_matrix::from_nested_csr(1, 1, {{0}}), observed),
+      std::vector<std::vector<uint32_t>>{{0}},
+      std::vector<std::vector<uint32_t>>{{0}},
+      task_graph_options{.async_streaming = true,
+                         .async_queue_capacity = 1,
+                         .async_num_workers = 1,
+                         .async_worker_cpus = {requested_cpu}});
+  EXPECT_EQ(pinned_threads(), before + 1); // the one worker
+  ASSERT_TRUE(pinned_graph->enqueue_syndrome(&zero, 1, round_type::FINAL));
+  EXPECT_EQ(observed->load(std::memory_order_acquire), requested_cpu);
+  EXPECT_THROW(decoding_task_graph::from_spec(
+                   rep5_spec(5), "single_error_lut", {},
+                   {.async_streaming = true, .async_worker_cpus = {-1}}),
+               std::invalid_argument);
+  // Sharing a CPU, between workers or with the coordinator, only warns.
+  pinned_graph.reset();
+  EXPECT_NO_THROW(decoding_task_graph::from_spec(
+      rep5_spec(5), "single_error_lut", {},
+      {.async_streaming = true,
+       .async_coordinator_cpu = requested_cpu,
+       .async_worker_cpus = {requested_cpu, requested_cpu}}));
 #endif
 }
 
@@ -12603,6 +12631,26 @@ TEST(DecodingTaskGraph, ConcurrentRecordsMatchSynchronousGraphKinds) {
                                          std::move(async_right), options));
     compare(build_residual_graph(), build_residual_graph(options));
   }
+}
+
+TEST(DecodingTaskGraph, AsyncNumWorkersBoundsNodeParallelism) {
+  if (std::thread::hardware_concurrency() < 2)
+    GTEST_SKIP() << "parallel graph execution needs at least two CPU threads";
+  // Two independent branches would run together on the default pool; one
+  // worker serialises them, so the second never enters while the first is
+  // held.
+  auto probe = std::make_shared<parallel_decode_probe>();
+  auto graph = decoding_task_graph::combine(
+      make_parallel_probe_graph(probe), make_parallel_probe_graph(probe),
+      {.async_streaming = true, .async_num_workers = 1});
+  uint8_t syndrome = 0;
+  auto enqueue = std::async(std::launch::async, [&] {
+    return graph->enqueue_syndrome(&syndrome, 1, round_type::FINAL);
+  });
+  ASSERT_TRUE(probe->wait_for_entered(1));
+  EXPECT_FALSE(probe->wait_for_entered(2));
+  probe->release();
+  EXPECT_TRUE(enqueue.get());
 }
 
 /// One fire of an indexed join, as the test kind below records it.

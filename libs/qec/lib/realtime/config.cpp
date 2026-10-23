@@ -363,6 +363,13 @@ static void validate_task_graph(const decoder_config &config) {
   if (tg.options.async_coordinator_cpu < -1)
     throw std::runtime_error(
         who + ": task_graph.async_coordinator_cpu must be -1 or nonnegative");
+  if (tg.options.async_num_workers && *tg.options.async_num_workers == 0)
+    throw std::runtime_error(
+        who + ": task_graph.async_num_workers must be at least 1");
+  for (const int cpu : tg.options.async_worker_cpus)
+    if (cpu < 0)
+      throw std::runtime_error(
+          who + ": task_graph.async_worker_cpus ids must be nonnegative");
 
   if (tg.nodes.empty()) {
     if (!tg.edges.empty())
@@ -1299,6 +1306,8 @@ struct MappingTraits<task_graph_spec_t> {
                    -1);
     io.mapOptional("async_spin_pause_iters", tg.options.async_spin_pause_iters,
                    std::size_t{0});
+    io.mapOptional("async_num_workers", tg.options.async_num_workers);
+    io.mapOptional("async_worker_cpus", tg.options.async_worker_cpus);
     io.mapOptional("nodes", tg.nodes);
     io.mapOptional("edges", tg.edges);
   }
@@ -2157,6 +2166,14 @@ llvm::json::Object task_graph_json_schema() {
                 {"async_spin_pause_iters",
                  llvm::json::Object{
                      {"type", "integer"}, {"minimum", 0}, {"default", 0}}},
+                {"async_num_workers",
+                 llvm::json::Object{{"type", "integer"}, {"minimum", 1}}},
+                {"async_worker_cpus",
+                 llvm::json::Object{
+                     {"type", "array"},
+                     {"uniqueItems", true},
+                     {"items", llvm::json::Object{{"type", "integer"},
+                                                  {"minimum", 0}}}}},
                 {"nodes",
                  llvm::json::Object{
                      {"type", "array"},
