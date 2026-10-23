@@ -6,6 +6,7 @@
 #include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_graph_utils.h"
 #include "../lib/decoding_task/decoding_task_memory_window_node.h"
+#include "../lib/decoding_task/decoding_task_node_kind_registry.h"
 #include "../lib/decoding_task/decoding_task_predecoder_node.h"
 #include "../lib/decoding_task/decoding_task_window_node.h"
 #include "../lib/realtime/decode_target.h"
@@ -5422,8 +5423,10 @@ public:
 
   streaming_task_graph_node *streaming() override { return this; }
   bool enqueue(const uint8_t *, std::size_t len, round_type) override {
-    if (mode_ == "throwing")
+    if (mode_ == "throwing") {
+      failed_ = true;
       throw std::runtime_error("test streaming failure");
+    }
     if (mode_ == "guarded_noop_tail") {
       bytes_in_ += len;
       if (bytes_in_ < 3)
@@ -5433,11 +5436,16 @@ public:
     }
     return false;
   }
-  const uint8_t *corrections() const override { return &correction_; }
+  const uint8_t *corrections() const override {
+    if (failed_)
+      throw std::logic_error("test corrections unavailable after failure");
+    return &correction_;
+  }
   void clear_corrections() override { correction_ = 0; }
   void reset_streaming_state() override {
     correction_ = 0;
     bytes_in_ = 0;
+    failed_ = false;
   }
   std::size_t num_msyn_per_decode() const override {
     return mode_ == "guarded_noop_tail" ? 3 : 1;
@@ -5504,6 +5512,7 @@ private:
   std::string mode_;
   std::size_t bytes_in_ = 0;
   uint8_t correction_ = 0;
+  bool failed_ = false;
 };
 
 static const bool routing_probe_registered = [] {
@@ -5521,6 +5530,241 @@ static const bool routing_probe_registered = [] {
                      });
   return true;
 }();
+
+TEST(DecodingTaskGraph, NativeChunksReachFactoryWithoutFullRealization) {
+  constexpr std::uint64_t horizon = 1000000000;
+  auto invoked = std::make_shared<bool>(false);
+  task_graph_node_kind_spec kind;
+  kind.name = "test_native_chunks";
+  kind.requires_decoder = false;
+  kind.native_dem_chunks = true;
+  register_node_kind(
+      std::move(kind), {}, [invoked, horizon](node_build_context &ctx) {
+        EXPECT_NE(ctx.native_dem_chunks, nullptr);
+        if (ctx.native_dem_chunks)
+          EXPECT_EQ(ctx.native_dem_chunks->num_rounds, horizon);
+        EXPECT_EQ(ctx.d, nullptr);
+        EXPECT_EQ(ctx.h, nullptr);
+        EXPECT_EQ(ctx.o, nullptr);
+        EXPECT_EQ(ctx.closed_dem, nullptr);
+        EXPECT_EQ(ctx.dec, nullptr);
+        *invoked = true;
+        return std::make_unique<routing_probe_node>("no_raw_support");
+      });
+  const auto config = [] {
+    task_graph_node_config node;
+    node.id = "native";
+    node.kind = "test_native_chunks";
+    node.dem = rep5_spec(horizon);
+    return node;
+  };
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(config());
+  EXPECT_NO_THROW(decoding_task_graph::from_topology(std::move(nodes)));
+  EXPECT_TRUE(*invoked);
+  *invoked = false;
+  auto invalid = config();
+  invalid.h_sparse = {{0}};
+  nodes.clear();
+  nodes.push_back(std::move(invalid));
+  EXPECT_THROW(decoding_task_graph::from_topology(std::move(nodes)),
+               std::invalid_argument);
+  EXPECT_FALSE(*invoked);
+}
+
+TEST(DecodingTaskGraph,
+     NativeChunkKindRejectsConflictingConstructionContracts) {
+  task_graph_node_kind_spec kind;
+  kind.name = "test_invalid_native_chunks";
+  kind.native_dem_chunks = true;
+  EXPECT_THROW(register_task_graph_node_kind(kind, {}), std::invalid_argument);
+  kind.requires_decoder = false;
+  kind.requires_dem = false;
+  EXPECT_THROW(register_task_graph_node_kind(kind, {}), std::invalid_argument);
+}
+
+TEST(DecodingTaskGraph, InputPolicyPreservesStaticRequirements) {
+  task_graph_node_kind_spec kind;
+  const cudaqx::heterogeneous_map parameters;
+  auto policy = kind.input_policy(parameters);
+  EXPECT_TRUE(policy.requires_decoder);
+  EXPECT_TRUE(policy.requires_dem);
+  EXPECT_FALSE(policy.native_dem_chunks);
+  kind.requires_decoder = false;
+  kind.native_dem_chunks = true;
+  policy = kind.input_policy(parameters);
+  EXPECT_FALSE(policy.requires_decoder);
+  EXPECT_TRUE(policy.requires_dem);
+  EXPECT_TRUE(policy.native_dem_chunks);
+}
+
+constexpr std::uint64_t kInputPolicyNativeHorizon = 1000000000;
+
+static node_kind_registration register_input_policy_probe(
+    const std::shared_ptr<std::array<std::size_t, 3>> &calls) {
+  task_graph_node_kind_spec kind;
+  kind.name = "test_input_policy";
+  kind.aliases = {"TestInputPolicy"};
+  kind.input_policy_resolver = [](const cudaqx::heterogeneous_map &params) {
+    const auto form = params.get<std::string>("input_form", "closed");
+    if (form == "native")
+      return task_graph_node_input_policy{false, true, true};
+    if (form == "model_free")
+      return task_graph_node_input_policy{false, false, false};
+    if (form == "invalid")
+      return task_graph_node_input_policy{true, true, true};
+    if (form == "invalid_no_dem")
+      return task_graph_node_input_policy{false, false, true};
+    return task_graph_node_input_policy{};
+  };
+  decoding::config::decoder_schema schema;
+  schema.params.push_back({"input_form", decoding::config::param_kind::string});
+  return register_scoped_node_kind(
+      std::move(kind), std::move(schema),
+      [calls](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
+        const auto form =
+            ctx.node_params->get<std::string>("input_form", "closed");
+        if (form == "native") {
+          ++(*calls)[0];
+          EXPECT_NE(ctx.native_dem_chunks, nullptr);
+          if (ctx.native_dem_chunks)
+            EXPECT_EQ(ctx.native_dem_chunks->num_rounds,
+                      kInputPolicyNativeHorizon);
+          EXPECT_EQ(ctx.d, nullptr);
+          EXPECT_EQ(ctx.h, nullptr);
+          EXPECT_EQ(ctx.o, nullptr);
+          EXPECT_EQ(ctx.closed_dem, nullptr);
+          EXPECT_EQ(ctx.dec, nullptr);
+        } else if (form == "closed") {
+          ++(*calls)[1];
+          EXPECT_EQ(ctx.native_dem_chunks, nullptr);
+          EXPECT_NE(ctx.d, nullptr);
+          EXPECT_NE(ctx.o, nullptr);
+          EXPECT_NE(ctx.closed_dem, nullptr);
+          EXPECT_NE(ctx.dec, nullptr);
+        } else {
+          ++(*calls)[2];
+          EXPECT_EQ(ctx.native_dem_chunks, nullptr);
+          EXPECT_EQ(ctx.d, nullptr);
+          EXPECT_EQ(ctx.o, nullptr);
+          EXPECT_EQ(ctx.dec, nullptr);
+        }
+        return std::make_unique<routing_probe_node>("no_raw_support");
+      });
+}
+
+TEST(DecodingTaskGraph, InputPolicySelectsTopologyAndServerConstruction) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto calls = std::make_shared<std::array<std::size_t, 3>>();
+  auto registration = register_input_policy_probe(calls);
+  for (const std::string form : {"native", "closed", "model_free"}) {
+    SCOPED_TRACE(form);
+    const auto horizon = form == "native" ? kInputPolicyNativeHorizon : 5;
+    task_graph_node_config node;
+    node.id = "probe";
+    node.kind = "TestInputPolicy";
+    node.node_params.insert("input_form", form);
+    if (form != "model_free")
+      node.dem = rep5_spec(horizon);
+    if (form == "closed")
+      node.decoder_type = "single_error_lut";
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(node));
+    EXPECT_NO_THROW(decoding_task_graph::from_topology(std::move(nodes)));
+
+    cfg::multi_decoder_config configuration;
+    cfg::decoder_config entry;
+    entry.task_graph.emplace();
+    cfg::decoder_config::task_graph_spec::node_spec description;
+    description.id = "probe";
+    description.type = "TestInputPolicy";
+    description.node_params.map().insert("input_form", form);
+    if (form != "model_free")
+      entry.dem_chunks = rep5_spec(horizon);
+    if (form == "closed")
+      description.inner_type = "single_error_lut";
+    entry.task_graph->nodes.push_back(std::move(description));
+    configuration.decoders.push_back(std::move(entry));
+    const auto yaml = configuration.to_yaml_str();
+    EXPECT_EQ(yaml.find("type: TestInputPolicy"), std::string::npos);
+    auto parsed = cfg::multi_decoder_config::from_yaml_str(yaml);
+    ASSERT_EQ(parsed.decoders.size(), 1u);
+    EXPECT_NO_THROW(decoding::host::build_task_graph(parsed.decoders.front()));
+    auto &parsed_node = parsed.decoders.front().task_graph->nodes.front();
+    if (form == "closed") {
+      parsed_node.inner_type.clear();
+      EXPECT_THROW(
+          cfg::multi_decoder_config::from_yaml_str(parsed.to_yaml_str()),
+          std::runtime_error);
+    } else {
+      parsed_node.inner_type = "single_error_lut";
+      EXPECT_THROW(
+          cfg::multi_decoder_config::from_yaml_str(parsed.to_yaml_str()),
+          std::runtime_error);
+    }
+  }
+  EXPECT_EQ(*calls, (std::array<std::size_t, 3>{2, 2, 2}));
+}
+
+TEST(DecodingTaskGraph, InputPolicyRejectsInvalidResolvedRequirements) {
+  auto calls = std::make_shared<std::array<std::size_t, 3>>();
+  auto registration = register_input_policy_probe(calls);
+  const auto *kind = find_task_graph_node_kind("test_input_policy");
+  ASSERT_NE(kind, nullptr);
+  for (const std::string form : {"invalid", "invalid_no_dem"}) {
+    SCOPED_TRACE(form);
+    cudaqx::heterogeneous_map parameters;
+    parameters.insert("input_form", form);
+    EXPECT_THROW(kind->input_policy(parameters), std::invalid_argument);
+    task_graph_node_config node;
+    node.id = "probe";
+    node.kind = "test_input_policy";
+    node.node_params = parameters;
+    node.dem = rep5_spec(5);
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(node));
+    EXPECT_THROW(decoding_task_graph::from_topology(std::move(nodes)),
+                 std::invalid_argument);
+  }
+  EXPECT_EQ(*calls, (std::array<std::size_t, 3>{0, 0, 0}));
+}
+
+TEST(DecodingTaskGraph, PreparedFactoryDataPreservesAnAlreadyBuiltDecoder) {
+  auto invoked = std::make_shared<bool>(false);
+  task_graph_node_kind_spec kind;
+  kind.name = "test_prepared_decoder";
+  kind.requires_dem = false;
+  auto registration = register_scoped_node_kind(
+      std::move(kind), {}, [invoked](node_build_context &ctx) {
+        EXPECT_NE(ctx.dec, nullptr);
+        EXPECT_EQ(std::any_cast<std::string>(ctx.prepared_data), "prepared");
+        EXPECT_EQ(ctx.d, nullptr);
+        EXPECT_EQ(ctx.h, nullptr);
+        EXPECT_EQ(ctx.o, nullptr);
+        *invoked = true;
+        return std::make_unique<routing_probe_node>("no_raw_support");
+      });
+  const auto config = [] {
+    task_graph_node_config node;
+    node.id = "prepared";
+    node.kind = "test_prepared_decoder";
+    node.prepared_data = std::string{"prepared"};
+    return node;
+  };
+  std::vector<task_graph_node_config> nodes;
+  auto prepared = config();
+  prepared.decoder_instance = get_decoder(
+      "single_error_lut", make_rep3_inputs().closed.detector_error_matrix);
+  nodes.push_back(std::move(prepared));
+  EXPECT_NO_THROW(decoding_task_graph::from_topology(std::move(nodes)));
+  EXPECT_TRUE(*invoked);
+  *invoked = false;
+  nodes.clear();
+  nodes.push_back(config());
+  EXPECT_THROW(decoding_task_graph::from_topology(std::move(nodes)),
+               std::invalid_argument);
+  EXPECT_FALSE(*invoked);
+}
 
 static task_graph_node_config routing_probe_config(std::string id,
                                                    std::string mode) {
@@ -5698,6 +5942,211 @@ static const bool ordered_stream_registered = [] {
                      });
   return true;
 }();
+
+TEST(DecodingTaskGraph, ExplicitCoverageRejectsMissingOrGappedPublication) {
+  class coverage_probe final : public ordered_stream_node {
+  public:
+    explicit coverage_probe(bool missing)
+        : ordered_stream_node("source", 1), missing_(missing) {}
+    std::optional<window_spec> streaming_schedule() const override {
+      return std::nullopt;
+    }
+    bool has_explicit_streaming_coverage() const override { return true; }
+    std::optional<committed_coverage> streaming_coverage() const override {
+      return missing_ ? std::nullopt : std::optional{committed_coverage{1, 2}};
+    }
+
+  private:
+    bool missing_;
+  };
+  for (bool missing : {false, true}) {
+    task_graph_node_kind_spec kind;
+    kind.name = missing ? "test_missing_coverage" : "test_gapped_coverage";
+    kind.requires_dem = kind.requires_decoder = false;
+    const auto name = kind.name;
+    register_node_kind(std::move(kind), {}, [missing](node_build_context &) {
+      return std::make_unique<coverage_probe>(missing);
+    });
+    task_graph_node_config config;
+    config.id = "source";
+    config.kind = name;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(config));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes), {{"measurements", "output", "source", "input"},
+                           {"source", "output", "output", "input"}});
+    const std::uint8_t zero = 0;
+    EXPECT_THROW(graph->enqueue_syndrome(&zero, 1), std::runtime_error);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::failed);
+  }
+  std::vector<task_graph_node_config> folded;
+  for (const auto *id : {"left", "right"}) {
+    task_graph_node_config node;
+    node.id = id;
+    node.kind = "test_gapped_coverage";
+    folded.push_back(std::move(node));
+  }
+  task_graph_node_config combine;
+  combine.id = "combine";
+  combine.kind = "xor";
+  folded.push_back(std::move(combine));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(folded), {{"measurements", "output", "left", "input"},
+                          {"measurements", "output", "right", "input"},
+                          {"left", "output", "combine", "a"},
+                          {"right", "output", "combine", "b"},
+                          {"combine", "output", "output", "input"}});
+  EXPECT_FALSE(graph->supports_streaming());
+  EXPECT_NE(graph->streaming_incompatibility_reason().find("schedule"),
+            std::string::npos);
+}
+
+TEST(DecodingTaskGraph, ExplicitCoverageTracksBatchesClearsAndShotEpochs) {
+  class coverage_source final : public ordered_stream_node {
+  public:
+    coverage_source() : ordered_stream_node("source", 0) {}
+    bool enqueue(const uint8_t *bits, std::size_t len,
+                 round_type type) override {
+      const auto fired = ordered_stream_node::enqueue(bits, len, type);
+      parity_ ^= bits[0];
+      coverage_ = {next_round_, next_round_ + 1};
+      ++next_round_;
+      finalized_ = type == round_type::FINAL;
+      return fired;
+    }
+    std::optional<window_spec> streaming_schedule() const override {
+      return std::nullopt;
+    }
+    bool has_explicit_streaming_coverage() const override { return true; }
+    std::optional<committed_coverage> streaming_coverage() const override {
+      return coverage_;
+    }
+    const uint8_t *corrections() const override { return &parity_; }
+    void clear_corrections() override {
+      parity_ = 0;
+      if (finalized_) {
+        next_round_ = 0;
+        coverage_.reset();
+        finalized_ = false;
+      }
+    }
+    void reset_streaming_state() override {
+      ordered_stream_node::reset_streaming_state();
+      parity_ = 0;
+      next_round_ = 0;
+      coverage_.reset();
+      finalized_ = false;
+    }
+
+  private:
+    uint8_t parity_ = 0;
+    uint64_t next_round_ = 0;
+    bool finalized_ = false;
+    std::optional<committed_coverage> coverage_;
+  };
+  task_graph_node_kind_spec kind;
+  kind.name = "test_contiguous_coverage";
+  kind.requires_dem = kind.requires_decoder = false;
+  auto registration =
+      register_scoped_node_kind(std::move(kind), {}, [](node_build_context &) {
+        return std::make_unique<coverage_source>();
+      });
+  for (const bool asynchronous : {false, true}) {
+    std::vector<task_graph_node_config> nodes;
+    task_graph_node_config source;
+    source.id = "source";
+    source.kind = "test_contiguous_coverage";
+    nodes.push_back(std::move(source));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "source", "input"},
+         {"source", "output", "output", "input"}},
+        {.async_streaming = asynchronous, .async_queue_capacity = 2});
+    ASSERT_TRUE(graph->supports_streaming())
+        << graph->streaming_incompatibility_reason();
+    const std::array<uint8_t, 3> input{1, 0, 0};
+    EXPECT_EQ(graph->enqueue_syndrome(input.data(), input.size()),
+              !asynchronous);
+    EXPECT_EQ(graph->streaming_result().values, (std::vector<uint8_t>{1}));
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 0u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 3u);
+    graph->clear_corrections();
+    ASSERT_TRUE(graph->enqueue_syndrome(input.data(), 2, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 3u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 5u);
+    graph->clear_corrections();
+    ASSERT_TRUE(graph->enqueue_syndrome(input.data(), 1, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 0u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 1u);
+    graph->reset_decoder();
+    ASSERT_TRUE(graph->enqueue_syndrome(input.data(), 2, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 0u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 2u);
+  }
+}
+
+TEST(DecodingTaskGraph, FailedResetHidesPreviousCorrectionsUntilRecovery) {
+  class reset_probe final : public ordered_stream_node {
+  public:
+    explicit reset_probe(std::shared_ptr<bool> fail)
+        : ordered_stream_node("source", 0), fail_(std::move(fail)) {}
+    bool enqueue(const uint8_t *bits, std::size_t size,
+                 round_type type) override {
+      correction_ = 1;
+      return ordered_stream_node::enqueue(bits, size, type);
+    }
+    const uint8_t *corrections() const override { return &correction_; }
+    void reset_streaming_state() override {
+      if (*fail_)
+        throw std::runtime_error("injected reset failure");
+      correction_ = 0;
+      ordered_stream_node::reset_streaming_state();
+    }
+
+  private:
+    std::shared_ptr<bool> fail_;
+    uint8_t correction_ = 0;
+  };
+  auto fail = std::make_shared<bool>(false);
+  task_graph_node_kind_spec kind;
+  kind.name = "test_failed_reset";
+  kind.requires_dem = kind.requires_decoder = false;
+  auto registration = register_scoped_node_kind(
+      std::move(kind), {}, [fail](node_build_context &) {
+        return std::make_unique<reset_probe>(fail);
+      });
+  for (const bool asynchronous : {false, true}) {
+    std::vector<task_graph_node_config> nodes;
+    task_graph_node_config node;
+    node.id = "reset_probe";
+    node.kind = "test_failed_reset";
+    nodes.push_back(std::move(node));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "reset_probe", "input"},
+         {"reset_probe", "output", "output", "input"}},
+        {.async_streaming = asynchronous, .async_queue_capacity = 2});
+    const uint8_t bit = 1;
+    EXPECT_EQ(graph->enqueue_syndrome(&bit, 1), !asynchronous);
+    EXPECT_EQ(graph->streaming_result().values, (std::vector<uint8_t>{1}));
+    *fail = true;
+    EXPECT_THROW(graph->reset_decoder(), std::runtime_error);
+    ASSERT_NE(graph->get_obs_corrections(), nullptr);
+    EXPECT_EQ(graph->get_obs_corrections()[0], 0);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::failed);
+    EXPECT_EQ(graph->streaming_result().values, (std::vector<uint8_t>{0}));
+    EXPECT_THROW(graph->enqueue_syndrome(&bit, 1), std::logic_error);
+    *fail = false;
+    EXPECT_NO_THROW(graph->reset_decoder());
+    EXPECT_EQ(graph->get_obs_corrections()[0], 0);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::pending);
+    EXPECT_EQ(graph->enqueue_syndrome(&bit, 1), !asynchronous);
+    EXPECT_EQ(graph->streaming_result().values, (std::vector<uint8_t>{1}));
+  }
+}
 
 class lockstep_probe {
 public:
@@ -8591,6 +9040,12 @@ public:
   }
 };
 
+/// A malformed raw-input producer that cannot accept any bytes.
+class stalled_source_node : public dummy_source_node {
+public:
+  std::optional<std::size_t> raw_chunk_limit() const override { return 0; }
+};
+
 /// Names an output type nothing registered.
 class unregistered_source_node : public dummy_source_node {
 public:
@@ -8629,6 +9084,9 @@ static void register_one_shot_test_kind(const char *name,
 }
 
 static const bool dummy_kinds_registered = [] {
+  register_one_shot_test_kind("test_stalled_source", [](node_build_context &) {
+    return std::make_unique<stalled_source_node>();
+  });
   register_one_shot_test_kind("test_dummy_source", [](node_build_context &) {
     return std::unique_ptr<task_graph_node>(new dummy_source_node());
   });
@@ -8680,6 +9138,101 @@ TEST(DecodingTaskGraph, RegisteredEdgeValueTypeWiresAndRuns) {
   // run too.
   m.bits = {1, 1, 0, 0};
   EXPECT_EQ(graph->run(m).bits[0], 0);
+}
+
+TEST(DecodingTaskGraph, MatrixAccessorsRejectTopologyWithoutGlobalMatrices) {
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(decoderless_node("src", "test_dummy_source"));
+  nodes.push_back(decoderless_node("sink", "test_dummy_sink"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"dets", "output", "src", "input"},
+                         {"src", "output", "sink", "input"},
+                         {"sink", "output", "output", "input"}});
+  EXPECT_THROW((void)graph->d_matrix(), std::logic_error);
+  EXPECT_THROW((void)graph->o_matrix(), std::logic_error);
+}
+
+TEST(DecodingTaskGraph, ZeroRawCapacityRejectsRatherThanDroppingAcceptedInput) {
+  for (const bool asynchronous : {false, true}) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(decoderless_node("src", "test_stalled_source"));
+    nodes.push_back(decoderless_node("sink", "test_dummy_sink"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"dets", "output", "src", "input"},
+         {"src", "output", "sink", "input"},
+         {"sink", "output", "output", "input"}},
+        {.async_streaming = asynchronous, .async_queue_capacity = 2});
+    const std::uint8_t byte = 1;
+    EXPECT_THROW(graph->enqueue_syndrome(&byte, 1, round_type::FINAL),
+                 std::logic_error);
+  }
+}
+
+TEST(DecodingTaskGraph, RecordNotificationPreservesTaggedAndUntaggedChunking) {
+  struct record_trace {
+    std::vector<std::pair<round_type, std::size_t>> records;
+    std::vector<std::vector<uint8_t>> chunks;
+    std::vector<round_type> tags;
+    std::size_t untagged_chunks = 0;
+  };
+  class record_source : public dummy_source_node {
+  public:
+    explicit record_source(std::shared_ptr<record_trace> trace)
+        : trace_(std::move(trace)) {}
+    void begin_input_record(round_type type, std::size_t bytes) override {
+      trace_->records.emplace_back(type, bytes);
+    }
+    std::optional<std::size_t> raw_chunk_limit() const override { return 1; }
+    std::optional<std::size_t> untagged_chunk_limit() const override {
+      return 2;
+    }
+    bool enqueue(const uint8_t *bits, std::size_t size,
+                 round_type type) override {
+      trace_->tags.push_back(type);
+      trace_->chunks.emplace_back(bits, bits + size);
+      return dummy_source_node::enqueue(bits, size, type);
+    }
+    bool enqueue_untagged(const uint8_t *bits, std::size_t size) override {
+      ++trace_->untagged_chunks;
+      return enqueue(bits, size, round_type::BULK);
+    }
+
+  private:
+    std::shared_ptr<record_trace> trace_;
+  };
+  const auto trace = std::make_shared<record_trace>();
+  register_one_shot_test_kind("test_record_notification_source",
+                              [trace](node_build_context &) {
+                                return std::make_unique<record_source>(trace);
+                              });
+  for (const bool asynchronous : {false, true}) {
+    *trace = {};
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(decoderless_node("src", "test_record_notification_source"));
+    nodes.push_back(decoderless_node("sink", "test_dummy_sink"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"dets", "output", "src", "input"},
+         {"src", "output", "sink", "input"},
+         {"sink", "output", "output", "input"}},
+        {.async_streaming = asynchronous, .async_queue_capacity = 2});
+    const std::array<uint8_t, 5> bits{1, 0, 1, 1, 0};
+    (void)graph->enqueue_syndrome(bits.data(), bits.size());
+    (void)graph->enqueue_syndrome(bits.data(), bits.size(), round_type::FINAL);
+    const std::vector<std::pair<round_type, std::size_t>> expected_records{
+        {round_type::BULK, bits.size()}, {round_type::FINAL, bits.size()}};
+    EXPECT_EQ(trace->records, expected_records);
+    EXPECT_EQ(trace->untagged_chunks, 3u);
+    EXPECT_EQ(trace->chunks,
+              (std::vector<std::vector<uint8_t>>{
+                  {1, 0}, {1, 1}, {0}, {1}, {0}, {1}, {1}, {0}}));
+    ASSERT_EQ(trace->tags.size(), 8u);
+    EXPECT_EQ(trace->tags.back(), round_type::FINAL);
+    EXPECT_TRUE(
+        std::all_of(trace->tags.begin(), trace->tags.end() - 1,
+                    [](round_type type) { return type == round_type::BULK; }));
+  }
 }
 
 TEST(DecodingTaskGraph, RegisteredEdgeValueTypeFlowsOnAStreamingEdge) {
@@ -11697,7 +12250,8 @@ TEST(DecodingTaskGraph, StreamingResultLatchesOperationalFailure) {
   const auto &failed = graph->streaming_result();
   EXPECT_EQ(failed.status, task_graph_streaming_status::failed);
   EXPECT_FALSE(failed.operation_completed);
-  EXPECT_NE(failed.error.find("test streaming failure"), std::string::npos);
+  EXPECT_EQ(failed.error, "test streaming failure");
+  EXPECT_EQ(failed.values, (std::vector<uint8_t>{0}));
   EXPECT_EQ(failed.result_revision, 1u);
   ASSERT_EQ(failed.outputs.size(), 1u);
   EXPECT_EQ(failed.outputs[0].status, task_graph_streaming_status::failed);

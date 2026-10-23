@@ -1855,9 +1855,83 @@ TEST(DemChunkSpec, NumFaultsMustFitUint32) {
   EXPECT_THROW(spec.validate("test"), std::invalid_argument);
 }
 
-TEST(DemChunkSpec, ZeroFaultsThrows) {
+TEST(DemChunkSpec, UndeclaredZeroFaultPhaseThrows) {
   dem_chunk_spec spec;
   EXPECT_THROW(spec.validate("chunk"), std::invalid_argument);
+}
+
+TEST(DemChunkSpec, DeclaredNoiselessPhasePreservesSeamAndObservableAxes) {
+  dem_chunk_spec spec;
+  spec.H_sparse = {-1, -1};
+  spec.O_sparse = {-1};
+  spec.D_sparse = {0, -1, 1, -1};
+  spec.num_measurements = 2;
+  ASSERT_NO_THROW(spec.validate("perfect readout"));
+  const auto chunk =
+      dem_chunk_from_spec(spec, {seam_name::prev_round, seam_name::next_round});
+  EXPECT_EQ(chunk.num_faults(), 0u);
+  EXPECT_EQ(chunk.H.num_rows(), 4u);
+  EXPECT_EQ(chunk.H.num_cols(), 0u);
+  EXPECT_EQ(chunk.O.num_rows(), 1u);
+  EXPECT_EQ(chunk.O.num_cols(), 0u);
+  EXPECT_EQ(chunk.get_seam(seam_name::prev_round).num_rows(), 2u);
+  EXPECT_EQ(chunk.get_seam(seam_name::next_round).num_rows(), 2u);
+  EXPECT_EQ(chunk.tags, (std::vector<uint64_t>{0, 1, 0, 1}));
+  EXPECT_TRUE(chunk.error_rates.empty());
+  EXPECT_NO_THROW(chunk.validate("perfect readout"));
+}
+
+TEST(DemChunkSpec, NoiselessPhaseRejectsFaultReferencesAndPriors) {
+  dem_chunk_spec spec;
+  spec.H_sparse = {-1};
+  spec.O_sparse = {-1};
+  ASSERT_NO_THROW(spec.validate("perfect readout"));
+  auto invalid = spec;
+  invalid.H_sparse = {0, -1};
+  EXPECT_THROW(invalid.validate("H"), std::invalid_argument);
+  invalid = spec;
+  invalid.O_sparse = {0, -1};
+  EXPECT_THROW(invalid.validate("O"), std::invalid_argument);
+  invalid = spec;
+  invalid.error_rates = {0.0};
+  EXPECT_THROW(invalid.validate("priors"), std::invalid_argument);
+}
+
+TEST(DemChunkSpec, NoiselessPhasesKeepTheirAxesThroughStitchAndClose) {
+  for (const std::size_t observables : {0u, 1u, 2u}) {
+    dem_chunk_spec spec;
+    spec.H_sparse = {-1, -1};
+    spec.O_sparse.assign(observables, -1);
+    const auto chunk = dem_chunk_from_spec(
+        spec, {seam_name::prev_round, seam_name::next_round});
+    const auto pair =
+        dem_stitch(chunk, chunk, seam_name::next_round, seam_name::prev_round);
+    EXPECT_EQ(pair.H.num_rows(), 6u);
+    EXPECT_EQ(pair.H.num_cols(), 0u);
+    EXPECT_EQ(pair.O.num_rows(), observables);
+    EXPECT_EQ(pair.O.num_cols(), 0u);
+    ASSERT_NO_THROW(pair.validate("noiseless pair"));
+    const auto folded =
+        dem_stitch(pair, chunk, seam_name::next_round, seam_name::prev_round);
+    const auto whole = dem_stitch_all({chunk, chunk, chunk});
+    EXPECT_EQ(folded.H.num_rows(), 8u);
+    EXPECT_EQ(folded.H.num_cols(), 0u);
+    EXPECT_EQ(folded.H.to_nested_csr(), whole.H.to_nested_csr());
+    EXPECT_EQ(folded.O.to_nested_csr(), whole.O.to_nested_csr());
+    EXPECT_EQ(folded.O.num_rows(), observables);
+    ASSERT_NO_THROW(folded.validate("noiseless chain"));
+    const auto closed = dem_close(folded);
+    const auto direct = dem_close_all({chunk, chunk, chunk});
+    EXPECT_EQ(closed.detector_error_matrix.shape(),
+              (std::vector<std::size_t>{6, 0}));
+    EXPECT_EQ(closed.observables_flips_matrix.shape(),
+              (std::vector<std::size_t>{observables, 0}));
+    EXPECT_TRUE(tensors_equal(closed.detector_error_matrix,
+                              direct.detector_error_matrix));
+    EXPECT_TRUE(tensors_equal(closed.observables_flips_matrix,
+                              direct.observables_flips_matrix));
+    EXPECT_TRUE(closed.error_rates.empty());
+  }
 }
 
 TEST(DemChunkSpec, ExpandsToRequestedRoundCount) {

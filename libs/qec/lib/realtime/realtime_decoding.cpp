@@ -500,12 +500,13 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
   if (!kind)
     throw std::runtime_error(where + " has unregistered kind '" + node.kind +
                              "'");
+  const auto input_policy = kind->input_policy(node.node_params);
 
   const bool flat = !cfg.H_sparse.empty();
   // A node's own matrices outrank every entry-level form. validate_task_graph()
   // rejects pairing them with dem_chunks, or splitting the D/O pair.
   const bool node_flat = !ns.D_sparse.empty();
-  if (kind->requires_dem) {
+  if (input_policy.requires_dem) {
     if (node_flat) {
       node.d_sparse = parse_flat_sparse_rows(ns.D_sparse, "D_sparse");
       node.o_sparse = parse_flat_sparse_rows(ns.O_sparse, "O_sparse");
@@ -532,7 +533,7 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
     }
   }
 
-  if (kind->requires_decoder) {
+  if (input_policy.requires_decoder) {
     const cudaq::qec::decoder_output_request decoder_output =
         kind->inner_decoder_output(node.node_params);
     const bool decoder_takes_observables =
