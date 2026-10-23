@@ -6,6 +6,7 @@
 #include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_graph_utils.h"
 #include "../lib/decoding_task/decoding_task_memory_window_node.h"
+#include "../lib/decoding_task/decoding_task_node_kind_registry.h"
 #include "../lib/decoding_task/decoding_task_predecoder_node.h"
 #include "../lib/decoding_task/decoding_task_window_node.h"
 #include "../lib/realtime/decode_target.h"
@@ -5580,6 +5581,152 @@ TEST(DecodingTaskGraph,
   kind.requires_decoder = false;
   kind.requires_dem = false;
   EXPECT_THROW(register_task_graph_node_kind(kind, {}), std::invalid_argument);
+}
+
+TEST(DecodingTaskGraph, InputPolicyPreservesStaticRequirements) {
+  task_graph_node_kind_spec kind;
+  const cudaqx::heterogeneous_map parameters;
+  auto policy = kind.input_policy(parameters);
+  EXPECT_TRUE(policy.requires_decoder);
+  EXPECT_TRUE(policy.requires_dem);
+  EXPECT_FALSE(policy.native_dem_chunks);
+  kind.requires_decoder = false;
+  kind.native_dem_chunks = true;
+  policy = kind.input_policy(parameters);
+  EXPECT_FALSE(policy.requires_decoder);
+  EXPECT_TRUE(policy.requires_dem);
+  EXPECT_TRUE(policy.native_dem_chunks);
+}
+
+constexpr std::uint64_t kInputPolicyNativeHorizon = 1000000000;
+
+static node_kind_registration register_input_policy_probe(
+    const std::shared_ptr<std::array<std::size_t, 3>> &calls) {
+  task_graph_node_kind_spec kind;
+  kind.name = "test_input_policy";
+  kind.aliases = {"TestInputPolicy"};
+  kind.input_policy_resolver = [](const cudaqx::heterogeneous_map &params) {
+    const auto form = params.get<std::string>("input_form", "closed");
+    if (form == "native")
+      return task_graph_node_input_policy{false, true, true};
+    if (form == "model_free")
+      return task_graph_node_input_policy{false, false, false};
+    if (form == "invalid")
+      return task_graph_node_input_policy{true, true, true};
+    if (form == "invalid_no_dem")
+      return task_graph_node_input_policy{false, false, true};
+    return task_graph_node_input_policy{};
+  };
+  decoding::config::decoder_schema schema;
+  schema.params.push_back({"input_form", decoding::config::param_kind::string});
+  return register_scoped_node_kind(
+      std::move(kind), std::move(schema),
+      [calls](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
+        const auto form =
+            ctx.node_params->get<std::string>("input_form", "closed");
+        if (form == "native") {
+          ++(*calls)[0];
+          EXPECT_NE(ctx.native_dem_chunks, nullptr);
+          if (ctx.native_dem_chunks)
+            EXPECT_EQ(ctx.native_dem_chunks->num_rounds,
+                      kInputPolicyNativeHorizon);
+          EXPECT_EQ(ctx.d, nullptr);
+          EXPECT_EQ(ctx.h, nullptr);
+          EXPECT_EQ(ctx.o, nullptr);
+          EXPECT_EQ(ctx.closed_dem, nullptr);
+          EXPECT_EQ(ctx.dec, nullptr);
+        } else if (form == "closed") {
+          ++(*calls)[1];
+          EXPECT_EQ(ctx.native_dem_chunks, nullptr);
+          EXPECT_NE(ctx.d, nullptr);
+          EXPECT_NE(ctx.o, nullptr);
+          EXPECT_NE(ctx.closed_dem, nullptr);
+          EXPECT_NE(ctx.dec, nullptr);
+        } else {
+          ++(*calls)[2];
+          EXPECT_EQ(ctx.native_dem_chunks, nullptr);
+          EXPECT_EQ(ctx.d, nullptr);
+          EXPECT_EQ(ctx.o, nullptr);
+          EXPECT_EQ(ctx.dec, nullptr);
+        }
+        return std::make_unique<routing_probe_node>("no_raw_support");
+      });
+}
+
+TEST(DecodingTaskGraph, InputPolicySelectsTopologyAndServerConstruction) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto calls = std::make_shared<std::array<std::size_t, 3>>();
+  auto registration = register_input_policy_probe(calls);
+  for (const std::string form : {"native", "closed", "model_free"}) {
+    SCOPED_TRACE(form);
+    const auto horizon = form == "native" ? kInputPolicyNativeHorizon : 5;
+    task_graph_node_config node;
+    node.id = "probe";
+    node.kind = "TestInputPolicy";
+    node.node_params.insert("input_form", form);
+    if (form != "model_free")
+      node.dem = rep5_spec(horizon);
+    if (form == "closed")
+      node.decoder_type = "single_error_lut";
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(node));
+    EXPECT_NO_THROW(decoding_task_graph::from_topology(std::move(nodes)));
+
+    cfg::multi_decoder_config configuration;
+    cfg::decoder_config entry;
+    entry.task_graph.emplace();
+    cfg::decoder_config::task_graph_spec::node_spec description;
+    description.id = "probe";
+    description.type = "TestInputPolicy";
+    description.node_params.map().insert("input_form", form);
+    if (form != "model_free")
+      entry.dem_chunks = rep5_spec(horizon);
+    if (form == "closed")
+      description.inner_type = "single_error_lut";
+    entry.task_graph->nodes.push_back(std::move(description));
+    configuration.decoders.push_back(std::move(entry));
+    const auto yaml = configuration.to_yaml_str();
+    EXPECT_EQ(yaml.find("type: TestInputPolicy"), std::string::npos);
+    auto parsed = cfg::multi_decoder_config::from_yaml_str(yaml);
+    ASSERT_EQ(parsed.decoders.size(), 1u);
+    EXPECT_NO_THROW(decoding::host::build_task_graph(parsed.decoders.front()));
+    auto &parsed_node = parsed.decoders.front().task_graph->nodes.front();
+    if (form == "closed") {
+      parsed_node.inner_type.clear();
+      EXPECT_THROW(
+          cfg::multi_decoder_config::from_yaml_str(parsed.to_yaml_str()),
+          std::runtime_error);
+    } else {
+      parsed_node.inner_type = "single_error_lut";
+      EXPECT_THROW(
+          cfg::multi_decoder_config::from_yaml_str(parsed.to_yaml_str()),
+          std::runtime_error);
+    }
+  }
+  EXPECT_EQ(*calls, (std::array<std::size_t, 3>{2, 2, 2}));
+}
+
+TEST(DecodingTaskGraph, InputPolicyRejectsInvalidResolvedRequirements) {
+  auto calls = std::make_shared<std::array<std::size_t, 3>>();
+  auto registration = register_input_policy_probe(calls);
+  const auto *kind = find_task_graph_node_kind("test_input_policy");
+  ASSERT_NE(kind, nullptr);
+  for (const std::string form : {"invalid", "invalid_no_dem"}) {
+    SCOPED_TRACE(form);
+    cudaqx::heterogeneous_map parameters;
+    parameters.insert("input_form", form);
+    EXPECT_THROW(kind->input_policy(parameters), std::invalid_argument);
+    task_graph_node_config node;
+    node.id = "probe";
+    node.kind = "test_input_policy";
+    node.node_params = parameters;
+    node.dem = rep5_spec(5);
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(node));
+    EXPECT_THROW(decoding_task_graph::from_topology(std::move(nodes)),
+                 std::invalid_argument);
+  }
+  EXPECT_EQ(*calls, (std::array<std::size_t, 3>{0, 0, 0}));
 }
 
 TEST(DecodingTaskGraph, PreparedFactoryDataPreservesAnAlreadyBuiltDecoder) {

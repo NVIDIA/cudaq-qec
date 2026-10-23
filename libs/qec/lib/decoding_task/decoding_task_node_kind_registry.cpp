@@ -221,7 +221,7 @@ node_kind_registry_lock lock_node_kind_registry() {
   return node_kind_registry_lock(registry_mutex());
 }
 
-void register_task_graph_node_kind_v2(task_graph_node_kind_spec spec,
+void register_task_graph_node_kind_v3(task_graph_node_kind_spec spec,
                                       decoding::config::decoder_schema params) {
   std::lock_guard<std::recursive_mutex> lock(registry_mutex());
   register_task_graph_node_kind_locked(std::move(spec), std::move(params));
@@ -246,7 +246,7 @@ std::vector<std::string> registered_task_graph_node_kinds() {
   return names;
 }
 
-void register_node_kind_v2(task_graph_node_kind_spec spec,
+void register_node_kind_v3(task_graph_node_kind_spec spec,
                            decoding::config::decoder_schema params,
                            node_factory factory) {
   const std::string name = spec.name;
@@ -279,7 +279,7 @@ void unregister_task_graph_node_kind_if_current(const std::string &name,
 /// @param factory Factory that constructs nodes of this kind.
 /// @return Move-only token that unregisters the kind when destroyed.
 node_kind_registration
-register_scoped_node_kind_v2(task_graph_node_kind_spec spec,
+register_scoped_node_kind_v3(task_graph_node_kind_spec spec,
                              decoding::config::decoder_schema params,
                              node_factory factory) {
   std::string name = spec.name;

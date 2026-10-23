@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.
-# All rights reserved.
-#
-# This source code and the accompanying materials are made available under
-# the terms of the Apache License 2.0 which accompanies this distribution.
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Validate a binary plugin delivery and stage its modules without loading them.
 
 The mandatory checksum sidecar is ``ARCHIVE.sha256`` and names only ARCHIVE's
@@ -29,7 +24,7 @@ import tempfile
 SCHEMA_VERSION = 1
 # Keep this in step with CUDAQ_QEC_TASK_GRAPH_FRAMEWORK_ABI_VERSION in the
 # installed C gateway. The runtime checks the binary rather than trusting JSON.
-EXPECTED_TASK_GRAPH_FRAMEWORK_ABI_VERSION = 2
+EXPECTED_TASK_GRAPH_FRAMEWORK_ABI_VERSION = 3
 MANIFEST_LIMIT_BYTES = 1024 * 1024
 CHECKSUM_LIMIT_BYTES = 1024
 COPY_CHUNK_BYTES = 1024 * 1024

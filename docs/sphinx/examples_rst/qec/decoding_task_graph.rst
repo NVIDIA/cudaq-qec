@@ -522,7 +522,7 @@ flows into a downstream ``window_node`` (e.g. PyMatching) via a streaming edge:
    its ``pre_L`` and ``residual`` ports.
 
 Native model factories and plugin compatibility
-++++++++++++++++++++++++++++++++++++++++++++++
++++++++++++++++++++++++++++++++++++++++++++++++
 
 A custom node kind can set ``native_dem_chunks`` together with
 ``requires_dem = true`` and ``requires_decoder = false``. Its internal factory
@@ -530,6 +530,11 @@ then receives an immutable ``dem_chunks_spec`` without realizing a whole-shot
 DEM or measurement map. The factory owns preparation and inner decoder
 construction. This is an optional capability; existing node kinds and decoder
 plugins retain their current model preparation and output contracts.
+
+A kind supporting multiple input forms may supply ``input_policy_resolver``
+to resolve those three requirements from its node parameters. Validation,
+server translation and topology construction use the same resolved policy;
+an absent resolver preserves the static requirements above.
 
 ``task_graph_node_config.prepared_data`` carries process-local factory data for
 programmatic construction. It is not serialized to YAML. A decoder-backed kind

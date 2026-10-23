@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under    #
-# the terms of the Apache License 2.0 which accompanies this distribution.    #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Release image for the CUDA-Q QEC decoding server. The "toolchain" and
 # "builder" stages are discarded; the "runtime" stage ships the server,
@@ -152,7 +147,7 @@ RUN --mount=type=bind,from=artifacts,target=/mnt/artifacts \
                 echo 'Ising delivery requires binary, model and example artifacts' >&2; exit 1; \
             fi; \
             case ";$QEC_REQUIRED_EXTERNAL_PLUGINS;" in *';cudaq-qec-ising-task-graph-plugin;'*) ;; *) echo 'Ising delivery requires its binary provider' >&2; exit 1 ;; esac; \
-            for kind in ising_dem_chunks ising; do \
+            for kind in ising; do \
                 case ";$QEC_REQUIRED_TASK_GRAPH_KINDS;" in *";$kind;"*) ;; *) echo "Ising delivery requires kind $kind" >&2; exit 1 ;; esac; \
             done ;; \
         *) echo 'Unknown image delivery profile' >&2; exit 1 ;; \

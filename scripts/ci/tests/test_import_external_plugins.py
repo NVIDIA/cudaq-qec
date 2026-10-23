@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.
-# All rights reserved.
-#
-# This source code and the accompanying materials are made available under
-# the terms of the Apache License 2.0 which accompanies this distribution.
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Public import contract tests using synthetic, never-loaded ELF modules."""
 
 import copy
@@ -61,7 +56,7 @@ def module_descriptor(identity, kind, data, architecture="x86_64"):
         "cuda_version": "13.0.88",
         "tensorrt_version": None,
         "glibcxx_use_cxx11_abi": 1,
-        "framework_abi_version": 2 if kind == "task_graph" else None,
+        "framework_abi_version": 3 if kind == "task_graph" else None,
         "sha256": hashlib.sha256(data).hexdigest(),
         "size_bytes": len(data),
         "needed": ["libcudaq-qec-decoders.so"],
@@ -172,7 +167,7 @@ class ImportExternalPluginsTest(unittest.TestCase):
         self.run_import()
 
     def test_task_graph_abi_must_match_before_staging(self):
-        for value in (None, 0, 1, 3, -1, True, "2"):
+        for value in (None, 0, 1, 2, 4, -1, True, "3"):
             with self.subTest(value=value):
                 self.manifest["modules"][0]["framework_abi_version"] = value
                 self.write_archive()

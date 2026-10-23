@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Execute image artifact selection and check the final-runtime smoke wiring."""
 
 import os
@@ -98,8 +93,7 @@ class ImagePluginDeliveryTest(unittest.TestCase):
         self.assertIn(
             "QEC_REQUIRED_EXTERNAL_PLUGINS=cudaq-qec-ising-task-graph-plugin\n",
             values)
-        self.assertIn("QEC_REQUIRED_TASK_GRAPH_KINDS=ising_dem_chunks;ising\n",
-                      values)
+        self.assertIn("QEC_REQUIRED_TASK_GRAPH_KINDS=ising\n", values)
 
     def test_runtime_data_optional_for_generic_required_for_ising(self):
         self.assertEqual(0, self.run_asset_selection().returncode)
@@ -349,7 +343,7 @@ class ImagePluginDeliveryTest(unittest.TestCase):
             environment,
             QEC_DELIVERY_PROFILE="ising",
             QEC_REQUIRED_EXTERNAL_PLUGINS="cudaq-qec-ising-task-graph-plugin",
-            QEC_REQUIRED_TASK_GRAPH_KINDS="ising_dem_chunks;ising",
+            QEC_REQUIRED_TASK_GRAPH_KINDS="ising",
             QEC_EXTERNAL_PLUGIN_ARCHIVE="plugin.tar.gz",
             QEC_RUNTIME_ASSET_ARCHIVE="data.tar.gz",
             QEC_RUNTIME_ASSET_ID="fixture")

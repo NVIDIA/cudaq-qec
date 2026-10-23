@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.
-# All rights reserved.
-#
-# This source code and the accompanying materials are made available under
-# the terms of the Apache License 2.0 which accompanies this distribution.
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Standalone external-plugin CMake contracts, not GPU qualification.
 
 Tests compile a tiny ordinary shared object and configure the real public CMake
@@ -180,7 +175,7 @@ class ExternalPluginCMakeTest(unittest.TestCase):
                 "cuda_version": "13.0.88",
                 "tensorrt_version": None,
                 "glibcxx_use_cxx11_abi": 1,
-                "framework_abi_version": 2 if kind == "task_graph" else None,
+                "framework_abi_version": 3 if kind == "task_graph" else None,
                 "sha256": hashlib.sha256(self.elf_bytes).hexdigest(),
                 "size_bytes": len(self.elf_bytes),
                 "needed": [],

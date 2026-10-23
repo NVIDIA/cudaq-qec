@@ -27,12 +27,21 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace cudaq::qec {
+
+/// Inputs prepared for a node factory, resolved before constructing its model
+/// or inner decoder. Native phase models require factory-owned decoder state.
+struct task_graph_node_input_policy {
+  bool requires_decoder = true;
+  bool requires_dem = true;
+  bool native_dem_chunks = false;
+};
 
 /// Task-graph node kinds.
 ///
@@ -61,13 +70,13 @@ struct task_graph_node_kind_spec {
   /// Accepted alternative spellings, e.g. "SlidingWindow" for
   /// "sliding_window". Parsing accepts these; emission never produces them.
   std::vector<std::string> aliases;
-  /// Whether the kind wraps a decoder plugin, and so requires a decoder name
-  /// (an `inner:` block or a plugin-valued `type`). An `xor` node does not.
+  /// Default requirement for a decoder plugin (an `inner:` block or a
+  /// plugin-valued `type`). Resolve input_policy(params) for a configuration.
   bool requires_decoder = true;
-  /// Whether the kind needs a DEM (`dem_chunks` or flat matrices) to build its
-  /// D and O matrices.
+  /// Default requirement for a DEM (`dem_chunks` or flat matrices) to build
+  /// D and O. A configuration's resolved input policy may override it.
   bool requires_dem = true;
-  /// Deliver the immutable phase spec to the factory without closing or
+  /// Default selection of native phase-model delivery without closing or
   /// expanding it. Native factories own bounded window compilation and their
   /// decoders; flat matrices and an externally built decoder are not accepted.
   /// Defaults preserve the existing closed-model construction path.
@@ -101,6 +110,27 @@ struct task_graph_node_kind_spec {
     return !inner_decoder_observable_policy ||
            inner_decoder_observable_policy(params);
   }
+  /// Optional construction policy for kinds supporting more than one input
+  /// form. The resolver must be deterministic and depend only on the node's
+  /// parameters; validation, server translation and graph construction all
+  /// evaluate it. When absent, the static requirements above are preserved.
+  std::function<task_graph_node_input_policy(const cudaqx::heterogeneous_map &)>
+      input_policy_resolver;
+
+  task_graph_node_input_policy
+  input_policy(const cudaqx::heterogeneous_map &params) const {
+    const auto policy =
+        input_policy_resolver
+            ? input_policy_resolver(params)
+            : task_graph_node_input_policy{requires_decoder, requires_dem,
+                                           native_dem_chunks};
+    if (policy.native_dem_chunks &&
+        (!policy.requires_dem || policy.requires_decoder))
+      throw std::invalid_argument(
+          "task graph node kind '" + name +
+          "': native chunks require a DEM and factory-owned decoder state");
+    return policy;
+  }
   // Port names are deliberately absent: a node declares them itself, and
   // compile_wires() checks every edge against the node it actually built, so a
   // copy here could only drift out of sync with the real thing.
@@ -121,7 +151,7 @@ inline std::string task_graph_node_schema_name(const std::string &kind) {
 /// ordering hazards. A plugin that registers executable metadata must arrange
 /// to unregister its kind before that plugin is unloaded.
 __attribute__((visibility("default"))) void
-register_task_graph_node_kind_v2(task_graph_node_kind_spec spec,
+register_task_graph_node_kind_v3(task_graph_node_kind_spec spec,
                                  decoding::config::decoder_schema params);
 
 // Preserve source compatibility, not the pre-gate binary entry point. An old
@@ -130,7 +160,7 @@ register_task_graph_node_kind_v2(task_graph_node_kind_spec spec,
 __attribute__((visibility("hidden"))) inline void
 register_task_graph_node_kind(task_graph_node_kind_spec spec,
                               decoding::config::decoder_schema params) {
-  register_task_graph_node_kind_v2(std::move(spec), std::move(params));
+  register_task_graph_node_kind_v3(std::move(spec), std::move(params));
 }
 
 /// Unregister a canonical kind or alias while its defining image is mapped.

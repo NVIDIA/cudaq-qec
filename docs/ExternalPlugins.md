@@ -169,7 +169,7 @@ For the decoding-server workflow, `delivery_profile=generic` remains the
 default and needs no runtime archive. An explicit `runtime_asset_id` requires
 its matching per-platform archive. `delivery_profile=ising` additionally
 requires `cuda_version=13.0`, an asset ID, the reviewed native provider and
-both `ising_dem_chunks` and `ising` node kinds. Missing binary, model or example
+the canonical `ising` node kind. Missing binary, model or example
 artifacts fail the build; the profile must not silently fall back to a generic
 image. The current matrix includes amd64 and arm64, so an amd64-only archive
 does not establish an arm64 delivery.

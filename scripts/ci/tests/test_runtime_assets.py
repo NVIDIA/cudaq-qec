@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.
-# All rights reserved.
-#
-# This source code and the accompanying materials are made available under
-# the terms of the Apache License 2.0 which accompanies this distribution.
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Data archive security and provider-independent compatibility contracts."""
 
 import copy
@@ -55,7 +50,7 @@ class RuntimeAssetsTest(unittest.TestCase):
             "provider_commit":
                 "a" * 40,
             "framework_abi_version":
-                2,
+                3,
             "compatibility": {
                 "architecture": "x86_64",
                 "cuda_version": "13.0.88",
@@ -147,7 +142,7 @@ class RuntimeAssetsTest(unittest.TestCase):
                           require_provider="fixture-provider",
                           require_asset="fixture-data",
                           gpu_compute_capability="12.0",
-                          framework_abi_version=2))
+                          framework_abi_version=3))
         self.assertEqual(manifest,
                          ASSETS.import_assets(self.archive, self.output))
         self.assertEqual((self.data / "bundle/model.engine").read_bytes(),
