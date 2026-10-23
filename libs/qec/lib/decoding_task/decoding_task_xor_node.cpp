@@ -11,23 +11,52 @@
 
 namespace cudaq::qec {
 
+// The ports combine() and existing configurations name.
+xor_node::xor_node() : inputs_{"a", "b"} {}
+
+// Ports in_0 ... in_{N-1}, so N need not be known to name them.
+xor_node::xor_node(std::size_t num_inputs) {
+  if (num_inputs < 2)
+    throw std::invalid_argument("xor: num_inputs must be at least 2, not " +
+                                std::to_string(num_inputs));
+  for (std::size_t i = 0; i < num_inputs; ++i)
+    inputs_.push_back("in_" + std::to_string(i));
+}
+
 // Out-of-line destructor anchors the vtable to this translation unit.
 xor_node::~xor_node() = default;
 
 namespace {
 
+/// The kind's one parameter: how many inputs, when not the two of a and b.
+decoding::config::decoder_schema xor_params() {
+  decoding::config::decoder_schema schema;
+  schema.params.push_back({"num_inputs", decoding::config::param_kind::uint64});
+  schema.validate = [](const cudaqx::heterogeneous_map &p) {
+    if (p.contains("num_inputs") && p.get<std::size_t>("num_inputs") < 2)
+      throw std::runtime_error("xor: num_inputs must be at least 2");
+  };
+  return schema;
+}
+
 /// The `xor` node kind, which is what makes combine()'s topology expressible
-/// from YAML. It wraps no decoder and needs no DEM, so it declares neither and
-/// has no parameters of its own.
+/// from YAML. It wraps no decoder and needs no DEM, so it declares neither.
+/// Without num_inputs its ports stay a and b, so existing configurations are
+/// unchanged.
 const bool registered = [] {
   task_graph_node_kind_spec spec;
   spec.name = "xor";
   spec.aliases = {"XOR", "Xor"};
   spec.requires_decoder = false;
   spec.requires_dem = false;
-  register_node_kind(std::move(spec), {}, [](node_build_context &) {
-    return std::unique_ptr<task_graph_node>(new xor_node());
-  });
+  register_node_kind(std::move(spec), xor_params(),
+                     [](node_build_context &ctx) {
+                       const auto *p = ctx.node_params;
+                       if (p && p->contains("num_inputs"))
+                         return std::unique_ptr<task_graph_node>(
+                             new xor_node(p->get<std::size_t>("num_inputs")));
+                       return std::unique_ptr<task_graph_node>(new xor_node());
+                     });
   return true;
 }();
 

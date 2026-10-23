@@ -1235,6 +1235,25 @@ def test_verify_residual_parser_and_schema_agree():
         assert not validator.is_valid(yaml.safe_load(text))
 
 
+def test_xor_num_inputs_parser_and_schema_agree():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    text = _PW_GRAPH_YAML.replace("type: xor",
+                                  "type: xor\n          num_inputs: 3")
+    assert "num_inputs: 3" in text
+    mdc = qec.multi_decoder_config.from_yaml_str(text)
+    sum_node = [n for n in mdc.decoders[0].task_graph.nodes if n.id == "sum"][0]
+    assert sum_node.node_params["num_inputs"] == 3
+    validator.validate(yaml.safe_load(text))
+    with pytest.raises(RuntimeError, match="num_inputs must be at least 2"):
+        qec.multi_decoder_config.from_yaml_str(
+            text.replace("num_inputs: 3", "num_inputs: 1"))
+
+
 def test_experimental_window_request_is_writable():
     exp = qec.experimental
     request = exp.window_request()
