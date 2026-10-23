@@ -27,7 +27,6 @@ decoding::config::decoder_schema decode_window_params() {
   schema.params.push_back({"max_in_flight", param_kind::uint64});
   schema.params.push_back({"verify_residual", param_kind::string});
   schema.validate = [](const cudaqx::heterogeneous_map &p) {
-    check_max_in_flight(p, "decode_window");
     check_verify_residual(p, "decode_window");
   };
   return schema;
@@ -40,6 +39,7 @@ const bool registered = [] {
   spec.name = "decode_window";
   spec.requires_decoder = true;
   spec.requires_dem = false;
+  spec.parameter_minimums = {{"max_in_flight", 1}};
   register_node_kind(
       std::move(spec), decode_window_params(),
       [](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {

@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -89,6 +90,10 @@ struct task_graph_node_kind_spec {
   /// Whether the kind reads window requests from a `windows` map, one output
   /// port per layer. Every other kind rejects `windows`.
   bool takes_windows = false;
+  /// Least values of the kind's uint64 parameters, by key. Registration adds
+  /// the check to the kind's parameter validation, and the JSON schema
+  /// publishes each one in the kind's clause, so the two agree.
+  std::map<std::string, std::uint64_t> parameter_minimums;
   /// Optional policy deciding whether the inner decoder needs the DEM's
   /// observable model. An absent policy means yes. When the policy returns
   /// false, the topology withholds O and leaves projection to the node.
