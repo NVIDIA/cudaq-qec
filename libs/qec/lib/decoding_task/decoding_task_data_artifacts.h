@@ -54,12 +54,13 @@ public:
   /// Records a Stim DEM's text, if new.
   void add_stim_dem(std::string_view text);
 
-  /// Builds every variant of @p request on @p context not held yet: one
-  /// window per variant key, over the shot lengths that hold every key. A
-  /// window holding the readout round carries m2o when the template has a
-  /// readout map.
+  /// Builds every variant of @p request on the store's template with
+  /// @p context's content not held yet: one window per variant key, over
+  /// the shot lengths that hold every key. A window holding the readout
+  /// round carries m2o when the template has a readout map.
   /// @throws std::invalid_argument as window_from_dem_chunks() does.
-  /// @throws std::logic_error if @p context is not one of this store's.
+  /// @throws std::logic_error if no template with @p context's content was
+  /// added.
   void add_windows(const std::shared_ptr<const experiment_template> &context,
                    const window_request &request);
 
@@ -68,8 +69,8 @@ public:
   std::shared_ptr<const experiment_template>
   find_template(const dem_chunks_spec &spec) const;
 
-  /// The window variant @p key of @p request on @p context, without
-  /// building it.
+  /// The window variant @p key of @p request on the template with
+  /// @p context's content, without building it.
   /// @throws std::logic_error if it was not built at configuration time.
   std::shared_ptr<const decoding_window>
   find_window(const experiment_template &context, const window_request &request,
@@ -90,13 +91,13 @@ private:
     variant_key key;
     std::shared_ptr<const decoding_window> handle;
   };
-  /// The sha256 of a template this store holds.
+  /// The sha256 of the template this store holds with @p context's
+  /// content.
   /// @throws std::logic_error naming @p what if it holds no such template.
-  const std::string &template_hash(const experiment_template &context,
-                                   const std::string &what) const;
+  std::string template_hash(const experiment_template &context,
+                            const std::string &what) const;
 
   std::map<std::string, template_entry> templates_;
-  std::map<const experiment_template *, std::string> template_hashes_;
   std::map<std::string, std::string> stim_dems_;
   std::map<std::string, window_entry> windows_;
   std::vector<data_artifact_record> records_;

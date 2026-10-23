@@ -149,28 +149,42 @@ class parallel_window_reference {
 public:
   /// Slices every window of @p graph in a @p rounds round shot of @p spec
   /// and builds its decoder.
-  /// @throws std::invalid_argument if a request sets a column option, which
-  /// the reference does not model, or the dependencies form a cycle.
+  /// @throws std::invalid_argument if a request is invalid, as
+  /// check_window_request() finds, or sets a column option, which the
+  /// reference does not model, or if the dependencies form a cycle.
   parallel_window_reference(const dem_chunks_spec &spec,
                             const window_graph &graph, std::size_t rounds,
                             const std::string &decoder_name,
                             const cudaqx::heterogeneous_map &params = {});
 
-  /// Decodes one shot's detection events. Without @p sends, no delta is
-  /// applied and imports keep the shot's detection events: the negative
-  /// control.
-  result decode(const std::vector<std::uint8_t> &detectors, bool sends = true);
+  /// Decodes one shot's detection events. A send whose id is in @p dropped
+  /// is not applied, so its receiver keeps the shot's detection events on
+  /// those rows: the negative control.
+  result decode(const std::vector<std::uint8_t> &detectors,
+                const std::vector<std::string> &dropped = {});
 
   /// The closed whole-shot model the windows are sliced from.
   const shot &model() const { return shot_; }
   /// Every window, by layer in graph order, then by k.
   const std::vector<reference_window> &windows() const { return windows_; }
+  /// The decoder's columns of window @p i, as rows local to the window: its
+  /// shot columns, then its boundary columns.
+  const std::vector<std::vector<std::uint32_t>> &
+  decoder_columns(std::size_t i) const {
+    return h_.at(i);
+  }
+  /// The priors of window @p i's decoder columns.
+  const std::vector<double> &priors(std::size_t i) const {
+    return priors_.at(i);
+  }
 
 private:
   shot shot_;
   std::vector<reference_window> windows_;
   /// Each window's decoder columns, as rows local to the window.
   std::vector<std::vector<std::vector<std::uint32_t>>> h_;
+  /// Each window's decoder column priors.
+  std::vector<std::vector<double>> priors_;
   std::vector<std::unique_ptr<decoder>> decoders_;
   /// Window indices with every producer before its consumers.
   std::vector<std::size_t> order_;

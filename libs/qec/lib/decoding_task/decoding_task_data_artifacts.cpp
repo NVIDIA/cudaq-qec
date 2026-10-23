@@ -81,9 +81,11 @@ std::string list(const std::vector<T> &values) {
   return out;
 }
 
-// A double by its bit pattern, so equal values give equal bytes.
+// A double by its bit pattern, so equal values give equal bytes. Zero is
+// written as +0.0, since -0.0 compares equal to it.
 std::string bits(double value) {
-  return std::to_string(std::bit_cast<std::uint64_t>(value));
+  return std::to_string(
+      std::bit_cast<std::uint64_t>(value == 0.0 ? 0.0 : value));
 }
 
 // An optional value, or "-" when unset.
@@ -230,7 +232,6 @@ data_artifact_store::add_template(const dem_chunks_spec &spec) {
     return it->second.handle;
   }
   auto handle = std::make_shared<const experiment_template>(spec);
-  template_hashes_[handle.get()] = hash;
   records_.push_back({"dem_chunks", bytes.size(), hash});
   templates_.emplace(std::move(hash), template_entry{spec, handle});
   return handle;
@@ -244,22 +245,22 @@ void data_artifact_store::add_stim_dem(std::string_view text) {
   stim_dems_.emplace(std::move(hash), std::string(text));
 }
 
-// Builds each variant key at the first shot length and instance that has
-// it; variant_probe_rounds() bounds the lengths that hold every key. A hash
-// hit whose request or key differs means the window bytes missed a field,
-// as for templates. A window
-// holding the readout round gets m2o when the template has a readout map:
-// the key fixes where a window ends, so every instance of a variant agrees.
+// Builds each variant key on the store's template, at the first shot length
+// and instance that has it; variant_probe_rounds() bounds the lengths that
+// hold every key. A hash hit whose request or key differs means the window
+// bytes missed a field, as for templates. A window holding the readout round
+// gets m2o when the template has a readout map: the key fixes where a window
+// ends, so every instance of a variant agrees.
 void data_artifact_store::add_windows(
     const std::shared_ptr<const experiment_template> &context,
     const window_request &request) {
-  const auto &hash = template_hash(*context, "add_windows");
-  const bool readout_map = !context->readout().empty();
-  for (auto R = context->min_rounds();
-       R < variant_probe_rounds(*context, request); ++R) {
+  const auto hash = template_hash(*context, "add_windows");
+  const auto &t = templates_.at(hash).handle;
+  const bool readout_map = !t->readout().empty();
+  for (auto R = t->min_rounds(); R < variant_probe_rounds(*t, request); ++R) {
     const auto instances = window_instances(request, R);
     for (auto k = instances.begin; k < instances.end; ++k) {
-      const auto key = window_variant(*context, request, k, R);
+      const auto key = window_variant(*t, request, k, R);
       const auto bytes = window_bytes(hash, request, key);
       auto window_hash = sha256_hex(bytes);
       if (const auto hit = windows_.find(window_hash); hit != windows_.end()) {
@@ -270,10 +271,10 @@ void data_artifact_store::add_windows(
         continue;
       }
       const bool with_m2o =
-          readout_map && place_window(context, request, k, R).rounds.end ==
+          readout_map && place_window(t, request, k, R).rounds.end ==
                              static_cast<std::int64_t>(R);
       auto handle = std::make_shared<const decoding_window>(
-          window_from_dem_chunks(context, request, k, R, with_m2o));
+          window_from_dem_chunks(t, request, k, R, with_m2o));
       records_.push_back({"window", bytes.size(), window_hash});
       windows_.emplace(std::move(window_hash),
                        window_entry{request, key, std::move(handle)});
@@ -295,7 +296,7 @@ std::shared_ptr<const decoding_window>
 data_artifact_store::find_window(const experiment_template &context,
                                  const window_request &request,
                                  const variant_key &key) const {
-  const auto &hash = template_hash(context, "find_window");
+  const auto hash = template_hash(context, "find_window");
   const auto it = windows_.find(sha256_hex(window_bytes(hash, request, key)));
   if (it == windows_.end() || it->second.request != request ||
       it->second.key != key)
@@ -304,15 +305,17 @@ data_artifact_store::find_window(const experiment_template &context,
   return it->second.handle;
 }
 
-const std::string &
+// By content, as add_template() keys it, so an equal template built
+// elsewhere names the same entry.
+std::string
 data_artifact_store::template_hash(const experiment_template &context,
                                    const std::string &what) const {
-  const auto it = template_hashes_.find(&context);
-  if (it == template_hashes_.end())
+  auto hash = sha256_hex(canonical_bytes(context.spec()));
+  const auto it = templates_.find(hash);
+  if (it == templates_.end() || it->second.spec != context.spec())
     throw std::logic_error("data_artifact_store::" + what +
-                           ": the template is not one of this store's "
-                           "templates");
-  return it->second;
+                           ": no template with this content was added");
+  return hash;
 }
 
 } // namespace cudaq::qec

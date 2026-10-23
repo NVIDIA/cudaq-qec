@@ -3638,6 +3638,50 @@ TEST(DataArtifactStore, RejectsALayerWhoseEntryIsOnAnotherTemplate) {
   EXPECT_EQ(records_of(store, "dem_chunks").size(), 1u);
 } // end - TEST(DataArtifactStore, RejectsALayerWhoseEntryIsOnAnotherTemplate)
 
+// A layer builds its own request. Once that differs from the entry it names,
+// to_yaml_str() writes it inline, since the name no longer describes it; so
+// the entry's template is no longer checked against the node's.
+TEST(DataArtifactStore, ALayerBuildsItsOwnRequest) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  auto config =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  auto &decoder = config.decoders.at(0);
+  auto &layers = decoder.task_graph->nodes.at(0).windows;
+  decoder.dem_chunks->phases.at(0).spec.error_rates.at(0) = 0.02;
+  for (auto &layer : layers)
+    ++layer.request.offset;
+  const auto store =
+      cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+  const auto tmpl = store.find_template(*decoder.dem_chunks);
+  for (const auto &layer : layers)
+    for (const auto &key : variant_keys(*tmpl, layer.request))
+      EXPECT_NO_THROW(store.find_window(*tmpl, layer.request, key));
+} // end - TEST(DataArtifactStore, ALayerBuildsItsOwnRequest)
+
+// A configuration built in code skips the parser, so filling rejects a pin
+// on an inline Stim DEM as parsing does.
+TEST(DataArtifactStore, RejectsAPinOnAnInlineStimDem) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  auto config =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  auto &entry = config.data_artifacts.at(3);
+  ASSERT_EQ(entry.name, "rep_stim");
+  entry.stim_dem = rep_dem_text;
+  entry.stim_dem_path.clear();
+  try {
+    cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+    ADD_FAILURE() << "a pin on an inline Stim DEM was accepted";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "data_artifacts.rep_stim: sha256 pins a file, so it needs a "
+                  "file-backed entry such as stim_dem_path"),
+              std::string::npos)
+        << e.what();
+  }
+} // end - TEST(DataArtifactStore, RejectsAPinOnAnInlineStimDem)
+
 // ---------------------------------------------------------------------------
 // parallel_window pattern and pool options
 // ---------------------------------------------------------------------------

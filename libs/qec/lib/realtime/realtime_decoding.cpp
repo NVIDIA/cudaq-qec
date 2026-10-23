@@ -5,6 +5,7 @@
 
 #include "realtime_decoding.h"
 #include "decode_target.h"
+#include "../decoding_task/decoding_task_data_artifacts.h"
 #include "../decoding_task/decoding_task_graph_utils.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
@@ -98,7 +99,8 @@ static std::string read_stim_dem_file(const std::filesystem::path &path,
   if (!std::filesystem::is_regular_file(path, ec))
     throw std::runtime_error(
         fmt::format("{} is not a readable file: {}", where, path.string()));
-  std::ifstream file(path);
+  // Binary, so the bytes read are the file's: a pinned sha256 hashes them.
+  std::ifstream file(path, std::ios::binary);
   if (!file)
     throw std::runtime_error(
         fmt::format("{} could not be opened: {}", where, path.string()));
@@ -955,13 +957,17 @@ void for_each_node(const std::vector<node_spec> &nodes, Visit &&visit) {
   }
 }
 
-// Runs step, giving a construction error the place it came from.
+// Runs step, giving an error the place it came from. A construction error
+// becomes a configuration error; the store's own logic errors keep their
+// kind.
 template <typename Step>
 void at(const std::string &where, Step &&step) {
   try {
     step();
   } catch (const std::invalid_argument &e) {
     throw std::runtime_error(where + ": " + e.what());
+  } catch (const std::logic_error &e) {
+    throw std::logic_error(where + ": " + e.what());
   }
 }
 
@@ -998,6 +1004,11 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
   for (const auto &entry : config.data_artifacts) {
     std::filesystem::path path(entry.stim_dem_path);
     std::string text = entry.stim_dem;
+    // As parsing does, since a configuration built in code skips it.
+    if (entry.stim_dem_path.empty() && !entry.sha256.empty())
+      throw std::runtime_error(entry_name(entry) +
+                               ": sha256 pins a file, so it needs a "
+                               "file-backed entry such as stim_dem_path");
     if (entry.stim_dem_path.empty()) {
       if (!text.empty())
         store.add_stim_dem(text);
@@ -1053,9 +1064,11 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
       for (const auto &layer : node.windows) {
         const auto layer_where = where + ", layer '" + layer.layer + "'";
         const auto tmpl = store.find_template(*spec);
-        // A layer naming a window entry is built on the node's template, so
-        // the entry must be on that template too; the window-entry pass has
-        // already checked its context.
+        // A layer builds its own request. While that equals the window entry
+        // it names, as parsing leaves it, the entry describes the layer and
+        // must be on the node's template; an edited layer is written inline
+        // by to_yaml_str(), so its name no longer applies. The window-entry
+        // pass has already checked the entry's context.
         if (!layer.artifact.empty()) {
           const auto entry = std::find_if(config.data_artifacts.begin(),
                                           config.data_artifacts.end(),
@@ -1070,7 +1083,8 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
               [&](const config::data_artifact &e) {
                 return e.name == entry->context;
               });
-          if (store.find_template(*context->dem_chunks) != tmpl)
+          if (*entry->window == layer.request &&
+              store.find_template(*context->dem_chunks) != tmpl)
             throw std::runtime_error(layer_where + ": window entry '" +
                                      layer.artifact + "' is built on '" +
                                      entry->context +

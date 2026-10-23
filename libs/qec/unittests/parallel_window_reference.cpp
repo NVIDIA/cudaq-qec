@@ -238,6 +238,7 @@ parallel_window_reference::parallel_window_reference(
   const auto R = static_cast<std::int64_t>(rounds);
   for (const auto &layer : graph.layers) {
     const auto &q = layer.request;
+    experimental::check_window_request(q);
     if (q.columns.merge_identical ||
         q.columns.conflicting_parallel !=
             experimental::parallel_resolution::reject)
@@ -258,7 +259,7 @@ parallel_window_reference::parallel_window_reference(
                      [&](const window_layer &l) { return l.node == w.node; })
             ->request;
     auto &h = h_.emplace_back();
-    std::vector<double> priors;
+    auto &priors = priors_.emplace_back();
     index[{w.node, w.k}] = i;
     for (const auto c : w.columns) {
       auto &rows = h.emplace_back();
@@ -273,8 +274,8 @@ parallel_window_reference::parallel_window_reference(
     }
     decoders_.push_back(nullptr);
     if (!h.empty() && !w.rows.empty())
-      decoders_.back() = make_decoder(h, w.rows.size(), std::move(priors),
-                                      decoder_name, params);
+      decoders_.back() =
+          make_decoder(h, w.rows.size(), priors, decoder_name, params);
   } // end - for(i)
 
   consumers.resize(windows_.size());
@@ -306,7 +307,7 @@ parallel_window_reference::parallel_window_reference(
 // each send H[send rows] e', plus d for a residual; l = O e'.
 result
 parallel_window_reference::decode(const std::vector<std::uint8_t> &detectors,
-                                  bool sends) {
+                                  const std::vector<std::string> &dropped) {
   result r;
   const auto K = shot_.dem.observables_flips_matrix.shape()[0];
   r.errors.assign(shot_.h.size(), 0);
@@ -320,7 +321,8 @@ parallel_window_reference::decode(const std::vector<std::uint8_t> &detectors,
     for (const auto row : w.rows)
       out.detectors.push_back(detectors[row]);
     for (const auto &input : w.inputs) {
-      if (!sends || !input.exists)
+      if (!input.exists || std::find(dropped.begin(), dropped.end(),
+                                     input.from_output) != dropped.end())
         continue;
       const auto p =
           std::find_if(windows_.begin(), windows_.end(),
