@@ -3004,15 +3004,46 @@ TEST(TaskGraphWindowKinds, ParsesThePlansParallelWindowGraph) {
       << emitted;
 } // end - TEST(TaskGraphWindowKinds, ParsesThePlansParallelWindowGraph)
 
+// pw_graph_yaml() with a length for build_task_graph() to expand, both of
+// each round's faults flipping the observable, and `from` replaced by `to`.
+// pw_graph_yaml()'s faults touch the same detector with different
+// observable effects, which no decoder can tell apart, so validation would
+// reject its windows; as identical twins they are no conflict.
+std::string pw_build_yaml(const std::string &from = {},
+                          const std::string &to = {}) {
+  auto yaml =
+      pw_graph_yaml_with("      seam: {from: next_round, to: prev_round}\n",
+                         "      seam: {from: next_round, to: prev_round}\n"
+                         "      num_rounds: 12\n");
+  for (auto at = yaml.find("O_sparse: [0, -1]"); at != std::string::npos;
+       at = yaml.find("O_sparse: [0, -1]", at))
+    yaml.replace(at, 17, "O_sparse: [0, 1, -1]");
+  if (from.empty())
+    return yaml;
+  const auto at = yaml.find(from);
+  if (at == std::string::npos)
+    throw std::logic_error("pw_build_yaml has no '" + from + "'");
+  return yaml.replace(at, from.size(), to);
+}
+
+// Expect building decoder 0 of `config` to fail with `text` in the message.
+void expect_build_error(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
+    const std::string &text) {
+  try {
+    cudaq::qec::decoding::host::build_task_graph(config.decoders.at(0));
+    ADD_FAILURE() << "the graph built; expected: " << text;
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
 // The kinds are registered for configuration, so a graph naming them parses
 // and validates, and building it says the kinds are not available yet.
 TEST(TaskGraphWindowKinds, BuildingSaysTheKindsAreNotAvailableYet) {
   namespace cfg = cudaq::qec::decoding::config;
   // build_task_graph() expands the entry-level DEM, so it needs a length.
-  auto parsed = cfg::multi_decoder_config::from_yaml_str(
-      pw_graph_yaml_with("      seam: {from: next_round, to: prev_round}\n",
-                         "      seam: {from: next_round, to: prev_round}\n"
-                         "      num_rounds: 12\n"));
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
   try {
     cudaq::qec::decoding::host::build_task_graph(parsed.decoders.at(0));
     ADD_FAILURE() << "the graph built";
@@ -3024,6 +3055,85 @@ TEST(TaskGraphWindowKinds, BuildingSaysTheKindsAreNotAvailableYet) {
         << e.what();
   }
 }
+
+// Building a windowed graph validates its windows before anything is built,
+// so each mistake is reported with its own message, ahead of the kinds
+// saying they are not available yet.
+TEST(TaskGraphWindowKinds, BuildingValidatesTheWindowsFirst) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &from, const std::string &to,
+                          const std::string &text) {
+    SCOPED_TRACE(text);
+    expect_build_error(
+        cfg::multi_decoder_config::from_yaml_str(pw_build_yaml(from, to)),
+        text);
+  };
+  rejects("        - {from: measurements, to: ingest}\n", "",
+          "ingest node 'ingest' must be fed by measurements alone");
+  rejects("{from: ingest.A, to: A}", "{from: ingest.C, to: A}",
+          "decode_window node 'A' is fed by 'ingest.C', which is not a window "
+          "port of an ingest node");
+  rejects("{from: ingest.A, to: A}", "{from: measurements, to: A}",
+          "decode_window node 'A' is fed by 'measurements.output', which is "
+          "not a window port of an ingest node");
+  rejects("          type: ingest\n",
+          "          type: ingest\n          read_logical: true\n",
+          "ingest node 'ingest' reads the logical value, but its template's "
+          "last phase has no m2o_sparse");
+  rejects("to: B.receive_1}", "to: B.receive_2}",
+          "decode_window node 'B' has num_receives 2, so it has no input "
+          "'receive_2'");
+  rejects("        - {from: A.backward, to: B.receive_1}\n", "",
+          "validate_commitment: F3: ");
+  rejects(", index_offset: -1}", "}", "reaches round");
+  rejects("              period: 12\n              offset: -9",
+          "              period: 13\n              offset: -9",
+          "have periods 12 and 13");
+  rejects("                input: {disposition: closed}\n",
+          "                input: {disposition: open, prior: 0.01}\n", "F1: ");
+} // end - TEST(TaskGraphWindowKinds, BuildingValidatesTheWindowsFirst)
+
+// A configuration built in code skips the parser, so building also rejects
+// a positive index_offset. Windows of two ingest nodes are two shots: a send
+// between them is rejected, and so are two ingest nodes with different
+// templates that reach one node.
+TEST(TaskGraphWindowKinds, BuildingRejectsMixedShots) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
+  const auto with_second_ingest = [&] {
+    auto config = parsed;
+    auto &decoder = config.decoders.at(0);
+    auto &graph = *decoder.task_graph;
+    auto second = graph.nodes.at(0);
+    second.id = "ingest2";
+    second.dem_chunks = *decoder.dem_chunks;
+    second.dem_chunks->phases.at(0).spec.error_rates.at(0) = 0.02;
+    graph.nodes.push_back(second);
+    graph.edges.push_back({"measurements", "output", "ingest2", "input"});
+    for (auto &edge : graph.edges)
+      if (edge.from_node == "ingest" && edge.from_output == "B")
+        edge.from_node = "ingest2";
+    return config;
+  };
+  auto positive = parsed;
+  auto across = with_second_ingest();
+  auto apart = with_second_ingest();
+  for (auto &edge : positive.decoders.at(0).task_graph->edges)
+    if (edge.from_output == "forward")
+      edge.index_offset = 1;
+  auto &apart_edges = apart.decoders.at(0).task_graph->edges;
+  std::erase_if(apart_edges, [](const auto &edge) {
+    return edge.to_node == "B" && edge.to_input != "input";
+  });
+  expect_build_error(positive, "edge A.forward -> B.receive_0 (index_offset "
+                               "1) has a positive index_offset");
+  expect_build_error(across, "edge A.forward -> B.receive_0 (index_offset -1) "
+                             "joins the windows of ingest nodes 'ingest' and "
+                             "'ingest2'");
+  expect_build_error(apart,
+                     "ingest nodes 'ingest' and 'ingest2' have different "
+                     "templates but both reach 'sum'");
+} // end - TEST(TaskGraphWindowKinds, BuildingRejectsMixedShots)
 
 // Misplaced or malformed windows, and a bad verify_residual, are each
 // rejected when parsed, with their own message. verify_residual takes no
