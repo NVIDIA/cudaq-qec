@@ -16,11 +16,13 @@
 #include "decoding_task_commitment.h"
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <iterator>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace cudaq::qec {
@@ -203,6 +205,10 @@ std::string describe(const window_dependency &d, const scheduled_window &c) {
 void check_deliveries(const window_schedule &s) {
   const auto index = positions(s);
   for (const auto &c : s.windows) {
+    // The inputs already read, by producer and send: a send arriving twice
+    // would cancel itself.
+    std::map<std::tuple<std::string, std::int64_t, std::string>, std::string>
+        received;
     for (const auto &input : c.inputs) {
       std::vector<std::int64_t> sent;
       std::vector<std::int64_t> imported;
@@ -212,6 +218,13 @@ void check_deliveries(const window_schedule &s) {
       const auto &p = s.windows[index.at({input.from_node, input.k})];
       const auto &send = send_of(p, input);
       const bool delta = send.mode == send_mode::delta;
+      const auto [first, fresh] = received.emplace(
+          std::tuple{input.from_node, input.k, input.from_output},
+          input.to_input);
+      if (!fresh)
+        reject(name(c) + of_shot(s.num_rounds) + " receives " + name(p) +
+               "'s " + (delta ? "delta" : "residual") + " '" + send.id +
+               "' twice, on " + first->second + " and " + input.to_input);
       const auto what = describe(input, c) + " in the " +
                         std::to_string(s.num_rounds) +
                         "-round shot: " + name(p) + "'s " +
@@ -484,13 +497,19 @@ schedule_windows(std::shared_ptr<const experiment_template> context,
 } // end - schedule_windows()
 
 // The longest layer's variant probe, one period longer, so the probe shots
-// also hold the bulk around two consecutive bulk windows of every layer.
+// also hold the bulk around two consecutive bulk windows of every layer;
+// longer still by the periods the farthest edge reaches back, so that every
+// consumer variant meets its producer.
 std::size_t commitment_probe_rounds(const experiment_template &context,
-                                    const std::vector<window_layer> &layers) {
+                                    const std::vector<window_layer> &layers,
+                                    const std::vector<task_graph_edge> &edges) {
   std::size_t end = context.min_rounds() + 1;
+  std::int64_t reach = 1;
   if (!context.repeats() || layers.empty())
     return end;
   const auto &first = layers.front();
+  for (const auto &e : edges)
+    reach = std::max(reach, std::abs(e.index_offset));
   for (const auto &layer : layers) {
     if (layer.request.period != first.request.period)
       throw std::invalid_argument(
@@ -500,8 +519,8 @@ std::size_t commitment_probe_rounds(const experiment_template &context,
           "; every layer needs the same period");
     end = std::max(end, variant_probe_rounds(context, layer.request));
   }
-  return end + static_cast<std::size_t>(first.request.period);
-}
+  return end + static_cast<std::size_t>(reach * first.request.period);
+} // end - commitment_probe_rounds()
 
 // Sends are checked for every probe shot before any row, so an edge with
 // the wrong index map reports its mismatch rather than the row it leaves
@@ -517,7 +536,7 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
     reject("no template");
   for (const auto &layer : layers)
     requests[layer.node] = &layer.request;
-  const auto end = commitment_probe_rounds(*context, layers);
+  const auto end = commitment_probe_rounds(*context, layers, edges);
   for (auto R = context->min_rounds(); R < end; ++R) {
     schedules.push_back(schedule_windows(context, layers, edges, R));
     check_deliveries(schedules.back());

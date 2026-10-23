@@ -2724,6 +2724,41 @@ TEST(WindowRequestYAML, RoundTrips) {
   }
 }
 
+// A send's rounds are one range, [b, e] or {rounds: [b, e]}, or a list of
+// ranges in either form; several ranges are written as a list and read back.
+// A list that mixes numbers and ranges, or holds a malformed range, is
+// rejected.
+TEST(WindowRequestYAML, SendsWithSeveralRangesRoundTrip) {
+  using namespace cudaq::qec;
+  const auto with_backward = [](const std::string &send) {
+    auto yaml = window_a_yaml();
+    yaml.replace(yaml.find("{id: backward}"), 14, send);
+    return yaml;
+  };
+  const auto rejects = [&](const std::string &send, const std::string &text) {
+    try {
+      window_request_from_yaml_str(with_backward(send));
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find("window request: " + text),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  auto request = window_a();
+  request.sends.push_back({"wide", send_mode::delta, {{-3, -2}, {3, 5}}});
+  const auto text = window_request_to_yaml_str(request);
+  EXPECT_EQ(window_request_from_yaml_str(text), request) << text;
+  const auto listed = window_request_from_yaml_str(with_backward(
+      "{id: backward, mode: residual, rounds: [[0, 1], {rounds: [2, 3]}]}"));
+  EXPECT_EQ(listed.sends.at(1).rounds,
+            (std::vector<round_range>{{0, 1}, {2, 3}}));
+  rejects("{id: backward, mode: residual, rounds: [0, [1, 2]]}",
+          "a send's rounds are [begin, end] or a list of ranges");
+  rejects("{id: backward, mode: residual, rounds: [[0, 1, 2]]}",
+          "a round range is [begin, end]");
+} // end - TEST(WindowRequestYAML, SendsWithSeveralRangesRoundTrip)
+
 // The forward-compatible shapes reserved for spatial windows are each
 // rejected with their own message, as are malformed ranges and unknown keys.
 TEST(WindowRequestYAML, RejectsReservedShapes) {
@@ -2810,6 +2845,21 @@ TEST(WindowRequestYAML, RejectsInvalidRequests) {
   rejects("prior: 0.01", "prior: 1.5",
           "the input prior must be strictly between 0 and 1");
 } // end - TEST(WindowRequestYAML, RejectsInvalidRequests)
+
+// An empty value where a range or a send's rounds belong is rejected, where
+// LLVM's YAML reader would otherwise stop the process.
+TEST(WindowRequestYAML, EmptyValuesFailCleanly) {
+  using namespace cudaq::qec;
+  for (const auto &[from, to] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"commit: [0, 3]", "commit: "},
+           {"{id: backward}", "{id: backward, mode: residual, rounds: }"}}) {
+    auto yaml = window_a_yaml();
+    yaml.replace(yaml.find(from), from.size(), to);
+    EXPECT_THROW(window_request_from_yaml_str(yaml), std::invalid_argument)
+        << to;
+  }
+}
 
 // A hand-written parallel-window graph, with a two-input xor, over
 // a streaming rep-code template. edit() changes the text before parsing.
@@ -3012,6 +3062,68 @@ TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded) {
           "window layer 'A': window request: the output port has no "
           "disposition");
 } // end - TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded)
+
+// Only an ingest node takes windows: a node whose type is a decoder plugin,
+// and an ensemble entry, are rejected rather than having theirs dropped.
+TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(pw_graph_yaml_with("type: ingest", "type: single_error_lut"),
+          "sets windows, which only an ingest node takes");
+  rejects(R"(decoders:
+  - id: 0
+    task_graph:
+      nodes:
+        - id: e
+          windows:
+            A: {period: 4, zones: {commit: [0, 2]}, ports: {input: {disposition: closed}, output: {disposition: open}}}
+          ensemble:
+            join_strategy: deadline
+            join_params: {deadline_us: 200000}
+            members:
+              - nodes:
+                  - {id: a, type: single_window, inner: {type: single_error_lut}}
+                edges: [{from: input, to: a}, {from: a, to: output}]
+      edges:
+        - {from: measurements, to: e}
+        - {from: e, to: output}
+)",
+          "is an ensemble entry, which takes no windows");
+} // end - TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles)
+
+// An empty value where a value of several forms belongs (dem_chunks, a
+// window layer, a partition) is a parse error, where LLVM's YAML reader
+// would otherwise stop the process.
+TEST(TaskGraphWindowKinds, EmptyValuesFailCleanly) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects("decoders:\n  - id: 0\n    type: single_error_lut\n    dem_chunks:\n",
+          "dem_chunks needs a value");
+  rejects(
+      pw_graph_yaml_with("          windows:\n            A:",
+                         "          windows:\n            C:\n            A:"),
+      "a window layer needs a value");
+  rejects(pw_graph_yaml_with("        - id: sum\n          type: xor\n",
+                             "        - id: sum\n          type: xor\n"
+                             "          partition:\n"),
+          "partition needs a value");
+} // end - TEST(TaskGraphWindowKinds, EmptyValuesFailCleanly)
 
 // An ingest node with no windows has nothing to publish.
 TEST(TaskGraphWindowKinds, IngestNeedsAWindow) {
@@ -3234,6 +3346,39 @@ TEST(DataArtifactsYAML, RejectsMalformedEntriesAndReferences) {
                               "      responsibility: [0]\n"),
           "'responsibility' is reserved");
 } // end - TEST(DataArtifactsYAML, RejectsMalformedEntriesAndReferences)
+
+// A reference is written back by name only while the copy still equals the
+// named entry; a copy edited after parsing is written inline, so emitting
+// and parsing again keeps the edit, as the YAML published to remote targets
+// must. A decoder written on its own has no entries to name, so it writes
+// its copies inline.
+TEST(DataArtifactsYAML, EditsAfterParsingAreWrittenInline) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(artifacts_yaml());
+  const auto unchanged = cfg::multi_decoder_config::from_yaml_str(
+      cfg::multi_decoder_config(parsed).to_yaml_str(200));
+  auto edited = parsed;
+  auto &layers = edited.decoders.at(0).task_graph->nodes.at(0).windows;
+  edited.decoders.at(0).dem_chunks->num_rounds = 7;
+  layers.at(0).request.period = 24;
+  const auto again =
+      cfg::multi_decoder_config::from_yaml_str(edited.to_yaml_str(200));
+  const auto &again_layers =
+      again.decoders.at(0).task_graph->nodes.at(0).windows;
+  EXPECT_EQ(unchanged, parsed);
+  EXPECT_EQ(again.decoders.at(0).dem_chunks, edited.decoders.at(0).dem_chunks);
+  EXPECT_TRUE(again.decoders.at(0).dem_chunks_artifact.empty());
+  EXPECT_EQ(again_layers.at(0).request, layers.at(0).request);
+  EXPECT_TRUE(again_layers.at(0).artifact.empty());
+  EXPECT_EQ(again_layers.at(1).artifact, "pw_B");
+  const auto alone = cfg::decoder_config::from_yaml_str(
+      cfg::decoder_config(parsed.decoders.at(0)).to_yaml_str(200));
+  EXPECT_EQ(alone.dem_chunks, parsed.decoders.at(0).dem_chunks);
+  EXPECT_EQ(
+      alone.task_graph->nodes.at(0).windows.at(0).request,
+      parsed.decoders.at(0).task_graph->nodes.at(0).windows.at(0).request);
+} // end - TEST(DataArtifactsYAML, EditsAfterParsingAreWrittenInline)
 
 // A decoder parsed on its own has no data_artifacts to name.
 TEST(DataArtifactsYAML, AStandaloneDecoderCannotNameAnEntry) {

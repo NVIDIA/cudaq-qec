@@ -38,9 +38,44 @@ range_form to_form(round_range range) {
   return form;
 }
 
+// A send's rounds: one range, or a list whose every element is a range.
+std::vector<round_range> to_ranges(const send_rounds_form &form) {
+  std::vector<round_range> out;
+  std::vector<std::int64_t> numbers;
+  const auto *shape = "a send's rounds are [begin, end] or a list of ranges";
+  if (!form.scalar.empty())
+    reject(shape);
+  if (!form.map.rounds.empty())
+    return {to_range({form.map, ""})};
+  for (const auto &item : form.items)
+    if (item.number.set)
+      numbers.push_back(item.number.value);
+  if (!numbers.empty() && numbers.size() == form.items.size())
+    return {to_range({{numbers}, ""})};
+  if (!numbers.empty() || form.items.empty())
+    reject(shape);
+  for (const auto &item : form.items)
+    out.push_back(to_range(
+        {item.list.empty() ? item.map : range_map_form{item.list}, ""}));
+  return out;
+}
+
+// One range as [begin, end], several as a list of them.
+send_rounds_form to_send_form(const std::vector<round_range> &rounds) {
+  send_rounds_form form;
+  if (rounds.size() == 1) {
+    form.items.push_back({{rounds[0].begin, true}, {}, {}});
+    form.items.push_back({{rounds[0].end, true}, {}, {}});
+    return form;
+  }
+  for (const auto r : rounds)
+    form.items.push_back({{}, {r.begin, r.end}, {}});
+  return form;
+}
+
 } // namespace
 
-// Field for field; a send's one range becomes its list of ranges.
+// Field for field; a send's rounds become its list of ranges.
 window_request request_from_form(const request_form &form) {
   if (!form.period)
     reject("missing required key 'period'");
@@ -67,7 +102,7 @@ window_request request_from_form(const request_form &form) {
     out.id = send.id;
     out.mode = send.mode;
     if (send.rounds)
-      out.rounds.push_back(to_range(*send.rounds));
+      out.rounds = to_ranges(*send.rounds);
   }
   request.columns = {form.columns.merge_identical,
                      form.columns.conflicting_parallel};
@@ -92,14 +127,10 @@ request_form form_from_request(const window_request &request) {
     ports.output.imports = to_form(*request.output.imports);
   for (const auto &send : request.sends) {
     auto &out = form.sends.emplace_back();
-    if (send.rounds.size() > 1)
-      throw std::invalid_argument("window request: send '" + send.id +
-                                  "' has more than one round range, which "
-                                  "YAML cannot write");
     out.id = send.id;
     out.mode = send.mode;
     if (!send.rounds.empty())
-      out.rounds = to_form(send.rounds.front());
+      out.rounds = to_send_form(send.rounds);
   }
   form.columns = {request.columns.merge_identical,
                   request.columns.conflicting_parallel};

@@ -411,6 +411,10 @@ static void validate_task_graph(const decoder_config &config) {
       throw std::runtime_error(who + ": duplicate task_graph node id '" +
                                node.id + "'");
     ids.push_back(node.id);
+    if (node.ensemble.has_value() && !node.windows.empty())
+      throw std::runtime_error(node_context(node.id) +
+                               " is an ensemble entry, which takes no "
+                               "windows; only an ingest node takes windows");
     if (node.ensemble.has_value())
       validate_ensemble_node(node, node_context(node.id), typed);
     else
@@ -423,6 +427,12 @@ static void validate_task_graph(const decoder_config &config) {
 
     const auto *kind = cudaq::qec::find_task_graph_node_kind(node.type);
     reject_lowered_only_kind(kind, node.type, where);
+    if (!kind && !node.windows.empty())
+      throw std::runtime_error(
+          where + " has type '" + node.type +
+          "', which is not a registered node kind, so it is taken as a "
+          "decoder plugin name and sets windows, which only an ingest node "
+          "takes");
     if (kind) {
       if (kind->requires_decoder && node.inner_type.empty())
         throw std::runtime_error(where + " of kind '" + kind->name +
@@ -602,6 +612,18 @@ const data_artifact_t *named_artifact(const std::vector<data_artifact_t> &list,
                          return e.name < n;
                        });
   return it != list.end() && it->name == name ? &*it : nullptr;
+}
+
+/// The entry a reference may be written back as: the document being written
+/// holds one named @p name. Without one, as when a decoder is written on its
+/// own, the copy is written inline.
+const data_artifact_t *written_entry(llvm::yaml::IO &io,
+                                     const std::string &name) {
+  const auto *context =
+      static_cast<const config_parse_context *>(io.getContext());
+  if (name.empty() || !context || !context->artifacts)
+    return nullptr;
+  return named_artifact(*context->artifacts, name);
 }
 
 /// The kinds an entry holds, in key order, for checks and messages.
@@ -1136,6 +1158,16 @@ struct PolymorphicTraits<partition_form> {
   }
 };
 
+/// An empty partition is rejected before the polymorphic read, which LLVM
+/// cannot do for an empty value.
+inline void yamlize(IO &io, partition_form &form, bool required,
+                    EmptyContext &context) {
+  if (cudaq::qec::window_yaml::reading_empty(io))
+    throw std::runtime_error(
+        "partition needs a value: a label, or {columns: [...]}");
+  yamlize<partition_form>(io, form, required, context);
+}
+
 template <>
 struct CustomMappingTraits<inner_form> {
   static void inputOne(IO &io, StringRef key, inner_form &inner) {
@@ -1217,6 +1249,15 @@ struct PolymorphicTraits<dem_chunks_form> {
   }
 };
 
+/// An empty dem_chunks is rejected before the polymorphic read.
+inline void yamlize(IO &io, dem_chunks_form &form, bool required,
+                    EmptyContext &context) {
+  if (cudaq::qec::window_yaml::reading_empty(io))
+    throw std::runtime_error("dem_chunks needs a value: a mapping, or the "
+                             "name of a data_artifacts entry");
+  yamlize<dem_chunks_form>(io, form, required, context);
+}
+
 /// Maps a `dem_chunks` key holding the block or naming an entry. A name
 /// resolves to a copy of the entry's template and is kept, so emission writes
 /// the name back.
@@ -1225,7 +1266,12 @@ static void map_dem_chunks(IO &io,
                            std::string &artifact, const std::string &where) {
   std::optional<dem_chunks_form> form;
   if (io.outputting()) {
-    if (!artifact.empty())
+    // An edit made after parsing is kept: the name is written back only while
+    // the copy still equals the entry.
+    const auto *entry = written_entry(io, artifact);
+    const bool unedited =
+        entry && entry->dem_chunks && spec && *entry->dem_chunks == *spec;
+    if (unedited || (!spec && !artifact.empty()))
       io.mapRequired("dem_chunks", artifact);
     else
       io.mapOptional("dem_chunks", spec);
@@ -1266,6 +1312,15 @@ struct PolymorphicTraits<layer_form> {
     return form.list;
   }
 };
+
+/// An empty window layer is rejected before the polymorphic read.
+inline void yamlize(IO &io, layer_form &form, bool required,
+                    EmptyContext &context) {
+  if (cudaq::qec::window_yaml::reading_empty(io))
+    throw std::runtime_error("a window layer needs a value: a request, or the "
+                             "name of a data_artifacts window entry");
+  yamlize<layer_form>(io, form, required, context);
+}
 
 /// A `window` entry of data_artifacts: a request and the dem_chunks entry
 /// it is built on.
@@ -1417,7 +1472,9 @@ struct CustomMappingTraits<windows_form> {
   }
   static void output(IO &io, windows_form &form) {
     for (auto &window : *form.windows) {
-      if (!window.artifact.empty()) {
+      // As for dem_chunks, the name only while the copy equals the entry.
+      const auto *entry = written_entry(io, window.artifact);
+      if (entry && entry->window && *entry->window == window.request) {
         io.mapRequired(window.layer.c_str(), window.artifact);
         continue;
       }
@@ -2074,11 +2131,14 @@ template <>
 struct MappingTraits<cudaq::qec::decoding::config::multi_decoder_config> {
   static void
   mapping(IO &io, cudaq::qec::decoding::config::multi_decoder_config &config) {
-    // Read before the decoders, whose references resolve against it.
+    // Read before the decoders, whose references resolve against it; when
+    // writing, references are compared against it.
     artifacts_form artifacts{&config.data_artifacts};
     if (io.outputting()) {
       if (!config.data_artifacts.empty())
         io.mapRequired("data_artifacts", artifacts);
+      if (auto *context = static_cast<config_parse_context *>(io.getContext()))
+        context->artifacts = &config.data_artifacts;
     } else {
       io.mapOptional("data_artifacts", artifacts);
       validate_data_artifacts(config.data_artifacts);
@@ -2190,7 +2250,8 @@ std::string cudaq::qec::decoding::config::multi_decoder_config::to_yaml_str(
     int column_wrap) {
   std::string yaml_str;
   llvm::raw_string_ostream yaml_stream(yaml_str);
-  llvm::yaml::Output yaml_out(yaml_stream, nullptr, column_wrap);
+  config_parse_context context;
+  llvm::yaml::Output yaml_out(yaml_stream, &context, column_wrap);
   yaml_out << *this;
   return yaml_str;
 }

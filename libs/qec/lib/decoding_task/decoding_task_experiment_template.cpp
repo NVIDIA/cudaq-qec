@@ -9,6 +9,7 @@
 
 #include "decoding_task_experiment_template.h"
 #include <algorithm>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -34,6 +35,7 @@ experiment_template::experiment_template(dem_chunks_spec spec)
   const auto to = spec_.seam.to_seam;
   const auto from = spec_.seam.from_seam;
   std::optional<std::pair<phase_id, std::size_t>> uniform;
+  std::set<phase_id> chain;
   spec_.validate();
   repeats_ = spec_.has_repeating_phase();
   if (repeats_) {
@@ -54,8 +56,15 @@ experiment_template::experiment_template(dem_chunks_spec spec)
                                 " is below the " + std::to_string(min_rounds_) +
                                 " rounds the phase chain needs");
   num_observables_ = spec_.num_observables();
+  chain.insert(prefix_.begin(), prefix_.end());
+  chain.insert(suffix_.begin(), suffix_.end());
+  if (repeats_)
+    chain.insert(bulk_);
 
+  // A phase no connection reaches is in no shot, so it is not built.
   for (const auto &entry : spec_.phases) {
+    if (!chain.count(entry.id))
+      continue;
     const auto context = "dem_chunks." + entry.id.name();
     phase_chunks p{dem_chunk_from_spec(entry.spec, {to, from}, context),
                    dem_chunk_from_spec(entry.spec, {to}, context)};

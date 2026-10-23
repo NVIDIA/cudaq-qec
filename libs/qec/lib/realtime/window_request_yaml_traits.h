@@ -26,6 +26,16 @@ using namespace cudaq::qec::experimental;
 /// Throws std::invalid_argument for a malformed request.
 [[noreturn]] void reject(const std::string &what);
 
+/// Whether the value being read is empty. LLVM's YAML reader reaches
+/// llvm_unreachable when it reads an empty value of a polymorphic type, so
+/// those types check this first.
+inline bool reading_empty(llvm::yaml::IO &io) {
+  if (io.outputting())
+    return false;
+  const auto *node = static_cast<llvm::yaml::Input &>(io).getCurrentNode();
+  return node == nullptr || llvm::isa<llvm::yaml::NullNode>(node);
+}
+
 /// The map form of a round range, {rounds: [b, e]}; the list form [b, e]
 /// fills the same rounds.
 struct range_map_form {
@@ -59,10 +69,33 @@ struct ports_form {
   output_form output;
 };
 
+/// A round number in a send's rounds, which records that it was read, so a
+/// range [b, e] is told apart from a list of ranges.
+struct round_number {
+  std::int64_t value = 0;
+  bool set = false;
+};
+
+/// One element of a send's rounds: a number of the one range [b, e], or a
+/// range in list or map form.
+struct rounds_item {
+  round_number number;
+  std::vector<std::int64_t> list;
+  range_map_form map;
+};
+
+/// A send's rounds: one range, [b, e] or {rounds: [b, e]}, or a list of
+/// ranges. A scalar is kept only to be rejected.
+struct send_rounds_form {
+  std::vector<rounds_item> items;
+  range_map_form map;
+  std::string scalar;
+};
+
 struct send_form {
   std::string id;
   std::optional<send_mode> mode;
-  std::optional<range_form> rounds;
+  std::optional<send_rounds_form> rounds;
 };
 
 struct columns_form {
@@ -88,12 +121,12 @@ struct request_form {
 window_request request_from_form(const request_form &form);
 
 /// The form that writes @p request, every range in list form.
-/// @throws std::invalid_argument for a send with more than one round range.
 request_form form_from_request(const window_request &request);
 
 } // namespace cudaq::qec::window_yaml
 
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::window_yaml::range_form)
+LLVM_YAML_IS_FLOW_SEQUENCE_VECTOR(cudaq::qec::window_yaml::rounds_item)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::window_yaml::send_form)
 
 namespace llvm::yaml {
@@ -176,6 +209,93 @@ struct PolymorphicTraits<cudaq::qec::window_yaml::range_form> {
     return form.map.rounds;
   }
 };
+
+/// An empty range is rejected before the polymorphic read.
+inline void yamlize(IO &io, cudaq::qec::window_yaml::range_form &form,
+                    bool required, EmptyContext &context) {
+  if (cudaq::qec::window_yaml::reading_empty(io))
+    cudaq::qec::window_yaml::reject("a round range is [begin, end]");
+  yamlize<cudaq::qec::window_yaml::range_form>(io, form, required, context);
+}
+
+/// A round number: an integer, recorded as read.
+template <>
+struct ScalarTraits<cudaq::qec::window_yaml::round_number> {
+  static void output(const cudaq::qec::window_yaml::round_number &number,
+                     void *, raw_ostream &out) {
+    out << number.value;
+  }
+  static StringRef input(StringRef text, void *,
+                         cudaq::qec::window_yaml::round_number &number) {
+    long long value = 0;
+    if (text.getAsInteger(10, value))
+      return "a round is an integer";
+    number = {value, true};
+    return {};
+  }
+  static QuotingType mustQuote(StringRef) { return QuotingType::None; }
+};
+
+/// A number, or a range [b, e] or {rounds: [b, e]}; written as a number or
+/// [b, e].
+template <>
+struct PolymorphicTraits<cudaq::qec::window_yaml::rounds_item> {
+  static NodeKind getKind(const cudaq::qec::window_yaml::rounds_item &item) {
+    return item.number.set ? NodeKind::Scalar : NodeKind::Sequence;
+  }
+  static cudaq::qec::window_yaml::round_number &
+  getAsScalar(cudaq::qec::window_yaml::rounds_item &item) {
+    return item.number;
+  }
+  static cudaq::qec::window_yaml::range_map_form &
+  getAsMap(cudaq::qec::window_yaml::rounds_item &item) {
+    return item.map;
+  }
+  static std::vector<std::int64_t> &
+  getAsSequence(cudaq::qec::window_yaml::rounds_item &item) {
+    return item.list;
+  }
+};
+
+/// [b, e], {rounds: [b, e]}, or a list of ranges; written as a list.
+template <>
+struct PolymorphicTraits<cudaq::qec::window_yaml::send_rounds_form> {
+  static NodeKind getKind(const cudaq::qec::window_yaml::send_rounds_form &) {
+    return NodeKind::Sequence;
+  }
+  static std::string &
+  getAsScalar(cudaq::qec::window_yaml::send_rounds_form &form) {
+    return form.scalar;
+  }
+  static cudaq::qec::window_yaml::range_map_form &
+  getAsMap(cudaq::qec::window_yaml::send_rounds_form &form) {
+    return form.map;
+  }
+  static std::vector<cudaq::qec::window_yaml::rounds_item> &
+  getAsSequence(cudaq::qec::window_yaml::send_rounds_form &form) {
+    return form.items;
+  }
+};
+
+/// An empty element of a send's rounds is rejected before the polymorphic
+/// read.
+inline void yamlize(IO &io, cudaq::qec::window_yaml::rounds_item &item,
+                    bool required, EmptyContext &context) {
+  if (cudaq::qec::window_yaml::reading_empty(io))
+    cudaq::qec::window_yaml::reject(
+        "a send's rounds are [begin, end] or a list of ranges");
+  yamlize<cudaq::qec::window_yaml::rounds_item>(io, item, required, context);
+}
+
+/// Empty send rounds are rejected before the polymorphic read.
+inline void yamlize(IO &io, cudaq::qec::window_yaml::send_rounds_form &form,
+                    bool required, EmptyContext &context) {
+  if (cudaq::qec::window_yaml::reading_empty(io))
+    cudaq::qec::window_yaml::reject(
+        "a send's rounds are [begin, end] or a list of ranges");
+  yamlize<cudaq::qec::window_yaml::send_rounds_form>(io, form, required,
+                                                     context);
+}
 
 template <>
 struct MappingTraits<cudaq::qec::window_yaml::zones_form> {

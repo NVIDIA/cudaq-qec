@@ -73,19 +73,20 @@ schedule_windows(std::shared_ptr<const experiment_template> context,
                  std::size_t num_rounds);
 
 /// The shot lengths validate_commitment() checks: [min_rounds(), end).
-/// They cover every prefix and terminal variant of every layer, and two
-/// bulk periods.
+/// They cover every prefix and terminal variant of every layer, two bulk
+/// periods, and the periods the farthest of @p edges reaches back.
 /// @throws std::invalid_argument naming the operation if a request is
 /// invalid or the layers' periods differ.
 std::size_t commitment_probe_rounds(const experiment_template &context,
-                                    const std::vector<window_layer> &layers);
+                                    const std::vector<window_layer> &layers,
+                                    const std::vector<task_graph_edge> &edges);
 
 /// Check, for every probe shot length, that every detector row has exactly
 /// one finalizer, that every fault touching it is the finalizer's or
 /// committed elsewhere and delivered to the finalizer by a send covering
 /// the row, and that every detectable fault is committed exactly once
-/// (F1-F4); that sends match receives; and that no commit column has an
-/// ambiguous parallel column.
+/// (F1-F4); that sends match receives, none twice; and that no commit
+/// column has an ambiguous parallel column.
 /// @throws std::invalid_argument naming the check, and the row, column,
 /// window or edge that fails it.
 void validate_commitment(std::shared_ptr<const experiment_template> context,

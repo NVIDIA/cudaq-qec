@@ -210,6 +210,23 @@ TEST(ExperimentTemplate, ReportsItsShape) {
   EXPECT_EQ(experiment_template(next_only_spec()).max_span(), 1u);
 }
 
+// A phase no connection names is not part of any shot, so it is neither
+// built nor checked: one of another width, without D_sparse, whose faults
+// reach the next round changes neither the checks nor max_span.
+TEST(ExperimentTemplate, IgnoresPhasesTheChainDoesNotUse) {
+  auto spec = single_round_spec();
+  auto spare = spec.phases.at(1);
+  spare.id = phase_id::from_name("spare");
+  spare.spec.seam_specs = {{seam_name::prev_round, {{0, -1, 1, -1}, {}}},
+                           {seam_name::next_round, {{0, -1, 1, -1}, {}}}};
+  spec.phases.push_back(spare);
+  const experiment_template tmpl(spec);
+  const experiment_template plain(single_round_spec());
+  EXPECT_EQ(tmpl.max_span(), 0u);
+  EXPECT_EQ(tmpl.min_rounds(), plain.min_rounds());
+  EXPECT_EQ(tmpl.row_offset(6, 6), plain.row_offset(6, 6));
+}
+
 // A spec without a repeating phase supports exactly its own length.
 TEST(ExperimentTemplate, LinearChainHasOneLength) {
   const experiment_template tmpl(linear_spec());
@@ -1522,7 +1539,7 @@ TEST(WindowSchedule, ProbeRoundsCoverEveryVariant) {
     for (const auto &requests :
          {layered(2, 1, 3), layered(3, 2, 2), interior_commit(3, 2, 2)}) {
       const auto g = parallel_graph(requests);
-      const auto probe = commitment_probe_rounds(tmpl, g.layers);
+      const auto probe = commitment_probe_rounds(tmpl, g.layers, g.edges);
       const auto period = static_cast<std::size_t>(requests.a.period);
       for (const auto &layer : g.layers) {
         std::set<variant_key> early;
@@ -1549,14 +1566,14 @@ TEST(WindowSchedule, ProbeRoundsNeedOnePeriod) {
   auto g = parallel_graph(layered(2, 2, 3));
   auto chain = rep5_spec();
   g.layers[1].request.period = 4;
-  expect_error([&] { commitment_probe_rounds(tmpl, g.layers); },
+  expect_error([&] { commitment_probe_rounds(tmpl, g.layers, g.edges); },
                "commitment_probe_rounds", "periods 5 and 4");
   chain.connections.erase(chain.connections.begin() + 1);
   chain.num_rounds.reset();
   const experiment_template fixed(chain);
-  EXPECT_EQ(
-      commitment_probe_rounds(fixed, parallel_graph(layered(1, 1, 1)).layers),
-      fixed.min_rounds() + 1);
+  EXPECT_EQ(commitment_probe_rounds(
+                fixed, parallel_graph(layered(1, 1, 1)).layers, {}),
+            fixed.min_rounds() + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1569,7 +1586,7 @@ TEST(WindowSchedule, ProbeRoundsNeedOnePeriod) {
 // of the shot is committed exactly once. validate_commitment() accepts it.
 void expect_sound(const dem_chunks_spec &spec, const window_graph &g) {
   const auto tmpl = std::make_shared<const experiment_template>(spec);
-  const auto probe = commitment_probe_rounds(*tmpl, g.layers);
+  const auto probe = commitment_probe_rounds(*tmpl, g.layers, g.edges);
   EXPECT_NO_THROW(validate_commitment(tmpl, g.layers, g.edges));
   for (auto R = tmpl->min_rounds(); R < probe; ++R) {
     auto fixed = spec;
@@ -1765,13 +1782,43 @@ TEST(CommitmentSends, RejectsAResidualThatDiffersFromTheImports) {
       "[5, 7); round 6 differs");
 }
 
-// Imports take their values from exactly one residual.
+// Imports take their values from exactly one residual: a second residual
+// send over the same rounds is rejected.
 TEST(CommitmentSends, RejectsTwoResidualsForOneImport) {
-  auto g = parallel_graph(layered(2, 2, 3));
-  g.edges.push_back({"A", "backward", "B", "receive_2", 0});
+  auto requests = layered(2, 2, 3);
+  requests.a.sends.push_back({"again", send_mode::residual, {{0, 1}}});
+  auto g = parallel_graph(requests);
+  g.edges.push_back({"A", "again", "B", "receive_2", 0});
   expect_error([&] { validate(arbitrary_memory_spec(5), g); },
                "validate_commitment: B[1] of the",
                "imports rounds [5, 6) but receives 2 residuals");
+}
+
+// The probe shots reach every edge's producer: with an extra edge seven
+// instances back, the range grows by six periods, and that edge's delta,
+// which lands before its receiver's rounds, is rejected.
+TEST(CommitmentSends, ProbesReachAProducerSeveralPeriodsBack) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  auto g = sliding_graph(2, 5);
+  const auto probe = commitment_probe_rounds(*tmpl, g.layers, g.edges);
+  g.edges.push_back({"W", "forward", "W", "receive_1", -7});
+  EXPECT_EQ(commitment_probe_rounds(*tmpl, g.layers, g.edges), probe + 6 * 2);
+  expect_error([&] { validate(arbitrary_memory_spec(5), g); },
+               "validate_commitment: edge W.forward -> W.receive_1 "
+               "(index_offset -7)",
+               "outside W[");
+}
+
+// One producer's send reaching a receiver twice, through two edges, would
+// cancel itself, so it is rejected naming both inputs.
+TEST(CommitmentSends, RejectsASendDeliveredTwice) {
+  auto g = parallel_graph(layered(2, 2, 3));
+  g.edges.push_back({"A", "forward", "B", "receive_2", -1});
+  expect_error([&] { validate(arbitrary_memory_spec(5), g); },
+               "validate_commitment: B[1] of the",
+               "receives A[0]'s delta 'forward' twice, on receive_0 and "
+               "receive_2");
 }
 
 // ---------------------------------------------------------------------------
