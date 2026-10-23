@@ -1765,6 +1765,95 @@ decoders:
                std::runtime_error);
 }
 
+TEST(DecoderSchemaTest, PreservesFloatingPointParametersExactly) {
+  using namespace cudaq::qec::decoding::config;
+  // Schema-only metadata is enough to exercise configuration serialization;
+  // this test never creates a decoder or registers a stand-in executor.
+  register_decoder_schema({"exact_parameter_engine",
+                           {{"gain", param_kind::f64},
+                            {"weights", param_kind::f64_vec},
+                            {"matrix", param_kind::f64_matrix}}});
+  register_decoder_schema(
+      {"exact_parameter_decoder",
+       {{"gain", param_kind::f64},
+        {"weights", param_kind::f64_vec},
+        {"matrix", param_kind::f64_matrix},
+        {"label", param_kind::string},
+        {"fixed", param_kind::subschema, false, "exact_parameter_engine"},
+        {"engine", param_kind::string},
+        {"engine_params", param_kind::discriminated, false, "", "engine"}}});
+
+  const std::string label = "001,alpha;beta='quoted':a=b/with spaces\nnext";
+  for (const auto gain :
+       {std::nextafter(0.001, 1.0), 0.12345678901234567,
+        std::numeric_limits<double>::denorm_min(), std::nextafter(1.0, 0.0)}) {
+    SCOPED_TRACE(gain);
+    const std::vector<double> weights{gain, -gain, 1.2345678901234567e-20};
+    const std::vector<std::vector<double>> matrix{
+        {gain, -gain}, {1.2345678901234567e-20, gain}};
+    cudaqx::heterogeneous_map nested;
+    nested.insert("gain", gain);
+    nested.insert("weights", weights);
+    nested.insert("matrix", matrix);
+    cudaqx::heterogeneous_map arguments = nested;
+    arguments.insert("label", label);
+    arguments.insert("fixed", nested);
+    arguments.insert("engine", "exact_parameter_engine");
+    arguments.insert("engine_params", nested);
+    auto decoder = create_test_empty_decoder_config(0);
+    decoder.type = "exact_parameter_decoder";
+    decoder.decoder_custom_args = arguments;
+    multi_decoder_config original;
+    original.decoders.push_back(std::move(decoder));
+    const auto emitted = original.to_yaml_str(200);
+    const auto parsed = multi_decoder_config::from_yaml_str(emitted);
+    EXPECT_EQ(parsed, original);
+    const auto &roundtrip = parsed.decoders.front().decoder_custom_args.map();
+    EXPECT_EQ(roundtrip.get<double>("gain"), gain);
+    EXPECT_EQ(roundtrip.get<std::vector<double>>("weights"), weights);
+    EXPECT_EQ(roundtrip.get<std::vector<std::vector<double>>>("matrix"),
+              matrix);
+    EXPECT_EQ(roundtrip.get<std::string>("label"), label);
+    for (const auto *section : {"fixed", "engine_params"}) {
+      const auto child = roundtrip.get<cudaqx::heterogeneous_map>(section);
+      EXPECT_EQ(child.get<double>("gain"), gain);
+      EXPECT_EQ(child.get<std::vector<double>>("weights"), weights);
+      EXPECT_EQ(child.get<std::vector<std::vector<double>>>("matrix"), matrix);
+    }
+  }
+}
+
+TEST(DecoderSchemaTest, DiscriminatedSchemaPrefixRoundtrips) {
+  using namespace cudaq::qec::decoding::config;
+  register_decoder_schema(
+      {"prefixed_parameter_engine.demo", {{"passes", param_kind::int32}}});
+  register_decoder_schema(
+      {"prefixed_parameter_decoder",
+       {{"engine", param_kind::string},
+        {"engine_params", param_kind::discriminated, false, "", "engine", false,
+         "prefixed_parameter_engine."}}});
+  auto parsed = multi_decoder_config::from_yaml_str(R"(
+decoders:
+  - id: 0
+    type: prefixed_parameter_decoder
+    block_size: 2
+    syndrome_size: 1
+    H_sparse: [0, -1]
+    O_sparse: [0, -1]
+    D_sparse: [0, -1]
+    decoder_custom_args:
+      engine: demo
+      engine_params: {passes: 3}
+)");
+  const auto &arguments = parsed.decoders.front().decoder_custom_args.map();
+  EXPECT_EQ(arguments.get<std::string>("engine"), "demo");
+  EXPECT_EQ(arguments.get<cudaqx::heterogeneous_map>("engine_params")
+                .get<int>("passes"),
+            3);
+  const auto emitted = parsed.to_yaml_str();
+  EXPECT_EQ(multi_decoder_config::from_yaml_str(emitted), parsed);
+}
+
 TEST(DecoderSchemaTest, CustomArgsForUnregisteredTypeThrow) {
   const std::string yaml = R"(
 decoders:

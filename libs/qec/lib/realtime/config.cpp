@@ -24,6 +24,7 @@
 #include <array>
 #include <cassert>
 #include <charconv>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -31,6 +32,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace cudaq::qec::decoding::config {
@@ -545,15 +547,16 @@ static void validate_task_graph(const decoder_config &config) {
 
 namespace {
 
-// LLVM's default double emitter rounds to six significant digits. Phase priors
-// are model data and must survive export without changing their probabilities.
-struct phase_probability {
+// LLVM's default double emitter rounds to six significant digits. Model priors
+// and schema-typed decoder parameters must both survive export unchanged.
+struct exact_yaml_double {
   double value = 0;
 };
 
 } // namespace
 
-LLVM_YAML_IS_FLOW_SEQUENCE_VECTOR(phase_probability)
+LLVM_YAML_IS_FLOW_SEQUENCE_VECTOR(exact_yaml_double)
+LLVM_YAML_IS_SEQUENCE_VECTOR(std::vector<exact_yaml_double>)
 LLVM_YAML_IS_SEQUENCE_VECTOR(std::vector<double>)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::decoding::config::decoder_config)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::phase_connection)
@@ -572,9 +575,15 @@ LLVM_YAML_IS_SEQUENCE_VECTOR(
 namespace llvm::yaml {
 
 template <>
-struct ScalarTraits<phase_probability> {
-  static void output(const phase_probability &probability, void *,
+struct ScalarTraits<exact_yaml_double> {
+  static void output(const exact_yaml_double &probability, void *context,
                      raw_ostream &stream) {
+    // Preserve LLVM's established spelling for nonfinite parameter values.
+    // Phase-prior validation rejects them independently.
+    if (!std::isfinite(probability.value)) {
+      ScalarTraits<double>::output(probability.value, context, stream);
+      return;
+    }
     std::array<char, 64> buffer;
     const auto result = std::to_chars(
         buffer.data(), buffer.data() + buffer.size(), probability.value);
@@ -583,7 +592,7 @@ struct ScalarTraits<phase_probability> {
     stream << StringRef(buffer.data(), result.ptr - buffer.data());
   }
   static StringRef input(StringRef text, void *context,
-                         phase_probability &value) {
+                         exact_yaml_double &value) {
     return ScalarTraits<double>::input(text, context, value.value);
   }
   static QuotingType mustQuote(StringRef) { return QuotingType::None; }
@@ -611,8 +620,29 @@ void input_schema_scalar(IO &io, const std::string &key,
 template <typename T>
 void output_schema_scalar(IO &io, const std::string &key,
                           const cudaqx::heterogeneous_map &map) {
-  T value = map.get<T>(key);
-  io.mapRequired(key.c_str(), value);
+  auto value = map.get<T>(key);
+  if constexpr (std::is_same_v<T, double>) {
+    exact_yaml_double exact{value};
+    io.mapRequired(key.c_str(), exact);
+  } else if constexpr (std::is_same_v<T, std::vector<double>>) {
+    std::vector<exact_yaml_double> exact;
+    exact.reserve(value.size());
+    for (const auto element : value)
+      exact.push_back({element});
+    io.mapRequired(key.c_str(), exact);
+  } else if constexpr (std::is_same_v<T, std::vector<std::vector<double>>>) {
+    std::vector<std::vector<exact_yaml_double>> exact;
+    exact.reserve(value.size());
+    for (const auto &row : value) {
+      auto &converted = exact.emplace_back();
+      converted.reserve(row.size());
+      for (const auto element : row)
+        converted.push_back({element});
+    }
+    io.mapRequired(key.c_str(), exact);
+  } else {
+    io.mapRequired(key.c_str(), value);
+  }
 }
 
 } // namespace
@@ -688,7 +718,7 @@ struct CustomMappingTraits<schema_binding> {
                                  spec->discriminator + "' is not set.");
       const auto *nested_schema =
           cudaq::qec::decoding::config::find_decoder_schema(
-              discriminator_value);
+              spec->discriminator_prefix + discriminator_value);
       if (!nested_schema)
         throw std::runtime_error(
             "'" + key_str + "' does not support " + spec->discriminator + " '" +
@@ -773,7 +803,7 @@ struct CustomMappingTraits<schema_binding> {
             discriminator_value.empty()
                 ? nullptr
                 : cudaq::qec::decoding::config::find_decoder_schema(
-                      discriminator_value);
+                      spec.discriminator_prefix + discriminator_value);
         if (!nested_schema)
           throw std::runtime_error("'" + spec.key +
                                    "' is present but no parameter schema is "
@@ -838,7 +868,7 @@ struct MappingTraits<cudaq::qec::dem_chunk_spec> {
     io.mapOptional("H_sparse", spec.H_sparse);
     io.mapOptional("seam_specs", spec.seam_specs);
     io.mapOptional("O_sparse", spec.O_sparse, std::vector<std::int64_t>{});
-    std::vector<phase_probability> rates;
+    std::vector<exact_yaml_double> rates;
     if (io.outputting()) {
       rates.reserve(spec.error_rates.size());
       for (const auto value : spec.error_rates)
