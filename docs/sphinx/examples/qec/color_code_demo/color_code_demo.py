@@ -11,6 +11,8 @@
 # predecoder to ONNX, and replays one schedule of sampled shots through each
 # decoder and session: inproc (decoder in the emulator process) and server (a
 # decoding_server over UDP). It then draws the figure from the results.
+# With --prepare-only, it instead exports portable server inputs for Docker
+# without a CUDA-Q QEC SDK. Add --baseline-only to skip model access and export.
 
 # [Begin Documentation]
 """Ising color-code decoder: LER per round vs. runtime on the playback emulator.
@@ -19,9 +21,6 @@ Usage: python3 color_code_demo.py [options]
 """
 import argparse, json, os, re, shutil, subprocess, sys, warnings
 import numpy as np
-import cudaq_qec as qec
-
-pb = qec.playback
 
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument("--deps",
@@ -37,6 +36,14 @@ parser.add_argument("--shots",
                     default=100000,
                     help="shots per distance")
 parser.add_argument("--seed", type=int, default=1234)
+parser.add_argument("--prepare-only",
+                    action="store_true",
+                    help="write DEM, ONNX, schedules, and server YAML files "
+                    "without loading a decoder or starting a server")
+parser.add_argument("--baseline-only",
+                    action="store_true",
+                    help="with --prepare-only, write only the Chromobius "
+                    "inputs; do not download weights or export ONNX")
 parser.add_argument("--decoding-server",
                     default=shutil.which("decoding_server"),
                     help="decoding_server binary (default: from PATH)")
@@ -47,8 +54,13 @@ parser.add_argument("--server-timeout",
 args = parser.parse_args()
 
 distances = [int(d) for d in args.distances.split(",")]
-if not args.decoding_server:
+if args.baseline_only and not args.prepare_only:
+    parser.error("--baseline-only requires --prepare-only")
+if not args.prepare_only and not args.decoding_server:
     parser.error("decoding_server not found; pass --decoding-server")
+if not args.prepare_only:
+    import cudaq_qec as qec
+    pb = qec.playback
 
 # Ising-Decoding source and model weights
 ISING_REPOSITORY = "https://github.com/NVIDIA/Ising-Decoding.git"
@@ -75,8 +87,16 @@ if not os.path.isdir(ising):
     ):
         subprocess.run(command, check=True)
     os.rename(partial, ising)
+if (subprocess.check_output(["git", "-C", ising, "rev-parse", "HEAD"],
+                            text=True).strip() != ISING_COMMIT or
+        subprocess.run([
+            "git", "-C", ising, "diff", "--quiet", "HEAD", "--", "code"
+        ]).returncode):
+    parser.error("the Ising-Decoding checkout in --deps must be at " +
+                 ISING_COMMIT + " with no changes in code; choose a new "
+                 "--deps directory")
 weights = args.weights or os.path.join(args.deps, HF_FILENAME)
-if not os.path.exists(weights):
+if not args.baseline_only and not os.path.exists(weights):
     if not shutil.which("hf"):
         sys.exit("the hf CLI is needed to download the weights; install "
                  "huggingface_hub, or pass --weights")
@@ -92,6 +112,8 @@ from qec.color_code.reference_superdense_noise import build_color_memory_circuit
 
 # Shots in flight: shot i starts once shot i - DEPTH has its correction.
 DEPTH = 4
+# One microsecond; zero ticks are rejected by the updated playback API.
+PLAYBACK_TICK_NS = 1000
 MEASURE_OPS = {"M", "MZ", "MX", "MY", "MR", "MRX", "MRY", "MRZ"}
 
 
@@ -186,14 +208,21 @@ def export_onnx(d, model, support, onnx_path):
 def decoder_config(name, d, m2d, engine_args=None):
     """A one-decoder config. The decoder reads its matrices from the DEM file;
     D_sparse maps the raw measurements to detectors."""
-    dc = qec.decoder_config()
-    dc.type = name
-    dc.D_sparse = qec.d_sparse(m2d)
-    dc.stim_dem_path = "dem_d%d.txt" % d
+    d_sparse = []
+    for row in m2d:
+        d_sparse.extend(row)
+        d_sparse.append(
+            -1)  # Each detector row ends with -1, as in qec.d_sparse.
+    dc = {
+        "id": 0,
+        "type": name,
+        "D_sparse": d_sparse,
+        "stim_dem_path": "dem_d%d.txt" % d
+    }
     if name == "trt_decoder":
         # The predecoder returns its observable flips and residual detectors;
         # Chromobius decodes the residual.
-        dc.decoder_custom_args = {
+        dc["decoder_custom_args"] = {
             "batch_size": 1,
             "engine_output_format": "observables_and_residual_detectors",
             "global_decoder": "chromobius",
@@ -201,9 +230,8 @@ def decoder_config(name, d, m2d, engine_args=None):
                 "engine_load_path": "engine_d%d.trt" % d
             })
         }
-    mdc = qec.multi_decoder_config()
-    mdc.decoders = [dc]
-    return mdc
+    # JSON is valid YAML and needs no CUDA-Q QEC SDK or YAML package to write.
+    return json.dumps({"decoders": [dc]}, indent=2) + "\n"
 
 
 def write_schedule(circuit, shots, sched_path, chunk=10000):
@@ -244,27 +272,44 @@ def per_round(ler, rounds):
 
 def run_checked(schedule, shots, **session):
     """Runs `schedule`; fails unless every shot returned its correction."""
-    result = pb.run(schedule, tick_ns=0, sources={}, **session)
-    gc = [r for r in result.records if r.op == pb.operation.get_corrections]
-    bad = [
-        str(r.status)
-        for r in gc
-        if str(r.status) != "OK" or r.correction_count == 0
-    ]
+    # A positive tick is accepted by both versions of the emulator.
+    result = pb.run(schedule, tick_ns=PLAYBACK_TICK_NS, sources={}, **session)
+    records = result.records
+    # Borrow the records directly: exporting the full CSV would duplicate
+    # large schedules and allocate a second dictionary for every event.
+    if records and isinstance(records[0], dict):
+        gc = [r for r in records if r["op"] == "get_corrections"]
+        bad = [
+            str(r["status"]) for r in gc if r["status"] != 0 or
+            not r["read_completed"] or not r["correction_bits"]
+        ]
+    else:
+        gc = [r for r in records if r.op == pb.operation.get_corrections]
+        bad = [
+            str(r.status) for r in gc if str(r.status) != "OK" or
+            not r.read_completed or r.correction_count == 0
+        ]
     if len(gc) != shots or bad:
         raise RuntimeError("%d/%d corrections returned, failures: %s" %
                            (len(gc), shots, sorted(set(bad))))
     return result, gc
 
 
+def record_value(record, field):
+    """Read timing/result fields from either playback record API."""
+    return record[field] if isinstance(record, dict) else getattr(record, field)
+
+
 def run_session(name, mdc, schedule, shots):
     """Runs `schedule` with requests routed through session `name`: inproc,
     or a decoding_server for `mdc` over UDP, stopped once the run ends."""
     if name == "inproc":
-        return run_checked(schedule, shots, decoders=mdc)
+        return run_checked(schedule,
+                           shots,
+                           decoders=qec.multi_decoder_config.from_yaml_str(mdc))
     cfg_path = "server_config.yaml"
     with open(cfg_path, "w") as f:
-        f.write(mdc.to_yaml_str())
+        f.write(mdc)
     proc = subprocess.Popen([
         args.decoding_server, "--config=" + cfg_path, "--transport=udp",
         "--port=0",
@@ -293,18 +338,37 @@ def run_session(name, mdc, schedule, shots):
 
 
 # Build and run the experiments
-from export.safetensors_utils import load_safetensors
+if not args.baseline_only:
+    from export.safetensors_utils import load_safetensors
 
-model = load_safetensors(weights, device="cpu")[0].float().eval()
+    model = load_safetensors(weights, device="cpu")[0].float().eval()
 results = {}
 for d in distances:
     circuit = color_circuit(d)
     m2d, support = measurement_maps(circuit, d)
     with open("dem_d%d.txt" % d, "w") as f:
         f.write(str(circuit.detector_error_model()))
-    export_onnx(d, model, support, "pre_d%d.onnx" % d)
+    if not args.baseline_only:
+        export_onnx(d, model, support, "pre_d%d.onnx" % d)
     print("d=%-2d %d detectors" % (d, circuit.num_detectors), flush=True)
-    write_schedule(circuit, args.shots, "schedule.txt")
+    schedule_path = "schedule_d%d.txt" % d if args.prepare_only else "schedule.txt"
+    write_schedule(circuit, args.shots, schedule_path)
+    if args.prepare_only:
+        # Relative paths let the entire directory move into a container.
+        # Build the TensorRT engine on the server's GPU, not the SDK host.
+        decoders = ("chromobius",) if args.baseline_only else ("chromobius",
+                                                               "trt_decoder")
+        for dec in decoders:
+            engine_args = {
+                "onnx_load_path": "pre_d%d.onnx" % d,
+                "engine_save_path": "engine_d%d.trt" % d
+            } if dec == "trt_decoder" else None
+            config_path = "config_%s_d%d.yaml" % (dec, d)
+            with open(config_path, "w") as f:
+                f.write(decoder_config(dec, d, m2d, engine_args))
+            print("wrote", config_path, flush=True)
+        print("wrote", schedule_path, flush=True)
+        continue
     schedule = open("schedule.txt").read()
     for dec in ("chromobius", "trt_decoder"):
         for sess in ("inproc", "server"):
@@ -319,9 +383,9 @@ for d in distances:
                                      schedule, args.shots)
             # Runtime per round: the time until the last reply, divided by
             # the rounds decoded.
-            runtime = max(
-                r.return_ns for r in result.records) / 1e3 / args.shots / d
-            errors = sum(r.correction_mismatch for r in gc)
+            runtime = max(record_value(r, "return_ns")
+                          for r in result.records) / 1e3 / args.shots / d
+            errors = sum(record_value(r, "correction_mismatch") for r in gc)
             # Per-round rate from the d-round rate, with a binomial error
             # bar.
             total = min(max(errors / args.shots, 0.5 / args.shots), 1 - 1e-12)
@@ -340,6 +404,9 @@ for d in distances:
     json.dump(dict(p=args.p, results=results),
               open("results.json", "w"),
               indent=1)
+
+if args.prepare_only:
+    sys.exit(0)
 
 # Plot the results
 import matplotlib

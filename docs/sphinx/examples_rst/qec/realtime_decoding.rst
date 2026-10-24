@@ -5,6 +5,9 @@ Realtime decoding runs CUDA-Q QEC decoders concurrently with quantum execution, 
 
 The examples below cover realtime decoding end to end — start with Getting Started, then explore the specialized predecoding and decoding workloads:
 
+For deploying the packaged server and running playback or CUDA-Q clients
+against it, see :doc:`decoding_server`.
+
 .. toctree::
    :maxdepth: 2
 
