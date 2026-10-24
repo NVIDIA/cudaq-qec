@@ -65,3 +65,26 @@ install(TARGETS cudaq-qec-realtime-decoding-cudaq-stubs
   COMPONENT qec-lib
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
+# Fail the build if the Quantinuum library needs a CUDA-Q symbol the stubs do
+# not export. Do not link libcudaq. --no-as-needed keeps both libraries in
+# DT_NEEDED; --no-allow-shlib-undefined reports a missing stub. Not installed.
+# ctest runs it so library startup executes the stubs it uses.
+add_executable(cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck
+  quantinuum_stubs_linkcheck.cpp)
+target_link_libraries(cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck
+  PRIVATE
+    "-Wl,--no-as-needed"
+    cudaq-qec-realtime-decoding-quantinuum
+    cudaq-qec-realtime-decoding-cudaq-stubs
+    "-Wl,--as-needed")
+target_link_options(cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck
+  PRIVATE
+    "LINKER:--no-allow-shlib-undefined")
+set_target_properties(
+  cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck PROPERTIES
+    BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+add_test(NAME cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck
+  COMMAND cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck)
+set_tests_properties(cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck
+  PROPERTIES LABELS "qec")
+
