@@ -512,6 +512,30 @@ std::vector<std::int64_t> d_sparse(const cudaq::M2DSparseMatrix &m2d) {
   return out;
 }
 
+// Rows keep their order and their indices' order; only the offset changes.
+std::vector<std::int64_t> m2o_sparse(const cudaq::M2OSparseMatrix &m2o,
+                                     std::size_t first_measurement) {
+  std::vector<std::int64_t> out;
+  if (first_measurement > m2o.num_measurements)
+    throw std::invalid_argument(
+        "m2o_sparse: first_measurement " + std::to_string(first_measurement) +
+        " is past the " + std::to_string(m2o.num_measurements) +
+        " measurements of the shot");
+  for (const auto &row : m2o.rows) {
+    for (const auto meas : row) {
+      if (meas < first_measurement || meas >= m2o.num_measurements)
+        throw std::invalid_argument("m2o_sparse: measurement " +
+                                    std::to_string(meas) +
+                                    " lies outside the final phase [" +
+                                    std::to_string(first_measurement) + ", " +
+                                    std::to_string(m2o.num_measurements) + ")");
+      out.push_back(static_cast<std::int64_t>(meas - first_measurement));
+    }
+    out.push_back(-1);
+  } // end - for(row)
+  return out;
+} // end - m2o_sparse()
+
 /// Bridge from CUDA-Q circuit analysis to the QEC-owned sparse matrix a
 /// decoder is constructed from.
 sparse_binary_matrix m2d_to_sparse(const cudaq::M2DSparseMatrix &m2d) {
