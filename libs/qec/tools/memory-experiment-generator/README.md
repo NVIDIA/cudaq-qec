@@ -133,11 +133,13 @@ before preparation.
 The same configuration structure is used for each decoder; its name and
 schema-typed parameters differ. Configuration emission does not qualify a
 decoder's fault-output capability, A/B accuracy or parallel execution.
-The current checks do not construct inner decoders against the actual A/B
-window models. That validation must use the framework's authoritative pattern
-lowering when available, requesting fault-column outputs and checking the
-concrete model and parameters. A tiny or whole-shot model is not a substitute
-for those windows; the generator does not maintain a backend-name whitelist.
+The CLI does not construct inner decoders against the actual A/B window models.
+That validation must use the framework's authoritative pattern lowering when
+available, requesting fault-column outputs and checking the concrete model and
+parameters. Component tests use the framework's window construction and decode
+helpers; they do not execute the generated pattern. A tiny or whole-shot model
+is not a substitute for those windows; the generator does not maintain a
+backend-name whitelist.
 When a worker count is supplied, every independent patch receives that same
 per-graph count. The total is checked for overflow before model preparation and
 reported explicitly; no allocation across graphs is invented. Omitting the
@@ -256,10 +258,18 @@ removed output/replay/bundle flags. Per-graph worker tests check exact policy
 round trips, independent patches, unchanged defaults and checked worker totals.
 PyMatching tests check explicit merge-policy preservation and, when the public
 window model is available, fault estimates and committed effects on the
-X/Z reference windows. They use the framework's existing model and commit
-helpers, not a tool-owned scheduler.
+X/Z reference windows. With the sparse window implementation, they exercise
+the framework's preallocated decode workspace and canonical solve/commit
+operations. They use the framework's existing models and helpers, not a
+tool-owned scheduler.
 Base-framework tests check explicit unavailability; positive configuration tests
 require the public pattern.
+
+Windowed-graph wiring validation applies to concrete `ingest` and
+`decode_window` nodes. It cannot validate the generated `parallel_window`
+pattern's internal wiring until the framework expands that pattern. The
+framework also owns the resulting XOR node and its input count; no additional
+generator argument is needed.
 
 Actual graph construction, same-plan serial/parallel correctness, seam faults,
 sustained overlap, sampled logical accuracy, installed replay and

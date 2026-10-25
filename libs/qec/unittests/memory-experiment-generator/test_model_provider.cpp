@@ -131,6 +131,132 @@ TEST(MemoryExperimentProvider, BoundedModelMatchesCompleteXMemoryCircuit) {
   compare_with_full_circuit(3, memory_basis::x);
 }
 
+#if __has_include("../../lib/decoding_task/decoding_task_commitment.h") &&     \
+                  __has_include("../task_graph_test_fixtures.h")
+template <typename Window>
+void check_pymatching_window(const Window &window, const std::string &policy) {
+  const auto parity = [](const auto &rows,
+                         const std::vector<std::uint8_t> &input) {
+    std::vector<std::uint8_t> result(rows.size(), 0);
+    for (std::size_t row = 0; row < result.size(); ++row)
+      for (const auto column : rows[row])
+        result[row] ^= input[column];
+    return result;
+  };
+  const auto exercise = [&](const sparse_binary_matrix &h,
+                            const sparse_binary_matrix &o, auto &&solve) {
+    const auto rows = h.to_nested_csr();
+    const auto logicals = o.to_nested_csr();
+    const auto columns = h.to_nested_csc();
+    ASSERT_GT(columns.size(), 1);
+    ASSERT_EQ(columns.size(), window.num_decoder_columns());
+    ASSERT_GE(o.num_cols(), columns.size());
+    const auto check = [&](const std::vector<std::uint8_t> &detectors) {
+      const auto &solution = solve(detectors);
+      ASSERT_TRUE(solution.converged);
+      if constexpr (requires { solution.satisfied; })
+        EXPECT_TRUE(solution.satisfied);
+      ASSERT_EQ(solution.estimate.size(), o.num_cols());
+      const auto &estimate = solution.estimate;
+      const std::vector<std::uint8_t> error_frame(
+          estimate.begin(), estimate.begin() + columns.size());
+      EXPECT_EQ(parity(rows, error_frame), detectors);
+      const auto &committed = solution.outputs;
+      auto expected = estimate;
+      for (std::size_t column = 0; column < expected.size(); ++column)
+        if (column < window.commit_columns.begin ||
+            column >= window.commit_columns.end)
+          expected[column] = 0;
+      EXPECT_EQ(committed.committed, expected);
+      EXPECT_EQ(committed.frame, parity(logicals, expected));
+      const std::vector<std::uint8_t> committed_frame(
+          expected.begin(), expected.begin() + columns.size());
+      const auto delta = parity(rows, committed_frame);
+      ASSERT_EQ(committed.sends.size(), window.sends.size());
+      for (std::size_t send = 0; send < window.sends.size(); ++send) {
+        std::vector<std::uint8_t> values;
+        for (const auto row : window.sends[send].rows)
+          values.push_back(window.sends[send].mode == send_mode::residual
+                               ? detectors[row] ^ delta[row]
+                               : delta[row]);
+        EXPECT_EQ(committed.sends[send], values);
+      }
+    };
+    std::vector<std::uint8_t> detectors(h.num_rows(), 0);
+    check(detectors);
+    for (const auto &column : columns) {
+      std::fill(detectors.begin(), detectors.end(), 0);
+      for (const auto row : column)
+        detectors[row] ^= 1;
+      check(detectors);
+    }
+    std::fill(detectors.begin(), detectors.end(), 0);
+    for (const auto column : {std::size_t{0}, columns.size() - 1})
+      for (const auto row : columns[column])
+        detectors[row] ^= 1;
+    check(detectors);
+  };
+  const cudaqx::heterogeneous_map parameters{{"merge_strategy", policy}};
+  // Exercise the canonical sparse workload when the framework provides it;
+  // keep the same assertions on the earlier experimental window API.
+  if constexpr (requires {
+                  window.model.h;
+                  make_window_workspace(window);
+                }) {
+    auto matching = make_window_decoder(window, "pymatching", parameters);
+    ASSERT_NE(matching, nullptr);
+    ASSERT_EQ(matching->get_result_type(), decode_result_type::errors);
+    auto workspace = make_window_workspace(window);
+    exercise(window.model.h, window.model.o,
+             [&](const auto &detectors) -> const auto & {
+               solve_window(window, matching.get(), detectors, workspace);
+               return workspace.solution;
+             });
+  } else {
+    const auto forms = kernel_forms(window);
+    ASSERT_GE(forms.priors.size(), forms.h.num_cols());
+    const std::vector<double> priors(forms.priors.begin(),
+                                     forms.priors.begin() + forms.h.num_cols());
+    auto matching = decoder::get(
+        "pymatching", decoder_init(forms.h, std::nullopt, priors),
+        decoder_output_request{decode_result_type::errors}, parameters);
+    ASSERT_EQ(matching->get_result_type(), decode_result_type::errors);
+    struct solution_type {
+      bool converged = false;
+      std::vector<std::uint8_t> estimate;
+      window_outputs outputs;
+    };
+    exercise(
+        forms.h, sparse_binary_matrix(window.model.observables_flips_matrix),
+        [&](const auto &detectors) {
+          const std::vector<float_t> syndrome(detectors.begin(),
+                                              detectors.end());
+          const auto decoded = matching->decode(syndrome);
+          solution_type solution;
+          solution.converged = decoded.converged;
+          EXPECT_EQ(decoded.result.size(), forms.h.num_cols());
+          if (decoded.result.size() != forms.h.num_cols())
+            return solution;
+          solution.estimate.assign(window.model.num_error_mechanisms(), 0);
+          for (std::size_t column = 0; column < decoded.result.size();
+               ++column) {
+            EXPECT_TRUE(std::isfinite(decoded.result[column]));
+            EXPECT_TRUE(decoded.result[column] == 0 ||
+                        decoded.result[column] == 1);
+            if (!std::isfinite(decoded.result[column]) ||
+                (decoded.result[column] != 0 && decoded.result[column] != 1))
+              return solution;
+            solution.estimate[column] =
+                static_cast<std::uint8_t>(decoded.result[column]);
+          }
+          solution.outputs =
+              commit_window(window, detectors, solution.estimate);
+          return solution;
+        });
+  }
+}
+#endif
+
 TEST(MemoryExperimentProvider, PyMatchingFaultFramesCommitReferenceWindows) {
 #if __has_include("../../lib/decoding_task/decoding_task_commitment.h") &&     \
                   __has_include("../task_graph_test_fixtures.h")
@@ -140,14 +266,6 @@ TEST(MemoryExperimentProvider, PyMatchingFaultFramesCommitReferenceWindows) {
   // and commit contracts, not logical accuracy or parallel runtime execution.
   constexpr std::uint64_t extraction_rounds = 26;
   constexpr std::size_t detector_rounds = extraction_rounds + 1;
-  const auto parity = [](const auto &rows,
-                         const std::vector<std::uint8_t> &input) {
-    std::vector<std::uint8_t> result(rows.size(), 0);
-    for (std::size_t row = 0; row < result.size(); ++row)
-      for (const auto column : rows[row])
-        result[row] ^= input[column];
-    return result;
-  };
   const auto requests = layered(3, 3, 9);
   const std::vector<window_layer> layers{{"A", "a", requests.a},
                                          {"B", "b", requests.b}};
@@ -169,78 +287,9 @@ TEST(MemoryExperimentProvider, PyMatchingFaultFramesCommitReferenceWindows) {
       const auto &request = entry.node == "A" ? requests.a : requests.b;
       const auto window =
           window_from_dem_chunks(context, request, entry.k, detector_rounds);
-      const auto forms = kernel_forms(window);
-      const auto h = forms.h.to_nested_csr();
-      const auto full_h =
-          sparse_binary_matrix(window.model.detector_error_matrix)
-              .to_nested_csr();
-      const auto o = sparse_binary_matrix(window.model.observables_flips_matrix)
-                         .to_nested_csr();
-      const auto columns = forms.h.to_nested_csc();
-      ASSERT_GT(columns.size(), 1);
-      ASSERT_EQ(columns.size(), window.num_decoder_columns());
-      ASSERT_GE(window.model.num_error_mechanisms(), columns.size());
-      ASSERT_GE(forms.priors.size(), columns.size());
-      const std::vector<double> priors(forms.priors.begin(),
-                                       forms.priors.begin() + columns.size());
       for (const std::string policy : {"smallest_weight", "independent"}) {
         SCOPED_TRACE(policy);
-        auto matching = decoder::get(
-            "pymatching", decoder_init(forms.h, std::nullopt, priors),
-            decoder_output_request{decode_result_type::errors},
-            cudaqx::heterogeneous_map{{"merge_strategy", policy}});
-        ASSERT_EQ(matching->get_result_type(), decode_result_type::errors);
-        const auto check = [&](const std::vector<std::uint8_t> &detectors) {
-          const std::vector<float_t> syndrome(detectors.begin(),
-                                              detectors.end());
-          const auto decoded = matching->decode(syndrome);
-          ASSERT_TRUE(decoded.converged);
-          ASSERT_EQ(decoded.result.size(), columns.size());
-          std::vector<std::uint8_t> estimate(
-              window.model.num_error_mechanisms(), 0);
-          for (std::size_t column = 0; column < decoded.result.size();
-               ++column) {
-            ASSERT_TRUE(std::isfinite(decoded.result[column]));
-            ASSERT_TRUE(decoded.result[column] == 0 ||
-                        decoded.result[column] == 1);
-            estimate[column] =
-                static_cast<std::uint8_t>(decoded.result[column]);
-          }
-          const std::vector<std::uint8_t> error_frame(
-              estimate.begin(), estimate.begin() + columns.size());
-          EXPECT_EQ(parity(h, error_frame), detectors);
-          const auto committed = commit_window(window, detectors, estimate);
-          auto expected = estimate;
-          for (std::size_t column = 0; column < expected.size(); ++column)
-            if (column < window.commit_columns.begin ||
-                column >= window.commit_columns.end)
-              expected[column] = 0;
-          EXPECT_EQ(committed.committed, expected);
-          EXPECT_EQ(committed.frame, parity(o, expected));
-          const auto delta = parity(full_h, expected);
-          ASSERT_EQ(committed.sends.size(), window.sends.size());
-          for (std::size_t send = 0; send < window.sends.size(); ++send) {
-            std::vector<std::uint8_t> values;
-            for (const auto row : window.sends[send].rows)
-              values.push_back(window.sends[send].mode == send_mode::residual
-                                   ? detectors[row] ^ delta[row]
-                                   : delta[row]);
-            EXPECT_EQ(committed.sends[send], values);
-          }
-        };
-        std::vector<std::uint8_t> detectors(forms.h.num_rows(), 0);
-        check(detectors);
-        for (const auto &column : columns) {
-          std::fill(detectors.begin(), detectors.end(), 0);
-          for (const auto row : column)
-            detectors[row] ^= 1;
-          check(detectors);
-        }
-        std::fill(detectors.begin(), detectors.end(), 0);
-        for (const auto column : {std::size_t{0}, columns.size() - 1})
-          for (const auto row : columns[column])
-            detectors[row] ^= 1;
-        check(detectors);
+        check_pymatching_window(window, policy);
       }
     }
   }
