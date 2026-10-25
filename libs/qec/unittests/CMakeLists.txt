@@ -112,6 +112,12 @@ target_link_libraries(test_extended_dem PRIVATE GTest::gtest_main
 add_dependencies(CUDAQXQECUnitTests test_extended_dem)
 gtest_discover_tests(test_extended_dem)
 
+add_executable(test_decoding_window test_decoding_window.cpp)
+target_link_libraries(test_decoding_window PRIVATE GTest::gtest_main
+                                           cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_decoding_window)
+gtest_discover_tests(test_decoding_window)
+
 add_executable(test_decoding_task_graph test_decoding_task_graph.cpp)
 target_link_libraries(test_decoding_task_graph PRIVATE GTest::gtest_main
                                               cudaq-qec
