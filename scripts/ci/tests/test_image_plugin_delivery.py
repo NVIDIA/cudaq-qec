@@ -82,7 +82,8 @@ class ImagePluginDeliveryTest(unittest.TestCase):
                               capture_output=True,
                               text=True)
 
-    def test_ising_profile_requires_binary_provider_and_kinds(self):
+    def test_ising_profile_requires_ordinary_provider_without_private_kinds(
+            self):
         result = self.run_selection(DELIVERY_PROFILE="ising")
         self.assertNotEqual(0, result.returncode)
         self.supply_archive()
@@ -90,10 +91,15 @@ class ImagePluginDeliveryTest(unittest.TestCase):
                                     PLUGIN_FRAMEWORK_COMMIT=PRODUCER_COMMIT)
         self.assertEqual(0, result.returncode, result.stderr)
         values = self.envfile.read_text()
-        self.assertIn(
-            "QEC_REQUIRED_EXTERNAL_PLUGINS=cudaq-qec-ising-task-graph-plugin\n",
-            values)
-        self.assertIn("QEC_REQUIRED_TASK_GRAPH_KINDS=ising\n", values)
+        self.assertIn("QEC_REQUIRED_EXTERNAL_PLUGINS=cudaq-qec-ising-decoder\n",
+                      values)
+        self.assertIn("QEC_REQUIRED_TASK_GRAPH_KINDS=\n", values)
+        result = self.run_selection(DELIVERY_PROFILE="ising",
+                                    PLUGIN_FRAMEWORK_COMMIT=PRODUCER_COMMIT,
+                                    REQUIRED_TASK_GRAPH_KINDS="fixture_kind")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("QEC_REQUIRED_TASK_GRAPH_KINDS=fixture_kind\n",
+                      self.envfile.read_text())
 
     def test_runtime_data_optional_for_generic_required_for_ising(self):
         self.assertEqual(0, self.run_asset_selection().returncode)
@@ -242,7 +248,7 @@ class ImagePluginDeliveryTest(unittest.TestCase):
     def image_stages(self):
         dockerfile = (REPOSITORY /
                       "docker/release/Dockerfile.decoding-server").read_text()
-        base_start = dockerfile.index("FROM nvidia/cuda:")
+        base_start = dockerfile.index("FROM nvcr.io/nvidia/cuda:")
         validation_start = dockerfile.index("FROM runtime-base AS validation")
         runtime_start = dockerfile.index("FROM runtime-base AS runtime\n")
         return (dockerfile[:base_start],
@@ -252,7 +258,7 @@ class ImagePluginDeliveryTest(unittest.TestCase):
 
     def test_customer_filesystem_has_no_validation_tools_or_reports(self):
         builder, base, _, runtime = self.image_stages()
-        self.assertIn("COPY --from=builder /opt/nvidia/cudaqx", base)
+        self.assertIn("COPY --from=builder /opt/nvidia/cudaq-qec", base)
         self.assertIn("-o /tmp/qec-plugin-registration-probe", builder)
         self.assertNotIn("bin/qec-plugin-registration-probe", builder)
         for value in ("python3-minimal", "patchelf", "installed_plugin_smoke",
@@ -270,7 +276,7 @@ class ImagePluginDeliveryTest(unittest.TestCase):
         self.assertIn("COPY --from=builder /tmp/qec-plugin-registration-probe",
                       validation)
         self.assertIn("CUDA_VISIBLE_DEVICES=\"\" python3", validation)
-        self.assertIn("--prefix=/opt/nvidia/cudaqx", validation)
+        self.assertIn("--prefix=/opt/nvidia/cudaq-qec", validation)
         self.assertIn("--require-provider=$provider", validation)
         self.assertIn("--require-node-kind=$kind", validation)
         self.assertIn("--output=/tmp/qec-plugin-validation/results", validation)
@@ -281,8 +287,11 @@ class ImagePluginDeliveryTest(unittest.TestCase):
         builder, base, validation, _ = self.image_stages()
         self.assertIn('ARG QEC_DELIVERY_PROFILE=generic', builder)
         self.assertIn('test "${CUDA_VERSION%%.*}" = 13', builder)
-        self.assertIn('Ising delivery requires its binary provider', builder)
-        self.assertIn('Ising delivery requires kind $kind', builder)
+        self.assertIn('Ising delivery requires its ordinary decoder provider',
+                      builder)
+        self.assertIn('--require-provider=cudaq-qec-ising-decoder', builder)
+        self.assertNotIn('Ising delivery requires kind', builder)
+        self.assertNotIn('--framework-abi-version', builder)
         self.assertIn('python3 scripts/ci/runtime_assets.py import', builder)
         self.assertIn(
             '--provider-commit="$QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT"',
@@ -290,6 +299,10 @@ class ImagePluginDeliveryTest(unittest.TestCase):
         self.assertIn('--require-asset="$QEC_RUNTIME_ASSET_ID"', builder)
         self.assertIn('dpkg-query -W', builder)
         self.assertIn('runtime_assets.py verify-installed', validation)
+        self.assertIn('--require-decoder=ising', validation)
+        self.assertIn('--require-native-streaming-decoder=ising', validation)
+        self.assertIn('--require-provider=cudaq-qec-ising-decoder', validation)
+        self.assertNotIn('--framework-abi-version', validation)
         self.assertIn('dpkg-query -W', validation)
         self.assertIn('share/cudaq-qec/runtime-assets/$QEC_RUNTIME_ASSET_ID',
                       validation)
@@ -339,14 +352,12 @@ class ImagePluginDeliveryTest(unittest.TestCase):
 
         # Valid required lists must not mask absent archives through POSIX
         # `set -e` exceptions for intermediate AND-list commands.
-        required = dict(
-            environment,
-            QEC_DELIVERY_PROFILE="ising",
-            QEC_REQUIRED_EXTERNAL_PLUGINS="cudaq-qec-ising-task-graph-plugin",
-            QEC_REQUIRED_TASK_GRAPH_KINDS="ising",
-            QEC_EXTERNAL_PLUGIN_ARCHIVE="plugin.tar.gz",
-            QEC_RUNTIME_ASSET_ARCHIVE="data.tar.gz",
-            QEC_RUNTIME_ASSET_ID="fixture")
+        required = dict(environment,
+                        QEC_DELIVERY_PROFILE="ising",
+                        QEC_REQUIRED_EXTERNAL_PLUGINS="cudaq-qec-ising-decoder",
+                        QEC_EXTERNAL_PLUGIN_ARCHIVE="plugin.tar.gz",
+                        QEC_RUNTIME_ASSET_ARCHIVE="data.tar.gz",
+                        QEC_RUNTIME_ASSET_ID="fixture")
         for missing in ("QEC_EXTERNAL_PLUGIN_ARCHIVE",
                         "QEC_RUNTIME_ASSET_ARCHIVE", "QEC_RUNTIME_ASSET_ID"):
             with self.subTest(missing=missing):
@@ -357,6 +368,21 @@ class ImagePluginDeliveryTest(unittest.TestCase):
                 self.assertNotEqual(0, result.returncode)
                 self.assertIn(b"requires binary, model and example artifacts",
                               result.stderr)
+
+    def test_image_preserves_established_paths_and_license_material(self):
+        builder, base, validation, _ = self.image_stages()
+        self.assertIn("WORKDIR /workspaces/cudaq-qec", builder)
+        self.assertIn("CUDAQ_QEC_INSTALL_PREFIX=/opt/nvidia/cudaq-qec", builder)
+        self.assertIn("FROM nvcr.io/nvidia/cuda:", base)
+        self.assertIn("COPY LICENSE NOTICE /opt/nvidia/cudaq-qec/", base)
+        self.assertIn("COPY libs/qec/LICENSE /opt/nvidia/cudaq-qec/LICENSE.qec",
+                      base)
+        self.assertIn(
+            "/workspaces/cudaq-qec/scripts/ci/installed_plugin_smoke.py",
+            validation)
+        for section in (builder, base, validation):
+            self.assertNotIn("/opt/nvidia/cudaqx", section)
+            self.assertNotIn("/workspaces/cudaqx", section)
 
     def test_packaging_contracts_run_in_cpu_pr_ci(self):
         workflow = (REPOSITORY /

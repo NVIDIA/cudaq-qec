@@ -10,7 +10,7 @@ starting point.
 | Path | Contents |
 | --- | --- |
 | `~/examples/` | Five surface-code memory experiments with realtime decoding, plus `build.sh` |
-| `/opt/nvidia/cudaqx/bin` | `decoding_server`, `playback-emulator`, `hsb_fpga_syndrome_playback`, example server configs |
+| `/opt/nvidia/cudaq-qec/bin` | `decoding_server`, `playback-emulator`, `hsb_fpga_syndrome_playback`, example server configs |
 
 `nvq++`, the CUDA-Q and QEC headers, and all libraries are on the default
 search paths. A program is compiled with `nvq++ --target stim`, linking the QEC
@@ -125,13 +125,14 @@ the realtime decoding examples.
 
 The built-in decoders (`multi_error_lut`, `single_error_lut`, `sliding_window`
 and others) live in `libcudaq-qec-decoders.so`. Plugin decoders are loaded from
-`/opt/nvidia/cudaqx/lib/decoder-plugins`; this image ships `pymatching`,
+`/opt/nvidia/cudaq-qec/lib/decoder-plugins`; this image ships `pymatching`,
 `chromobius`, `trt_decoder` and a small `example` plugin. The `nv-qldpc-decoder`
 GPU plugin is present when the image was built with the proprietary artifacts.
 
 ## Optimized Ising example
 
-An image built with `delivery_profile=ising` includes the private binary plugin
+An image built with `delivery_profile=ising` includes the ordinary private decoder
+plugin `libcudaq-qec-ising-decoder.so` under `lib/decoder-plugins`
 and a separate, compatible runtime-data archive. No private GitLab access,
 Python, PyTorch, training checkpoint or model-generation script is required to
 run the examples. Generic images intentionally do not require these artifacts.
@@ -155,12 +156,14 @@ a model. `global` selects CNN followed by one global matching solve;
 algorithms, not two names for block-parallel matching.
 
 `QEC_RUNTIME_ASSET_ID` identifies the included asset directory under
-`/opt/nvidia/cudaqx/share/cudaq-qec/runtime-assets/`. Its `manifest.json` records
+`/opt/nvidia/cudaq-qec/share/cudaq-qec/runtime-assets/`. Its `manifest.json` records
 CPU architecture, CUDA/TensorRT versions, supported GPU compute capabilities,
 model variant, checkpoint fingerprint and producer identities. The YAML and
 playback files are under `examples/`, and the runtime bundle is under `bundle/`.
 When running the server manually, first change to that asset directory: the
 configuration intentionally uses the relocatable `artifact_bundle: bundle`.
+The configurations select decoder `ising`, directly or through the built-in
+`streaming` node with `inner.type: ising`; no private task-graph module is needed.
 
 The shipped data is a small correctness example, not a throughput benchmark,
 logical-error-rate estimate or claim of release qualification. TensorRT engines

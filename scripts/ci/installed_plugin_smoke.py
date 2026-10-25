@@ -16,6 +16,7 @@ import sys
 import replay_decoding_server as playback
 
 MISSING_NODE_KIND = "qec_packaging_intentionally_missing_kind"
+MISSING_DECODER = "qec_packaging_intentionally_missing_decoder"
 COMMAND_TIMEOUT_SECONDS = 60
 PLUGIN_DIRECTORIES = {
     "decoder": "decoder-plugins",
@@ -115,26 +116,40 @@ def smoke(args):
     if task_graph and not args.require_node_kind:
         raise ValueError(
             "task-graph deliveries require explicit expected node kinds")
-    if args.require_node_kind and (args.registration_probe is None or
-                                   not args.registration_probe.is_file()):
+    registration_required = (args.require_node_kind or args.require_decoder or
+                             args.require_native_streaming_decoder)
+    if registration_required and (args.registration_probe is None or
+                                  not args.registration_probe.is_file()):
         raise ValueError(
-            "expected node kinds require an installed registration probe")
+            "expected registrations require an installed registration probe")
     args.output.mkdir(exist_ok=False)
     report = {"status": "failed", "scope": "installed artifact, no-GPU smoke"}
     try:
         report["modules"] = [check_module(module) for module in modules]
-        if args.require_node_kind:
-            positive = run_command([args.registration_probe] +
-                                   args.require_node_kind)
+        if registration_required:
+            command = [args.registration_probe] + args.require_node_kind
+            for option, names in (("--decoder", args.require_decoder),
+                                  ("--native-streaming-decoder",
+                                   args.require_native_streaming_decoder)):
+                for name in names:
+                    command.extend((option, name))
+            positive = run_command(command)
             report["registration"] = positive
             if positive["returncode"]:
-                raise ValueError(
-                    "installed node registration/schema check failed")
-            negative = run_command([args.registration_probe, MISSING_NODE_KIND])
-            report["missing_kind"] = negative
-            if negative["returncode"] != 1:
-                raise ValueError(
-                    "missing-kind registration probe did not reject the kind")
+                raise ValueError("installed registration/schema check failed")
+            for key, required, request in (
+                ("missing_kind", args.require_node_kind,
+                 [MISSING_NODE_KIND]), ("missing_decoder", args.require_decoder,
+                                        ["--decoder", MISSING_DECODER]),
+                ("missing_native_streaming_decoder",
+                 args.require_native_streaming_decoder,
+                 ["--native-streaming-decoder", MISSING_DECODER])):
+                if required:
+                    negative = run_command([args.registration_probe] + request)
+                    report[key] = negative
+                    if negative["returncode"] != 1:
+                        raise ValueError(
+                            f"{key} registration probe did not reject the name")
         replay_args = playback.arguments([
             f"--server={args.prefix / 'bin/decoding_server'}",
             f"--playback={args.prefix / 'bin/playback-emulator'}",
@@ -168,6 +183,10 @@ def arguments(argv=None):
                         default=[])
     parser.add_argument("--require-provider", action="append", default=[])
     parser.add_argument("--require-node-kind", action="append", default=[])
+    parser.add_argument("--require-decoder", action="append", default=[])
+    parser.add_argument("--require-native-streaming-decoder",
+                        action="append",
+                        default=[])
     parser.add_argument("--registration-probe",
                         type=lambda value: Path(value).resolve())
     parser.add_argument("--fixtures",

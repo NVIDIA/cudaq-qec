@@ -84,7 +84,9 @@ public:
   /// A task graph's dispatch is CPU-hosted, but an inner decoder can still run
   /// CUDA kernels on whatever device is current, so it needs the same pin.
   void pin_device() const {
-    if (decoder_)
+    if (const auto device = native_decoder_device())
+      cudaq::qec::detail_affinity::set_cuda_device_for_decode(*device);
+    else if (decoder_)
       cudaq::qec::detail_affinity::pin_decode_device(*decoder_);
     else if (const auto device = graph_device())
       cudaq::qec::detail_affinity::set_cuda_device_for_decode(*device);
@@ -95,7 +97,9 @@ public:
   /// threads that serve one target per call and would otherwise re-pin an
   /// already-current device on every call.
   void pin_device_cached() const {
-    if (decoder_)
+    if (const auto device = native_decoder_device())
+      cudaq::qec::detail_affinity::set_cuda_device_for_decode_cached(*device);
+    else if (decoder_)
       cudaq::qec::detail_affinity::pin_decode_device_cached(*decoder_);
     else if (const auto device = graph_device())
       cudaq::qec::detail_affinity::set_cuda_device_for_decode_cached(*device);
@@ -111,8 +115,20 @@ public:
   /// overload.  Either way the caller reads the one boolean it always read.
   bool enqueue_syndrome(const uint8_t *syndrome, std::size_t len,
                         cudaq::qec::round_type type) const {
-    return graph_ ? graph_->enqueue_syndrome(syndrome, len, type)
-                  : decoder_->enqueue_syndrome(syndrome, len, type);
+    if (graph_)
+      return graph_->enqueue_syndrome(syndrome, len, type);
+    const bool ready = decoder_->enqueue_syndrome(syndrome, len, type);
+    if (type == round_type::FINAL &&
+        dynamic_cast<native_streaming_decoder_provider *>(decoder_)) {
+      auto *corrections =
+          dynamic_cast<streaming_correction_provider *>(decoder_);
+      if (!corrections)
+        throw std::logic_error(
+            "native streaming decoder requires a correction provider");
+      corrections->finalize_obs_corrections();
+      return true;
+    }
+    return ready;
   }
 
   /// Interpret one enqueue result and freeze a newly completed graph aggregate
@@ -179,15 +195,24 @@ public:
   }
 
   std::size_t num_msyn_per_decode() const {
-    return graph_ ? graph_->get_num_msyn_per_decode()
-                  : decoder_->get_num_msyn_per_decode();
+    if (graph_)
+      return graph_->get_num_msyn_per_decode();
+    if (const auto *native =
+            dynamic_cast<const native_streaming_decoder_provider *>(decoder_))
+      return native->streaming_layout().input_quantum;
+    return decoder_->get_num_msyn_per_decode();
   }
 
   /// Measurement bytes this target always accepts in one enqueue call: one
   /// round for a sliding window, which frees only that much per fire, and a
   /// whole buffer for a decoder, which empties on every fire.
   std::size_t num_msyn_per_round() const {
-    return graph_ ? graph_->get_num_msyn_per_round() : num_msyn_per_decode();
+    if (graph_)
+      return graph_->get_num_msyn_per_round();
+    if (const auto *native =
+            dynamic_cast<const native_streaming_decoder_provider *>(decoder_))
+      return native->streaming_layout().measurements_per_round;
+    return num_msyn_per_decode();
   }
 
   /// Largest chunk one enqueue call may carry, or nullopt when the target
@@ -195,6 +220,8 @@ public:
   /// still ignores a chunk that does not fit, leaving its buffer the bound.
   std::optional<std::size_t> chunk_limit() const {
     if (!decoder_)
+      return std::nullopt;
+    if (dynamic_cast<const native_streaming_decoder_provider *>(decoder_))
       return std::nullopt;
     return decoder_->get_num_msyn_per_decode();
   }
@@ -209,6 +236,12 @@ public:
   bool is_graph() const { return graph_ != nullptr; }
 
 private:
+  std::optional<int> native_decoder_device() const {
+    const auto *native =
+        dynamic_cast<const native_streaming_decoder_provider *>(decoder_);
+    return native ? native->streaming_layout().cuda_device_id : std::nullopt;
+  }
+
   /// graph_'s device, or nullopt if there's no graph or it isn't GPU-affine.
   std::optional<int> graph_device() const {
     return graph_ ? graph_->cuda_device_id() : std::nullopt;

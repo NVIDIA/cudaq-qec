@@ -152,6 +152,59 @@ class InstalledPluginSmokeTest(unittest.TestCase):
             "failed",
             json.loads((args.output / "summary.json").read_text())["status"])
 
+    def ordinary_options(self):
+        self.document["modules"][0].update(kind="decoder",
+                                           path="decoder-plugins/fixture.so")
+        self.module = self.prefix / "lib/decoder-plugins/fixture.so"
+        self.module.parent.mkdir(parents=True)
+        self.module.write_bytes(b"ordinary ELF fixture")
+        self.write_manifest()
+        args = self.options()
+        args.require_node_kind = []
+        args.require_decoder = ["fixture_decoder"]
+        args.require_native_streaming_decoder = ["fixture_decoder"]
+        return args
+
+    def test_ordinary_native_decoder_checks_need_no_task_graph_kind(self):
+        args = self.ordinary_options()
+        commands = [{"returncode": 0}, {"returncode": 1}, {"returncode": 1}]
+        replay = {"status": "passed", "result": {"shots": 8, "requests": 24}}
+        with mock.patch.object(smoke, "check_module", return_value={"id": "fixture"}), \
+             mock.patch.object(smoke, "run_command", side_effect=commands) as run, \
+             mock.patch.object(smoke.playback, "replay", return_value=replay):
+            report = smoke.smoke(args)
+        self.assertEqual("passed", report["status"])
+        self.assertEqual([
+            args.registration_probe, "--decoder", "fixture_decoder",
+            "--native-streaming-decoder", "fixture_decoder"
+        ], run.call_args_list[0].args[0])
+        self.assertEqual(
+            [args.registration_probe, "--decoder", smoke.MISSING_DECODER],
+            run.call_args_list[1].args[0])
+        self.assertEqual([
+            args.registration_probe, "--native-streaming-decoder",
+            smoke.MISSING_DECODER
+        ], run.call_args_list[2].args[0])
+        self.assertNotIn("missing_kind", report)
+
+    def test_ordinary_registration_requirements_need_a_probe(self):
+        args = self.ordinary_options()
+        args.registration_probe = None
+        with self.assertRaisesRegex(ValueError, "installed registration probe"):
+            smoke.smoke(args)
+        self.assertFalse(args.output.exists())
+
+    def test_native_streaming_negative_probe_must_reject_unknown_decoder(self):
+        args = self.ordinary_options()
+        commands = [{"returncode": 0}, {"returncode": 1}, {"returncode": 0}]
+        with mock.patch.object(smoke, "check_module", return_value={"id": "fixture"}), \
+             mock.patch.object(smoke, "run_command", side_effect=commands), \
+             mock.patch.object(smoke.playback, "replay") as launch:
+            with self.assertRaisesRegex(ValueError,
+                                        "missing_native_streaming_decoder"):
+                smoke.smoke(args)
+            launch.assert_not_called()
+
     def test_existing_output_is_preserved(self):
         args = self.options()
         args.output.mkdir()

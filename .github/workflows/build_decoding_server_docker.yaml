@@ -178,8 +178,7 @@ jobs:
             [[ -z "$names" || "$names" =~ ^[A-Za-z0-9_-]+(\;[A-Za-z0-9_-]+)*$ ]] || { echo "Invalid required provider/kind list" >&2; exit 1; }
           done
           if [[ "${DELIVERY_PROFILE:-generic}" == ising ]]; then
-            REQUIRED_PLUGIN_IDS="${REQUIRED_PLUGIN_IDS:+$REQUIRED_PLUGIN_IDS;}cudaq-qec-ising-task-graph-plugin"
-            REQUIRED_TASK_GRAPH_KINDS="${REQUIRED_TASK_GRAPH_KINDS:+$REQUIRED_TASK_GRAPH_KINDS;}ising"
+            REQUIRED_PLUGIN_IDS="${REQUIRED_PLUGIN_IDS:+$REQUIRED_PLUGIN_IDS;}cudaq-qec-ising-decoder"
           fi
           if [[ -f "$archive" ]]; then
             [[ "$PLUGIN_FRAMEWORK_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "An exact reviewed plugin_framework_commit is required" >&2; exit 1; }

@@ -86,6 +86,10 @@ done
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("Validated 1 completed shots (5 requests)", result.stdout)
 
+    def test_default_prefix_matches_the_server_image(self):
+        self.assertIn("${CUDAQX_INSTALL_DIR:-/opt/nvidia/cudaq-qec}",
+                      RUNNER.read_text())
+
     def test_client_success_cannot_hide_failure_or_wrong_correction(self):
         for row, column, value in ((1, 2, "103"), (1, 4, "0 9"), (3, 6, "0"),
                                    (3, 7, "1"), (3, 5, "1"), (3, 3, "0")):

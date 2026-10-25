@@ -99,11 +99,16 @@ c++ -std=c++20 scripts/ci/plugin_registration_probe.cpp \
   -Wl,-rpath,/path/to/install/lib -lcudaq-qec-decoders \
   -o plugin-registration-probe
 ./plugin-registration-probe <expected-node-kind>
+./plugin-registration-probe --decoder <expected-decoder>
+./plugin-registration-probe --native-streaming-decoder <expected-decoder>
 ```
 
-The probe uses public installed headers and checks both registration and the
-parameter schema without constructing a GPU engine. Also run a missing-kind
-negative case, ordinary-decoder regressions without external artifacts, and
+The probe uses public installed headers and checks registration and the parameter
+schema without constructing a decoder or GPU engine. The native-streaming check
+also requires the decoder's bounded DEM-chunk source declaration, without a
+matrix-materialization requirement. Positional node-kind arguments remain
+supported; checks can be combined. Also run missing-name negative cases,
+ordinary-decoder regressions without external artifacts, and
 real configuration/replay tests with the intended runtime libraries and model
 bundle. TensorRT's SONAME alone does not establish engine compatibility.
 
@@ -168,8 +173,11 @@ example run on each intended target remains a separate gate.
 For the decoding-server workflow, `delivery_profile=generic` remains the
 default and needs no runtime archive. An explicit `runtime_asset_id` requires
 its matching per-platform archive. `delivery_profile=ising` additionally
-requires `cuda_version=13.0`, an asset ID, the reviewed native provider and
-the canonical `ising` node kind. Missing binary, model or example
+requires `cuda_version=13.0`, an asset ID and the reviewed ordinary provider
+`cudaq-qec-ising-decoder`. The installed no-GPU check requires decoder name
+`ising`, its parameter schema and native DEM-chunk streaming declaration, not a
+private task-graph kind. Its module and runtime-data manifests use a null
+task-graph ABI. Missing binary, model or example
 artifacts fail the build; the profile must not silently fall back to a generic
 image. The current matrix includes amd64 and arm64, so an amd64-only archive
 does not establish an arm64 delivery.
@@ -178,7 +186,7 @@ Direct Docker builds use `QEC_DELIVERY_PROFILE`, `QEC_RUNTIME_ASSET_ID` and
 `QEC_RUNTIME_ASSET_ARCHIVE` alongside the existing plugin arguments. The archive
 and checksum enter through the same read-only `artifacts` context, but are
 validated by their separate data contract. Data installs under
-`/opt/nvidia/cudaqx/share/cudaq-qec/runtime-assets/<asset-id>/`. Example configs
+`/opt/nvidia/cudaq-qec/share/cudaq-qec/runtime-assets/<asset-id>/`. Example configs
 use relative bundle paths, so the image-local shell runner changes to this
 directory before invoking the installed server and playback client. Run
 `bash /root/examples/run-ising-example.sh x-global` (or `z-global`,
@@ -187,11 +195,16 @@ No private source, training framework or external fixture generation is needed.
 
 The `runtime` image target depends on a separate `validation` stage that checks
 the copied install without a GPU: manifests, RPATHs, dependencies,
-positive/negative node-kind registration and eight ordinary PyMatching shots
+positive/negative requested decoder or node-kind registration and eight ordinary PyMatching shots
 over UDP. Validation failure prevents publication. Python, patchelf, the probe,
 fixtures and reports stay in that stage, not the shipped runtime. CI can collect
 `/tmp/qec-plugin-validation/results` from the `validation` target. This packaging
 check does not replace model or GPU qualification.
+
+Optimized Ising examples select the ordinary `ising` decoder directly or use the
+built-in `streaming` node with `inner.type: ising`. No private Ising task-graph
+module is required. The generic task-graph ABI gate above remains applicable to
+other optional task-graph providers; it is not an Ising delivery requirement.
 
 ## Send requests through the installed server
 

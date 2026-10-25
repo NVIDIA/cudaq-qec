@@ -74,6 +74,10 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       !cfg.decoder_type.empty() &&
       !decoder_needs_model_matrices(cfg.decoder_type,
                                     decoder_model_source::dem_chunks);
+  const bool bounded_streaming_chunks =
+      native_streaming_chunks &&
+      decoder_uses_native_streaming_source(cfg.decoder_type,
+                                           decoder_model_source::dem_chunks);
   ctx.id = cfg.id;
   ctx.node_params = &cfg.node_params;
   ctx.prepared_data = std::move(cfg.prepared_data);
@@ -131,8 +135,9 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     dem_chunks_spec working = *cfg.dem;
     if (cfg.node_params.contains("window_size"))
       working.num_rounds = cfg.node_params.get<std::size_t>("window_size");
-    else if (!working.num_rounds.has_value() && working.has_repeating_phase())
-      working.num_rounds = working.minimum_rounds();
+    else if (working.has_repeating_phase() &&
+             (bounded_streaming_chunks || !working.num_rounds.has_value()))
+      working.num_rounds = std::max<std::uint64_t>(2, working.minimum_rounds());
 
     std::vector<extended_dem> chunks;
     if (!native_streaming_chunks)
@@ -206,7 +211,10 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       ctx.spr = static_cast<uint32_t>(*working.measurements_per_round);
       ctx.num_measurements = d_mat.num_cols();
     }
-    prepared_chunks.emplace(std::move(working));
+    // The representative only supplies graph dimensions. A native streaming
+    // decoder must still see the caller's unresolved physical horizon.
+    prepared_chunks.emplace(bounded_streaming_chunks ? *cfg.dem
+                                                     : std::move(working));
   } else {
     if (cfg.node_params.contains("measurement_frame_lengths_file")) {
       flat_frames = detail::read_measurement_frame_lengths(
@@ -343,8 +351,11 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       if (prepared_chunks &&
           !decoder_needs_model_matrices(cfg.decoder_type,
                                         decoder_model_source::dem_chunks)) {
-        auto native =
-            decoder_init::from_dem_chunks(std::move(*prepared_chunks), *ctx.d);
+        auto native = bounded_streaming_chunks
+                          ? decoder_init::from_dem_chunks_stream(
+                                std::move(*prepared_chunks), *ctx.d)
+                          : decoder_init::from_dem_chunks(
+                                std::move(*prepared_chunks), *ctx.d);
         return decoder_takes_observables ? std::move(native)
                                          : native.without_observables();
       }
@@ -355,6 +366,11 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     }();
     ctx.dec = get_decoder(cfg.decoder_type, std::move(inputs), decoder_output,
                           cfg.params);
+    if (bounded_streaming_chunks &&
+        !dynamic_cast<native_streaming_decoder_provider *>(ctx.dec.get()))
+      throw std::invalid_argument(
+          where +
+          ": bounded native streaming declaration requires its provider");
   }
   return ctx;
 }

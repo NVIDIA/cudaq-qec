@@ -21,7 +21,7 @@ asset_id=${QEC_RUNTIME_ASSET_ID:-}
 case "$asset_id" in
     ''|*[!A-Za-z0-9_-]*) echo 'This image has no configured Ising runtime assets.' >&2; exit 1 ;;
 esac
-prefix=${CUDAQX_INSTALL_DIR:-/opt/nvidia/cudaqx}
+prefix=${CUDAQX_INSTALL_DIR:-/opt/nvidia/cudaq-qec}
 asset_root="$prefix/share/cudaq-qec/runtime-assets/$asset_id"
 config="examples/$example.yaml"
 schedule="examples/$example.schedule"

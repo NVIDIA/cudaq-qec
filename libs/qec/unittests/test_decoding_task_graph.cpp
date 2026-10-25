@@ -644,6 +644,9 @@ TEST(DecodingTaskGraph, OversizedEnqueueIsConsumedRatherThanDropped) {
 
 class native_stream_probe_decoder : public decoder {
 public:
+  explicit native_stream_probe_decoder(decoder_init inputs)
+      : decoder(std::move(inputs), decode_result_type::observables) {}
+
   explicit native_stream_probe_decoder(bool withhold_tail = false,
                                        bool tag_aware = true)
       : decoder(decoder_init(sparse_binary_matrix::from_nested_csr(
@@ -1194,6 +1197,266 @@ TEST(DecodingTaskGraph, StreamingNodeRequiresDecoderAndDWidthsToMatch) {
         }
       },
       std::invalid_argument);
+}
+
+// A native stream publishes once per accepted physical record, whose size is
+// unrelated to the representative D. FINAL is wider than an ordinary round.
+class native_metadata_probe_decoder final
+    : public native_stream_probe_decoder,
+      public streaming_correction_provider,
+      public native_streaming_decoder_provider {
+public:
+  native_metadata_probe_decoder() = default;
+  explicit native_metadata_probe_decoder(decoder_init inputs)
+      : native_stream_probe_decoder(std::move(inputs)) {}
+  const dem_chunks_spec &source_recipe() const {
+    return get_inputs().dem_chunks();
+  }
+  decoder_streaming_layout streaming_layout() const override {
+    return {2, 1, configured_device};
+  }
+  void set_base_device_for_test(int id) { cuda_device_id_ = id; }
+  void begin_input_record(round_type type, std::size_t bytes) override {
+    if (remaining_ || finalized_ || bytes == 0 ||
+        (type == round_type::FINAL && bytes != terminal_width))
+      throw std::invalid_argument("invalid probe record");
+    records.emplace_back(type, bytes);
+    remaining_ = bytes;
+    record_bytes_ = bytes;
+    final_record_ = type == round_type::FINAL;
+  }
+  std::optional<std::size_t> raw_input_limit() const override {
+    return std::min(fragment_capacity, remaining_);
+  }
+  bool enqueue_syndrome(const uint8_t *input, std::size_t bytes,
+                        round_type type) override {
+    if (!input || !bytes || bytes > remaining_ ||
+        type != (final_record_ && bytes == remaining_ ? round_type::FINAL
+                                                      : round_type::BULK))
+      throw std::invalid_argument("invalid probe fragment");
+    fragments.emplace_back(type, bytes);
+    for (std::size_t i = 0; i < bytes; ++i)
+      correction_[0] ^= input[i];
+    remaining_ -= bytes;
+    if (remaining_)
+      return false;
+    const auto begin = rounds_;
+    rounds_ += final_record_ ? 1 : record_bytes_;
+    coverage_ = decoder_streaming_coverage{begin, rounds_};
+    return !final_record_ || final_enqueue_ready;
+  }
+  std::optional<decoder_streaming_coverage>
+  committed_coverage() const override {
+    ++coverage_reads;
+    return coverage_;
+  }
+  const uint8_t *peek_obs_corrections() const override {
+    ++peeks;
+    return correction_.data();
+  }
+  const uint8_t *finalize_obs_corrections() override {
+    if (remaining_ || !final_record_)
+      throw std::logic_error("probe requires complete physical FINAL");
+    if (!finalized_)
+      ++finalizations;
+    finalized_ = true;
+    return correction_.data();
+  }
+  std::optional<std::uint64_t> finalized_round_count() const override {
+    return finalized_ ? std::optional{rounds_} : std::nullopt;
+  }
+  const uint8_t *get_obs_corrections() const override {
+    return correction_.data();
+  }
+  void clear_corrections() override {
+    correction_[0] = 0;
+    if (finalized_)
+      reset_decoder();
+  }
+  void reset_decoder() override {
+    correction_[0] = 0;
+    remaining_ = record_bytes_ = 0;
+    rounds_ = 0;
+    final_record_ = finalized_ = false;
+    coverage_.reset();
+  }
+  decoder_result
+  decode_measurements(const std::vector<uint8_t> &measurements) override {
+    raw_shot = measurements;
+    uint8_t parity = 0;
+    for (const auto bit : measurements)
+      parity ^= bit;
+    return {true, {static_cast<float_t>(parity)}};
+  }
+
+  static constexpr std::size_t fragment_capacity = 2;
+  static constexpr std::size_t terminal_width = 3;
+  std::vector<std::pair<round_type, std::size_t>> records, fragments;
+  std::vector<uint8_t> raw_shot;
+  mutable std::size_t peeks = 0;
+  mutable std::size_t coverage_reads = 0;
+  std::size_t finalizations = 0;
+  bool final_enqueue_ready = true;
+  std::optional<int> configured_device;
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      native_metadata_probe_decoder,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &) {
+        if (output && output->primary != decode_result_type::observables)
+          throw std::invalid_argument("probe requires observable output");
+        return std::make_unique<native_metadata_probe_decoder>(
+            std::move(inputs));
+      })
+
+private:
+  std::array<uint8_t, 1> correction_{0};
+  std::size_t remaining_ = 0, record_bytes_ = 0;
+  std::uint64_t rounds_ = 0;
+  bool final_record_ = false, finalized_ = false;
+  std::optional<decoder_streaming_coverage> coverage_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(native_metadata_probe_decoder)
+
+static std::pair<std::unique_ptr<decoding_task_graph>,
+                 native_metadata_probe_decoder *>
+native_metadata_graph(bool async,
+                      std::optional<int> native_device = std::nullopt,
+                      int base_device = -1) {
+  auto instance = std::make_unique<native_metadata_probe_decoder>();
+  instance->configured_device = native_device;
+  instance->set_base_device_for_test(base_device);
+  auto *probe = instance.get();
+  task_graph_node_config node;
+  node.id = "native";
+  node.kind = "streaming";
+  // D produces four identical detectors from one measurement. Applying it to
+  // an offline shot would change its parity, so raw and detector paths differ.
+  node.d_sparse = {{0}, {0}, {0}, {0}};
+  node.o_sparse = {{0}};
+  node.decoder_instance = std::move(instance);
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(std::move(node));
+  return {decoding_task_graph::from_topology(
+              std::move(nodes), {},
+              {.async_streaming = async, .async_queue_capacity = 2}),
+          probe};
+}
+
+TEST(DecodingTaskGraph, NativeMetadataPreservesRecordsAndVariableCoverage) {
+  using R = round_type;
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    auto [graph, probe] = native_metadata_graph(async);
+    EXPECT_EQ(graph->get_num_msyn_per_decode(), 2u);
+    EXPECT_EQ(graph->get_num_msyn_per_round(), 1u);
+    EXPECT_EQ(graph->d_matrix().num_cols(), 1u);
+    const std::array<uint8_t, 5> bulk{1, 0, 0, 0, 0};
+    (void)graph->enqueue_syndrome(bulk.data(), bulk.size(), R::BULK);
+    EXPECT_EQ(graph->get_obs_corrections()[0], 1);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 5u);
+    EXPECT_EQ(probe->finalizations, 0u);
+    graph->clear_corrections();
+    const uint8_t next = 1;
+    (void)graph->enqueue_syndrome(&next, 1, R::BULK);
+    EXPECT_EQ(graph->get_obs_corrections()[0], 1);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 5u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 6u);
+    const std::array<uint8_t, 3> final{1, 0, 0};
+    EXPECT_TRUE(graph->enqueue_syndrome(final.data(), final.size(), R::FINAL));
+    EXPECT_EQ(graph->get_obs_corrections()[0], 0);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 6u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 7u);
+    EXPECT_EQ(probe->finalizations, 1u);
+    EXPECT_EQ(probe->records, (std::vector<std::pair<R, std::size_t>>{
+                                  {R::BULK, 5}, {R::BULK, 1}, {R::FINAL, 3}}));
+    EXPECT_EQ(probe->fragments,
+              (std::vector<std::pair<R, std::size_t>>{{R::BULK, 2},
+                                                      {R::BULK, 2},
+                                                      {R::BULK, 1},
+                                                      {R::BULK, 1},
+                                                      {R::BULK, 2},
+                                                      {R::FINAL, 1}}));
+    const auto generation = graph->streaming_result().generation;
+    (void)graph->enqueue_syndrome(final.data(), final.size(), R::FINAL);
+    EXPECT_EQ(graph->streaming_result().generation, generation);
+    EXPECT_EQ(probe->finalizations, 1u);
+
+    graph->clear_corrections();
+    EXPECT_TRUE(graph->enqueue_syndrome(final.data(), final.size(), R::FINAL));
+    EXPECT_EQ(graph->get_obs_corrections()[0], 1);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 0u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 1u);
+    graph->reset_decoder();
+    EXPECT_EQ(graph->get_obs_corrections()[0], 0);
+  }
+}
+
+TEST(DecodingTaskGraph, NativeRawOneShotDoesNotApplyRepresentativeD) {
+  auto [graph, probe] = native_metadata_graph(false);
+  const measurement_results raw{{1, 0, 0}};
+  EXPECT_EQ(graph->run(raw).bits, (std::vector<uint8_t>{1}));
+  EXPECT_EQ(probe->raw_shot, raw.bits);
+  EXPECT_EQ(probe->decode_calls, 0u);
+  EXPECT_EQ(graph->run_async(raw).get().bits, (std::vector<uint8_t>{1}));
+  EXPECT_EQ(probe->raw_shot, raw.bits);
+  EXPECT_EQ(probe->decode_calls, 0u);
+}
+
+TEST(DecodingTaskGraph, NativeFinalPublicationWaitsForTheSeparateFlushPhase) {
+  const auto *factory = find_node_factory("streaming");
+  ASSERT_NE(factory, nullptr);
+  for (const bool final_ready : {false, true}) {
+    SCOPED_TRACE(final_ready);
+    auto instance = std::make_unique<native_metadata_probe_decoder>();
+    auto *probe = instance.get();
+    probe->final_enqueue_ready = final_ready;
+    node_build_context context;
+    context.d = std::make_shared<const sparse_binary_matrix>(
+        sparse_binary_matrix::from_nested_csr(4, 1, {{0}, {0}, {0}, {0}}));
+    context.o = std::make_shared<const sparse_binary_matrix>(
+        sparse_binary_matrix::from_nested_csr(1, 1, {{0}}));
+    context.dec = std::move(instance);
+    context.spr = 1;
+    const cudaqx::heterogeneous_map parameters;
+    context.node_params = &parameters;
+    auto node = (*factory)(context);
+    auto *stream = node->streaming();
+    ASSERT_NE(stream, nullptr);
+    const std::array<std::uint8_t, 3> final{1, 0, 0};
+    stream->begin_input_record(round_type::FINAL, final.size());
+    EXPECT_FALSE(stream->enqueue(final.data(), 2, round_type::BULK));
+    EXPECT_FALSE(stream->enqueue(final.data() + 2, 1, round_type::FINAL));
+    EXPECT_EQ(probe->finalizations, 0u);
+    EXPECT_EQ(probe->peeks, 0u);
+    EXPECT_EQ(probe->coverage_reads, 0u);
+    EXPECT_EQ(stream->corrections()[0], 0);
+    EXPECT_EQ(stream->streaming_output(0), nullptr);
+
+    EXPECT_TRUE(stream->flush());
+    EXPECT_EQ(probe->finalizations, 1u);
+    EXPECT_EQ(probe->peeks, 0u);
+    EXPECT_EQ(probe->coverage_reads, 1u);
+    EXPECT_EQ(stream->corrections()[0], 1);
+    const auto coverage = stream->streaming_coverage();
+    ASSERT_TRUE(coverage.has_value());
+    EXPECT_EQ(coverage->begin_round, 0u);
+    EXPECT_EQ(coverage->end_round, 1u);
+    EXPECT_FALSE(stream->flush());
+    EXPECT_EQ(probe->finalizations, 1u);
+  }
+}
+
+TEST(DecodingTaskGraph, NativeStreamingUsesTheResourceOwningDevice) {
+  const auto [native, probe] = native_metadata_graph(false, 2);
+  EXPECT_EQ(probe->get_cuda_device_id(), -1);
+  EXPECT_EQ(native->cuda_device_id(), std::optional<int>{2});
+  const auto [fallback, pinned] = native_metadata_graph(false, std::nullopt, 3);
+  EXPECT_EQ(fallback->cuda_device_id(), std::optional<int>{3});
+  const auto [host, unpinned] = native_metadata_graph(false);
+  EXPECT_FALSE(host->cuda_device_id().has_value());
+  EXPECT_THROW(native_metadata_graph(false, -1), std::invalid_argument);
 }
 
 // Returns a different single-fault explanation on each call and counts the
@@ -3848,6 +4111,49 @@ public:
       })
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(chunk_source_probe_decoder)
+
+TEST(DecodingTaskGraph, NativeStreamingKeepsAnUnresolvedSourceHorizon) {
+  register_decoder_native_streaming_source("native_metadata_probe_decoder",
+                                           decoder_model_source::dem_chunks);
+  task_graph_node_config node;
+  node.id = "native";
+  node.kind = "streaming";
+  node.dem = rep5_streaming_spec();
+  node.decoder_type = "native_metadata_probe_decoder";
+  node.node_params = {{"num_syndromes_per_round", std::size_t{4}}};
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(std::move(node));
+  auto graph = decoding_task_graph::from_topology(std::move(nodes), {});
+  const auto *probe =
+      dynamic_cast<native_metadata_probe_decoder *>(graph->inner_decoder());
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(probe->source_recipe(), rep5_streaming_spec());
+  EXPECT_FALSE(probe->source_recipe().num_rounds.has_value());
+}
+
+TEST(DecodingTaskGraph, NativeStreamingBoundsFiniteBillionRoundPreparation) {
+  register_decoder_native_streaming_source("native_metadata_probe_decoder",
+                                           decoder_model_source::dem_chunks);
+  constexpr std::uint64_t large_horizon = 1'000'000'000;
+  task_graph_node_config node;
+  node.id = "native";
+  node.kind = "streaming";
+  node.dem = rep5_spec(large_horizon);
+  node.decoder_type = "native_metadata_probe_decoder";
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(std::move(node));
+  auto graph = decoding_task_graph::from_topology(std::move(nodes), {});
+  const auto *probe =
+      dynamic_cast<native_metadata_probe_decoder *>(graph->inner_decoder());
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(probe->source_recipe().num_rounds, large_horizon);
+  auto representative = rep5_streaming_spec();
+  representative.num_rounds = representative.minimum_rounds();
+  EXPECT_EQ(graph->d_matrix().to_nested_csr(),
+            dem_chunks_to_d_sparse(representative));
+  EXPECT_EQ(graph->get_num_msyn_per_decode(), 2u);
+  EXPECT_EQ(graph->get_num_msyn_per_round(), 1u);
+}
 
 TEST(DecodingTaskGraph, NativeChunkConsumersKeepRecipeAndOutputPolicy) {
   register_decoder_native_model_source("chunk_source_probe_decoder",
