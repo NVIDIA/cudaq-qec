@@ -13,10 +13,11 @@ namespace cudaq::qec::realtime {
 /// Resources returned by decoder::capture_decode_graph().
 ///
 /// The decoder plugin captures a CUDA graph internally and populates this
-/// struct.  The host dispatcher (libcudaq-realtime-host-dispatch) uses
-/// graph_exec / stream to launch the graph, and writes per-slot I/O
-/// addresses into h_mailbox before each launch.  function_id is used by
-/// the host dispatcher to route RPC requests to the correct graph worker.
+/// struct.  The device-side graph scheduler (DeviceGraphRingConsumer /
+/// DeviceGraphTransceiver) launches graph_exec from the GPU dispatch kernel;
+/// function_id names the RPC the graph serves.  d_mailbox / h_mailbox are a
+/// pinned, device-mapped slot through which a launcher can hand per-launch
+/// I/O addresses to the graph; the device scheduler does not use them.
 struct graph_resources {
   cudaGraphExec_t graph_exec = nullptr;
   cudaStream_t stream = nullptr;
