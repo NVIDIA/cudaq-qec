@@ -23,40 +23,41 @@ __device__ mock_decoder *g_mock_decoder = nullptr;
 __device__ void mock_decoder::decode_impl(
     const uint8_t *__restrict__ measurements, uint8_t *__restrict__ corrections,
     std::size_t num_measurements, std::size_t num_observables) {
-  // Thread 0 does the lookup (simple single-threaded implementation for CI)
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
-    // Default: if no match found, output zeros
-    for (std::size_t i = 0; i < num_observables; ++i) {
-      corrections[i] = 0;
-    }
+  // Simple single-threaded lookup for CI.  The dispatch kernel calls the
+  // DEVICE_CALL handler on every thread of its block, so both callers
+  // (mock_decode_rpc and mock_decode_graph_kernel) guard on thread 0 before
+  // calling decode(); this body runs on one thread and has no block-wide
+  // sync.
 
-    // Search for matching measurements in lookup table
-    for (std::size_t entry = 0; entry < ctx_.num_lookup_entries; ++entry) {
-      const uint8_t *entry_measurements =
-          ctx_.lookup_measurements + entry * num_measurements;
+  // Default: if no match found, output zeros
+  for (std::size_t i = 0; i < num_observables; ++i) {
+    corrections[i] = 0;
+  }
 
-      // Check if this entry matches the input
-      bool match = true;
-      for (std::size_t i = 0; i < num_measurements; ++i) {
-        if (entry_measurements[i] != measurements[i]) {
-          match = false;
-          break;
-        }
-      }
+  // Search for matching measurements in lookup table
+  for (std::size_t entry = 0; entry < ctx_.num_lookup_entries; ++entry) {
+    const uint8_t *entry_measurements =
+        ctx_.lookup_measurements + entry * num_measurements;
 
-      if (match) {
-        // Found match - copy expected corrections to output
-        const uint8_t *entry_corrections =
-            ctx_.lookup_corrections + entry * num_observables;
-        for (std::size_t i = 0; i < num_observables; ++i) {
-          corrections[i] = entry_corrections[i];
-        }
+    // Check if this entry matches the input
+    bool match = true;
+    for (std::size_t i = 0; i < num_measurements; ++i) {
+      if (entry_measurements[i] != measurements[i]) {
+        match = false;
         break;
       }
     }
-  }
 
-  // Single-threaded handler; no block-wide sync required.
+    if (match) {
+      // Found match - copy expected corrections to output
+      const uint8_t *entry_corrections =
+          ctx_.lookup_corrections + entry * num_observables;
+      for (std::size_t i = 0; i < num_observables; ++i) {
+        corrections[i] = entry_corrections[i];
+      }
+      break;
+    }
+  }
 }
 
 //==============================================================================
@@ -71,6 +72,16 @@ __device__ int mock_decode_rpc(const void *rx_slot, void *tx_slot,
                                std::size_t slot_size) {
   using cudaq::realtime::RPCHeader;
   using cudaq::realtime::RPCResponse;
+
+  // The dispatch kernel runs one block of threads_per_block threads and calls
+  // this handler on every thread of that block with identical arguments,
+  // between two __syncthreads(); blockIdx.x is always 0 and only thread 0's
+  // return value is recorded.  The lookup is single-threaded and the slots
+  // may alias, so thread 0 alone stages the request, decodes and writes the
+  // response; the other threads return before touching either slot.  There
+  // is no barrier below, so the early return is safe.
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return 0;
 
   // Two-pointer ABI (same form as a HOST_CALL handler, plus a returned
   // status): the request (RPCHeader + measurements) is in rx_slot and the
