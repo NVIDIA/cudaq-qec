@@ -579,6 +579,19 @@ ingest_core::view_detectors(const window_view &view, std::int64_t r) const {
   return {ring_.data() + slot * max_rows_, ring_rows_[slot]};
 }
 
+// Round by round, as view_detectors() reads them.
+void ingest_core::copy_window(const window_view &view, window_rows &out) const {
+  out.k = view.k;
+  out.rounds = view.rounds;
+  out.variant = view.variant;
+  out.first_row = view.first_row;
+  out.detectors.clear();
+  for (auto r = view.rounds.begin; r < view.rounds.end; ++r) {
+    const auto round = view_detectors(view, r);
+    out.detectors.insert(out.detectors.end(), round.begin(), round.end());
+  }
+}
+
 // Every index is handed over once FINAL fixes the last.
 bool ingest_core::done() const {
   return shot_rounds_ && next_index_ >= index_end_;

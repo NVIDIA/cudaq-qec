@@ -220,6 +220,17 @@ variant_key window_variant(const experiment_template &context,
                            const window_request &request, std::int64_t k,
                            std::size_t num_rounds);
 
+/// One window of a layer, as ingest hands it over by value: which window it
+/// is, its rounds and model, where its first row lies in the shot, and its
+/// own rows' detectors. A decode_window reads nothing else of ingest.
+struct window_rows {
+  std::int64_t k = 0;
+  round_range rounds;        ///< The window's rounds, clipped to the shot
+  variant_key variant;       ///< Its model among the layer's variants
+  std::size_t first_row = 0; ///< Its first round's first row in the shot
+  std::vector<std::uint8_t> detectors; ///< Its own rows, round by round
+};
+
 /// A shot length past which a layer gains no variant: every key appears in
 /// some shot of [context.min_rounds(), variant_probe_rounds()).
 std::size_t variant_probe_rounds(const experiment_template &context,

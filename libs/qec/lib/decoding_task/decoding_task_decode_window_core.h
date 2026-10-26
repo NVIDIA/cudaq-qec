@@ -6,18 +6,17 @@
 // Internal header: the decode_window node's core, apart from the executor.
 // It holds one model for each variant of its layer, taken from the data
 // artifact store, with its decoders, and fires any instance of a variant
-// from ingest's view of its rows and the sends its receives name: the
-// canonical workload, into a slot sized beforehand for every variant. Fires
-// into different slots may run at once. Sends carry their rows' place in
-// the shot, so a receive needs neither instance's model. Never included
-// from a public header.
+// from its rows, as ingest hands them over, and the sends its receives
+// name: the canonical workload, into a slot sized beforehand for every
+// variant. Fires into different slots may run at once. Sends carry their
+// rows' place in the shot, so a receive needs neither instance's model.
+// Never included from a public header.
 
 #pragma once
 
 #include "cuda-qx/core/heterogeneous_map.h"
 #include "decoding_task_data_artifacts.h"
 #include "decoding_task_decoding_window.h"
-#include "decoding_task_ingest_core.h"
 #include "decoding_task_window_kind_params.h"
 #include <atomic>
 #include <cstddef>
@@ -85,24 +84,23 @@ public:
                      const cudaqx::heterogeneous_map &params, std::size_t slots,
                      verify_residual_mode verify = verify_residual_mode::none);
 
-  /// Fire window view.k into @p slot: copy the view's rows from its ring,
-  /// apply each receive, a delta to the window's own rows and a residual to
-  /// its imported ones, then decode and commit. The view and every received
-  /// row are checked first, so a rejected fire leaves the slot holding what
-  /// it held; a decoder that fails, or a solution that verify_residual fail
-  /// rejects, leaves it empty. Allocates nothing beyond what the decoder's
-  /// decode() does, except for the message of a solution it rejects.
+  /// Fire @p window into @p slot: copy its rows, apply each receive, a
+  /// delta to the window's own rows and a residual to its imported ones,
+  /// then decode and commit. The window and every received row are checked
+  /// first, so a rejected fire leaves the slot holding what it held; a decoder
+  /// that fails, or a solution that verify_residual fail rejects, leaves it
+  /// empty. Allocates nothing beyond what the decoder's decode() does, except
+  /// for the message of a solution it rejects.
   /// @param receives One per receive port: the producer instance's send, or
   /// null when that instance does not exist.
-  /// @throws std::invalid_argument if the slot does not exist, the view is
-  /// not of this layer's window k, of one of its variants, holding that
+  /// @throws std::invalid_argument if the slot does not exist, the window is
+  /// not this layer's window k, of one of its variants, holding that
   /// variant's rows, a received send reaches a row the window does not take
   /// in its mode, or an imported row receives no residual;
-  /// std::out_of_range if the view's rounds are not in its ring;
-  /// std::logic_error if the view's variant is a prefix or terminal one
+  /// std::logic_error if the window's variant is a prefix or terminal one
   /// that another slot is decoding; std::runtime_error if verify_residual
   /// is fail and the solution does not satisfy the window's detectors.
-  const window_fire &fire(std::size_t slot, const window_view &view,
+  const window_fire &fire(std::size_t slot, const window_rows &window,
                           std::span<const window_send_value *const> receives);
 
   /// Start a new shot: no slot holds a fire, so held() shows none of an

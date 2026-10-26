@@ -67,19 +67,17 @@ decode_window_core::decode_window_core(
 // is row (that) - (this window's first row) here: a delta must land on an
 // own row and a residual on an imported one, and every imported row must be
 // reached, since a window imports rows only when the instance that values
-// them exists. The view must be this layer's window k: its rounds are the
+// them exists. The window must be this layer's window k: its rounds are the
 // request's zones at k's anchor, clipped to the shot, whose end a terminal
-// variant gives. The view and every received row are checked before the
+// variant gives. The window and every received row are checked before the
 // slot is touched, so a rejected fire changes nothing; the slot is marked
 // unfired while it is rewritten, so a decoder that fails, or a solution that
 // verify_residual fail rejects, leaves it empty rather than torn. Whether
 // H e = d is always known: solve_window() finds it as it commits.
 const window_fire &
-decode_window_core::fire(std::size_t slot, const window_view &view,
+decode_window_core::fire(std::size_t slot, const window_rows &window,
                          std::span<const window_send_value *const> receives) {
   std::size_t v = 0;
-  std::size_t row = 0;
-  std::size_t rows = 0;
   std::size_t missed = 0; // The first row H e does not explain
   // Frees a prefix or terminal variant's decoder however the fire ends.
   struct free_on_exit {
@@ -90,25 +88,23 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
     }
   } claim;
   check_slot(slot);
-  while (v < variants_.size() && !(variants_[v].key == view.variant))
+  while (v < variants_.size() && !(variants_[v].key == window.variant))
     ++v;
   if (v == variants_.size())
-    fail("window " + std::to_string(view.k) +
+    fail("window " + std::to_string(window.k) +
          "'s variant is none of this layer's");
-  if (!view.source)
-    fail("window " + std::to_string(view.k) + "'s view has no ring");
-  const auto anchor = request_.offset + view.k * request_.period;
+  const auto anchor = request_.offset + window.k * request_.period;
   const round_range rounds{
       std::max<std::int64_t>(0, anchor + span_.begin),
-      view.variant.terminal
-          ? std::min(anchor + span_.end, anchor + *view.variant.terminal)
+      window.variant.terminal
+          ? std::min(anchor + span_.end, anchor + *window.variant.terminal)
           : anchor + span_.end};
-  if (view.rounds != rounds)
-    fail("window " + std::to_string(view.k) + "'s view spans rounds [" +
-         std::to_string(view.rounds.begin) + ", " +
-         std::to_string(view.rounds.end) + "), not this layer's window " +
-         std::to_string(view.k) + "'s [" + std::to_string(rounds.begin) + ", " +
-         std::to_string(rounds.end) + ")");
+  if (window.rounds != rounds)
+    fail("window " + std::to_string(window.k) + " spans rounds [" +
+         std::to_string(window.rounds.begin) + ", " +
+         std::to_string(window.rounds.end) + "), not this layer's window " +
+         std::to_string(window.k) + "'s [" + std::to_string(rounds.begin) +
+         ", " + std::to_string(rounds.end) + ")");
   const auto &w = *variants_[v].window;
   auto &d = detectors_[slot][v];
   auto &ws = workspaces_[slot][v];
@@ -121,22 +117,21 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
   // window's rows.
   const auto target = [&](const window_send_value &r, std::size_t i) {
     const auto shot_row = r.first_row + r.send->rows[i];
-    return shot_row < view.first_row ? all : shot_row - view.first_row;
+    return shot_row < window.first_row ? all : shot_row - window.first_row;
   };
 
-  // The view's rows, counted until they are too many.
-  for (auto r = view.rounds.begin; r < view.rounds.end && rows <= own; ++r)
-    rows += view.source->view_detectors(view, r).size();
-  if (rows != own || view.rounds.empty())
-    fail("window " + std::to_string(view.k) + "'s view holds other rows " +
-         "than the " + std::to_string(own) + " of its variant");
+  if (window.detectors.size() != own || window.rounds.empty())
+    fail("window " + std::to_string(window.k) + " holds " +
+         std::to_string(window.detectors.size()) + " rows, not the " +
+         std::to_string(own) + " of its variant");
   std::fill(covered.begin(), covered.begin() + (all - own), 0);
   for (const auto *r : receives) {
     if (!r || !r->send)
       continue;
     if (r->values.size() != r->send->rows.size())
-      fail("a send '" + r->send->id + "' to window " + std::to_string(view.k) +
-           " has " + std::to_string(r->values.size()) + " values for " +
+      fail("a send '" + r->send->id + "' to window " +
+           std::to_string(window.k) + " has " +
+           std::to_string(r->values.size()) + " values for " +
            std::to_string(r->send->rows.size()) + " rows");
     for (std::size_t i = 0; i < r->values.size(); ++i) {
       const auto t = target(*r, i);
@@ -144,7 +139,7 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
       if (delta ? t >= own : t < own || t >= all)
         fail("send '" + r->send->id + "' reaches shot row " +
              std::to_string(r->first_row + r->send->rows[i]) +
-             ", which window " + std::to_string(view.k) +
+             ", which window " + std::to_string(window.k) +
              " does not take as a " + (delta ? "delta" : "residual"));
       if (!delta)
         covered[t - own] = 1;
@@ -152,25 +147,22 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
   } // end - for(r)
   for (std::size_t i = 0; i < all - own; ++i)
     if (!covered[i])
-      fail("window " + std::to_string(view.k) + " imports " +
+      fail("window " + std::to_string(window.k) + " imports " +
            std::to_string(all - own) + " rows, but no residual reaches " +
            "its imported row " + std::to_string(i));
   // A prefix or terminal variant's one decoder is claimed before the slot
   // is touched, so a second fire of it leaves its slot as it was.
-  if (!view.variant.bulk()) {
+  if (!window.variant.bulk()) {
     if (decoding_[v].exchange(true))
-      throw std::logic_error("decode_window: window " + std::to_string(view.k) +
+      throw std::logic_error("decode_window: window " +
+                             std::to_string(window.k) +
                              "'s variant is decoding in another slot; a "
                              "window fires into one slot at a time");
     claim.decoding = &decoding_[v];
   }
 
   out.fired = false;
-  for (auto r = view.rounds.begin; r < view.rounds.end; ++r) {
-    const auto round = view.source->view_detectors(view, r);
-    std::copy(round.begin(), round.end(), d.begin() + row);
-    row += round.size();
-  }
+  std::copy(window.detectors.begin(), window.detectors.end(), d.begin());
   std::fill(d.begin() + own, d.end(), 0);
   for (const auto *r : receives) {
     if (!r || !r->send)
@@ -187,22 +179,23 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
     while (ws.explained[missed] == (d[missed] & 1))
       ++missed;
     throw std::runtime_error(
-        "decode_window: window " + std::to_string(view.k) +
+        "decode_window: window " + std::to_string(window.k) +
         "'s solution does not satisfy its detectors (verify_residual: "
         "fail): H e first differs from d at its " +
         (missed < own ? "row " + std::to_string(missed) + ", shot row " +
-                            std::to_string(view.first_row + missed)
+                            std::to_string(window.first_row + missed)
                       : "imported row " + std::to_string(missed - own)));
   }
-  out.k = view.k;
+  out.k = window.k;
   out.fired = true;
   out.checked = verify_ != verify_residual_mode::none;
-  out.commit = {std::max(view.rounds.begin, anchor + request_.commit->begin),
-                std::min(view.rounds.end, anchor + request_.commit->end)};
+  out.commit = {std::max(window.rounds.begin, anchor + request_.commit->begin),
+                std::min(window.rounds.end, anchor + request_.commit->end)};
   out.detectors = d;
   out.solution = &ws.solution;
   for (std::size_t s = 0; s < out.sends.size(); ++s)
-    out.sends[s] = {ws.solution.outputs.sends[s], &w.sends[s], view.first_row};
+    out.sends[s] = {ws.solution.outputs.sends[s], &w.sends[s],
+                    window.first_row};
   return out;
 } // end - fire()
 

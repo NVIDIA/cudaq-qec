@@ -3507,16 +3507,26 @@ private:
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(allocation_counting_lut)
 
+// The window @p view holds, copied from its ring as an ingest node hands it
+// over.
+window_rows rows_of(const window_view &view) {
+  window_rows rows;
+  view.source->copy_window(view, rows);
+  return rows;
+}
+
 // A windowed graph run without the executor, for shots of any length, with
 // its windows from a data artifact store: ingest takes a shot's
 // measurements in records of one period, and each index it hands over
 // fires its layers in g's order, each receiving the sends of the producer
-// instances its edges name. Every window's detectors and solution are kept.
+// instances its edges name. A window's rows are copied as its view is
+// released, as an ingest node hands them over. Every window's detectors and
+// solution are kept.
 //
 // With in_flight set, as the executor's fire pools will: each window fires
 // on its own thread once its producers have finished and its slot is free,
 // with no barrier between layers or indices, while this thread hands ingest
-// records, collects finished fires and releases their views. A slot is free
+// records and collects finished fires. A slot is free
 // once every fire that may receive from its last window has finished, so up
 // to in_flight indices are in flight at once.
 class core_pipeline {
@@ -3601,13 +3611,7 @@ private:
   struct waiting_fire {
     std::size_t l = 0;
     std::int64_t k = 0;
-    const window_view *view = nullptr;
-  };
-
-  // A fire running on its own thread, and the view it reads.
-  struct running_fire {
-    std::thread thread;
-    const window_view *view = nullptr;
+    window_rows window; ///< Copied as ingest released its view
   };
 
   // What a fire's thread hands back: its record, or why it failed.
@@ -3631,8 +3635,8 @@ private:
     return true;
   }
 
-  // Fires each layer's window of the index, in g's order, and releases its
-  // view once its rows are copied.
+  // Fires each layer's window of the index, in g's order, from its rows,
+  // copied as the view is released.
   void fire_index(const ingest_publication &p) {
     for (std::size_t l = 0; l < graph_.layers.size(); ++l) {
       const auto *view = p.views[l];
@@ -3640,10 +3644,11 @@ private:
       const window_fire *f = nullptr;
       if (!view)
         continue;
-      fire_allocations_ += allocation_counter::during(
-          [&] { f = &cores_[l]->fire(slot_of(l, p.k), *view, receives); });
-      keep(l, *f);
+      ingest_->copy_window(*view, rows_);
       ingest_->release(*view);
+      fire_allocations_ += allocation_counter::during(
+          [&] { f = &cores_[l]->fire(slot_of(l, p.k), rows_, receives); });
+      keep(l, *f);
     } // end - for(l)
   } // end - fire_index()
 
@@ -3663,7 +3668,8 @@ private:
         for (std::size_t l = 0; l < graph_.layers.size(); ++l)
           if (p->views[l]) {
             published_.insert({l, p->k});
-            waiting.push_back({l, p->k, p->views[l]});
+            waiting.push_back({l, p->k, rows_of(*p->views[l])});
+            ingest_->release(*p->views[l]);
           }
         moved = true;
       }
@@ -3719,22 +3725,21 @@ private:
         ++fired_beside_other_layers_;
         break;
       }
-    running_fire &r = running_[{w.l, w.k}];
-    r.view = w.view;
-    r.thread = std::thread([this, w, slot, receives = std::move(receives)] {
-      finished_fire f{{w.l, w.k}, nullptr, ""};
-      try {
-        f.fire = &cores_[w.l]->fire(slot, *w.view, receives);
-      } catch (const std::exception &e) {
-        f.error = e.what();
-      }
-      const std::lock_guard<std::mutex> lock(finished_mutex_);
-      finished_queue_.push_back(std::move(f));
-    });
+    running_[{w.l, w.k}] =
+        std::thread([this, w, slot, receives = std::move(receives)] {
+          finished_fire f{{w.l, w.k}, nullptr, ""};
+          try {
+            f.fire = &cores_[w.l]->fire(slot, w.window, receives);
+          } catch (const std::exception &e) {
+            f.error = e.what();
+          }
+          const std::lock_guard<std::mutex> lock(finished_mutex_);
+          finished_queue_.push_back(std::move(f));
+        });
   }
 
-  // Joins the fires that have finished, keeps their records and releases
-  // their views. Returns whether any had.
+  // Joins the fires that have finished and keeps their records. Returns
+  // whether any had.
   bool collect() {
     std::vector<finished_fire> done;
     {
@@ -3742,13 +3747,11 @@ private:
       done.swap(finished_queue_);
     }
     for (auto &f : done) {
-      auto &r = running_.at(f.at);
-      r.thread.join();
+      running_.at(f.at).join();
       EXPECT_EQ(f.error, "")
           << graph_.layers[f.at.first].node << "[" << f.at.second << "]";
       if (f.fire)
         keep(f.at.first, *f.fire);
-      ingest_->release(*r.view);
       running_.erase(f.at);
       finished_.insert(f.at);
     }
@@ -3806,12 +3809,13 @@ private:
   std::unique_ptr<ingest_core> ingest_;
   std::vector<std::unique_ptr<decode_window_core>> cores_;
   const std::vector<std::uint8_t> *measurements_ = nullptr;
+  window_rows rows_;   ///< A serial fire's window, reused
   std::size_t at_ = 0; ///< The shot's measurements handed to ingest
   // Pipelined: the shot's published and finished windows, the running
   // fires, and those finished but not yet collected.
   std::set<instance> published_;
   std::set<instance> finished_;
-  std::map<instance, running_fire> running_;
+  std::map<instance, std::thread> running_;
   std::mutex finished_mutex_;
   std::vector<finished_fire> finished_queue_;
   std::map<std::pair<std::string, std::int64_t>, production_decode> decodes_;
@@ -3980,7 +3984,7 @@ TEST(DecodeWindowCore, AMissingResidualIsRejected) {
     while ((p = ingest.poll()) && !p->views[1])
       ;
   }
-  const auto &fired = a.fire(0, *p->views[0], {});
+  const auto &fired = a.fire(0, rows_of(*p->views[0]), {});
   const auto &residual = fired.sends[a.send_index("backward")];
   const window_send_value *with[] = {nullptr, &residual};
   const window_send_value *without[] = {nullptr, nullptr};
@@ -3990,10 +3994,10 @@ TEST(DecodeWindowCore, AMissingResidualIsRejected) {
         f.detectors.end());
   };
   ASSERT_NE(std::count(residual.values.begin(), residual.values.end(), 1), 0);
-  EXPECT_EQ(imported(b.fire(0, *p->views[1], with)),
+  EXPECT_EQ(imported(b.fire(0, rows_of(*p->views[1]), with)),
             std::vector<std::uint8_t>(residual.values.begin(),
                                       residual.values.end()));
-  expect_error([&] { b.fire(0, *p->views[1], without); },
+  expect_error([&] { b.fire(0, rows_of(*p->views[1]), without); },
                "decode_window: window " + std::to_string(p->k) + " imports " +
                    std::to_string(residual.values.size()) +
                    " rows, but no residual reaches its imported row 0");
@@ -4061,18 +4065,18 @@ TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty) {
       views.push_back(p->views[0]);
   }
   failing_lut::fail_next = false;
-  a.fire(0, *views[0], {});
+  a.fire(0, rows_of(*views[0]), {});
   ASSERT_TRUE(a.held(0).fired);
   ASSERT_EQ(a.held(0).k, views[0]->k);
   failing_lut::fail_next = true;
-  EXPECT_THROW(a.fire(0, *views[0], {}), std::runtime_error);
+  EXPECT_THROW(a.fire(0, rows_of(*views[0]), {}), std::runtime_error);
   failing_lut::fail_next = false;
   EXPECT_FALSE(a.held(0).fired);
   // The failed fire freed its variant's one decoder.
   ASSERT_FALSE(views[0]->variant.bulk());
-  EXPECT_EQ(a.fire(0, *views[0], {}).k, views[0]->k);
+  EXPECT_EQ(a.fire(0, rows_of(*views[0]), {}).k, views[0]->k);
   failing_lut::fail_next = true;
-  EXPECT_THROW(a.fire(0, *views[1], {}), std::runtime_error);
+  EXPECT_THROW(a.fire(0, rows_of(*views[1]), {}), std::runtime_error);
   failing_lut::fail_next = false;
   EXPECT_FALSE(a.held(0).fired);
   expect_error([&] { a.held(1); },
@@ -4150,16 +4154,16 @@ TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported) {
   for (auto r = noisy_view->rounds.begin; r < noisy_view->rounds.end; ++r)
     own += noisy_ingest.view_detectors(*noisy_view, r).size();
 
-  const auto &reported = report.fire(0, *noisy_view, {});
+  const auto &reported = report.fire(0, rows_of(*noisy_view), {});
   EXPECT_TRUE(reported.checked);
   EXPECT_FALSE(reported.solution->satisfied);
   const auto missed = static_cast<std::size_t>(
       std::find(reported.detectors.begin(), reported.detectors.end(), 1) -
       reported.detectors.begin());
   ASSERT_LT(missed, own);
-  EXPECT_FALSE(none.fire(0, *noisy_view, {}).checked);
+  EXPECT_FALSE(none.fire(0, rows_of(*noisy_view), {}).checked);
   expect_throw<std::runtime_error>(
-      [&] { fail.fire(0, *noisy_view, {}); },
+      [&] { fail.fire(0, rows_of(*noisy_view), {}); },
       "decode_window: window " + std::to_string(noisy_view->k) +
           "'s solution does not satisfy its detectors (verify_residual: "
           "fail): H e first differs from d at its row " +
@@ -4168,7 +4172,7 @@ TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported) {
   EXPECT_FALSE(fail.held(0).fired);
 
   for (auto *core : {&none, &report, &fail}) {
-    const auto &f = core->fire(0, *quiet_view, {});
+    const auto &f = core->fire(0, rows_of(*quiet_view), {});
     EXPECT_TRUE(f.solution->satisfied);
     EXPECT_EQ(f.checked, core != &none);
   }
@@ -4201,13 +4205,13 @@ TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow) {
       ;
   }
   const auto &residual =
-      a.fire(0, *p->views[0], {}).sends[a.send_index("backward")];
+      a.fire(0, rows_of(*p->views[0]), {}).sends[a.send_index("backward")];
   const std::vector<std::uint8_t> ones(residual.values.size(), 1);
   const window_send_value forged{ones, residual.send, residual.first_row};
   const window_send_value *receives[] = {nullptr, &forged};
   ASSERT_FALSE(ones.empty());
   expect_throw<std::runtime_error>(
-      [&] { b.fire(0, *p->views[1], receives); },
+      [&] { b.fire(0, rows_of(*p->views[1]), receives); },
       "decode_window: window " + std::to_string(p->k) +
           "'s solution does not satisfy its detectors (verify_residual: "
           "fail): H e first differs from d at its imported row 0");
@@ -4364,11 +4368,12 @@ TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
   const window_view *bulk = nullptr;
   std::string errors[2];
   std::atomic<std::size_t> finished = 0;
-  // Fires view into slot s on its own thread, keeping what it throws.
+  // Fires view's window into slot s on its own thread, keeping what it
+  // throws.
   const auto fire_on_thread = [&](std::size_t s, const window_view &view) {
-    return std::thread([&, s] {
+    return std::thread([&, s, window = rows_of(view)] {
       try {
-        a.fire(s, view, {});
+        a.fire(s, window, {});
       } catch (const std::exception &e) {
         errors[s] = e.what();
       }
@@ -4391,7 +4396,7 @@ TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
 
   // Slot 1 holds a bulk window, which a rejected fire leaves there.
   gated_lut::open = true;
-  ASSERT_EQ(a.fire(1, *bulk, {}).k, bulk->k);
+  ASSERT_EQ(a.fire(1, rows_of(*bulk), {}).k, bulk->k);
   // The second fire is rejected before it reaches the decoder, or, were it
   // not, waits there beside the first until the gate opens.
   gated_lut::open = false;
@@ -4416,7 +4421,7 @@ TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
   EXPECT_TRUE(a.held(1).fired);
   EXPECT_EQ(a.held(1).k, bulk->k);
   // Once the first fire is done, the window may fire again.
-  EXPECT_EQ(a.fire(1, *edge, {}).k, edge->k);
+  EXPECT_EQ(a.fire(1, rows_of(*edge), {}).k, edge->k);
 
   // Both fires of a bulk window reach their decoders at once.
   gated_lut::open = false;
@@ -4438,8 +4443,8 @@ TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
 
 // A rejected fire changes nothing: its slot still holds the window it last
 // fired, rows and solution alike, whether a received send is misdirected,
-// the view holds more rounds than its window, or a later window's rounds
-// are not yet in the ring.
+// the window spans more rounds than its own, or it holds fewer rows than
+// its variant.
 TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas) {
   const auto spec = arbitrary_memory_spec(5);
   const auto g = parallel_graph(layered(2, 1, 3));
@@ -4472,29 +4477,32 @@ TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas) {
     }
   }
   const auto k = b_views[0]->k;
-  const auto &before = a.fire(0, *a_views[static_cast<std::size_t>(k - 1)], {});
-  const auto &at_k = a.fire(1, *a_views[static_cast<std::size_t>(k)], {});
+  const auto &before =
+      a.fire(0, rows_of(*a_views[static_cast<std::size_t>(k - 1)]), {});
+  const auto &at_k =
+      a.fire(1, rows_of(*a_views[static_cast<std::size_t>(k)]), {});
   const window_send_value *receives[] = {&before.sends[a.send_index("forward")],
                                          &at_k.sends[a.send_index("backward")]};
   const window_send_value *misdirected[] = {
       nullptr, &at_k.sends[a.send_index("backward")]};
-  const auto &fired = b.fire(0, *b_views[0], receives);
+  const auto &fired = b.fire(0, rows_of(*b_views[0]), receives);
   const std::vector<std::uint8_t> detectors(fired.detectors.begin(),
                                             fired.detectors.end());
   const auto estimate = fired.solution->estimate;
-  auto longer = *b_views[1];
-  auto later = *b_views[1];
+  auto longer = rows_of(*b_views[1]);
+  auto shorter = rows_of(*b_views[1]);
   longer.rounds.end += 1000;
-  later.k += 100;
-  later.rounds = {later.rounds.begin + 100 * 5, later.rounds.end + 100 * 5};
-  expect_error([&] { b.fire(0, *b_views[1], misdirected); },
+  shorter.detectors.pop_back();
+  expect_error([&] { b.fire(0, rows_of(*b_views[1]), misdirected); },
                "send 'backward' reaches shot row");
   expect_error([&] { b.fire(0, longer, {}); }, "decode_window: window " +
                                                    std::to_string(k + 1) +
-                                                   "'s view spans rounds");
-  expect_throw<std::out_of_range>([&] { b.fire(0, later, {}); },
-                                  "ingest: window " + std::to_string(later.k) +
-                                      "'s view does not hold round");
+                                                   " spans rounds");
+  expect_error(
+      [&] { b.fire(0, shorter, {}); },
+      "decode_window: window " + std::to_string(k + 1) + " holds " +
+          std::to_string(shorter.detectors.size()) + " rows, not the " +
+          std::to_string(shorter.detectors.size() + 1) + " of its variant");
   const auto &kept = b.held(0);
   ASSERT_TRUE(kept.fired);
   EXPECT_EQ(kept.k, k);
@@ -4530,9 +4538,9 @@ TEST(DecodeWindowCore, RejectsAnotherLayersViewOfTheSameSize) {
         b_view = p->views[1];
   }
   ASSERT_EQ(b_view->rounds.end - b_view->rounds.begin, 9);
-  expect_error([&] { a.fire(0, *b_view, {}); }, "decode_window: window " +
-                                                    std::to_string(b_view->k) +
-                                                    "'s view spans rounds");
+  expect_error([&] { a.fire(0, rows_of(*b_view), {}); },
+               "decode_window: window " + std::to_string(b_view->k) +
+                   " spans rounds");
 }
 
 // A fire takes only its own layer's windows into existing slots, and a
@@ -4568,22 +4576,22 @@ TEST(DecodeWindowCore, RejectsWhatIsNotItsWindow) {
         b_views.push_back(p->views[1]);
     }
   }
-  auto unknown = *a_views[0];
+  auto unknown = rows_of(*a_views[0]);
   unknown.variant.position = 1000;
-  expect_error([&] { a.fire(2, *a_views[0], {}); },
+  expect_error([&] { a.fire(2, rows_of(*a_views[0]), {}); },
                "decode_window: slot 2 does not exist; there are 2");
   expect_error([&] { a.fire(0, unknown, {}); },
                "decode_window: window 0's variant is none of this layer's");
-  expect_error([&] { a.fire(0, *b_views.back(), {}); },
+  expect_error([&] { a.fire(0, rows_of(*b_views.back()), {}); },
                "decode_window: window " + std::to_string(b_views.back()->k) +
-                   "'s view spans rounds");
+                   " spans rounds");
   // A[k].backward is B[k]'s imports, before B[k + 1]'s rows.
   ASSERT_EQ(b_views[1]->k, b_views[0]->k + 1);
   const auto &fired =
-      a.fire(0, *a_views[static_cast<std::size_t>(b_views[0]->k)], {});
+      a.fire(0, rows_of(*a_views[static_cast<std::size_t>(b_views[0]->k)]), {});
   const window_send_value *misdirected[] = {
       nullptr, &fired.sends[a.send_index("backward")]};
-  expect_error([&] { b.fire(0, *b_views[1], misdirected); },
+  expect_error([&] { b.fire(0, rows_of(*b_views[1]), misdirected); },
                "send 'backward' reaches shot row");
   expect_error([&] { a.send_index("sideways"); },
                "decode_window: the layer has no send 'sideways'");

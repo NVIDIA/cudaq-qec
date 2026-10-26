@@ -130,6 +130,12 @@ public:
   std::span<const std::uint8_t> view_detectors(const window_view &view,
                                                std::int64_t r) const;
 
+  /// Copy @p view's window into @p out: its index, rounds, variant, first
+  /// row and own rows' detectors, so the view may be released at once.
+  /// Allocates nothing once @p out has held a window as large.
+  /// @throws std::out_of_range as view_detectors() does.
+  void copy_window(const window_view &view, window_rows &out) const;
+
   /// The rounds in the shot, once a FINAL record is taken.
   std::optional<std::size_t> shot_rounds() const { return shot_rounds_; }
   /// The raw logical value, m2o times the readout round's measurements, once
