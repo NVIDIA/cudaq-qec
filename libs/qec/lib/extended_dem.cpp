@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // Implements extended_dem using a single H matrix with named seam row bands.
 //
@@ -23,6 +20,7 @@
 #include "dem_construction_utils.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
@@ -74,6 +72,21 @@ std::string seam_id::name() const {
   char buf[16];
   std::snprintf(buf, sizeof(buf), "seam:%08x", value);
   return buf;
+}
+
+seam_id seam_id::from_name(std::string_view name) {
+  constexpr std::string_view prefix = "seam:";
+  if (name.size() == prefix.size() + 8 && name.starts_with(prefix)) {
+    seam_id id;
+    const auto *end = name.data() + name.size();
+    if (std::from_chars(name.data() + prefix.size(), end, id.value, 16).ptr ==
+        end)
+      return id;
+  }
+  const std::string text(name);
+  const seam_id id{text.c_str()};
+  register_name(id, text);
+  return id;
 }
 
 static const bool seam_names_registered = [] {
@@ -548,7 +561,8 @@ extended_dem extended_dem_from_css_matrices(const css_code_matrices &code,
 
 bool dem_chunk_spec::is_empty() const {
   return num_faults == 0 && H_sparse.empty() && seam_specs.empty() &&
-         O_sparse.empty() && error_rates.empty();
+         O_sparse.empty() && error_rates.empty() && D_sparse.empty() &&
+         !num_measurements.has_value() && m2o_sparse.empty();
 }
 
 void dem_chunk_spec::expand(const std::vector<seam_id> &ids) {
@@ -585,6 +599,19 @@ void dem_chunk_spec::validate(const std::string &context) const {
     validate_index_list(e.spec.O_sparse, num_faults, context,
                         "seam[" + e.id.name() + "].O_sparse");
   }
+  // Measurement indices are bounded only once the previous round is known, by
+  // dem_chunks_to_d_sparse().
+  for (const std::int64_t value : D_sparse)
+    if (value < -1)
+      throw std::invalid_argument(context + ".D_sparse value " +
+                                  std::to_string(value) + " is below -1");
+  if (!D_sparse.empty() && D_sparse.back() != -1)
+    throw std::invalid_argument(context +
+                                ".D_sparse must end with a -1 terminator");
+  // Index bounds need the round's width; dem_chunks_spec::validate() checks
+  // them.
+  validate_index_list(m2o_sparse, std::numeric_limits<uint64_t>::max(), context,
+                      "m2o_sparse");
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +675,14 @@ bool dem_chunks_spec::has_repeating_phase() const {
   return false;
 }
 
+uint64_t dem_chunks_spec::minimum_rounds() const {
+  uint64_t rounds = 1;
+  for (const auto &c : connections)
+    if (!c.is_self())
+      ++rounds;
+  return rounds;
+}
+
 phase_id dem_chunks_spec::repeating_phase() const {
   phase_id result;
   bool found = false;
@@ -664,6 +699,38 @@ phase_id dem_chunks_spec::repeating_phase() const {
     throw std::invalid_argument(
         "dem_chunks_spec: no self-connected (repeating) phase");
   return result;
+}
+
+dem_chunks_spec::repeating_span dem_chunks_spec::repeating_rounds() const {
+  const phase_id repeating = repeating_phase();
+  // The shortest chain visits the repeating phase once, or twice when it is
+  // the only phase, which num_rounds >= 2 requires. Bounding num_rounds by it
+  // keeps the checks phase_sequence() makes of num_rounds.
+  auto shortest = *this;
+  if (num_rounds)
+    shortest.num_rounds =
+        std::min(*num_rounds, std::max<uint64_t>(2, minimum_rounds()));
+  const auto sequence = shortest.phase_sequence();
+  const auto prefix = static_cast<uint64_t>(
+      std::find(sequence.begin(), sequence.end(), repeating) -
+      sequence.begin());
+  const auto suffix = static_cast<uint64_t>(
+      std::find(sequence.rbegin(), sequence.rend(), repeating) -
+      sequence.rbegin());
+  return {prefix, *num_rounds - prefix - suffix, suffix};
+}
+
+// The shortest chain visits every prefix and suffix phase once, so it holds
+// the layout of every longer shot.
+dem_chunks_spec::phase_layout dem_chunks_spec::layout() const {
+  const phase_id repeating = repeating_phase();
+  auto shortest = *this;
+  shortest.num_rounds = std::max<uint64_t>(2, minimum_rounds());
+  const auto sequence = shortest.phase_sequence();
+  const auto first = std::find(sequence.begin(), sequence.end(), repeating);
+  const auto last =
+      std::find(sequence.rbegin(), sequence.rend(), repeating).base();
+  return {{sequence.begin(), first}, repeating, {last, sequence.end()}};
 }
 
 std::vector<phase_id> dem_chunks_spec::phase_sequence() const {
@@ -779,6 +846,74 @@ const dem_chunk_spec &dem_chunks_spec::get_phase(phase_id id) const {
                               " not found");
 }
 
+// Checks observable_names and m2o_sparse against the observable count. The
+// readout phase is the last of the chain phase_sequence() walks, which
+// rejects branches and cycles; the shortest chain is enough to find it, and
+// it must not be the repeating phase.
+static void validate_observables(const dem_chunks_spec &spec) {
+  const uint64_t observables = spec.num_observables();
+  std::unordered_set<std::string> names;
+  std::optional<phase_id> last_phase;
+  if (!spec.observable_names.empty() &&
+      spec.observable_names.size() != observables)
+    throw std::invalid_argument(
+        "dem_chunks_spec: " + std::to_string(spec.observable_names.size()) +
+        " observable_names for " + std::to_string(observables) +
+        " observables");
+  for (const auto &name : spec.observable_names)
+    if (!names.insert(name).second)
+      throw std::invalid_argument(
+          "dem_chunks_spec: observable_names repeats '" + name + "'");
+
+  for (const auto &e : spec.phases) {
+    const auto &m2o = e.spec.m2o_sparse;
+    const auto fail = [&](const std::string &what) {
+      throw std::invalid_argument("dem_chunks_spec: phase '" + e.id.name() +
+                                  "' " + what);
+    };
+    if (m2o.empty())
+      continue;
+    if (!last_phase) {
+      auto shortest = spec;
+      shortest.num_rounds = std::max<uint64_t>(2, spec.minimum_rounds());
+      last_phase = shortest.phase_sequence().back();
+    }
+    const bool repeats =
+        std::any_of(spec.connections.begin(), spec.connections.end(),
+                    [&](const phase_connection &c) {
+                      return c.is_self() && c.from_phase == *last_phase;
+                    });
+    if (e.id != *last_phase || repeats)
+      fail("carries m2o_sparse, which only the last phase may carry");
+    const auto rows = static_cast<uint64_t>(
+        std::count(m2o.begin(), m2o.end(), std::int64_t{-1}));
+    if (rows != observables)
+      fail("has " + std::to_string(rows) + " m2o_sparse rows for " +
+           std::to_string(observables) + " observables");
+    // The readout round's measurements in the stream: its count when the
+    // phases supply D_sparse, else one per detector, the memory convention
+    // of dem_chunks_to_d_sparse(), which no declared count widens.
+    const bool mapped = spec.has_D_sparse();
+    uint64_t width = 0;
+    if (mapped) {
+      if (!e.spec.num_measurements && !spec.measurements_per_round)
+        fail("carries m2o_sparse but neither it nor the spec sets a "
+             "measurement count (num_measurements / measurements_per_round)");
+      width = spec.measurements_of(e.spec);
+    } else {
+      width = spec.detectors_of(e.spec, "dem_chunks." + e.id.name());
+    }
+    const std::int64_t last = *std::max_element(m2o.begin(), m2o.end());
+    if (last >= 0 && static_cast<uint64_t>(last) >= width)
+      fail("m2o_sparse reads measurement " + std::to_string(last) +
+           ", past the " + std::to_string(width) +
+           " measurements its round has" +
+           (mapped ? ""
+                   : "; without D_sparse a round measures one bit per "
+                     "detector, so num_measurements cannot widen it"));
+  } // end - for(e)
+} // end - validate_observables()
+
 void dem_chunks_spec::validate() const {
   if (is_empty())
     throw std::invalid_argument("dem_chunks_spec: no phases or connections");
@@ -791,7 +926,98 @@ void dem_chunks_spec::validate() const {
     throw std::invalid_argument("dem_chunks_spec: num_rounds must be >= 2");
   for (const auto &e : phases)
     e.spec.validate("dem_chunks." + e.id.name());
+  // Every phase a connection names needs a spec.
+  for (const auto &c : connections)
+    for (const phase_id id : {c.from_phase, c.to_phase})
+      if (std::none_of(phases.begin(), phases.end(),
+                       [&](const phase_spec_entry &e) { return e.id == id; }))
+        throw std::invalid_argument(
+            "dem_chunks_spec: a connection names phase '" + id.name() +
+            "', which has no spec");
+  validate_observables(*this);
+  // Emptiness is only a half-written map when the map is inferred from it. A
+  // declared map says which phases are mapped on its own, so a phase that
+  // contributes no detector rows is legal under it.
+  if (!phases_supply_D_sparse.has_value()) {
+    const auto mapped = std::count_if(
+        phases.begin(), phases.end(),
+        [](const phase_spec_entry &e) { return !e.spec.D_sparse.empty(); });
+    if (mapped != 0 && mapped != static_cast<std::ptrdiff_t>(phases.size()))
+      throw std::invalid_argument(
+          "dem_chunks_spec: either every phase carries D_sparse or none does; "
+          "set phases_supply_D_sparse to declare that they do even where a "
+          "phase "
+          "contributes no rows");
+  }
+  if (has_D_sparse())
+    for (const auto &e : phases)
+      if (!e.spec.num_measurements && !measurements_per_round)
+        throw std::invalid_argument(
+            "dem_chunks_spec: phase '" + e.id.name() +
+            "' carries D_sparse but neither it nor the spec sets a "
+            "measurement count (num_measurements / measurements_per_round)");
 }
+
+// Inferring from any phase rather than from the first: validate() has already
+// rejected a spec where only some phases carry rows, so any phase answers for
+// all of them, and a caller that has not validated still gets the answer its
+// rows imply rather than one the phase order decides.
+bool dem_chunks_spec::has_D_sparse() const {
+  if (phases_supply_D_sparse.has_value())
+    return *phases_supply_D_sparse;
+  return std::any_of(
+      phases.begin(), phases.end(),
+      [](const phase_spec_entry &e) { return !e.spec.D_sparse.empty(); });
+} // end - dem_chunks_spec::has_D_sparse()
+
+uint64_t dem_chunks_spec::measurements_of(const dem_chunk_spec &phase) const {
+  if (phase.num_measurements)
+    return *phase.num_measurements;
+  if (measurements_per_round)
+    return *measurements_per_round;
+  throw std::invalid_argument(
+      "dem_chunks_spec: a phase has no measurement count (num_measurements / "
+      "measurements_per_round)");
+}
+
+// Built through dem_chunk_from_spec(), so the shorthand and per-seam forms
+// count alike.
+uint64_t dem_chunks_spec::detectors_of(const dem_chunk_spec &phase,
+                                       const std::string &context) const {
+  const auto chunk =
+      dem_chunk_from_spec(phase, {seam.to_seam, seam.from_seam}, context);
+  return (chunk.has_seam(seam.to_seam) ? chunk.get_seam(seam.to_seam).num_rows()
+                                       : 0) +
+         uint64_t{chunk.num_interior_rows()};
+}
+
+// Every phase a connection names must carry the same number of O_sparse
+// rows. Other phases are never built, so they are not counted.
+uint64_t dem_chunks_spec::num_observables() const {
+  const phase_spec_entry *first = nullptr;
+  const auto rows = [](const phase_spec_entry &e) {
+    return static_cast<uint64_t>(std::count(
+        e.spec.O_sparse.begin(), e.spec.O_sparse.end(), std::int64_t{-1}));
+  };
+  const auto in_chain = [&](const phase_spec_entry &e) {
+    return std::any_of(connections.begin(), connections.end(),
+                       [&](const phase_connection &c) {
+                         return c.from_phase == e.id || c.to_phase == e.id;
+                       });
+  };
+  for (const auto &e : phases) {
+    if (!in_chain(e))
+      continue;
+    if (!first)
+      first = &e;
+    if (rows(e) != rows(*first))
+      throw std::invalid_argument(
+          "dem_chunks_spec: phase '" + e.id.name() + "' has " +
+          std::to_string(rows(e)) + " observable rows (O_sparse) but phase '" +
+          first->id.name() + "' has " + std::to_string(rows(*first)));
+  } // end - for(e)
+  return first ? rows(*first) : 0;
+} // end - dem_chunks_spec::num_observables()
 
 // ---------------------------------------------------------------------------
 // dem_chunks_from_spec
@@ -967,7 +1193,7 @@ chain_layout plan_chain(const std::vector<extended_dem> &chunks,
                         seam_id from_seam, seam_id to_seam) {
   const std::size_t T = chunks.size();
   chain_layout plan;
-  plan.col_off.assign(T + 1, 0);
+  plan.col_off = dem_chunks_to_fault_offsets(chunks);
   plan.interior_row.assign(T, 0);
   plan.seam_row.assign(T - 1, 0);
   plan.lead = seam_rows_or_zero(chunks.front(), to_seam);
@@ -975,7 +1201,6 @@ chain_layout plan_chain(const std::vector<extended_dem> &chunks,
 
   std::size_t rows = plan.lead;
   for (std::size_t i = 0; i < T; ++i) {
-    plan.col_off[i + 1] = plan.col_off[i] + chunks[i].num_faults();
     plan.interior_row[i] = rows;
     rows += chunks[i].num_interior_rows();
     if (i + 1 < T) {
@@ -1200,10 +1425,7 @@ detector_error_model dem_close_all(const std::vector<extended_dem> &chunks,
     check_seam_boundary(chunks[i], chunks[i + 1], from_seam, to_seam,
                         "dem_close_all: boundary " + std::to_string(i));
 
-  // Cumulative fault column offsets
-  std::vector<std::size_t> col_off(T + 1, 0);
-  for (std::size_t i = 0; i < T; ++i)
-    col_off[i + 1] = col_off[i] + chunks[i].num_faults();
+  const auto col_off = dem_chunks_to_fault_offsets(chunks);
   const std::size_t n_faults = col_off.back();
 
   const std::size_t lead =
@@ -1341,6 +1563,16 @@ dem_chunks_to_detector_round(const std::vector<extended_dem> &chunks,
   return result;
 }
 
+std::vector<std::size_t>
+dem_chunks_to_fault_offsets(const std::vector<extended_dem> &chunks) {
+  std::vector<std::size_t> offsets;
+  offsets.reserve(chunks.size() + 1);
+  offsets.push_back(0);
+  for (const auto &c : chunks)
+    offsets.push_back(offsets.back() + c.num_faults());
+  return offsets;
+}
+
 std::vector<std::vector<uint32_t>>
 dem_chunks_to_o_sparse(const std::vector<extended_dem> &chunks) {
   if (chunks.empty())
@@ -1384,6 +1616,99 @@ dem_chunks_to_o_sparse(const std::vector<extended_dem> &chunks) {
   }
   return o_sparse;
 }
+
+// The repeating phase is visited twice rather than once so the chain carries
+// that phase's own boundary -- the bulk-to-bulk seam a single visit never
+// forms -- which is what lets a caller validate the whole chain against this
+// stand-in and extrapolate the rest a round at a time.
+compact_chain dem_chunks_to_compact_chain(const dem_chunks_spec &spec) {
+  compact_chain chain;
+  auto representative = spec;
+  if (spec.has_repeating_phase()) {
+    const auto run = spec.repeating_rounds();
+    chain.repeating = static_cast<std::size_t>(run.prefix);
+    chain.repeat_rounds = run.length;
+    representative.num_rounds =
+        run.prefix + chain.repeated_copies() + run.suffix;
+  }
+  chain.chunks = dem_chunks_from_spec(representative);
+  // Without a repeating phase the index must name no entry, and the chunk
+  // count is the one index that never does.
+  if (!spec.has_repeating_phase())
+    chain.repeating = chain.chunks.size();
+  return chain;
+} // end - dem_chunks_to_compact_chain()
+
+chunked_observable_map dem_chunks_to_o_chunked(const dem_chunks_spec &spec) {
+  const auto chain = dem_chunks_to_compact_chain(spec);
+  return dem_chunks_to_o_chunked(chain.chunks, chain.repeating,
+                                 chain.repeated_copies(), chain.repeat_rounds);
+}
+
+// The compact counterpart of dem_chunks_to_o_sparse() above. Same column
+// convention -- chunks in order, each owning num_faults() consecutive columns
+// -- but kept per chunk rather than concatenated, and with the repeating
+// chunk's copies collapsed to one entry that records the rounds it stands for.
+chunked_observable_map
+dem_chunks_to_o_chunked(const std::vector<extended_dem> &chain,
+                        std::size_t repeating, std::size_t repeated_copies,
+                        std::uint64_t repeat_rounds) {
+  chunked_observable_map map;
+  if (chain.empty())
+    throw std::invalid_argument(
+        "dem_chunks_to_o_chunked: chain must be non-empty");
+  const uint32_t k_obs = chain[0].num_observables();
+  for (std::size_t i = 1; i < chain.size(); ++i)
+    if (chain[i].num_observables() != k_obs)
+      throw std::invalid_argument(
+          "dem_chunks_to_o_chunked: observable count mismatch at "
+          "chunk " +
+          std::to_string(i));
+
+  // The collapse below trusts these three to describe `chain`; nothing about
+  // the chain itself can confirm them, so reject a set that does not fit
+  // rather than silently dropping or replaying the wrong entries.
+  if (repeated_copies == 0)
+    throw std::invalid_argument(
+        "dem_chunks_to_o_chunked: repeated_copies must be at least 1");
+  if (repeating < chain.size() && repeating + repeated_copies > chain.size())
+    throw std::invalid_argument(
+        "dem_chunks_to_o_chunked: the repeating chunk's copies run past the "
+        "end of the chain");
+  if (repeating > chain.size())
+    throw std::invalid_argument(
+        "dem_chunks_to_o_chunked: repeating must index the chain, or equal "
+        "its size when nothing repeats");
+  if (repeat_rounds < repeated_copies)
+    throw std::invalid_argument(
+        "dem_chunks_to_o_chunked: the repeating chunk cannot stand for fewer "
+        "rounds than the copies the chain carries");
+
+  map.repeating = repeating;
+  map.repeat_count = repeat_rounds;
+  map.columns.reserve(chain.size());
+  for (std::size_t i = 0; i < chain.size(); ++i) {
+    // Keep the first copy of the repeating chunk and drop the rest: the extra
+    // copies exist so the chain exercises the repeating chunk's own boundary,
+    // not because they differ.
+    if (repeated_copies > 1 && i > repeating && i < repeating + repeated_copies)
+      continue;
+    const auto &chunk = chain[i];
+    const auto faults = static_cast<uint32_t>(chunk.num_faults());
+    // A chunk flipping no observable may carry a default-constructed O with
+    // no column pointers at all; it still owns its fault columns, so give it
+    // an empty O of the right width rather than letting the walk lose them.
+    if (chunk.O.num_cols() == 0) {
+      map.columns.push_back(sparse_binary_matrix::from_nested_csc(
+          k_obs, faults, std::vector<std::vector<uint32_t>>(faults)));
+      continue;
+    }
+    map.columns.push_back(chunk.O.layout() == sparse_binary_matrix_layout::csc
+                              ? chunk.O
+                              : chunk.O.to_csc());
+  } // end - for(chunk)
+  return map;
+} // end - dem_chunks_to_o_chunked()
 
 sparse_binary_matrix dem_chunks_to_pcm(const std::vector<extended_dem> &chunks,
                                        seam_id from_seam, seam_id to_seam) {

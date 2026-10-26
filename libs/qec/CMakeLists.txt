@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Requiring the same version as the others.
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
@@ -361,6 +356,9 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/lib/version.cpp.in"
 # ==============================================================================
 
 add_subdirectory(lib)
+add_subdirectory(
+  "${CUDAQX_QEC_SOURCE_DIR}/../../benchmarks/qec"
+  "${CMAKE_CURRENT_BINARY_DIR}/benchmarks")
 if (NOT CUDAQ_QEC_DECODERS_ONLY OR CUDAQ_QEC_BUILD_DECODING_SERVER)
   add_subdirectory(tools)
 endif()

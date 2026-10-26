@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2025 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // The realtime_decoding_demo example source (a copy of the in-tree
 // unittests/realtime/app_examples/surface_code-1.cpp, adapted in this header,
@@ -198,12 +195,12 @@ build_multi_decoder_config(const cudaq::qec::decoder_inputs &inputs,
     dc.H_sparse = cudaq::qec::pcm_to_sparse_vec(dem.detector_error_matrix);
     dc.O_sparse = cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix);
     dc.D_sparse = d_sparse;
+    dc.error_rate_vec = dem.error_rates;
 
     if (opts.decoder_type == "nv-qldpc-decoder") {
       dc.type = "nv-qldpc-decoder";
       cudaqx::heterogeneous_map nv_args;
       nv_args.insert("use_sparsity", true);
-      nv_args.insert("error_rate_vec", dem.error_rates);
       nv_args.insert("max_iterations", 50);
       nv_args.insert("bp_method", 3);   // min-sum + dmem (required for relay)
       nv_args.insert("composition", 1); // sequential relay
@@ -228,7 +225,6 @@ build_multi_decoder_config(const cudaq::qec::decoder_inputs &inputs,
       sw_args.insert("straddle_start_round", false);
       sw_args.insert("straddle_end_round", true);
       sw_args.insert("inner_decoder_name", "multi_error_lut");
-      sw_args.insert("error_rate_vec", dem.error_rates);
       cudaqx::heterogeneous_map inner_lut_args;
       inner_lut_args.insert("lut_error_depth", 2);
       sw_args.insert("inner_decoder_params", inner_lut_args);
@@ -237,7 +233,6 @@ build_multi_decoder_config(const cudaq::qec::decoder_inputs &inputs,
       dc.type = "pymatching";
       cudaqx::heterogeneous_map pm_args;
       pm_args.insert("merge_strategy", "smallest_weight");
-      pm_args.insert("error_rate_vec", dem.error_rates);
       dc.decoder_custom_args = pm_args;
     } else {
       dc.type = "multi_error_lut";

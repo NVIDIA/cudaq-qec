@@ -273,8 +273,9 @@ with optimized inference performance on NVIDIA GPUs.
 
 Unlike traditional algorithmic decoders, neural network decoders can be trained on specific error
 models and code structures, potentially achieving superior performance for certain noise regimes.
-The TensorRT decoder supports loading models in ONNX format and provides configurable precision
-modes (fp16, bf16, int8, fp8, tf32) to balance accuracy and inference speed.
+The TensorRT decoder supports loading models in ONNX format. Its strongly typed network preserves
+the data types and quantization encoded in the model; its ``precision`` option controls only the
+TensorRT TF32 build policy.
 
 This tutorial demonstrates the complete workflow for training a simple multi-layer perceptron (MLP)
 to decode surface code syndromes using PyTorch and Stim, exporting the model to ONNX format, and
@@ -311,7 +312,9 @@ Using the TensorRT Decoder in CUDA-Q QEC
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Once you have a trained ONNX model, you can load it with the TensorRT decoder for accelerated
-inference. The decoder can be used in both C++ and Python workflows.
+inference. The decoder can be used in both C++ and Python workflows. Keep the ``.dem`` file emitted
+by the training example beside the model: it fixes the detector and observable dimensions and the
+error-mechanism ordering that the model was trained against.
 
 **Loading from ONNX (with automatic TensorRT optimization)**:
 
@@ -322,56 +325,55 @@ inference. The decoder can be used in both C++ and Python workflows.
       import cudaq_qec as qec
       import numpy as np
 
-      # Note: The AI decoder doesn't use the parity check matrix.
-      # A placeholder matrix is provided here to satisfy the API.
-      H = np.array([[1, 0, 0, 1, 0, 1, 1],
-                    [0, 1, 0, 1, 1, 0, 1],
-                    [0, 0, 1, 0, 1, 1, 1]], dtype=np.uint8)
+      with open("surface_code_decoder.dem") as dem_file:
+          dem_text = dem_file.read()
+      dem = qec.dem_from_stim_text(dem_text)
 
-      # Create TensorRT decoder from ONNX model
-      decoder = qec.get_decoder("trt_decoder", H,
-                                onnx_load_path="ai_decoder.onnx")
+      # The training model predicts logical observables, so both the engine
+      # tensor format and the public decoder result are explicit.
+      decoder = qec.get_decoder(
+          "trt_decoder",
+          dem_text,
+          onnx_load_path="surface_code_decoder.onnx",
+          engine_output_format="observables",
+          output="observables")
 
       # Decode a syndrome
-      syndrome = np.array([1.0, 0.0, 1.0], dtype=np.float32)
+      syndrome = np.zeros(dem.num_detectors(), dtype=np.float32)
       result = decoder.decode(syndrome)
-      print(f"Predicted error: {result}")
+      print(f"Predicted observable: {result.result}")
 
 .. tab:: C++
 
    .. code-block:: cpp
 
       #include "cudaq/qec/decoder.h"
-      #include "cuda-qx/core/tensor.h"
       #include "cuda-qx/core/heterogeneous_map.h"
 
+      #include <fstream>
+      #include <iterator>
+      #include <string>
+      #include <utility>
+      #include <vector>
+
       int main() {
-          // Note: The AI decoder doesn't use the parity check matrix.
-          // A placeholder matrix is provided here to satisfy the API.
-          std::vector<std::vector<uint8_t>> H_vec = {
-              {1, 0, 0, 1, 0, 1, 1},
-              {0, 1, 0, 1, 1, 0, 1},
-              {0, 0, 1, 0, 1, 1, 1}
-          };
-          
-          // Convert to tensor
-          cudaqx::tensor<uint8_t> H({3, 7});
-          for (size_t i = 0; i < 3; ++i) {
-              for (size_t j = 0; j < 7; ++j) {
-                  H.at({i, j}) = H_vec[i][j];
-              }
-          }
+          std::ifstream dem_file("surface_code_decoder.dem");
+          std::string dem_text((std::istreambuf_iterator<char>(dem_file)),
+                               std::istreambuf_iterator<char>());
+          auto inputs = cudaq::qec::decoder_init::from_stim_dem(dem_text);
+          const auto syndrome_size = inputs.num_detectors();
 
-          // Create decoder parameters
           cudaqx::heterogeneous_map params;
-          params.insert("onnx_load_path", "ai_decoder.onnx");
-          params.insert("precision", "fp16");
+          params.insert("onnx_load_path", "surface_code_decoder.onnx");
+          params.insert("engine_output_format", std::string("observables"));
 
-          // Create TensorRT decoder
-          auto decoder = cudaq::qec::get_decoder("trt_decoder", H, params);
+          // The training model predicts logical observables, so request that
+          // result basis explicitly.
+          auto decoder = cudaq::qec::get_decoder(
+              "trt_decoder", std::move(inputs),
+              cudaq::qec::decode_result_type::observables, params);
 
-          // Decode syndrome
-          std::vector<cudaq::qec::float_t> syndrome = {1.0, 0.0, 1.0};
+          std::vector<cudaq::qec::float_t> syndrome(syndrome_size, 0.0);
           auto result = decoder->decode(syndrome);
 
           return 0;
@@ -386,8 +388,15 @@ you can load it directly:
 
    .. code-block:: python
 
-      decoder = qec.get_decoder("trt_decoder", H,
-                                engine_load_path="surface_code_decoder.trt")
+      with open("surface_code_decoder.dem") as dem_file:
+          dem_text = dem_file.read()
+
+      decoder = qec.get_decoder(
+          "trt_decoder",
+          dem_text,
+          engine_load_path="surface_code_decoder.trt",
+          engine_output_format="observables",
+          output="observables")
 
 Converting ONNX Models to TensorRT Engines
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

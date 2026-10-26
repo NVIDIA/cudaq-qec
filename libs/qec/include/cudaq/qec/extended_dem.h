@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // One chunk of a detector error model (extended_dem) with named seam
 // boundaries, plus the operations that compose chunks into a flat
@@ -31,7 +28,9 @@
 //   dem_chunk_rounds               — how many measurement rounds a chunk spans
 //   dem_chunks_to_rounds           — total rounds across a list
 //   dem_chunks_to_detector_round   — per-detector round index
-//   dem_chunks_to_o_sparse         — observable-flip map
+//   dem_chunks_to_compact_chain    — stand-in chain for a repeating spec
+//   dem_chunks_to_o_sparse         — observable-flip map, flattened
+//   dem_chunks_to_o_chunked        — observable-flip map, chunking preserved
 //   dem_chunks_to_pcm              — parity-check matrix
 //
 // The matching D_sparse map is memory-circuit-specific, so it lives in
@@ -100,6 +99,12 @@ struct seam_id {
 
   /// Return the registered name, or "seam:<hex>" if not registered.
   std::string name() const;
+
+  /// Inverse of name(): "seam:<hex>" is the id it spells, left unregistered so
+  /// the placeholder does not claim the id; any other name is hashed and
+  /// registered.
+  /// @throws std::invalid_argument on a collision, as register_name().
+  static seam_id from_name(std::string_view name);
 };
 
 /// @brief Same type as seam_id; separate alias for readability at call sites
@@ -291,6 +296,36 @@ struct dem_chunk_spec {
 
   std::vector<double> error_rates;
 
+  /// Optional measurement-to-detector rows in the -1-terminated encoding, one
+  /// per detector this chunk contributes when closed: its to_seam rows, then
+  /// its interior rows. Indices count the previous round's measurements first
+  /// and then this round's own: index j is the previous round's measurement j
+  /// when j is below that round's measurement count, and otherwise this
+  /// round's measurement j minus that count. Either every phase of a
+  /// dem_chunks_spec carries rows or none does; with none, D follows the
+  /// memory-experiment convention of dem_chunks_to_d_sparse().
+  ///
+  /// The window is those two rounds and no further back, which bounds what a
+  /// measurement-free phase can sit between. Such a phase -- a transversal
+  /// Clifford, a state preparation -- may form its own detectors from the
+  /// round before it, but it then leaves that round unreachable to the phase
+  /// after it, whose window starts at its own first measurement. A chain
+  /// that must difference across such a gadget cannot say so here.
+  std::vector<std::int64_t> D_sparse;
+
+  /// Measurements this phase's round adds to the stream, when it differs from
+  /// dem_chunks_spec::measurements_per_round (a final data readout, say).
+  /// Like that field, it applies when the phases carry D_sparse rows; without
+  /// them a round adds one measurement per detector.
+  std::optional<uint64_t> num_measurements;
+
+  /// Optional readout map, -1-terminated: one row per observable, listing
+  /// the measurements of this phase's own round whose parity is the
+  /// observable's raw value. Only the last phase may carry it. The round has
+  /// its measurement count when the phases carry D_sparse rows, else one
+  /// measurement per detector.
+  std::vector<std::int64_t> m2o_sparse;
+
   /// True when nothing has been set.
   bool is_empty() const;
   bool operator==(const dem_chunk_spec &) const = default;
@@ -376,6 +411,51 @@ struct dem_chunks_spec {
   seam_connection seam;
   std::optional<uint64_t> num_rounds;
 
+  /// Measurements each round adds to the stream, for phases carrying D_sparse
+  /// rows; a phase's num_measurements overrides it.
+  std::optional<uint64_t> measurements_per_round;
+
+  /// Whether the phases supply D, where the emptiness of their D_sparse rows
+  /// cannot say so on its own. Carries no rows itself: it only settles how
+  /// has_D_sparse() reads the ones the phases carry.
+  ///
+  /// Unset infers it: any phase carrying rows means the spec supplies D,
+  /// which is what every spec written before this field did and what a
+  /// memory experiment needs. Set it only where emptiness is ambiguous --
+  /// true declares that the phases supply D even where one of them
+  /// contributes no detector rows at all, false keeps the
+  /// dem_chunks_to_d_sparse() memory convention even though rows are
+  /// present. See has_D_sparse().
+  std::optional<bool> phases_supply_D_sparse;
+
+  /// Optional observable names, one per O_sparse row.
+  std::vector<std::string> observable_names;
+
+  /// The measurement count of @p phase's round: its num_measurements, else
+  /// measurements_per_round. @throws std::invalid_argument if neither is set.
+  uint64_t measurements_of(const dem_chunk_spec &phase) const;
+
+  /// @brief The number of O_sparse rows every phase a connection names
+  /// carries; 0 when no connection names a phase.
+  /// @throws std::invalid_argument if two of those phases disagree.
+  uint64_t num_observables() const;
+
+  /// The detector rows @p phase's round contributes when closed: its to_seam
+  /// band and interior rows. Builds the phase's chunk on each call.
+  /// @param phase The DEM chunk phase whose detector rows are counted.
+  /// @param context Prefix for error messages, as for dem_chunk_from_spec().
+  /// @throws std::invalid_argument if the phase is inconsistent.
+  uint64_t detectors_of(const dem_chunk_spec &phase,
+                        const std::string &context = "dem_chunk") const;
+
+  /// @brief Whether the phases supply D, rather than leaving
+  /// dem_chunks_to_d_sparse() to apply the memory convention.
+  ///
+  /// phases_supply_D_sparse when set, else inferred from any phase carrying
+  /// rows. Replaces the `!D_sparse.empty()` test, which cannot tell an absent
+  /// mapping from a present one whose phase contributes no rows.
+  bool has_D_sparse() const;
+
   /// True when no phases or connections have been set.
   bool is_empty() const;
   bool operator==(const dem_chunks_spec &) const = default;
@@ -383,9 +463,41 @@ struct dem_chunks_spec {
   /// True when any connection is a self-loop.
   bool has_repeating_phase() const;
 
+  /// Shortest chain the connections admit: one round per non-self connection,
+  /// plus the round the last one lands on. A repeating phase can be visited
+  /// once, so this is the round count a streaming spec expands to when nothing
+  /// else pins it, and the smallest window a caller may ask that spec for.
+  uint64_t minimum_rounds() const;
+
   /// Return the phase_id of the self-connected (repeating) phase.
   /// @throws std::invalid_argument if there is no or more than one self-loop.
   phase_id repeating_phase() const;
+
+  /// @brief Rounds of phase_sequence() before, of, and after the repeating
+  /// phase.
+  struct repeating_span {
+    uint64_t prefix = 0; ///< rounds before the first repeating round
+    uint64_t length = 0; ///< repeating rounds
+    uint64_t suffix = 0; ///< rounds after the last repeating round
+  };
+
+  /// @brief Where the repeating phase sits in phase_sequence(), found from the
+  /// shortest chain, so nothing proportional to num_rounds is built.
+  /// @throws std::invalid_argument as phase_sequence() and repeating_phase().
+  repeating_span repeating_rounds() const;
+
+  /// @brief The phases of a shot's rounds before, of, and after the repeating
+  /// phase.
+  struct phase_layout {
+    std::vector<phase_id> prefix; ///< phases of the rounds before it, in order
+    phase_id repeating;           ///< the repeating phase
+    std::vector<phase_id> suffix; ///< phases of the rounds after it, in order
+  };
+
+  /// @brief The phase layout of a shot of any length, from the shortest
+  /// chain; num_rounds is not consulted. Copies the spec on each call.
+  /// @throws std::invalid_argument as phase_sequence() and repeating_phase().
+  phase_layout layout() const;
 
   /// @brief Expand connections + num_rounds into an ordered phase_id list.
   ///
@@ -405,6 +517,12 @@ struct dem_chunks_spec {
   const dem_chunk_spec &get_phase(phase_id id) const;
 
   /// @brief Validate phase specs, connection graph, and seam widths.
+  ///
+  /// Also checks that every connection names a phase with a spec, the phases
+  /// agree on the observable count, observable_names has one unique name per
+  /// observable, and only the last phase carries m2o_sparse, with one row per
+  /// observable inside its round: its measurement count with D_sparse, else
+  /// its detectors.
   /// @throws std::invalid_argument on the first violation.
   void validate() const;
 };
@@ -554,10 +672,157 @@ dem_chunks_to_detector_round(const std::vector<extended_dem> &chunks,
 std::vector<std::vector<uint32_t>>
 dem_chunks_to_o_sparse(const std::vector<extended_dem> &chunks);
 
+/// @brief Cumulative fault-column offsets of T chunks, with a trailing total.
+///
+/// Chunk i owns columns [offsets[i], offsets[i + 1]) of the closed model, so
+/// the result has T + 1 entries and offsets.back() is the total fault count.
+/// Per-chunk counts differ (a rep-5 memory experiment is 9/9/5 for
+/// init/bulk/final), so a caller cannot assume a uniform stride. Seam names
+/// are not needed: closing a chain concatenates fault columns in chunk order
+/// and shares no column between chunks.
+std::vector<std::size_t>
+dem_chunks_to_fault_offsets(const std::vector<extended_dem> &chunks);
+
 /// @brief Build a canonicalized CSC parity-check matrix from chunks.
 sparse_binary_matrix
 dem_chunks_to_pcm(const std::vector<extended_dem> &chunks,
                   seam_id from_seam = seam_name::next_round,
                   seam_id to_seam = seam_name::prev_round);
+
+/// Rounds the compact chain gives the repeating phase. Two rather than one so
+/// the chain forms that phase's own boundary, which one visit never makes.
+inline constexpr std::uint64_t compact_chain_repeating_visits = 2;
+
+/// @brief A short chain standing in for a long one.
+///
+/// A repeating spec expands to num_rounds chunks but holds only a handful of
+/// distinct ones, so this carries every distinct chunk and boundary the full
+/// chain has while staying bounded by the phase count. What a caller needs
+/// from the full chain is then read off this one or extrapolated, one term
+/// per elided round. It is the expanded form of what repeating_rounds()
+/// states declaratively, and unlike that one it is defined for a spec with no
+/// repeating phase.
+struct compact_chain {
+  /// Chunks in round order, the repeating one present repeated_copies() times
+  /// starting at `repeating`.
+  std::vector<extended_dem> chunks;
+  /// First repeating copy (repeating_rounds().prefix), or chunks.size() when
+  /// nothing repeats.
+  std::size_t repeating = 0;
+  /// Rounds the repeating chunk stands for (repeating_rounds().length).
+  std::uint64_t repeat_rounds = 1;
+
+  /// Copies this chain carries. Derived, so it cannot disagree with
+  /// `repeat_rounds`.
+  std::size_t repeated_copies() const {
+    return static_cast<std::size_t>(repeat_rounds <
+                                            compact_chain_repeating_visits
+                                        ? repeat_rounds
+                                        : compact_chain_repeating_visits);
+  }
+
+  /// Rounds the full chain has that this one does not.
+  std::uint64_t elided_rounds() const {
+    return repeat_rounds - repeated_copies();
+  }
+};
+
+/// @brief Expand @p spec into a compact chain.
+/// @throws std::invalid_argument as phase_sequence(), and if the spec has a
+///   repeating phase but no num_rounds.
+compact_chain dem_chunks_to_compact_chain(const dem_chunks_spec &spec);
+
+/// @brief Observable-flip map of a chunk chain, kept in chunk form.
+///
+/// The compact counterpart of dem_chunks_to_o_sparse(): that one is flat and
+/// observable-major, so proportional to the expanded chain, while this holds
+/// one entry per distinct chunk and costs the same however many rounds the
+/// middle repeats for. A decoder built from a chunked DEM without its closed
+/// model projects an error frame through this instead.
+///
+/// The chain's error columns are the entries concatenated in round order,
+/// the entry at `repeating` walked `repeat_count` times in place of once.
+struct chunked_observable_map {
+  /// Each chunk's O in CSC: column `local` names the observables that chunk's
+  /// local fault column flips. One column per fault even where the chunk
+  /// flips nothing, so a walk advances by num_cols() alone.
+  std::vector<sparse_binary_matrix> columns;
+  /// Index of the repeating entry, or columns.size() when none repeats.
+  std::size_t repeating = 0;
+  /// Rounds the repeating entry stands for. 1 when nothing repeats.
+  std::uint64_t repeat_count = 1;
+
+  /// @brief Walk the chain's error columns in round order.
+  ///
+  /// Visits each entry once, the one at `repeating` `repeat_count` times,
+  /// advancing the column past every entry whether or not it flips anything.
+  /// For each column \p is_set reports set, calls `on_flip(column,
+  /// observable)` per observable it flips, giving the net parity the O matrix
+  /// gives, column-major. A hand-rolled walk gets the repetition or the
+  /// advance wrong in a way that still looks right on a chain that does not
+  /// repeat, so the layout contract stays here with the type.
+  ///
+  /// Allocation-free; both callbacks are templated rather than erased through
+  /// std::function, since this runs per shot.
+  ///
+  /// @param num_columns Error columns the caller holds; the walk stops
+  ///   consulting \p is_set past them.
+  /// @param is_set Called as `is_set(column)`; true when that error column is
+  ///   set in the frame being projected.
+  /// @param on_flip Called as `on_flip(column, observable)` once per
+  ///   observable a set column flips.
+  template <typename IsSetFn, typename OnFlipFn>
+  void for_each_flip(std::size_t num_columns, IsSetFn &&is_set,
+                     OnFlipFn &&on_flip) const {
+    std::size_t column = 0;
+    for (std::size_t entry = 0; entry < columns.size(); ++entry) {
+      const auto &chunk = columns[entry];
+      const auto &ptr = chunk.ptr();
+      const auto &rows = chunk.indices();
+      const std::uint64_t visits =
+          entry == repeating ? repeat_count : std::uint64_t{1};
+      for (std::uint64_t visit = 0; visit < visits; ++visit) {
+        for (std::size_t local = 0; local < chunk.num_cols();
+             ++local, ++column) {
+          if (column >= num_columns || !is_set(column))
+            continue;
+          for (auto p = ptr[local]; p < ptr[local + 1]; ++p)
+            on_flip(column, rows[p]);
+        }
+      } // end - for(visit)
+    } // end - for(entry)
+  } // end - for_each_flip()
+
+  /// @brief Total error columns the chain describes.
+  std::size_t num_error_columns() const {
+    std::size_t total = 0;
+    for (std::size_t entry = 0; entry < columns.size(); ++entry)
+      total += columns[entry].num_cols() *
+               static_cast<std::size_t>(entry == repeating ? repeat_count : 1);
+    return total;
+  }
+};
+
+/// @brief Build the chunk-form observable map of a chain.
+///
+/// Same map and fault-column convention as dem_chunks_to_o_sparse(), which
+/// flattens the chunking away; this keeps it.
+///
+/// @param chain Chunks in round order; the repeating chunk's copies are
+///   identical, so they collapse to one entry.
+/// @param repeating First repeating copy, or chain.size() when none repeats.
+/// @param repeated_copies Copies of the repeating chunk present in `chain`.
+/// @param repeat_rounds Rounds the collapsed entry records.
+/// @throws std::invalid_argument on an empty chain or an observable count
+///   mismatch between chunks.
+chunked_observable_map
+dem_chunks_to_o_chunked(const std::vector<extended_dem> &chain,
+                        std::size_t repeating, std::size_t repeated_copies,
+                        std::uint64_t repeat_rounds);
+
+/// @brief As above, from a spec, through its compact chain. Nothing it builds
+/// or returns is proportional to the spec's round count.
+/// @throws std::invalid_argument as dem_chunks_to_compact_chain().
+chunked_observable_map dem_chunks_to_o_chunked(const dem_chunks_spec &spec);
 
 } // namespace cudaq::qec

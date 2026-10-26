@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under    #
-# the terms of the Apache License 2.0 which accompanies this distribution.    #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Pure-NumPy tests of the relay_solutions post-processing helper against
 # hand-computed expectations. The decoder itself is not needed: the wire
@@ -227,6 +222,126 @@ def test_percentile_validation():
                             OBS_TRUTH,
                             percentiles=[50, 101],
                             observables=L)
+
+
+def test_pack_words_rejects_wrong_row_width():
+    # Packed rows must match the declared bit width.
+    bits = np.array([[1, 0, 1, 0]], dtype=np.uint8)
+    with pytest.raises(ValueError, match="expected 5 bits per row, got 4"):
+        rs._pack_words(bits, 5)
+
+
+def _single_shot_payload():
+    payload = _payload(WIDTH, 2, [2], [2], [[3, 10]], [[5.0, 2.0]],
+                       [RECORD_BITS[0][:2]])
+    payload["relay_solutions_count"] = int(
+        payload.pop("relay_solutions_counts")[0])
+    payload["relay_solutions_total"] = int(
+        payload.pop("relay_solutions_totals")[0])
+    return payload
+
+
+def _counts_shape_payload():
+    return _payload(WIDTH, R, [1, 2], [1, 2], ITERS[:2], WEIGHT[:2],
+                    RECORD_BITS[:2])
+
+
+def _flat_size_payload():
+    payload = _payload(WIDTH, R, COUNTS, COUNTS, ITERS, WEIGHT, RECORD_BITS)
+    payload["relay_solutions_iters"] = payload["relay_solutions_iters"][:-1]
+    return payload
+
+
+@pytest.mark.parametrize(
+    "payload, num_shots, match",
+    [
+        (None, 1, r"no relay_solutions records"),
+        (_single_shot_payload(), 2,
+         r"single-shot relay_solutions keys but num_shots=2"),
+        (_counts_shape_payload(), N_SHOTS, r"counts/totals have shape"),
+        (_flat_size_payload(), N_SHOTS, r"relay_solutions_iters has shape"),
+    ],
+)
+def test_unpack_rejects_malformed_payloads(payload, num_shots, match):
+    with pytest.raises(ValueError, match=match):
+        rs.unpack(payload, num_shots)
+
+
+@pytest.mark.parametrize("kind", ["obs_1d", "obs_shape", "n_empty", "n_zero"])
+def test_stop_nconv_sweep_rejects_invalid_inputs(kind):
+    results = make_results()
+    if kind == "obs_1d":
+        with pytest.raises(ValueError, match="obs_truth must be 2-D"):
+            rs.stop_nconv_sweep(results,
+                                np.array([1, 0, 1, 0]),
+                                percentiles=50,
+                                observables=L)
+    elif kind == "obs_shape":
+        with pytest.raises(ValueError, match="observables has shape"):
+            rs.stop_nconv_sweep(results,
+                                OBS_TRUTH,
+                                percentiles=50,
+                                observables=np.ones((3, 5), dtype=int))
+    elif kind == "n_empty":
+        with pytest.raises(ValueError, match="n_values must be positive"):
+            rs.stop_nconv_sweep(results,
+                                OBS_TRUTH,
+                                percentiles=50,
+                                n_values=[],
+                                observables=L)
+    else:
+        with pytest.raises(ValueError, match="n_values must be positive"):
+            rs.stop_nconv_sweep(results,
+                                OBS_TRUTH,
+                                percentiles=50,
+                                n_values=[0],
+                                observables=L)
+
+
+def test_stop_nconv_sweep_fallback_result_width_mismatch():
+    # A never-converged shot is scored from results.result, which must have
+    # the same width as the recorded solutions.
+    payload = _payload(WIDTH, 1, [0], [0], [[-1]], [[INF]], [[[0] * WIDTH]])
+    returned = np.array([[0.0, 1.0]], dtype=np.float64)
+    opt_results = [{"num_iter": 8}]
+    results = qec.BatchDecoderResult(returned, np.array([False]), opt_results,
+                                     payload)
+    obs_truth = np.array([[0, 1]])
+    observables = np.array([[1, 0, 0, 0, 0], [0, 1, 0, 0, 0]])
+    with pytest.raises(ValueError,
+                       match="results.result rows have length 2, expected 5"):
+        rs.stop_nconv_sweep(results,
+                            obs_truth,
+                            percentiles=50,
+                            n_values=[1],
+                            observables=observables)
+
+
+def test_stop_nconv_sweep_zero_record_slots():
+    # max_records=0: the shot never recorded a convergence, so the fallback
+    # result, num_iter, and exhausted fraction are the whole story.
+    width = 2
+    payload = {
+        "relay_solutions_width": width,
+        "relay_solutions_max_records": 0,
+        "relay_solutions_counts": np.array([0], dtype=np.int32),
+        "relay_solutions_totals": np.array([0], dtype=np.int32),
+        "relay_solutions_iters": np.array([], dtype=np.int32),
+        "relay_solutions_weight": np.array([], dtype=np.float64),
+        "relay_solutions_result": np.array([], dtype=np.int32),
+    }
+    returned = np.array([[1.0, 0.0]], dtype=np.float64)
+    opt_results = [{"num_iter": 12}]
+    results = qec.BatchDecoderResult(returned, np.array([False]), opt_results,
+                                     payload)
+    truth = np.array([[0, 0]])
+    sweep = rs.stop_nconv_sweep(results, truth, percentiles=50, n_values=[1])
+    assert sweep.num_shots == 1
+    assert sweep.num_unconverged == 1
+    np.testing.assert_array_equal(sweep.num_errors, [1])
+    np.testing.assert_allclose(sweep.ler, [1.0])
+    np.testing.assert_allclose(sweep.avg_iters, [12.0])
+    np.testing.assert_allclose(sweep.frac_exhausted, [1.0])
 
 
 if __name__ == "__main__":

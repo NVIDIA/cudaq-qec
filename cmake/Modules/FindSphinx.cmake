@@ -1,4 +1,7 @@
-# Unfortunately, there is no "standard way to find sphinx" 
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Unfortunately, there is no "standard way to find sphinx"
 
 find_program(SPHINX_EXECUTABLE
   NAMES sphinx-build

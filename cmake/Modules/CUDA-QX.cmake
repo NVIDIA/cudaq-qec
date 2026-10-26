@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 #[=======================================================================[.rst:
 cudaqx_add_device_code
@@ -34,7 +29,9 @@ given library target.
     A list of source files to be compiled.
 
   ``COMPILER_FLAGS <flag1> [<flag2> ...]``
-    Optional. A list of compiler flags to be passed to nvq++.
+    Optional. A list of compiler flags to be passed to nvq++. Passing an
+    explicit ``--target`` here also opts the object into nvq++'s pre-main
+    ``setTargetBackend()`` initializer; see ``-fno-set-target-backend`` below.
 
 This function creates custom commands to compile each source file using
 nvq++, generates custom targets for each compilation, and adds the
@@ -75,13 +72,23 @@ function(cudaqx_add_device_code LIBRARY_NAME)
 
   set(COMPILER ${CUDAQ_INSTALL_DIR}/bin/nvq++)
 
+  # Without an explicit --target, nvq++ picks the build host's default, which
+  # is `nvidia` wherever a GPU is visible. For any target declaring
+  # gen-target-backend that bakes a pre-main setTargetBackend() into the
+  # object, which then overrides the target the application selected, and
+  # throws from a static initializer when the library is dlopen'd after a
+  # target is already active. Only an explicit --target asks for that.
+  if(NOT "${ARGS_COMPILER_FLAGS}" MATCHES "--target")
+    list(APPEND ARGS_COMPILER_FLAGS -fno-set-target-backend)
+  endif()
+
   # It might be that our CXX toolchain is installed in non-standard path and
   # `cudaq-quake`, being a clang-based compiler, won't be able to find it. In
   # such cases, setting CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN will allows us
   # to tell `cudaq-quake` where to look for the toolchain. (This happens when
   # building wheels inside the manylinux container, for example.)
   if (CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN)
-    set(ARGS_COMPILER_FLAGS "${ARGS_COMPILER_FLAGS} --gcc-install-dir=${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}")
+    list(APPEND ARGS_COMPILER_FLAGS "--gcc-install-dir=${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}")
   endif()
 
   set(prop "$<TARGET_PROPERTY:${LIBRARY_NAME},INCLUDE_DIRECTORIES>")
@@ -199,7 +206,13 @@ function(cudaqx_import_cudaq_targets)
   find_package(CUDAQEnsmallen REQUIRED CONFIG)
   find_package(CUDAQEmDefault REQUIRED CONFIG)
   find_package(CUDAQPlatformDefault REQUIRED CONFIG)
+  find_package(CUDAQMlirRuntime REQUIRED CONFIG)
   find_package(CUDAQPythonInterop CONFIG)
+
+  set(CUDAQTargetCatalog_DIR "${CUDAQ_CMAKE_DIR}/../CUDAQTargetCatalog")
+  if(EXISTS "${CUDAQTargetCatalog_DIR}/CUDAQTargetCatalogConfig.cmake")
+    find_package(CUDAQTargetCatalog REQUIRED CONFIG)
+  endif()
 
   # Import the CUDA-Q library target without loading CUDAQConfig.cmake, which
   # enables the CUDAQ CMake language in current CUDA-Q installs.

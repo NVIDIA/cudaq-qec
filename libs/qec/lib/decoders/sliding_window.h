@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2025 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -22,6 +19,9 @@ namespace cudaq::qec {
 /// low-latency decoding of streaming syndrome data.
 class sliding_window : public decoder {
 private:
+  /// Canonical materialized matrix view retained by this matrix-family decoder.
+  const sparse_binary_matrix &H;
+
   // --- Input parameters ---
 
   /// The number of rounds of syndrome data in each window.
@@ -41,7 +41,7 @@ private:
   /// any subsequent rounds be included?
   bool straddle_end_round = true;
   /// The vector of error rates for the error mechanisms.
-  std::vector<cudaq::qec::float_t> error_rate_vec;
+  std::vector<double> error_rate_vec;
   /// The name of the inner decoder to use.
   std::string inner_decoder_name;
   /// The parameters to pass to the inner decoder.
@@ -92,7 +92,12 @@ private:
 
   /// @brief Decode the active window from the rolling buffer, commit, and back
   /// out committed errors into the next window's syndrome mods.
-  void decode_window();
+  /// @return false if the inner decoder abandoned the window.
+  bool decode_window(cancellation_token tok);
+
+  /// @brief Drop any partially streamed block so the next round starts a new
+  /// one.
+  void reset_stream();
 
 public:
   /// @brief Constructor
@@ -104,7 +109,11 @@ public:
   ///   - num_boundary_syndromes: Boundary-layer width (0 if uniform)
   ///   - inner_decoder_name: Name of the inner decoder to use
   ///   - inner_decoder_params: Parameters for the inner decoder (optional)
-  sliding_window(const cudaq::qec::sparse_binary_matrix &H,
+  sliding_window(cudaq::qec::decoder_init inputs,
+                 decode_result_type requested_output,
+                 const cudaqx::heterogeneous_map &params);
+  sliding_window(cudaq::qec::decoder_init inputs,
+                 decoder_output_request request,
                  const cudaqx::heterogeneous_map &params);
 
   /// @brief Decode a syndrome vector
@@ -112,12 +121,35 @@ public:
   /// @return The decoded error correction
   decoder_result decode(const std::vector<float_t> &syndrome) override;
 
+  /// @brief Decode a syndrome vector, forwarding `tok` to the inner decoders.
+  /// @param syndromes Syndrome measurements to decode
+  /// @param tok The cancellation token to use
+  /// @return std::nullopt if an inner decoder honored a stop (the partial
+  /// block is dropped), a result with an empty `result` vector until the
+  /// final window is complete, otherwise the decoded result.
+  std::optional<decoder_result> decode(const std::vector<float_t> &syndrome,
+                                       cancellation_token tok) override;
+
   /// @brief Decode multiple syndromes in batch
   /// @param syndromes Multiple syndrome measurements to decode
   /// @return The decoded error corrections
   using decoder::decode_batch; // keep the batch_opt_results overload visible
   std::vector<decoder_result>
   decode_batch(const std::vector<std::vector<float_t>> &syndromes) override;
+
+  /// @brief Decode multiple syndromes in batch, forwarding `tok` to the inner
+  /// decoders.
+  /// @param syndromes Multiple syndrome measurements to decode
+  /// @param tok The cancellation token to use
+  /// @return std::nullopt if an inner decoder honored a stop (the partial
+  /// block is dropped), an empty vector until the final window is complete,
+  /// otherwise one entry per shot.
+  std::optional<std::vector<decoder_result>>
+  decode_batch(const std::vector<std::vector<float_t>> &syndromes,
+               cancellation_token tok) override;
+
+  /// @brief Reset the decoder, also dropping any partially streamed block.
+  void reset_decoder() override;
 
   /// @brief Get the number of syndromes per round
   /// @return The number of syndromes measured in each round
@@ -142,9 +174,13 @@ public:
   // Plugin registration macros
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       sliding_window, static std::unique_ptr<decoder> create(
-                          const cudaq::qec::decoder_init &init,
+                          cudaq::qec::decoder_init inputs,
+                          std::optional<decoder_output_request> output,
                           const cudaqx::heterogeneous_map &params) {
-        return cudaq::qec::make_pcm_decoder<sliding_window>(init, params);
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<sliding_window>(std::move(inputs), request,
+                                                params);
       })
 };
 

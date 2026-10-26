@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2025-2026 NVIDIA Corporation & Affiliates.                    *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /// @file gpu_roce_qldpc_graph_decoder_bridge.cpp
 /// @brief QLDPC Relay-BP decoder bridge: GpuRoceTransceiver GPU-RoCE ring <->
@@ -63,6 +60,33 @@
 #include "cudaq/qec/realtime/decoding_config.h"
 #include "cudaq/qec/realtime/graph_resources.h"
 #include "cudaq/qec/realtime/sparse_to_csr.h"
+
+namespace {
+/// Flat, -1-terminated sparse rows (the YAML/config encoding) to a shaped
+/// sparse matrix, so O and D can be handed to the decoder as part of its model.
+cudaq::qec::sparse_binary_matrix
+sparse_matrix_from_flat_rows(const std::vector<std::int64_t> &flat,
+                             std::uint32_t num_rows) {
+  std::vector<std::vector<std::uint32_t>> rows;
+  std::vector<std::uint32_t> row;
+  std::uint32_t num_cols = 0;
+  for (std::int64_t entry : flat) {
+    if (entry < 0) {
+      rows.push_back(std::move(row));
+      row.clear();
+      continue;
+    }
+    const auto col = static_cast<std::uint32_t>(entry);
+    num_cols = std::max(num_cols, col + 1);
+    row.push_back(col);
+  }
+  if (!row.empty())
+    rows.push_back(std::move(row));
+  rows.resize(num_rows);
+  return cudaq::qec::sparse_binary_matrix::from_nested_csr(num_rows, num_cols,
+                                                           rows);
+}
+} // namespace
 
 namespace {
 
@@ -216,13 +240,23 @@ int main(int argc, char *argv[]) {
       H_tensor.at({r, static_cast<std::size_t>(h_col_idx[j])}) = 1;
 
   auto params = dec.decoder_custom_args_to_heterogeneous_map();
-  auto decoder = cudaq::qec::decoder::get("nv-qldpc-decoder", H_tensor, params);
+  // O and D belong to the model, so they are supplied at construction rather
+  // than installed afterwards.
+  const auto num_observable_rows = static_cast<std::uint32_t>(
+      std::count(dec.O_sparse.begin(), dec.O_sparse.end(), -1));
+  auto decoder = cudaq::qec::decoder::get(
+      "nv-qldpc-decoder",
+      cudaq::qec::decoder_init(
+          cudaq::qec::sparse_binary_matrix(H_tensor),
+          sparse_matrix_from_flat_rows(dec.O_sparse, num_observable_rows),
+          dec.effective_error_rate_vec(),
+          sparse_matrix_from_flat_rows(dec.D_sparse,
+                                       static_cast<std::uint32_t>(ss))),
+      params);
   if (!decoder) {
     std::cerr << "ERROR: Failed to create nv-qldpc-decoder" << std::endl;
     return 1;
   }
-  decoder->set_D_sparse(dec.D_sparse);
-  decoder->set_O_sparse(dec.O_sparse);
 
   std::vector<uint32_t> d_rp, d_ci;
   cudaq::qec::realtime::sparse_vec_to_csr(dec.D_sparse, d_rp, d_ci);

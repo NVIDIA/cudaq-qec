@@ -136,9 +136,26 @@ Streaming decoder maps
 .. doxygenfunction:: cudaq::qec::dem_chunk_rounds
 .. doxygenfunction:: cudaq::qec::dem_chunks_to_rounds
 .. doxygenfunction:: cudaq::qec::dem_chunks_to_detector_round
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse(const std::vector<extended_dem> &, seam_id, seam_id)
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse(const dem_chunks_spec &)
+.. doxygenfunction:: cudaq::qec::dem_chunks_measurement_count
 .. doxygenfunction:: cudaq::qec::dem_chunks_to_o_sparse
 .. doxygenfunction:: cudaq::qec::dem_chunks_to_pcm
+
+Compact chunk forms
+-------------------
+
+.. doxygenvariable:: cudaq::qec::compact_chain_repeating_visits
+
+.. doxygenstruct:: cudaq::qec::compact_chain
+    :members:
+
+.. doxygenstruct:: cudaq::qec::chunked_observable_map
+    :members:
+
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_compact_chain
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_chunked(const std::vector<extended_dem> &, std::size_t, std::size_t, std::uint64_t)
+.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_chunked(const dem_chunks_spec &)
 
 .. _dem_sampling_cpp_api:
 
@@ -163,17 +180,131 @@ Legacy convenience wrappers (delegate to ``cpu::sample_dem``; prefer the
 Decoder Interfaces
 ==================
 
+.. doxygenenum:: cudaq::qec::decode_result_type
+
+.. doxygenenum:: cudaq::qec::decoder_auxiliary_result_type
+
+.. doxygenstruct:: cudaq::qec::decoder_output_request
+   :members:
+
+.. doxygenenum:: cudaq::qec::decoder_model_source
+
 .. doxygenstruct:: cudaq::qec::decoder_inputs
     :members:
 
+.. doxygenclass:: cudaq::qec::decoder_init
+    :members:
+
+.. doxygenfunction:: cudaq::qec::register_decoder_native_model_source
+.. doxygenfunction:: cudaq::qec::decoder_needs_model_matrices
+
 .. doxygenfunction:: cudaq::qec::d_sparse(const cudaq::M2DSparseMatrix &)
 
-.. doxygentypedef:: cudaq::qec::decoder_init
+.. doxygenenum:: cudaq::qec::round_type
+.. doxygenenum:: cudaq::qec::cancellation_level
+
+.. doxygenclass:: cudaq::qec::cancellation_token
+    :members:
+
+.. doxygenclass:: cudaq::qec::cancellation_source
+    :members:
 
 .. doxygenclass:: cudaq::qec::decoder
     :members:
 
 .. doxygenstruct:: cudaq::qec::decoder_result
+    :members:
+
+Decoding Task Graph
+===================
+
+A ``decoding_task_graph`` is a composable decode pipeline backed by a
+node/edge DAG. Each node is an instance of a registered node kind; query the
+available kinds with ``registered_task_graph_node_kinds()``. Edges route typed
+values between nodes at construction time.
+
+Built-in factories:
+
+- ``from_spec`` / public constructor — single decoder wrapped in a
+  window-accumulation node.
+- ``from_topology`` — any topology of ``task_graph_node_config`` nodes wired
+  by ``task_graph_edge`` edges.
+- ``combine`` — two independent decoders whose logical outcomes are
+  XOR'd; each branch applies its own D matrix.
+
+The graph exposes both a **streaming interface** (``enqueue_syndrome`` /
+``get_obs_corrections``) that accumulates syndrome rounds per window, and
+**one-shot execution** (``run`` / ``run_async``) that processes one full shot.
+``run_batch`` processes a collection; one-shot execution is commonly used for
+offline analysis.
+
+
+I/O types
+---------
+
+.. doxygenstruct:: cudaq::qec::measurement_results
+    :members:
+
+.. doxygenstruct:: cudaq::qec::detection_events
+    :members:
+
+.. doxygenstruct:: cudaq::qec::logical_outcome
+    :members:
+
+.. doxygenstruct:: cudaq::qec::error_pattern
+    :members:
+
+.. doxygenfunction:: cudaq::qec::apply_d_sparse
+.. doxygenfunction:: cudaq::qec::apply_o_sparse
+.. doxygenfunction:: cudaq::qec::xor_logical
+
+Graph
+-----
+
+.. doxygenstruct:: cudaq::qec::experimental::round_range
+    :members:
+
+.. doxygenenum:: cudaq::qec::experimental::port_disposition
+.. doxygenenum:: cudaq::qec::experimental::send_mode
+.. doxygenenum:: cudaq::qec::experimental::input_boundary
+.. doxygenenum:: cudaq::qec::experimental::parallel_resolution
+
+.. doxygenstruct:: cudaq::qec::experimental::window_request
+    :members:
+
+.. doxygenstruct:: cudaq::qec::experimental::ingest_window
+    :members:
+
+.. doxygenstruct:: cudaq::qec::task_graph_edge
+    :members:
+
+.. doxygenstruct:: cudaq::qec::task_graph_node_config
+    :members:
+
+.. doxygenstruct:: cudaq::qec::task_graph_ensemble_spec
+    :members:
+
+.. doxygenvariable:: cudaq::qec::default_task_graph_node_kind
+
+.. doxygenfunction:: cudaq::qec::registered_task_graph_node_kinds
+
+.. doxygenclass:: cudaq::qec::edge_value_type
+    :members:
+
+.. doxygenfunction:: cudaq::qec::registered_edge_value_types
+
+.. doxygenenum:: cudaq::qec::task_graph_streaming_status
+
+.. doxygenstruct:: cudaq::qec::task_graph_output_progress
+    :members:
+
+.. doxygenstruct:: cudaq::qec::task_graph_streaming_result
+    :members:
+
+.. doxygenstruct:: cudaq::qec::task_graph_options
+    :members:
+
+.. doxygenclass:: cudaq::qec::decoding_task_graph
     :members:
 
 Built-in Decoders
@@ -185,6 +316,13 @@ NVIDIA QLDPC Decoder
 --------------------
 
 .. include:: nv_qldpc_decoder_api.rst
+
+.. _nv_fusion_decoder_api_cpp:
+
+NVIDIA Fusion Decoder
+---------------------
+
+.. include:: nv_fusion_decoder_api.rst
 
 Sliding Window Decoder
 ----------------------

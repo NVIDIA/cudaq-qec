@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2025 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # [Begin Documentation]
 
 import sys
@@ -46,6 +41,8 @@ circuit = stim.Circuit.generated("surface_code:rotated_memory_x",
 
 # Convert to detector error model
 dem = circuit.detector_error_model()
+with open("surface_code_decoder.dem", "w") as dem_file:
+    dem_file.write(str(dem))
 num_detectors = dem.num_detectors
 num_data_qubits = circuit.num_qubits - num_detectors
 
@@ -256,7 +253,8 @@ torch.onnx.export(model,
                   X_train[:1],
                   "surface_code_decoder.onnx",
                   input_names=["detectors"],
-                  output_names=["data_qubit_probs"],
+                  output_names=["observable_probs"],
                   opset_version=17)
 print("ONNX model saved as surface_code_decoder.onnx")
+print("Detector error model saved as surface_code_decoder.dem")
 print("PyTorch weights saved as surface_code_decoder_best.pth")

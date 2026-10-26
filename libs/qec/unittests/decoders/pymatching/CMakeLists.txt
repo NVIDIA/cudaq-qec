@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2025 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # External Dependencies 
 # ==============================================================================
@@ -26,6 +21,9 @@ add_compile_options(-Wno-attributes)
 
 add_executable(test_pymatching test_pymatching.cpp)
 target_link_libraries(test_pymatching PRIVATE GTest::gtest_main cudaq-qec-decoders)
+set_target_properties(test_pymatching PROPERTIES
+  BUILD_RPATH "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
+add_dependencies(test_pymatching cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_pymatching)
 gtest_discover_tests(test_pymatching)
 

@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import pytest
 import numpy as np
 import cudaq
@@ -476,6 +471,103 @@ def test_het_map_from_kwargs_bool():
 
 def test_version():
     assert "CUDA-Q QEC" in qec.__version__
+
+
+def test_python_steane_code_direct_construction():
+    # Construct the example plugin class directly and check the Steane layout
+    # (qubit counts, stabilizer/observable words, and operation encodings).
+    code = example.MySteaneCodeImpl()
+    assert code.get_num_data_qubits() == 7
+    assert code.get_num_ancilla_x_qubits() == 3
+    assert code.get_num_ancilla_z_qubits() == 3
+    assert code.get_num_ancilla_qubits() == 6
+    assert code.get_num_x_stabilizers() == 3
+    assert code.get_num_z_stabilizers() == 3
+    stab_words = [term.get_pauli_word() for term in code.stabilizers]
+    assert stab_words == [
+        "XXXXIII", "IXXIXXI", "IIXXIXX", "ZZZZIII", "IZZIZZI", "IIZZIZZ"
+    ]
+    obs_words = [term.get_pauli_word() for term in code.pauli_observables]
+    assert obs_words == ["IIIIXXX", "IIIIZZZ"]
+    encodings = code.operation_encodings
+    assert encodings[qec.operation.prep0] is example.prep0
+    assert encodings[qec.operation.stabilizer_round] is example.stabilizer
+
+
+def test_python_steane_kernel_bodies(monkeypatch):
+    # Run the Python bodies retained on the kernel callables: prep0 applies
+    # three Hadamards and eight CNOTs; stabilizer uses both CNOT orientations,
+    # measures Z then X ancillas, and resets both ancilla registers.
+    class _Reg:
+
+        def __init__(self, ids):
+            self._ids = list(ids)
+
+        def __len__(self):
+            return len(self._ids)
+
+        def __getitem__(self, i):
+            return self._ids[i]
+
+        def __iter__(self):
+            return iter(self._ids)
+
+    class _Patch:
+
+        def __init__(self):
+            self.data = _Reg(range(7))
+            self.ancx = _Reg(range(10, 13))
+            self.ancz = _Reg(range(20, 23))
+
+    hadamards = []
+    cnots = []
+    measures = []
+    resets = []
+
+    def fake_h(*qubits):
+        hadamards.append(qubits)
+
+    class _X:
+
+        def ctrl(self, control, target):
+            cnots.append((control, target))
+
+    def fake_mz(qubits):
+        measures.append(list(qubits))
+        return "mz-sentinel"
+
+    def fake_reset(qubits):
+        resets.append(qubits)
+
+    for fn in (example.prep0.kernelFunction, example.stabilizer.kernelFunction):
+        monkeypatch.setitem(fn.__globals__, "h", fake_h)
+        monkeypatch.setitem(fn.__globals__, "x", _X())
+        monkeypatch.setitem(fn.__globals__, "mz", fake_mz)
+        monkeypatch.setitem(fn.__globals__, "reset", fake_reset)
+
+    logical = _Patch()
+    example.prep0.kernelFunction(logical)
+    assert hadamards == [(0, 4, 6)]
+    assert cnots == [(0, 1), (4, 5), (6, 3), (6, 5), (4, 2), (0, 3), (4, 1),
+                     (3, 2)]
+
+    hadamards.clear()
+    cnots.clear()
+    n_data = 7
+    x_stab = [0] * (3 * n_data)
+    z_stab = [0] * (3 * n_data)
+    x_stab[0 * n_data + 0] = 1
+    x_stab[1 * n_data + 2] = 1
+    x_stab[2 * n_data + 6] = 1
+    z_stab[0 * n_data + 1] = 1
+    z_stab[1 * n_data + 3] = 1
+    z_stab[2 * n_data + 5] = 1
+    result = example.stabilizer.kernelFunction(logical, x_stab, z_stab)
+    assert hadamards == [(logical.ancx,), (logical.ancx,)]
+    assert cnots == [(10, 0), (11, 2), (12, 6), (1, 20), (3, 21), (5, 22)]
+    assert measures == [[20, 21, 22, 10, 11, 12]]
+    assert resets == [logical.ancx, logical.ancz]
+    assert result == "mz-sentinel"
 
 
 if __name__ == "__main__":

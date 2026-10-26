@@ -1,12 +1,10 @@
-/*******************************************************************************
- * Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cudaq/qec/decoder.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include <atomic>
 #include <cmath>
 #include <gtest/gtest.h>
@@ -47,6 +45,47 @@ TEST(PyMatchingDecoder, checkRegularEdges) {
   result = d->decode(syndrome);
   EXPECT_EQ(result.result[0], 1.0);
   EXPECT_EQ(result.result[1], 1.0);
+}
+
+TEST(PyMatchingDecoder, drivesSingleWindowTaskGraph) {
+  using namespace cudaq::qec;
+
+  constexpr std::size_t block_size = 2;
+  constexpr std::size_t syndrome_size = 3;
+  const std::vector<uint8_t> H_vec = {1, 0, 1, 1, 0, 1};
+  cudaqx::tensor<uint8_t> H;
+  H.copy(H_vec.data(), {syndrome_size, block_size});
+
+  auto direct = decoder::get("pymatching", H);
+  task_graph_node_config node;
+  node.id = "pymatching";
+  node.kind = "single_window";
+  node.d_sparse = {{0}, {1}, {2}};
+  node.o_sparse = {{0}, {1}};
+  node.decoder_instance = decoder::get("pymatching", H);
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(std::move(node));
+  auto graph = decoding_task_graph::from_topology(std::move(nodes));
+
+  const std::vector<cudaq::qec::float_t> syndrome = {1, 1, 0};
+  const auto direct_result = direct->decode(syndrome);
+  std::vector<uint8_t> direct_hard;
+  convert_vec_soft_to_hard(direct_result.result, direct_hard);
+  ASSERT_TRUE(direct_result.converged);
+  ASSERT_EQ(direct_hard, (std::vector<uint8_t>{1, 0}));
+
+  measurement_results shot;
+  shot.bits = {1, 1, 0};
+  const auto batch = graph->run(shot);
+  EXPECT_TRUE(batch.converged);
+  EXPECT_EQ(batch.bits, direct_hard);
+
+  graph->reset_decoder();
+  ASSERT_TRUE(graph->enqueue_syndrome(shot.bits.data(), shot.bits.size()));
+  EXPECT_EQ(std::vector<uint8_t>(graph->get_obs_corrections(),
+                                 graph->get_obs_corrections() +
+                                     graph->get_num_observables()),
+            batch.bits);
 }
 
 TEST(PyMatchingDecoder, checkBoundaryEdges) {
@@ -166,7 +205,17 @@ TEST(PyMatchingDecoder, AcceptsAllMergeStrategiesAndRejectsUnknown) {
         "replace"}) {
     cudaqx::heterogeneous_map params;
     params.insert("merge_strategy", strategy);
-    auto d = cudaq::qec::decoder::get("pymatching", H, params);
+    std::unique_ptr<cudaq::qec::decoder> d;
+    if (strategy == "disallow") {
+      d = cudaq::qec::decoder::get("pymatching", H, params);
+    } else {
+      auto sparse_H = cudaq::qec::sparse_binary_matrix(H);
+      auto O = cudaq::qec::sparse_binary_matrix::from_nested_csr(1, 1, {{0}});
+      d = cudaq::qec::decoder::get(
+          "pymatching",
+          cudaq::qec::decoder_init(std::move(sparse_H), std::move(O)),
+          cudaq::qec::decode_result_type::observables, params);
+    }
     ASSERT_NE(d, nullptr) << strategy;
     auto result = d->decode(std::vector<cudaq::qec::float_t>{1.0});
     ASSERT_TRUE(result.converged) << strategy;
@@ -179,6 +228,42 @@ TEST(PyMatchingDecoder, AcceptsAllMergeStrategiesAndRejectsUnknown) {
                std::runtime_error);
 }
 
+// Parallel columns share one matching edge, so an error frame has to name one
+// of them. The column named is the one whose parameters the graph actually
+// holds after the merge: KEEP_ORIGINAL and INDEPENDENT retain the first
+// column's observables, REPLACE adopts the last, SMALLEST_WEIGHT adopts
+// whichever weight is smaller. Baseline main named the last column for every
+// strategy, which contradicts the retained edge for the first two.
+TEST(PyMatchingDecoder,
+     ConstructionInputErrorOutputTracksMergedParallelEdgeColumn) {
+  cudaqx::tensor<uint8_t> H;
+  const std::vector<uint8_t> H_vec = {1, 1};
+  H.copy(H_vec.data(), {1, 2});
+
+  auto decode_with = [&](const std::string &strategy) {
+    cudaqx::heterogeneous_map params;
+    params.insert("merge_strategy", strategy);
+    auto O = cudaq::qec::sparse_binary_matrix::from_csr(
+        0, 2, std::vector<std::uint32_t>{0}, {});
+    auto inputs = cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(H),
+                                           std::move(O), {0.1, 0.2});
+    auto decoder = cudaq::qec::decoder::get(
+        "pymatching", std::move(inputs), cudaq::qec::decode_result_type::errors,
+        params);
+    return decoder->decode(std::vector<cudaq::qec::float_t>{1.0}).result;
+  };
+
+  EXPECT_EQ(decode_with("keep_original"),
+            (std::vector<cudaq::qec::float_t>{1.0, 0.0}));
+  EXPECT_EQ(decode_with("independent"),
+            (std::vector<cudaq::qec::float_t>{1.0, 0.0}));
+  EXPECT_EQ(decode_with("replace"),
+            (std::vector<cudaq::qec::float_t>{0.0, 1.0}));
+  EXPECT_EQ(decode_with("smallest_weight"),
+            (std::vector<cudaq::qec::float_t>{0.0, 1.0}));
+  EXPECT_THROW((void)decode_with("disallow"), std::invalid_argument);
+}
+
 TEST(PyMatchingDecoder, RejectsObservableMatrixWithWrongBlockSize) {
   cudaqx::tensor<uint8_t> H;
   std::vector<uint8_t> H_vec = {1, 0, 0, 1};
@@ -186,11 +271,72 @@ TEST(PyMatchingDecoder, RejectsObservableMatrixWithWrongBlockSize) {
 
   cudaqx::tensor<uint8_t> O({1, 3});
   O.at({0, 0}) = 1;
-  cudaqx::heterogeneous_map params;
-  params.insert("O", O);
+  EXPECT_THROW(
+      (void)cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(H),
+                                     cudaq::qec::sparse_binary_matrix(O)),
+      std::invalid_argument);
+}
 
-  EXPECT_THROW((void)cudaq::qec::decoder::get("pymatching", H, params),
-               std::runtime_error);
+TEST(PyMatchingDecoder, ObservableModelDoesNotSelectOutputBasis) {
+  cudaqx::tensor<uint8_t> H;
+  const std::vector<uint8_t> H_vec = {1, 0, 0, 1};
+  H.copy(H_vec.data(), {2, 2});
+
+  cudaqx::tensor<uint8_t> O;
+  const std::vector<uint8_t> O_vec = {1, 1};
+  O.copy(O_vec.data(), {1, 2});
+
+  auto inputs = cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(H),
+                                         cudaq::qec::sparse_binary_matrix(O),
+                                         std::vector<double>{0.1, 0.1});
+
+  auto error_decoder = cudaq::qec::decoder::get("pymatching", inputs);
+  EXPECT_EQ(error_decoder->get_result_type(),
+            cudaq::qec::decode_result_type::errors);
+  const auto error_result = error_decoder->decode({1.0, 0.0});
+  ASSERT_TRUE(error_result.converged);
+  EXPECT_EQ(error_result.result, (std::vector<cudaq::qec::float_t>{1.0, 0.0}));
+
+  auto observable_decoder = cudaq::qec::decoder::get(
+      "pymatching", inputs, cudaq::qec::decode_result_type::observables);
+  EXPECT_EQ(observable_decoder->get_result_type(),
+            cudaq::qec::decode_result_type::observables);
+  const auto observable_result = observable_decoder->decode({1.0, 0.0});
+  ASSERT_TRUE(observable_result.converged);
+  EXPECT_EQ(observable_result.result, (std::vector<cudaq::qec::float_t>{1.0}));
+
+  EXPECT_THROW(
+      (void)cudaq::qec::decoder::get(
+          "pymatching", inputs,
+          cudaq::qec::decoder_output_request{
+              cudaq::qec::decode_result_type::observables,
+              cudaq::qec::decoder_auxiliary_result_type::residual_detectors}),
+      std::invalid_argument);
+}
+
+TEST(PyMatchingDecoder, ObservableModelDoesNotChangeErrorMergeDefault) {
+  cudaqx::tensor<uint8_t> H;
+  const std::vector<uint8_t> H_vec = {1, 1};
+  H.copy(H_vec.data(), {1, 2});
+
+  cudaqx::tensor<uint8_t> O;
+  const std::vector<uint8_t> O_vec = {1, 0};
+  O.copy(O_vec.data(), {1, 2});
+  auto inputs = cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(H),
+                                         cudaq::qec::sparse_binary_matrix(O),
+                                         std::vector<double>{0.1, 0.2});
+
+  // Parallel edges remain disallowed for error output even when O is model
+  // data. Only an explicit observable-output request selects the independent
+  // merge default used for detector-error models.
+  EXPECT_THROW((void)cudaq::qec::decoder::get("pymatching", inputs),
+               std::invalid_argument);
+  EXPECT_THROW(
+      (void)cudaq::qec::decoder::get("pymatching", inputs,
+                                     cudaq::qec::decode_result_type::errors),
+      std::invalid_argument);
+  EXPECT_NO_THROW((void)cudaq::qec::decoder::get(
+      "pymatching", inputs, cudaq::qec::decode_result_type::observables));
 }
 
 // Regression test: when two H columns share the same edge (parallel columns),
@@ -243,8 +389,12 @@ TEST(PyMatchingDecoder, ErrorOutputTracksMergedParallelEdgeColumn) {
   {
     cudaqx::heterogeneous_map params;
     params.insert("merge_strategy", std::string("smallest_weight"));
-    params.insert("error_rate_vec", std::vector<double>{0.01, 0.1, 0.01});
-    auto d = cudaq::qec::decoder::get("pymatching", H, params);
+    auto inputs = cudaq::qec::decoder_init(
+        cudaq::qec::sparse_binary_matrix(H), std::nullopt,
+        std::vector<double>{0.01, 0.1, 0.01});
+    auto d = cudaq::qec::decoder::get("pymatching", std::move(inputs),
+                                      cudaq::qec::decode_result_type::errors,
+                                      params);
     ASSERT_NE(d, nullptr);
 
     std::vector<float_t> syndrome = {1.0, 1.0, 0.0};
@@ -296,6 +446,43 @@ TEST(PyMatchingDecoder, ErrorOutputTracksMergedParallelEdgeColumn) {
   }
 }
 
+TEST(PyMatchingDecoder, PreparedLookupPreservesBoundaryMergesAndColumnOrder) {
+  using namespace cudaq::qec;
+  using cudaq::qec::float_t;
+  // Boundary columns are separated by regular edges, and regular neighbors
+  // are deliberately supplied out of order. The result must retain the
+  // caller's columns, including the selected parallel boundary edge.
+  const auto h =
+      sparse_binary_matrix::from_nested_csc(4, 4, {{3}, {0, 2}, {3}, {0, 1}});
+  for (const std::string strategy :
+       {"independent", "keep_original", "smallest_weight", "replace"}) {
+    cudaqx::heterogeneous_map params;
+    params.insert("merge_strategy", strategy);
+    auto dec = decoder::get("pymatching",
+                            decoder_init(h, std::nullopt, {0.1, 0.1, 0.2, 0.1}),
+                            decode_result_type::errors, params);
+    const std::size_t boundary_column =
+        strategy == "replace" || strategy == "smallest_weight" ? 2 : 0;
+    for (std::size_t epoch = 0; epoch < 8; ++epoch)
+      for (const auto &syndrome :
+           std::vector<std::vector<float_t>>{{0, 0, 0, 1},
+                                             {1, 0, 1, 0},
+                                             {1, 1, 0, 0},
+                                             {1, 1, 0, 1},
+                                             {0, 0, 0, 0}}) {
+        SCOPED_TRACE(strategy);
+        const auto result = dec->decode(syndrome);
+        ASSERT_TRUE(result.converged);
+        ASSERT_EQ(result.result.size(), 4u);
+        std::vector<float_t> expected(4);
+        expected[boundary_column] = syndrome[3];
+        expected[1] = syndrome[2];
+        expected[3] = syndrome[1];
+        EXPECT_EQ(result.result, expected);
+      }
+  }
+}
+
 TEST(PyMatchingDecoder, DecodesHighObservableIndicesAcrossPaths) {
   using cudaq::qec::float_t;
 
@@ -309,9 +496,11 @@ TEST(PyMatchingDecoder, DecodesHighObservableIndicesAcrossPaths) {
       O.at({i, i}) = 1;
     }
 
-    cudaqx::heterogeneous_map params;
-    params.insert("O", O);
-    auto d = cudaq::qec::decoder::get("pymatching", H, params);
+    auto d = cudaq::qec::decoder::get(
+        "pymatching",
+        cudaq::qec::decoder_init(cudaq::qec::sparse_binary_matrix(H),
+                                 cudaq::qec::sparse_binary_matrix(O)),
+        cudaq::qec::decode_result_type::observables);
     // ASSERT: valid graph-like identity matrices must construct a decoder.
     ASSERT_NE(d, nullptr);
 

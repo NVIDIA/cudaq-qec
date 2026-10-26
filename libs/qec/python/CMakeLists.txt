@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # External Dependencies
 # ==============================================================================
@@ -55,6 +50,7 @@ cudaqx_add_pymodule(${MODULE_NAME}
   bindings/cudaqx_qec.cpp
   bindings/py_code.cpp
   bindings/py_decoder.cpp
+  bindings/py_decoding_task_graph.cpp
   bindings/py_decoding_config.cpp
   bindings/py_decoding.cpp
   bindings/py_dem_construction.cpp
@@ -72,6 +68,21 @@ target_link_libraries(${MODULE_NAME}
     cudaq::cudaq-python-interop
     cudaq::cudaq-mlir-runtime
 )
+
+# cudaq-qec-playback-emulator only exist when cudaq-realtime was found;
+# CUDAQX_QEC_HAS_CUDAQ_REALTIME lets the bindings reflect that at compile
+# time.
+if(CUDAQ_REALTIME_INCLUDE_DIR)
+  target_sources(${MODULE_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools/playback-emulator/python/py_playback_emulator.cpp
+  )
+  target_include_directories(${MODULE_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools/playback-emulator/python
+    ${CMAKE_CURRENT_SOURCE_DIR}/bindings
+  )
+  target_link_libraries(${MODULE_NAME} PRIVATE cudaq-qec-playback-emulator)
+  target_compile_definitions(${MODULE_NAME} PRIVATE CUDAQX_QEC_HAS_CUDAQ_REALTIME)
+endif()
 
 find_package(CUDAToolkit REQUIRED)
 target_link_libraries(${MODULE_NAME} PRIVATE CUDA::cudart)

@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2025 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // For full test script: surface_code-1-test.sh
 //
@@ -36,18 +33,23 @@
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
+#include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/experiments.h"
+#include "cudaq/qec/extended_dem.h"
 #include "cudaq/qec/noise_model.h"
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/realtime/decoding.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 
 #ifdef QEC_APP_CQR
 // cqr build variant: this same application compiled with -frealtime-lowering
@@ -161,9 +163,12 @@ struct run_options {
   int sw_step_size = 1;
   std::string sw_inner_decoder = "multi_error_lut";
   bool sw_inner_decoder_set = false;
+  bool task_graph = false; // wrap --decoder_type in a decoding_task_graph
+  bool async_streaming = false;
   std::vector<std::string> decoder_params; // --param key=value overrides
   bool save_dem = false;
   bool load_dem = false;
+  bool dem_chunks = false; // describe the DEM one round at a time
   std::string dem_filename;
   bool save_syndrome = false;
   bool load_syndrome = false;
@@ -193,16 +198,15 @@ syndrome_capture_state g_capture;
 
 } // namespace
 
-// Return the custom-args map for a named decoder given the DEM error rates,
-// with any --param key=value overrides applied on top. The registered decoder
-// schema drives type coercion for each override.
+// Return the custom-args map for a named decoder, with any --param key=value
+// overrides applied on top. The registered decoder schema drives type coercion
+// for each override.
 static cudaqx::heterogeneous_map
-decoder_args(const std::string &type, const std::vector<double> &error_rates,
+decoder_args(const std::string &type, [[maybe_unused]] int distance,
              const std::vector<std::string> &params = {}) {
   cudaqx::heterogeneous_map args;
   if (type == "nv-qldpc-decoder") {
     args.insert("use_sparsity", true);
-    args.insert("error_rate_vec", error_rates);
     args.insert("max_iterations", 50);
     args.insert("bp_method", 3);   // min-sum + dmem (required for relay)
     args.insert("composition", 1); // sequential relay
@@ -218,7 +222,6 @@ decoder_args(const std::string &type, const std::vector<double> &error_rates,
     args.insert("gamma_dist", std::vector<double>{0.1, 0.2});
   } else if (type == "pymatching") {
     args.insert("merge_strategy", "smallest_weight");
-    args.insert("error_rate_vec", error_rates);
   } else if (type == "multi_error_lut") {
     args.insert("lut_error_depth", 2);
   } else {
@@ -301,17 +304,238 @@ decoder_args(const std::string &type, const std::vector<double> &error_rates,
   return args;
 }
 
+// Split the characterized model into one DEM chunk per measurement round, so a
+// single config serves any number of rounds. Round r's chunk holds the
+// detectors whose latest measurement lies in round r, and the faults whose
+// first detector lies there; a fault must reach no further than the next
+// round's detectors, and a detector no further back than the previous round's
+// measurements. The rounds equal to the middle one are the repeating bulk.
+static cudaq::qec::dem_chunks_spec
+build_dem_chunks(const cudaq::qec::decoder_inputs &inputs,
+                 std::size_t num_rounds, std::size_t num_syndromes_per_round,
+                 std::size_t num_data) {
+  using namespace cudaq::qec;
+  const auto rows_of = [](const std::vector<std::int64_t> &flat) {
+    std::vector<std::vector<std::int64_t>> rows(1);
+    for (const auto value : flat)
+      if (value < 0)
+        rows.emplace_back();
+      else
+        rows.back().push_back(value);
+    rows.pop_back();
+    return rows;
+  };
+  const std::size_t S = num_syndromes_per_round, R = num_rounds + 1;
+  const auto count = [&](std::size_t r) {
+    return r < num_rounds ? S : num_data;
+  };
+  const auto round_of = [&](std::int64_t m) {
+    return std::min(static_cast<std::size_t>(m) / S, num_rounds);
+  };
+
+  // Detector rounds, local indices, and D rows in round-local measurements:
+  // the previous round's first, then the detector's own round's.
+  const auto d_rows = rows_of(d_sparse(inputs.m2d));
+  std::vector<std::size_t> det_round(d_rows.size()), local(d_rows.size());
+  std::vector<std::size_t> width(R + 1, 0);
+  std::vector<std::vector<std::int64_t>> d_local(R);
+  for (std::size_t k = 0; k < d_rows.size(); ++k) {
+    if (d_rows[k].empty())
+      throw std::runtime_error("--dem_chunks: detector " + std::to_string(k) +
+                               " reads no measurement");
+    std::size_t r = 0;
+    for (const auto m : d_rows[k])
+      r = std::max(r, round_of(m));
+    det_round[k] = r;
+    local[k] = width[r]++;
+    for (const auto m : d_rows[k]) {
+      const std::size_t at = round_of(m);
+      const auto offset = static_cast<std::int64_t>(at * S);
+      if (at + 1 == r)
+        d_local[r].push_back(m - offset);
+      else if (at == r)
+        d_local[r].push_back(
+            m - offset + static_cast<std::int64_t>(r > 0 ? count(r - 1) : 0));
+      else
+        throw std::runtime_error("--dem_chunks: detector " + std::to_string(k) +
+                                 " reads a measurement more than one round "
+                                 "before its last");
+    }
+    d_local[r].push_back(-1);
+  }
+
+  // Round-major numbering makes a column's lowest detector index its earliest
+  // round, and makes the closed chunks renumber detectors as this DEM does.
+  if (!std::is_sorted(det_round.begin(), det_round.end()))
+    throw std::runtime_error(
+        "--dem_chunks needs detectors numbered round by round");
+
+  struct fault {
+    double p = 0.0;
+    std::vector<std::int64_t> rows, next_rows;
+    std::uint64_t obs = 0;
+    auto key() const { return std::tie(rows, next_rows, obs); }
+  };
+  const auto &dem = inputs.dem;
+  const std::size_t num_columns = dem.num_error_mechanisms();
+  std::vector<std::vector<std::size_t>> columns(num_columns);
+  const auto h_rows = rows_of(pcm_to_sparse_vec(dem.detector_error_matrix));
+  for (std::size_t det = 0; det < h_rows.size(); ++det)
+    for (const auto col : h_rows[det])
+      columns[col].push_back(det);
+  std::vector<std::uint64_t> column_obs(num_columns, 0);
+  const auto o_rows = rows_of(pcm_to_sparse_vec(dem.observables_flips_matrix));
+  if (o_rows.size() > 64)
+    throw std::runtime_error("--dem_chunks supports at most 64 observables");
+  for (std::size_t o = 0; o < o_rows.size(); ++o)
+    for (const auto col : o_rows[o])
+      column_obs[col] |= std::uint64_t{1} << o;
+
+  std::vector<std::vector<fault>> rounds(R);
+  for (std::size_t col = 0; col < num_columns; ++col) {
+    if (columns[col].empty())
+      throw std::runtime_error("--dem_chunks needs every column to flip a "
+                               "detector");
+    const std::size_t r = det_round[columns[col].front()];
+    fault f;
+    f.p = dem.error_rates[col];
+    f.obs = column_obs[col];
+    for (const auto det : columns[col]) {
+      const std::size_t at = det_round[det];
+      // Both directions: an earlier round would land on the outgoing seam,
+      // which is the wrong boundary rather than a wider one.
+      if (at != r && at != r + 1)
+        throw std::runtime_error("--dem_chunks needs every column within two "
+                                 "consecutive rounds");
+      (at == r ? f.rows : f.next_rows)
+          .push_back(static_cast<std::int64_t>(local[det]));
+    }
+    rounds[r].push_back(std::move(f));
+  }
+  for (std::size_t r = 0; r < R; ++r) {
+    auto &faults = rounds[r];
+    std::sort(faults.begin(), faults.end(),
+              [](const fault &a, const fault &b) { return a.key() < b.key(); });
+    std::vector<fault> merged;
+    for (auto &f : faults) {
+      if (!merged.empty() && merged.back().key() == f.key()) {
+        double &p = merged.back().p;
+        p = p * (1 - f.p) + f.p * (1 - p);
+      } else {
+        merged.push_back(std::move(f));
+      }
+    }
+    // Every fault here starts in round r, so ordering the round's columns as
+    // pcm_is_sorted() would, with the next round's rows one block later,
+    // leaves the closed model sorted, as sliding_window requires.
+    const auto block = static_cast<std::uint32_t>(
+        std::max<std::size_t>({width[r], width[r + 1], 1}));
+    std::vector<std::vector<std::uint32_t>> local_rows;
+    for (const auto &f : merged) {
+      auto &rows = local_rows.emplace_back(f.rows.begin(), f.rows.end());
+      for (const auto row : f.next_rows)
+        rows.push_back(block + static_cast<std::uint32_t>(row));
+    }
+    faults.clear();
+    for (const auto i : get_sorted_pcm_column_indices(local_rows, block))
+      faults.push_back(std::move(merged[i]));
+  }
+
+  const auto same = [&](std::size_t a, std::size_t b) {
+    if (width[a] != width[b] || width[a + 1] != width[b + 1] ||
+        count(a) != count(b) || (a > 0) != (b > 0) ||
+        (a > 0 && count(a - 1) != count(b - 1)) || d_local[a] != d_local[b] ||
+        rounds[a].size() != rounds[b].size())
+      return false;
+    for (std::size_t i = 0; i < rounds[a].size(); ++i) {
+      const fault &x = rounds[a][i], &y = rounds[b][i];
+      if (x.key() != y.key() || std::abs(x.p - y.p) > 1e-9 * std::max(x.p, y.p))
+        return false;
+    }
+    return true;
+  };
+  const std::size_t middle = R / 2;
+  std::size_t bulk_first = middle, bulk_last = middle;
+  while (bulk_first > 0 && same(bulk_first - 1, middle))
+    --bulk_first;
+  while (bulk_last + 1 < R && same(bulk_last + 1, middle))
+    ++bulk_last;
+  if (bulk_last == bulk_first)
+    throw std::runtime_error("--dem_chunks found no repeating round in " +
+                             std::to_string(num_rounds) +
+                             " rounds; raise --num_rounds");
+
+  const auto chunk_of = [&](std::size_t r) {
+    const auto &faults = rounds[r];
+    const auto seam_rows = [&](std::size_t rows, bool next) {
+      std::vector<std::vector<std::int64_t>> by_row(rows);
+      for (std::size_t i = 0; i < faults.size(); ++i)
+        for (const auto row : next ? faults[i].next_rows : faults[i].rows)
+          by_row[row].push_back(static_cast<std::int64_t>(i));
+      std::vector<std::int64_t> sparse;
+      for (const auto &row : by_row) {
+        sparse.insert(sparse.end(), row.begin(), row.end());
+        sparse.push_back(-1);
+      }
+      return sparse;
+    };
+    dem_chunk_spec spec;
+    spec.num_faults = faults.size();
+    for (const auto &f : faults)
+      spec.error_rates.push_back(f.p);
+    spec.seam_specs.push_back(
+        {seam_name::prev_round, {seam_rows(width[r], false), {}}});
+    if (r + 1 < R)
+      spec.seam_specs.push_back(
+          {seam_name::next_round, {seam_rows(width[r + 1], true), {}}});
+    for (std::size_t o = 0; o < o_rows.size(); ++o) {
+      for (std::size_t i = 0; i < faults.size(); ++i)
+        if (faults[i].obs >> o & 1)
+          spec.O_sparse.push_back(static_cast<std::int64_t>(i));
+      spec.O_sparse.push_back(-1);
+    }
+    spec.D_sparse = d_local[r];
+    if (count(r) != S)
+      spec.num_measurements = count(r);
+    return spec;
+  };
+
+  dem_chunks_spec spec;
+  spec.seam = {seam_name::next_round, seam_name::prev_round};
+  spec.num_rounds = R;
+  spec.measurements_per_round = S;
+  std::vector<phase_id> chain;
+  const auto add_phase = [&](const std::string &name, std::size_t r) {
+    const phase_id id = phase_id::from_name(name);
+    spec.phases.push_back({id, chunk_of(r)});
+    chain.push_back(id);
+  };
+  for (std::size_t r = 0; r < bulk_first; ++r)
+    add_phase("before" + std::to_string(r), r);
+  add_phase("bulk", middle);
+  for (std::size_t r = bulk_last + 1; r < R; ++r)
+    add_phase("after" + std::to_string(r - bulk_last - 1), r);
+  for (std::size_t i = 0; i + 1 < chain.size(); ++i)
+    spec.connections.push_back({chain[i], chain[i + 1]});
+  spec.connections.push_back({chain[bulk_first], chain[bulk_first]});
+  printf("DEM chunks: %zu rounds before the repeating round, %zu after\n",
+         bulk_first, R - 1 - bulk_last);
+  return spec;
+}
+
 // Build one decoder config per logical qubit from the decoder_inputs produced
 // by `decoder_context_from_memory_circuit(...).full_component()`. All decoders
 // share the same DEM (`H_sparse`), observables (`O_sparse`) and
 // measurement-to-detector map (`D_sparse`); only the decoder type/parameters
 // differ. Per-decoder args use the declarative `heterogeneous_map` schema
-// (`decoder_custom_args`) validated by `multi_decoder_config`.
+// (`decoder_custom_args`) validated by `multi_decoder_config`. Given
+// `chunks`, the decoders carry them in place of the flat model.
 static cudaq::qec::decoding::config::multi_decoder_config
-build_multi_decoder_config(const cudaq::qec::decoder_inputs &inputs,
-                           std::size_t num_syndromes_per_round,
-                           std::size_t num_boundary_syndromes,
-                           const run_options &opts) {
+build_multi_decoder_config(
+    const cudaq::qec::decoder_inputs &inputs,
+    std::size_t num_syndromes_per_round, std::size_t num_boundary_syndromes,
+    const std::optional<cudaq::qec::dem_chunks_spec> &chunks,
+    const run_options &opts) {
   namespace config = cudaq::qec::decoding::config;
   const auto &dem = inputs.dem;
   const auto d_sparse = cudaq::qec::d_sparse(inputs.m2d);
@@ -320,11 +544,16 @@ build_multi_decoder_config(const cudaq::qec::decoder_inputs &inputs,
   for (int i = 0; i < opts.num_logical; i++) {
     config::decoder_config dc;
     dc.id = i;
-    dc.block_size = dem.num_error_mechanisms();
-    dc.syndrome_size = dem.num_detectors();
-    dc.H_sparse = cudaq::qec::pcm_to_sparse_vec(dem.detector_error_matrix);
-    dc.O_sparse = cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix);
-    dc.D_sparse = d_sparse;
+    if (chunks) {
+      dc.dem_chunks = chunks;
+    } else {
+      dc.block_size = dem.num_error_mechanisms();
+      dc.syndrome_size = dem.num_detectors();
+      dc.H_sparse = cudaq::qec::pcm_to_sparse_vec(dem.detector_error_matrix);
+      dc.O_sparse = cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix);
+      dc.D_sparse = d_sparse;
+      dc.error_rate_vec = dem.error_rates;
+    }
 
     if (opts.decoder_type == "sliding_window") {
       dc.type = "sliding_window";
@@ -336,15 +565,25 @@ build_multi_decoder_config(const cudaq::qec::decoder_inputs &inputs,
       sw_args.insert("straddle_start_round", false);
       sw_args.insert("straddle_end_round", true);
       sw_args.insert("inner_decoder_name", opts.sw_inner_decoder);
-      sw_args.insert("error_rate_vec", dem.error_rates);
       sw_args.insert("inner_decoder_params",
-                     decoder_args(opts.sw_inner_decoder, dem.error_rates,
+                     decoder_args(opts.sw_inner_decoder, opts.distance,
                                   opts.decoder_params));
       dc.decoder_custom_args = sw_args;
     } else {
-      dc.type = opts.decoder_type;
+      // A task graph over these flat matrices is one window covering the whole
+      // syndrome volume, with the entry's custom args reaching the inner
+      // decoder unchanged -- so the two branches decode identically and differ
+      // only in which engine runs them.
+      if (opts.task_graph) {
+        dc.task_graph.emplace();
+        dc.task_graph->type = "single_window";
+        dc.task_graph->inner_type = opts.decoder_type;
+        dc.task_graph->options.async_streaming = opts.async_streaming;
+      } else {
+        dc.type = opts.decoder_type;
+      }
       dc.decoder_custom_args =
-          decoder_args(opts.decoder_type, dem.error_rates, opts.decoder_params);
+          decoder_args(opts.decoder_type, opts.distance, opts.decoder_params);
     }
 
     multi_config.decoders.push_back(dc);
@@ -493,6 +732,18 @@ bool setup_decoders(const cudaq::qec::code &code,
     config_text << config_file.rdbuf();
     auto cfg = config::multi_decoder_config::from_yaml_str(config_text.str());
 
+    // A chunk config serves any length: one chunk per syndrome round plus the
+    // data readout.
+    for (auto &dc : cfg.decoders) {
+      if (!dc.dem_chunks || !dc.H_sparse.empty())
+        continue;
+      const auto minimum = dc.dem_chunks->minimum_rounds() - 1;
+      if (static_cast<std::uint64_t>(opts.num_rounds) < minimum)
+        throw std::runtime_error("Loaded DEM chunks need --num_rounds >= " +
+                                 std::to_string(minimum));
+      dc.dem_chunks->num_rounds = opts.num_rounds + 1;
+    }
+
     // Cross-check the saved syndrome_size against the current code geometry.
     if (!cfg.decoders.empty()) {
       const bool is_z_prep = state_prep == cudaq::qec::operation::prep0 ||
@@ -500,12 +751,14 @@ bool setup_decoders(const cudaq::qec::code &code,
       const std::size_t num_ancx = code.get_num_ancilla_x_qubits();
       const std::size_t num_ancz = code.get_num_ancilla_z_qubits();
       const std::size_t num_boundary = is_z_prep ? num_ancz : num_ancx;
+      auto checked = cfg.decoders[0];
+      config::expand_dem_chunks(checked);
       const std::size_t expected_syndromes =
           2 * num_boundary + (opts.num_rounds - 1) * (num_ancx + num_ancz);
-      if (cfg.decoders[0].syndrome_size != expected_syndromes)
+      if (checked.syndrome_size != expected_syndromes)
         throw std::runtime_error(
             "Loaded DEM syndrome_size (" +
-            std::to_string(cfg.decoders[0].syndrome_size) +
+            std::to_string(checked.syndrome_size) +
             ") does not match current geometry (" +
             std::to_string(expected_syndromes) +
             " = 2*num_boundary + (num_rounds-1)*num_stabilizers); "
@@ -513,11 +766,20 @@ bool setup_decoders(const cudaq::qec::code &code,
 
       // also cross-check the raw-measurement span: the largest measurement
       // index in D_sparse, plus one.
-      const auto &D = cfg.decoders[0].D_sparse;
+      const auto &D = checked.D_sparse;
       if (D.empty())
         throw std::runtime_error("Loaded DEM has empty D_sparse");
+      // A chunk config declares its per-round counts, and a round's trailing
+      // measurements may be read by no detector; the largest index in D then
+      // falls short of the stream the decoder is fed.
+      const auto declared =
+          checked.dem_chunks
+              ? cudaq::qec::dem_chunks_measurement_count(*checked.dem_chunks)
+              : std::nullopt;
       const std::size_t loaded_measurements =
-          *std::max_element(D.begin(), D.end()) + 1;
+          declared ? static_cast<std::size_t>(*declared)
+                   : static_cast<std::size_t>(
+                         *std::max_element(D.begin(), D.end()) + 1);
       const std::size_t expected_measurements =
           opts.num_rounds * (num_ancx + num_ancz) + code.get_num_data_qubits();
       if (loaded_measurements != expected_measurements)
@@ -537,10 +799,13 @@ bool setup_decoders(const cudaq::qec::code &code,
 
   // Characterize the DEM and build the decoder configuration. full_component()
   // canonicalizes both stabilizer types (boundary-aware) into decoder_inputs.
+  // Matching decoders need a graphlike DEM, so decompose hyperedge error
+  // mechanisms into graph-like columns for them.
   const std::string &leaf_decoder = opts.decoder_type == "sliding_window"
                                         ? opts.sw_inner_decoder
                                         : opts.decoder_type;
-  const bool decompose_errors = (leaf_decoder == "pymatching");
+  bool decompose_errors = (leaf_decoder == "pymatching");
+  decompose_errors = decompose_errors || leaf_decoder == "nv-fusion-decoder";
   auto ctx = cudaq::qec::decoder_context_from_memory_circuit(
       code, state_prep, opts.num_rounds, noise, decompose_errors);
   const auto inputs = ctx.full_component();
@@ -555,8 +820,12 @@ bool setup_decoders(const cudaq::qec::code &code,
       num_x_stabilizers + num_z_stabilizers;
   const std::size_t num_boundary_syndromes =
       is_z_prep ? num_z_stabilizers : num_x_stabilizers;
+  std::optional<cudaq::qec::dem_chunks_spec> chunks;
+  if (opts.dem_chunks)
+    chunks = build_dem_chunks(inputs, opts.num_rounds, num_syndromes_per_round,
+                              code.get_num_data_qubits());
   auto cfg = build_multi_decoder_config(inputs, num_syndromes_per_round,
-                                        num_boundary_syndromes, opts);
+                                        num_boundary_syndromes, chunks, opts);
 
   if (opts.save_dem) {
     // Serialize the config to YAML -- the inverse of the decoding server's
@@ -862,6 +1131,15 @@ void show_help() {
   printf("  --sw_step_size <int>    Sliding window step size. Default: 1\n");
   printf("  --sw_inner_decoder <string> Inner decoder for sliding_window. "
          "Default: multi_error_lut\n");
+  printf("  --task_graph        Run --decoder_type inside a decoding task "
+         "graph\n"
+         "      (one single_window node over the whole syndrome volume) "
+         "instead of\n"
+         "      calling it directly. Not valid with --decoder_type "
+         "sliding_window.\n");
+  printf("  --async_streaming   Process task-graph streaming input on its "
+         "coordinator thread.\n"
+         "      Requires --task_graph.\n");
   printf(
       "  --param <key=value> Override a decoder parameter (repeatable). For\n"
       "      --decoder_type sliding_window the override targets the inner\n"
@@ -871,7 +1149,10 @@ void show_help() {
          "YAML to a file, and exit (to configure a standalone "
          "decoding_server).\n");
   printf("  --load_dem <string> Load the decoder config from a YAML file "
-         "instead of characterizing in-process.\n");
+         "instead of characterizing in-process. A --dem_chunks config "
+         "decodes the --num_rounds given here.\n");
+  printf("  --dem_chunks        Describe the DEM as one chunk per round with a "
+         "repeating bulk, so one config serves any --num_rounds.\n");
   printf("  --save_syndrome <string> Save syndrome data to a file for later "
          "replay.\n");
   printf("  --load_syndrome <string> Load and replay syndrome data from a "
@@ -927,6 +1208,10 @@ int main(int argc, char **argv) {
         opts.sw_inner_decoder = val(i);
         opts.sw_inner_decoder_set = true;
         i++;
+      } else if (arg == "--task_graph") {
+        opts.task_graph = true;
+      } else if (arg == "--async_streaming") {
+        opts.async_streaming = true;
       } else if (arg == "--save_dem") {
         opts.save_dem = true;
         opts.dem_filename = val(i);
@@ -935,6 +1220,8 @@ int main(int argc, char **argv) {
         opts.load_dem = true;
         opts.dem_filename = val(i);
         i++;
+      } else if (arg == "--dem_chunks") {
+        opts.dem_chunks = true;
       } else if (arg == "--save_syndrome") {
         opts.save_syndrome = true;
         opts.syndrome_filename = val(i);
@@ -978,15 +1265,22 @@ int main(int argc, char **argv) {
   if (opts.sw_window_size == -1)
     opts.sw_window_size = opts.distance;
 
-  // Leaf decoders: valid as --decoder_type or --sw_inner_decoder.
+  // Sliding-window leaf decoders are valid both as --decoder_type and as
+  // --sw_inner_decoder.
+  // nv-fusion-decoder is wired only as a top-level decoder: it needs a
+  // per-detector round map sized to its own PCM, and sliding_window hands
+  // every window the same inner_decoder_params, so nothing here derives a
+  // per-window detector_round for it.
   auto is_leaf_decoder = [](const std::string &t) {
     return t == "multi_error_lut" || t == "nv-qldpc-decoder" ||
            t == "pymatching";
   };
   if (!is_leaf_decoder(opts.decoder_type) &&
+      opts.decoder_type != "nv-fusion-decoder" &&
       opts.decoder_type != "sliding_window") {
     printf("Error: --decoder_type must be 'multi_error_lut', "
-           "'nv-qldpc-decoder', 'sliding_window', or 'pymatching'\n");
+           "'nv-qldpc-decoder', 'nv-fusion-decoder', "
+           "'sliding_window', or 'pymatching'\n");
     return 1;
   }
   if (opts.decoder_type == "sliding_window" &&
@@ -995,9 +1289,20 @@ int main(int argc, char **argv) {
            "'nv-qldpc-decoder', or 'pymatching'\n");
     return 1;
   }
-  if (opts.sw_inner_decoder_set && is_leaf_decoder(opts.decoder_type)) {
+  if (opts.sw_inner_decoder_set && opts.decoder_type != "sliding_window") {
     printf("Error: --sw_inner_decoder is only valid with "
            "--decoder_type sliding_window\n");
+    return 1;
+  }
+  // The graph node owns the windowing, so the sliding_window decoder would be a
+  // window inside a window; nothing here derives the inner one's parameters.
+  if (opts.task_graph && !is_leaf_decoder(opts.decoder_type)) {
+    printf("Error: --task_graph requires --decoder_type 'multi_error_lut', "
+           "'nv-qldpc-decoder', or 'pymatching'\n");
+    return 1;
+  }
+  if (opts.async_streaming && !opts.task_graph) {
+    printf("Error: --async_streaming requires --task_graph\n");
     return 1;
   }
 

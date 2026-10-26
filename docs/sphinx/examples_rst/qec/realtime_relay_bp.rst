@@ -94,7 +94,7 @@ Obtaining the proprietary components
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The realtime decode path uses **two** closed-source artifacts that are not
-built from this (cudaqx) repository:
+built from this (cudaq-qec) repository:
 
 - ``libcudaq-qec-nv-qldpc-decoder.so`` -- the Relay BP decoder **plugin**,
   ``dlopen``'d at runtime.  It supplies the device-launchable cooperative
@@ -140,13 +140,13 @@ CPU architecture (``amd64`` or ``arm64``) -- no manual override is needed.
 
 The runtime plugin loader searches for decoder plugins in the
 ``decoder-plugins/`` subdirectory next to ``libcudaq-qec.so``.  For a source
-build of cudaqx, that path is ``<cudaqx-build>/lib/decoder-plugins/``:
+build of cudaq-qec, that path is ``<cudaq-qec-build>/lib/decoder-plugins/``:
 
 .. code-block:: bash
 
-   mkdir -p <cudaqx-build>/lib/decoder-plugins
+   mkdir -p <cudaq-qec-build>/lib/decoder-plugins
    cp libcudaq-qec-nv-qldpc-decoder.so \
-      <cudaqx-build>/lib/decoder-plugins/
+      <cudaq-qec-build>/lib/decoder-plugins/
 
 Source Repositories
 ^^^^^^^^^^^^^^^^^^^
@@ -158,8 +158,8 @@ Source Repositories
    * - Repository
      - URL
      - Version
-   * - **cudaqx**
-     - https://github.com/NVIDIA/cudaqx
+   * - **cudaq-qec**
+     - https://github.com/NVIDIA/cudaq-qec
      - ``main`` branch (or your feature branch)
    * - **cuda-quantum** (realtime)
      - https://github.com/NVIDIA/cuda-quantum
@@ -183,7 +183,7 @@ provides the ``GpuRoceTransceiver`` library for RDMA transport.
 Repository Layout
 -----------------
 
-Key files within ``cudaqx``:
+Key files within ``cudaq-qec``:
 
 .. code-block:: text
 
@@ -266,10 +266,10 @@ To also build the bridge and playback tools for emulated or FPGA testing:
    ninja && ninja install
    cd ../../..
 
-   # 4. Build cudaqx with HSB tools enabled.
+   # 4. Build cudaq-qec with HSB tools enabled.
    #    CUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE supplies the DEVICE_CALL
    #    handlers (WHOLE_ARCHIVE-linked into the bridge + test).
-   cmake -S cudaqx -B cudaqx/build \
+   cmake -S cudaq-qec -B cudaq-qec/build \
      -DCMAKE_BUILD_TYPE=Release \
      -DCUDAQ_DIR=/path/to/cudaq-install/lib/cmake/cudaq/ \
      -DCUDAQ_REALTIME_ROOT=/tmp/cudaq-realtime \
@@ -279,7 +279,7 @@ To also build the bridge and playback tools for emulated or FPGA testing:
      -DCUDAQX_QEC_ENABLE_HSB_TOOLS=ON \
      -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/path/to/holoscan-sensor-bridge \
      -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/path/to/holoscan-sensor-bridge/build
-   cmake --build cudaqx/build --target \
+   cmake --build cudaq-qec/build --target \
      gpu_roce_qldpc_graph_decoder_bridge \
      hsb_fpga_syndrome_playback
 
@@ -309,13 +309,13 @@ bridge):
 
 .. code-block:: bash
 
-   cmake --build cudaqx/build --target surface_code-1-local
+   cmake --build cudaq-qec/build --target surface_code-1-local
 
 Run it in two steps -- generate the decoder config (DEM), then run the shots:
 
 .. code-block:: bash
 
-   cd cudaqx/build
+   cd cudaq-qec/build
    export CUDAQ_DEFAULT_SIMULATOR=stim
 
    APP=./libs/qec/unittests/realtime/app_examples/surface_code-1-local
@@ -547,7 +547,7 @@ Build Options
      - cuda-quantum source directory
    * - ``--cuda-qx-dir DIR``
      - ``/workspaces/cudaqx``
-     - cudaqx source directory
+     - cudaq-qec source directory
    * - ``--jobs N``
      - ``nproc``
      - Parallel build jobs

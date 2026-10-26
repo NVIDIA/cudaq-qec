@@ -5,7 +5,7 @@ on:
     inputs:
       wheels_repo:
         type: string
-        description: Retrieve assets from a GitHub Actions run in this repo (e.g. NVIDIA/cudaqx)
+        description: Retrieve assets from a GitHub Actions run in this repo (e.g. NVIDIA/cudaq-qec)
         required: true
       wheels_run_id:
         type: string

@@ -17,19 +17,28 @@ on:
         required: false
 
 jobs:
-  # Build the decoder stack with CUDAQ_QEC_DECODERS_ONLY=ON: no CUDA-Q
-  # install, no LLVM/MLIR, no cuStabilizer. Guards the decoders-only
-  # configuration against rot and demonstrates a decoder call through the
-  # decoders-only python module.
+  # Prove the decoders-only build environment: build the ubuntu:24.04
+  # build-env image (docker/build_env/cudaqx.decoders.Dockerfile) from scratch,
+  # then build the decoder stack with CUDAQ_QEC_DECODERS_ONLY=ON inside it. This
+  # guards both the decoders-only CMake configuration (no CUDA-Q, no LLVM/MLIR,
+  # no cuStabilizer) and the build-env image itself -- proving the decoders can
+  # be built on a bare ubuntu with only the documented apt dependencies. The
+  # image is a local tag, built and consumed on this runner only; nothing is
+  # pushed. verify_build_env.sh runs the build and all assertions (decoding
+  # server correctly skipped, standalone python decode with no cudaq import, no
+  # CUDA-Q/LLVM linkage, and the opt-in TensorRT decoder plugin).
   decoders-only-build:
-    name: Decoders-only build (no CUDA-Q)
+    name: Decoders-only build (CUDA ${{ matrix.cuda_version }}, TensorRT ${{ matrix.install_tensorrt }}, ${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
-        platform: ['amd64', 'arm64']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
-    container:
-      image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu13.0-gcc12-main
+        # One run per platform. amd64 exercises the opt-in TensorRT path
+        # (TensorRT resolves to a +cuda13 build, so pair it with 13.0); arm64
+        # covers the default (no TensorRT, plugin auto-disabled).
+        include:
+          - { platform: amd64, cuda_version: '13.0', install_tensorrt: 'on' }
+          - { platform: arm64, cuda_version: '13.0', install_tensorrt: 'off' }
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
     permissions:
       contents: read
     steps:
@@ -38,52 +47,20 @@ jobs:
         with:
           set-safe-directory: true
 
-      - name: Configure and build (decoders only)
-        shell: bash
+      - name: Build decoders-only build-env image
         run: |
-          set -o pipefail
-          cmake -S libs/qec -B build_decoders_only \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCUDAQ_QEC_DECODERS_ONLY=ON \
-            -DCUDAQX_QEC_BINDINGS_PYTHON=ON 2>&1 | tee configure.log
-          cmake --build build_decoders_only -j$(nproc)
+          docker build \
+            -f docker/build_env/cudaqx.decoders.Dockerfile \
+            --build-arg cuda_version=${{ matrix.cuda_version }} \
+            --build-arg install_tensorrt=${{ matrix.install_tensorrt }} \
+            -t cudaqx-decoders-build:ci .
 
-      # This image has no cudaq-realtime, so this run also covers the
-      # not-found half of the decoding-server gate: warn, and build the
-      # decoders anyway.
-      - name: Check the decoding server was skipped, not fatal
+      - name: Build decoders-only stack and verify
         run: |
-          grep -q "cudaq-realtime not found" configure.log || {
-            echo "ERROR: expected a warning that cudaq-realtime was not found"
-            exit 1
-          }
-          if [ -e build_decoders_only/bin/decoding_server ]; then
-            echo "ERROR: decoding_server was built without cudaq-realtime"
-            exit 1
-          fi
-          test -e build_decoders_only/lib/libcudaq-qec-decoders.so
-
-      - name: Smoke test (pymatching decode, no cudaq import)
-        run: |
-          PYTHONPATH=build_decoders_only/python python3 - <<'EOF'
-          import sys
-          assert "cudaq" not in sys.modules
-          import numpy as np
-          import _qec_decoders_standalone
-          qec = _qec_decoders_standalone.qecrt
-          # Distance-4 repetition code (pymatching needs a matching graph:
-          # every H column with at most 2 ones).
-          H = np.array([[1, 1, 0, 0],
-                        [0, 1, 1, 0],
-                        [0, 0, 1, 1]], dtype=np.uint8)
-          decoder = qec.get_decoder("pymatching", H)
-          result = decoder.decode([1, 1, 0])
-          assert result.converged
-          correction = (np.asarray(result.result) >= 0.5).astype(np.uint8)
-          np.testing.assert_array_equal((H @ correction) % 2, [1, 1, 0])
-          assert "cudaq" not in sys.modules
-          print("pymatching decode OK without CUDA-Q:", correction.tolist())
-          EOF
+          docker run --rm \
+            -v "$PWD":/workspaces/cudaqx -w /workspaces/cudaqx \
+            cudaqx-decoders-build:ci \
+            bash .github/workflows/scripts/verify_build_env.sh ${{ matrix.install_tensorrt }}
 
   build-and-test:
     name: Build and test
@@ -92,7 +69,7 @@ jobs:
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-cpu8', matrix.platform) || 'ubuntu-latest' }}
     container:
       image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
       # SYS_NICE: the default seccomp profile only admits the NUMA memory-policy
@@ -284,6 +261,29 @@ jobs:
             --realtime-lib-dir "$RT" \
             --example-build-dir /tmp/rtdemo-build
 
+      # The color-code demo needs the gated Ising model weights, so CI only
+      # checks that it starts.
+      - name: Check color_code_demo starts
+        shell: bash
+        run: |
+          export PYTHONPATH="/cudaq-install:$HOME/.cudaqx"
+          python3 docs/sphinx/examples/qec/color_code_demo/color_code_demo.py --help
+
+      # ========================================================================
+      # SIFL demo example
+      #
+      # Builds the per_round_decoder plugin against the INSTALLED SDK and runs
+      # it on the playback emulator. Stim is only installed on x86_64.
+      # ========================================================================
+      - name: Build & run sifl_demo
+        if: matrix.platform == 'amd64'
+        shell: bash
+        run: |
+          export PATH=/cudaq-install/bin:$PATH
+          export PYTHONPATH="/cudaq-install:$HOME/.cudaqx"
+          bash docs/sphinx/examples/qec/sifl_demo/run_sifl_demo.sh \
+            --shots 10 --cadences 2 50
+
       # ========================================================================
       # Upload build artifacts for GPU tests
       # ========================================================================
@@ -313,7 +313,7 @@ jobs:
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaqx') && format('linux-{0}-gpu-a100-latest-1', matrix.platform) || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-gpu-a100-latest-1', matrix.platform) || 'ubuntu-latest' }}
     container:
       image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
       env:
@@ -343,6 +343,12 @@ jobs:
       - name: Extract build artifacts
         run: |
           tar xzf /tmp/qec-build-artifacts.tar.gz -C /
+
+      # The build linked against the DOCA libibverbs that CUDA-Q's
+      # install_devdeps.sh installs; the stock container's OFED libibverbs is
+      # too old for the resulting Python module to load.
+      - name: Install rdma-core runtime from DOCA
+        run: bash .github/workflows/scripts/install_doca_rdma_core.sh
 
       - name: Configure
         id: config
@@ -441,6 +447,12 @@ jobs:
       - name: Extract build artifacts
         run: |
           tar xzf /tmp/qec-build-artifacts.tar.gz -C /
+
+      # The build linked against the DOCA libibverbs that CUDA-Q's
+      # install_devdeps.sh installs; the stock container's OFED libibverbs is
+      # too old for the resulting Python module to load.
+      - name: Install rdma-core runtime from DOCA
+        run: bash .github/workflows/scripts/install_doca_rdma_core.sh
 
       - name: Configure
         id: config

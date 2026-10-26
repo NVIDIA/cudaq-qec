@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cuda-qx/core/tensor_impl.h"
 #include "cuda-qx/core/type_traits.h"
@@ -59,7 +56,7 @@ public:
   std::size_t size() const override {
     if (rank() == 0)
       return 0;
-    return std::accumulate(m_shape.begin(), m_shape.end(), 1,
+    return std::accumulate(m_shape.begin(), m_shape.end(), std::size_t{1},
                            std::multiplies<size_t>());
   }
 
@@ -94,7 +91,7 @@ public:
   /// @param d Pointer to the source data
   /// @param shape The shape of the source data
   void copy(const Scalar *d, const std::vector<std::size_t> &shape) override {
-    auto size = std::accumulate(shape.begin(), shape.end(), 1,
+    auto size = std::accumulate(shape.begin(), shape.end(), std::size_t{1},
                                 std::multiplies<size_t>());
     if (m_data)
       delete[] m_data;

@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "DecodingServer.h"
 #include "../../hardware_guards.h"
@@ -12,6 +9,8 @@
 #include "cudaq/qec/logger.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 
+#include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -88,17 +87,25 @@ DecodingServer::DecodingServer(const std::string &config_yaml) {
           yaml_str);
   if (config.decoders.empty())
     throw std::runtime_error("No decoders in config: " + config_yaml);
-  registry_.load_from_config(config, config_yaml);
+  registry_.load_from_config(
+      config, config_yaml,
+      std::filesystem::absolute(config_yaml).parent_path());
 
   const auto dispatch = registry_.required_dispatch();
   // device_graph must run on the GPU the FPGA/NIC is affine to; when exactly
-  // one session is booting, pass its decoder's cuda_device_id so the factory
-  // can place the transport on that device.
+  // one session is booting, pass its cuda_device_id so the factory can place
+  // the transport on that device -- from the decoder directly, or from the
+  // task graph's cuda_device_id() (throws if its nodes disagree on device;
+  // fail fast at boot rather than silently pick no pin).
   const auto &boot_sessions = registry_.sessions();
-  const int pinned_cuda_device =
-      boot_sessions.size() == 1
-          ? boot_sessions.begin()->second->dec->get_cuda_device_id()
-          : -1;
+  int pinned_cuda_device = -1;
+  if (boot_sessions.size() == 1) {
+    const auto *session = boot_sessions.begin()->second.get();
+    if (session->dec)
+      pinned_cuda_device = session->dec->get_cuda_device_id();
+    else if (session->graph)
+      pinned_cuda_device = session->graph->cuda_device_id().value_or(-1);
+  }
   auto t = make_transport(dispatch, pinned_cuda_device,
                           config.transport.resolve_device_graph());
   ITransceiver *raw = t.get();

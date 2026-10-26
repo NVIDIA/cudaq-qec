@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Deprecated typed decoder-config classes.
 
 These classes reproduce the pre-schema typed configuration API
@@ -100,6 +95,12 @@ class _deprecated_typed_config:
                     kinds = {entry["key"]: entry["kind"] for entry in schema}
             except Exception:
                 pass
+            # Model rates were part of several deprecated typed configs but
+            # are no longer declared by their custom-parameter schemas. Keep
+            # the legacy setter's type checking while conversion promotes the
+            # value to decoder_config.error_rate_vec.
+            if "error_rate_vec" in cls._fields:
+                kinds.setdefault("error_rate_vec", "float64_vec")
             cls._kind_cache = kinds
         return cls._kind_cache
 
@@ -239,7 +240,8 @@ class trt_decoder_config(_deprecated_typed_config):
     _schema_name = "trt_decoder"
     _fields = ("onnx_load_path", "engine_load_path", "engine_save_path",
                "precision", "memory_workspace", "batch_size", "use_cuda_graph",
-               "global_decoder", "global_decoder_params")
+               "engine_output_format", "global_decoder",
+               "global_decoder_params")
 
     _global_decoder_classes = {
         "pymatching": pymatching_config,

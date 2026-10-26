@@ -1,11 +1,6 @@
 #!/bin/bash
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         #
-# All rights reserved.                                                        #
-#                                                                             #
-# This source code and the accompanying materials are made available under    #
-# the terms of the Apache License 2.0 which accompanies this distribution.    #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # gpu_roce_predecoder_test.sh
 #
@@ -84,7 +79,7 @@ Actions:
 
 Directory options:
   --cuda-quantum-dir DIR (default: /workspaces/cuda-quantum)
-  --cuda-qx-dir DIR      (default: /workspaces/cuda-qx)
+  --cuda-qx-dir DIR      (default: /workspaces/cudaqx)
   --data-dir DIR         Predecoder test data (expects detectors.bin,
                          observables.bin inside; e.g. predecoder/test_data/d13_T104_X)
 

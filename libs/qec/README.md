@@ -27,16 +27,16 @@ Some decoders require additional dependencies to operate. You can install them w
 ## Getting Started
 
 For detailed documentation, tutorials, and API reference, visit the
-[CUDA-Q QEC Documentation](https://nvidia.github.io/cudaqx/components/qec/introduction.html).
+[CUDA-Q QEC Documentation](https://nvidia.github.io/cudaq-qec/components/qec/introduction.html).
 
 ## License
 
 Most components of CUDA-Q QEC are open source. The source code is available on
 [GitHub][github_link] and licensed under [Apache License
-2.0](https://github.com/NVIDIA/cudaqx/blob/main/LICENSE).
+2.0](https://github.com/NVIDIA/cudaq-qec/blob/main/LICENSE).
 
 The `libcudaq-qec-nv-qldpc-decoder.so` library (distributed with CUDA-Q QEC) is
 closed source and is subject to the [NVIDIA Software License Agreement][github_qec_license]
 
-[github_link]: https://github.com/NVIDIA/cudaqx/tree/main/libs/qec
-[github_qec_license]: https://github.com/NVIDIA/cudaqx/blob/main/libs/qec/LICENSE
+[github_link]: https://github.com/NVIDIA/cudaq-qec/tree/main/libs/qec
+[github_qec_license]: https://github.com/NVIDIA/cudaq-qec/blob/main/libs/qec/LICENSE

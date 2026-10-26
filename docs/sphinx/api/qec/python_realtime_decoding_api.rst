@@ -9,13 +9,13 @@ Core Decoding Functions
 
 These functions can be called from within CUDA-Q quantum kernels (``@cudaq.kernel`` decorated functions) to interact with real-time decoders.
 
-.. py:function:: cudaq_qec.qec.enqueue_syndromes(decoder_id, syndromes, tag=0)
+.. py:function:: cudaq_qec.qec.enqueue_syndromes(decoder_id, syndromes, tag)
 
    Enqueue syndrome measurements for decoding.
 
    :param decoder_id: Unique identifier for the decoder instance (matches configured decoder ID)
    :param syndromes: List of syndrome measurement results from stabilizer measurements
-   :param tag: Optional tag for logging and debugging (default: 0)
+   :param tag: Which round this is; identifies the round for logging and ordering
 
    **Example:**
 
@@ -30,13 +30,52 @@ These functions can be called from within CUDA-Q quantum kernels (``@cudaq.kerne
           syndromes = measure_stabilizers(logical)
           qec.enqueue_syndromes(decoder_id, syndromes, 0)
 
-.. py:function:: cudaq_qec.qec.get_corrections(decoder_id, return_size, reset=False)
+.. py:function:: cudaq_qec.qec.enqueue_syndromes_mapped(decoder_id, syndromes, tag, syndrome_mapping_id)
+
+   Enqueue syndrome measurements, naming the ``syndrome_mapping`` row this round
+   belongs to.
+
+   A separate function rather than an optional argument on
+   :py:func:`cudaq_qec.qec.enqueue_syndromes`, because a device kernel carries one
+   argument count per name.
+
+   :param decoder_id: Unique identifier for the decoder instance
+   :param syndromes: List of syndrome measurement results from stabilizer measurements
+   :param tag: Which round this is
+   :param syndrome_mapping_id: Which ``syndrome_mapping`` row describes this round.
+      ``tag`` says which round it is, this says what kind. ``0`` is the
+      pass-through ``bulk`` row present in every configuration; naming a row
+      declared ``type: final`` ends the shot, committing whatever a guarded
+      window is still withholding. An id no row declares is rejected.
+
+   **Example:**
+
+   .. code-block:: python
+
+      import cudaq
+      import cudaq_qec as qec
+
+      # decoders: ...
+      # syndrome_mapping:
+      #   - {id: 1, type: final}
+
+      @cudaq.kernel
+      def shot(decoder_id: int, num_rounds: int):
+          q = cudaq.qvector(4)
+          for r in range(num_rounds):
+              syndromes = mz(q)
+              if r + 1 == num_rounds:
+                  qec.enqueue_syndromes_mapped(decoder_id, syndromes, r, 1)
+              else:
+                  qec.enqueue_syndromes(decoder_id, syndromes, r)
+
+.. py:function:: cudaq_qec.qec.get_corrections(decoder_id, return_size, reset)
 
    Retrieve calculated corrections from the decoder.
 
    :param decoder_id: Unique identifier for the decoder instance
    :param return_size: Number of correction bits to return (typically equals number of logical observables)
-   :param reset: Whether to reset accumulated corrections after retrieval (default: False)
+   :param reset: Whether to reset accumulated corrections after retrieval
    :returns: List of boolean values indicating detected bit flips for each logical observable
 
    **Example:**
@@ -79,26 +118,40 @@ out-of-tree decoder plugins. Use ``cudaq_qec.decoder_param_schema(name)`` to
 inspect a decoder's parameters and ``cudaq_qec.registered_decoder_schemas()``
 to list all decoders with registered schemas.
 
-For example, the ``pymatching`` decoder accepts ``error_rate_vec``
-(per-error prior probabilities in the range ``(0, 0.5]``, length matching
-the decoder ``block_size``) and ``merge_strategy`` (one of ``"disallow"``,
-``"independent"``, ``"smallest_weight"``, ``"keep_original"``,
-``"replace"``):
+For example, model error rates may be assigned to the top-level
+``decoder_config.error_rate_vec`` field, while the ``pymatching`` decoder's
+custom ``merge_strategy`` is one of ``"disallow"``, ``"independent"``,
+``"smallest_weight"``, ``"keep_original"``, or ``"replace"``. Emitted YAML
+retains the established spelling under ``decoder_custom_args``. Input YAML
+accepts either location, but rejects a configuration that supplies both:
 
 .. code-block:: python
 
    config.type = "pymatching"
+   config.error_rate_vec = [0.1, 0.1, 0.1]
    config.decoder_custom_args = {
-       "error_rate_vec": [0.1, 0.1, 0.1],
        "merge_strategy": "smallest_weight",
    }
 
+The corresponding YAML keeps the error rates in the compatibility location:
+
+.. code-block:: yaml
+
+   decoder_custom_args:
+     error_rate_vec: [0.1, 0.1, 0.1]
+     merge_strategy: smallest_weight
+
 The ``trt_decoder`` accepts ``onnx_load_path`` or ``engine_load_path``
-(mutually exclusive), ``engine_save_path``, ``precision`` ("fp16", "bf16",
-"int8", "fp8", "tf32", "noTF32", or "best"), ``memory_workspace`` (bytes),
-``batch_size``, ``use_cuda_graph``, and an optional global decoder attached
-via ``global_decoder`` plus ``global_decoder_params`` (a nested dict whose
-keys follow the schema of the named global decoder).
+(mutually exclusive), required ``engine_output_format`` (``"errors"``,
+``"residual_detectors"``, ``"observables"``, or
+``"observables_and_residual_detectors"``), ``engine_save_path``, ``precision``
+(``"best"``, ``"tf32"``, or ``"noTF32"``; legacy ``"fp16"``, ``"bf16"``,
+``"int8"``, and ``"fp8"`` values are accepted but ignored for strongly typed
+networks),
+``memory_workspace`` (bytes), ``batch_size``, ``use_cuda_graph``, and an
+optional global decoder attached via ``global_decoder`` plus
+``global_decoder_params`` (a nested dict whose keys follow the schema of the
+named global decoder).
 
 .. py:function:: cudaq_qec.decoder_param_schema(decoder_name)
 

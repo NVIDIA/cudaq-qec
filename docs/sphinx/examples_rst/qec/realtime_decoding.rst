@@ -13,11 +13,13 @@ The examples below cover realtime decoding end to end — start with Getting Sta
    AI Predecoder with CUDA-Q Realtime <realtime_predecoder_pymatching>
    AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection) <realtime_predecoder_fpga>
    Relay BP Decoding with CUDA-Q Realtime <realtime_relay_bp>
+   Ising Color-Code Emulator with Decoding Server <color_code_demo>
+   Streaming Interleaved Feed-forward Latency (SIFL) <sifl_demo>
    Dynamic DEM Construction <dyn_dem>
 
 See Also
 --------
 
-* Example source code: `libs/qec/unittests/realtime/app_examples <https://github.com/NVIDIA/cudaqx/tree/main/libs/qec/unittests/realtime/app_examples>`_
+* Example source code: `libs/qec/unittests/realtime/app_examples <https://github.com/NVIDIA/cudaq-qec/tree/main/libs/qec/unittests/realtime/app_examples>`_
 * :ref:`Realtime Decoding C++ API <cpp_realtime_decoding_api>`
 * :ref:`Realtime Decoding Python API <python_realtime_decoding_api>`

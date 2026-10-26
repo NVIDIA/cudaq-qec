@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <cmath>
 #include <filesystem>
@@ -21,6 +18,14 @@
 #include "cudaq/qec/version.h"
 
 namespace {
+
+TEST(DecoderInputsUtilities, DSparseDoesNotRequireDeclaredMeasurementWidth) {
+  cudaq::M2DSparseMatrix m2d;
+  m2d.rows = {{2}, {}, {0, 4}};
+
+  EXPECT_EQ(cudaq::qec::d_sparse(m2d),
+            (std::vector<std::int64_t>{2, -1, -1, 0, 4, -1}));
+}
 
 using cudaq::qec::surface_code::sc_orientation;
 using cudaq::qec::surface_code::stabilizer_grid;

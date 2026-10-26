@@ -15,6 +15,12 @@
     remain in an intermediate state, awaiting future syndromes. The return
     vector is only non-empty once enough data has been provided to match the
     original syndrome size (calculated from the Parity Check Matrix).
+
+    The cancellable :code:`decode` and :code:`decode_batch` overloads forward
+    the token to the inner decoders. They return the same empty result while a
+    block is incomplete, and :code:`std::nullopt` if an inner decoder honors a
+    stop; the partial block is dropped and the next round starts a new one.
+    :code:`reset_decoder()` also drops a partial block.
     
     Sliding window decoders are advantageous in QEC codes subject to
     circuit-level noise across multiple syndrome extraction rounds. These
@@ -44,7 +50,7 @@
     `Toward Low-latency Iterative Decoding of QLDPC Codes Under Circuit-Level Noise <https://arxiv.org/abs/2403.18901>`_
 
     .. note::
-      It is required to create decoders with the `get_decoder` API from the CUDA-QX
+      It is required to create decoders with the `get_decoder` API from the CUDA-Q QEC
       extension points API, such as
 
       .. tab:: Python
@@ -96,14 +102,13 @@
                 auto inner_decoder_params =
                     cudaqx::heterogeneous_map{{"use_osd", true}, {"max_iterations", 50}};
                 auto opts = cudaqx::heterogeneous_map{
-                    {"error_rate_vec", dem.error_rates},
                     {"window_size", 1},
                     {"num_syndromes_per_round", code->get_num_z_stabilizers() + code->get_num_x_stabilizers()},
                     {"num_boundary_syndromes", code->get_num_z_stabilizers()},
                     {"inner_decoder_name", "single_error_lut"},
                     {"inner_decoder_params", inner_decoder_params}};
                 auto swdec = cudaq::qec::get_decoder("sliding_window",
-                                                    dem.detector_error_matrix, opts);
+                                                    cudaq::qec::decoder_init{dem}, opts);
 
                 return 0;
             }
@@ -116,10 +121,12 @@
     :param H: Parity check matrix (tensor format)
     :param params: Heterogeneous map of parameters:
 
-        - `error_rate_vec` (double): Vector of length "block size" containing
-          the probability of an error (in 0-1 range). This vector is used to
-          populate the `error_rate_vec` parameter for the inner decoder
-          (automatically sliced correctly according to each window).
+        - `error_rate_vec` (vector<double>): Vector of length ``block_size``
+          containing the probability of each error. Python accepts this as a
+          keyword. C++ supplies it through :cpp:class:`cudaq::qec::decoder_init`
+          (for example, by constructing it from the DEM as above), not the
+          heterogeneous parameter map. It is sliced to each window before the
+          inner decoder is constructed.
         - `window_size` (int): The number of rounds of syndrome data in each window. (Defaults to 1.)
         - `step_size` (int): The number of rounds to advance the window by each time. (Defaults to 1.)
         - `num_syndromes_per_round` (int): The number of syndromes per round. (Must be provided.)
