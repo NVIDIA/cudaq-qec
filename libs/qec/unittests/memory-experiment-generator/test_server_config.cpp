@@ -90,7 +90,7 @@ void expect_worker_policy_tampering_rejected(Config value,
       options.pool_threads = static_cast<std::size_t>(workers + 1);
       reject();
       if constexpr (requires { options.async_num_workers; }) {
-        options.async_num_workers = static_cast<std::size_t>(workers);
+        options.async_num_workers = expected.async_num_workers == 1 ? 2 : 1;
         reject();
       }
     } else {
@@ -101,7 +101,7 @@ void expect_worker_policy_tampering_rejected(Config value,
     }
     options.async_streaming = false;
     reject();
-    options.async_queue_capacity = 4;
+    options.async_queue_capacity = expected.async_queue_capacity == 1 ? 2 : 1;
     reject();
     if constexpr (requires { options.pool_affinity; }) {
       options.pool_affinity.push_back(0);
@@ -112,10 +112,11 @@ void expect_worker_policy_tampering_rejected(Config value,
       reject();
     }
     if constexpr (requires { options.async_max_in_flight_records; }) {
-      options.async_max_in_flight_records = 2;
+      options.async_max_in_flight_records =
+          expected.async_max_in_flight_records == 1 ? 2 : 1;
       reject();
     }
-    options.async_coordinator_cpu = 0;
+    options.async_coordinator_cpu = expected.async_coordinator_cpu == 0 ? 1 : 0;
     reject();
   } else {
     ADD_FAILURE() << "The public pattern requires worker configuration support";
@@ -272,14 +273,6 @@ TEST(MemoryExperimentServerConfig,
   EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 4));
   EXPECT_THROW(validate_server_config(yaml, model.chunks, 1),
                std::runtime_error);
-  EXPECT_NE(yaml.find("memory_model"), std::string::npos);
-  EXPECT_NE(yaml.find("corrections"), std::string::npos);
-  EXPECT_EQ(yaml.find("async_streaming"), std::string::npos);
-  EXPECT_EQ(yaml.find("async_num_workers"), std::string::npos);
-  EXPECT_EQ(yaml.find("async_worker_cpus"), std::string::npos);
-  EXPECT_EQ(yaml.find("pool_threads"), std::string::npos);
-  EXPECT_EQ(yaml.find("pool_affinity"), std::string::npos);
-  EXPECT_EQ(yaml.find("async_max_in_flight_records"), std::string::npos);
   const auto value = config::multi_decoder_config::from_yaml_str(yaml);
   ASSERT_EQ(value.syndrome_mapping.size(), 2);
   EXPECT_EQ(value.syndrome_mapping[0].id, 0);
@@ -293,10 +286,13 @@ TEST(MemoryExperimentServerConfig,
     ASSERT_TRUE(decoder.task_graph);
     EXPECT_EQ(decoder.task_graph->options, task_graph_options{});
     ASSERT_EQ(decoder.task_graph->nodes.size(), 1);
-    EXPECT_EQ(
-        decoder.task_graph->nodes.front().node_params.map().get<std::string>(
-            "output"),
-        "corrections");
+    const auto &node = decoder.task_graph->nodes.front();
+    EXPECT_EQ(node.type, "parallel_window");
+    const std::vector<task_graph_edge> edges{
+        {"measurements", "output", node.id, "input"},
+        {node.id, "output", "output", "input"}};
+    EXPECT_EQ(decoder.task_graph->edges, edges);
+    EXPECT_EQ(node.node_params.map().get<std::string>("output"), "corrections");
   }
 }
 

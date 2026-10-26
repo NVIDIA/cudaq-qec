@@ -141,10 +141,9 @@ class GeneratorCliTest(unittest.TestCase):
                       buffer=None,
                       gap=None,
                       workers=None):
-        self.assertEqual(set(document),
-                         {"data_artifacts", "decoders", "syndrome_mapping"})
-        self.assertEqual(set(document["data_artifacts"]), {"memory_model"})
-        model = document["data_artifacts"]["memory_model"]["dem_chunks"]
+        self.assertEqual(len(document["data_artifacts"]), 1)
+        model_name, artifact = next(iter(document["data_artifacts"].items()))
+        model = artifact["dem_chunks"]
         self.assertEqual(model["num_rounds"], rounds + 1)
         self.assertEqual(model["measurements_per_round"], distance**2 - 1)
         mapping = document["syndrome_mapping"]
@@ -156,50 +155,33 @@ class GeneratorCliTest(unittest.TestCase):
         decoders = document["decoders"]
         self.assertEqual([decoder["id"] for decoder in decoders],
                          list(range(patches)))
-        worker_key = None
         for decoder in decoders:
-            self.assertEqual(decoder["dem_chunks"], "memory_model")
+            self.assertEqual(decoder["dem_chunks"], model_name)
             graph = decoder["task_graph"]
-            if workers is None:
-                self.assertEqual(set(graph), {"nodes", "edges"})
-            else:
-                worker_keys = {"pool_threads", "async_num_workers"} & set(graph)
-                self.assertEqual(len(worker_keys), 1)
-                active_key = next(iter(worker_keys))
-                if worker_key is None:
-                    worker_key = active_key
-                self.assertEqual(active_key, worker_key)
-                self.assertEqual(
-                    set(graph),
-                    {"nodes", "edges", "async_streaming", worker_key})
+            if workers is not None:
                 self.assertIs(graph["async_streaming"], True)
-                self.assertEqual(graph[worker_key], workers)
-            self.assertEqual(graph["edges"], [
-                {
-                    "from": "measurements",
-                    "to": "parallel_memory"
-                },
-                {
-                    "from": "parallel_memory",
-                    "to": "output"
-                },
-            ])
+                worker_counts = {
+                    graph[key]
+                    for key in ("pool_threads", "async_num_workers")
+                    if graph.get(key) not in (None, 0)
+                }
+                self.assertEqual(worker_counts, {workers})
+            # C++ round-trip tests check typed edges and framework defaults;
+            # do not pin their YAML spelling or omitted optional fields here.
             self.assertEqual(len(graph["nodes"]), 1)
             node = graph["nodes"][0]
-            self.assertEqual(node["id"], "parallel_memory")
             self.assertEqual(node["type"], "parallel_window")
             self.assertEqual(node["output"], "corrections")
             self.assertEqual(node["commit_rounds"],
                              distance if commit is None else commit)
             self.assertEqual(node["buffer_rounds"],
                              distance if buffer is None else buffer)
-            if gap is None:
-                self.assertNotIn("gap_rounds", node)
-            else:
+            if gap is not None:
                 self.assertEqual(node["gap_rounds"], gap)
-            self.assertNotIn("async_worker_cpus", graph)
-            self.assertNotIn("pool_affinity", graph)
-            self.assertNotIn("async_max_in_flight_records", graph)
+            elif "gap_rounds" in node:
+                self.assertEqual(
+                    node["gap_rounds"],
+                    node["commit_rounds"] + 2 * node["buffer_rounds"])
         connections = model["connections"]
         connected = {connection["to"] for connection in connections}
         outgoing = {connection["from"] for connection in connections}
@@ -448,8 +430,7 @@ class GeneratorCliTest(unittest.TestCase):
                     self.assertNotIn("workers_per_graph", node)
                     self.assertNotIn("async_num_workers", node)
                     self.assertNotIn("pool_threads", node)
-                    self.assertEqual(node["inner"],
-                                     {"type": "single_error_lut"})
+                    self.assertEqual(node["inner"]["type"], "single_error_lut")
 
     def test_total_worker_overflow_is_rejected_without_output(self):
         working = self.case_directory()
@@ -484,7 +465,7 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertIs(inner["straddle_start_round"], True)
         self.assertIs(inner["straddle_end_round"], False)
         self.assertEqual(inner["inner_decoder_name"], "multi_error_lut")
-        self.assertEqual(inner["inner_decoder_params"], {"lut_error_depth": 2})
+        self.assertEqual(inner["inner_decoder_params"]["lut_error_depth"], 2)
 
     def test_explicit_pymatching_merge_policy_is_preserved_for_every_patch(
             self):
@@ -509,11 +490,9 @@ class GeneratorCliTest(unittest.TestCase):
                 document = yaml.safe_load((working / "server.yaml").read_text())
                 self.assert_server(document, patches=2)
                 for decoder in document["decoders"]:
-                    self.assertEqual(decoder["task_graph"]["nodes"][0]["inner"],
-                                     {
-                                         "type": "pymatching",
-                                         "merge_strategy": policy,
-                                     })
+                    inner = decoder["task_graph"]["nodes"][0]["inner"]
+                    self.assertEqual(inner["type"], "pymatching")
+                    self.assertEqual(inner["merge_strategy"], policy)
 
     def test_bad_decoder_arguments_and_backend_name_leave_no_output(self):
         for arguments in (
