@@ -96,7 +96,8 @@ LOOP_LOG_FLUSH_TIMEOUT_SECONDS=1
                               timeout=5)
 
     def assert_rejected(self, result, message):
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotEqual(result.returncode, 0,
+                            result.stdout + result.stderr)
         self.assertIn(message, result.stdout + result.stderr)
 
     def test_cli_rejects_loop_errors_before_network_setup(self):
@@ -126,11 +127,11 @@ LOOP_LOG_FLUSH_TIMEOUT_SECONDS=1
                    "1"], "--loop-seconds must be a positive integer"),
                  (["--emulate", "--loop-seconds", "1", "--min-decodes",
                    "0"], "--min-decodes must be a positive integer"), ([
-                       "--emulate", "--loop-seconds", "1", "--min-decodes", "1",
-                       "--no-verify"
+                       "--emulate", "--loop-seconds", "1", "--min-decodes",
+                       "1", "--no-verify"
                    ], "requires ILA verification"), ([
-                       "--emulate", "--loop-seconds", "1", "--min-decodes", "1",
-                       "--timeout", "0"
+                       "--emulate", "--loop-seconds", "1", "--min-decodes",
+                       "1", "--timeout", "0"
                    ], "--timeout must be a positive integer"),
                  (["--loop-seconds"], "--loop-seconds requires a value"),
                  (["--min-decodes"], "--min-decodes requires a value"),
@@ -139,14 +140,16 @@ LOOP_LOG_FLUSH_TIMEOUT_SECONDS=1
         for arguments, message in cases:
             with self.subTest(arguments=arguments):
                 result = subprocess.run(
-                    ["bash", str(SCRIPT), "--setup-network", *arguments],
+                    ["bash",
+                     str(SCRIPT), "--setup-network", *arguments],
                     env=environment,
                     capture_output=True,
                     text=True,
                     check=False,
                     timeout=5)
                 self.assert_rejected(result, message)
-                self.assertFalse(sentinel.exists(), "Network setup was reached")
+                self.assertFalse(sentinel.exists(),
+                                 "Network setup was reached")
 
     def test_default_mode_stays_real_fpga_and_valid_loop_can_skip_run(self):
         for arguments, mode in ((["--no-run"], "Mode: Real FPGA"), ([
@@ -229,8 +232,8 @@ LOOP_LOG_FLUSH_TIMEOUT_SECONDS=1
                 self.emulator.write_text(original.replace(before, after))
                 self.assert_rejected(
                     self.run_functions(
-                        'verify_loop_statistics "$SERVER_LOG" "$EMULATOR_LOG"'),
-                    "Emulator loop transport failed")
+                        'verify_loop_statistics "$SERVER_LOG" "$EMULATOR_LOG"'
+                    ), "Emulator loop transport failed")
 
     def test_finish_waits_for_flushed_logs_and_runs_acceptance(self):
         result = self.run_functions(
