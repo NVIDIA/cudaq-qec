@@ -272,6 +272,13 @@ Realtime Decoding
 Common
 =============
 
+.. autofunction:: cudaq_qec.sample_memory_circuit_raw
+
+Raw memory records are returned as ``list[str]``, not detector-valued arrays.
+Each string contains the chronological ancilla measurements for all extraction
+rounds, followed by terminal data-qubit readout in the preparation basis.
+An explicit noise model is required; use ``cudaq.NoiseModel()`` for no noise.
+
 .. autofunction:: cudaq_qec.sample_memory_circuit
 .. autofunction:: cudaq_qec.x_sample_memory_circuit
 .. autofunction:: cudaq_qec.z_sample_memory_circuit

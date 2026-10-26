@@ -639,6 +639,35 @@ void bindCode(nb::module_ &mod) {
       "Generate a rank-1 tensor for random bits", nb::arg("numBits"),
       nb::arg("error_probability"));
   qecmod.def(
+      "sample_memory_circuit_raw",
+      [](code &code, operation op, std::size_t numShots, std::size_t numRounds,
+         cudaq::noise_model noise) {
+        return sample_memory_circuit_raw(code, op, numShots, numRounds, noise);
+      },
+      R"pbdoc(
+        Sample chronological measurement records from a memory circuit.
+
+        Args:
+            code: The QEC code to sample.
+            op: One of prep0, prep1, prepp or prepm supported by the code.
+            numShots: Positive number of independent shots.
+            numRounds: Positive extraction-round count, excluding final readout.
+            noise: Required noise model. Pass cudaq.NoiseModel() for no noise.
+
+        Returns:
+            A list of bit strings, one per shot. The standard stabilizer round
+            orders Z-ancilla before X-ancilla measurements. After all rounds,
+            the data qubits are read in the preparation basis. No detector XOR,
+            decoding or circuit DEM analysis is performed.
+
+        Sampling uses the current CUDA-Q backend and cudaq.set_random_seed.
+        Concurrent changes to sampling, random-seed and noise state must be
+        serialized. Seeded records are not guaranteed identical across backends
+        or CUDA-Q versions.
+      )pbdoc",
+      nb::arg("code"), nb::arg("op"), nb::arg("numShots"), nb::arg("numRounds"),
+      nb::arg("noise"));
+  qecmod.def(
       "sample_memory_circuit",
       [](code &code, std::size_t numShots, std::size_t numRounds,
          std::optional<cudaq::noise_model> noise = std::nullopt) {

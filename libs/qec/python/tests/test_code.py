@@ -112,6 +112,86 @@ def test_sample_memory_circuit():
     assert syndromes_with_op.shape == (nShots, nDetectors)
 
 
+@pytest.mark.parametrize("prep", [
+    qec.operation.prep0, qec.operation.prep1, qec.operation.prepp,
+    qec.operation.prepm
+])
+def test_sample_memory_circuit_raw_layout_and_seed(prep):
+    cudaq.set_target("stim")
+    try:
+        code = qec.get_code("surface_code", distance=3)
+        shots, rounds, seed = 3, 3, 67
+        noise = cudaq.NoiseModel()
+        noise.add_all_qubit_channel("x", qec.TwoQubitDepolarization(0.05), 1)
+        num_z = code.get_num_ancilla_z_qubits()
+        num_x = code.get_num_ancilla_x_qubits()
+        final_begin = rounds * (num_z + num_x)
+        width = final_begin + code.get_num_data_qubits()
+        cudaq.set_random_seed(seed)
+        records = qec.sample_memory_circuit_raw(code,
+                                                prep,
+                                                numShots=shots,
+                                                numRounds=rounds,
+                                                noise=noise)
+        assert isinstance(records, list)
+        assert len(records) == shots
+        assert all(
+            isinstance(record, str) and len(record) == width and
+            set(record) <= {"0", "1"} for record in records)
+        cudaq.set_random_seed(seed)
+        assert qec.sample_memory_circuit_raw(code, prep, shots, rounds,
+                                             noise) == records
+
+        # Legacy detector sampling analyzes a DEM before sampling, which may
+        # change the RNG stream. Check raw layout independently: without noise,
+        # initial fixed-basis checks, inter-round differences, and final
+        # data-parity checks must all vanish for the prepared code state.
+        noiseless = qec.sample_memory_circuit_raw(code, prep, shots, rounds,
+                                                  cudaq.NoiseModel())
+        bits = np.asarray(
+            [[int(bit) for bit in record] for record in noiseless],
+            dtype=np.uint8)
+        frames = bits[:, :final_begin].reshape(shots, rounds, num_z + num_x)
+        readout = bits[:, final_begin:]
+        is_z_prep = prep in (qec.operation.prep0, qec.operation.prep1)
+        fixed = frames[:, :, :num_z] if is_z_prep else frames[:, :, num_z:]
+        parity = code.get_parity_z() if is_z_prep else code.get_parity_x()
+        initial = fixed[:, 0, :]
+        transitions = frames[:, 1:, :] ^ frames[:, :-1, :]
+        terminal = fixed[:, -1, :] ^ ((readout @ parity.T) % 2)
+        np.testing.assert_array_equal(initial, np.zeros_like(initial))
+        np.testing.assert_array_equal(transitions, np.zeros_like(transitions))
+        np.testing.assert_array_equal(terminal, np.zeros_like(terminal))
+        observables = (code.get_observables_z()
+                       if is_z_prep else code.get_observables_x())
+        logical = (readout @ observables.T) % 2
+        prep_bit = int(prep in (qec.operation.prep1, qec.operation.prepm))
+        np.testing.assert_array_equal(logical, np.full_like(logical, prep_bit))
+    finally:
+        cudaq.reset_target()
+
+
+def test_sample_memory_circuit_raw_requires_noise_model():
+    code = qec.get_code("surface_code", distance=3)
+    with pytest.raises(TypeError, match="sample_memory_circuit_raw"):
+        qec.sample_memory_circuit_raw(code, qec.operation.prep0, 1, 1)
+    with pytest.raises(TypeError, match="sample_memory_circuit_raw"):
+        qec.sample_memory_circuit_raw(code, qec.operation.prep0, 1, 1, None)
+
+
+@pytest.mark.parametrize("prep, shots, rounds", [
+    (qec.operation.prep0, 0, 3),
+    (qec.operation.prep0, 1, 0),
+    (qec.operation.stabilizer_round, 1, 3),
+])
+def test_sample_memory_circuit_raw_rejects_invalid_requests(
+        prep, shots, rounds):
+    code = qec.get_code("surface_code", distance=3)
+    with pytest.raises(RuntimeError, match="sample_memory_circuit_raw"):
+        qec.sample_memory_circuit_raw(code, prep, shots, rounds,
+                                      cudaq.NoiseModel())
+
+
 def test_custom_steane_code():
     ops = ["ZZZZIII", "XXXXIII", "IXXIXXI", "IIXXIXX", "IZZIZZI", "IIZZIZZ"]
     custom_steane = qec.get_code("steane", stabilizers=ops)

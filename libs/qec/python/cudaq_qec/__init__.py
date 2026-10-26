@@ -86,6 +86,7 @@ AsyncDecoderResult = qecrt.AsyncDecoderResult
 DetectorErrorModel = qecrt.DetectorErrorModel
 generate_random_bit_flips = qecrt.generate_random_bit_flips
 sample_memory_circuit = qecrt.sample_memory_circuit
+sample_memory_circuit_raw = qecrt.sample_memory_circuit_raw
 x_sample_memory_circuit = qecrt.x_sample_memory_circuit
 z_sample_memory_circuit = qecrt.z_sample_memory_circuit
 sample_code_capacity = qecrt.sample_code_capacity

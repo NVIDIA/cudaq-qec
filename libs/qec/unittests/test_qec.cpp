@@ -340,6 +340,10 @@ TEST(MemoryRecordSampling, PublicRawRecordsMatchDetectorAndReadoutSamples) {
     const auto input =
         decoder_context_from_memory_circuit(*surface, prep, rounds, noise)
             .full_component();
+    // Both routes sample the same compiled kernel on the same backend with
+    // identical noise. This assumes DEM analysis does not advance the sampling
+    // RNG; reseeding checks layout equivalence, not stability across backends
+    // or CUDA-Q versions.
     cudaq::set_random_seed(seed);
     const auto raw =
         sample_memory_circuit_raw(*surface, prep, shots, rounds, noise);
