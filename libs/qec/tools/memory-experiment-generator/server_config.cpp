@@ -47,27 +47,29 @@ const config::decoder_schema &parallel_window_schema() {
 }
 
 template <typename Number>
-Number number(std::string_view text, const std::string &path) {
+Number number(std::string_view text, const std::string &path,
+              const std::string &kind) {
   Number value{};
   const auto parsed =
       std::from_chars(text.data(), text.data() + text.size(), value);
   if (text.empty() || parsed.ec != std::errc() ||
       parsed.ptr != text.data() + text.size())
-    throw std::invalid_argument("decoder argument '" + path +
+    throw std::invalid_argument(kind + " argument '" + path +
                                 "' has an invalid or out-of-range number");
   return value;
 }
 
 std::vector<double> double_vector(std::string_view text,
-                                  const std::string &path) {
+                                  const std::string &path,
+                                  const std::string &kind) {
   std::vector<double> result;
   if (text.empty())
     return result;
   for (;;) {
     const auto separator = text.find(',');
-    const auto value = number<double>(text.substr(0, separator), path);
+    const auto value = number<double>(text.substr(0, separator), path, kind);
     if (!std::isfinite(value))
-      throw std::invalid_argument("decoder argument '" + path +
+      throw std::invalid_argument(kind + " argument '" + path +
                                   "' must contain finite numbers");
     result.push_back(value);
     if (separator == std::string_view::npos)
@@ -77,37 +79,41 @@ std::vector<double> double_vector(std::string_view text,
 }
 
 std::vector<std::vector<double>> double_matrix(std::string_view text,
-                                               const std::string &path) {
+                                               const std::string &path,
+                                               const std::string &kind) {
   std::vector<std::vector<double>> result;
   if (text.empty())
     return result;
   for (;;) {
     const auto separator = text.find(';');
-    result.push_back(double_vector(text.substr(0, separator), path));
+    result.push_back(double_vector(text.substr(0, separator), path, kind));
     if (separator == std::string_view::npos)
       return result;
     text.remove_prefix(separator + 1);
   }
 }
 
-argument_leaves split_arguments(const std::vector<std::string> &arguments) {
+argument_leaves split_arguments(const std::vector<std::string> &arguments,
+                                const std::string &kind) {
   argument_leaves result;
   for (const auto &argument : arguments) {
     const auto equals = argument.find('=');
     if (equals == std::string::npos || equals == 0)
-      throw std::invalid_argument("--decoder-arg expects PATH=VALUE");
+      throw std::invalid_argument("--" + kind + "-arg expects PATH=VALUE");
     const auto path = argument.substr(0, equals);
     if (path.front() == '.' || path.back() == '.' ||
         path.find("..") != std::string::npos)
-      throw std::invalid_argument("invalid decoder argument path: " + path);
+      throw std::invalid_argument("invalid " + kind +
+                                  " argument path: " + path);
     if (!result.emplace(path, argument.substr(equals + 1)).second)
-      throw std::invalid_argument("duplicate decoder argument: " + path);
+      throw std::invalid_argument("duplicate " + kind + " argument: " + path);
   }
   return result;
 }
 
 cudaqx::heterogeneous_map parse_arguments(const config::decoder_schema &schema,
                                           const argument_leaves &leaves,
+                                          const std::string &kind,
                                           const std::string &prefix = {}) {
   cudaqx::heterogeneous_map result;
   argument_leaves remaining = leaves;
@@ -123,20 +129,20 @@ cudaqx::heterogeneous_map parse_arguments(const config::decoder_schema &schema,
     switch (parameter.kind) {
     case param_kind::boolean:
       if (text != "true" && text != "false")
-        throw std::invalid_argument("decoder argument '" + path +
+        throw std::invalid_argument(kind + " argument '" + path +
                                     "' must be true or false");
       result.insert(parameter.key, text == "true");
       break;
     case param_kind::int32:
-      result.insert(parameter.key, number<int>(text, path));
+      result.insert(parameter.key, number<int>(text, path, kind));
       break;
     case param_kind::uint64:
-      result.insert(parameter.key, number<std::size_t>(text, path));
+      result.insert(parameter.key, number<std::size_t>(text, path, kind));
       break;
     case param_kind::f64: {
-      const auto value = number<double>(text, path);
+      const auto value = number<double>(text, path, kind);
       if (!std::isfinite(value))
-        throw std::invalid_argument("decoder argument '" + path +
+        throw std::invalid_argument(kind + " argument '" + path +
                                     "' must be finite");
       result.insert(parameter.key, value);
       break;
@@ -145,14 +151,14 @@ cudaqx::heterogeneous_map parse_arguments(const config::decoder_schema &schema,
       result.insert(parameter.key, text);
       break;
     case param_kind::f64_vec:
-      result.insert(parameter.key, double_vector(text, path));
+      result.insert(parameter.key, double_vector(text, path, kind));
       break;
     case param_kind::f64_matrix:
-      result.insert(parameter.key, double_matrix(text, path));
+      result.insert(parameter.key, double_matrix(text, path, kind));
       break;
     case param_kind::subschema:
     case param_kind::discriminated:
-      throw std::invalid_argument("decoder argument '" + path +
+      throw std::invalid_argument(kind + " argument '" + path +
                                   "' is a section; name its leaf parameters");
     }
     remaining.erase(parameter.key);
@@ -173,7 +179,7 @@ cudaqx::heterogeneous_map parse_arguments(const config::decoder_schema &schema,
     auto schema_name = parameter.subschema;
     if (parameter.kind == config::param_kind::discriminated) {
       if (!result.contains(parameter.discriminator))
-        throw std::invalid_argument("decoder argument section '" + prefix +
+        throw std::invalid_argument(kind + " argument section '" + prefix +
                                     parameter.key + "' requires '" + prefix +
                                     parameter.discriminator + "'");
       schema_name = parameter.discriminator_prefix +
@@ -181,22 +187,22 @@ cudaqx::heterogeneous_map parse_arguments(const config::decoder_schema &schema,
     }
     const auto *nested = config::find_decoder_schema(schema_name);
     if (!nested)
-      throw std::invalid_argument("no registered decoder parameter schema: " +
-                                  schema_name);
-    result.insert(parameter.key,
-                  parse_arguments(*nested, children, prefix + child_prefix));
+      throw std::invalid_argument("no registered " + kind +
+                                  " parameter schema: " + schema_name);
+    result.insert(parameter.key, parse_arguments(*nested, children, kind,
+                                                 prefix + child_prefix));
   }
   if (!remaining.empty())
-    throw std::invalid_argument("unknown decoder argument: " + prefix +
+    throw std::invalid_argument("unknown " + kind + " argument: " + prefix +
                                 remaining.begin()->first);
   config::materialize_default_args(schema, result);
-  config::validate_custom_args(schema, result, "decoder arguments");
+  config::validate_custom_args(schema, result, kind + " arguments");
   return result;
 }
 
 cudaqx::heterogeneous_map
 decoder_arguments(const server_config_options &options) {
-  auto leaves = split_arguments(options.decoder_args);
+  auto leaves = split_arguments(options.decoder_args, "decoder");
   // A windows introduce parallel boundary edges. Select this profile's merge
   // policy explicitly, without changing PyMatching defaults or user overrides.
   if (options.decoder == "pymatching")
@@ -208,25 +214,18 @@ decoder_arguments(const server_config_options &options) {
     throw std::invalid_argument("decoder '" + options.decoder +
                                 "' has no registered parameter schema");
   }
-  return parse_arguments(*schema, leaves);
+  return parse_arguments(*schema, leaves, "decoder");
 }
 
 cudaqx::heterogeneous_map
 pattern_arguments(const server_config_options &options) {
-  if (options.commit_rounds > std::numeric_limits<std::size_t>::max() ||
-      options.buffer_rounds > std::numeric_limits<std::size_t>::max() ||
-      (options.gap_rounds &&
-       *options.gap_rounds > std::numeric_limits<std::size_t>::max()))
-    throw std::overflow_error("parallel-window geometry exceeds size_t");
-  cudaqx::heterogeneous_map result;
-  result.insert("commit_rounds",
-                static_cast<std::size_t>(options.commit_rounds));
-  result.insert("buffer_rounds",
-                static_cast<std::size_t>(options.buffer_rounds));
+  auto leaves = split_arguments(options.pattern_args, "pattern");
+  leaves.try_emplace("commit_rounds", std::to_string(options.commit_rounds));
+  leaves.try_emplace("buffer_rounds", std::to_string(options.buffer_rounds));
   if (options.gap_rounds)
-    result.insert("gap_rounds", static_cast<std::size_t>(*options.gap_rounds));
-  result.insert("output", std::string(corrections_output));
-  return result;
+    leaves.try_emplace("gap_rounds", std::to_string(*options.gap_rounds));
+  leaves.try_emplace("output", corrections_output);
+  return parse_arguments(parallel_window_schema(), leaves, "pattern");
 }
 
 void validate_worker_count(std::optional<std::uint64_t> workers) {
@@ -343,15 +342,9 @@ void validate_configuration(const config::multi_decoder_config &value,
                 node.partition_label.empty() &&
                 node.partition_columns.empty() && node.windows.empty(),
             "unexpected parallel-window node or model override");
-    require(node.node_params.map().get<std::string>("output") ==
-                corrections_output,
-            "parallel-window output must be corrections");
-    for (const auto &parameter : node.node_params.map())
-      require(parameter.first == "commit_rounds" ||
-                  parameter.first == "buffer_rounds" ||
-                  parameter.first == "gap_rounds" ||
-                  parameter.first == "output",
-              "unexpected parallel-window policy override");
+    config::validate_custom_args(parallel_window_schema(),
+                                 node.node_params.map(),
+                                 "parallel-window configuration");
     const std::vector<task_graph_edge> edges{
         {"measurements", "output", node_name, "input"},
         {node_name, "output", "output", "input"}};
@@ -380,15 +373,14 @@ configured_worker_total(const server_config_options &options,
 }
 
 void validate_server_config_options(const server_config_options &options) {
-  const auto &schema = parallel_window_schema();
+  (void)parallel_window_schema();
   (void)execution_options(options.workers_per_graph);
   if (options.decoder.empty())
     throw std::invalid_argument("--decoder must not be empty");
   if (!cudaq::qec::decoder::is_registered(options.decoder))
     throw std::invalid_argument(
         "decoder is not registered in this QEC build: " + options.decoder);
-  config::validate_custom_args(schema, pattern_arguments(options),
-                               "parallel-window configuration");
+  (void)pattern_arguments(options);
   (void)decoder_arguments(options);
 }
 

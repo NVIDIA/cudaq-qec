@@ -101,6 +101,24 @@ struct scoped_parameter_schema {
   }
 };
 
+// Extend only the actual pattern's parameter schema, never its kind or builder.
+// Restoring the complete original also preserves its cross-field validation.
+struct scoped_pattern_schema_extension {
+  config::decoder_schema original;
+
+  scoped_pattern_schema_extension()
+      : original(*config::find_decoder_schema(
+            task_graph_node_schema_name("parallel_window"))) {
+    auto extended = original;
+    extended.params.push_back({"profile_hint", config::param_kind::f64});
+    config::register_decoder_schema(std::move(extended));
+  }
+
+  ~scoped_pattern_schema_extension() {
+    config::register_decoder_schema(std::move(original));
+  }
+};
+
 TEST(MemoryExperimentServerConfig, ConfiguredWorkerTotalIsExplicitAndChecked) {
   auto options = reference_options();
   EXPECT_EQ(configured_worker_total(options, 3), std::nullopt);
@@ -149,6 +167,146 @@ TEST(MemoryExperimentServerConfig, PublicSchemaChecksGeometryAndDecoderArgs) {
   }
   options.decoder_args = {"lut_error_depth=2"};
   EXPECT_NO_THROW(validate_server_config_options(options));
+}
+
+TEST(MemoryExperimentServerConfig,
+     AllPatternParametersRoundtripWithTypedOverridesForEveryPatch) {
+  const preparation_request request{
+      {"surface_code", 3, 26, 1, memory_basis::z}};
+  const auto model = prepare_model(request);
+  auto options = reference_options();
+  options.workers_per_graph = 2;
+  options.pattern_args = {"commit_rounds=5",
+                          "buffer_rounds=2",
+                          "gap_rounds=11",
+                          "output=corrected_logical",
+                          "boundary_prior=1.2345678901234567e-6",
+                          "input_boundary=columns",
+                          "merge_identical=false",
+                          "conflicting_parallel=most_likely",
+                          "max_in_flight=4",
+                          "verify_residual=report"};
+  const auto yaml = emit_server_config(model, options, 2);
+  EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 2, 2));
+  const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(parsed.decoders.size(), 2);
+  for (const auto &decoder : parsed.decoders) {
+    ASSERT_TRUE(decoder.task_graph);
+    expect_worker_policy(decoder.task_graph->options, 2);
+    ASSERT_EQ(decoder.task_graph->nodes.size(), 1);
+    const auto &parameters =
+        decoder.task_graph->nodes.front().node_params.map();
+    EXPECT_EQ(parameters.get<std::size_t>("commit_rounds"), 5);
+    EXPECT_EQ(parameters.get<std::size_t>("buffer_rounds"), 2);
+    EXPECT_EQ(parameters.get<std::size_t>("gap_rounds"), 11);
+    EXPECT_EQ(parameters.get<std::string>("output"), "corrected_logical");
+    EXPECT_EQ(parameters.get<double>("boundary_prior"), 1.2345678901234567e-6);
+    EXPECT_EQ(parameters.get<std::string>("input_boundary"), "columns");
+    EXPECT_FALSE(parameters.get<bool>("merge_identical"));
+    EXPECT_EQ(parameters.get<std::string>("conflicting_parallel"),
+              "most_likely");
+    EXPECT_EQ(parameters.get<std::size_t>("max_in_flight"), 4);
+    EXPECT_EQ(parameters.get<std::string>("verify_residual"), "report");
+  }
+  auto different_patch = parsed;
+  different_patch.decoders.back()
+      .task_graph->nodes.front()
+      .node_params.map()
+      .insert("max_in_flight", std::size_t{5});
+  EXPECT_THROW(
+      validate_server_config(different_patch.to_yaml_str(), model.chunks, 2, 2),
+      std::runtime_error);
+}
+
+TEST(MemoryExperimentServerConfig, PatternSchemaRejectsInvalidArguments) {
+  for (const auto &arguments : std::vector<std::vector<std::string>>{
+           {"max_in_flight=2", "max_in_flight=3"},
+           {"not_registered=1"},
+           {"lut_error_depth=2"},
+           {".output=corrections"},
+           {"max_in_flight..child=2"},
+           {"max_in_flight"},
+           {"max_in_flight=-1"},
+           {"max_in_flight=18446744073709551616"},
+           {"max_in_flight=2junk"},
+           {"max_in_flight=0"},
+           {"commit_rounds=0"},
+           {"buffer_rounds=0"},
+           {"gap_rounds=0"},
+           {"boundary_prior=nan"},
+           {"boundary_prior=inf"},
+           {"boundary_prior=0"},
+           {"boundary_prior=1"},
+           {"boundary_prior=-0.1"},
+           {"input_boundary=unknown"},
+           {"output=unknown"},
+           {"merge_identical=1"},
+           {"merge_identical=TRUE"},
+           {"conflicting_parallel=unknown"},
+           {"verify_residual=unknown"},
+           {"verify_residual=false"},
+           {"input_boundary=truncate", "boundary_prior=0.1"}}) {
+    SCOPED_TRACE(::testing::PrintToString(arguments));
+    auto options = reference_options();
+    options.pattern_args = arguments;
+    EXPECT_THROW(validate_server_config_options(options), std::exception);
+  }
+  auto options = reference_options();
+  options.pattern_args = {"max_in_flight=2junk"};
+  try {
+    validate_server_config_options(options);
+    FAIL() << "Invalid pattern number was accepted";
+  } catch (const std::invalid_argument &error) {
+    EXPECT_NE(std::string(error.what()).find("pattern argument"),
+              std::string::npos);
+    EXPECT_EQ(std::string(error.what()).find("decoder argument"),
+              std::string::npos);
+  }
+}
+
+TEST(MemoryExperimentServerConfig, PatternSchemaAcceptsItsOtherValidChoices) {
+  const preparation_request request{
+      {"surface_code", 3, 26, 1, memory_basis::z}};
+  const auto model = prepare_model(request);
+  for (const std::string residual : {"none", "fail"}) {
+    auto options = reference_options();
+    options.pattern_args = {"input_boundary=truncate", "merge_identical=true",
+                            "conflicting_parallel=reject",
+                            "verify_residual=" + residual};
+    const auto yaml = emit_server_config(model, options, 1);
+    EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 1));
+    const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
+    const auto &parameters =
+        parsed.decoders.front().task_graph->nodes.front().node_params.map();
+    EXPECT_EQ(parameters.get<std::string>("input_boundary"), "truncate");
+    EXPECT_TRUE(parameters.get<bool>("merge_identical"));
+    EXPECT_EQ(parameters.get<std::string>("conflicting_parallel"), "reject");
+    EXPECT_EQ(parameters.get<std::string>("verify_residual"), residual);
+    EXPECT_EQ(parameters.get<std::string>("output"), "corrections");
+  }
+}
+
+TEST(MemoryExperimentServerConfig, PatternSchemaExtensionsNeedNoToolWhitelist) {
+  ASSERT_NE(config::find_decoder_schema(
+                task_graph_node_schema_name("parallel_window")),
+            nullptr);
+  const preparation_request request{
+      {"surface_code", 3, 26, 1, memory_basis::z}};
+  const auto model = prepare_model(request);
+  auto options = reference_options();
+  options.pattern_args = {"profile_hint=0.12345678901234567"};
+  {
+    const scoped_pattern_schema_extension schema;
+    const auto yaml = emit_server_config(model, options, 2);
+    EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 2));
+    const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
+    ASSERT_EQ(parsed.decoders.size(), 2);
+    for (const auto &decoder : parsed.decoders)
+      EXPECT_EQ(decoder.task_graph->nodes.front().node_params.map().get<double>(
+                    "profile_hint"),
+                0.12345678901234567);
+  }
+  EXPECT_THROW(validate_server_config_options(options), std::invalid_argument);
 }
 
 TEST(MemoryExperimentServerConfig,

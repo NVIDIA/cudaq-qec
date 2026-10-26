@@ -2,7 +2,8 @@
 
 This public tool prepares a bounded Surface Code model and writes one
 `server.yaml` containing the framework's public `parallel_window`
-configuration. Experiment and decoder parameters are command-line inputs.
+configuration. Experiment, decoder and pattern parameters are command-line
+inputs.
 The framework owns A/B construction, fault ownership, routing and scheduling;
 the tool does not implement a second scheduler or substitute a global or
 sliding-window algorithm.
@@ -58,7 +59,7 @@ configuration before generating another; the tool never replaces it.
 
 ## Shared configuration location
 
-There is no generator output argument. The generator and standalone
+There is no generator output-path argument. The generator and standalone
 `decoding_server` use the same tools-private path resolver:
 
 1. A nonempty `CUDAQ_QEC_DECODER_CONFIG` selects the deployment's configuration
@@ -116,6 +117,7 @@ Arguments use `--name=value` form; there is no JSON or YAML input format.
 | `--buffer-rounds` | Optional positive A-layer buffer width; defaults to distance |
 | `--gap-rounds` | Optional positive B-layer gap override; omitted otherwise |
 | `--decoder-arg` | Repeatable `PATH=VALUE`, typed by the registered decoder schema |
+| `--pattern-arg` | Repeatable `PATH=VALUE`, typed by the registered `parallel_window` schema |
 | `--workers-per-graph` | Optional positive pool-worker count for each patch's graph; excludes its coordinator |
 
 Window geometry belongs to the A/B scheduling scheme, not to an individual
@@ -123,6 +125,11 @@ decoder's parameters. Every `parallel_window` configuration requires commit
 and buffer widths irrespective of its inner algorithm. The Surface Code
 generator supplies those fields; users need not enter them for each decoder.
 Geometry overrides tune the same A/B scheme, not a different algorithm.
+The dedicated geometry options are aliases for `commit_rounds`, `buffer_rounds`
+and `gap_rounds` in `--pattern-arg`. A pattern argument alone can override the
+default geometry, for example `--pattern-arg=commit_rounds=5`. Do not also supply
+`--commit-rounds` for that field: using both spellings is rejected, even when
+their values agree. The same rule applies to buffer and gap widths.
 
 Decoder arguments are validated through the selected decoder's registered
 schema, not a tool-owned decoder whitelist. Dotted paths select nested leaves,
@@ -132,6 +139,30 @@ vectors use commas (`0.1,0.2`); matrices use semicolon-separated rows
 (`0.1,0.2;0.3,0.4`). Quote shell-sensitive values. Strings retain their literal
 value. Unknown or duplicate arguments and missing required parameters fail
 before preparation.
+
+Pattern arguments use the same schema-typed conversion rules as decoder
+arguments, but are validated against the linked framework's registered
+`parallel_window` schema. For example:
+
+```sh
+build/bin/memory-experiment-generator \
+  --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
+  --pattern-arg=output=corrected_logical \
+  --pattern-arg=boundary_prior=0.01 \
+  --pattern-arg=verify_residual=report \
+  --pattern-arg=max_in_flight=4 \
+  --pattern-arg=merge_identical=true \
+  --pattern-arg=conflicting_parallel=most_likely
+```
+
+The boundary-column prior must be strictly between zero and one. Alternatively,
+use `--pattern-arg=input_boundary=truncate` without `boundary_prior`; truncation
+keeps the crossing faults' own priors, so combining those options is rejected.
+Boolean column options use `true` or `false`, for example
+`--pattern-arg=merge_identical=false`. Unknown names, duplicate arguments and
+invalid combinations fail before model preparation. New parameters using
+existing schema types need no generator key-list change; semantic/default
+changes still need validation and may require adaptation.
 
 The same configuration structure is used for each decoder; its name and
 schema-typed parameters differ. Configuration emission does not qualify a
@@ -152,14 +183,20 @@ is unspecified. The count is an execution option, not an inner-decoder argument.
 CPU affinity remains unset, allowing the framework to inherit process affinity;
 the generator neither assigns cores nor duplicates cross-graph overlap checks.
 Configuring workers does not establish runtime availability or measured overlap.
+`--pattern-arg=max_in_flight=4` is a different setting: it requests concurrent
+window instances/decoder replicas from the pattern, not four worker threads or
+four dedicated cores. It does not replace `--workers-per-graph`.
 
 ## Server configuration and deployment
 
 The YAML embeds one compact model in `data_artifacts`; artifact names are
 references within that document, not file paths. Each patch has a distinct
 decoder ID and one `parallel_window` pattern, with the same recipe and
-geometry. Output is explicitly `corrections`, not the corrected raw logical
-value. Existing consumers may XOR corrections with their own raw readout.
+geometry. Output defaults to `corrections`, which existing consumers may XOR
+with their own raw readout. `--pattern-arg=output=corrected_logical` instead
+requests that the framework combine the raw logical readout with its correction
+frame. The model already embeds the terminal `m2o_sparse` readout map; this
+selection does not require a separate readout file or change the experiment.
 
 The mappings remain distinct:
 
@@ -168,10 +205,10 @@ The mappings remain distinct:
 - Phase O maps faults to logical flips.
 - Terminal `m2o_sparse` maps final data measurements to the raw logical value.
 
-The public serializer and parser must preserve the model, geometry and decoder
-parameters exactly, including floating-point vectors and matrices. Bounded
-validation checks seams, detector-map rows and indices, widths, probabilities,
-horizons, code geometry and raw-logical support before writing.
+The public serializer and parser must preserve the model, geometry, decoder
+parameters and pattern parameters exactly, including floating-point vectors and
+matrices. Bounded validation checks seams, detector-map rows and indices, widths,
+probabilities, horizons, code geometry and raw-logical support before writing.
 
 Pass-through syndrome mapping ID 0 is BULK; ID 1 is FINAL. A producer must select
 the terminal mapping correctly. Packet batching and transport-control schedules

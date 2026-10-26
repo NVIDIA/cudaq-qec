@@ -13,14 +13,17 @@
 
 namespace cudaq::qec::memory_experiment {
 
-/// Public parallel-window configuration. Decoder arguments are CLI
-/// path=value leaves, typed by the decoder's registered parameter schema.
+/// Public parallel-window configuration. Argument leaves are typed by the
+/// registered decoder and pattern schemas.
 struct server_config_options {
   std::string decoder;
   std::uint64_t commit_rounds = 0;
   std::uint64_t buffer_rounds = 0;
   std::optional<std::uint64_t> gap_rounds;
   std::vector<std::string> decoder_args;
+  /// Pattern PATH=VALUE leaves override the profile's geometry and output
+  /// defaults. The CLI rejects duplicate dedicated geometry options.
+  std::vector<std::string> pattern_args;
   /// Pool workers per independent graph, excluding its coordinator. Unset
   /// leaves execution policy to the framework; this is not a shared budget.
   std::optional<std::uint64_t> workers_per_graph;
@@ -39,8 +42,8 @@ configured_worker_total(const server_config_options &options,
 void validate_server_config_options(const server_config_options &options);
 
 /// Serialize and reparse a complete public server configuration. Independent
-/// patches reference one named model and explicitly request corrections, not
-/// corrected raw logical values. No graph is constructed or executed.
+/// patches reference one named model and share a schema-validated pattern
+/// recipe. Output defaults to corrections. No graph is constructed or executed.
 std::string emit_server_config(const prepared_model &model,
                                const server_config_options &options,
                                std::uint64_t logical_qubits);

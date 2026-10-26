@@ -127,7 +127,8 @@ class GeneratorCliTest(unittest.TestCase):
                       commit=None,
                       buffer=None,
                       gap=None,
-                      workers=None):
+                      workers=None,
+                      output="corrections"):
         self.assertEqual(len(document["data_artifacts"]), 1)
         model_name, artifact = next(iter(document["data_artifacts"].items()))
         model = artifact["dem_chunks"]
@@ -153,7 +154,7 @@ class GeneratorCliTest(unittest.TestCase):
             self.assertEqual(len(graph["nodes"]), 1)
             node = graph["nodes"][0]
             self.assertEqual(node["type"], "parallel_window")
-            self.assertEqual(node["output"], "corrections")
+            self.assertEqual(node["output"], output)
             self.assertEqual(node["commit_rounds"],
                              distance if commit is None else commit)
             self.assertEqual(node["buffer_rounds"],
@@ -184,7 +185,7 @@ class GeneratorCliTest(unittest.TestCase):
         result = self.invoke("--help")
         for option in ("--distance", "--rounds", "--basis", "--decoder",
                        "--commit-rounds", "--buffer-rounds", "--decoder-arg",
-                       "--workers-per-graph"):
+                       "--pattern-arg", "--workers-per-graph"):
             self.assertIn(option, result.stdout)
         for removed in ("--output", "--config", "--batch-rounds",
                         "--replay-shots", "--seed", "--validate-bundle"):
@@ -361,6 +362,140 @@ class GeneratorCliTest(unittest.TestCase):
             with self.subTest(flag=flag):
                 _, document = self.generate(**{flag: value})
                 self.assert_server(document, **{parameter: value})
+
+    def test_schema_typed_pattern_arguments_apply_to_every_patch(self):
+        parameters = {
+            "commit_rounds": 2,
+            "buffer_rounds": 4,
+            "gap_rounds": 7,
+            "boundary_prior": 1e-6,
+            "input_boundary": "columns",
+            "merge_identical": True,
+            "conflicting_parallel": "most_likely",
+            "max_in_flight": 3,
+            "verify_residual": "report",
+            "output": "corrected_logical",
+        }
+        pattern_arguments = (
+            "--pattern-arg=commit_rounds=2",
+            "--pattern-arg=buffer_rounds=4",
+            "--pattern-arg=gap_rounds=7",
+            "--pattern-arg=boundary_prior=1e-6",
+            "--pattern-arg=input_boundary=columns",
+            "--pattern-arg=merge_identical=true",
+            "--pattern-arg=conflicting_parallel=most_likely",
+            "--pattern-arg=max_in_flight=3",
+            "--pattern-arg=verify_residual=report",
+            "--pattern-arg=output=corrected_logical",
+            "--decoder-arg=lut_error_depth=2",
+        )
+        for patches in (1, 3):
+            with self.subTest(patches=patches):
+                _, document = self.generate(decoder="multi_error_lut",
+                                            extra=pattern_arguments,
+                                            **{"logical-qubits": patches})
+                self.assert_server(document,
+                                   patches=patches,
+                                   commit=2,
+                                   buffer=4,
+                                   gap=7,
+                                   output="corrected_logical")
+                for decoder in document["decoders"]:
+                    node = decoder["task_graph"]["nodes"][0]
+                    for name, expected in parameters.items():
+                        self.assertIs(type(node[name]), type(expected))
+                        self.assertEqual(node[name], expected)
+                    self.assertEqual(node["inner"]["type"], "multi_error_lut")
+                    self.assertEqual(node["inner"]["lut_error_depth"], 2)
+
+    def test_pattern_geometry_overrides_only_unspecified_profile_defaults(self):
+        for key, parameter, value in (("commit_rounds", "commit",
+                                       2), ("buffer_rounds", "buffer", 4),
+                                      ("gap_rounds", "gap", 7)):
+            with self.subTest(key=key):
+                _, document = self.generate(
+                    extra=(f"--pattern-arg={key}={value}",))
+                self.assert_server(document, **{parameter: value})
+
+    def test_truncated_boundary_and_residual_policies_roundtrip(self):
+        for verification in ("none", "fail", "report"):
+            with self.subTest(verification=verification):
+                _, document = self.generate(extra=(
+                    "--pattern-arg=input_boundary=truncate",
+                    "--pattern-arg=merge_identical=false",
+                    "--pattern-arg=conflicting_parallel=reject",
+                    "--pattern-arg=max_in_flight=1",
+                    f"--pattern-arg=verify_residual={verification}",
+                ))
+                self.assert_server(document)
+                node = document["decoders"][0]["task_graph"]["nodes"][0]
+                self.assertEqual(node["input_boundary"], "truncate")
+                self.assertIs(node["merge_identical"], False)
+                self.assertEqual(node["conflicting_parallel"], "reject")
+                self.assertEqual(node["max_in_flight"], 1)
+                self.assertEqual(node["verify_residual"], verification)
+
+    def test_pattern_geometry_aliases_reject_explicit_dedicated_flags(self):
+        for flag, key, value in (("commit-rounds", "commit_rounds",
+                                  2), ("buffer-rounds", "buffer_rounds", 4),
+                                 ("gap-rounds", "gap_rounds", 7)):
+            for pattern_value in (value, value + 1):
+                for pattern_first in (False, True):
+                    with self.subTest(flag=flag,
+                                      value=pattern_value,
+                                      pattern_first=pattern_first):
+                        working = self.case_directory()
+                        arguments = generation_options(**{flag: value})
+                        pattern = f"--pattern-arg={key}={pattern_value}"
+                        if pattern_first:
+                            arguments.insert(0, pattern)
+                        else:
+                            arguments.append(pattern)
+                        result = self.invoke(*arguments,
+                                             cwd=working,
+                                             success=False)
+                        self.assertIn(f"--{flag}", result.stderr)
+                        self.assertIn(f"--pattern-arg={key}", result.stderr)
+                        self.assertEqual(list(working.iterdir()), [])
+
+    def test_invalid_pattern_arguments_are_rejected_without_output(self):
+        invalid = (
+            ("unknown=1",),
+            ("commit_rounds=0",),
+            ("buffer_rounds=0",),
+            ("gap_rounds=0",),
+            ("boundary_prior=0",),
+            ("boundary_prior=1",),
+            ("boundary_prior=nan",),
+            ("boundary_prior=inf",),
+            ("boundary_prior=1junk",),
+            ("merge_identical=1",),
+            ("max_in_flight=0",),
+            ("max_in_flight=-1",),
+            ("max_in_flight=1.5",),
+            ("output=unsupported",),
+            ("input_boundary=unsupported",),
+            ("conflicting_parallel=unsupported",),
+            ("verify_residual=unsupported",),
+            ("output=corrections", "output=corrections"),
+            ("output=corrections", "output=corrected_logical"),
+            ("input_boundary=truncate", "boundary_prior=1e-6"),
+            ("boundary_prior=1e-6", "input_boundary=truncate"),
+            (".output=corrections",),
+            ("output.child=corrections",),
+            ("missing_equals",),
+            ("=value",),
+            ("output=",),
+        )
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                working = self.case_directory()
+                self.invoke(
+                    *generation_options(),
+                    *(f"--pattern-arg={argument}" for argument in arguments),
+                    cwd=working,
+                    success=False)
+                self.assertEqual(list(working.iterdir()), [])
 
     def test_long_and_awkward_fixed_horizons_are_not_rounded(self):
         self.assertGreater(96, 10 * 3)

@@ -45,7 +45,8 @@ void usage() {
          "--basis=X|Z\n"
          "       --decoder=NAME [--logical-qubits=N] [--error-rate=P]\n"
          "       [--commit-rounds=N] [--buffer-rounds=N]\n"
-         "       [--gap-rounds=N] [--decoder-arg=PATH=VALUE ...]\n"
+         "       [--gap-rounds=N] [--pattern-arg=PATH=VALUE ...]\n"
+         "       [--decoder-arg=PATH=VALUE ...]\n"
          "       [--workers-per-graph=N]\n"
          "\nGenerates server.yaml for a Surface Code memory experiment.\n"
          "--rounds counts extraction cycles, excluding terminal readout.\n"
@@ -63,10 +64,11 @@ void usage() {
          "CUDAQ_QEC_DECODER_CONFIG selects a deployment configuration path.\n"
          "The parent must exist; an existing configuration is never replaced.\n"
          "Server execution requires parallel-window runtime support.\n"
-         "Decoder output: logical correction bits.\n"
+         "Pattern output defaults to corrections (logical correction bits).\n"
          "PyMatching uses merge_strategy=smallest_weight unless overridden.\n"
-         "Decoder arguments use registered schema types, dotted nested paths,\n"
-         "comma-separated vectors and semicolon-separated matrix rows.\n";
+         "Pattern and decoder arguments use registered types and dotted "
+         "paths.\n"
+         "Vectors use commas; matrix rows use semicolons.\n";
 }
 
 } // namespace
@@ -80,6 +82,7 @@ int main(int argc, char **argv) {
     }
     std::map<std::string, std::string> values;
     std::vector<std::string> decoder_args;
+    std::vector<std::string> pattern_args;
     for (int i = 1; i < argc; ++i) {
       const std::string argument(argv[i]);
       const auto equals = argument.find('=');
@@ -89,6 +92,10 @@ int main(int argc, char **argv) {
       const auto name = argument.substr(2, equals - 2);
       if (name == "decoder-arg") {
         decoder_args.push_back(argument.substr(equals + 1));
+        continue;
+      }
+      if (name == "pattern-arg") {
+        pattern_args.push_back(argument.substr(equals + 1));
         continue;
       }
       if (name != "distance" && name != "rounds" && name != "basis" &&
@@ -103,6 +110,18 @@ int main(int argc, char **argv) {
     for (const auto *required : {"distance", "rounds", "basis", "decoder"})
       if (!values.contains(required))
         throw std::invalid_argument(std::string("missing --") + required);
+    // Geometry aliases must not compete with explicit dedicated flags. Other
+    // pattern leaves are parsed and validated by the registered schema.
+    for (const auto &argument : pattern_args) {
+      const auto key = argument.substr(0, argument.find('='));
+      const auto *flag = key == "commit_rounds"   ? "commit-rounds"
+                         : key == "buffer_rounds" ? "buffer-rounds"
+                         : key == "gap_rounds"    ? "gap-rounds"
+                                                  : nullptr;
+      if (flag && values.contains(flag))
+        throw std::invalid_argument(std::string("cannot combine --") + flag +
+                                    " with --pattern-arg=" + key);
+    }
     generator::preparation_request request;
     auto &spec = request.experiment;
     spec.distance = integer(values.at("distance"), "--distance");
@@ -137,6 +156,7 @@ int main(int argc, char **argv) {
       options.workers_per_graph =
           integer(values.at("workers-per-graph"), "--workers-per-graph");
     options.decoder_args = std::move(decoder_args);
+    options.pattern_args = std::move(pattern_args);
     generator::validate_preparation_request(request);
     const auto total_workers =
         generator::configured_worker_total(options, spec.logical_qubits);
