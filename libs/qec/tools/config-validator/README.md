@@ -16,8 +16,19 @@ the decoding server), and then handed over together with this script:
 python3 validate_decoder_config.py --export-schema decoder_config.schema.json
 ```
 
-The two files, `decoder_config.schema.json` and
-`validate_decoder_config.py`, are all a validating machine needs.
+An installation that has only the decoding server, without the Python
+package, exports the same schema from the server binary; it reflects the
+decoder plugins that server actually loads, including ones added after it
+was built:
+
+```bash
+decoding_server --export-schema=decoder_config.schema.json
+```
+
+That export keeps `task_graph`; this script removes it when it reads the
+file unless `--allow-task-graph` is given. The two files,
+`decoder_config.schema.json` and `validate_decoder_config.py`, are all a
+validating machine needs.
 
 The schema reflects the decoder plugins loaded in that installation, so
 export it from the same CUDA-Q QEC release the server runs; a decoder type
