@@ -5228,29 +5228,25 @@ public:
     }
   } // end - node_pipeline()
 
-  // Decodes one shot of measurements, in records of the ingest node's
-  // limit.
-  void run(const std::vector<std::uint8_t> &measurements) {
-    const auto limit = *ingest_->raw_chunk_limit();
-    ingest_->reset_streaming_state();
-    for (auto &node : nodes_)
-      node->reset_streaming_state();
-    published_.clear();
-    held_.clear();
-    logical_.clear();
-    fire_allocations_ = 0;
-    for (std::size_t at = 0; at < measurements.size(); at += limit) {
-      const auto len = std::min(limit, measurements.size() - at);
-      const auto type = at + len == measurements.size() ? round_type::FINAL
-                                                        : round_type::BULK;
-      for (bool more = ingest_->enqueue(measurements.data() + at, len, type);
-           more; more = ingest_->publish_next())
-        fire_index();
-    }
+  // Decodes one shot of measurements, in records of @p record
+  // measurements, or of the ingest node's limit for 0, the last FINAL.
+  void run(const std::vector<std::uint8_t> &measurements,
+           std::size_t record = 0) {
+    start();
+    feed(measurements, record, measurements.size());
     for (bool more = ingest_->flush(); more; more = ingest_->publish_next())
       logical_ =
           ingest_->streaming_output(nodes_.size())->get<logical_outcome>().bits;
-  } // end - run()
+  }
+
+  // Feeds a shot's first @p records records, none FINAL, and stops there,
+  // as a shot cut off mid-way.
+  void run_part(const std::vector<std::uint8_t> &measurements,
+                std::size_t records) {
+    const auto limit = *ingest_->raw_chunk_limit();
+    start();
+    feed(measurements, 0, std::min(records * limit, measurements.size() - 1));
+  }
 
   const std::shared_ptr<const experiment_template> &context() const {
     return context_;
@@ -5261,10 +5257,38 @@ public:
     return published_;
   }
   const std::vector<std::uint8_t> &logical() const { return logical_; }
+  ingest_node &ingest() { return *ingest_; }
   // What the last shot's fires allocated, the decoders' included.
   std::size_t fire_allocations() const { return fire_allocations_; }
 
 private:
+  // A new shot: every node reset, and nothing kept from the last.
+  void start() {
+    ingest_->reset_streaming_state();
+    for (auto &node : nodes_)
+      node->reset_streaming_state();
+    published_.clear();
+    held_.clear();
+    logical_.clear();
+    fire_allocations_ = 0;
+  }
+
+  // Feeds measurements [0, end) in records of @p record measurements, or of
+  // the ingest node's limit for 0; a record ending the shot is FINAL.
+  void feed(const std::vector<std::uint8_t> &measurements, std::size_t record,
+            std::size_t end) {
+    const auto size = record ? record : *ingest_->raw_chunk_limit();
+    ASSERT_LE(size, *ingest_->raw_chunk_limit());
+    for (std::size_t at = 0; at < end; at += size) {
+      const auto len = std::min(size, end - at);
+      const auto type = at + len == measurements.size() ? round_type::FINAL
+                                                        : round_type::BULK;
+      for (bool more = ingest_->enqueue(measurements.data() + at, len, type);
+           more; more = ingest_->publish_next())
+        fire_index();
+    }
+  } // end - feed()
+
   // Fires each layer's window of the current index, in g's order.
   void fire_index() {
     const auto i = *ingest_->published_index();
@@ -5334,17 +5358,25 @@ private:
   std::size_t fire_allocations_ = 0;
 };
 
-// Every window's publication is the reference's: its frame update,
-// convergence, commit interval and sends, and the frames XOR to the
-// reference's frame.
+// The shot behind @p detectors, streamed in records of @p record
+// measurements (the ingest node's limit for 0), publishes the reference's
+// windows: each one's frame update, convergence, commit interval and sends,
+// with frames that XOR to the reference's frame. With a readout map, the
+// logical value is the readout round's through m2o, computed apart.
 void expect_nodes_match(node_pipeline &pipeline,
                         parallel_window_reference &reference,
                         const std::vector<std::uint8_t> &detectors,
-                        std::size_t R) {
+                        std::size_t R, std::size_t record = 0) {
   const auto want = reference.decode(detectors);
+  const auto measurements =
+      memory_measurements(*pipeline.context(), R, detectors);
   std::vector<std::uint8_t> frame(want.frame.size(), 0);
-  ASSERT_NO_FATAL_FAILURE(
-      pipeline.run(memory_measurements(*pipeline.context(), R, detectors)));
+  ASSERT_NO_FATAL_FAILURE(pipeline.run(measurements, record));
+  if (pipeline.context()->readout().empty())
+    EXPECT_TRUE(pipeline.logical().empty());
+  else
+    EXPECT_EQ(pipeline.logical(),
+              raw_logical(*pipeline.context(), R, measurements));
   ASSERT_EQ(pipeline.published().size(), reference.windows().size());
   for (std::size_t i = 0; i < reference.windows().size(); ++i) {
     const auto &rw = reference.windows()[i];
@@ -5363,25 +5395,30 @@ void expect_nodes_match(node_pipeline &pipeline,
 } // end - expect_nodes_match()
 
 // The ingest and decode_window nodes, joined by index as an executor joins
-// them, decode every single fault as the reference does, window by window,
-// on the parallel layouts and a sliding one, for shot lengths up to 24, and
-// a sampled shot with PyMatching; the logical value is the readout round's.
+// them, decode single faults as the reference does, window by window, at
+// every shot length up to 60, so every remainder of the period and every
+// terminal clip: on parallel layouts and a sliding one, with a wider
+// readout round and with three suffix phases. Sampled shots with PyMatching
+// decode alike.
 TEST(DecodeWindowNode, DecodesEveryWindowAsTheReference) {
+  for (const auto &spec :
+       {wide_readout_spec(), multi_terminal_memory_spec(5, 3)}) {
+    for (const auto &g :
+         {parallel_graph(layered(2, 1, 3)), parallel_graph(layered(3, 2, 2)),
+          sliding_graph(2, 5)}) {
+      node_pipeline pipeline(spec, g, "single_error_lut");
+      for (auto R = pipeline.context()->min_rounds(); R <= 60; ++R) {
+        SCOPED_TRACE("R=" + std::to_string(R));
+        parallel_window_reference reference(spec, g, R, "single_error_lut");
+        const auto &s = reference.model();
+        for (std::size_t c = R % 7; c < s.h.size(); c += 7)
+          ASSERT_NO_FATAL_FAILURE(
+              expect_nodes_match(pipeline, reference, detectors_of(s, c), R))
+              << "column " << c;
+      }
+    } // end - for(g)
+  } // end - for(spec)
   const auto spec = wide_readout_spec();
-  for (const auto &g :
-       {parallel_graph(layered(2, 1, 3)), parallel_graph(layered(3, 2, 2)),
-        sliding_graph(2, 5)}) {
-    node_pipeline pipeline(spec, g, "single_error_lut");
-    for (auto R = pipeline.context()->min_rounds(); R <= 24; R += 3) {
-      SCOPED_TRACE("R=" + std::to_string(R));
-      parallel_window_reference reference(spec, g, R, "single_error_lut");
-      const auto &s = reference.model();
-      for (std::size_t c = 0; c < s.h.size(); c += 5)
-        ASSERT_NO_FATAL_FAILURE(
-            expect_nodes_match(pipeline, reference, detectors_of(s, c), R))
-            << "column " << c;
-    }
-  } // end - for(g)
   const auto g = parallel_graph(layered(3, 3, 9));
   constexpr std::size_t R = 20;
   node_pipeline pipeline(spec, g, "pymatching", matching);
@@ -5389,17 +5426,66 @@ TEST(DecodeWindowNode, DecodesEveryWindowAsTheReference) {
   const auto &s = reference.model();
   const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
       s.dem.detector_error_matrix, 20, s.dem.error_rates, 41);
-  for (std::size_t i = 0; i < 20; ++i) {
-    const auto syndrome = row_of(detectors, i);
+  for (std::size_t i = 0; i < 20; ++i)
     ASSERT_NO_FATAL_FAILURE(
-        expect_nodes_match(pipeline, reference, syndrome, R))
+        expect_nodes_match(pipeline, reference, row_of(detectors, i), R))
         << "shot " << i;
-    EXPECT_EQ(
-        pipeline.logical(),
-        raw_logical(*pipeline.context(), R,
-                    memory_measurements(*pipeline.context(), R, syndrome)));
-  }
 } // end - TEST(DecodeWindowNode, DecodesEveryWindowAsTheReference)
+
+// However a shot's records are cut, it decodes as the reference does:
+// single measurements, half rounds, whole rounds, several rounds, records
+// that end mid-round, or a period of the widest rounds, the last of them
+// holding the wider readout round with whatever precedes it.
+TEST(DecodeWindowNode, DecodesAlikeHoweverRecordsAreCut) {
+  const auto spec = wide_readout_spec(); // 4 measurements a round, 5 last
+  const auto g = parallel_graph(layered(3, 3, 9));
+  constexpr std::size_t R = 26;
+  node_pipeline pipeline(spec, g, "pymatching", matching);
+  parallel_window_reference reference(spec, g, R, "pymatching", matching);
+  const auto &s = reference.model();
+  const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+      s.dem.detector_error_matrix, 5, s.dem.error_rates, 43);
+  const auto limit = *pipeline.ingest().raw_chunk_limit();
+  for (const std::size_t record :
+       {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{9},
+        std::size_t{12}, limit}) {
+    SCOPED_TRACE("records of " + std::to_string(record));
+    for (std::size_t i = 0; i < 5; ++i)
+      ASSERT_NO_FATAL_FAILURE(expect_nodes_match(
+          pipeline, reference, row_of(detectors, i), R, record))
+          << "shot " << i;
+  }
+} // end - TEST(DecodeWindowNode, DecodesAlikeHoweverRecordsAreCut)
+
+// A shot cut off mid-way leaves nothing behind once the next starts, a
+// longer shot's part before a shorter shot or a shorter one's before a
+// longer. Input after FINAL is rejected until the next shot starts.
+TEST(DecodeWindowNode, AShotCutOffLeavesNothingBehind) {
+  const auto spec = wide_readout_spec();
+  const auto g = parallel_graph(layered(2, 1, 3));
+  node_pipeline pipeline(spec, g, "single_error_lut");
+  const auto &context = *pipeline.context();
+  std::mt19937 rng(59);
+  for (const auto [cut, R] : {std::pair<std::size_t, std::size_t>{40, 18},
+                              std::pair<std::size_t, std::size_t>{12, 30}}) {
+    SCOPED_TRACE("R=" + std::to_string(R) +
+                 " after part of R=" + std::to_string(cut));
+    std::vector<std::uint8_t> other(context.measurement_offset(cut, cut));
+    parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const auto &s = reference.model();
+    for (auto &x : other)
+      x = static_cast<std::uint8_t>(rng() & 1);
+    for (std::size_t c = 0; c < s.h.size(); c += 11) {
+      ASSERT_NO_FATAL_FAILURE(pipeline.run_part(other, 3));
+      ASSERT_NO_FATAL_FAILURE(
+          expect_nodes_match(pipeline, reference, detectors_of(s, c), R))
+          << "column " << c;
+    }
+  } // end - for(cut)
+  expect_throw<std::logic_error>(
+      [&] { pipeline.ingest().enqueue(nullptr, 0, round_type::BULK); },
+      "ingest: input after FINAL; reset() starts the next shot");
+} // end - TEST(DecodeWindowNode, AShotCutOffLeavesNothingBehind)
 
 // Window k of @p request in an R-round shot whose detection events are
 // @p detectors, made by hand as ingest would hand it over.
