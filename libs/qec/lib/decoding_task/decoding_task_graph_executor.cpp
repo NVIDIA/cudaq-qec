@@ -981,12 +981,25 @@ struct decoding_task_graph::impl::record_scheduler {
         push(c, event, id, no_event, /*wait_for_siblings=*/true);
         return;
       }
+      // Every instance of the shot is resolved; the next shot's numbering
+      // starts over.
+      auto lock = lock_runtime();
+      dropped[event.node].clear();
     }
     if (owner.streaming_nodes[event.node].capability->flush())
       c.fired.store(publish_streaming(c, id, event.root, event.node),
                     std::memory_order_relaxed);
     else if (!pooled(event.node) && !indexed(event.node) && !staged(event.node))
       snapshot_node(c, event.node); // a pooled copy holds only its last delta
+    {
+      // The flush was the shot's last publication on the node's wires; the
+      // next shot's indices start a new run.
+      auto lock = lock_runtime();
+      const auto node_idx = owner.streaming_nodes[event.node].node_index;
+      for (const auto &wire : owner.streaming_wires_from[node_idx])
+        if (wire.id >= 0)
+          wire_last[static_cast<std::size_t>(wire.id)] = no_index;
+    }
     push(c, {graph_event_kind::streaming_flush_release, event.node}, id,
          no_event, /*wait_for_siblings=*/true);
   }
@@ -1573,11 +1586,13 @@ public:
   std::vector<std::vector<std::int64_t>> join_offsets;
   std::vector<std::vector<uint8_t>> join_required;
   // Instances found never to exist before FINAL, by streaming node; each is
-  // announced to the consumers once and never created afterwards.
+  // announced to the consumers once and never created afterwards. Cleared
+  // when the node's FINAL flush has resolved the shot's instances.
   std::vector<std::vector<std::int64_t>> dropped;
   // The last index a record-ordered producer published on each value wire,
   // by compiled_wire::id: its indices never decrease, so the ones it skipped
-  // are announced as absent when the next one is published.
+  // are announced as absent when the next one is published. Cleared by the
+  // producer's FINAL flush, after which a shot's numbering starts over.
   std::vector<std::int64_t> wire_last;
 
   join_entry &add_join_entry(std::size_t si) {

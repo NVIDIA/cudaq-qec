@@ -12870,8 +12870,13 @@ public:
     return true;
   }
   bool flush() override {
-    if (mode_ != "logical")
+    if (mode_ != "logical") {
+      // A tagging node numbers each shot from 0; `first` applies to the
+      // first shot only.
+      records_ = 0;
+      first_ = 0;
       return false;
+    }
     value_out_.get<logical_outcome>().bits[0] = parity_;
     correction_ = parity_;
     coverage_ = committed_coverage{0, whole_shot};
@@ -13333,6 +13338,16 @@ TEST(DecodingTaskGraph, IndexedJoinLearnsAbsenceBeforeFinal) {
   EXPECT_EQ(graph->streaming_result().status,
             task_graph_streaming_status::complete);
   EXPECT_EQ(probe->records("K"), (std::vector<std::size_t>{1, 2, 3}));
+
+  // The next shot numbers from 0 again and T publishes index 0 this time, so
+  // J[0] and K[0] exist: nothing dropped last shot may be remembered.
+  graph->clear_corrections();
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  EXPECT_EQ(probe->records("K"), (std::vector<std::size_t>{1, 2, 3, 0, 1, 2}));
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  EXPECT_EQ(probe->records("K"),
+            (std::vector<std::size_t>{1, 2, 3, 0, 1, 2, 3}));
 }
 
 TEST(DecodingTaskGraph, PortsPublishTheirOwnIndices) {
@@ -13382,6 +13397,19 @@ TEST(DecodingTaskGraph, PortsPublishTheirOwnIndices) {
   expect_fires(records.size());
   EXPECT_EQ(graph->streaming_result().status,
             task_graph_streaming_status::complete);
+
+  // The next shot numbers from 0 again, so the indices `odd` skips at its
+  // start are announced again rather than measured against last shot's.
+  graph->clear_corrections();
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  expect_fires(records.size() - 1);
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  expect_fires(records.size());
 }
 
 TEST(DecodingTaskGraph, IndexedJoinMatchesSynchronousGraph) {
