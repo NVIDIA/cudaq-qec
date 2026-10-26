@@ -3,19 +3,138 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// The `decode_window` node kind: decodes whichever window its `input` view
-// carries, applies the deltas and residuals on its `receive_<i>` inputs, and
-// publishes its frame update and one output per send. The kind is registered
-// so configurations that use it parse and validate; the node itself is not
-// available yet.
+// The `decode_window` node and its kind: decodes whichever window its
+// `input` carries, applies the deltas and residuals on its `receive_<i>`
+// inputs, and publishes its frame update and one output per send. The kind
+// is registered so configurations that use it parse and validate; building
+// it is not available yet.
 
+#include "decoding_task_decode_window_node.h"
 #include "decoding_task_node_kind_registry.h"
 #include "decoding_task_window_kind_params.h"
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 namespace cudaq::qec {
+
+// One slot: an executor runs copies of the node for fires at once. The
+// frame update has a bit per observable of the template.
+decode_window_node::decode_window_node(
+    const data_artifact_store &store,
+    std::shared_ptr<const experiment_template> context, window_request request,
+    const std::string &decoder_name, const cudaqx::heterogeneous_map &params,
+    std::size_t num_receives, verify_residual_mode verify)
+    : core_(store, context, request, decoder_name, params, 1, verify),
+      receives_(num_receives), received_(num_receives, nullptr),
+      frame_(logical_outcome{}), corrections_(context->num_observables(), 0) {
+  inputs_.push_back("input");
+  for (std::size_t i = 0; i < num_receives; ++i)
+    inputs_.push_back("receive_" + std::to_string(i));
+  outputs_.push_back("output");
+  for (const auto &send : request.sends) {
+    outputs_.push_back(send.id);
+    sends_.emplace_back(window_send_payload{});
+  }
+  frame_.get<logical_outcome>().bits = corrections_;
+} // end - decode_window_node()
+
+// Inputs are checked before the core fires, which checks the window and
+// every received row before it touches its slot. Publications are copies,
+// so an executor may keep them after the next fire.
+bool decode_window_node::fire(std::int64_t k,
+                              const std::vector<const edge_value *> &inputs) {
+  published_ = false;
+  if (inputs.size() != inputs_.size())
+    throw std::invalid_argument("decode_window: instance " + std::to_string(k) +
+                                " has " + std::to_string(inputs.size()) +
+                                " inputs, not the node's " +
+                                std::to_string(inputs_.size()));
+  if (!inputs[0])
+    throw std::invalid_argument("decode_window: instance " + std::to_string(k) +
+                                " has no window on its input");
+  const auto &window = inputs[0]->get<window_rows>();
+  for (std::size_t i = 0; i < receives_.size(); ++i) {
+    received_[i] = nullptr;
+    if (!inputs[1 + i])
+      continue;
+    receives_[i] = receive_of(inputs[1 + i]->get<window_send_payload>());
+    received_[i] = &receives_[i];
+  }
+  const auto &fired = core_.fire(0, window, received_);
+  auto &frame = frame_.get<logical_outcome>();
+  std::copy(fired.solution->outputs.frame.begin(),
+            fired.solution->outputs.frame.end(), corrections_.begin());
+  frame.bits = corrections_;
+  frame.converged = fired.solution->converged;
+  for (std::size_t s = 0; s < sends_.size(); ++s)
+    copy_send(fired.sends[s], sends_[s].get<window_send_payload>());
+  commit_ = {static_cast<std::uint64_t>(fired.commit.begin),
+             static_cast<std::uint64_t>(fired.commit.end)};
+  index_ = k;
+  published_ = true;
+  return true;
+} // end - fire()
+
+std::optional<std::int64_t> decode_window_node::published_index() const {
+  return published_ ? std::optional<std::int64_t>(index_) : std::nullopt;
+}
+
+// Windows are decoded as their instances' inputs join, never per shot.
+void decode_window_node::execute_indexed(const std::vector<edge_value> &,
+                                         std::vector<edge_value> &) const {
+  throw std::logic_error("decode_window: the node joins its inputs by index; "
+                         "it has no one-shot path");
+}
+
+// The frame update, then a send per port.
+std::optional<edge_value_type>
+decode_window_node::output_type(std::size_t slot) const {
+  if (slot == 0)
+    return logical_outcome_type;
+  if (slot < outputs_.size())
+    return edge_value_type::of<window_send_payload>();
+  return std::nullopt;
+}
+
+// A window on `input`, a send on each receive.
+bool decode_window_node::accepts_input_type(std::size_t slot,
+                                            edge_value_type type) const {
+  if (slot == 0)
+    return type == edge_value_type::of<window_rows>();
+  return slot < inputs_.size() &&
+         type == edge_value_type::of<window_send_payload>();
+}
+
+bool decode_window_node::enqueue(const uint8_t *, std::size_t, round_type) {
+  throw std::logic_error(
+      "decode_window: the node takes windows, not raw measurements");
+}
+
+// Nothing stands once a fire has failed, or before the first.
+const edge_value *decode_window_node::streaming_output(std::size_t slot) const {
+  if (!published_ || slot >= outputs_.size())
+    return nullptr;
+  return slot == 0 ? &frame_ : &sends_[slot - 1];
+}
+
+std::optional<streaming_task_graph_node::committed_coverage>
+decode_window_node::streaming_coverage() const {
+  return published_ ? std::optional<committed_coverage>(commit_) : std::nullopt;
+}
+
+void decode_window_node::clear_corrections() {
+  std::fill(corrections_.begin(), corrections_.end(), 0);
+}
+
+// A new shot: no slot holds a fire, and nothing is published.
+void decode_window_node::reset_streaming_state() {
+  core_.reset();
+  published_ = false;
+  clear_corrections();
+}
+
 namespace {
 
 /// num_receives creates the ports receive_0 ... receive_{n-1}. The windows
