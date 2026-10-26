@@ -2330,9 +2330,13 @@ void expect_logic_error(Check &&check, const std::string &text) {
 }
 
 // sha256_hex() gives the FIPS 180-2 test vectors, and the lengths either side
-// of the block boundary where the length field moves to a second block.
+// of the block boundary where the length field moves to a second block, after
+// no whole block and after one or two.
 TEST(DataArtifactStore, Sha256MatchesTheStandardVectors) {
   EXPECT_EQ(sha256_hex(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  // A default view may hold a null pointer; offsetting it by zero is defined.
+  EXPECT_EQ(sha256_hex(std::string_view{}),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
   EXPECT_EQ(sha256_hex("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
@@ -2347,6 +2351,16 @@ TEST(DataArtifactStore, Sha256MatchesTheStandardVectors) {
             "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a");
   EXPECT_EQ(sha256_hex(std::string(64, 'a')),
             "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+  EXPECT_EQ(sha256_hex(std::string(63, 'a')),
+            "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34");
+  EXPECT_EQ(sha256_hex(std::string(119, 'a')),
+            "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb");
+  EXPECT_EQ(sha256_hex(std::string(120, 'a')),
+            "2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c");
+  EXPECT_EQ(sha256_hex(std::string(127, 'a')),
+            "c57e9278af78fa3cab38667bef4ce29d783787a2f731d4e12200270f0c32320a");
+  EXPECT_EQ(sha256_hex(std::string(128, 'a')),
+            "6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e");
 }
 
 // Changing any one field of a template or a window request changes its
@@ -2427,16 +2441,20 @@ TEST(DataArtifactStore, EqualTemplatesShareOneEntry) {
       store.records()[0],
       (data_artifact_record{"dem_chunks", bytes.size(), sha256_hex(bytes)}));
   EXPECT_NE(store.records()[1].sha256, store.records()[0].sha256);
-  expect_logic_error([&] { store.find_template(single_round_spec()); },
-                     "data_artifact_store: no template");
+  expect_logic_error(
+      [&] { store.find_template(single_round_spec()); },
+      "data_artifact_store::find_template: no template with this content was "
+      "added");
 }
 
-// A Stim DEM is keyed by its text.
+// A Stim DEM is keyed by its text, whether the store hashes it or is given
+// the hash a caller has already computed.
 TEST(DataArtifactStore, StimDemsAreKeyedByTheirText) {
   data_artifact_store store;
   const std::string text = "error(0.01) D0\n";
   store.add_stim_dem(text);
   store.add_stim_dem(std::string(text));
+  store.add_stim_dem(text, sha256_hex(text));
   store.add_stim_dem("error(0.02) D0\n");
   ASSERT_EQ(store.records().size(), 2u);
   EXPECT_EQ(store.records()[0],

@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -53,6 +54,10 @@ public:
 
   /// Records a Stim DEM's text, if new.
   void add_stim_dem(std::string_view text);
+
+  /// As above, with @p sha256 the sha256_hex() of @p text, which a caller
+  /// that has already hashed the text passes rather than hash it again.
+  void add_stim_dem(std::string_view text, std::string sha256);
 
   /// Builds every variant of @p request on the store's template with
   /// @p context's content not held yet: one window per variant key, over
@@ -91,14 +96,15 @@ private:
     variant_key key;
     std::shared_ptr<const decoding_window> handle;
   };
-  /// The sha256 of the template this store holds with @p context's
-  /// content.
+  /// The sha256 of the template this store holds with @p spec's content.
   /// @throws std::logic_error naming @p what if it holds no such template.
-  std::string template_hash(const experiment_template &context,
+  std::string template_hash(const dem_chunks_spec &spec,
                             const std::string &what) const;
 
   std::map<std::string, template_entry> templates_;
-  std::map<std::string, std::string> stim_dems_;
+  /// The sha256 of each Stim DEM held. A Stim DEM's bytes are its text, so a
+  /// hash hit is the content and the text need not be kept.
+  std::set<std::string> stim_dems_;
   std::map<std::string, window_entry> windows_;
   std::vector<data_artifact_record> records_;
 };

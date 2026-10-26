@@ -5,6 +5,7 @@
 
 #include "realtime_decoding.h"
 #include "decode_target.h"
+#include "stim_dem_forms.h"
 #include "../decoding_task/decoding_task_data_artifacts.h"
 #include "../decoding_task/decoding_task_graph_utils.h"
 #include "cudaq/qec/decoder.h"
@@ -120,31 +121,43 @@ std::string read_stim_dem(const std::filesystem::path &dem_path) {
   return read_stim_dem_file(dem_path, "stim_dem_path");
 }
 
-/// Read a data_artifacts entry's Stim DEM: its inline text, or its file,
-/// resolved against `base_dir` as a decoder's is and checked against the
-/// entry's pin. A pin needs a file, as parsing requires; a configuration
-/// built in code skips the parser. Other kinds of entry give no text.
-static std::string read_stim_dem_entry(const config::data_artifact &entry,
-                                       const std::filesystem::path &base_dir) {
+/// A pin as sha256_hex() writes a hash: lowercase.
+static std::string lowercase_pin(std::string pin) {
+  std::transform(pin.begin(), pin.end(), pin.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return pin;
+}
+
+/// Read a data_artifacts entry's Stim DEM, hashing it once: its inline text,
+/// or its file, resolved against `base_dir` as a decoder's is and checked
+/// against the entry's pin. A pin needs a file, as parsing requires; a
+/// configuration built in code skips the parser. Other kinds of entry give
+/// no text and no hash.
+static stim_dem_read
+read_stim_dem_entry(const config::data_artifact &entry,
+                    const std::filesystem::path &base_dir) {
   const auto where = "data_artifacts." + entry.name;
+  const auto pinned = lowercase_pin(entry.sha256);
   std::filesystem::path path(entry.stim_dem_path);
-  std::string pinned = entry.sha256;
+  stim_dem_read read;
   if (entry.stim_dem_path.empty() && !entry.sha256.empty())
     throw std::runtime_error(where + ": sha256 pins a file, so it needs a "
                                      "file-backed entry such as stim_dem_path");
-  if (entry.stim_dem_path.empty())
-    return entry.stim_dem;
+  if (entry.stim_dem_path.empty()) {
+    read.text = entry.stim_dem;
+    if (!read.text.empty())
+      read.sha256 = cudaq::qec::sha256_hex(read.text);
+    return read;
+  }
   if (path.is_relative())
     path = std::filesystem::absolute(base_dir / path).lexically_normal();
-  auto text = read_stim_dem_file(path, where);
-  const auto actual = cudaq::qec::sha256_hex(text);
-  std::transform(pinned.begin(), pinned.end(), pinned.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
-  if (!pinned.empty() && pinned != actual)
+  read.text = read_stim_dem_file(path, where);
+  read.sha256 = cudaq::qec::sha256_hex(read.text);
+  if (!pinned.empty() && pinned != read.sha256)
     throw std::runtime_error(where + ": " + entry.stim_dem_path +
-                             " has sha256 " + actual + ", but the entry pins " +
-                             entry.sha256);
-  return text;
+                             " has sha256 " + read.sha256 +
+                             ", but the entry pins " + entry.sha256);
+  return read;
 } // end - read_stim_dem_entry()
 
 cudaqx::heterogeneous_map prepare_decoder_params(
@@ -345,13 +358,9 @@ cudaq::qec::decoder_init resolve_dem_chunks_init(
 cudaq::qec::decoder_init resolve_decoder_init(
     const cudaq::qec::decoding::config::decoder_config &config_in,
     const std::filesystem::path &base_dir) {
-  const char *dem_key =
-      config_in.stim_dem_path.empty() ? "stim_dem" : "stim_dem_path";
+  const char *dem_key = config::stim_dem_key(config_in.stim_dem_path);
   if (!config_in.stim_dem_path.empty() && !config_in.stim_dem.empty())
-    throw std::runtime_error(
-        "decoder " + std::to_string(config_in.id) +
-        " sets both stim_dem and stim_dem_path; the model comes in exactly "
-        "one form, inline or by file");
+    throw config::both_stim_forms("decoder " + std::to_string(config_in.id));
   if ((!config_in.stim_dem_path.empty() || !config_in.stim_dem.empty()) &&
       config_in.dem_chunks.has_value())
     throw std::runtime_error(std::string("dem_chunks and ") + dem_key +
@@ -407,10 +416,16 @@ cudaq::qec::decoder_init resolve_decoder_init(
     auto inputs = cudaq::qec::decoder_init::from_stim_dem(std::move(dem_text),
                                                           std::move(D));
 
+    // Name the model as the decoder gives it: its file, else the entry it
+    // names, whose file with_pinned_stim_dems() may have read into text,
+    // else its own text.
+    std::string source = "stim_dem";
+    if (!decoder_config.stim_dem_path.empty())
+      source = decoder_config.stim_dem_path;
+    else if (!decoder_config.stim_dem_artifact.empty())
+      source = "data_artifacts." + decoder_config.stim_dem_artifact;
     check_declared_dimensions(
-        decoder_config, inputs,
-        decoder_config.stim_dem.empty() ? decoder_config.stim_dem_path
-                                        : std::string("stim_dem"),
+        decoder_config, inputs, source,
         ". The derived value is the column count of the flattened matrix "
         "projection of the DEM, which need not equal a count reported using a "
         "different decomposition.");
@@ -501,6 +516,28 @@ std::unique_ptr<cudaq::qec::decoder> create_realtime_decoder(
   return decoder;
 }
 
+namespace {
+
+// The template a task-graph node's DEM is built from: none for a node with
+// matrices of its own, else its own dem_chunks, else its decoder's while the
+// decoder has no flat matrices. expand_dem_chunks() leaves H_sparse beside
+// dem_chunks, and the flat matrices then outrank it. Shared by
+// translate_task_graph_node() and fill_data_artifact_store(), so a node's
+// windows are built on the template it runs on.
+const cudaq::qec::dem_chunks_spec *
+node_template(const config::decoder_config &cfg,
+              const config::decoder_config::task_graph_spec::node_spec &ns) {
+  if (!ns.D_sparse.empty())
+    return nullptr;
+  if (ns.dem_chunks)
+    return &*ns.dem_chunks;
+  if (cfg.dem_chunks && cfg.H_sparse.empty())
+    return &*cfg.dem_chunks;
+  return nullptr;
+}
+
+} // namespace
+
 /// Translate one `task_graph.nodes` entry into build inputs for the graph.
 ///
 /// The DEM falls back from the node's own `dem_chunks` to the entry-level DEM,
@@ -558,10 +595,8 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
       node.o_sparse = parse_flat_sparse_rows(ns.O_sparse, "O_sparse");
       if (!ns.H_sparse.empty())
         node.h_sparse = parse_flat_sparse_rows(ns.H_sparse, "H_sparse");
-    } else if (ns.dem_chunks.has_value())
-      node.dem = *ns.dem_chunks;
-    else if (cfg.dem_chunks.has_value() && !flat)
-      node.dem = *cfg.dem_chunks;
+    } else if (const auto *tmpl = node_template(cfg, ns))
+      node.dem = *tmpl;
     else if (flat) {
       if (cfg.D_sparse.empty() || cfg.O_sparse.empty())
         throw std::runtime_error(
@@ -735,27 +770,66 @@ void for_each_node(Nodes &nodes, Visit &&visit) {
 
 } // namespace
 
-// Pinned entries are read before any copy changes, so a failure leaves the
-// caller's configuration and the process untouched. A copy names an entry
-// only while its path is still the entry's: one edited after parsing is
-// read as it stands.
+namespace {
+
+// What read_pinned_stim_dems() read for pinned entry @p entry. The read is
+// the entry's only while its hash is the entry's current pin: by name alone,
+// a map read for another configuration would pass bytes this pin does not
+// name, and a missing read would leave the file unchecked.
+const stim_dem_read &pinned_read(const pinned_stim_dems &pinned,
+                                 const config::data_artifact &entry) {
+  const auto where = "data_artifacts." + entry.name;
+  const auto it = pinned.find(entry.name);
+  if (it == pinned.end())
+    throw std::logic_error(where + " is pinned, but its text was not read "
+                                   "with read_pinned_stim_dems()");
+  if (it->second.sha256 != lowercase_pin(entry.sha256))
+    throw std::logic_error(where + " pins sha256 " + entry.sha256 +
+                           ", but its text was read against " +
+                           it->second.sha256 +
+                           "; read the pins of this configuration");
+  return it->second;
+}
+
+} // namespace
+
+pinned_stim_dems
+read_pinned_stim_dems(const config::multi_decoder_config &config,
+                      const std::filesystem::path &base_dir) {
+  pinned_stim_dems pinned;
+  for (const auto &entry : config.data_artifacts)
+    if (!entry.sha256.empty())
+      pinned[entry.name] = read_stim_dem_entry(entry, base_dir);
+  return pinned;
+}
+
 config::multi_decoder_config
 with_pinned_stim_dems(const config::multi_decoder_config &config,
                       const std::filesystem::path &base_dir) {
+  return with_pinned_stim_dems(config, read_pinned_stim_dems(config, base_dir));
+}
+
+// Pinned entries are looked up before any copy changes, so a failure leaves
+// the caller's configuration untouched. A copy names an entry only while its
+// path is still the entry's: one edited after parsing is read as it stands.
+config::multi_decoder_config
+with_pinned_stim_dems(const config::multi_decoder_config &config,
+                      const pinned_stim_dems &pinned) {
   auto out = config;
-  std::map<std::string, std::pair<std::string, std::string>> pinned;
+  // Each pinned entry's path and checked text, by name.
+  std::map<std::string, std::pair<std::string, std::string>> by_name;
   const auto use_text = [&](std::string &text, std::string &path,
                             const std::string &artifact) {
-    const auto it = pinned.find(artifact);
-    if (it == pinned.end() || !text.empty() || path != it->second.first)
+    const auto it = by_name.find(artifact);
+    if (it == by_name.end() || !text.empty() || path != it->second.first)
       return;
     text = it->second.second;
     path.clear();
   };
   for (const auto &entry : config.data_artifacts)
     if (!entry.sha256.empty())
-      pinned[entry.name] = {entry.stim_dem_path,
-                            read_stim_dem_entry(entry, base_dir)};
+      by_name[entry.name] = {entry.stim_dem_path,
+                             pinned_read(pinned, entry).text};
   for (auto &decoder : out.decoders) {
     use_text(decoder.stim_dem, decoder.stim_dem_path,
              decoder.stim_dem_artifact);
@@ -1071,12 +1145,23 @@ void at(const std::string &where, Step &&step) {
 
 } // namespace
 
-// Templates first, so window entries and ingest layers find their context;
-// then Stim DEMs, a file-backed one checked against its pin; then every
-// window variant.
 cudaq::qec::data_artifact_store
 fill_data_artifact_store(const config::multi_decoder_config &config,
                          const std::filesystem::path &base_dir) {
+  return fill_data_artifact_store(config, base_dir,
+                                  read_pinned_stim_dems(config, base_dir));
+}
+
+// Templates first, so window entries and ingest layers find their context;
+// then Stim DEMs, a pinned one from its checked read; then every window
+// variant. Only the templates windows are built on are added:
+// experiment_template is stricter than a plain decoder's dem_chunks, so
+// building every template would reject models that decoders without windows
+// accept.
+cudaq::qec::data_artifact_store
+fill_data_artifact_store(const config::multi_decoder_config &config,
+                         const std::filesystem::path &base_dir,
+                         const pinned_stim_dems &pinned) {
   cudaq::qec::data_artifact_store store;
   const auto entry_name = [](const config::data_artifact &entry) {
     return "data_artifacts." + entry.name;
@@ -1084,24 +1169,46 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
   const auto decoder_name = [](const config::decoder_config &decoder) {
     return "decoder " + std::to_string(decoder.id);
   };
-  for (const auto &entry : config.data_artifacts)
-    if (entry.dem_chunks)
-      at(entry_name(entry), [&] { store.add_template(*entry.dem_chunks); });
+  // A context that names no template is rejected with the window entries
+  // below.
+  for (const auto &entry : config.data_artifacts) {
+    if (!entry.window)
+      continue;
+    const auto context =
+        std::find_if(config.data_artifacts.begin(), config.data_artifacts.end(),
+                     [&](const config::data_artifact &e) {
+                       return e.name == entry.context;
+                     });
+    if (context != config.data_artifacts.end() && context->dem_chunks)
+      at(entry_name(*context),
+         [&] { store.add_template(*context->dem_chunks); });
+  }
+  // The template a node with layers runs on, its own or its decoder's; one
+  // with layers but no template is rejected with the layers below.
   for (const auto &decoder : config.decoders) {
-    if (decoder.dem_chunks)
-      at(decoder_name(decoder),
-         [&] { store.add_template(*decoder.dem_chunks); });
-    if (decoder.task_graph)
-      for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
-        if (node.dem_chunks)
-          at(decoder_name(decoder) + ", node '" + node.id + "'",
-             [&] { store.add_template(*node.dem_chunks); });
-      });
+    if (!decoder.task_graph)
+      continue;
+    for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
+      const auto *spec = node_template(decoder, node);
+      const bool own = node.dem_chunks && spec == &*node.dem_chunks;
+      if (node.windows.empty() || !spec)
+        return;
+      at(own ? decoder_name(decoder) + ", node '" + node.id + "'"
+             : decoder_name(decoder),
+         [&] { store.add_template(*spec); });
+    });
   }
 
-  for (const auto &entry : config.data_artifacts)
-    if (const auto text = read_stim_dem_entry(entry, base_dir); !text.empty())
-      store.add_stim_dem(text);
+  // Each read carries its hash, so the store does not hash the text again.
+  for (const auto &entry : config.data_artifacts) {
+    if (!entry.sha256.empty()) {
+      const auto &read = pinned_read(pinned, entry);
+      store.add_stim_dem(read.text, read.sha256);
+    } else if (const auto read = read_stim_dem_entry(entry, base_dir);
+               !read.text.empty()) {
+      store.add_stim_dem(read.text, read.sha256);
+    }
+  }
 
   for (const auto &entry : config.data_artifacts) {
     if (!entry.window)
@@ -1130,12 +1237,20 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
       continue;
     for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
       const auto where = decoder_name(decoder) + ", node '" + node.id + "'";
-      const auto &spec = node.dem_chunks ? node.dem_chunks : decoder.dem_chunks;
+      const auto *spec = node_template(decoder, node);
+      // Expanded chunks keep dem_chunks beside the flat matrices they make,
+      // so name why it does not apply.
+      const bool expanded = node.D_sparse.empty() && decoder.dem_chunks &&
+                            !decoder.H_sparse.empty();
       if (node.windows.empty())
         return;
       if (!spec)
-        throw std::runtime_error(where + " has windows but no dem_chunks "
-                                         "template");
+        throw std::runtime_error(
+            where + " has windows but no dem_chunks template" +
+            (expanded ? ": its decoder's dem_chunks is expanded into "
+                        "H_sparse, and a node beside flat matrices runs on "
+                        "them; give the node dem_chunks of its own"
+                      : ""));
       for (const auto &layer : node.windows) {
         const auto layer_where = where + ", layer '" + layer.layer + "'";
         const auto tmpl = store.find_template(*spec);
