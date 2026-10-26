@@ -1460,6 +1460,7 @@ void decoding_task_graph::reset_decoder() {
   impl_->invalidate_async_stream_snapshot();
   impl_->finalized = false;
   impl_->async_streaming.needs_reset = false;
+  impl_->discard_records();
   const auto reset_node = [](task_graph_node &node) {
     if (auto *decoder_backed = node.decoder_backed())
       decoder_backed->reset_decoder();

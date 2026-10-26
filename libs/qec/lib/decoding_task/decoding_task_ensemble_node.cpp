@@ -34,12 +34,16 @@ namespace {
 /// the sink observer that writes it and the join that reads it. Copies share
 /// one state.
 class ensemble_selection {
+  struct state;
+
 public:
   ensemble_selection() : s_(std::make_shared<state>()) {}
   explicit ensemble_selection(std::unique_ptr<selection_strategy> strategy)
       : ensemble_selection() {
     s_->strategy = std::move(strategy);
   }
+  explicit ensemble_selection(std::shared_ptr<state> s) : s_(std::move(s)) {}
+  std::weak_ptr<state> weak() const { return s_; }
 
   /// Start a run under `source`, pushing into `sink`: forget the previous
   /// decision and have the strategy do the same. The previous run's members
@@ -187,7 +191,11 @@ private:
     cancellation_source source;
     candidate_sink sink;
     ensemble_selection selection(factory_(params_));
-    sink.reset([selection](const candidate &c) { selection.offer(c); });
+    // The strategy holds the sink, so the observer must not own the selection.
+    sink.reset([weak = selection.weak()](const candidate &c) {
+      if (auto s = weak.lock())
+        ensemble_selection(std::move(s)).offer(c);
+    });
     selection.begin(source, sink);
     out_[1] = std::move(sink);
     out_[2] = source.get_token();

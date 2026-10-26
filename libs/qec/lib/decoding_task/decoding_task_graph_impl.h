@@ -292,6 +292,8 @@ struct decoding_task_graph::impl {
   bool flush_sweep(int cuda_device_id);
   /// Allocate the worker pool and record contexts after graph compilation.
   void prepare_event_runtime(std::size_t context_count, bool dispatcher_thread);
+  /// Drop every record, join entry and replica lease, as a new shot needs.
+  void discard_records();
   /// Fold a finished record's captured node state into the graph-level view.
   void apply_record_context(record_context &c);
   /// Retire the oldest asynchronous record and publish its progress.

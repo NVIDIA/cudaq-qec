@@ -84,6 +84,8 @@ struct decoding_task_graph::impl::record_context {
     graph_event continuation;
     std::size_t pool_slot = no_event; ///< replica a running delivery holds
     bool releases_pool = false;       ///< last delivery: hand the replica back
+    edge_value value;                 ///< an indexed delivery's own copy
+    bool has_value = false;
     std::size_t parent = no_event;
     std::size_t blocked_by = no_event;
     std::size_t first_child = no_event;
@@ -596,7 +598,15 @@ struct decoding_task_graph::impl::record_scheduler {
       graph_event event{graph_event_kind::streaming_edge, consumer, wire, 0,
                         root};
       event.index = index;
-      push_locked(c, event, parent, blocker);
+      const auto id = push_locked(c, event, parent, blocker);
+      // Several instances may publish through one wire before any delivery
+      // runs, so an indexed delivery keeps its own copy of the value.
+      const auto wire_id = static_cast<std::size_t>(wire.id);
+      if (id != no_event && indexed(consumer) && wire.id >= 0 &&
+          c.wire_valid[wire_id]) {
+        c.slots[id].value = c.wire_values[wire_id];
+        c.slots[id].has_value = true;
+      }
     }
     notify_workers();
   }
@@ -632,7 +642,8 @@ struct decoding_task_graph::impl::record_scheduler {
           std::to_string(event.wire.from_node));
     const auto k = event.index - event.wire.index_offset;
     const auto slot = static_cast<std::size_t>(event.wire.to_slot);
-    const auto *value = delivered_value(c, event);
+    const auto *value =
+        c.slots[id].has_value ? &c.slots[id].value : delivered_value(c, event);
     auto lock = lock_runtime();
     if (k < 0)
       return; // instances are numbered from 0
@@ -698,13 +709,17 @@ struct decoding_task_graph::impl::record_scheduler {
   // The shot has ended and every producer of the node has finished, so no
   // pending input will arrive: instances with their required inputs fire
   // with the rest absent, and the others never existed.
-  void resolve_joins_locked(context &c, std::size_t parent, std::size_t si,
+  // The table may have outgrown the event store, so stop once half of it is
+  // queued and report that a later flush has to continue; true when so.
+  bool resolve_joins_locked(context &c, std::size_t parent, std::size_t si,
                             std::size_t root) {
     auto &table = joins[si];
     for (std::size_t index = 0; index < table.size(); ++index) {
       auto &entry = table[index];
       if (!entry.used || entry.pending == 0)
         continue;
+      if (c.free_slots.size() <= c.slots.size() / 2)
+        return true;
       bool exists = true;
       for (std::size_t i = 0; i < entry.state.size(); ++i)
         if (entry.state[i] == join_entry::missing && join_required[si][i])
@@ -719,12 +734,16 @@ struct decoding_task_graph::impl::record_scheduler {
       entry.pending = 0;
       queue_indexed_fire_locked(c, parent, si, index, root);
     }
+    return false;
   }
 
   // Whether no event of any record other than `self`'s flush still targets
-  // the indexed node: its producers' deliveries have all been filed and its
-  // own fires have all finished.
-  bool indexed_quiescent_locked(const context &self, std::size_t si) const {
+  // the pooled or indexed node: its producers' deliveries have all been filed
+  // or run and its own fires have all finished.
+  bool quiescent_locked(const context &self, std::size_t si) const {
+    for (const auto busy : replica_busy[si])
+      if (busy)
+        return false;
     for (const auto *c : active) {
       auto live = c->node_live[si];
       if (c == &self)
@@ -742,7 +761,13 @@ struct decoding_task_graph::impl::record_scheduler {
     const auto si = event.node;
     const auto &node = owner.streaming_nodes[si];
     const auto replica = c.slots[id].pool_slot;
-    auto &entry = joins[si][event.entry];
+    join_entry *entry_ptr;
+    {
+      // Another record's delivery may be growing the deque.
+      auto lock = lock_runtime();
+      entry_ptr = &joins[si][event.entry];
+    }
+    auto &entry = *entry_ptr;
     auto &inputs = fire_inputs[si][replica];
     for (std::size_t i = 0; i < inputs.size(); ++i)
       inputs[i] =
@@ -866,8 +891,15 @@ struct decoding_task_graph::impl::record_scheduler {
 
   void execute_flush(context &c, std::size_t id, const graph_event &event) {
     if (indexed(event.node)) {
-      auto lock = lock_runtime();
-      resolve_joins_locked(c, id, event.node, event.root);
+      bool more;
+      {
+        auto lock = lock_runtime();
+        more = resolve_joins_locked(c, id, event.node, event.root);
+      }
+      if (more) { // continue once the queued fires have drained
+        push(c, event, id, no_event, /*wait_for_siblings=*/true);
+        return;
+      }
     }
     if (owner.streaming_nodes[event.node].capability->flush())
       c.fired.store(publish_streaming(c, id, event.root, event.node),
@@ -1247,8 +1279,8 @@ private:
       // Resolving an indexed node's pending instances needs every delivery
       // to it, from any record, filed first.
       if (candidate.event.kind == graph_event_kind::streaming_flush &&
-          indexed(candidate.event.node) &&
-          !indexed_quiescent_locked(c, candidate.event.node))
+          targets_pool(candidate.event) &&
+          !quiescent_locked(c, candidate.event.node))
         continue;
       // A pooled node keeps no state, so its records need no order.
       if (c.gated && !targets_pool(candidate.event)) {
@@ -1268,7 +1300,8 @@ private:
   // events for it: every producer has been handed on and nothing targeting
   // the node is queued or running.
   void try_release_locked(context &c, std::size_t si) {
-    if (!c.gated || c.node_released[si] || c.node_live[si] != 0)
+    if (!c.gated || c.node_released[si] || c.node_live[si] != 0 ||
+        node_turn[si] != c.sequence)
       return;
     for (const auto producer : owner.streaming_producers[si])
       if (!c.node_released[producer])
@@ -1277,9 +1310,22 @@ private:
     node_turn[si] = c.sequence + 1;
     for (const auto dependent : owner.streaming_dependents[si])
       try_release_locked(c, dependent);
+    // The next record may have been waiting only for its turn on this node.
+    for (auto *next : active)
+      if (next->sequence == c.sequence + 1 && next->gated)
+        try_release_locked(*next, si);
   }
 
   void mark_complete_locked(context &c) {
+    // A producer that skipped this record leaves a pooled consumer's lease
+    // held and its inputs partial; hand the replica back clean.
+    for (std::size_t si = 0; si < c.pool_replica.size(); ++si)
+      if (c.pool_replica[si] != no_event) {
+        const auto replica = c.pool_replica[si];
+        owner.streaming_nodes[si].replicas[replica]->reset_streaming_state();
+        pool_free[si].push_back(replica);
+        c.pool_replica[si] = no_event;
+      }
     c.complete = true;
     if (c.gated)
       owner.wake_async_stream();
@@ -1464,6 +1510,11 @@ public:
 
 // Construct empty graph state before the private scheduler type is complete.
 decoding_task_graph::impl::impl() = default;
+
+void decoding_task_graph::impl::discard_records() {
+  if (scheduler)
+    scheduler->discard_all();
+}
 
 void decoding_task_graph::impl::prepare_event_runtime(std::size_t context_count,
                                                       bool dispatcher_thread) {

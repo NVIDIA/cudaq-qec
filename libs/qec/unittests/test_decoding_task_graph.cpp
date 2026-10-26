@@ -12172,6 +12172,8 @@ public:
   }
   bool enqueue_edge_value(const edge_value &value, std::size_t slot) override {
     const uint8_t bit = value.get<logical_outcome>().bits[0];
+    if (mode_ == "skip" && (skipped_++ % 2) == 0)
+      return false; // publishes on every other record only
     if (mode_ == "join") {
       pending_[slot] = bit;
       if (++received_ < 2)
@@ -12206,6 +12208,7 @@ public:
     valid_ = false;
     received_ = 0;
     records_ = 0;
+    skipped_ = 0;
   }
   std::size_t num_msyn_per_decode() const override {
     return mode_ == "source" ? 1 : 0;
@@ -12268,6 +12271,7 @@ private:
   uint8_t correction_ = 0;
   bool valid_ = false;
   std::size_t received_ = 0;
+  std::size_t skipped_ = 0;
   std::size_t records_ = 0;
   uint8_t pending_[2] = {0, 0};
   edge_value value_out_;
@@ -12458,6 +12462,57 @@ TEST(DecodingTaskGraph, ConcurrentRecordsKeepPerNodeOrder) {
   }
   expect_consistent_pairs(probe->pairs(), records);
   EXPECT_EQ(graph->streaming_result().generation, count);
+}
+
+// measurements -> A -> S -> X, where S publishes on odd records only. A
+// record S skips must not hand X on while an earlier record still runs X.
+TEST(DecodingTaskGraph, SkippedRecordDoesNotHandNodeOnEarly) {
+  if (std::thread::hardware_concurrency() < 3)
+    GTEST_SKIP() << "pipelining needs at least three CPU threads";
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(pipeline_node("S", "skip"));
+  nodes.push_back(pipeline_node("X", "pass", /*hold_ms=*/5));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "S", "input"},
+       {"S", "output", "X", "input"},
+       {"X", "output", "output", "input"}},
+      {.async_streaming = true,
+       .async_queue_capacity = 16,
+       .async_num_workers = 2});
+  constexpr std::size_t count = 40;
+  const auto records = pipeline_records(count);
+  // A hung FINAL is unblocked by a reset so the test fails instead of hanging.
+  std::atomic<bool> done{false};
+  struct joiner {
+    std::thread t;
+    ~joiner() { t.join(); }
+  } watchdog{std::thread([&] {
+    for (int i = 0; i < 2000 && !done.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!done.load())
+      graph->reset_decoder();
+  })};
+  bool fired = false;
+  try {
+    for (std::size_t i = 0; i + 1 < count; ++i)
+      graph->enqueue_syndrome(&records[i], 1);
+    fired = graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+  } catch (const std::exception &e) {
+    done = true;
+    FAIL() << e.what();
+  }
+  done = true;
+  EXPECT_TRUE(fired);
+  const auto seen = probe->records("X");
+  ASSERT_EQ(seen.size(), count / 2);
+  for (std::size_t i = 0; i < seen.size(); ++i)
+    EXPECT_EQ(seen[i], i) << "X ran records out of order";
 }
 
 TEST(DecodingTaskGraph, ConcurrentRecordsBufferEdgeValuesPerRecord) {
