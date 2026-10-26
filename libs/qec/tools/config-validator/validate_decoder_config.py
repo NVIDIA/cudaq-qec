@@ -443,6 +443,10 @@ def dem_chunks_checks(chunks, who, where):
         problems.append((where, message))
         return problems
 
+    if isinstance(chunks, str) and not isinstance(chunks, EmptyScalar):
+        # A name of a data_artifacts entry; the schema decides whether that
+        # form is allowed, nothing structural to check here.
+        return problems
     if not isinstance(chunks, dict):
         return fail(f"{who}: dem_chunks must be a mapping")
 
@@ -530,6 +534,14 @@ def dem_chunks_checks(chunks, who, where):
             if key in spec and not _is_int_list(spec[key]):
                 return fail(f"{who}: {label}.spec.{key} must be a list of "
                             "integers")
+    # Every connection endpoint must name a phase that has a spec.
+    names = {phase["name"] for phase in phases}
+    for conn in connections:
+        for key in ("from", "to"):
+            if conn[key] not in names:
+                return fail(f"Invalid dem_chunks for {who}: dem_chunks_spec: "
+                            f"a connection names phase '{conn[key]}', which "
+                            "has no spec")
     return problems
 
 
