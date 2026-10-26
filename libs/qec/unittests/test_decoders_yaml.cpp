@@ -24,6 +24,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
+#include <regex>
 #include <stdexcept>
 #include <unistd.h>
 
@@ -1765,6 +1766,18 @@ decoders:
                std::runtime_error);
 }
 
+namespace {
+
+void expect_yaml11_numeric_exponents(const std::string &yaml) {
+  // Test numeric-token interoperability, not to_chars' choice of exponent or
+  // fixed notation. YAML 1.1 requires a decimal point in an exponent mantissa.
+  static const std::regex bare_exponent(
+      R"((^|[\s\[,])[-+]?[0-9]+[eE][-+]?[0-9]+($|[\s,\]]))");
+  EXPECT_FALSE(std::regex_search(yaml, bare_exponent)) << yaml;
+}
+
+} // namespace
+
 TEST(DecoderSchemaTest, PreservesFloatingPointParametersExactly) {
   using namespace cudaq::qec::decoding::config;
   // Schema-only metadata is enough to exercise configuration serialization;
@@ -1785,7 +1798,7 @@ TEST(DecoderSchemaTest, PreservesFloatingPointParametersExactly) {
 
   const std::string label = "001,alpha;beta='quoted':a=b/with spaces\nnext";
   for (const auto gain :
-       {std::nextafter(0.001, 1.0), 0.12345678901234567,
+       {1e-6, 1e20, std::nextafter(0.001, 1.0), 0.12345678901234567,
         std::numeric_limits<double>::denorm_min(), std::nextafter(1.0, 0.0)}) {
     SCOPED_TRACE(gain);
     const std::vector<double> weights{gain, -gain, 1.2345678901234567e-20};
@@ -1806,6 +1819,7 @@ TEST(DecoderSchemaTest, PreservesFloatingPointParametersExactly) {
     multi_decoder_config original;
     original.decoders.push_back(std::move(decoder));
     const auto emitted = original.to_yaml_str(200);
+    expect_yaml11_numeric_exponents(emitted);
     const auto parsed = multi_decoder_config::from_yaml_str(emitted);
     EXPECT_EQ(parsed, original);
     const auto &roundtrip = parsed.decoders.front().decoder_custom_args.map();
@@ -2431,19 +2445,20 @@ TEST(MemoryExperimentYaml, PreservesEveryPhaseProbabilityExactly) {
   // A native phase fixture keeps this framework serialization regression
   // independent of circuit characterization and the generator executable.
   for (const auto probability :
-       {0.0, 1.0, std::numeric_limits<double>::denorm_min(),
+       {0.0, 1.0, 1e-6, std::numeric_limits<double>::denorm_min(),
         std::nextafter(0.001, 1.0), std::numeric_limits<double>::min(),
         std::nextafter(1.0, 0.0), 0.12345678901234567}) {
     SCOPED_TRACE(probability);
     for (auto &phase : entry.dem_chunks->phases)
       for (auto &rate : phase.spec.error_rates)
         rate = probability;
-    EXPECT_EQ(config::dem_chunks_from_yaml_str(
-                  config::dem_chunks_to_yaml_str(*entry.dem_chunks)),
-              *entry.dem_chunks);
-    EXPECT_EQ(
-        config::decoder_config::from_yaml_str(entry.to_yaml_str()).dem_chunks,
-        entry.dem_chunks);
+    const auto model_yaml = config::dem_chunks_to_yaml_str(*entry.dem_chunks);
+    expect_yaml11_numeric_exponents(model_yaml);
+    EXPECT_EQ(config::dem_chunks_from_yaml_str(model_yaml), *entry.dem_chunks);
+    const auto decoder_yaml = entry.to_yaml_str();
+    expect_yaml11_numeric_exponents(decoder_yaml);
+    EXPECT_EQ(config::decoder_config::from_yaml_str(decoder_yaml).dem_chunks,
+              entry.dem_chunks);
   }
   EXPECT_THROW(config::dem_chunks_from_yaml_str("unknown_field: 1\n"),
                std::runtime_error);

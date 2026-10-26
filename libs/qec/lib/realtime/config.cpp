@@ -772,7 +772,15 @@ struct ScalarTraits<exact_yaml_double> {
         buffer.data(), buffer.data() + buffer.size(), probability.value);
     assert(result.ec == std::errc() &&
            "the buffer must fit the shortest double representation");
-    stream << StringRef(buffer.data(), result.ptr - buffer.data());
+    const StringRef text(buffer.data(), result.ptr - buffer.data());
+    const auto exponent = text.find_first_of("eE");
+    // YAML 1.1 readers such as PyYAML infer an exponent-only spelling (1e-06)
+    // as a string. A decimal point preserves numeric interpretation without
+    // changing the shortest representation's value or significant digits.
+    if (exponent != StringRef::npos && !text.contains('.'))
+      stream << text.take_front(exponent) << ".0" << text.drop_front(exponent);
+    else
+      stream << text;
   }
   static StringRef input(StringRef text, void *context,
                          exact_yaml_double &value) {
