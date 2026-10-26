@@ -7,6 +7,7 @@
 #include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_data_artifacts.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
+#include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "../lib/realtime/realtime_decoding.h"
 #include "../lib/realtime/window_request_yaml.h"
 #include "cudaq/qec/decoder.h"
@@ -4396,6 +4397,51 @@ TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
   expect_build_error(cfg::multi_decoder_config::from_yaml_str(resolved),
                      "the 'ingest' kind is not available yet");
 } // end - TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt)
+
+// Filling the store from the pattern holds every variant of its two layers,
+// the very windows of the parallel-window graph written by hand with the
+// same sizes and prior. A pattern whose parameters or template give no
+// windows is named.
+TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::fill_data_artifact_store;
+  const auto pattern = cfg::multi_decoder_config::from_yaml_str(pattern_yaml());
+  const auto by_hand =
+      cfg::multi_decoder_config::from_yaml_str(pw_graph_yaml());
+  const auto store = fill_data_artifact_store(pattern, ".");
+  const auto tmpl = store.find_template(*pattern.decoders.at(0).dem_chunks);
+  const auto requests = cudaq::qec::parallel_window_requests(
+      pattern.decoders.at(0).task_graph->nodes.at(0).node_params.map(), *tmpl);
+  std::size_t variants = 0;
+  for (const auto &request : {requests.first, requests.second}) {
+    const auto keys = variant_keys(*tmpl, request);
+    variants += keys.size();
+    for (const auto &key : keys)
+      EXPECT_NE(store.find_window(*tmpl, request, key), nullptr);
+  }
+  EXPECT_EQ(records_of(store, "window").size(), variants);
+  EXPECT_EQ(records_of(store, "window"),
+            records_of(fill_data_artifact_store(by_hand, "."), "window"));
+
+  auto uncrossed = pattern;
+  auto zero = pattern;
+  uncrossed.decoders.at(0).dem_chunks = cudaq::qec::single_round_spec();
+  zero.decoders.at(0).task_graph->nodes.at(0).node_params.map().insert(
+      "commit_rounds", std::size_t{0});
+  for (const auto &[config, text] :
+       {std::pair{uncrossed, "decoder 0, node 'pw': parallel_window: no fault "
+                             "crosses into the next round"},
+        std::pair{zero, "decoder 0, node 'pw': parallel_window: "
+                        "commit_rounds must be at least 1"}}) {
+    try {
+      fill_data_artifact_store(config, ".");
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  }
+} // end - TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows)
 
 // Each bad pattern parameter is rejected when parsed, with its own message.
 TEST(ParallelWindowPattern, RejectsBadParameters) {

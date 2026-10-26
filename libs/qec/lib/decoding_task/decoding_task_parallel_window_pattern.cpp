@@ -77,10 +77,9 @@ const bool registered = [] {
   register_node_kind(
       std::move(spec), parallel_window_params(),
       [](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
-        throw std::invalid_argument(
-            "task graph node '" + ctx.id +
-            "': the 'parallel_window' pattern expands only as a node of the "
-            "graph, not inside an ensemble");
+        throw std::logic_error("task graph node '" + ctx.id +
+                               "': the 'parallel_window' pattern is expanded "
+                               "before any node is built");
       });
   return true;
 }();
@@ -109,12 +108,22 @@ double largest_crossing_prior(const experiment_template &t) {
 
 } // namespace
 
-// Parameters are read as the schema has checked them: the round counts are
-// at least 1, and boundary_prior is not set with truncate.
+// The parameters are checked against the pattern's schema first, so the
+// round counts are at least 1 and boundary_prior is not set with truncate,
+// whoever built them.
 std::pair<experimental::window_request, experimental::window_request>
-parallel_window_requests(const cudaqx::heterogeneous_map &params,
+parallel_window_requests(const cudaqx::heterogeneous_map &checked,
                          const experiment_template &context) {
   using namespace experimental;
+  const auto *schema = decoding::config::find_decoder_schema(
+      task_graph_node_schema_name("parallel_window"));
+  auto params = checked;
+  if (!schema)
+    throw std::logic_error("parallel_window: the pattern is registered "
+                           "without a parameter schema");
+  decoding::config::materialize_default_args(*schema, params);
+  decoding::config::validate_custom_args(*schema, params,
+                                         "parallel_window parameters");
   const auto c_a =
       static_cast<std::int64_t>(params.get<std::size_t>("commit_rounds"));
   const auto b =

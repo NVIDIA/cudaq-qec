@@ -28,10 +28,12 @@ namespace cudaq::qec {
 /// the column options. A's open input with boundary columns takes
 /// boundary_prior, or else the largest prior of a fault that crosses into
 /// the next round.
-/// @param params The pattern's parameters, checked against its schema.
+/// @param params The pattern's parameters, which are checked against its
+/// schema first.
 /// @param context The template the windows are built on.
-/// @throws std::invalid_argument if A's input needs a prior and no fault
-/// crosses into the next round with a prior strictly between 0 and 1.
+/// @throws std::runtime_error naming the parameter if one is invalid;
+/// std::invalid_argument if A's input needs a prior and no fault crosses
+/// into the next round with a prior strictly between 0 and 1.
 std::pair<experimental::window_request, experimental::window_request>
 parallel_window_requests(const cudaqx::heterogeneous_map &params,
                          const experiment_template &context);

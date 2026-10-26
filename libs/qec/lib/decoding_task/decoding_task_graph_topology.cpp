@@ -426,6 +426,11 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
       if (n.ensemble)
         throw std::invalid_argument(member + " nests an ensemble, which is "
                                              "not supported yet");
+      // Its ingest must be fed by measurements alone, never by a fan-out.
+      if (is_parallel_window(n))
+        throw std::invalid_argument(member + " has parallel_window '" + n.id +
+                                    "', which expands only as a node of the "
+                                    "graph");
       if (n.id.empty())
         throw std::invalid_argument(member + " has a node without an id");
       n.id = prefix + n.id;

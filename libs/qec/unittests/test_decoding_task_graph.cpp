@@ -14057,4 +14057,36 @@ TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
       "commit_rounds");
 } // end - TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern)
 
+// A pattern inside an ensemble is rejected before anything is built: its
+// ingest would be fed by the ensemble's fan-out, not by measurements alone.
+TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble) {
+  task_graph_ensemble_spec spec;
+  task_graph_ensemble_spec::member member;
+  task_graph_node_config pattern;
+  task_graph_node_config ensemble;
+  std::vector<task_graph_node_config> nodes;
+  pattern.id = "pw";
+  pattern.kind = "parallel_window";
+  pattern.dem = arbitrary_memory_spec(5);
+  pattern.decoder_type = "single_error_lut";
+  pattern.node_params = {{"commit_rounds", std::size_t{2}},
+                         {"buffer_rounds", std::size_t{1}}};
+  member.nodes.push_back(std::move(pattern));
+  member.edges = {{"input", "output", "pw", "input"},
+                  {"pw", "output", "output", "input"}};
+  spec.members.push_back(std::move(member));
+  spec.join_strategy = "first";
+  ensemble.id = "E";
+  ensemble.ensemble = std::move(spec);
+  nodes.push_back(std::move(ensemble));
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(
+            std::move(nodes), {{"measurements", "output", "E", "input"},
+                               {"E", "output", "output", "input"}});
+      },
+      "from_topology: ensemble 'E' member 0 has parallel_window 'pw', which "
+      "expands only as a node of the graph");
+} // end - TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble)
+
 } // namespace cudaq::qec

@@ -8,6 +8,7 @@
 #include "stim_dem_forms.h"
 #include "../decoding_task/decoding_task_data_artifacts.h"
 #include "../decoding_task/decoding_task_graph_utils.h"
+#include "../decoding_task/decoding_task_parallel_window_pattern.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -1017,7 +1018,7 @@ using node_spec = config::decoder_config::task_graph_spec::node_spec;
 
 // Runs step, giving an error the place it came from. A construction error
 // becomes a configuration error; the store's own logic errors keep their
-// kind.
+// kind, as configuration errors do.
 template <typename Step>
 void at(const std::string &where, Step &&step) {
   try {
@@ -1026,6 +1027,8 @@ void at(const std::string &where, Step &&step) {
     throw std::runtime_error(where + ": " + e.what());
   } catch (const std::logic_error &e) {
     throw std::logic_error(where + ": " + e.what());
+  } catch (const std::runtime_error &e) {
+    throw std::runtime_error(where + ": " + e.what());
   }
 }
 
@@ -1038,9 +1041,9 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
                                   read_pinned_stim_dems(config, base_dir));
 }
 
-// Templates first, so window entries and ingest layers find their context;
-// then Stim DEMs, a pinned one from its checked read; then every window
-// variant. Only the templates windows are built on are added:
+// Templates first, so window entries, ingest layers and patterns find their
+// context; then Stim DEMs, a pinned one from its checked read; then every
+// window variant. Only the templates windows are built on are added:
 // experiment_template is stricter than a plain decoder's dem_chunks, so
 // building every template would reject models that decoders without windows
 // accept.
@@ -1069,15 +1072,16 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
       at(entry_name(*context),
          [&] { store.add_template(*context->dem_chunks); });
   }
-  // The template a node with layers runs on, its own or its decoder's; one
-  // with layers but no template is rejected with the layers below.
+  // The template a node with layers, or a pattern, runs on, its own or its
+  // decoder's; one with neither is rejected with the layers below.
   for (const auto &decoder : config.decoders) {
     if (!decoder.task_graph)
       continue;
     for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
       const auto *spec = node_template(decoder, node);
       const bool own = node.dem_chunks && spec == &*node.dem_chunks;
-      if (node.windows.empty() || !spec)
+      if ((node.windows.empty() && node.resolved_kind() != "parallel_window") ||
+          !spec)
         return;
       at(own ? decoder_name(decoder) + ", node '" + node.id + "'"
              : decoder_name(decoder),
@@ -1128,7 +1132,11 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
       // so name why it does not apply.
       const bool expanded = node.D_sparse.empty() && decoder.dem_chunks &&
                             !decoder.H_sparse.empty();
-      if (node.windows.empty())
+      // A pattern's layers are its windows <id>.A and <id>.B.
+      const bool pattern = node.resolved_kind() == "parallel_window";
+      std::pair<experimental::window_request, experimental::window_request>
+          generated;
+      if (node.windows.empty() && !pattern)
         return;
       if (!spec)
         throw std::runtime_error(
@@ -1137,6 +1145,17 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
                         "H_sparse, and a node beside flat matrices runs on "
                         "them; give the node dem_chunks of its own"
                       : ""));
+      if (pattern) {
+        const auto tmpl = store.find_template(*spec);
+        at(where, [&] {
+          generated = parallel_window_requests(node.node_params.map(), *tmpl);
+        });
+        at(where + ", window '" + node.id + ".A'",
+           [&] { store.add_windows(tmpl, generated.first); });
+        at(where + ", window '" + node.id + ".B'",
+           [&] { store.add_windows(tmpl, generated.second); });
+        return;
+      }
       for (const auto &layer : node.windows) {
         const auto layer_where = where + ", layer '" + layer.layer + "'";
         const auto tmpl = store.find_template(*spec);
