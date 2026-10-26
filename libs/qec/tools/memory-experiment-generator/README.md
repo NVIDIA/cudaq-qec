@@ -109,7 +109,7 @@ Arguments use `--name=value` form; there is no JSON or YAML input format.
 |---|---|
 | `--code` | `surface_code`; other code families are not currently supported |
 | `--distance` | Required odd Surface Code distance, at least 3 |
-| `--rounds` | Required finite extraction-cycle count, excluding terminal data readout |
+| `--rounds` | Required finite extraction-cycle count, at least 4, excluding terminal data readout |
 | `--basis` | Required `X` or `Z` preparation/readout basis |
 | `--logical-qubits` | Independent patches sharing one model; default 1 |
 | `--error-rate` | CNOT two-qubit depolarization probability; default 0.001, strictly between 0 and 1 |
@@ -222,9 +222,9 @@ decoding must not be switched to device dispatch merely to select a wire.
 
 Raw samples, seeds, replay schedules and result-oracle records belong to the
 qualification workflow. The production CLI does not sample measurements.
-Tests retain the public `sample_memory_circuit_raw` sampler and record/batch
-helpers. Raw logical values alone are not expected corrections or an accuracy
-oracle.
+Tests use the public `sample_memory_circuit_raw` sampler and test-only
+record/batch helpers. Raw logical values alone are not expected corrections or
+an accuracy oracle.
 
 Internal UDP assessment is not customer RoCE/FPGA qualification. Installed
 two-process replay needs an executable A/B runtime, a transport-specific
@@ -249,7 +249,7 @@ The provider characterizes 12 and 13 extraction cycles using the public
 `decoder_context_from_memory_circuit` API. It compares retained phases,
 probabilities, measurement maps and readout support before retargeting.
 These fixed depths leave margin beyond transient endpoints and check even and
-odd horizons. They are provenance, not schema constraints. Preparation and
+odd horizons. These depths are internal preparation choices. Preparation and
 stored phases do not grow with requested T; code construction grows with
 distance. No process address-space cap is imposed. This relies on the known
 repeating Surface Code circuit, not inferred periodicity for arbitrary circuits.
@@ -274,7 +274,9 @@ unknown-duration producer, terminal flush or admission policy.
 ## Build scope and verification
 
 The executable installs through `qec-tools`, with existing QEC and CUDA-Q
-runtime dependencies, and is included in full-QEC release archives. Circuit
+runtime dependencies. Official release archives currently omit both this tool
+and the standalone decoding server; build them from a full QEC checkout for
+development. Circuit
 characterization requires full QEC, CUDA-Q and Stim, so the target is skipped
 in decoders-only builds. Building the server does not acquire those
 dependencies. Tool-local interfaces are not new installed SDK APIs.
@@ -316,3 +318,60 @@ Actual graph construction, same-plan serial/parallel correctness, seam faults,
 sustained overlap, sampled logical accuracy, installed replay and
 cores-versus-capacity/tail-latency measurements remain runtime gates. Model and
 configuration tests do not establish those results.
+
+## Generated configuration
+
+The following abbreviated output shows the configuration for the distance-three
+example. The actual file contains the complete model, including every phase's
+sparse matrices, priors and terminal readout map; the comments below stand in
+for that content and are not a runnable replacement.
+
+```yaml
+data_artifacts:
+  memory_model:
+    dem_chunks:
+      num_rounds: 27       # 26 extraction cycles plus terminal readout
+      measurements_per_round: 8
+      # seam, connections and complete phase specifications omitted
+decoders:
+  - id: 0
+    dem_chunks: memory_model
+    task_graph:
+      nodes:
+        - id: parallel_memory
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          output: corrections
+          inner: {type: pymatching, merge_strategy: smallest_weight}
+      edges:
+        - {from: measurements, to: parallel_memory}
+        - {from: parallel_memory, to: output}
+syndrome_mapping:
+  - {id: 0}
+  - {id: 1, type: final}
+```
+
+## Exit status and troubleshooting
+
+The generator returns 0 after publishing a complete configuration, or for
+`--help` / `-h` anywhere in the command. It returns 1 for invalid arguments,
+preparation or serialization errors, or file-publication failures, with a
+diagnostic on standard error. Failures do not replace an existing destination.
+A generated configuration is not evidence that the server can execute it.
+
+- **Server reports `the 'parallel_window' pattern is not available yet`:**
+  the linked framework recognizes the configuration but does not implement
+  its runtime expansion yet. The standalone server exits with status 1.
+  Executable parallel-window support is required; changing decoder arguments
+  does not enable that runtime.
+- **`decoder is not registered in this QEC build: pymatching`:** PyMatching
+  must be enabled in the build. When its target exists, building the generator
+  also builds the plugin; run from the matching build or installation so the
+  runtime loader can discover `lib/decoder-plugins`.
+- **`configuration already exists`:** retain or move the old configuration
+  before generating another. The tool intentionally never overwrites it.
+- **Destination filesystem does not support hard links:** set
+  `CUDAQ_QEC_DECODER_CONFIG` to a configuration path on a filesystem supporting
+  hard links. The parent directory must exist. Use the same setting when
+  starting the server; failed publication removes its temporary staging file.

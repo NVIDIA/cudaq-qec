@@ -50,9 +50,7 @@ void validate_experiment_spec(const experiment_spec &spec) {
 memory_record_layout::memory_record_layout(std::uint64_t extraction_rounds,
                                            std::uint64_t regular_measurements,
                                            std::uint64_t final_measurements)
-    : extraction_rounds_(extraction_rounds),
-      regular_measurements_(regular_measurements),
-      final_measurements_(final_measurements), raw_measurements_(0) {
+    : extraction_rounds_(extraction_rounds), raw_measurements_(0) {
   validate_rounds(extraction_rounds);
   if (regular_measurements == 0 || final_measurements == 0)
     throw std::invalid_argument("memory experiment: extraction and readout "
@@ -60,40 +58,6 @@ memory_record_layout::memory_record_layout(std::uint64_t extraction_rounds,
   raw_measurements_ =
       checked_add(checked_multiply(extraction_rounds, regular_measurements),
                   final_measurements);
-}
-
-std::uint64_t
-memory_record_layout::measurement_offset(std::uint64_t round) const {
-  // Constructor validation bounds every in-range offset by the total count.
-  return round == input_rounds() ? raw_measurements_
-                                 : round * regular_measurements_;
-}
-
-measurement_range
-memory_record_layout::measurements_for_rounds(std::uint64_t first,
-                                              std::uint64_t past_last) const {
-  if (first > past_last || past_last > input_rounds())
-    throw std::out_of_range(
-        "memory experiment: raw-round range is outside the experiment");
-  return {measurement_offset(first), measurement_offset(past_last)};
-}
-
-delivery_layout
-memory_record_layout::batches(std::uint64_t extraction_rounds_per_batch) const {
-  if (extraction_rounds_per_batch == 0)
-    throw std::invalid_argument(
-        "memory experiment: extraction rounds per batch must be positive");
-  const auto regular_batches = extraction_rounds_ / extraction_rounds_per_batch;
-  const auto remaining_rounds =
-      extraction_rounds_ % extraction_rounds_per_batch;
-  // A batch larger than the shot produces no regular batch: do not multiply
-  // its unused width, which need not be representable even for a valid shot.
-  return {regular_batches,
-          regular_batches == 0
-              ? 0
-              : extraction_rounds_per_batch * regular_measurements_,
-          remaining_rounds,
-          remaining_rounds * regular_measurements_ + final_measurements_};
 }
 
 } // namespace cudaq::qec::memory_experiment

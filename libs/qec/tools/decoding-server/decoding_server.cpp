@@ -426,7 +426,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::cout << "Loaded decoder configuration: " << cfg.config_path << std::endl;
-  ::setenv("CUDAQ_QEC_DECODER_CONFIG", cfg.config_path.c_str(),
+  ::setenv(cudaq::qec::tools::decoder_config_environment,
+           cfg.config_path.c_str(),
            /*overwrite=*/1);
   // Not `type`: a task_graph entry leaves it empty and names its decoder inside
   // the block, in either of the block's two forms.

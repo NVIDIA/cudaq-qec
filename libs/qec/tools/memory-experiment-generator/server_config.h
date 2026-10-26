@@ -8,7 +8,6 @@
 #include <filesystem>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace cudaq::qec::memory_experiment {
@@ -47,14 +46,6 @@ void validate_server_config_options(const server_config_options &options);
 std::string emit_server_config(const prepared_model &model,
                                const server_config_options &options,
                                std::uint64_t logical_qubits);
-
-/// Check the emitted topology, independent patch identities and shared model
-/// through the public parser, with the expected per-graph worker policy.
-/// Does not construct or execute the task graph.
-void validate_server_config(
-    std::string_view yaml, const dem_chunks_spec &expected_model,
-    std::uint64_t logical_qubits,
-    std::optional<std::uint64_t> workers_per_graph = {});
 
 /// Validate the model and serialize before publishing a configuration file.
 /// Stage in the destination directory, then publish the complete file without

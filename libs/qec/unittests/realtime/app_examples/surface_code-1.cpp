@@ -36,7 +36,6 @@
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/experiments.h"
 #include "cudaq/qec/extended_dem.h"
-#include "cudaq/qec/memory_dem_chunks.h"
 #include "cudaq/qec/noise_model.h"
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/realtime/decoding.h"

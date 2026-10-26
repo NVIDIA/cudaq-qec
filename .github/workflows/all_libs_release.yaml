@@ -146,13 +146,14 @@ jobs:
 
       - name: Save build artifacts
         run: |
-          # The decoding server is not shipped in the official release, so
-          # remove its executables (and example configs) as well as the
-          # loadable service-plugin library itself from the install prefix
+          # The decoding server and its configuration generator are not shipped
+          # in the official release. Remove their executables, server example
+          # configs, and loadable service-plugin library from the install prefix
           # and the install manifest before zipping. Without removing the
           # library, the server remained activatable via
           # CUDAQ_DEVICE_CALL_CHANNEL even with the launcher binary gone.
           for f in /usr/local/cudaq/bin/decoding_server* \
+                   /usr/local/cudaq/bin/memory-experiment-generator \
                    /usr/local/cudaq/lib/libcudaq-qec-realtime-decoding-server-cqr.so; do
             [ -e "$f" ] || continue
             rm -f "$f"
@@ -174,7 +175,10 @@ jobs:
       # ========================================================================
       #
       - name: Install generator CLI test requirements
-        run: python3 -m pip install --break-system-packages -r libs/qec/unittests/memory-experiment-generator/requirements.txt
+        run: |
+          cli_python=$(ctest --test-dir "${{ steps.build.outputs.build-dir }}" --show-only=json-v1 |
+            jq -er '.tests[] | select(.name == "memory_experiment_generator_cli") | .command[0]')
+          "$cli_python" -m pip install --break-system-packages -r libs/qec/unittests/memory-experiment-generator/requirements.txt
 
       - name: Run tests
         run: cmake --build ${{ steps.build.outputs.build-dir }} --target run_tests

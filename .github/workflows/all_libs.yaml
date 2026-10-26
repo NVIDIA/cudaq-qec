@@ -103,7 +103,10 @@ jobs:
       # ========================================================================
       #
       - name: Install generator CLI test requirements
-        run: python3 -m pip install --break-system-packages -r libs/qec/unittests/memory-experiment-generator/requirements.txt
+        run: |
+          cli_python=$(ctest --test-dir "${{ steps.build.outputs.build-dir }}" --show-only=json-v1 |
+            jq -er '.tests[] | select(.name == "memory_experiment_generator_cli") | .command[0]')
+          "$cli_python" -m pip install --break-system-packages -r libs/qec/unittests/memory-experiment-generator/requirements.txt
 
       - name: Run tests
         env:

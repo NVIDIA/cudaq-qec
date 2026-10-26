@@ -56,8 +56,6 @@ void compare_with_full_circuit(std::uint64_t distance, memory_basis basis,
       {"surface_code", distance, extraction_rounds, 1, basis}};
   const auto prepared = prepare_model(request);
   ASSERT_EQ(prepared.chunks.num_rounds, extraction_rounds + 1);
-  ASSERT_EQ(prepared.characterization_rounds, representative_extraction_rounds);
-  ASSERT_EQ(prepared.validation_rounds, validation_extraction_rounds);
 
   auto surface = get_code(
       "surface_code", cudaqx::heterogeneous_map{
@@ -128,8 +126,8 @@ TEST(MemoryExperimentProvider, BoundedModelMatchesCompleteXMemoryCircuit) {
   compare_with_full_circuit(3, memory_basis::x);
 }
 
-template <typename Window>
-void check_pymatching_window(const Window &window, const std::string &policy) {
+void check_pymatching_window(const decoding_window &window,
+                             const std::string &policy) {
   const auto parity = [](const auto &rows,
                          const std::vector<std::uint8_t> &input) {
     std::vector<std::uint8_t> result(rows.size(), 0);
@@ -149,8 +147,6 @@ void check_pymatching_window(const Window &window, const std::string &policy) {
     const auto check = [&](const std::vector<std::uint8_t> &detectors) {
       const auto &solution = solve(detectors);
       ASSERT_TRUE(solution.converged);
-      if constexpr (requires { solution.satisfied; })
-        EXPECT_TRUE(solution.satisfied);
       ASSERT_EQ(solution.estimate.size(), o.num_cols());
       const auto &estimate = solution.estimate;
       const std::vector<std::uint8_t> error_frame(
@@ -192,63 +188,40 @@ void check_pymatching_window(const Window &window, const std::string &policy) {
     check(detectors);
   };
   const cudaqx::heterogeneous_map parameters{{"merge_strategy", policy}};
-  // Exercise the canonical sparse workload when the framework provides it;
-  // keep the same assertions on the earlier experimental window API.
-  if constexpr (requires {
-                  window.model.h;
-                  make_window_workspace(window);
-                }) {
-    auto matching = make_window_decoder(window, "pymatching", parameters);
-    ASSERT_NE(matching, nullptr);
-    ASSERT_EQ(matching->get_result_type(), decode_result_type::errors);
-    auto workspace = make_window_workspace(window);
-    exercise(window.model.h, window.model.o,
-             [&](const auto &detectors) -> const auto & {
-               solve_window(window, matching.get(), detectors, workspace);
-               return workspace.solution;
-             });
-  } else {
-    const auto forms = kernel_forms(window);
-    ASSERT_GE(forms.priors.size(), forms.h.num_cols());
-    const std::vector<double> priors(forms.priors.begin(),
-                                     forms.priors.begin() + forms.h.num_cols());
-    auto matching = decoder::get(
-        "pymatching", decoder_init(forms.h, std::nullopt, priors),
-        decoder_output_request{decode_result_type::errors}, parameters);
-    ASSERT_EQ(matching->get_result_type(), decode_result_type::errors);
-    struct solution_type {
-      bool converged = false;
-      std::vector<std::uint8_t> estimate;
-      window_outputs outputs;
-    };
-    exercise(
-        forms.h, sparse_binary_matrix(window.model.observables_flips_matrix),
-        [&](const auto &detectors) {
-          const std::vector<float_t> syndrome(detectors.begin(),
-                                              detectors.end());
-          const auto decoded = matching->decode(syndrome);
-          solution_type solution;
-          solution.converged = decoded.converged;
-          EXPECT_EQ(decoded.result.size(), forms.h.num_cols());
-          if (decoded.result.size() != forms.h.num_cols())
-            return solution;
-          solution.estimate.assign(window.model.num_error_mechanisms(), 0);
-          for (std::size_t column = 0; column < decoded.result.size();
-               ++column) {
-            EXPECT_TRUE(std::isfinite(decoded.result[column]));
-            EXPECT_TRUE(decoded.result[column] == 0 ||
-                        decoded.result[column] == 1);
-            if (!std::isfinite(decoded.result[column]) ||
-                (decoded.result[column] != 0 && decoded.result[column] != 1))
-              return solution;
-            solution.estimate[column] =
-                static_cast<std::uint8_t>(decoded.result[column]);
-          }
-          solution.outputs =
-              commit_window(window, detectors, solution.estimate);
-          return solution;
-        });
-  }
+  const auto forms = kernel_forms(window);
+  ASSERT_GE(forms.priors.size(), forms.h.num_cols());
+  const std::vector<double> priors(forms.priors.begin(),
+                                   forms.priors.begin() + forms.h.num_cols());
+  auto matching = decoder::get(
+      "pymatching", decoder_init(forms.h, std::nullopt, priors),
+      decoder_output_request{decode_result_type::errors}, parameters);
+  ASSERT_EQ(matching->get_result_type(), decode_result_type::errors);
+  struct solution_type {
+    bool converged = false;
+    std::vector<std::uint8_t> estimate;
+    window_outputs outputs;
+  };
+  exercise(forms.h, forms.o, [&](const auto &detectors) {
+    const std::vector<float_t> syndrome(detectors.begin(), detectors.end());
+    const auto decoded = matching->decode(syndrome);
+    solution_type solution;
+    solution.converged = decoded.converged;
+    EXPECT_EQ(decoded.result.size(), forms.h.num_cols());
+    if (decoded.result.size() != forms.h.num_cols())
+      return solution;
+    solution.estimate.assign(window.model.num_error_mechanisms(), 0);
+    for (std::size_t column = 0; column < decoded.result.size(); ++column) {
+      EXPECT_TRUE(std::isfinite(decoded.result[column]));
+      EXPECT_TRUE(decoded.result[column] == 0 || decoded.result[column] == 1);
+      if (!std::isfinite(decoded.result[column]) ||
+          (decoded.result[column] != 0 && decoded.result[column] != 1))
+        return solution;
+      solution.estimate[column] =
+          static_cast<std::uint8_t>(decoded.result[column]);
+    }
+    solution.outputs = commit_window(window, detectors, solution.estimate);
+    return solution;
+  });
 }
 
 TEST(MemoryExperimentProvider, PyMatchingFaultFramesCommitReferenceWindows) {
@@ -315,8 +288,6 @@ TEST(MemoryExperimentProvider, RequestedDurationAndPatchCountDoNotGrowModel) {
     EXPECT_EQ(large.chunks.measurements_per_round,
               small.chunks.measurements_per_round);
     EXPECT_EQ(large.final_m2o, small.final_m2o);
-    EXPECT_EQ(large.characterization_rounds, small.characterization_rounds);
-    EXPECT_EQ(large.validation_rounds, small.validation_rounds);
     EXPECT_EQ(large.physical_qubits, small.physical_qubits);
   }
 }
@@ -337,9 +308,23 @@ TEST(MemoryExperimentProvider, InvalidNoiseAndGeometryFailBeforeCircuitWork) {
   EXPECT_THROW(prepare_model(request), std::overflow_error);
 }
 
-TEST(MemoryExperimentProvider, TooShortDurationIsRejectedWithoutRounding) {
-  const preparation_request request{{"surface_code", 3, 1, 1, memory_basis::z}};
-  EXPECT_THROW(prepare_model(request), std::invalid_argument);
+TEST(MemoryExperimentProvider, MinimumDurationIsEnforcedWithoutRounding) {
+  constexpr std::uint64_t minimum_extraction_rounds = 4;
+  for (const auto basis : {memory_basis::x, memory_basis::z}) {
+    SCOPED_TRACE(basis == memory_basis::x ? "X" : "Z");
+    preparation_request request{{"surface_code", 3, 1, 1, basis}};
+    for (const auto rounds :
+         {std::uint64_t{1}, minimum_extraction_rounds - 1}) {
+      SCOPED_TRACE(rounds);
+      request.experiment.rounds = rounds;
+      EXPECT_THROW(prepare_model(request), std::invalid_argument);
+    }
+    request.experiment.rounds = minimum_extraction_rounds;
+    const auto model = prepare_model(request);
+    EXPECT_EQ(model.chunks.num_rounds, minimum_extraction_rounds + 1);
+    EXPECT_EQ(model.chunks.minimum_rounds(), minimum_extraction_rounds + 1);
+    EXPECT_NO_THROW(validate_prepared_model(request, model));
+  }
 }
 
 TEST(MemoryExperimentProvider, PreparedGeometryIsCheckedAgainstCode) {
@@ -409,43 +394,6 @@ TEST(MemoryExperimentProvider, PublicReadoutAgreesWithTerminalMeasurements) {
     other.spec.m2o_sparse = expected;
     EXPECT_THROW(validate_final_readout(chunks, model.final_m2o),
                  std::invalid_argument);
-  }
-}
-
-TEST(MemoryExperimentProvider, AcceptsSaneBoundedCharacterizationProvenance) {
-  const preparation_request request{
-      {"surface_code", 3, 26, 1, memory_basis::z}};
-  const auto original = prepare_model(request);
-  for (const auto &[characterization, validation] :
-       std::vector<std::pair<std::uint64_t, std::uint64_t>>{{16, 17},
-                                                            {14, 19}}) {
-    auto model = original;
-    model.characterization_rounds = characterization;
-    model.validation_rounds = validation;
-    EXPECT_NO_THROW(validate_prepared_model(request, model));
-  }
-}
-
-TEST(MemoryExperimentProvider, RejectsDegenerateCharacterizationProvenance) {
-  const preparation_request request{
-      {"surface_code", 3, 26, 1, memory_basis::z}};
-  const auto original = prepare_model(request);
-  const auto too_short = original.chunks.minimum_rounds() - 1;
-  const auto maximum = std::numeric_limits<std::uint64_t>::max();
-  for (const auto &[characterization, validation] :
-       std::vector<std::pair<std::uint64_t, std::uint64_t>>{
-           {0, 13},
-           {12, 0},
-           {12, 12},
-           {too_short, 13},
-           {12, too_short},
-           {maximum, 13},
-           {12, maximum},
-           {maximum - 1, 13}}) {
-    auto model = original;
-    model.characterization_rounds = characterization;
-    model.validation_rounds = validation;
-    EXPECT_THROW(validate_prepared_model(request, model), std::exception);
   }
 }
 

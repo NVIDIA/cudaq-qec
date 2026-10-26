@@ -4,6 +4,7 @@
  */
 
 #include "experiment_spec.h"
+#include "record_layout_test_helpers.h"
 #include <array>
 #include <gtest/gtest.h>
 #include <limits>
@@ -51,7 +52,7 @@ TEST(MemoryExperimentSpec, RejectsUnsupportedExperimentInputs) {
 }
 
 TEST(MemoryRecordLayout, ReferenceLayoutPreservesTerminalReadoutAndLookback) {
-  const memory_record_layout layout(26, 8, 9);
+  const replay_record_layout layout(26, 8, 9);
   EXPECT_EQ(layout.extraction_rounds(), 26);
   EXPECT_EQ(layout.input_rounds(), 27);
   EXPECT_EQ(layout.raw_measurements(), 217);
@@ -72,7 +73,7 @@ TEST(MemoryRecordLayout, ReferenceLayoutPreservesTerminalReadoutAndLookback) {
 }
 
 TEST(MemoryRecordLayout, HalfOpenRangesIncludeEmptyAndReadoutOnly) {
-  const memory_record_layout layout(26, 8, 9);
+  const replay_record_layout layout(26, 8, 9);
   EXPECT_EQ(layout.measurements_for_rounds(0, 27).size(), 217);
   EXPECT_EQ(layout.measurements_for_rounds(0, 26).size(), 208);
   const auto final = layout.measurements_for_rounds(26, 27);
@@ -98,12 +99,12 @@ TEST(MemoryRecordLayout, RejectsZeroCountsAndOverflowBeforeUsingOffsets) {
   EXPECT_THROW(memory_record_layout(max_count / 2 + 1, 2, 1),
                std::overflow_error);
   EXPECT_THROW(memory_record_layout(max_count / 2, 2, 2), std::overflow_error);
-  const memory_record_layout layout(26, 8, 9);
+  const replay_record_layout layout(26, 8, 9);
   EXPECT_THROW(layout.batches(0), std::invalid_argument);
 }
 
 TEST(MemoryRecordLayout, ExactUint64BoundaryRemainsRepresentable) {
-  const memory_record_layout layout(max_count / 2, 2, 1);
+  const replay_record_layout layout(max_count / 2, 2, 1);
   EXPECT_EQ(layout.raw_measurements(), max_count);
   EXPECT_EQ(layout.measurements_for_rounds(0, layout.input_rounds()).end,
             max_count);
@@ -118,7 +119,7 @@ TEST(MemoryRecordLayout, ExactUint64BoundaryRemainsRepresentable) {
 }
 
 TEST(MemoryRecordLayout, MaximumInputRoundCountHasValidEndpoint) {
-  const memory_record_layout layout(max_count - 1, 1, 1);
+  const replay_record_layout layout(max_count - 1, 1, 1);
   EXPECT_EQ(layout.input_rounds(), max_count);
   EXPECT_EQ(layout.raw_measurements(), max_count);
   EXPECT_EQ(layout.measurements_for_rounds(max_count, max_count).begin,
@@ -127,7 +128,7 @@ TEST(MemoryRecordLayout, MaximumInputRoundCountHasValidEndpoint) {
 }
 
 TEST(MemoryRecordLayout, AlignedBatchesKeepReadoutInItsOwnTerminalBatch) {
-  const memory_record_layout layout(24, 8, 9);
+  const replay_record_layout layout(24, 8, 9);
   const auto delivery = layout.batches(3);
   EXPECT_EQ(delivery.regular_batches, 8);
   EXPECT_EQ(delivery.regular_batch_measurements, 24);
@@ -136,7 +137,7 @@ TEST(MemoryRecordLayout, AlignedBatchesKeepReadoutInItsOwnTerminalBatch) {
 }
 
 TEST(MemoryRecordLayout, OversizedBatchDoesNotMultiplyAnUnusedWidth) {
-  const memory_record_layout layout(26, 8, 9);
+  const replay_record_layout layout(26, 8, 9);
   for (auto batch : {std::uint64_t{27}, max_count}) {
     const auto delivery = layout.batches(batch);
     EXPECT_EQ(delivery.regular_batches, 0);
@@ -148,7 +149,7 @@ TEST(MemoryRecordLayout, OversizedBatchDoesNotMultiplyAnUnusedWidth) {
 
 TEST(MemoryRecordLayout, HugeHorizonNeedsNoPerRoundMaterialization) {
   const auto rounds = max_count / 8 - 1;
-  const memory_record_layout layout(rounds, 8, 9);
+  const replay_record_layout layout(rounds, 8, 9);
   EXPECT_EQ(layout.raw_measurements(), rounds * 8 + 9);
   const auto delivery = layout.batches(max_count);
   EXPECT_EQ(delivery.regular_batches, 0);
@@ -160,7 +161,7 @@ TEST(MemoryRecordLayout, HugeHorizonNeedsNoPerRoundMaterialization) {
 TEST(MemoryRecordLayout, BatchingConservesRecordsWithNarrowAndWideReadouts) {
   for (std::uint64_t rounds : {1, 26, 99, 1000})
     for (auto widths : {std::array<std::uint64_t, 2>{8, 9}, {24, 9}, {1, 32}}) {
-      const memory_record_layout layout(rounds, widths[0], widths[1]);
+      const replay_record_layout layout(rounds, widths[0], widths[1]);
       for (std::uint64_t batch : {1, 2, 3, 5, 1001}) {
         const auto delivery = layout.batches(batch);
         EXPECT_EQ(delivery.regular_batches * batch +

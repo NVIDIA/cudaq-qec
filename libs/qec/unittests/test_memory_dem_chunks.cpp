@@ -5,7 +5,6 @@
 
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/experiments.h"
-#include "cudaq/qec/memory_dem_chunks.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>

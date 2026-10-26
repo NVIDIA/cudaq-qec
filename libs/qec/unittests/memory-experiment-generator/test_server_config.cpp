@@ -56,31 +56,6 @@ void expect_worker_policy(const task_graph_options &options,
   EXPECT_EQ(options, expected);
 }
 
-void expect_worker_policy_tampering_rejected(config::multi_decoder_config value,
-                                             const dem_chunks_spec &model,
-                                             std::uint64_t workers) {
-  auto &options = value.decoders.back().task_graph->options;
-  const auto expected = options;
-  const auto reject = [&] {
-    EXPECT_THROW(validate_server_config(value.to_yaml_str(), model,
-                                        value.decoders.size(), workers),
-                 std::runtime_error);
-    options = expected;
-  };
-  options.async_num_workers.reset();
-  reject();
-  options.async_num_workers = static_cast<std::size_t>(workers + 1);
-  reject();
-  options.async_streaming = false;
-  reject();
-  options.async_queue_capacity = expected.async_queue_capacity == 1 ? 2 : 1;
-  reject();
-  options.async_worker_cpus.push_back(0);
-  reject();
-  options.async_coordinator_cpu = expected.async_coordinator_cpu == 0 ? 1 : 0;
-  reject();
-}
-
 // Only the parameter schema is replaced, for a real registered decoder. The
 // test never constructs it and never registers a stand-in pattern or executor.
 struct scoped_parameter_schema {
@@ -187,7 +162,6 @@ TEST(MemoryExperimentServerConfig,
                           "max_in_flight=4",
                           "verify_residual=report"};
   const auto yaml = emit_server_config(model, options, 2);
-  EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 2, 2));
   const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
   ASSERT_EQ(parsed.decoders.size(), 2);
   for (const auto &decoder : parsed.decoders) {
@@ -208,14 +182,6 @@ TEST(MemoryExperimentServerConfig,
     EXPECT_EQ(parameters.get<std::size_t>("max_in_flight"), 4);
     EXPECT_EQ(parameters.get<std::string>("verify_residual"), "report");
   }
-  auto different_patch = parsed;
-  different_patch.decoders.back()
-      .task_graph->nodes.front()
-      .node_params.map()
-      .insert("max_in_flight", std::size_t{5});
-  EXPECT_THROW(
-      validate_server_config(different_patch.to_yaml_str(), model.chunks, 2, 2),
-      std::runtime_error);
 }
 
 TEST(MemoryExperimentServerConfig, PatternSchemaRejectsInvalidArguments) {
@@ -274,7 +240,6 @@ TEST(MemoryExperimentServerConfig, PatternSchemaAcceptsItsOtherValidChoices) {
                             "conflicting_parallel=reject",
                             "verify_residual=" + residual};
     const auto yaml = emit_server_config(model, options, 1);
-    EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 1));
     const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
     const auto &parameters =
         parsed.decoders.front().task_graph->nodes.front().node_params.map();
@@ -298,7 +263,6 @@ TEST(MemoryExperimentServerConfig, PatternSchemaExtensionsNeedNoToolWhitelist) {
   {
     const scoped_pattern_schema_extension schema;
     const auto yaml = emit_server_config(model, options, 2);
-    EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 2));
     const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
     ASSERT_EQ(parsed.decoders.size(), 2);
     for (const auto &decoder : parsed.decoders)
@@ -399,9 +363,6 @@ TEST(MemoryExperimentServerConfig,
   const auto model = prepare_model(request);
   const auto options = reference_options();
   const auto yaml = emit_server_config(model, options, 4);
-  EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 4));
-  EXPECT_THROW(validate_server_config(yaml, model.chunks, 1),
-               std::runtime_error);
   const auto value = config::multi_decoder_config::from_yaml_str(yaml);
   ASSERT_EQ(value.syndrome_mapping.size(), 2);
   EXPECT_EQ(value.syndrome_mapping[0].id, 0);
@@ -437,9 +398,6 @@ TEST(MemoryExperimentServerConfig,
     SCOPED_TRACE(workers);
     options.workers_per_graph = workers;
     const auto yaml = emit_server_config(model, options, 3);
-    EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 3, workers));
-    EXPECT_THROW(validate_server_config(yaml, model.chunks, 3),
-                 std::runtime_error);
     const auto value = config::multi_decoder_config::from_yaml_str(yaml);
     ASSERT_EQ(value.decoders.size(), 3);
     for (const auto &decoder : value.decoders) {
@@ -450,7 +408,6 @@ TEST(MemoryExperimentServerConfig,
       EXPECT_EQ(decoder.task_graph->edges,
                 baseline.decoders.front().task_graph->edges);
     }
-    expect_worker_policy_tampering_rejected(value, model.chunks, workers);
   }
 }
 
@@ -485,7 +442,10 @@ TEST(MemoryExperimentServerConfig, PublishesOnlyServerYamlWithoutOverwriting) {
   EXPECT_EQ(files, (std::vector<std::string>{"custom server.yaml"}));
   std::ifstream input(output);
   const std::string yaml((std::istreambuf_iterator<char>(input)), {});
-  EXPECT_NO_THROW(validate_server_config(yaml, model.chunks, 1));
+  const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(parsed.decoders.size(), 1);
+  ASSERT_TRUE(parsed.decoders.front().dem_chunks);
+  EXPECT_EQ(*parsed.decoders.front().dem_chunks, model.chunks);
   EXPECT_THROW(write_server_config(request, model, options, output),
                std::exception);
   std::ifstream unchanged(output);

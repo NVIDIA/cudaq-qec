@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "cudaq/qec/memory_dem_chunks.h"
+#include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/experiments.h"
 #include "cudaq/qec/pcm_utils.h"
 #include <algorithm>

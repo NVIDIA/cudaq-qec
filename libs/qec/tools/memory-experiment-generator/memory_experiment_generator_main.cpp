@@ -44,12 +44,16 @@ void usage() {
       << "Usage: memory-experiment-generator --distance=N --rounds=T "
          "--basis=X|Z\n"
          "       --decoder=NAME [--logical-qubits=N] [--error-rate=P]\n"
+         "       [--code=surface_code]\n"
          "       [--commit-rounds=N] [--buffer-rounds=N]\n"
          "       [--gap-rounds=N] [--pattern-arg=PATH=VALUE ...]\n"
          "       [--decoder-arg=PATH=VALUE ...]\n"
          "       [--workers-per-graph=N]\n"
          "\nGenerates server.yaml for a Surface Code memory experiment.\n"
-         "--rounds counts extraction cycles, excluding terminal readout.\n"
+         "--distance must be odd and at least 3.\n"
+         "--rounds must be at least 4 extraction cycles, excluding readout.\n"
+         "Logical-qubit, geometry and worker counts must be positive.\n"
+         "--error-rate must be finite and strictly between 0 and 1.\n"
          "Multiple logical qubits represent independent patches.\n"
          "Defaults: code=surface_code, logical-qubits=1, CNOT "
          "depolarization=0.001.\n"
@@ -76,10 +80,12 @@ void usage() {
 int main(int argc, char **argv) {
   namespace generator = cudaq::qec::memory_experiment;
   try {
-    if (argc == 2 && std::string_view(argv[1]) == "--help") {
-      usage();
-      return 0;
-    }
+    for (int i = 1; i < argc; ++i)
+      if (const std::string_view argument(argv[i]);
+          argument == "--help" || argument == "-h") {
+        usage();
+        return 0;
+      }
     std::map<std::string, std::string> values;
     std::vector<std::string> decoder_args;
     std::vector<std::string> pattern_args;
@@ -171,7 +177,7 @@ int main(int argc, char **argv) {
                                   parent.string());
     const auto model = generator::prepare_model(request);
     generator::write_server_config(request, model, options, output);
-    std::cout << "Generated server configuration: " << output << '\n';
+    std::cout << "Generated server configuration: " << output.string() << '\n';
     if (total_workers)
       std::cout << "Workers per graph: " << *options.workers_per_graph
                 << "; graphs: " << spec.logical_qubits

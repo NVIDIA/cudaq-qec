@@ -55,6 +55,41 @@ However they are split up, the decoder will not begin decoding until all `numMea
 Thus it is the final `enqueue_syndromes` call which kicks off the decoder, and is an asynchronous function.
 Additional quantum gates can be applied, and only when `get_corrections` is called does the kernel sync and wait for the corrections.
 
+Memory experiment configuration generator
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``memory-experiment-generator`` prepares the model and writes one ``server.yaml``
+for a finite Surface Code memory experiment using the public ``parallel_window``
+configuration. It supports X/Z bases and independent logical patches. For example,
+in a full QEC build with CUDA-Q, Stim and PyMatching:
+
+.. code-block:: bash
+
+   cmake --build build --target memory-experiment-generator
+   build/bin/memory-experiment-generator \
+     --distance=3 --rounds=26 --basis=Z --decoder=pymatching
+
+Rounds count extraction cycles, excluding terminal data-qubit readout; at least
+four cycles and an odd distance of at least three are required. The generated YAML
+embeds a shared DEM-chunk model, one graph per independent patch and BULK/FINAL
+syndrome mappings. Output defaults to corrections;
+``--pattern-arg=output=corrected_logical`` requests the corrected logical outcome.
+``--help`` lists geometry, decoder, pattern and per-graph worker options.
+
+The generator and standalone server use ``server.yaml`` in their working
+directory unless ``CUDAQ_QEC_DECODER_CONFIG`` selects another path. Generation
+never overwrites an existing destination. Exit status is zero for successful
+generation or help and one for an error.
+
+.. important::
+
+   Configuration generation is available before executable parallel-window
+   support. A server without that runtime reports
+   ``the 'parallel_window' pattern is not available yet`` and exits with status
+   one. Official release archives currently omit both the standalone server and
+   generator. Build from a full QEC checkout for development; parsing the YAML
+   does not establish end-to-end decoding or performance.
+
 See Also
 ^^^^^^^^
 

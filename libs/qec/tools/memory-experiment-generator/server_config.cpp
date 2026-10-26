@@ -4,6 +4,7 @@
  */
 
 #include "server_config.h"
+#include "../common/decoding_server_config.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -17,6 +18,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include <map>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -28,6 +30,7 @@ constexpr auto pattern_name = "parallel_window";
 constexpr auto model_name = "memory_model";
 constexpr auto node_name = "parallel_memory";
 constexpr auto corrections_output = "corrections";
+constexpr auto staging_suffix_model = "%%%%%%%%%%%%%%%%";
 constexpr std::uint64_t bulk_mapping_id = 0;
 constexpr std::uint64_t final_mapping_id = 1;
 
@@ -402,19 +405,6 @@ std::string emit_server_config(const prepared_model &model,
   return yaml;
 }
 
-void validate_server_config(std::string_view yaml,
-                            const dem_chunks_spec &expected_model,
-                            std::uint64_t logical_qubits,
-                            std::optional<std::uint64_t> workers_per_graph) {
-  (void)parallel_window_schema();
-  server_config_options options;
-  options.workers_per_graph = workers_per_graph;
-  (void)configured_worker_total(options, logical_qubits);
-  const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
-  validate_configuration(parsed, expected_model, logical_qubits,
-                         workers_per_graph);
-}
-
 void write_server_config(const preparation_request &request,
                          const prepared_model &model,
                          const server_config_options &options,
@@ -432,7 +422,7 @@ void write_server_config(const preparation_request &request,
   std::error_code stage_error;
   for (unsigned attempt = 0; attempt < max_staging_attempts; ++attempt) {
     llvm::SmallString<32> suffix;
-    llvm::sys::fs::createUniquePath("%%%%%%%%%%%%%%%%", suffix, false);
+    llvm::sys::fs::createUniquePath(staging_suffix_model, suffix, false);
     temporary = config_file.string() + "." + suffix.str().str();
     stage_error = llvm::sys::fs::openFileForWrite(temporary, descriptor,
                                                   llvm::sys::fs::CD_CreateNew);
@@ -453,7 +443,20 @@ void write_server_config(const preparation_request &request,
     }
     // Unlike rename(), a hard-link publication is atomic and refuses an
     // existing destination, including symlinks and concurrent writers.
-    std::filesystem::create_hard_link(temporary, config_file);
+    std::error_code publication_error;
+    std::filesystem::create_hard_link(temporary, config_file,
+                                      publication_error);
+    if (publication_error == std::errc::operation_not_permitted ||
+        publication_error == std::errc::operation_not_supported ||
+        publication_error == std::errc::function_not_supported)
+      throw std::runtime_error(
+          "destination filesystem cannot publish using hard links; set " +
+          std::string(cudaq::qec::tools::decoder_config_environment) +
+          " to a configuration path on a filesystem supporting hard links");
+    if (publication_error)
+      throw std::filesystem::filesystem_error("cannot publish configuration",
+                                              temporary, config_file,
+                                              publication_error);
   } catch (const std::exception &error) {
     throw std::runtime_error("cannot write server configuration: " +
                              config_file.string() + ": " + error.what());

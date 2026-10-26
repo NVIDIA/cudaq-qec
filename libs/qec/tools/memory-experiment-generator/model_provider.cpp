@@ -8,7 +8,6 @@
 #include "cudaq/qec/decoder_init.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/experiments.h"
-#include "cudaq/qec/memory_dem_chunks.h"
 #include "cudaq/qec/noise_model.h"
 #include <algorithm>
 #include <cmath>
@@ -21,13 +20,22 @@
 namespace cudaq::qec::memory_experiment {
 namespace {
 
+// Fixed characterization depths do not grow with the requested shot duration.
+// Twelve cycles leave a margin beyond the Surface Code prefix and suffix for
+// repeated bulk visits; the adjacent odd depth also checks parity independence.
+constexpr std::uint64_t representative_extraction_rounds = 12;
+constexpr std::uint64_t validation_extraction_rounds =
+    representative_extraction_rounds + 1;
+constexpr std::uint64_t minimum_closed_phase_rounds = 2;
+
 phase_id terminal_phase(const dem_chunks_spec &chunks) {
   // Phase declarations may contain unused entries. Resolve the endpoint of
   // the actual connection chain, never the first disconnected declaration.
   // The public chain query needs a closed horizon, so use its minimum rather
   // than allocating an entry for every round in the requested experiment.
   auto bounded = chunks;
-  bounded.num_rounds = std::max<std::uint64_t>(2, chunks.minimum_rounds());
+  bounded.num_rounds =
+      std::max(minimum_closed_phase_rounds, chunks.minimum_rounds());
   return bounded.phase_sequence().back();
 }
 
@@ -112,7 +120,6 @@ prepared_model characterize(const code &surface, operation prep,
   result.final_measurements = surface.get_num_data_qubits();
   result.physical_qubits =
       surface.get_num_ancilla_qubits() + result.final_measurements;
-  result.characterization_rounds = rounds;
   result.chunks = memory_dem_chunks_from_decoder_inputs(
       inputs, rounds, result.regular_measurements, result.final_measurements);
   const auto final_begin = rounds * result.regular_measurements;
@@ -207,8 +214,9 @@ void validate_prepared_model(const preparation_request &request,
     throw std::invalid_argument(
         "memory experiment: raw-logical map disagrees with code and basis");
   for (const auto &phase : model.chunks.phases)
-    if (std::count(phase.spec.O_sparse.begin(), phase.spec.O_sparse.end(),
-                   std::int64_t{-1}) != readout_support.size())
+    if (static_cast<std::size_t>(
+            std::count(phase.spec.O_sparse.begin(), phase.spec.O_sparse.end(),
+                       std::int64_t{-1})) != readout_support.size())
       throw std::invalid_argument(
           "memory experiment: prepared phase fault-observable count "
           "disagrees with raw-logical count");
@@ -222,7 +230,8 @@ void validate_prepared_model(const preparation_request &request,
   // In particular, phase validation alone does not bound D rows or indices.
   (void)model.chunks.repeating_rounds();
   auto bounded = model.chunks;
-  const auto minimum = std::max<std::uint64_t>(2, bounded.minimum_rounds());
+  const auto minimum =
+      std::max(minimum_closed_phase_rounds, bounded.minimum_rounds());
   if (minimum == std::numeric_limits<std::uint64_t>::max())
     throw std::overflow_error(
         "memory experiment: representative phase chain exceeds round range");
@@ -236,9 +245,6 @@ void validate_prepared_model(const preparation_request &request,
           "the raw record layout");
   (void)decoder_init::from_dem_chunks(bounded);
   (void)dem_chunks_to_d_sparse(bounded);
-  validate_characterization_provenance(model.chunks, regular, data,
-                                       model.characterization_rounds,
-                                       model.validation_rounds);
   validate_final_readout(model.chunks, model.final_m2o);
 }
 
@@ -259,26 +265,6 @@ void validate_final_readout(
                                   "valid on the terminal phase");
     }
   }
-}
-
-void validate_characterization_provenance(const dem_chunks_spec &chunks,
-                                          std::uint64_t regular_measurements,
-                                          std::uint64_t final_measurements,
-                                          std::uint64_t characterization_rounds,
-                                          std::uint64_t validation_rounds) {
-  // minimum_rounds includes one bulk visit and the terminal readout. A
-  // characterization with that many extraction cycles adds a second bulk
-  // visit without tying a schema version to the producer's chosen depths.
-  const auto minimum_extraction_rounds = chunks.minimum_rounds();
-  if (characterization_rounds < minimum_extraction_rounds ||
-      validation_rounds < minimum_extraction_rounds ||
-      characterization_rounds == validation_rounds)
-    throw std::invalid_argument(
-        "memory experiment: characterization depths must be distinct and "
-        "cover prefix, repeated bulk and suffix");
-  for (const auto rounds : {characterization_rounds, validation_rounds})
-    (void)memory_record_layout(rounds, regular_measurements,
-                               final_measurements);
 }
 
 prepared_model prepare_model(const preparation_request &request) {
@@ -327,7 +313,6 @@ prepared_model prepare_model(const preparation_request &request) {
   // this topology check is bounded even when the requested duration is huge.
   (void)representative.chunks.repeating_rounds();
   representative.preparation = request;
-  representative.validation_rounds = verification.characterization_rounds;
   return representative;
 }
 

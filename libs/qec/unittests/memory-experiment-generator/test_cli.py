@@ -17,10 +17,13 @@ try:
     import yaml
 except ImportError:
     requirements = Path(__file__).with_name("requirements.txt")
-    print("SKIP: PyYAML is required only for the generator's tests. Install "
-          "the test dependencies with: "
-          f"{sys.executable} -m pip install -r {requirements}")
-    raise SystemExit(77)
+    in_ci = os.environ.get("CI", "").lower() not in ("", "0", "false")
+    prefix = "ERROR" if in_ci else "SKIP"
+    print(
+        f"{prefix}: PyYAML is required only for the generator's tests. Install "
+        "the test dependencies with: "
+        f"{sys.executable} -m pip install -r {requirements}")
+    raise SystemExit(1 if in_ci else 77)
 
 GENERATOR = None
 DECODING_SERVER = None
@@ -109,10 +112,12 @@ class GeneratorCliTest(unittest.TestCase):
         output = Path(config_path) if config_path else Path("server.yaml")
         if not output.is_absolute():
             output = working / output
-        self.invoke(*generation_options(**overrides),
-                    *extra,
-                    cwd=working,
-                    config_path=config_path)
+        result = self.invoke(*generation_options(**overrides),
+                             *extra,
+                             cwd=working,
+                             config_path=config_path)
+        self.assertIn(f"Generated server configuration: {output}",
+                      result.stdout.splitlines())
         expected = {output.name} if output.parent == working else set()
         self.assertEqual({path.name for path in working.iterdir()}, expected)
         document = yaml.safe_load(output.read_text())
@@ -182,17 +187,24 @@ class GeneratorCliTest(unittest.TestCase):
         return model
 
     def test_help_lists_inputs_without_an_output_or_config_flag(self):
-        result = self.invoke("--help")
-        for option in ("--distance", "--rounds", "--basis", "--decoder",
-                       "--commit-rounds", "--buffer-rounds", "--decoder-arg",
-                       "--pattern-arg", "--workers-per-graph"):
-            self.assertIn(option, result.stdout)
-        for removed in ("--output", "--config", "--batch-rounds",
-                        "--replay-shots", "--seed", "--validate-bundle"):
-            self.assertNotIn(removed, result.stdout)
-        self.assertIn("server.yaml", result.stdout)
-        self.assertIn(CONFIG_ENV, result.stdout)
-        self.assertEqual(list(self.root.iterdir()), [])
+        for arguments in (("--help",), ("-h",), ("--distance=3", "--help"),
+                          ("-h", "--basis=Z")):
+            with self.subTest(arguments=arguments):
+                result = self.invoke(*arguments)
+                for option in ("--code", "--distance", "--rounds", "--basis",
+                               "--decoder", "--commit-rounds",
+                               "--buffer-rounds", "--decoder-arg",
+                               "--pattern-arg", "--workers-per-graph"):
+                    self.assertIn(option, result.stdout)
+                for removed in ("--output", "--config", "--batch-rounds",
+                                "--replay-shots", "--seed",
+                                "--validate-bundle"):
+                    self.assertNotIn(removed, result.stdout)
+                self.assertIn("at least 3", result.stdout)
+                self.assertIn("at least 4", result.stdout)
+                self.assertIn("server.yaml", result.stdout)
+                self.assertIn(CONFIG_ENV, result.stdout)
+                self.assertEqual(list(self.root.iterdir()), [])
 
     def test_removed_modes_and_file_inputs_are_rejected_without_output(self):
         for name in ("output", "batch-rounds", "replay-shots", "seed",

@@ -14,14 +14,6 @@
 
 namespace cudaq::qec::memory_experiment {
 
-// Fixed characterization depths do not grow with the requested shot duration.
-// Twelve cycles leave a margin beyond the Surface Code prefix and suffix for
-// repeated bulk visits; the adjacent odd depth also checks parity independence.
-// These are producer choices, recorded as provenance, not schema constraints.
-inline constexpr std::uint64_t representative_extraction_rounds = 12;
-inline constexpr std::uint64_t validation_extraction_rounds =
-    representative_extraction_rounds + 1;
-
 struct preparation_request {
   experiment_spec experiment;
   double cnot_error_rate = 0.001;
@@ -40,8 +32,6 @@ struct prepared_model {
   std::uint64_t final_measurements = 0;
   /// Data and syndrome qubits in one independent patch, not all replicas.
   std::uint64_t physical_qubits = 0;
-  std::uint64_t characterization_rounds = 0;
-  std::uint64_t validation_rounds = 0;
 };
 
 /// Validate supported inputs and checked record arithmetic without constructing
@@ -59,15 +49,6 @@ void validate_prepared_model(const preparation_request &request,
 void validate_final_readout(
     const dem_chunks_spec &chunks,
     const std::vector<std::vector<std::uint64_t>> &readout);
-
-/// Check that distinct characterization depths can each exercise the retained
-/// prefix, repeated bulk and suffix within the model's measurement layout.
-/// Depths record producer provenance; they need not equal this build's choices.
-void validate_characterization_provenance(const dem_chunks_spec &chunks,
-                                          std::uint64_t regular_measurements,
-                                          std::uint64_t final_measurements,
-                                          std::uint64_t characterization_rounds,
-                                          std::uint64_t validation_rounds);
 
 /// Construct the selected code after checking its supported geometry and raw
 /// record arithmetic. This does not characterize a circuit or expand its DEM.
