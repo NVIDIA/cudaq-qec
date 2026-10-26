@@ -166,6 +166,12 @@ public:
   /// be idempotent: corrections accumulate by XOR, so a second commit of the
   /// same data cancels it out.  Default: nothing withheld.
   virtual bool flush() { return false; }
+  /// Make the node's next ready publication current, if it has one: the
+  /// executor publishes once after a delivery or flush fires, then asks
+  /// this until it returns false, publishing again each time. Repeat
+  /// publications reach indexed consumers only, and a port's indices never
+  /// decrease across them. Default: one publication per delivery.
+  virtual bool publish_next() { return false; }
 
   /// Index of the value the node has just published on output `slot`, for
   /// consumers that join their inputs by index (see indexed_join_node).

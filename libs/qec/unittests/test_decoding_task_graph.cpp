@@ -12866,7 +12866,21 @@ public:
     odd_valid_ = mode_ == "split" && (published_ % 2) == 1;
     if (odd_valid_)
       value_odd_.get<logical_outcome>().bits[0] = bit;
+    // `double` publishes record r as index 2r, then as 2r + 1 with the bit
+    // flipped when the executor asks for more.
+    if (mode_ == "double") {
+      published_ *= 2;
+      second_ready_ = true;
+    }
     valid_ = true;
+    return true;
+  }
+  bool publish_next() override {
+    if (!second_ready_)
+      return false;
+    second_ready_ = false;
+    ++published_;
+    value_out_.get<logical_outcome>().bits[0] ^= 1;
     return true;
   }
   bool flush() override {
@@ -12899,6 +12913,7 @@ public:
     parity_ = 0;
     valid_ = false;
     odd_valid_ = false;
+    second_ready_ = false;
     records_ = 0;
     published_ = 0;
     coverage_.reset();
@@ -12966,6 +12981,7 @@ private:
   uint8_t parity_ = 0;
   bool valid_ = false;
   bool odd_valid_ = false;
+  bool second_ready_ = false;
   std::size_t records_ = 0;
   std::int64_t published_ = 0;
   std::optional<committed_coverage> coverage_;
@@ -13410,6 +13426,77 @@ TEST(DecodingTaskGraph, PortsPublishTheirOwnIndices) {
   expect_fires(records.size() - 1);
   EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
   expect_fires(records.size());
+}
+
+TEST(DecodingTaskGraph, ANodePublishesSeveralIndicesPerDelivery) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  // S publishes record r twice on one port, as index 2r with the record's
+  // bit and as 2r + 1 with it flipped. J[k] takes a = S[k] and b = R[k],
+  // where R publishes one index per record, so J[k] for k < n fires once
+  // R[k] arrives and the rest fire at FINAL with b absent.
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("S", "double"));
+  nodes.push_back(index_node("R", "tag"));
+  nodes.push_back(index_node("J", "join"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "S", "input"},
+       {"A", "output", "R", "input"},
+       {"S", "output", "J", "a"},
+       {"R", "output", "J", "b"},
+       {"J", "output", "output", "input"}},
+      {});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const std::vector<uint8_t> records = {1, 0, 1, 1, 0};
+  const auto n = records.size();
+  const auto expect_fires = [&](std::size_t count) {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    ASSERT_EQ(index_fires.size(), count);
+    for (const auto &fire : index_fires) {
+      const auto k = static_cast<std::size_t>(fire.k);
+      ASSERT_LT(k, 2 * n);
+      EXPECT_EQ(fire.a, records[k / 2] ^ (k % 2)) << "instance " << k;
+      EXPECT_EQ(fire.b, k < n ? int{records[k]} : -1) << "instance " << k;
+    }
+  };
+  for (std::size_t i = 0; i + 1 < n; ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  expect_fires(n - 1); // J[k] for k <= n - 2 has both inputs
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  expect_fires(2 * n);
+  EXPECT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::complete);
+}
+
+TEST(DecodingTaskGraph, RepeatPublicationsNeedAnIndexedConsumer) {
+  ASSERT_TRUE(index_probe_registered);
+  ASSERT_TRUE(pipeline_probe_registered);
+  active_pipeline_probe = std::make_shared<pipeline_probe>();
+  // X joins its inputs by record and reads the wire's one buffer, so S's
+  // second publication of a record would replace the first: an error, not
+  // a lost value.
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("S", "double"));
+  nodes.push_back(pipeline_node("X", "pass"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "S", "input"},
+       {"S", "output", "X", "input"},
+       {"X", "output", "output", "input"}},
+      {});
+  const uint8_t record = 1;
+  EXPECT_THROW(graph->enqueue_syndrome(&record, 1), std::logic_error);
 }
 
 TEST(DecodingTaskGraph, IndexedJoinMatchesSynchronousGraph) {

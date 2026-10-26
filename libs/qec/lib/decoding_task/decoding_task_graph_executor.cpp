@@ -532,13 +532,44 @@ struct decoding_task_graph::impl::record_scheduler {
     c.node_snapshotted[si] = 1;
   }
 
+  // A fire leaves a publication current; publish it and each further one
+  // the node makes current. Only the first may carry the fire's own index.
+  bool publish_all(context &c, std::size_t parent, std::size_t root,
+                   std::size_t producer,
+                   streaming_task_graph_node *capability = nullptr,
+                   std::int64_t index = no_index) {
+    if (!capability)
+      capability = owner.streaming_nodes[producer].capability;
+    bool repeat = false;
+    do {
+      publish_streaming(c, parent, root, producer, capability,
+                        repeat ? no_index : index, repeat);
+      repeat = true;
+    } while (capability->publish_next());
+    return true;
+  }
+
   bool publish_streaming(context &c, std::size_t parent, std::size_t root,
                          std::size_t producer,
                          const streaming_task_graph_node *capability = nullptr,
-                         std::int64_t index = no_index) {
+                         std::int64_t index = no_index, bool repeat = false) {
     const auto node_idx = owner.streaming_nodes[producer].node_index;
     if (!capability)
       capability = owner.streaming_nodes[producer].capability;
+    // A record-ordered consumer reads the wire's one buffer when its delivery
+    // runs, so a second publication before then would replace the first.
+    if (repeat)
+      for (const auto &wire : owner.streaming_wires_from[node_idx])
+        if (!indexed(static_cast<std::size_t>(
+                owner.streaming_by_node[wire.to_node])) &&
+            capability->streaming_output(wire.from_slot))
+          throw std::logic_error(
+              "decoding_task_graph: node " + std::to_string(node_idx) +
+              " published twice in one delivery on output " +
+              std::to_string(wire.from_slot) +
+              ", whose consumer joins its "
+              "inputs by record; only an indexed consumer takes repeat "
+              "publications");
     snapshot_node(c, producer, capability);
     {
       auto lock = lock_runtime();
@@ -858,7 +889,7 @@ struct decoding_task_graph::impl::record_scheduler {
       entry.used = false;
     }
     if (fired)
-      (void)publish_streaming(c, id, event.root, si, capability, event.index);
+      (void)publish_all(c, id, event.root, si, capability, event.index);
     else
       publish_wires(c, id, event.root,
                     owner.completion_wires_from[node.node_index], event.index);
@@ -885,7 +916,7 @@ struct decoding_task_graph::impl::record_scheduler {
     const bool fired =
         value && consumer_node->enqueue_edge_value(*value, event.wire.to_slot);
     if (fired)
-      (void)publish_streaming(c, id, event.root, event.node, consumer_node);
+      (void)publish_all(c, id, event.root, event.node, consumer_node);
     // An edge-fed node completes the window after its last delivery. A
     // pooled node counts per record; a record-ordered one counts across
     // records, as its producers may fire in different ones.
@@ -960,7 +991,7 @@ struct decoding_task_graph::impl::record_scheduler {
     const bool fired = c.type ? node.enqueue(chunk, take, chunk_type)
                               : node.enqueue_untagged(chunk, take);
     if (fired)
-      c.fired.store(publish_streaming(c, id, event.root, event.node),
+      c.fired.store(publish_all(c, id, event.root, event.node),
                     std::memory_order_relaxed);
     else if (chunk_type == round_type::FINAL && !staged(event.node))
       snapshot_node(c, event.node); // a FINAL round may commit coverage
@@ -987,7 +1018,7 @@ struct decoding_task_graph::impl::record_scheduler {
       dropped[event.node].clear();
     }
     if (owner.streaming_nodes[event.node].capability->flush())
-      c.fired.store(publish_streaming(c, id, event.root, event.node),
+      c.fired.store(publish_all(c, id, event.root, event.node),
                     std::memory_order_relaxed);
     else if (!pooled(event.node) && !indexed(event.node) && !staged(event.node))
       snapshot_node(c, event.node); // a pooled copy holds only its last delta
