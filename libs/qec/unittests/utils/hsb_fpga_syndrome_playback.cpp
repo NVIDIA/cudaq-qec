@@ -3,10 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "hsb_playback_loop.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -20,6 +23,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -34,6 +38,10 @@
 
 namespace {
 
+using cudaq::qec::hsb_playback::LoopStats;
+using cudaq::qec::hsb_playback::make_measurement_run_summary;
+using cudaq::qec::hsb_playback::measurement_run_passed;
+
 // ============================================================================
 // Playback BRAM Constants
 // ============================================================================
@@ -46,9 +54,33 @@ constexpr std::uint32_t PLAYER_ENABLE_OFFSET = 0x0004;
 constexpr std::uint32_t RAM_NUM = 16;
 constexpr std::uint32_t RAM_DEPTH = 512;
 
-constexpr std::uint32_t PLAYER_ENABLE =
+constexpr std::uint32_t PLAYER_ENABLE_SINGLE_PASS =
     0x0000'000D; // enable + single-pass + ptp_bram_ena
+constexpr std::uint32_t PLAYER_ENABLE_LOOP =
+    0x0000'0009; // enable + ptp_bram_ena, with loop_dis clear
 constexpr std::uint32_t PLAYER_DISABLE = 0x0000'0000;
+
+// Software-emulator-only registers, shared with hsb_fpga_emulator.cpp in
+// CUDA-Q. Real FPGA playback must never read this address range.
+constexpr std::uint32_t LOOP_STATS_MAGIC = 0xE000'0000;
+constexpr std::uint32_t LOOP_STATS_STATE = 0xE000'0004;
+constexpr std::uint32_t LOOP_STATS_WINDOWS_LO = 0xE000'0008;
+constexpr std::uint32_t LOOP_STATS_WINDOWS_HI = 0xE000'000C;
+constexpr std::uint32_t LOOP_STATS_RESPONSES_LO = 0xE000'0010;
+constexpr std::uint32_t LOOP_STATS_RESPONSES_HI = 0xE000'0014;
+constexpr std::uint32_t LOOP_STATS_ERRORS = 0xE000'0018;
+constexpr std::uint32_t LOOP_STATS_TIMEOUTS = 0xE000'001C;
+constexpr std::uint32_t LOOP_STATS_ACK = 0xE000'0020;
+constexpr std::uint32_t LOOP_STATS_RESPONSE_FAILURES = 0xE000'0024;
+constexpr std::uint32_t LOOP_STATS_MAGIC_VALUE = 0x4853'4245;
+constexpr std::uint32_t LOOP_STATS_COMPLETE = 2;
+constexpr std::chrono::seconds kLoopStatsTimeout{5};
+constexpr std::chrono::seconds kPlayerControlTimeout{1};
+constexpr std::chrono::milliseconds kLoopPollInterval{50};
+
+volatile std::sig_atomic_t loop_stop_requested = 0;
+
+extern "C" void request_loop_stop(int) { loop_stop_requested = 1; }
 
 // Sensor TX streaming threshold register. The Host→FPGA path buffers
 // incoming data until this byte threshold is met before streaming to the
@@ -379,6 +411,9 @@ struct Options {
       function_name; // RPC function name (overrides default mock_decode)
   std::optional<std::size_t> num_shots;
   bool verify = false;
+  bool loop = false;
+  std::optional<std::uint32_t> loop_seconds;
+  std::optional<std::size_t> min_loop_shots;
 
   // Per-round mode (device-graph scheduler): emit N enqueue_syndromes frames
   // (one per round) followed by 1 get_corrections frame per shot, instead of a
@@ -429,6 +464,12 @@ void print_usage(const char *argv0) {
          "                        frames-per-shot x spacing)\n"
       << "  --verify              Capture and verify correction responses "
          "via ILA\n"
+      << "  --loop                Replay the BRAM load until Ctrl-C; --verify "
+         "first checks one finite pass\n"
+      << "  --loop-seconds <n>    Replay for n positive decimal seconds; "
+         "implies --loop and requires --control-port\n"
+      << "  --min-loop-shots <n> Require n completed decoding measurements; "
+         "requires --loop and --control-port\n"
       << "  --per-round           Per-round protocol (device-graph scheduler): "
          "send\n"
       << "                        N enqueue_syndromes frames (one per "
@@ -455,6 +496,20 @@ void print_usage(const char *argv0) {
       << "to the bridge tool's GPU buffers.\n";
 }
 
+template <typename T>
+T parse_positive_integer(std::string_view text, const char *option) {
+  T value{};
+  if (text.empty())
+    throw std::invalid_argument(std::string(option) +
+                                " must be a positive decimal integer in range");
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), value);
+  if (error != std::errc{} || end != text.data() + text.size() || value == 0)
+    throw std::invalid_argument(std::string(option) +
+                                " must be a positive decimal integer in range");
+  return value;
+}
+
 Options parse_args(int argc, char **argv) {
   Options options;
   for (int i = 1; i < argc; ++i) {
@@ -476,6 +531,19 @@ Options parse_args(int argc, char **argv) {
           static_cast<std::uint32_t>(std::stoul(argv[++i], nullptr, 0));
     } else if (arg == "--verify") {
       options.verify = true;
+    } else if (arg == "--loop") {
+      options.loop = true;
+    } else if (arg == "--loop-seconds") {
+      if (i + 1 == argc)
+        throw std::invalid_argument("--loop-seconds requires a value");
+      options.loop_seconds =
+          parse_positive_integer<std::uint32_t>(argv[++i], "--loop-seconds");
+      options.loop = true;
+    } else if (arg == "--min-loop-shots") {
+      if (i + 1 == argc)
+        throw std::invalid_argument("--min-loop-shots requires a value");
+      options.min_loop_shots =
+          parse_positive_integer<std::size_t>(argv[++i], "--min-loop-shots");
     } else if (arg == "--per-round") {
       options.per_round = true;
     } else if (arg == "--qp-number" && i + 1 < argc) {
@@ -1023,14 +1091,144 @@ VerifyResult verify_captured_responses(
   return result;
 }
 
+std::optional<LoopStats> read_loop_stats(hololink::Hololink &hsb) {
+  // One shared timeout bounds the whole snapshot/ACK exchange, including
+  // control-plane retries, rather than restarting a timeout for every read.
+  auto timeout = std::make_shared<hololink::Timeout>(
+      std::chrono::duration<float>(kLoopStatsTimeout).count(),
+      std::chrono::duration<float>(kLoopPollInterval).count());
+  const auto deadline = std::chrono::steady_clock::now() + kLoopStatsTimeout;
+  const auto read = [&](std::uint32_t address) {
+    return hsb.read_uint32(address, timeout);
+  };
+  const auto read_u64 = [&](std::uint32_t lo, std::uint32_t hi) {
+    return static_cast<std::uint64_t>(read(lo)) |
+           (static_cast<std::uint64_t>(read(hi)) << 32);
+  };
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (read(LOOP_STATS_MAGIC) == LOOP_STATS_MAGIC_VALUE &&
+        read(LOOP_STATS_STATE) == LOOP_STATS_COMPLETE) {
+      // COMPLETE publishes an immutable snapshot. The emulator keeps its
+      // control-plane session alive until this client acknowledges it.
+      const LoopStats stats{
+          read_u64(LOOP_STATS_WINDOWS_LO, LOOP_STATS_WINDOWS_HI),
+          read_u64(LOOP_STATS_RESPONSES_LO, LOOP_STATS_RESPONSES_HI),
+          read(LOOP_STATS_ERRORS), read(LOOP_STATS_TIMEOUTS),
+          read(LOOP_STATS_RESPONSE_FAILURES)};
+      if (!hsb.write_uint32(LOOP_STATS_ACK, LOOP_STATS_MAGIC_VALUE, timeout))
+        throw std::runtime_error("Failed to acknowledge loop statistics");
+      return stats;
+    }
+    std::this_thread::sleep_for(kLoopPollInterval);
+  }
+  return std::nullopt;
+}
+
+bool print_loop_summary(const LoopStats &stats, std::size_t frames_per_shot,
+                        std::optional<std::size_t> min_loop_shots) {
+  const auto summary =
+      make_measurement_run_summary(stats, frames_per_shot, min_loop_shots);
+  const bool passed = measurement_run_passed(summary);
+  std::cout << "\n=== Loop Measurement Summary ===\n"
+            << "  Completed measurements: " << summary.completed_measurements
+            << "\n"
+            << "  Partial measurement frames: "
+            << summary.partial_measurement_frames << "\n"
+            << "  Playback frames:        " << summary.playback_frames << "\n"
+            << "  Correction responses:   " << summary.response_frames << "\n"
+            << "  Transport errors:       " << summary.transport_errors << "\n"
+            << "  Transport timeouts:     " << summary.transport_timeouts
+            << "\n"
+            << "  RPC status failures:    " << summary.response_failures
+            << "\n";
+  if (min_loop_shots)
+    std::cout << "  Required measurements:  " << *min_loop_shots << "\n";
+  std::cout << "  RESULT: " << (passed ? "PASS" : "FAIL") << "\n";
+  return passed;
+}
+
+// Only loop runs install signal handlers or add player cleanup. Keep control
+// traffic out of the signal handler, and bound disable retries during
+// unwinding.
+class LoopPlayerGuard {
+public:
+  explicit LoopPlayerGuard(hololink::Hololink &hsb) : hsb_(hsb) {
+    loop_stop_requested = 0;
+    previous_int_ = std::signal(SIGINT, request_loop_stop);
+    if (previous_int_ == SIG_ERR)
+      throw std::runtime_error("Failed to install SIGINT handler");
+    previous_term_ = std::signal(SIGTERM, request_loop_stop);
+    if (previous_term_ == SIG_ERR) {
+      std::signal(SIGINT, previous_int_);
+      throw std::runtime_error("Failed to install SIGTERM handler");
+    }
+  }
+
+  LoopPlayerGuard(const LoopPlayerGuard &) = delete;
+  LoopPlayerGuard &operator=(const LoopPlayerGuard &) = delete;
+
+  ~LoopPlayerGuard() {
+    try {
+      disable();
+    } catch (const std::exception &error) {
+      std::cerr << "Loop player cleanup failed: " << error.what() << "\n";
+    }
+    std::signal(SIGTERM, previous_term_);
+    std::signal(SIGINT, previous_int_);
+  }
+
+  void enable(std::uint32_t mode) {
+    if (loop_stop_requested)
+      throw std::runtime_error("Playback interrupted before enabling player");
+    active_ = true;
+    if (!write_control(mode))
+      throw std::runtime_error("Failed to enable loop player");
+  }
+
+  void disable() {
+    if (!active_)
+      return;
+    if (!write_control(PLAYER_DISABLE))
+      throw std::runtime_error("Failed to disable loop player");
+    active_ = false;
+  }
+
+private:
+  bool write_control(std::uint32_t value) {
+    auto timeout = std::make_shared<hololink::Timeout>(
+        std::chrono::duration<float>(kPlayerControlTimeout).count(),
+        std::chrono::duration<float>(kLoopPollInterval).count());
+    return hsb_.write_uint32(PLAYER_ADDR + PLAYER_ENABLE_OFFSET, value,
+                             timeout);
+  }
+
+  hololink::Hololink &hsb_;
+  using SignalHandler = void (*)(int);
+  SignalHandler previous_int_ = SIG_DFL;
+  SignalHandler previous_term_ = SIG_DFL;
+  bool active_ = false;
+};
+
 } // namespace
 
 // ============================================================================
 // Main
 // ============================================================================
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv) try {
   Options options = parse_args(argc, argv);
+  if (options.min_loop_shots && !options.loop)
+    throw std::invalid_argument("--min-loop-shots requires --loop");
+  if ((options.loop_seconds || options.min_loop_shots) && !options.control_port)
+    throw std::invalid_argument(
+        "--loop-seconds and --min-loop-shots require --control-port "
+        "(software emulator only)");
+  if (options.loop &&
+      (options.spacing_us == 0 ||
+       options.spacing_us >
+           std::numeric_limits<std::uint32_t>::max() / RF_SOC_TIMER_SCALE))
+    throw std::invalid_argument(
+        "Loop playback requires positive --spacing representable by the timer");
   // --data-dir is required unless both --config and --syndromes are given
   bool has_explicit_files =
       !options.config_file.empty() && !options.syndromes_file.empty();
@@ -1384,7 +1582,18 @@ int main(int argc, char **argv) {
   // ------------------------------------------------------------------
   // Enable playback
   // ------------------------------------------------------------------
-  if (!hsb->write_uint32(PLAYER_ADDR + PLAYER_ENABLE_OFFSET, PLAYER_ENABLE))
+  std::optional<LoopPlayerGuard> loop_player;
+  if (options.loop)
+    loop_player.emplace(*hsb);
+  // Verify the finite, unique response sequence before continuously replaying
+  // it. Install loop cleanup and signal handling before either phase starts.
+  const auto player_enable = options.loop && !options.verify
+                                 ? PLAYER_ENABLE_LOOP
+                                 : PLAYER_ENABLE_SINGLE_PASS;
+  if (loop_player)
+    loop_player->enable(player_enable);
+  else if (!hsb->write_uint32(PLAYER_ADDR + PLAYER_ENABLE_OFFSET,
+                              player_enable))
     throw std::runtime_error("Failed to enable player");
 
   std::cout << "Playback enabled: " << num_shots << " shots / " << num_windows
@@ -1405,6 +1614,9 @@ int main(int argc, char **argv) {
 
     int elapsed = 0;
     while (elapsed < kVerifyTimeoutMs) {
+      if (options.loop && loop_stop_requested)
+        throw std::runtime_error(
+            "Playback interrupted during ILA verification");
       std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
       elapsed += kPollIntervalMs;
       const std::uint32_t count = ila_sample_count(*hsb);
@@ -1516,8 +1728,50 @@ int main(int argc, char **argv) {
                 << " of " << num_shots << " expected shots)\n";
       return 1;
     }
-    std::cout << "  RESULT: PASS\n";
+    std::cout << (options.loop ? "  ILA verification: PASS\n"
+                               : "  RESULT: PASS\n");
+  }
+
+  if (loop_player) {
+    if (options.verify) {
+      // Real FPGA single-pass playback stays in DONE until ram_ena is cleared.
+      // Writing LOOP directly after SINGLE_PASS would not restart that FSM.
+      loop_player->disable();
+      loop_player->enable(PLAYER_ENABLE_LOOP);
+    }
+    std::cout << "Continuous replay enabled: " << num_windows << " frames / "
+              << frames_per_shot
+              << " frames per measurement; stop with Ctrl-C\n"
+              << std::flush;
+    const auto loop_start = std::chrono::steady_clock::now();
+    while (!loop_stop_requested) {
+      if (options.loop_seconds &&
+          std::chrono::steady_clock::now() - loop_start >=
+              std::chrono::seconds(*options.loop_seconds))
+        break;
+      std::this_thread::sleep_for(kLoopPollInterval);
+    }
+    loop_player->disable();
+    if (!using_emulator) {
+      // These counters exist only in the software emulator. A manual hardware
+      // loop ends at disable; only its optional finite ILA pass is verified.
+      std::cout << "Manual FPGA loop stopped; player disabled. Hardware loop "
+                   "statistics are unavailable.\n";
+      if (options.verify)
+        std::cout << "  RESULT: PASS (finite ILA verification only)\n";
+      return 0;
+    }
+    const auto stats = read_loop_stats(*hsb);
+    if (!stats)
+      throw std::runtime_error(
+          "Emulator did not publish final loop statistics before timeout");
+    return print_loop_summary(*stats, frames_per_shot, options.min_loop_shots)
+               ? 0
+               : 1;
   }
 
   return 0;
+} catch (const std::exception &error) {
+  std::cerr << "Playback failed: " << error.what() << "\n";
+  return 1;
 }
