@@ -77,9 +77,11 @@ enum class ingest_status {
 /// view copies nothing: it names rounds whose detectors stay in the ring
 /// while an unpublished window or a view out holds them.
 ///
-/// Not thread-safe: one thread enqueues, polls, releases and reads views'
-/// detectors. A consumer on another thread must not read detectors() while
-/// enqueue() runs, since enqueue() writes the ring detectors() reads.
+/// One thread enqueues, polls, releases and resets. Another thread may read
+/// a view's rows through view_detectors() while that one runs, between the
+/// view's hand-over and its release, when both pass through something that
+/// orders the two threads, such as a queue or a lock. The ring does not
+/// reuse a round that a view out holds.
 class ingest_core {
 public:
   /// @param context The experiment template.
@@ -115,9 +117,18 @@ public:
   void release(const window_view &view);
 
   /// The detectors of round @p r, while a view out or an unpublished window
-  /// holds it. Not to be called while enqueue() runs.
+  /// holds it. Not to be called while enqueue() runs; a consumer on another
+  /// thread uses view_detectors().
   /// @throws std::out_of_range if round r's detectors are not in the ring.
   std::span<const std::uint8_t> detectors(std::int64_t r) const;
+
+  /// The detectors of round @p r of @p view, a view out. Reads only that
+  /// round's place in the ring, so a consumer may call it while enqueue()
+  /// and poll() run on another thread.
+  /// @throws std::out_of_range if the view does not hold round r in the
+  /// ring.
+  std::span<const std::uint8_t> view_detectors(const window_view &view,
+                                               std::int64_t r) const;
 
   /// The rounds in the shot, once a FINAL record is taken.
   std::optional<std::size_t> shot_rounds() const { return shot_rounds_; }

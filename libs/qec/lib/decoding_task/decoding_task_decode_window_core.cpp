@@ -18,7 +18,9 @@ namespace cudaq::qec {
 
 // A window has every send of its request, in the request's order, with no
 // rows for one whose rounds it clips away. That is checked here, so a fire
-// publishes the window's send s as the request's send s.
+// publishes the window's send s as the request's send s. The bulk, which
+// any window of a shot may be, has a decoder per slot, so fires into
+// different slots never share one.
 decode_window_core::decode_window_core(
     const data_artifact_store &store,
     std::shared_ptr<const experiment_template> context, window_request request,
@@ -33,7 +35,8 @@ decode_window_core::decode_window_core(
     auto &v = variants_.emplace_back();
     v.key = key;
     v.window = window;
-    v.dec = make_window_decoder(*window, decoder_name, params);
+    for (std::size_t s = 0; s < (key.bulk() ? slots : 1); ++s)
+      v.decoders.push_back(make_window_decoder(*window, decoder_name, params));
     if (window->sends.size() != request_.sends.size() ||
         !std::equal(window->sends.begin(), window->sends.end(),
                     request_.sends.begin(),
@@ -45,7 +48,7 @@ decode_window_core::decode_window_core(
     imported =
         std::max(imported, window->model.h.num_rows() - window->num_own_rows);
   } // end - for(key)
-  covered_.assign(imported, 0);
+  covered_.assign(slots, std::vector<std::uint8_t>(imported, 0));
   workspaces_.resize(slots);
   detectors_.resize(slots);
   fires_.resize(slots);
@@ -100,6 +103,8 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
   auto &d = detectors_[slot][v];
   auto &ws = workspaces_[slot][v];
   auto &out = fires_[slot];
+  auto &covered = covered_[slot];
+  const auto &decoders = variants_[v].decoders;
   const auto own = w.num_own_rows;
   const auto all = d.size();
   // The receiving row of row i of send r, or all when it lies before this
@@ -111,11 +116,11 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
 
   // The view's rows, counted until they are too many.
   for (auto r = view.rounds.begin; r < view.rounds.end && rows <= own; ++r)
-    rows += view.source->detectors(r).size();
+    rows += view.source->view_detectors(view, r).size();
   if (rows != own || view.rounds.empty())
     fail("window " + std::to_string(view.k) + "'s view holds other rows " +
          "than the " + std::to_string(own) + " of its variant");
-  std::fill(covered_.begin(), covered_.begin() + (all - own), 0);
+  std::fill(covered.begin(), covered.begin() + (all - own), 0);
   for (const auto *r : receives) {
     if (!r || !r->send)
       continue;
@@ -132,18 +137,18 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
              ", which window " + std::to_string(view.k) +
              " does not take as a " + (delta ? "delta" : "residual"));
       if (!delta)
-        covered_[t - own] = 1;
+        covered[t - own] = 1;
     }
   } // end - for(r)
   for (std::size_t i = 0; i < all - own; ++i)
-    if (!covered_[i])
+    if (!covered[i])
       fail("window " + std::to_string(view.k) + " imports " +
            std::to_string(all - own) + " rows, but no residual reaches " +
            "its imported row " + std::to_string(i));
 
   out.fired = false;
   for (auto r = view.rounds.begin; r < view.rounds.end; ++r) {
-    const auto round = view.source->detectors(r);
+    const auto round = view.source->view_detectors(view, r);
     std::copy(round.begin(), round.end(), d.begin() + row);
     row += round.size();
   }
@@ -158,7 +163,7 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
         d[target(*r, i)] = r->values[i] & 1;
   }
 
-  solve_window(w, variants_[v].dec.get(), d, ws);
+  solve_window(w, decoders[decoders.size() > 1 ? slot : 0].get(), d, ws);
   out.k = view.k;
   out.fired = true;
   out.commit = {std::max(view.rounds.begin, anchor + request_.commit->begin),

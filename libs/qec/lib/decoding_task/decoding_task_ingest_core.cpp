@@ -566,6 +566,19 @@ std::span<const std::uint8_t> ingest_core::detectors(std::int64_t r) const {
   return {ring_.data() + slot * max_rows_, ring_rows_[slot]};
 }
 
+// A round a view out holds keeps its place in the ring, which enqueue()
+// writes only for rounds no view holds; formed_, which it does write, is
+// not read.
+std::span<const std::uint8_t>
+ingest_core::view_detectors(const window_view &view, std::int64_t r) const {
+  const auto slot = static_cast<std::size_t>(r) & ring_mask_;
+  if (r < view.rounds.begin || r >= view.rounds.end || ring_round_[slot] != r)
+    throw std::out_of_range("ingest: window " + std::to_string(view.k) +
+                            "'s view does not hold round " + std::to_string(r) +
+                            " in the ring");
+  return {ring_.data() + slot * max_rows_, ring_rows_[slot]};
+}
+
 // Every index is handed over once FINAL fixes the last.
 bool ingest_core::done() const {
   return shot_rounds_ && next_index_ >= index_end_;

@@ -4,12 +4,13 @@
  */
 
 // Internal header: the decode_window node's core, apart from the executor.
-// It holds one model and one decoder for each variant of its layer, taken
-// from the data artifact store, and fires any instance of a variant from
-// ingest's view of its rows and the sends its receives name: the canonical
-// workload, into a slot sized beforehand for every variant. Sends carry
-// their rows' place in the shot, so a receive needs neither instance's
-// model. Never included from a public header.
+// It holds one model for each variant of its layer, taken from the data
+// artifact store, with its decoders, and fires any instance of a variant
+// from ingest's view of its rows and the sends its receives name: the
+// canonical workload, into a slot sized beforehand for every variant. Fires
+// into different slots may run at once. Sends carry their rows' place in
+// the shot, so a receive needs neither instance's model. Never included
+// from a public header.
 
 #pragma once
 
@@ -48,15 +49,21 @@ struct window_fire {
   std::vector<window_send_value> sends; ///< One per send of the request
 };
 
-/// Fires one layer's windows. Not thread-safe: the slots share one decoder
-/// per variant.
+/// Fires one layer's windows. Fires into different slots may run at once,
+/// each on its own thread: each slot has its own buffers and bulk decoder,
+/// and a prefix or terminal variant, which only one window of a shot uses,
+/// has a single decoder. Nothing else may run alongside a fire: reset(),
+/// find() and another fire into the same slot touch what it writes, and a
+/// slot must not fire again while another fire reads its sends. The caller
+/// orders these, as the executor's queues will.
 class decode_window_core {
 public:
   /// @param store The store holding every variant of @p request on
   /// @p context.
   /// @param context The experiment template.
   /// @param request The layer's request.
-  /// @param decoder_name The inner decoder, one built per variant.
+  /// @param decoder_name The inner decoder, one built per slot for the
+  /// bulk and one for each other variant.
   /// @param params The inner decoder's parameters.
   /// @param slots The fires whose results may be held at once.
   /// @throws std::invalid_argument if @p slots is 0, or as
@@ -98,11 +105,12 @@ public:
   std::size_t num_slots() const { return fires_.size(); }
 
 private:
-  /// One variant's model and its decoder.
+  /// One variant's model and its decoders: one per slot for the bulk, else
+  /// one.
   struct variant {
     variant_key key;
     std::shared_ptr<const decoding_window> window;
-    std::unique_ptr<decoder> dec;
+    std::vector<std::unique_ptr<decoder>> decoders;
   };
 
   /// Throws std::invalid_argument for @p what.
@@ -116,8 +124,9 @@ private:
   std::vector<std::vector<window_workspace>> workspaces_;
   std::vector<std::vector<std::vector<std::uint8_t>>> detectors_;
   std::vector<window_fire> fires_;
-  /// Which imported rows a fire's residuals reach, checked before it writes.
-  std::vector<std::uint8_t> covered_;
+  /// Per slot, which imported rows a fire's residuals reach, checked before
+  /// it writes.
+  std::vector<std::vector<std::uint8_t>> covered_;
 };
 
 } // namespace cudaq::qec
