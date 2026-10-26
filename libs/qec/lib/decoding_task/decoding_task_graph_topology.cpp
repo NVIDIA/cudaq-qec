@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // from_topology(): the one place a task graph is built from configuration.
 // from_spec() and the flat constructor express themselves as one-node
@@ -635,6 +632,13 @@ void wire_patterns(const std::vector<ensemble_wiring> &wirings,
 std::unique_ptr<decoding_task_graph>
 decoding_task_graph::assemble(std::unique_ptr<impl> i,
                               task_graph_options options) {
+  // The pool sizes itself from the graph and inherits the process's
+  // affinity; silently ignoring a requested size or pinning would be worse
+  // than refusing it.
+  if (options.async_num_workers || !options.async_worker_cpus.empty())
+    throw std::invalid_argument(
+        "task_graph_options: async_num_workers and async_worker_cpus are not "
+        "applied yet");
   for (std::size_t n = 0; n < i->nodes.size(); ++n)
     require_registered_port_types(*i->nodes[n], i->node_ids[n]);
   i->compile_wires();

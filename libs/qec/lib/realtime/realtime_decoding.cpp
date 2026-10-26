@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "realtime_decoding.h"
 #include "decode_target.h"
@@ -500,6 +497,7 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
   node.kind = ns.resolved_kind();
   node.node_params = ns.node_params.map();
   node.max_in_flight = ns.max_in_flight;
+  node.windows = ns.windows;
 
   const auto *kind = cudaq::qec::find_task_graph_node_kind(node.kind);
   if (!kind)

@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "py_decoding_task_graph.h"
 #include "type_casters.h"
@@ -133,6 +130,7 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("node_params", &task_graph_node_config::node_params)
       .def_rw("max_in_flight", &task_graph_node_config::max_in_flight)
       .def_rw("dem", &task_graph_node_config::dem)
+      .def_rw("windows", &task_graph_node_config::windows)
       .def_rw("d_sparse", &task_graph_node_config::d_sparse)
       .def_rw("o_sparse", &task_graph_node_config::o_sparse)
       .def_rw("h_sparse", &task_graph_node_config::h_sparse)
@@ -190,8 +188,12 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
               &task_graph_options::async_coordinator_cpu)
       .def_rw("async_spin_pause_iters",
               &task_graph_options::async_spin_pause_iters)
-      .def_rw("async_num_workers", &task_graph_options::async_num_workers)
-      .def_rw("async_worker_cpus", &task_graph_options::async_worker_cpus);
+      .def_rw("async_num_workers", &task_graph_options::async_num_workers,
+              "Pool threads for an asynchronous graph; None sizes the pool\n"
+              "from the graph.")
+      .def_rw("async_worker_cpus", &task_graph_options::async_worker_cpus,
+              "CPUs for the pool threads, round-robin; empty inherits the\n"
+              "process's affinity.");
 
   // -------------------------------------------------------------------------
   // DecodingTaskGraph

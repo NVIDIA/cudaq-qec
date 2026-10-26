@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # External Dependencies 
 # ==============================================================================
@@ -115,6 +110,12 @@ target_link_libraries(test_extended_dem PRIVATE GTest::gtest_main
                                         cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_extended_dem)
 gtest_discover_tests(test_extended_dem)
+
+add_executable(test_decoding_window test_decoding_window.cpp)
+target_link_libraries(test_decoding_window PRIVATE GTest::gtest_main
+                                           cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_decoding_window)
+gtest_discover_tests(test_decoding_window)
 
 add_executable(test_decoding_task_graph test_decoding_task_graph.cpp)
 target_link_libraries(test_decoding_task_graph PRIVATE GTest::gtest_main
