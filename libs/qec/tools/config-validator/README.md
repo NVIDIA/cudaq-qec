@@ -8,9 +8,16 @@ schema file.
 
 ## Produce the schema (machine with `cudaq_qec`)
 
+The schema file is produced once per CUDA-Q QEC release, on any machine
+that has the matching `cudaq_qec` installed (for example the host that runs
+the decoding server), and then handed over together with this script:
+
 ```bash
 python3 validate_decoder_config.py --export-schema decoder_config.schema.json
 ```
+
+The two files, `decoder_config.schema.json` and
+`validate_decoder_config.py`, are all a validating machine needs.
 
 The schema reflects the decoder plugins loaded in that installation, so
 export it from the same CUDA-Q QEC release the server runs; a decoder type
