@@ -53,6 +53,7 @@ struct graph_event {
   std::int64_t index =
       no_index; ///< publication index, when the producer has one
   std::size_t entry = no_event; ///< join-table entry an indexed fire consumes
+  bool absent = false; ///< the producer's instance `index` never exists
 };
 
 } // namespace
@@ -164,6 +165,8 @@ struct decoding_task_graph::impl::record_scheduler {
         joins(owner.streaming_nodes.size()),
         join_offsets(owner.streaming_nodes.size()),
         join_required(owner.streaming_nodes.size()),
+        dropped(owner.streaming_nodes.size()),
+        wire_last(owner.streaming_value_wire_count, no_index),
         fire_inputs(owner.streaming_nodes.size()),
         has_waiting_workers(owner.parallel_pool->num_threads() > 1) {
     const auto N = owner.nodes.size();
@@ -354,6 +357,9 @@ struct decoding_task_graph::impl::record_scheduler {
     for (auto &table : joins)
       for (auto &entry : table)
         entry.used = false;
+    for (auto &instances : dropped)
+      instances.clear();
+    std::fill(wire_last.begin(), wire_last.end(), no_index);
     std::fill(node_deliveries_seen.begin(), node_deliveries_seen.end(), 0);
     stop = false;
     error = nullptr;
@@ -564,9 +570,36 @@ struct decoding_task_graph::impl::record_scheduler {
     if (wires.empty())
       return;
     auto lock = lock_runtime();
+    publish_wires_locked(c, parent, root, wires, index);
+    notify_workers();
+  }
+
+  // With `absent`, the publication says instance `index` of the producer
+  // never exists: it carries no value and goes only to indexed consumers,
+  // which file the absence under the instances reading that index.
+  void publish_wires_locked(context &c, std::size_t parent, std::size_t root,
+                            const std::vector<compiled_wire> &wires,
+                            std::int64_t index, bool absent = false) {
     for (const auto &wire : wires) {
       const auto consumer =
           static_cast<std::size_t>(owner.streaming_by_node[wire.to_node]);
+      if (absent && !indexed(consumer))
+        continue;
+      // A record-ordered producer publishes its indices in order, so the
+      // ones between its last publication and this one never come: announce
+      // them, from the first the consumer reads, before the value itself.
+      if (!absent && index != no_index && indexed(consumer) && wire.id >= 0) {
+        const auto producer =
+            static_cast<std::size_t>(owner.streaming_by_node[wire.from_node]);
+        auto &last = wire_last[static_cast<std::size_t>(wire.id)];
+        if (!pooled(producer) && !indexed(producer)) {
+          const auto from = last == no_index ? wire.index_offset : last + 1;
+          for (auto skipped = from; skipped < index; ++skipped)
+            publish_wires_locked(c, parent, root, {wire}, skipped,
+                                 /*absent=*/true);
+          last = index;
+        }
+      }
       std::size_t blocker = no_event;
       std::size_t blocker_sequence = 0;
       // Direct children are stored in declared wire order. A later branch
@@ -588,19 +621,19 @@ struct decoding_task_graph::impl::record_scheduler {
       graph_event event{graph_event_kind::streaming_edge, consumer, wire, 0,
                         root};
       event.index = index;
+      event.absent = absent;
       const auto id = push_locked(c, event, parent, blocker);
       // Several instances may publish through one wire before any delivery
       // runs, so an indexed delivery takes the record's copy of the value.
       // The swap hands the wire a buffer of the same type for the next one.
       const auto wire_id = static_cast<std::size_t>(wire.id);
-      if (id != no_event && indexed(consumer) && wire.id >= 0 &&
+      if (id != no_event && !absent && indexed(consumer) && wire.id >= 0 &&
           c.wire_valid[wire_id]) {
         std::swap(c.slots[id].value, c.wire_values[wire_id]);
         c.slots[id].has_value = true;
         c.wire_valid[wire_id] = 0;
       }
     }
-    notify_workers();
   }
 
   const edge_value *delivered_value(const context &c,
@@ -637,14 +670,14 @@ struct decoding_task_graph::impl::record_scheduler {
     // Any copy is made before taking the lock; the entry takes the
     // delivery's value by swap below.
     auto &own = c.slots[id];
-    if (!own.has_value)
+    if (!event.absent && !own.has_value)
       if (const auto *value = delivered_value(c, event)) {
         own.value = *value;
         own.has_value = true;
       }
     auto lock = lock_runtime();
-    if (k < 0)
-      return; // instances are numbered from 0
+    if (k < 0 || is_dropped(si, k))
+      return; // instances are numbered from 0, and a dropped one stays so
     auto &table = joins[si];
     std::size_t index = table.size();
     for (std::size_t i = 0; i < table.size() && index == table.size(); ++i)
@@ -671,6 +704,7 @@ struct decoding_task_graph::impl::record_scheduler {
         const bool absent = k + join_offsets[si][i] < 0;
         if (absent && join_required[si][i]) {
           entry->used = false;
+          drop_instance_locked(c, id, si, k, event.root);
           return; // an instance without a required input does not exist
         }
         entry->state[i] = absent ? join_entry::absent : join_entry::missing;
@@ -690,10 +724,33 @@ struct decoding_task_graph::impl::record_scheduler {
       entry->state[slot] = join_entry::present;
     } else {
       entry->state[slot] = join_entry::absent;
+      if (join_required[si][slot]) {
+        entry->used = false;
+        drop_instance_locked(c, id, si, k, event.root);
+        return;
+      }
     }
     if (entry->pending != 0)
       return;
     queue_indexed_fire_locked(c, id, si, index, event.root);
+    notify_workers();
+  }
+
+  bool is_dropped(std::size_t si, std::int64_t k) const {
+    const auto &instances = dropped[si];
+    return std::find(instances.begin(), instances.end(), k) != instances.end();
+  }
+
+  // Instance `k` of node `si` never exists: tell its indexed consumers once,
+  // so the instances reading it stop waiting for it.
+  void drop_instance_locked(context &c, std::size_t parent, std::size_t si,
+                            std::int64_t k, std::size_t root) {
+    if (is_dropped(si, k))
+      return;
+    dropped[si].push_back(k);
+    const auto node_idx = owner.streaming_nodes[si].node_index;
+    publish_wires_locked(c, parent, root, owner.streaming_wires_from[node_idx],
+                         k, /*absent=*/true);
     notify_workers();
   }
 
@@ -1493,6 +1550,13 @@ public:
   // an instance exists only if that input is delivered.
   std::vector<std::vector<std::int64_t>> join_offsets;
   std::vector<std::vector<uint8_t>> join_required;
+  // Instances found never to exist before FINAL, by streaming node; each is
+  // announced to the consumers once and never created afterwards.
+  std::vector<std::vector<std::int64_t>> dropped;
+  // The last index a record-ordered producer published on each value wire,
+  // by compiled_wire::id: its indices never decrease, so the ones it skipped
+  // are announced as absent when the next one is published.
+  std::vector<std::int64_t> wire_last;
 
   join_entry &add_join_entry(std::size_t si) {
     const auto inputs =

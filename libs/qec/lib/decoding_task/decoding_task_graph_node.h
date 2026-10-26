@@ -169,6 +169,9 @@ public:
 
   /// Index of the values the node has just published, for consumers that join
   /// their inputs by index (see indexed_join_node). Default: unindexed.
+  /// A record-ordered node's indices never decrease from one publication to
+  /// the next: once it has published index j, the executor treats a lower
+  /// index a consumer still waits for as one that will never arrive.
   virtual std::optional<std::int64_t> published_index() const {
     return std::nullopt;
   }

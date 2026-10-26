@@ -12782,9 +12782,10 @@ class index_probe_node : public task_graph_node,
 public:
   index_probe_node(std::string id, std::string mode, std::int64_t limit,
                    std::size_t hold_ms, int hold_bit, bool staged,
-                   std::shared_ptr<pipeline_probe> probe)
+                   std::shared_ptr<pipeline_probe> probe,
+                   std::int64_t first = 0)
       : id_(std::move(id)), mode_(std::move(mode)), limit_(limit),
-        hold_(hold_ms), hold_bit_(hold_bit), staged_(staged),
+        first_(first), hold_(hold_ms), hold_bit_(hold_bit), staged_(staged),
         probe_(std::move(probe)) {
     logical_outcome output;
     output.bits = {0};
@@ -12849,7 +12850,9 @@ public:
       valid_ = true;
       return true;
     }
-    if (static_cast<std::int64_t>(records_) >= limit_) {
+    // Indices below `first` and from `limit` on are never published.
+    if (static_cast<std::int64_t>(records_) < first_ ||
+        static_cast<std::int64_t>(records_) >= limit_) {
       ++records_;
       return false;
     }
@@ -12932,6 +12935,7 @@ private:
   std::string id_;
   std::string mode_;
   std::int64_t limit_;
+  std::int64_t first_;
   std::size_t hold_;
   int hold_bit_;
   bool staged_;
@@ -12957,6 +12961,7 @@ static const bool index_probe_registered = [] {
   schema.params.push_back({"hold_ms", param_kind::uint64, /*required=*/false});
   schema.params.push_back({"hold_bit", param_kind::int32, /*required=*/false});
   schema.params.push_back({"staged", param_kind::int32, /*required=*/false});
+  schema.params.push_back({"first", param_kind::int32, /*required=*/false});
   register_node_kind(
       std::move(spec), std::move(schema), [](node_build_context &ctx) {
         return std::make_unique<index_probe_node>(
@@ -12964,7 +12969,8 @@ static const bool index_probe_registered = [] {
             ctx.node_params->get<int>("limit", 1 << 30),
             ctx.node_params->get<std::size_t>("hold_ms", 0),
             ctx.node_params->get<int>("hold_bit", -1),
-            ctx.node_params->get<int>("staged", 0) != 0, active_pipeline_probe);
+            ctx.node_params->get<int>("staged", 0) != 0, active_pipeline_probe,
+            ctx.node_params->get<int>("first", 0));
       });
   return true;
 }();
@@ -12972,12 +12978,13 @@ static const bool index_probe_registered = [] {
 static task_graph_node_config
 index_node(std::string id, std::string mode, int limit = 1 << 30,
            std::size_t hold_ms = 0, int hold_bit = -1,
-           std::size_t max_in_flight = 1, bool staged = false) {
+           std::size_t max_in_flight = 1, bool staged = false, int first = 0) {
   task_graph_node_config config;
   config.id = std::move(id);
   config.kind = "test_index_probe";
   config.node_params.insert("mode", std::move(mode));
   config.node_params.insert("limit", limit);
+  config.node_params.insert("first", first);
   config.node_params.insert("hold_ms", hold_ms);
   config.node_params.insert("hold_bit", hold_bit);
   config.node_params.insert("staged", staged ? 1 : 0);
@@ -13260,6 +13267,53 @@ TEST(DecodingTaskGraph, IndexedJoinToleratesLateSecondInput) {
   expect_indexed_pairs(records, records.size());
   EXPECT_EQ(graph->streaming_result().values[0],
             expected_join_parity(records, records.size()));
+}
+
+TEST(DecodingTaskGraph, IndexedJoinLearnsAbsenceBeforeFinal) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  // T never publishes index 0. J[k] requires T[k], so J[0] never exists; K[k]
+  // requires T[k] and reads J[k - 1] if it exists. T[1]'s arrival settles
+  // T[0] as absent, which drops J[0], and J[0]'s absence travels to K[1],
+  // which fires with that input absent instead of waiting for FINAL.
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(
+      index_node("T", "tag", 1 << 30, 0, -1, 1, false, /*first=*/1));
+  nodes.push_back(index_node("R", "tag"));
+  nodes.push_back(index_node("J", "join"));
+  nodes.push_back(index_node("K", "join"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "T", "input"},
+       {"A", "output", "R", "input"},
+       {"T", "output", "J", "a"},
+       {"R", "output", "J", "b", /*index_offset=*/-1},
+       {"T", "output", "K", "a"},
+       {"J", "output", "K", "b", /*index_offset=*/-1},
+       {"K", "output", "output", "input"}},
+      {});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const std::vector<uint8_t> records = {1, 0, 1, 1};
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  const auto j = probe->records("J");
+  const auto k = probe->records("K");
+  EXPECT_EQ(std::count(j.begin(), j.end(), 0u), 0) << "J[0] fired";
+  EXPECT_EQ(std::count(k.begin(), k.end(), 0u), 0) << "K[0] fired";
+  EXPECT_EQ(std::count(k.begin(), k.end(), 1u), 1) << "K[1] waited for FINAL";
+  EXPECT_EQ(std::count(k.begin(), k.end(), 2u), 1);
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  EXPECT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::complete);
+  EXPECT_EQ(probe->records("K"), (std::vector<std::size_t>{1, 2, 3}));
 }
 
 TEST(DecodingTaskGraph, IndexedJoinMatchesSynchronousGraph) {
