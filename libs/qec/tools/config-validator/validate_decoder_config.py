@@ -15,7 +15,12 @@ is loaded. The only dependencies are ``pyyaml`` and ``jsonschema``;
 On a machine where ``cudaq_qec`` is installed the ``--schema`` argument may
 be omitted (the schema is generated from the installed package), and
 ``--export-schema OUT.json`` writes that schema out for machines that do not
-have the package.
+have the package. A decoding-server installation that has the CUDA-Q QEC
+libraries but not the Python package exports its own schema with
+``--lib-dir /path/to/lib`` (the directory holding
+``libcudaq-qec-realtime-decoding.so`` and the ``decoder-plugins`` folder):
+the libraries are loaded through ``ctypes`` and the schema then lists exactly
+the decoder plugins that installation has.
 
 Exit status is 0 when every file validates, 1 when at least one does not,
 and 2 for a usage or schema error.
@@ -55,6 +60,7 @@ checking the schema, so its verdicts match the server's for scalars.
 import argparse
 import copy
 import json
+import os
 import re
 import sys
 
@@ -345,6 +351,38 @@ def schema_from_installed_package():
     """Return the schema exported by the installed ``cudaq_qec`` package."""
     import cudaq_qec  # Only needed on the machine that produces the schema.
     return json.loads(cudaq_qec.decoder_config_json_schema())
+
+
+_REALTIME_DECODING_LIBRARY = "libcudaq-qec-realtime-decoding.so"
+_SCHEMA_C_SYMBOL = "cudaq_qec_decoder_config_json_schema"
+
+
+def schema_from_library_dir(lib_dir):
+    """Return the schema of the installation whose libraries sit in ``lib_dir``.
+
+    Loads ``libcudaq-qec-realtime-decoding.so`` with ``ctypes``; it pulls in
+    the decoder library, whose initialiser loads the ``decoder-plugins``
+    directory next to it, so the schema reflects the plugins that
+    installation has. No Python package is needed.
+    """
+    import ctypes
+    path = os.path.join(lib_dir, _REALTIME_DECODING_LIBRARY)
+    if not os.path.exists(path):
+        raise RuntimeError(f"{path} not found; --lib-dir must name the "
+                           "directory that holds the CUDA-Q QEC libraries")
+    try:
+        library = ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+    except OSError as exc:
+        raise RuntimeError(f"cannot load {path}: {exc} (dependent libraries "
+                           "are looked up next to it and on LD_LIBRARY_PATH)")
+    try:
+        export = getattr(library, _SCHEMA_C_SYMBOL)
+    except AttributeError:
+        raise RuntimeError(f"{path} has no {_SCHEMA_C_SYMBOL}; the library "
+                           "predates the schema export, use a newer release")
+    export.restype = ctypes.c_char_p
+    export.argtypes = []
+    return json.loads(export().decode("utf-8"))
 
 
 def forbid_task_graph(schema):
@@ -781,6 +819,13 @@ def build_parser():
         help="JSON Schema file; when omitted the schema is generated from "
         "the installed cudaq_qec package")
     parser.add_argument(
+        "--lib-dir",
+        metavar="DIR",
+        help="generate the schema from the CUDA-Q QEC libraries in DIR "
+        "(the directory with libcudaq-qec-realtime-decoding.so and "
+        "decoder-plugins/) instead of the Python package; for a "
+        "decoding-server installation without cudaq_qec")
+    parser.add_argument(
         "--allow-task-graph",
         action="store_true",
         help="accept task_graph configurations (rejected by default)")
@@ -799,14 +844,17 @@ def main(argv=None):
         if args.schema:
             with open(args.schema, encoding="utf-8") as handle:
                 schema = json.load(handle)
+        elif args.lib_dir:
+            schema = schema_from_library_dir(args.lib_dir)
         else:
             schema = schema_from_installed_package()
     except ImportError:
         sys.stderr.write("cudaq_qec is not installed; pass --schema with a "
-                         "schema exported by `--export-schema` on a machine "
-                         "that has it\n")
+                         "schema exported by `--export-schema`, or --lib-dir "
+                         "with the directory of a decoding-server "
+                         "installation's libraries\n")
         return 2
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         sys.stderr.write(f"cannot read schema: {exc}\n")
         return 2
 

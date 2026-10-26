@@ -212,8 +212,9 @@ installation that has ``cudaq_qec``:
 
    # On a machine with cudaq_qec installed:
    python3 validate_decoder_config.py --export-schema decoder_config.schema.json
-   # Or on a decoding-server installation without the Python package:
-   decoding_server --export-schema=decoder_config.schema.json
+   # Or on a decoding-server installation without the Python package
+   # (DIR holds libcudaq-qec-realtime-decoding.so and decoder-plugins/):
+   python3 validate_decoder_config.py --lib-dir DIR --export-schema decoder_config.schema.json
    # On any machine:
    pip install pyyaml jsonschema
    python3 validate_decoder_config.py --schema decoder_config.schema.json my_config.yaml

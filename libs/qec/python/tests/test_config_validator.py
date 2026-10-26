@@ -153,6 +153,48 @@ def test_schema_comes_from_the_installed_package_when_not_given(
     assert status == 0, out
 
 
+def _installed_lib_dir():
+    """Directory with libcudaq-qec-realtime-decoding.so for this cudaq_qec."""
+    here = pathlib.Path(qec.__file__).resolve().parent
+    for candidate in (here / "lib", here.parent.parent / "lib",
+                      here.parent.parent.parent / "lib"):
+        if (candidate / "libcudaq-qec-realtime-decoding.so").exists():
+            return candidate
+    return None
+
+
+def test_lib_dir_export_matches_the_python_export(tool, tmp_path, capsys):
+    # --lib-dir reads the schema through the libraries' C entry point, with
+    # no Python package involved; it must be the schema of this installation.
+    lib_dir = _installed_lib_dir()
+    if lib_dir is None:
+        pytest.skip("library directory of this installation not found")
+    try:
+        exported = tool.schema_from_library_dir(str(lib_dir))
+    except RuntimeError as exc:
+        if "predates" in str(exc):
+            pytest.skip(str(exc))
+        raise
+    assert exported == json.loads(qec.decoder_config_json_schema())
+
+    out_path = tmp_path / "from-lib.json"
+    status, _ = _run(tool, capsys, "--lib-dir", str(lib_dir), "--export-schema",
+                     str(out_path))
+    assert status == 0
+    assert "task_graph" not in json.loads(
+        out_path.read_text())["$defs"]["decoder_config"]["properties"]
+
+
+def test_lib_dir_errors_are_explained(tool, tmp_path, capsys):
+    status = tool.main([
+        "--lib-dir",
+        str(tmp_path), "--export-schema",
+        str(tmp_path / "x.json")
+    ])
+    assert status == 2
+    assert "not found" in capsys.readouterr().err
+
+
 def test_export_schema_strips_task_graph(tool, tmp_path, capsys):
     out_path = tmp_path / "exported.json"
     status, _ = _run(tool, capsys, "--export-schema", str(out_path))

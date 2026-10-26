@@ -16,14 +16,21 @@ the decoding server), and then handed over together with this script:
 python3 validate_decoder_config.py --export-schema decoder_config.schema.json
 ```
 
-An installation that has only the decoding server, without the Python
-package, exports the same schema from the server binary; it reflects the
-decoder plugins that server actually loads, including ones added after it
-was built:
+An installation that has the CUDA-Q QEC libraries but not the Python
+package (a decoding server deployed on its own) exports the same schema
+through the libraries themselves; it reflects the decoder plugins that
+installation actually has, including ones added after it was built. Point
+the script at the directory holding `libcudaq-qec-realtime-decoding.so`
+and the `decoder-plugins` folder:
 
 ```bash
-decoding_server --export-schema=decoder_config.schema.json
+python3 validate_decoder_config.py --lib-dir /path/to/lib --export-schema decoder_config.schema.json
 ```
+
+The libraries are loaded with `ctypes`; their own dependencies (the decoder
+library, the CUDA runtime) are found next to them or on `LD_LIBRARY_PATH`.
+Installations that run this repository's `decoding_server` can also use
+`decoding_server --export-schema=decoder_config.schema.json`.
 
 That export keeps `task_graph`; this script removes it when it reads the
 file unless `--allow-task-graph` is given. The two files,
