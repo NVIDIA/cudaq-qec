@@ -40,7 +40,8 @@ public:
   ///
   /// Searches the lookup table for matching measurements and returns the
   /// corresponding corrections. This is called by the base class's decode()
-  /// method.
+  /// method.  Both callers (mock_decode_rpc and mock_decode_graph_kernel)
+  /// guard on thread 0, so this body runs on a single thread.
   ///
   /// @param measurements Input raw measurements from quantum circuit
   /// @param corrections Output buffer for computed corrections
@@ -90,6 +91,14 @@ inline void set_mock_decoder(mock_decoder *decoder) {
 /// request in rx_slot, writes corrections directly after the RPCResponse in
 /// tx_slot and sets response->result_len; the dispatch kernel fills the other
 /// response header fields.
+///
+/// Threading: the dispatch kernel runs one block of threads_per_block threads
+/// and calls this handler on every thread of that block, with identical
+/// arguments, between two __syncthreads(); blockIdx.x is always 0 and only
+/// thread 0's return value is recorded.  The mock lookup is single-threaded,
+/// so every thread other than thread 0 returns 0 immediately and thread 0
+/// alone stages the request, decodes and writes the response.  The handler
+/// contains no block barriers.
 ///
 /// @param rx_slot   RPCHeader followed by the measurement bytes (read-only)
 /// @param tx_slot   RPCResponse followed by the result buffer (write-only)
