@@ -1414,10 +1414,16 @@ build_engine_from_onnx(const std::string &onnx_model_path,
     throw std::runtime_error("Failed to create TensorRT builder");
   }
 
-  auto network =
-      std::unique_ptr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(
-          1U << static_cast<uint32_t>(
-              nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED)));
+#if NV_TENSORRT_MAJOR >= 11
+  // Strongly typed mode is always on in TensorRT 11; the flag is deprecated.
+  constexpr nvinfer1::NetworkDefinitionCreationFlags networkFlags = 0U;
+#else
+  constexpr nvinfer1::NetworkDefinitionCreationFlags networkFlags =
+      1U << static_cast<uint32_t>(
+          nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
+#endif
+  auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(
+      builder->createNetworkV2(networkFlags));
   if (!network) {
     throw std::runtime_error("Failed to create TensorRT network");
   }

@@ -1408,10 +1408,14 @@ def test_parallel_window_pattern_validates_against_the_schema():
     del missing["decoders"][0]["task_graph"]["nodes"][0]["commit_rounds"]
     with pytest.raises(jsonschema.ValidationError):
         validator.validate(missing)
+    # Two workers on one CPU only warn when parsed, so the schema allows it.
     repeated = yaml.safe_load(_PATTERN_YAML)
     repeated["decoders"][0]["task_graph"]["async_worker_cpus"] = [4, 4]
+    validator.validate(repeated)
+    negative = yaml.safe_load(_PATTERN_YAML)
+    negative["decoders"][0]["task_graph"]["async_worker_cpus"] = [4, -1]
     with pytest.raises(jsonschema.ValidationError):
-        validator.validate(repeated)
+        validator.validate(negative)
 
 
 # A DEM whose detector coordinates carry the colour a colour-code decoder
