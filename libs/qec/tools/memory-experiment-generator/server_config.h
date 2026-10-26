@@ -47,10 +47,11 @@ std::string emit_server_config(const prepared_model &model,
                                const server_config_options &options,
                                std::uint64_t logical_qubits);
 
-/// Validate the model and serialize before publishing a configuration file.
-/// Stage in the destination directory, then publish the complete file without
-/// replacing any existing path. The parent must exist. Failures remove only
-/// this call's temporary file; no output directory or unrelated file is erased.
+/// Validate the model and serialize before creating the destination
+/// exclusively. Existing paths are never replaced, and the parent must exist.
+/// Write failures remove only the file created by this call. Visibility is not
+/// atomic: readers may observe an incomplete write, and interruption can leave
+/// a partial file.
 void write_server_config(const preparation_request &request,
                          const prepared_model &model,
                          const server_config_options &options,

@@ -76,10 +76,14 @@ syndrome mappings. Output defaults to corrections;
 ``--pattern-arg=output=corrected_logical`` requests the corrected logical outcome.
 ``--help`` lists geometry, decoder, pattern and per-graph worker options.
 
-The generator and standalone server use ``server.yaml`` in their working
-directory unless ``CUDAQ_QEC_DECODER_CONFIG`` selects another path. Generation
-never overwrites an existing destination. Exit status is zero for successful
-generation or help and one for an error.
+The generator is a standalone tool. Its default output is ``server.yaml`` in
+the working directory; ``--output=PATH`` selects another destination. Generation
+never overwrites an existing file or symlink. Wait for successful completion,
+then pass the file explicitly to ``decoding_server --config=PATH`` when the
+runtime is available. Server configuration discovery and the service's
+environment variables are unchanged. Exit status is zero for successful
+generation or help and one for an error. A forced termination may leave a
+partial output file, which must be removed before retrying.
 
 .. important::
 

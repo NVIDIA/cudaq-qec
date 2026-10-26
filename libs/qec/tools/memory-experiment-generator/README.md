@@ -58,47 +58,39 @@ reservation. The framework must support the worker-pool runtime to execute it.
 These examples are separate configurations. Retain or move an existing
 configuration before generating another; the tool never replaces it.
 
-## Shared configuration location
+## Output and server handoff
 
-There is no generator output-path argument. The generator and standalone
-`decoding_server` use the same tools-private path resolver:
+This is a standalone YAML-generation tool. It writes `server.yaml` in the
+working directory by default; `--output=PATH` selects another file. Relative
+paths resolve from the generator's working directory. The tool does not read
+the decoding service's `CUDAQ_QEC_DECODER_CONFIG` environment variable or
+change how the server finds its configuration.
 
-1. A nonempty `CUDAQ_QEC_DECODER_CONFIG` selects the deployment's configuration
-   file, using the environment setting already recognized by the server service.
-2. Otherwise, both use `server.yaml` in their working directory.
-
-The default therefore follows the container image's `WORKDIR` and also works
-outside Docker without requiring write access to an installation or system
-directory. Deployments can set the existing environment variable once for
-both processes, for example when mounting a configuration volume; it is not a
-per-experiment CLI input. Relative environment paths resolve from the process
-working directory. Both processes must use the same working directory or
-deployment setting.
-
-The server no longer requires `--config`. Its existing explicit
-`--config=PATH` remains available and takes precedence for compatibility with
-other configurations. The in-process service's configuration precedence is
-unchanged; it does not acquire implicit file loading.
-
-Once the target runtime supports the generated pattern, the matching launch
-is simply:
+Once the target runtime supports the generated pattern, pass the file to the
+server explicitly. For example, with an existing destination directory:
 
 ```sh
-build/bin/decoding_server
+build/bin/memory-experiment-generator \
+  --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
+  --output=/path/to/configs/memory.yaml
+build/bin/decoding_server --config=/path/to/configs/memory.yaml
 ```
+
+The generator neither starts the server nor configures its transport. The
+server's existing required `--config=PATH` interface is unchanged.
 
 The only generated file contains its shared model and all independent patch
 entries. A separate model file, manifest, measurement sample or JSON file is
 not needed. The destination parent must exist. Existing files, directories and
 symlinks are never overwritten. Model and exact YAML round-trip validation
-finish before publication; a uniquely reserved sibling holds the incomplete
-write, then the completed file is published atomically without replacement.
-Failures remove only that invocation's temporary file. Concurrent generators
-cannot overwrite each other's result.
+finish before the output is created exclusively. Concurrent generators cannot
+overwrite each other's result. A detected write or close failure removes the
+file created by that invocation. No hard-link support is required.
 New files use standard permissions (`0666` restricted by the deployment's
-umask); the tool does not change the process umask. The destination filesystem
-must support hard links; unsupported publication fails and removes the staging
-file without falling back to an overwrite.
+umask); the tool does not change the process umask. Wait for successful
+completion before reading or passing the file to the server: a reader may
+otherwise see an incomplete write. A crash or forced termination can leave a
+partial file; inspect and remove that file before retrying.
 
 ## Inputs
 
@@ -120,6 +112,7 @@ Arguments use `--name=value` form; there is no JSON or YAML input format.
 | `--decoder-arg` | Repeatable `PATH=VALUE`, typed by the registered decoder schema |
 | `--pattern-arg` | Repeatable `PATH=VALUE`, typed by the registered `parallel_window` schema |
 | `--workers-per-graph` | Optional positive pool-worker count for each patch's graph; excludes its coordinator |
+| `--output` | YAML destination; default `server.yaml` in the working directory; parent must exist |
 
 Window geometry belongs to the A/B scheduling scheme, not to an individual
 decoder's parameters. Every `parallel_window` configuration requires commit
@@ -283,7 +276,7 @@ dependencies. Tool-local interfaces are not new installed SDK APIs.
 
 ```sh
 python3 -m pip install -r libs/qec/unittests/memory-experiment-generator/requirements.txt
-cmake --build build --target memory-experiment-generator test_memory_dem_chunks test_memory_model_provider decoding_server
+cmake --build build --target memory-experiment-generator test_memory_dem_chunks test_memory_model_provider
 ctest --test-dir build \
   -R 'MemoryDemChunks|MemoryExperiment|MemoryRecord|memory_experiment_generator_cli' \
   --output-on-failure
@@ -297,8 +290,8 @@ timeout, with measured runtime recorded separately.
 Tests cover bounded/full-circuit agreement, the reference layout, awkward batches,
 overflow and invalid inputs, exact round trips, huge horizons, independent
 patches, typed decoder arguments, malformed detector maps, default geometry,
-shared generator/server configuration lookup, safe publication and rejection of
-removed output/replay/bundle flags. Per-graph worker tests check exact policy
+standalone output selection, no-overwrite creation, write-failure cleanup and
+rejection of removed replay/bundle flags. Per-graph worker tests check exact policy
 round trips, independent patches, unchanged defaults and checked worker totals.
 PyMatching tests check explicit merge-policy preservation and, when the public
 window model is available, fault estimates and committed effects on the
@@ -371,7 +364,8 @@ A generated configuration is not evidence that the server can execute it.
   runtime loader can discover `lib/decoder-plugins`.
 - **`configuration already exists`:** retain or move the old configuration
   before generating another. The tool intentionally never overwrites it.
-- **Destination filesystem does not support hard links:** set
-  `CUDAQ_QEC_DECODER_CONFIG` to a configuration path on a filesystem supporting
-  hard links. The parent directory must exist. Use the same setting when
-  starting the server; failed publication removes its temporary staging file.
+- **`configuration parent must exist`:** create the destination directory or
+  choose `--output=PATH` inside an existing directory.
+- **`cannot create server configuration` / `cannot write server configuration`:**
+  check directory permissions, free space and filesystem write errors. Do not
+  start the server until generation finishes successfully.

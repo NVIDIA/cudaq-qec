@@ -5,7 +5,6 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-import json
 import os
 from pathlib import Path
 import stat
@@ -27,8 +26,6 @@ except ImportError:
     raise SystemExit(1 if in_ci else 77)
 
 GENERATOR = None
-DECODING_SERVER = None
-CONFIG_ENV = "CUDAQ_QEC_DECODER_CONFIG"
 
 
 def generation_options(**overrides):
@@ -45,15 +42,13 @@ def generation_options(**overrides):
 def run_program(program,
                 *arguments,
                 cwd,
-                config_path=None,
+                environment_overrides=None,
                 timeout=90,
                 preexec_fn=None,
                 umask=-1):
     environment = os.environ.copy()
-    environment.pop(CONFIG_ENV, None)
-    environment.pop("QEC_DECODING_SERVER_CPU_DMA_LATENCY_US", None)
-    if config_path is not None:
-        environment[CONFIG_ENV] = str(config_path)
+    if environment_overrides:
+        environment.update(environment_overrides)
     return subprocess.run(
         [str(program), *map(str, arguments)],
         cwd=cwd,
@@ -96,11 +91,8 @@ class GeneratorCliTest(unittest.TestCase):
         working.mkdir()
         return working
 
-    def invoke(self, *arguments, success=True, cwd=None, config_path=None):
-        result = run_program(GENERATOR,
-                             *arguments,
-                             cwd=cwd or self.root,
-                             config_path=config_path)
+    def invoke(self, *arguments, success=True, cwd=None):
+        result = run_program(GENERATOR, *arguments, cwd=cwd or self.root)
         detail = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         if success:
             self.assertEqual(result.returncode, 0, detail)
@@ -108,15 +100,17 @@ class GeneratorCliTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, detail)
         return result
 
-    def generate(self, *, extra=(), config_path=None, **overrides):
+    def generate(self, *, extra=(), output_path=None, **overrides):
         working = self.case_directory()
-        output = Path(config_path) if config_path else Path("server.yaml")
+        output = Path(output_path) if output_path is not None else Path(
+            "server.yaml")
         if not output.is_absolute():
             output = working / output
-        result = self.invoke(*generation_options(**overrides),
-                             *extra,
-                             cwd=working,
-                             config_path=config_path)
+        result = self.invoke(
+            *generation_options(**overrides),
+            *extra,
+            *([f"--output={output_path}"] if output_path is not None else []),
+            cwd=working)
         self.assertIn(f"Generated server configuration: {output}",
                       result.stdout.splitlines())
         expected = {output.name} if output.parent == working else set()
@@ -187,7 +181,7 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertTrue(all(0 <= index < distance**2 for index in readout[:-1]))
         return model
 
-    def test_help_lists_inputs_without_an_output_or_config_flag(self):
+    def test_help_lists_standalone_inputs_and_output(self):
         for arguments in (("--help",), ("-h",), ("--distance=3", "--help"),
                           ("-h", "--basis=Z")):
             with self.subTest(arguments=arguments):
@@ -195,22 +189,22 @@ class GeneratorCliTest(unittest.TestCase):
                 for option in ("--code", "--distance", "--rounds", "--basis",
                                "--decoder", "--commit-rounds",
                                "--buffer-rounds", "--decoder-arg",
-                               "--pattern-arg", "--workers-per-graph"):
+                               "--pattern-arg", "--workers-per-graph",
+                               "--output"):
                     self.assertIn(option, result.stdout)
-                for removed in ("--output", "--config", "--batch-rounds",
-                                "--replay-shots", "--seed",
+                for removed in ("--batch-rounds", "--replay-shots", "--seed",
                                 "--validate-bundle"):
                     self.assertNotIn(removed, result.stdout)
                 self.assertIn("at least 3", result.stdout)
                 self.assertIn("at least 4", result.stdout)
                 self.assertIn("server.yaml", result.stdout)
-                self.assertIn(CONFIG_ENV, result.stdout)
+                self.assertNotIn("CUDAQ_QEC_DECODER_CONFIG", result.stdout)
                 self.assertEqual(list(self.root.iterdir()), [])
 
     def test_removed_modes_and_file_inputs_are_rejected_without_output(self):
-        for name in ("output", "batch-rounds", "replay-shots", "seed",
-                     "validate-bundle", "model-only", "request",
-                     "check-request", "config", "parameters", "input"):
+        for name in ("batch-rounds", "replay-shots", "seed", "validate-bundle",
+                     "model-only", "request", "check-request", "config",
+                     "parameters", "input"):
             with self.subTest(option=name):
                 working = self.case_directory()
                 unopened = working / "must-not-read.json"
@@ -256,7 +250,9 @@ class GeneratorCliTest(unittest.TestCase):
                     self.assertEqual(list(working.iterdir()), [])
         for extra in (("--distance=3",), ("--decoder=single_error_lut",),
                       ("--distance", "3"), ("--workers-per-graph=2",
-                                            "--workers-per-graph=3")):
+                                            "--workers-per-graph=3"),
+                      ("--output=one.yaml",
+                       "--output=two.yaml"), ("--output=",)):
             with self.subTest(extra=extra):
                 working = self.case_directory()
                 self.invoke(*generation_options(),
@@ -301,27 +297,56 @@ class GeneratorCliTest(unittest.TestCase):
                     self.assertEqual(output.read_text(),
                                      "unrelated user content")
 
-    def test_shared_environment_overrides_default_and_requires_existing_parent(
-            self):
+    def test_output_path_overrides_default_and_requires_existing_parent(self):
         deployment = self.root / "deployment % directory"
         deployment.mkdir()
         destination = deployment / "config %.yaml"
-        output, document = self.generate(config_path=destination)
+        output, document = self.generate(output_path=destination)
         self.assertEqual(output, destination)
         self.assert_server(document)
-        relative, document = self.generate(config_path="relative config.yaml")
+        relative, document = self.generate(output_path="relative config.yaml")
         self.assertEqual(relative.name, "relative config.yaml")
         self.assert_server(document)
-        _, document = self.generate(config_path="")
-        self.assert_server(document)
+        working = self.case_directory()
+        default = working / "server.yaml"
+        default.write_text("unrelated default configuration")
+        self.invoke(*generation_options(), "--output=another.yaml", cwd=working)
+        self.assertEqual(default.read_text(), "unrelated default configuration")
+        self.assert_server(
+            yaml.safe_load((working / "another.yaml").read_text()))
+        self.assertEqual({entry.name for entry in working.iterdir()},
+                         {"server.yaml", "another.yaml"})
         working = self.case_directory()
         missing = self.root / "missing parent" / "server.yaml"
         self.invoke(*generation_options(),
+                    f"--output={missing}",
                     cwd=working,
-                    config_path=missing,
                     success=False)
         self.assertEqual(list(working.iterdir()), [])
         self.assertFalse(missing.parent.exists())
+
+    def test_plugin_configuration_environment_does_not_select_output(self):
+        deployment = self.root / "deployment.yaml"
+        deployment.write_text("unrelated deployment configuration")
+        for environment_path in (deployment,
+                                 self.root / "missing" / "server.yaml"):
+            with self.subTest(environment_path=environment_path):
+                working = self.case_directory()
+                result = run_program(GENERATOR,
+                                     *generation_options(),
+                                     cwd=working,
+                                     environment_overrides={
+                                         "CUDAQ_QEC_DECODER_CONFIG":
+                                             str(environment_path)
+                                     })
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual({path.name for path in working.iterdir()},
+                                 {"server.yaml"})
+                self.assert_server(
+                    yaml.safe_load((working / "server.yaml").read_text()))
+        self.assertEqual(deployment.read_text(),
+                         "unrelated deployment configuration")
+        self.assertFalse((self.root / "missing").exists())
 
     @unittest.skipUnless(os.name == "posix", "requires POSIX file permissions")
     def test_published_permissions_follow_deployment_umask(self):
@@ -352,6 +377,31 @@ class GeneratorCliTest(unittest.TestCase):
                          [result.stderr for result in results])
         self.assertEqual({path.name for path in working.iterdir()},
                          {"server.yaml"})
+        self.assert_server(yaml.safe_load(
+            (working / "server.yaml").read_text()))
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX file-size limits")
+    def test_failed_write_removes_its_output_and_allows_retry(self):
+        import resource
+        import signal
+
+        def limit_child_file_size():
+            # Fault injection is confined to this child; normal generation and
+            # the test runner retain their original resource limits.
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            file_size_limit_bytes = 64
+            resource.setrlimit(resource.RLIMIT_FSIZE,
+                               (file_size_limit_bytes, file_size_limit_bytes))
+
+        working = self.case_directory()
+        result = run_program(GENERATOR,
+                             *generation_options(),
+                             cwd=working,
+                             preexec_fn=limit_child_file_size)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("cannot write server configuration", result.stderr)
+        self.assertEqual(list(working.iterdir()), [])
+        self.invoke(*generation_options(), cwd=working)
         self.assert_server(yaml.safe_load(
             (working / "server.yaml").read_text()))
 
@@ -652,149 +702,9 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertEqual(list(working.iterdir()), [])
 
 
-class DecodingServerConfigPathTest(unittest.TestCase):
-
-    def setUp(self):
-        if DECODING_SERVER is None:
-            self.skipTest("decoding_server target was not provided")
-        self.temporary = tempfile.TemporaryDirectory(
-            prefix="decoding-server-config-")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
-
-    def invoke(self, *arguments, config_path=None):
-        result = run_program(DECODING_SERVER,
-                             *arguments,
-                             cwd=self.root,
-                             config_path=config_path,
-                             timeout=15)
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        return result.stderr
-
-    def test_missing_and_malformed_default_stop_before_transport(self):
-        output = self.root / "server.yaml"
-        error = self.invoke()
-        self.assertIn("cannot open config file", error)
-        self.assertIn(str(output), error)
-        self.assertEqual(list(self.root.iterdir()), [])
-        output.write_text("decoders: [\n")
-        error = self.invoke()
-        self.assertIn("failed to parse", error)
-        self.assertIn(str(output), error)
-        self.assertEqual(output.read_text(), "decoders: [\n")
-
-    def test_shared_environment_and_explicit_config_precedence(self):
-        default = self.root / "server.yaml"
-        default.write_text("decoders: [\n")
-        environment_path = self.root / "environment.yaml"
-        error = self.invoke(config_path=environment_path)
-        self.assertIn("cannot open config file", error)
-        self.assertIn(str(environment_path), error)
-        environment_path.write_text("decoders: [\n")
-        error = self.invoke(config_path=environment_path)
-        self.assertIn("failed to parse", error)
-        self.assertIn(str(environment_path), error)
-        explicit = self.root / "explicit.yaml"
-        error = self.invoke(f"--config={explicit}",
-                            config_path=environment_path)
-        self.assertIn("cannot open config file", error)
-        self.assertIn(str(explicit), error)
-        explicit.write_text("decoders: [\n")
-        error = self.invoke(f"--config={explicit}",
-                            config_path=self.root / "missing.yaml")
-        self.assertIn("failed to parse", error)
-        self.assertIn(str(explicit), error)
-        self.assertEqual({path.name for path in self.root.iterdir()},
-                         {"server.yaml", "environment.yaml", "explicit.yaml"})
-
-    def test_explicit_empty_config_is_rejected_before_file_loading(self):
-        error = self.invoke("--config=")
-        self.assertIn("--config", error)
-        self.assertNotIn("cannot open config file", error)
-        self.assertEqual(list(self.root.iterdir()), [])
-
-    def test_schema_export_ignores_configuration_paths(self):
-        default = self.root / "server.yaml"
-        malformed = "decoders: [\n"
-        default.write_text(malformed)
-        missing = self.root / "missing deployment" / "server.yaml"
-        exported = self.root / "schema %.json"
-        cases = (
-            (("--export-schema",), None, None),
-            (("--export-schema",), missing, None),
-            (("--export-schema", "--config="), missing, None),
-            (("--config=", "--export-schema"), missing, None),
-            ((f"--export-schema={exported}", "--config="), missing, exported),
-        )
-        for arguments, config_path, output in cases:
-            with self.subTest(arguments=arguments, config_path=config_path):
-                result = run_program(DECODING_SERVER,
-                                     *arguments,
-                                     cwd=self.root,
-                                     config_path=config_path,
-                                     timeout=15)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                schema = json.loads(
-                    output.read_text() if output else result.stdout)
-                self.assertEqual(
-                    schema["$schema"],
-                    "https://json-schema.org/draft/2020-12/schema")
-                self.assertIn("decoder_params", schema["$defs"])
-                combined = result.stdout + result.stderr
-                self.assertNotIn("QEC_DECODING_SERVER_READY", combined)
-                self.assertNotIn("Loaded decoder configuration:", combined)
-                self.assertEqual(default.read_text(), malformed)
-                self.assertFalse(missing.parent.exists())
-        self.assertEqual({path.name for path in self.root.iterdir()},
-                         {"server.yaml", exported.name})
-
-    @unittest.skipUnless(os.name == "posix", "requires POSIX directory removal")
-    def test_schema_export_does_not_resolve_removed_working_directory(self):
-        working = self.root / "removed"
-        working.mkdir()
-        result = run_program(DECODING_SERVER,
-                             "--export-schema",
-                             cwd=working,
-                             config_path="missing/server.yaml",
-                             timeout=15,
-                             preexec_fn=lambda: os.rmdir(working))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        schema = json.loads(result.stdout)
-        self.assertIn("decoder_params", schema["$defs"])
-        self.assertNotIn("QEC_DECODING_SERVER_READY", result.stdout)
-        self.assertNotIn("Loaded decoder configuration:", result.stdout)
-        self.assertFalse(working.exists())
-
-    @unittest.skipUnless(os.name == "posix", "requires POSIX directory removal")
-    def test_removed_working_directory_does_not_break_help_or_explicit_config(
-            self):
-        explicit = self.root / "explicit.yaml"
-        explicit.write_text("decoders: [\n")
-        cases = ((["--help"], "Usage:"), ([f"--config={explicit}"],
-                                          "failed to parse"),
-                 ([], "cannot resolve default configuration"))
-        for index, (arguments, diagnostic) in enumerate(cases):
-            with self.subTest(arguments=arguments):
-                working = self.root / f"removed {index}"
-                working.mkdir()
-                # The single child removes only its own empty CWD after
-                # subprocess has entered it, before exec of the absolute tool.
-                result = run_program(DECODING_SERVER,
-                                     *arguments,
-                                     cwd=working,
-                                     timeout=15,
-                                     preexec_fn=lambda: os.rmdir(working))
-                self.assertGreaterEqual(result.returncode, 0, result.stderr)
-                self.assertIn(diagnostic, result.stdout + result.stderr)
-                self.assertFalse(working.exists())
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--generator", type=Path, required=True)
-    parser.add_argument("--decoding-server", type=Path)
     arguments, remaining = parser.parse_known_args()
     GENERATOR = arguments.generator.resolve()
-    DECODING_SERVER = (arguments.decoding_server.resolve()
-                       if arguments.decoding_server else None)
     unittest.main(argv=[sys.argv[0], *remaining])

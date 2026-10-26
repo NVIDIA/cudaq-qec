@@ -4,7 +4,6 @@
  */
 
 #include "server_config.h"
-#include "../common/decoding_server_config.h"
 #include <charconv>
 #include <cmath>
 #include <filesystem>
@@ -16,6 +15,8 @@
 #include <vector>
 
 namespace {
+
+constexpr auto default_output_filename = "server.yaml";
 
 std::uint64_t integer(std::string_view text, std::string_view flag) {
   std::uint64_t value = 0;
@@ -48,8 +49,8 @@ void usage() {
          "       [--commit-rounds=N] [--buffer-rounds=N]\n"
          "       [--gap-rounds=N] [--pattern-arg=PATH=VALUE ...]\n"
          "       [--decoder-arg=PATH=VALUE ...]\n"
-         "       [--workers-per-graph=N]\n"
-         "\nGenerates server.yaml for a Surface Code memory experiment.\n"
+         "       [--workers-per-graph=N] [--output=PATH]\n"
+         "\nGenerates standalone YAML for a Surface Code memory experiment.\n"
          "--distance must be odd and at least 3.\n"
          "--rounds must be at least 4 extraction cycles, excluding readout.\n"
          "Logical-qubit, geometry and worker counts must be positive.\n"
@@ -63,10 +64,9 @@ void usage() {
          "Each patch has its own graph; coordinator threads are additional.\n"
          "Omitting --workers-per-graph preserves framework execution "
          "defaults.\n"
-         "Writes server.yaml in the working directory, shared with the "
-         "server.\n"
-         "CUDAQ_QEC_DECODER_CONFIG selects a deployment configuration path.\n"
+         "--output defaults to server.yaml in the working directory.\n"
          "The parent must exist; an existing configuration is never replaced.\n"
+         "Pass the generated path explicitly: decoding_server --config=PATH.\n"
          "Server execution requires parallel-window runtime support.\n"
          "Pattern output defaults to corrections (logical correction bits).\n"
          "PyMatching uses merge_strategy=smallest_weight unless overridden.\n"
@@ -108,7 +108,7 @@ int main(int argc, char **argv) {
           name != "logical-qubits" && name != "error-rate" && name != "code" &&
           name != "decoder" && name != "commit-rounds" &&
           name != "buffer-rounds" && name != "gap-rounds" &&
-          name != "workers-per-graph")
+          name != "workers-per-graph" && name != "output")
         throw std::invalid_argument("unknown option: --" + name);
       if (!values.emplace(name, argument.substr(equals + 1)).second)
         throw std::invalid_argument("duplicate option: --" + name);
@@ -167,7 +167,9 @@ int main(int argc, char **argv) {
     const auto total_workers =
         generator::configured_worker_total(options, spec.logical_qubits);
     generator::validate_server_config_options(options);
-    const auto output = cudaq::qec::tools::default_server_config_path();
+    const auto output = std::filesystem::absolute(
+        values.contains("output") ? values.at("output")
+                                  : default_output_filename);
     if (std::filesystem::exists(std::filesystem::symlink_status(output)))
       throw std::invalid_argument("configuration already exists: " +
                                   output.string());

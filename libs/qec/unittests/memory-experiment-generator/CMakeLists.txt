@@ -38,16 +38,9 @@ if(TARGET memory-experiment-generator)
       # CI installs requirements after configuration; absence here is not fatal.
       message(STATUS "Generator CLI tests: PyYAML missing in ${Python_EXECUTABLE}; install test requirements before running")
     endif()
-    set(memory_generator_cli_args
-      --generator=$<TARGET_FILE:memory-experiment-generator>)
-    if(TARGET decoding_server)
-      list(APPEND memory_generator_cli_args
-        --decoding-server=$<TARGET_FILE:decoding_server>)
-      add_dependencies(CUDAQXQECUnitTests decoding_server)
-    endif()
     add_test(NAME memory_experiment_generator_cli
       COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py" -v
-        ${memory_generator_cli_args})
+        --generator=$<TARGET_FILE:memory-experiment-generator>)
     set_tests_properties(memory_experiment_generator_cli PROPERTIES
       LABELS "qec"
       SKIP_RETURN_CODE 77

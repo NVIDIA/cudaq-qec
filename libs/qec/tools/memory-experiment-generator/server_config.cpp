@@ -4,7 +4,6 @@
  */
 
 #include "server_config.h"
-#include "../common/decoding_server_config.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -12,7 +11,6 @@
 #include <charconv>
 #include <cmath>
 #include <limits>
-#include <llvm/ADT/SmallString.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/FileUtilities.h>
 #include <llvm/Support/raw_ostream.h>
@@ -30,7 +28,6 @@ constexpr auto pattern_name = "parallel_window";
 constexpr auto model_name = "memory_model";
 constexpr auto node_name = "parallel_memory";
 constexpr auto corrections_output = "corrections";
-constexpr auto staging_suffix_model = "%%%%%%%%%%%%%%%%";
 constexpr std::uint64_t bulk_mapping_id = 0;
 constexpr std::uint64_t final_mapping_id = 1;
 
@@ -412,55 +409,27 @@ void write_server_config(const preparation_request &request,
   validate_prepared_model(request, model);
   const auto yaml =
       emit_server_config(model, options, request.experiment.logical_qubits);
-  // Keep the incomplete write invisible to a server reading the default path.
-  // Randomize only the suffix: the literal destination may contain '%'.
-  // CreateNew reserves the sibling exclusively; normal file permissions are
-  // restricted by the deployment's umask, without changing that process state.
-  constexpr unsigned max_staging_attempts = 128;
-  std::string temporary;
+  // CreateNew refuses any existing destination, including symlinks and a
+  // concurrent writer's file. Normal permissions are restricted by the umask.
+  const auto filename = config_file.string();
   int descriptor = -1;
-  std::error_code stage_error;
-  for (unsigned attempt = 0; attempt < max_staging_attempts; ++attempt) {
-    llvm::SmallString<32> suffix;
-    llvm::sys::fs::createUniquePath(staging_suffix_model, suffix, false);
-    temporary = config_file.string() + "." + suffix.str().str();
-    stage_error = llvm::sys::fs::openFileForWrite(temporary, descriptor,
-                                                  llvm::sys::fs::CD_CreateNew);
-    if (stage_error != std::errc::file_exists)
-      break;
+  if (const auto error = llvm::sys::fs::openFileForWrite(
+          filename, descriptor, llvm::sys::fs::CD_CreateNew)) {
+    if (error == std::errc::file_exists)
+      throw std::invalid_argument("configuration already exists: " + filename);
+    throw std::system_error(error,
+                            "cannot create server configuration: " + filename);
   }
-  if (stage_error)
-    throw std::system_error(stage_error, "cannot stage server configuration: " +
-                                             config_file.string());
-  const llvm::FileRemover cleanup(temporary);
-  try {
-    llvm::raw_fd_ostream stream(descriptor, /*shouldClose=*/true);
-    stream << yaml;
-    stream.close();
-    if (const auto error = stream.error()) {
-      stream.clear_error();
-      throw std::system_error(error);
-    }
-    // Unlike rename(), a hard-link publication is atomic and refuses an
-    // existing destination, including symlinks and concurrent writers.
-    std::error_code publication_error;
-    std::filesystem::create_hard_link(temporary, config_file,
-                                      publication_error);
-    if (publication_error == std::errc::operation_not_permitted ||
-        publication_error == std::errc::operation_not_supported ||
-        publication_error == std::errc::function_not_supported)
-      throw std::runtime_error(
-          "destination filesystem cannot publish using hard links; set " +
-          std::string(cudaq::qec::tools::decoder_config_environment) +
-          " to a configuration path on a filesystem supporting hard links");
-    if (publication_error)
-      throw std::filesystem::filesystem_error("cannot publish configuration",
-                                              temporary, config_file,
-                                              publication_error);
-  } catch (const std::exception &error) {
-    throw std::runtime_error("cannot write server configuration: " +
-                             config_file.string() + ": " + error.what());
+  llvm::FileRemover cleanup(filename);
+  llvm::raw_fd_ostream stream(descriptor, /*shouldClose=*/true);
+  stream << yaml;
+  stream.close();
+  if (const auto error = stream.error()) {
+    stream.clear_error();
+    throw std::system_error(error,
+                            "cannot write server configuration: " + filename);
   }
+  cleanup.releaseFile();
 }
 
 } // namespace cudaq::qec::memory_experiment

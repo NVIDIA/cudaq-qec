@@ -88,12 +88,13 @@ Decoder parameters are validated against the parameter schema each decoder regis
 
 The configuration is then saved to a YAML file for reuse. The YAML format is human-readable, making it easy to inspect, modify, and share configurations across different execution environments.
 
-The standalone ``decoding_server`` and ``memory-experiment-generator`` share a
-default configuration location: ``server.yaml`` in their working directory, or
-the path selected by ``CUDAQ_QEC_DECODER_CONFIG`` when that deployment setting
-is nonempty. The generator has no output-path argument and never replaces an
-existing configuration. The server's optional ``--config=PATH`` overrides the
-shared default. This does not change in-process configuration APIs.
+For finite Surface Code memory experiments, the standalone
+``memory-experiment-generator`` can generate this YAML directly. Its output
+defaults to ``server.yaml`` in the working directory; ``--output=PATH`` selects
+another file. It never replaces an existing configuration. When the generated
+pattern's runtime is available, pass the completed file to
+``decoding_server --config=PATH`` explicitly. The generator does not change
+server configuration discovery or in-process configuration APIs.
 
 .. note::
 
