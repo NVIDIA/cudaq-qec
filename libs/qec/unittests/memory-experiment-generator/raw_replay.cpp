@@ -4,8 +4,8 @@
  */
 
 #include "raw_replay.h"
+#include "../utils/raw_memory_circuit_test_helpers.h"
 #include "cudaq/qec/code.h"
-#include "cudaq/qec/experiments.h"
 #include "cudaq/qec/noise_model.h"
 #include <algorithm>
 #include <cmath>
@@ -94,7 +94,7 @@ void sample_raw_replay(
       auto samples = [&] {
         const std::lock_guard lock(sampling_mutex);
         cudaq::set_random_seed(static_cast<std::size_t>(output.seed));
-        return sample_memory_circuit_raw(
+        return cudaq::qec::testing::sample_raw_memory_records(
             *surface, prep_kind, 1,
             static_cast<std::size_t>(request.experiment.rounds), noise);
       }();

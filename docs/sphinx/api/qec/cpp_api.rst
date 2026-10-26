@@ -163,10 +163,6 @@ Compact chunk forms
 Detector Error Model (DEM) Sampling
 ===================================
 
-Raw memory-circuit measurement records (before detector formation):
-
-.. doxygenfunction:: cudaq::qec::sample_memory_circuit_raw
-
 CPU sampling (host tensors):
 
 .. doxygenfunction:: cudaq::qec::dem_sampler::cpu::sample_dem(const cudaqx::tensor<uint8_t> &, std::size_t, const std::vector<double> &)

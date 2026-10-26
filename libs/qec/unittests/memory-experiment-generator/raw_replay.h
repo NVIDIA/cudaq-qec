@@ -27,10 +27,10 @@ struct raw_replay_shot {
 void validate_raw_replay_options(std::uint64_t patches, std::uint64_t shots,
                                  std::uint64_t base_seed);
 
-/// Sample the existing public memory circuit once per complete shot and pass
+/// Sample the existing compiled memory kernel once per complete shot and pass
 /// each result to consume without retaining the complete replay. Code geometry
 /// is prepared once per invocation; memory scales with one shot, not the number
-/// of shots or independent patches. The public sampler prepares code schedules
+/// of shots or independent patches. The test helper prepares code schedules
 /// for each shot without characterizing a circuit or constructing a DEM.
 /// References passed to consume remain valid only for that callback.
 ///

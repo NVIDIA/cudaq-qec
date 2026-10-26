@@ -82,6 +82,7 @@ else()
 endif()
 
 add_executable(test_qec test_qec.cpp)
+target_include_directories(test_qec PRIVATE ${CUDAQX_QEC_SOURCE_DIR}/lib)
 target_link_libraries(test_qec PRIVATE GTest::gtest_main cudaq-qec
   cudaq::cudaq cudaq::cudaq-stim-target)
 add_dependencies(CUDAQXQECUnitTests test_qec)

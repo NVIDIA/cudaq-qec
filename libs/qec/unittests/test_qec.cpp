@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "cuda-qx/core/library_utils.h"
+#include "utils/raw_memory_circuit_test_helpers.h"
 #include "cudaq/platform.h"
 #include "cudaq/qec/codes/surface_code.h"
 #include "cudaq/qec/experiments.h"
@@ -321,7 +322,7 @@ TEST(QECCodeTester, checkSampleMemoryCircuit) {
   }
 }
 
-TEST(MemoryRecordSampling, PublicRawRecordsMatchDetectorAndReadoutSamples) {
+TEST(MemoryRecordSampling, RawRecordsMatchDetectorAndReadoutSamples) {
   using namespace cudaq::qec;
   auto surface =
       get_code("surface_code", cudaqx::heterogeneous_map{{"distance", 3}});
@@ -345,8 +346,8 @@ TEST(MemoryRecordSampling, PublicRawRecordsMatchDetectorAndReadoutSamples) {
     // RNG; reseeding checks layout equivalence, not stability across backends
     // or CUDA-Q versions.
     cudaq::set_random_seed(seed);
-    const auto raw =
-        sample_memory_circuit_raw(*surface, prep, shots, rounds, noise);
+    const auto raw = cudaq::qec::testing::sample_raw_memory_records(
+        *surface, prep, shots, rounds, noise);
     cudaq::set_random_seed(seed);
     const auto [detectors, data] =
         sample_memory_circuit(*surface, prep, shots, rounds, noise);
@@ -373,31 +374,22 @@ TEST(MemoryRecordSampling, PublicRawRecordsMatchDetectorAndReadoutSamples) {
   }
 }
 
-TEST(MemoryRecordSampling, InvalidCountsAndPreparationRejectBeforeSampling) {
+TEST(MemoryRecordSampling, PublicSamplerRejectsInvalidRoundsAndPreparation) {
   using namespace cudaq::qec;
   auto surface =
       get_code("surface_code", cudaqx::heterogeneous_map{{"distance", 3}});
   cudaq::noise_model noise;
-  const auto expect_raw_input_error = [&](operation prep, std::size_t shots,
-                                          std::size_t rounds) {
+  const auto expect_input_error = [&](operation prep, std::size_t rounds,
+                                      const char *diagnostic) {
     try {
-      sample_memory_circuit_raw(*surface, prep, shots, rounds, noise);
-      FAIL() << "Expected an invalid raw-sampling request to fail";
+      sample_memory_circuit(*surface, prep, 1, rounds, noise);
+      FAIL() << "Expected invalid memory sampling inputs to fail";
     } catch (const std::runtime_error &error) {
-      EXPECT_EQ(std::string(error.what()).find("sample_memory_circuit_raw"), 0);
+      EXPECT_NE(std::string(error.what()).find(diagnostic), std::string::npos);
     }
   };
-  expect_raw_input_error(operation::prep0, 0, 3);
-  expect_raw_input_error(operation::prep0, 1, 0);
-  expect_raw_input_error(operation::stabilizer_round, 1, 3);
-  EXPECT_THROW(
-      sample_memory_circuit_raw(*surface, operation::prep0, 1,
-                                std::numeric_limits<std::size_t>::max(), noise),
-      std::overflow_error);
-  EXPECT_THROW(sample_memory_circuit_raw(
-                   *surface, operation::prep0,
-                   std::numeric_limits<std::size_t>::max(), 3, noise),
-               std::overflow_error);
+  expect_input_error(operation::prep0, 0, "numRounds");
+  expect_input_error(operation::stabilizer_round, 3, "state prep");
 }
 
 TEST(MemoryRecordSampling, FailedSampleClearsNoiseAndAllowsRecovery) {
@@ -417,7 +409,7 @@ TEST(MemoryRecordSampling, FailedSampleClearsNoiseAndAllowsRecovery) {
                           const std::vector<double> &) -> cudaq::kraus_channel {
                         // The detector-valued API analyzes a DEM first. Fail
                         // only in the sampling context to exercise cleanup
-                        // shared by both APIs.
+                        // in both the test helper and public sampler.
                         const auto *context = cudaq::getExecutionContext();
                         if (context && context->name == "sample") {
                           failed_during_sampling = true;
@@ -427,8 +419,8 @@ TEST(MemoryRecordSampling, FailedSampleClearsNoiseAndAllowsRecovery) {
                         return {};
                       });
     if (raw_records)
-      EXPECT_THROW(sample_memory_circuit_raw(*surface, operation::prep0, 1,
-                                             rounds, noise),
+      EXPECT_THROW(cudaq::qec::testing::sample_raw_memory_records(
+                       *surface, operation::prep0, 1, rounds, noise),
                    std::runtime_error);
     else
       EXPECT_THROW(
@@ -440,10 +432,21 @@ TEST(MemoryRecordSampling, FailedSampleClearsNoiseAndAllowsRecovery) {
     cudaq::get_platform().reset_noise();
 
     cudaq::noise_model noiseless;
-    const auto recovered = sample_memory_circuit_raw(*surface, operation::prep0,
-                                                     1, rounds, noiseless);
-    ASSERT_EQ(recovered.size(), 1);
-    EXPECT_EQ(recovered.front().size(), expected_records);
+    if (raw_records) {
+      const auto recovered = cudaq::qec::testing::sample_raw_memory_records(
+          *surface, operation::prep0, 1, rounds, noiseless);
+      ASSERT_EQ(recovered.size(), 1);
+      EXPECT_EQ(recovered.front().size(), expected_records);
+    } else {
+      const auto [detectors, data] = sample_memory_circuit(
+          *surface, operation::prep0, 1, rounds, noiseless);
+      ASSERT_EQ(detectors.shape().size(), 2);
+      EXPECT_EQ(detectors.shape()[0], 1);
+      EXPECT_GT(detectors.shape()[1], 0);
+      ASSERT_EQ(data.shape().size(), 2);
+      EXPECT_EQ(data.shape()[0], 1);
+      EXPECT_EQ(data.shape()[1], surface->get_num_data_qubits());
+    }
     EXPECT_EQ(cudaq::get_platform().get_noise(), nullptr);
   }
 }

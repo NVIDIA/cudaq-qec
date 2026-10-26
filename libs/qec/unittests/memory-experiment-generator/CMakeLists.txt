@@ -18,6 +18,8 @@ if(TARGET memory-experiment-generator)
     raw_replay.cpp
     test_raw_replay.cpp
     test_server_config.cpp)
+  target_include_directories(test_memory_model_provider PRIVATE
+    ${CUDAQX_QEC_SOURCE_DIR}/lib)
   target_link_directories(test_memory_model_provider PRIVATE ${CUDAQ_INSTALL_DIR}/lib)
   target_link_libraries(test_memory_model_provider PRIVATE
     GTest::gtest_main cudaq-qec-memory-experiment-provider

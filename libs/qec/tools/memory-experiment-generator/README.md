@@ -212,9 +212,9 @@ decoding must not be switched to device dispatch merely to select a wire.
 
 Raw samples, seeds, replay schedules and result-oracle records belong to the
 qualification workflow. The production CLI does not sample measurements.
-Tests use the public `sample_memory_circuit_raw` sampler and test-only
-record/batch helpers. Raw logical values alone are not expected corrections or
-an accuracy oracle.
+Tests sample the compiled memory-circuit kernel through test-only helpers for
+raw records and batching. Raw logical values alone are not expected corrections
+or an accuracy oracle.
 
 Internal UDP assessment is not customer RoCE/FPGA qualification. Installed
 two-process replay needs an executable A/B runtime, a transport-specific
