@@ -2014,6 +2014,37 @@ TEST(DecoderSchemaTest, JsonSchemaExportReflectsRegistry) {
   // Required keys and unknown-key rejection are carried over.
   EXPECT_NE(text.find("\"error_rate_vec\""), std::string::npos);
   EXPECT_NE(text.find("\"additionalProperties\": false"), std::string::npos);
+
+  // An int32 parameter carries the width of its stored type, so a document
+  // that overflows it fails offline exactly as it fails when parsed.
+  EXPECT_NE(text.find("\"maximum\": 2147483647"), std::string::npos);
+  EXPECT_NE(text.find("\"minimum\": -2147483648"), std::string::npos);
+  // Envelope: id is int64, cuda_device_id a non-negative int32.
+  EXPECT_NE(text.find("\"maximum\": 9223372036854775807"), std::string::npos);
+  EXPECT_NE(text.find("\"minimum\": -9223372036854775808"), std::string::npos);
+}
+
+TEST(DecoderConfigTest, NegativeCudaDeviceIdIsRejectedWhenParsed) {
+  using namespace cudaq::qec::decoding::config;
+  // decoder construction refuses a negative device id and the exported
+  // schema bounds it at 0; the parser must agree with both.
+  const std::string yaml = R"(decoders:
+  - id: 0
+    type: pymatching
+    cuda_device_id: -1
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0, -1, 1, -1, 2, -1]
+    O_sparse: [0, -1, 1, -1, 2, -1]
+    D_sparse: [0, -1, 1, -1, 2, -1]
+    decoder_custom_args:
+      merge_strategy: smallest_weight
+      error_rate_vec: [0.1, 0.1, 0.1]
+)";
+  EXPECT_THROW(multi_decoder_config::from_yaml_str(yaml), std::runtime_error);
+  std::string ok = yaml;
+  ok.replace(ok.find("cuda_device_id: -1"), 18, "cuda_device_id: 0");
+  EXPECT_NO_THROW(multi_decoder_config::from_yaml_str(ok));
 }
 
 TEST(DecoderConfigTest, SimulationHostPointerWrappersForwardToHostRuntime) {
