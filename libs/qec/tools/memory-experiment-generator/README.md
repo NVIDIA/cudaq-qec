@@ -144,7 +144,7 @@ build/bin/memory-experiment-generator \
   --pattern-arg=output=corrected_logical \
   --pattern-arg=boundary_prior=0.01 \
   --pattern-arg=verify_residual=report \
-  --pattern-arg=max_in_flight=4 \
+  --pattern-arg=gap_rounds=9 \
   --pattern-arg=merge_identical=true \
   --pattern-arg=conflicting_parallel=most_likely
 ```
@@ -177,9 +177,6 @@ is unspecified. The count is an execution option, not an inner-decoder argument.
 CPU affinity remains unset, allowing the framework to inherit process affinity;
 the generator neither assigns cores nor duplicates cross-graph overlap checks.
 Configuring workers does not establish runtime availability or measured overlap.
-`--pattern-arg=max_in_flight=4` is a different setting: it requests concurrent
-window instances/decoder replicas from the pattern, not four worker threads or
-four dedicated cores. It does not replace `--workers-per-graph`.
 
 ## Server configuration and deployment
 
@@ -293,12 +290,11 @@ patches, typed decoder arguments, malformed detector maps, default geometry,
 standalone output selection, no-overwrite creation, write-failure cleanup and
 rejection of removed replay/bundle flags. Per-graph worker tests check exact policy
 round trips, independent patches, unchanged defaults and checked worker totals.
-PyMatching tests check explicit merge-policy preservation and, when the public
-window model is available, fault estimates and committed effects on the
-X/Z reference windows. With the sparse window implementation, they exercise
-the framework's preallocated decode workspace and canonical solve/commit
-operations. They use the framework's existing models and helpers, not a
-tool-owned scheduler.
+PyMatching tests check explicit merge-policy preservation, fault estimates and
+committed effects on the X/Z reference windows. They construct decoder inputs
+with the framework's kernel forms, decode fault estimates, and apply the
+framework's commit operation. They reuse existing models and helpers rather
+than a tool-owned scheduler.
 Configuration tests use the framework's registered public pattern schema.
 
 Windowed-graph wiring validation applies to concrete `ingest` and

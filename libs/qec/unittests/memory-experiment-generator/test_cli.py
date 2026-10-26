@@ -435,7 +435,6 @@ class GeneratorCliTest(unittest.TestCase):
             "input_boundary": "columns",
             "merge_identical": True,
             "conflicting_parallel": "most_likely",
-            "max_in_flight": 3,
             "verify_residual": "report",
             "output": "corrected_logical",
         }
@@ -447,7 +446,6 @@ class GeneratorCliTest(unittest.TestCase):
             "--pattern-arg=input_boundary=columns",
             "--pattern-arg=merge_identical=true",
             "--pattern-arg=conflicting_parallel=most_likely",
-            "--pattern-arg=max_in_flight=3",
             "--pattern-arg=verify_residual=report",
             "--pattern-arg=output=corrected_logical",
             "--decoder-arg=lut_error_depth=2",
@@ -487,7 +485,6 @@ class GeneratorCliTest(unittest.TestCase):
                     "--pattern-arg=input_boundary=truncate",
                     "--pattern-arg=merge_identical=false",
                     "--pattern-arg=conflicting_parallel=reject",
-                    "--pattern-arg=max_in_flight=1",
                     f"--pattern-arg=verify_residual={verification}",
                 ))
                 self.assert_server(document)
@@ -495,7 +492,6 @@ class GeneratorCliTest(unittest.TestCase):
                 self.assertEqual(node["input_boundary"], "truncate")
                 self.assertIs(node["merge_identical"], False)
                 self.assertEqual(node["conflicting_parallel"], "reject")
-                self.assertEqual(node["max_in_flight"], 1)
                 self.assertEqual(node["verify_residual"], verification)
 
     def test_pattern_geometry_aliases_reject_explicit_dedicated_flags(self):
@@ -533,9 +529,8 @@ class GeneratorCliTest(unittest.TestCase):
             ("boundary_prior=inf",),
             ("boundary_prior=1junk",),
             ("merge_identical=1",),
-            ("max_in_flight=0",),
-            ("max_in_flight=-1",),
-            ("max_in_flight=1.5",),
+            ("gap_rounds=-1",),
+            ("gap_rounds=1.5",),
             ("output=unsupported",),
             ("input_boundary=unsupported",),
             ("conflicting_parallel=unsupported",),

@@ -145,7 +145,7 @@ TEST(MemoryExperimentServerConfig, PublicSchemaChecksGeometryAndDecoderArgs) {
 }
 
 TEST(MemoryExperimentServerConfig,
-     AllPatternParametersRoundtripWithTypedOverridesForEveryPatch) {
+     PatternParametersRoundtripWithTypedOverridesForEveryPatch) {
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
   const auto model = prepare_model(request);
@@ -159,7 +159,6 @@ TEST(MemoryExperimentServerConfig,
                           "input_boundary=columns",
                           "merge_identical=false",
                           "conflicting_parallel=most_likely",
-                          "max_in_flight=4",
                           "verify_residual=report"};
   const auto yaml = emit_server_config(model, options, 2);
   const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
@@ -179,23 +178,21 @@ TEST(MemoryExperimentServerConfig,
     EXPECT_FALSE(parameters.get<bool>("merge_identical"));
     EXPECT_EQ(parameters.get<std::string>("conflicting_parallel"),
               "most_likely");
-    EXPECT_EQ(parameters.get<std::size_t>("max_in_flight"), 4);
     EXPECT_EQ(parameters.get<std::string>("verify_residual"), "report");
   }
 }
 
 TEST(MemoryExperimentServerConfig, PatternSchemaRejectsInvalidArguments) {
   for (const auto &arguments : std::vector<std::vector<std::string>>{
-           {"max_in_flight=2", "max_in_flight=3"},
+           {"gap_rounds=2", "gap_rounds=3"},
            {"not_registered=1"},
            {"lut_error_depth=2"},
            {".output=corrections"},
-           {"max_in_flight..child=2"},
-           {"max_in_flight"},
-           {"max_in_flight=-1"},
-           {"max_in_flight=18446744073709551616"},
-           {"max_in_flight=2junk"},
-           {"max_in_flight=0"},
+           {"gap_rounds..child=2"},
+           {"gap_rounds"},
+           {"gap_rounds=-1"},
+           {"gap_rounds=18446744073709551616"},
+           {"gap_rounds=2junk"},
            {"commit_rounds=0"},
            {"buffer_rounds=0"},
            {"gap_rounds=0"},
@@ -218,7 +215,7 @@ TEST(MemoryExperimentServerConfig, PatternSchemaRejectsInvalidArguments) {
     EXPECT_THROW(validate_server_config_options(options), std::exception);
   }
   auto options = reference_options();
-  options.pattern_args = {"max_in_flight=2junk"};
+  options.pattern_args = {"gap_rounds=2junk"};
   try {
     validate_server_config_options(options);
     FAIL() << "Invalid pattern number was accepted";
