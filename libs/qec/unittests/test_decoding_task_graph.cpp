@@ -170,6 +170,25 @@ TEST(XorLogical, SizeMismatchThrows) {
   EXPECT_THROW(xor_logical(a, b), std::invalid_argument);
 }
 
+// Folds in place: bits are XORed, converged is ANDed, and nothing is
+// reallocated. A size mismatch throws and leaves the accumulator unchanged.
+TEST(XorLogical, IntoFoldsInPlace) {
+  logical_outcome acc, other;
+  acc.bits = {0, 1};
+  other.bits = {1, 1};
+  acc.converged = true;
+  other.converged = false;
+  const auto *data = acc.bits.data();
+  xor_logical_into(acc, other);
+  EXPECT_EQ(acc.bits, (std::vector<uint8_t>{1, 0}));
+  EXPECT_FALSE(acc.converged);
+  EXPECT_EQ(acc.bits.data(), data);
+
+  other.bits = {0};
+  EXPECT_THROW(xor_logical_into(acc, other), std::invalid_argument);
+  EXPECT_EQ(acc.bits, (std::vector<uint8_t>{1, 0}));
+}
+
 // ---------------------------------------------------------------------------
 // decoding_task_graph — construction and one-shot API
 // ---------------------------------------------------------------------------

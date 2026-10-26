@@ -730,6 +730,13 @@ void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
           reject_topology("decode_window node '" + id + "' is fed by '" +
                           e.from_node + "." + e.from_output +
                           "', which is not a window port of an ingest node");
+        // Commitment checks the window request as configured on the ingest
+        // node, so an offset here would hand window k another instance's
+        // window while it keeps its own boundary dependencies.
+        if (e.index_offset != 0)
+          reject_topology(describe(e) + " has a nonzero index_offset: a window "
+                                        "is fed by the same instance of its "
+                                        "ingest node");
         if (fed_by.count(id))
           reject_topology("decode_window node '" + id +
                           "' is fed by more than one window port");

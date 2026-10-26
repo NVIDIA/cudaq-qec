@@ -38,9 +38,11 @@ public:
   // inputs[i]  →  outputs[0]="output", the XOR of every input
   void execute_indexed(const std::vector<edge_value> &inputs,
                        std::vector<edge_value> &outputs) const override {
+    // One copy of the first input, folded in place: the result is the only
+    // allocation however many inputs there are.
     auto folded = inputs[0].get<logical_outcome>();
     for (std::size_t i = 1; i < inputs.size(); ++i)
-      folded = xor_logical(folded, inputs[i].get<logical_outcome>());
+      xor_logical_into(folded, inputs[i].get<logical_outcome>());
     outputs[0] = std::move(folded);
   }
 

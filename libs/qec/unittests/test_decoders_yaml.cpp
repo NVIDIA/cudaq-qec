@@ -3173,6 +3173,10 @@ TEST(TaskGraphWindowKinds, BuildingValidatesTheWindowsFirst) {
   rejects("to: B.receive_1}", "to: B.receive_99999999999999999999}",
           "decode_window node 'B' has no input "
           "'receive_99999999999999999999'");
+  rejects("{from: ingest.B, to: B}",
+          "{from: ingest.B, to: B, index_offset: -1}",
+          "edge ingest.B -> B.input (index_offset -1) has a nonzero "
+          "index_offset");
   rejects("        - {from: A.backward, to: B.receive_1}\n", "",
           "validate_commitment: F3: ");
   rejects(", index_offset: -1}", "}", "reaches round");
