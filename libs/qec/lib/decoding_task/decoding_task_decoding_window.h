@@ -222,7 +222,9 @@ variant_key window_variant(const experiment_template &context,
 
 /// One window of a layer, as ingest hands it over by value: which window it
 /// is, its rounds and model, where its first row lies in the shot, and its
-/// own rows' detectors. A decode_window reads nothing else of ingest.
+/// own rows' detectors. A decode_window reads nothing else of ingest. It is
+/// the edge-value type "window_rows", which an executor may copy into its
+/// joins.
 struct window_rows {
   std::int64_t k = 0;
   round_range rounds;        ///< The window's rounds, clipped to the shot

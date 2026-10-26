@@ -16,6 +16,7 @@
 
 #include "decoding_task_decoding_window.h"
 #include "cudaq/qec/decoder_init.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -1220,5 +1221,8 @@ void solve_window(const decoding_window &window, decoder *dec,
     out.satisfied = out.satisfied && ws.explained[r] == (detectors[r] & 1);
   commit_window(window, detectors, ws);
 } // end - solve_window()
+
+// Ingest's windows travel on edges by value.
+CUDAQ_REGISTER_EDGE_VALUE_TYPE(window_rows, "window_rows")
 
 } // namespace cudaq::qec

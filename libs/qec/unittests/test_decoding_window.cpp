@@ -40,6 +40,7 @@
 #include "../lib/decoding_task/decoding_task_data_artifacts.h"
 #include "../lib/decoding_task/decoding_task_decode_window_core.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
+#include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
 #include "../lib/decoding_task/decoding_task_ingest_core.h"
 #include "cudaq/qec/code.h"
@@ -4840,4 +4841,52 @@ TEST(DataArtifactStore, WindowsHoldingTheReadoutCarryM2o) {
 } // end - TEST(DataArtifactStore, WindowsHoldingTheReadoutCarryM2o)
 
 } // namespace
+
+// The windowed graph's payloads are edge-value types registered by name, so
+// their ports wire together, and an edge value refilled with a window or a
+// send no larger than the one it holds allocates nothing, as an executor's
+// join refills its copies.
+TEST(WindowPayloads, AreEdgeValuesRefilledInPlace) {
+  window_rows rows;
+  const window_send send{"forward", send_mode::delta, {}, {0, 1, 2}};
+  const std::vector<std::uint8_t> values{1, 0, 1};
+  window_send_payload payload;
+  EXPECT_EQ(edge_value_type("window_rows"), edge_value_type::of<window_rows>());
+  EXPECT_EQ(edge_value_type("window_send"),
+            edge_value_type::of<window_send_payload>());
+
+  copy_send({values, &send, 7}, payload);
+  EXPECT_EQ(payload.values, values);
+  EXPECT_EQ(payload.send, &send);
+  EXPECT_EQ(payload.first_row, 7u);
+  const auto received = receive_of(payload);
+  EXPECT_EQ(received.values.data(), payload.values.data());
+  EXPECT_EQ(received.values.size(), values.size());
+  EXPECT_EQ(received.send, &send);
+  EXPECT_EQ(received.first_row, 7u);
+
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  rows.k = 3;
+  rows.detectors.assign(64, 1);
+  edge_value held_rows(rows);
+  edge_value held_send(payload);
+  rows.k = 4;
+  rows.detectors.assign(40, 0);
+  payload.values.assign(2, 1);
+  const edge_value next_rows(rows);
+  const edge_value next_send(payload);
+  EXPECT_EQ(allocation_counter::during([&] {
+              held_rows = next_rows;
+              held_send = next_send;
+              copy_send(receive_of(next_send.get<window_send_payload>()),
+                        held_send.get<window_send_payload>());
+            }),
+            0u);
+  EXPECT_EQ(held_rows.get<window_rows>().k, 4);
+  EXPECT_EQ(held_rows.get<window_rows>().detectors, rows.detectors);
+  EXPECT_EQ(held_send.get<window_send_payload>().values, payload.values);
+} // end - TEST(WindowPayloads, AreEdgeValuesRefilledInPlace)
+
 } // namespace cudaq::qec

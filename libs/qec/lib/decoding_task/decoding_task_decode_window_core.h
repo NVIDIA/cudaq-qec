@@ -38,6 +38,29 @@ struct window_send_value {
   std::size_t first_row = 0;
 };
 
+/// A send as an edge carries it: a window_send_value whose values it owns,
+/// so an executor may copy it into a join and keep it after the sending
+/// slot fires again. Its definition lives in the data artifact store for
+/// the graph's life. It is the edge-value type "window_send".
+struct window_send_payload {
+  std::vector<std::uint8_t> values;
+  const window_send *send = nullptr;
+  std::size_t first_row = 0;
+};
+
+/// Copy a fire's send @p from into @p to. Allocates nothing once @p to has
+/// held as many values.
+inline void copy_send(const window_send_value &from, window_send_payload &to) {
+  to.values.assign(from.values.begin(), from.values.end());
+  to.send = from.send;
+  to.first_row = from.first_row;
+}
+
+/// @p payload as a receive takes it; valid while @p payload is.
+inline window_send_value receive_of(const window_send_payload &payload) {
+  return {payload.values, payload.send, payload.first_row};
+}
+
 /// One fire's results, held in its slot until the slot fires again.
 struct window_fire {
   std::int64_t k = 0;

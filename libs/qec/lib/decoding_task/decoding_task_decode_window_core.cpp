@@ -11,10 +11,14 @@
 // buffer; a fire allocates nothing beyond its decoder's result.
 
 #include "decoding_task_decode_window_core.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include <algorithm>
 #include <stdexcept>
 
 namespace cudaq::qec {
+
+// A fire's sends travel on edges by value.
+CUDAQ_REGISTER_EDGE_VALUE_TYPE(window_send_payload, "window_send")
 
 // A window has every send of its request, in the request's order, with no
 // rows for one whose rounds it clips away. That is checked here, so a fire
