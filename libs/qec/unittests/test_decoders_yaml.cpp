@@ -4381,9 +4381,9 @@ TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
     twins.replace(at, 17, "O_sparse: [0, 1, -1]");
   expect_build_error(
       cfg::multi_decoder_config::from_yaml_str(unpooled(pattern_yaml())),
-      "from_topology: ingest node 'pw.ingest' reads the "
-      "logical value, but its template's last phase has no "
-      "m2o_sparse");
+      "from_topology: parallel_window 'pw' has output: corrected_logical, "
+      "which reads the logical value through the last phase's m2o_sparse, "
+      "and its template has none; use output: corrections");
   auto resolved = corrections;
   resolved.replace(resolved.find("          max_in_flight: 4\n"), 0,
                    "          conflicting_parallel: most_likely\n");
@@ -4405,7 +4405,11 @@ TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
 TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows) {
   namespace cfg = cudaq::qec::decoding::config;
   using cudaq::qec::decoding::host::fill_data_artifact_store;
-  const auto pattern = cfg::multi_decoder_config::from_yaml_str(pattern_yaml());
+  // The prior the hand-written graph states.
+  const auto pattern =
+      cfg::multi_decoder_config::from_yaml_str(pattern_yaml_with(
+          "          max_in_flight: 4\n", "          boundary_prior: 0.01\n"
+                                          "          max_in_flight: 4\n"));
   const auto by_hand =
       cfg::multi_decoder_config::from_yaml_str(pw_graph_yaml());
   const auto store = fill_data_artifact_store(pattern, ".");
@@ -4423,8 +4427,8 @@ TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows) {
   EXPECT_EQ(records_of(store, "window"),
             records_of(fill_data_artifact_store(by_hand, "."), "window"));
 
-  auto uncrossed = pattern;
-  auto zero = pattern;
+  auto uncrossed = cfg::multi_decoder_config::from_yaml_str(pattern_yaml());
+  auto zero = uncrossed;
   uncrossed.decoders.at(0).dem_chunks = cudaq::qec::single_round_spec();
   zero.decoders.at(0).task_graph->nodes.at(0).node_params.map().insert(
       "commit_rounds", std::size_t{0});
@@ -4443,10 +4447,65 @@ TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows) {
   }
 } // end - TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows)
 
+// Configuring builds no decoder for a pattern, whose layers build their own
+// from their windows: a pattern beside flat matrices is reported as having
+// no template, and one inside an ensemble as expanding only as a node of the
+// graph, with no inner decoder constructed for either.
+TEST(ParallelWindowPattern, ConfiguringBuildsNoDecoderForAPattern) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const std::string flat = R"(
+decoders:
+  - id: 0
+    block_size: 2
+    syndrome_size: 1
+    H_sparse: [0, 1, -1]
+    O_sparse: [0, -1]
+    D_sparse: [0, -1]
+    task_graph:
+      nodes:
+)";
+  const std::string pattern =
+      "{id: pw, type: parallel_window, commit_rounds: 3, buffer_rounds: 3, "
+      "inner: {type: d_capture_decoder}}";
+  const std::string top = flat + "        - " + pattern + R"(
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+)";
+  const std::string nested = flat + R"(        - id: e
+          ensemble:
+            join_strategy: deadline
+            join_params: {deadline_us: 200000}
+            members:
+              - nodes:
+                  - )" + pattern +
+                             R"(
+                edges: [{from: input, to: pw}, {from: pw, to: output}]
+      edges:
+        - {from: measurements, to: e}
+        - {from: e, to: output}
+)";
+  for (const auto &[yaml, text] :
+       {std::pair{top, std::string("from_topology: parallel_window 'pw' has "
+                                   "no dem_chunks template")},
+        std::pair{nested,
+                  std::string("from_topology: ensemble 'e' member 0 has "
+                              "parallel_window 'pw', which expands only as a "
+                              "node of the graph")}}) {
+    cudaq::qec::construction_d_probe::model = {};
+    expect_build_error(cfg::multi_decoder_config::from_yaml_str(yaml), text);
+    EXPECT_EQ(cudaq::qec::construction_d_probe::model.num_detectors, 0u);
+  }
+} // end - TEST(ParallelWindowPattern, ConfiguringBuildsNoDecoderForAPattern)
+
 // Each bad pattern parameter is rejected when parsed, with its own message.
 TEST(ParallelWindowPattern, RejectsBadParameters) {
   expect_parse_error(pattern_yaml_with("          commit_rounds: 3\n", ""),
                      "commit_rounds");
+  expect_parse_error(
+      pattern_yaml_with("          commit_rounds: 3\n",
+                        "          commit_rounds: 2147483649\n"),
+      "parallel_window: commit_rounds must be at most 2147483648");
   expect_parse_error(pattern_yaml_with("buffer_rounds: 3", "buffer_rounds: 0"),
                      "parallel_window: buffer_rounds must be at least 1");
   expect_parse_error(pattern_yaml_with("gap_rounds: 9", "gap_rounds: 0"),

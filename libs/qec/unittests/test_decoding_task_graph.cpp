@@ -13913,7 +13913,8 @@ void expect_lowering_error(Check &&check, const std::string &text) {
 // and the logical, with the edges between them and the outer edges moved
 // onto P.ingest and P.sum.
 TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
-  const auto spec = arbitrary_memory_spec(5);
+  auto spec = arbitrary_memory_spec(5, true);
+  spec.phases.back().spec.m2o_sparse = {0, -1};
   auto layers = layered(3, 3, 9);
   layers.a.input.prior = 0.04;
   const lowered_pattern p(spec, {{"commit_rounds", std::size_t{3}},
@@ -13987,9 +13988,11 @@ TEST(ParallelWindowLowering, PassesTheOptionsOn) {
             0);
 } // end - TEST(ParallelWindowLowering, PassesTheOptionsOn)
 
-// Without boundary_prior, A's open input takes the largest prior of a
-// fault that crosses into the next round, whatever the priors of faults
-// that do not; with no such fault, the pattern asks for one.
+// Without boundary_prior, A's open input takes, over the detectors faults
+// cross into, the largest chance that an odd number of them fire: one
+// crossing fault's prior, or two combined as merged columns are, whatever
+// the priors of faults that do not cross; with no such fault, the pattern
+// asks for one.
 TEST(ParallelWindowLowering, DefaultsTheBoundaryPrior) {
   const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
                                          {"buffer_rounds", std::size_t{1}}};
@@ -13999,6 +14002,16 @@ TEST(ParallelWindowLowering, DefaultsTheBoundaryPrior) {
   const auto requests =
       parallel_window_requests(params, experiment_template(crossing));
   EXPECT_EQ(requests.first.input.prior, std::optional<double>{0.05});
+  auto two = crossing;
+  for (auto &phase : two.phases) {
+    phase.spec.num_faults = 6;
+    phase.spec.error_rates = {0.3, 0.3, 0.3, 0.3, 0.05, 0.1};
+    phase.spec.seam_specs[1].spec.H_sparse = {4, 5, -1, -1, -1, -1};
+  }
+  const auto combined =
+      parallel_window_requests(params, experiment_template(two));
+  ASSERT_TRUE(combined.first.input.prior.has_value());
+  EXPECT_NEAR(*combined.first.input.prior, 0.05 + 0.1 - 2 * 0.05 * 0.1, 1e-12);
   expect_lowering_error(
       [&] {
         parallel_window_requests(params,
@@ -14049,6 +14062,45 @@ TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
         lower({{"measurements", "output", "P", "input"}}, std::nullopt, params);
       },
       "from_topology: parallel_window 'P' has no dem_chunks template");
+  // What the layers cannot use: a Stim DEM, a built decoder, flat matrices.
+  const auto unusable =
+      [&](const std::function<void(task_graph_node_config &)> &edit,
+          const std::string &text) {
+        task_graph_node_config cfg;
+        std::vector<task_graph_node_config> nodes;
+        std::vector<task_graph_edge> edges{
+            {"measurements", "output", "P", "input"}};
+        cfg.id = "P";
+        cfg.kind = "parallel_window";
+        cfg.dem = spec;
+        cfg.node_params = params;
+        edit(cfg);
+        expect_lowering_error(
+            [&] { lower_parallel_window(std::move(cfg), nodes, edges); },
+            "from_topology: parallel_window 'P' " + text);
+      };
+  unusable([](auto &cfg) { cfg.stim_dem = "error(0.1) D0"; },
+           "takes no stim_dem: each layer builds its decoders from its "
+           "windows");
+  unusable(
+      [](auto &cfg) {
+        cfg.decoder_instance = get_decoder(
+            "single_error_lut",
+            decoder_init(sparse_binary_matrix::from_nested_csr(1, 1, {{0}})));
+      },
+      "takes no built decoder");
+  unusable([](auto &cfg) { cfg.d_sparse = {{0}}; }, "takes no flat matrices");
+  // corrected_logical, the default, reads the template's readout map.
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"}}, spec,
+              {{"commit_rounds", std::size_t{2}},
+               {"buffer_rounds", std::size_t{1}},
+               {"output", std::string("corrected_logical")}});
+      },
+      "from_topology: parallel_window 'P' has output: corrected_logical, "
+      "which reads the logical value through the last phase's m2o_sparse, "
+      "and its template has none");
   expect_lowering_error(
       [&] {
         lower({{"measurements", "output", "P", "input"}}, spec,
@@ -14088,5 +14140,31 @@ TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble) {
       "from_topology: ensemble 'E' member 0 has parallel_window 'pw', which "
       "expands only as a node of the graph");
 } // end - TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble)
+
+// A pattern or an ensemble may not take a synthetic endpoint's id, though
+// lowering gives its nodes other ids.
+TEST(ParallelWindowLowering, RejectsAReservedId) {
+  for (const std::string id : {"measurements", "dets", "output"}) {
+    SCOPED_TRACE(id);
+    task_graph_node_config pattern;
+    std::vector<task_graph_node_config> nodes;
+    pattern.id = id;
+    pattern.kind = "parallel_window";
+    pattern.dem = arbitrary_memory_spec(5);
+    pattern.decoder_type = "single_error_lut";
+    pattern.node_params = {{"commit_rounds", std::size_t{2}},
+                           {"buffer_rounds", std::size_t{1}},
+                           {"output", std::string("corrections")}};
+    nodes.push_back(std::move(pattern));
+    expect_lowering_error(
+        [&] {
+          decoding_task_graph::from_topology(
+              std::move(nodes), {{"measurements", "output", id, "input"},
+                                 {id, "output", "output", "input"}});
+        },
+        "from_topology: node id '" + id +
+            "' is reserved for a synthetic endpoint");
+  } // end - for(id)
+} // end - TEST(ParallelWindowLowering, RejectsAReservedId)
 
 } // namespace cudaq::qec

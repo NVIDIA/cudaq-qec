@@ -12,43 +12,40 @@
 
 #include "decoding_task_decode_window_core.h"
 #include <algorithm>
-#include <limits>
 #include <stdexcept>
 
 namespace cudaq::qec {
 
-namespace {
-
-// A request send the variant lacks.
-constexpr std::size_t no_send = std::numeric_limits<std::size_t>::max();
-
-} // namespace
-
-// Each variant's sends are matched to the request's by id; a send whose
-// rounds lie outside a clipped window may be missing.
+// A window has every send of its request, in the request's order, with no
+// rows for one whose rounds it clips away. That is checked here, so a fire
+// publishes the window's send s as the request's send s.
 decode_window_core::decode_window_core(
     const data_artifact_store &store,
     std::shared_ptr<const experiment_template> context, window_request request,
     const std::string &decoder_name, const cudaqx::heterogeneous_map &params,
     std::size_t slots)
     : context_(std::move(context)), request_(std::move(request)) {
+  std::size_t imported = 0;
   if (slots == 0)
     fail("no slot to fire into");
+  span_ = zone_span(request_);
   for (auto &[key, window] : store.find_windows(*context_, request_)) {
     auto &v = variants_.emplace_back();
     v.key = key;
     v.window = window;
     v.dec = make_window_decoder(*window, decoder_name, params);
-    for (const auto &wanted : request_.sends) {
-      const auto it = std::find_if(
-          window->sends.begin(), window->sends.end(),
-          [&](const window_send &send) { return send.id == wanted.id; });
-      v.send_of.push_back(
-          it == window->sends.end()
-              ? no_send
-              : static_cast<std::size_t>(it - window->sends.begin()));
-    }
+    if (window->sends.size() != request_.sends.size() ||
+        !std::equal(window->sends.begin(), window->sends.end(),
+                    request_.sends.begin(),
+                    [](const window_send &send, const auto &wanted) {
+                      return send.id == wanted.id;
+                    }))
+      throw std::logic_error("decode_window: a window's sends are not its "
+                             "request's, in order");
+    imported =
+        std::max(imported, window->model.h.num_rows() - window->num_own_rows);
   } // end - for(key)
+  covered_.assign(imported, 0);
   workspaces_.resize(slots);
   detectors_.resize(slots);
   fires_.resize(slots);
@@ -63,10 +60,14 @@ decode_window_core::decode_window_core(
 
 // A send's row i lies at its window's first row plus the send's row, so it
 // is row (that) - (this window's first row) here: a delta must land on an
-// own row and a residual on an imported one. The view and every received
-// row are checked before the slot is touched, so a rejected fire changes
-// nothing; the slot is marked unfired while it is rewritten, so a decoder
-// that fails leaves it empty rather than torn.
+// own row and a residual on an imported one, and every imported row must be
+// reached, since a window imports rows only when the instance that values
+// them exists. The view must be this layer's window k: its rounds are the
+// request's zones at k's anchor, clipped to the shot, whose end a terminal
+// variant gives. The view and every received row are checked before the
+// slot is touched, so a rejected fire changes nothing; the slot is marked
+// unfired while it is rewritten, so a decoder that fails leaves it empty
+// rather than torn.
 const window_fire &
 decode_window_core::fire(std::size_t slot, const window_view &view,
                          std::span<const window_send_value *const> receives) {
@@ -83,6 +84,18 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
          "'s variant is none of this layer's");
   if (!view.source)
     fail("window " + std::to_string(view.k) + "'s view has no ring");
+  const auto anchor = request_.offset + view.k * request_.period;
+  const round_range rounds{
+      std::max<std::int64_t>(0, anchor + span_.begin),
+      view.variant.terminal
+          ? std::min(anchor + span_.end, anchor + *view.variant.terminal)
+          : anchor + span_.end};
+  if (view.rounds != rounds)
+    fail("window " + std::to_string(view.k) + "'s view spans rounds [" +
+         std::to_string(view.rounds.begin) + ", " +
+         std::to_string(view.rounds.end) + "), not this layer's window " +
+         std::to_string(view.k) + "'s [" + std::to_string(rounds.begin) + ", " +
+         std::to_string(rounds.end) + ")");
   const auto &w = *variants_[v].window;
   auto &d = detectors_[slot][v];
   auto &ws = workspaces_[slot][v];
@@ -102,6 +115,7 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
   if (rows != own || view.rounds.empty())
     fail("window " + std::to_string(view.k) + "'s view holds other rows " +
          "than the " + std::to_string(own) + " of its variant");
+  std::fill(covered_.begin(), covered_.begin() + (all - own), 0);
   for (const auto *r : receives) {
     if (!r || !r->send)
       continue;
@@ -117,8 +131,15 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
              std::to_string(r->first_row + r->send->rows[i]) +
              ", which window " + std::to_string(view.k) +
              " does not take as a " + (delta ? "delta" : "residual"));
+      if (!delta)
+        covered_[t - own] = 1;
     }
   } // end - for(r)
+  for (std::size_t i = 0; i < all - own; ++i)
+    if (!covered_[i])
+      fail("window " + std::to_string(view.k) + " imports " +
+           std::to_string(all - own) + " rows, but no residual reaches " +
+           "its imported row " + std::to_string(i));
 
   out.fired = false;
   for (auto r = view.rounds.begin; r < view.rounds.end; ++r) {
@@ -138,22 +159,22 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
   }
 
   solve_window(w, variants_[v].dec.get(), d, ws);
-  const auto anchor = request_.offset + view.k * request_.period;
   out.k = view.k;
   out.fired = true;
   out.commit = {std::max(view.rounds.begin, anchor + request_.commit->begin),
                 std::min(view.rounds.end, anchor + request_.commit->end)};
   out.detectors = d;
   out.solution = &ws.solution;
-  for (std::size_t s = 0; s < out.sends.size(); ++s) {
-    const auto i = variants_[v].send_of[s];
-    out.sends[s] = i == no_send
-                       ? window_send_value{}
-                       : window_send_value{ws.solution.outputs.sends[i],
-                                           &w.sends[i], view.first_row};
-  }
+  for (std::size_t s = 0; s < out.sends.size(); ++s)
+    out.sends[s] = {ws.solution.outputs.sends[s], &w.sends[s], view.first_row};
   return out;
 } // end - fire()
+
+// A new shot: no slot holds a fire.
+void decode_window_core::reset() {
+  for (auto &f : fires_)
+    f.fired = false;
+}
 
 // The slots are few, so a scan finds the one holding window k.
 const window_fire *decode_window_core::find(std::int64_t k) const {

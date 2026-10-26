@@ -28,8 +28,8 @@ namespace cudaq::qec {
 
 /// A send as a fire publishes it: its values, its definition in the sending
 /// window's variant, whose rows count from that window's first row, and
-/// where that row lies in the shot. A send the variant lacks has neither
-/// values nor a definition.
+/// where that row lies in the shot. A send whose rounds the window clips
+/// away has no rows, and so no values.
 struct window_send_value {
   std::span<const std::uint8_t> values;
   const window_send *send = nullptr;
@@ -61,7 +61,7 @@ public:
   /// @param slots The fires whose results may be held at once.
   /// @throws std::invalid_argument if @p slots is 0, or as
   /// make_window_decoder() does; std::logic_error if the store lacks a
-  /// variant.
+  /// variant, or a variant's sends are not the request's.
   decode_window_core(const data_artifact_store &store,
                      std::shared_ptr<const experiment_template> context,
                      window_request request, const std::string &decoder_name,
@@ -77,12 +77,16 @@ public:
   /// @param receives One per receive port: the producer instance's send, or
   /// null when that instance does not exist.
   /// @throws std::invalid_argument if the slot does not exist, the view is
-  /// of no variant of this layer or holds other rows than its variant, or a
-  /// received send reaches a row the window does not take in its mode;
+  /// not of this layer's window k, of one of its variants, holding that
+  /// variant's rows, a received send reaches a row the window does not take
+  /// in its mode, or an imported row receives no residual;
   /// std::out_of_range if the view's rounds are not in its ring.
   const window_fire &fire(std::size_t slot, const window_view &view,
                           std::span<const window_send_value *const> receives);
 
+  /// Start a new shot: no slot holds a fire, so find() names only this
+  /// shot's windows.
+  void reset();
   /// The fire of window k still held in a slot, or null.
   const window_fire *find(std::int64_t k) const;
   /// The index of send @p id among the request's sends.
@@ -94,13 +98,11 @@ public:
   std::size_t num_slots() const { return fires_.size(); }
 
 private:
-  /// One variant's model, its decoder, and where each of the request's
-  /// sends is among the model's, or none.
+  /// One variant's model and its decoder.
   struct variant {
     variant_key key;
     std::shared_ptr<const decoding_window> window;
     std::unique_ptr<decoder> dec;
-    std::vector<std::size_t> send_of;
   };
 
   /// Throws std::invalid_argument for @p what.
@@ -108,11 +110,14 @@ private:
 
   std::shared_ptr<const experiment_template> context_;
   window_request request_;
+  round_range span_; ///< The rounds a window spans, from its anchor
   std::vector<variant> variants_;
   // Per slot, a workspace and a detector buffer for every variant.
   std::vector<std::vector<window_workspace>> workspaces_;
   std::vector<std::vector<std::vector<std::uint8_t>>> detectors_;
   std::vector<window_fire> fires_;
+  /// Which imported rows a fire's residuals reach, checked before it writes.
+  std::vector<std::uint8_t> covered_;
 };
 
 } // namespace cudaq::qec

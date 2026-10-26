@@ -42,11 +42,14 @@ inline thread_local std::size_t counted = 0;
 /// is included in the outer one. Always 0 under a sanitizer.
 template <typename Run>
 std::size_t during(const Run &run) {
+  // Restores the flag however run() returns, an exception included.
+  struct restore {
+    bool was_counting;
+    ~restore() { counting = was_counting; }
+  } guard{counting};
   const auto before = counted;
-  const bool was_counting = counting;
   counting = true;
   run();
-  counting = was_counting;
   return counted - before;
 }
 

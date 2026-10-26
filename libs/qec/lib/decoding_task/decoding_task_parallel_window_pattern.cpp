@@ -13,6 +13,7 @@
 #include "decoding_task_node_kind_registry.h"
 #include "decoding_task_window_kind_params.h"
 #include "cudaq/qec/decoder_config_schema.h"
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -74,6 +75,12 @@ const bool registered = [] {
   spec.requires_dem = true;
   spec.parameter_minimums = {
       {"commit_rounds", 1}, {"buffer_rounds", 1}, {"gap_rounds", 1}};
+  // A round count beyond the window round limit lies past any shot, and
+  // within it the layers' rounds and period stay within int64.
+  spec.parameter_maximums = {
+      {"commit_rounds", experimental::window_round_limit},
+      {"buffer_rounds", experimental::window_round_limit},
+      {"gap_rounds", experimental::window_round_limit}};
   register_node_kind(
       std::move(spec), parallel_window_params(),
       [](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
@@ -84,27 +91,35 @@ const bool registered = [] {
   return true;
 }();
 
-// The largest prior of a fault that touches the next round's detectors, on
-// a shot that holds every pair of neighbouring phases: a round's outgoing
-// seam band holds the next round's rows its faults touch.
-double largest_crossing_prior(const experiment_template &t) {
+// The largest chance, over the detectors faults cross into, that an odd
+// number of those faults fire: each detector combines the priors of the
+// faults that cross into it as merged columns do, p = p1 + p2 - 2 p1 p2, so
+// a detector crossed by one fault keeps that fault's prior. The shot holds
+// every pair of neighbouring phases, and a round's outgoing seam band holds
+// the next round's rows its faults touch.
+double crossing_prior(const experiment_template &t) {
   const auto R = t.repeats() ? t.min_rounds() + 2 : t.min_rounds();
   double largest = 0.0;
   for (std::size_t r = 0; r + 1 < R; ++r) {
     const auto &chunk = t.chunk(r, R);
     const auto columns = chunk.H.to_nested_csc();
     for (const auto &seam : chunk.seams) {
+      std::vector<double> odd(seam.num_rows(), 0.0);
       if (seam.id != t.spec().seam.from_seam)
         continue;
       for (std::size_t c = 0; c < columns.size(); ++c)
-        if (std::any_of(columns[c].begin(), columns[c].end(), [&](auto row) {
-              return row >= seam.row_begin && row < seam.row_end;
-            }))
-          largest = std::max(largest, chunk.error_rates[c]);
-    }
+        for (const auto row : columns[c])
+          if (row >= seam.row_begin && row < seam.row_end) {
+            const auto p = chunk.error_rates[c];
+            auto &q = odd[row - seam.row_begin];
+            q = q + p - 2 * q * p;
+          }
+      for (const auto q : odd)
+        largest = std::max(largest, q);
+    } // end - for(seam)
   } // end - for(r)
   return largest;
-} // end - largest_crossing_prior()
+} // end - crossing_prior()
 
 } // namespace
 
@@ -150,7 +165,7 @@ parallel_window_requests(const cudaqx::heterogeneous_map &checked,
   } else if (params.contains("boundary_prior")) {
     a.input.prior = params.get<double>("boundary_prior");
   } else {
-    a.input.prior = largest_crossing_prior(context);
+    a.input.prior = crossing_prior(context);
     if (!(*a.input.prior > 0.0 && *a.input.prior < 1.0))
       throw std::invalid_argument(
           "parallel_window: no fault crosses into the next round with a "
@@ -203,8 +218,18 @@ void lower_parallel_window(task_graph_node_config cfg,
                                          what + " parameters");
   if (!cfg.dem)
     throw std::invalid_argument(what + " has no dem_chunks template");
+  // Each layer builds its decoders from its windows' models.
+  if (!cfg.stim_dem.empty() || cfg.decoder_instance)
+    throw std::invalid_argument(
+        what + " takes no " +
+        (cfg.decoder_instance ? "built decoder" : "stim_dem") +
+        ": each layer builds its decoders from its windows");
+  if (!cfg.d_sparse.empty() || !cfg.o_sparse.empty() || !cfg.h_sparse.empty())
+    throw std::invalid_argument(what + " takes no flat matrices; its "
+                                       "dem_chunks template gives its windows");
+  const experiment_template context(*cfg.dem);
   const auto [request_a, request_b] =
-      parallel_window_requests(cfg.node_params, experiment_template(*cfg.dem));
+      parallel_window_requests(cfg.node_params, context);
   corrected = cfg.node_params.get<std::string>("output", "corrected_logical") ==
               "corrected_logical";
 
@@ -226,6 +251,13 @@ void lower_parallel_window(task_graph_node_config cfg,
   }
   if (inputs_seen != 1)
     throw std::invalid_argument(what + " needs exactly one edge into 'input'");
+  // Reported here, naming the pattern, rather than by its lowered ingest.
+  if (corrected && context.readout().empty())
+    throw std::invalid_argument(
+        what + " has output: corrected_logical, which reads the logical "
+               "value through the last phase's m2o_sparse, and its template "
+               "has none; use output: corrections, or give the last phase "
+               "m2o_sparse");
 
   ingest_cfg.id = ingest;
   ingest_cfg.kind = "ingest";

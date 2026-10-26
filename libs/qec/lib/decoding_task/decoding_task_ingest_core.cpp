@@ -124,6 +124,13 @@ ingest_core::ingest_core(std::shared_ptr<const experiment_template> context,
     reject("a round holds no measurements, so a record has no bound in "
            "rounds");
   record_limit_ = static_cast<std::size_t>(period_) * max_width_;
+  // Rounds cut before FINAL: bulk and every prefix round, but the last
+  // round of a shot that does not repeat, which is its readout round.
+  min_forward_width_ = repeats ? bulk_width_ : last_width_;
+  for (std::size_t r = 0; r + (repeats ? 0 : 1) < prefix_rounds_; ++r)
+    min_forward_width_ = std::min(min_forward_width_, prefix_widths_[r]);
+  for (std::size_t r = 0; !repeats && r < prefix_rounds_; ++r)
+    fixed_measurements_ += prefix_widths_[r];
 
   // Every round's D_sparse, as forming detectors will read it.
   for (auto R = t.min_rounds(); R <= probe; ++R)
@@ -174,15 +181,16 @@ ingest_core::ingest_core(std::shared_ptr<const experiment_template> context,
   }
 
   // Buffers. Raw rounds keep those not yet formed, with the one before them
-  // and the one being cut.
-  staged_slots_ = suffix_rounds_ + 2;
+  // and the one being cut: the suffix, and the rounds the readout round may
+  // have begun in.
+  staged_slots_ = suffix_rounds_ + 4 + last_width_ / min_forward_width_;
   staged_.assign(staged_slots_ * max_width_, 0);
   staged_width_.assign(staged_slots_, 0);
   const auto reach = static_cast<std::size_t>(highest - lowest) +
                      std::max<std::size_t>(suffix_rounds_, 1);
   const auto ring = power_of_two_at_least(
       reach + (max_views + 1) * static_cast<std::size_t>(period_) +
-      record_limit_ / min_width_ + 2 + suffix_rounds_ + 2);
+      (record_limit_ + max_width_) / min_forward_width_ + 1 + staged_slots_);
   ring_.assign(ring * max_rows_, 0);
   ring_rows_.assign(ring, 0);
   ring_round_.assign(ring, -1);
@@ -197,6 +205,7 @@ ingest_core::ingest_core(std::shared_ptr<const experiment_template> context,
     out_.emplace_back(layers_[l].max_views, false);
   }
   publication_.views.assign(layers_.size(), nullptr);
+  final_instances_.resize(layers_.size());
   reset();
 } // end - ingest_core()
 
@@ -255,17 +264,46 @@ void ingest_core::cut(const std::uint8_t *data, std::size_t len) {
     }
     complete_round(width);
   } // end - while(len)
+  form_known_rounds();
 } // end - cut()
 
-// Before FINAL a round r after the prefix is bulk once r + suffix rounds
-// have been cut: the shot has at least one more round, its readout round,
-// so r lies before the suffix.
+// A round is complete; those whose phase is now known are formed.
 void ingest_core::complete_round(std::size_t width) {
   staged_width_[rounds_cut_ % staged_slots_] = width;
   ++rounds_cut_;
+  cut_bytes_ += width;
   partial_ = 0;
+  form_known_rounds();
+}
+
+// The readout round must end at or past the last measurement received, so
+// it starts no earlier than the first round whose start lies within its
+// width of that measurement, and the shot has at least one round more than
+// those before it. Each step back passes a round of at least the narrowest
+// width, so the walk is a few rounds long.
+std::size_t ingest_core::least_shot_rounds() const {
+  const auto received = cut_bytes_ + partial_;
+  const auto earliest = received > last_width_ ? received - last_width_ : 0;
+  auto first = rounds_cut_ + 1; // starts past what has arrived
+  auto start = cut_bytes_;      // where the round before `first` starts
+  if (shot_rounds_)
+    return *shot_rounds_;
+  if (!context_->repeats())
+    return context_->min_rounds();
+  while (first > 0 && start >= earliest) {
+    --first;
+    if (first > 0)
+      start -= forward_width(first - 1);
+  }
+  return std::max(first + 1, context_->min_rounds());
+} // end - least_shot_rounds()
+
+// A round after the prefix is bulk once the shot is known to hold the
+// suffix after it.
+void ingest_core::form_known_rounds() {
+  const auto least = least_shot_rounds();
   while (formed_ < rounds_cut_ && (shot_rounds_ || formed_ < prefix_rounds_ ||
-                                   formed_ + suffix_rounds_ <= rounds_cut_)) {
+                                   formed_ + suffix_rounds_ < least)) {
     form_detectors(formed_);
     ++formed_;
   }
@@ -315,11 +353,13 @@ void ingest_core::form_detectors(std::size_t r) {
   rows_formed_ += rows;
 } // end - form_detectors()
 
-// A FINAL record is split from its end: its last measurements, with any
-// partial round before it, are the readout round, and what comes before
-// must be whole rounds. Counting them first fixes the shot's length, so
-// every round's phase is known before any is formed, and a record that
-// ends no shot changes nothing.
+// The shot's last measurements are its readout round, and the rounds before
+// it are whole. It may begin in the FINAL record or in rounds already cut,
+// none of them formed, since a round is formed only once the readout round
+// cannot have begun in it; a shot whose last phase is bulk forms its readout
+// round as bulk, which it is. Counting the rounds first fixes the shot's
+// length, so every round's phase is known before any is formed, and a
+// record that ends no shot changes nothing.
 ingest_status ingest_core::enqueue(const std::uint8_t *data, std::size_t len,
                                    bool final) {
   check_open();
@@ -330,37 +370,48 @@ ingest_status ingest_core::enqueue(const std::uint8_t *data, std::size_t len,
   if (len > 0 && !data)
     fail("a record of " + std::to_string(len) + " measurements has no data");
   if (!final) {
-    if (!has_room(rounds_cut_ + (partial_ + len) / min_width_))
+    // Checked before any round is cut, so a rejected record forms none.
+    if (!context_->repeats() &&
+        cut_bytes_ + partial_ + len > fixed_measurements_)
+      fail("a record runs past the shot's last round, " +
+           rounds_text(prefix_rounds_) + " long");
+    if (!has_room(rounds_cut_ + (partial_ + len) / min_forward_width_))
       return ingest_status::deferred;
     cut(data, len);
     return ingest_status::accepted;
   }
 
-  const auto total = partial_ + len;
+  const auto total = cut_bytes_ + partial_ + len;
   std::size_t r = rounds_cut_;
-  std::size_t left = 0;
+  std::size_t at = cut_bytes_; // where round r starts
   std::size_t head = 0;
   if (total < last_width_)
-    fail("the FINAL record and the partial round before it hold " +
-         std::to_string(total) +
-         " measurements, fewer than the readout "
-         "round's " +
+    fail("the shot holds " + std::to_string(total) +
+         " measurements, fewer than its readout round's " +
          std::to_string(last_width_));
-  left = total - last_width_;
-  // A shot that does not repeat has a last round, which the readout round
+  const auto readout_start = total - last_width_;
+  // Forward from the round being cut, or back over rounds already cut. A
+  // shot that does not repeat has a last round, which the readout round
   // must be: rounds before it are all prefix rounds, of known width.
-  while (left > 0) {
+  while (at < readout_start) {
     const auto width = forward_width(r);
     if (!context_->repeats() && r + 1 >= prefix_rounds_)
       fail("the FINAL record runs past the shot's last round, " +
            rounds_text(prefix_rounds_) + " long");
-    if (left < width)
+    if (readout_start - at < width)
       fail("the FINAL record ends mid-round: round " + std::to_string(r) +
-           " has " + std::to_string(left) + " of its " + std::to_string(width) +
-           " measurements before the readout round");
-    left -= width;
+           " has " + std::to_string(readout_start - at) + " of its " +
+           std::to_string(width) + " measurements before the readout round");
+    at += width;
     ++r;
   }
+  while (at > readout_start && r > 0)
+    at -= forward_width(--r);
+  if (at != readout_start)
+    fail("the FINAL record ends mid-round: round " + std::to_string(r) +
+         " has " + std::to_string(readout_start - at) + " of its " +
+         std::to_string(forward_width(r)) +
+         " measurements before the readout round");
   const auto R = r + 1;
   if (context_->repeats() ? R < context_->min_rounds()
                           : R != context_->min_rounds())
@@ -368,20 +419,39 @@ ingest_status ingest_core::enqueue(const std::uint8_t *data, std::size_t len,
          ", but the template's shots have " +
          (context_->repeats() ? "at least " : "exactly ") +
          std::to_string(context_->min_rounds()));
+  if (r < formed_ && suffix_rounds_ > 0)
+    fail("the FINAL record ends the shot at " + rounds_text(R) + ", but " +
+         rounds_text(formed_) + " are already formed as bulk");
   if (!has_room(R))
     return ingest_status::deferred;
 
   shot_rounds_ = R;
-  // The rounds before the readout round end on a round boundary, so the
-  // readout round is the rest of the record, after any partial round.
-  if (total - last_width_ > 0) {
-    head = total - last_width_ - partial_;
-    cut(data, head);
+  auto *readout = staged_.data() + (r % staged_slots_) * max_width_;
+  if (r >= rounds_cut_) {
+    // The readout round starts at the round being cut or in the record.
+    if (r > rounds_cut_) {
+      head = readout_start - cut_bytes_ - partial_;
+      cut(data, head);
+    }
+    std::copy_n(data + head, len - head, readout + partial_);
+    complete_round(last_width_);
+  } else if (r >= formed_) {
+    // It began in rounds already cut: their measurements, the partial
+    // round's and the record's join round r's in its slot.
+    std::size_t filled = forward_width(r);
+    for (auto q = r + 1; q < rounds_cut_; ++q) {
+      std::copy_n(staged_.data() + (q % staged_slots_) * max_width_,
+                  forward_width(q), readout + filled);
+      filled += forward_width(q);
+    }
+    std::copy_n(staged_.data() + (rounds_cut_ % staged_slots_) * max_width_,
+                partial_, readout + filled);
+    std::copy_n(data, len, readout + filled + partial_);
+    rounds_cut_ = r;
+    cut_bytes_ = readout_start;
+    partial_ = 0;
+    complete_round(last_width_);
   }
-  std::copy_n(data + head, len - head,
-              staged_.begin() + (rounds_cut_ % staged_slots_) * max_width_ +
-                  partial_);
-  complete_round(last_width_);
   if (read_logical_) {
     const auto *readout =
         staged_.data() + ((R - 1) % staged_slots_) * max_width_;
@@ -397,36 +467,41 @@ ingest_status ingest_core::enqueue(const std::uint8_t *data, std::size_t len,
     }
   }
   index_end_ = next_index_;
-  for (const auto &layer : layers_)
-    index_end_ = std::max(index_end_, window_instances(layer.request, R).end);
+  for (std::size_t l = 0; l < layers_.size(); ++l) {
+    final_instances_[l] = window_instances(layers_[l].request, R);
+    index_end_ = std::max(index_end_, final_instances_[l].end);
+  }
   return ingest_status::accepted;
 } // end - enqueue()
 
 // Before FINAL a layer has a window at every index from its first; after
-// it, at the indices whose commit zone the shot holds.
+// it, at the indices whose commit zone the shot holds, found at FINAL.
 bool ingest_core::window_exists(std::size_t l, std::int64_t k) const {
   if (!shot_rounds_)
     return k >= first_k_[l];
-  const auto instances = window_instances(layers_[l].request, *shot_rounds_);
-  return k >= instances.begin && k < instances.end;
+  return k >= final_instances_[l].begin && k < final_instances_[l].end;
 }
 
-// The shot has at least one more round than were cut, so a window that is
-// not terminal in a shot of that length is terminal in no longer one; its
-// rounds end before its reach, so they are formed.
-bool ingest_core::window_complete(std::size_t l, std::int64_t k) const {
+// A window that is not terminal in the shortest shot the measurements allow
+// is terminal in no longer one; its rounds end before its reach, so once
+// they are formed it is complete.
+bool ingest_core::window_complete(std::size_t l, std::int64_t k,
+                                  std::size_t least) const {
   const auto &request = layers_[l].request;
   if (shot_rounds_)
     return true;
-  return !window_variant(*context_, request, k, rounds_cut_ + 1).terminal &&
+  return !window_variant(*context_, request, k, least).terminal &&
          request.offset + k * period_ + spans_[l].end <=
              static_cast<std::int64_t>(formed_);
 }
 
 // Index by index, in order: an index waits for its last window and for a
 // view in every pool it needs. After FINAL an index with no window is
-// passed over.
+// passed over, and a failed shot hands nothing over.
 const ingest_publication *ingest_core::poll() {
+  const auto least = least_shot_rounds();
+  if (failed_)
+    return nullptr;
   for (;;) {
     const auto k = next_index_;
     bool any = false;
@@ -435,7 +510,7 @@ const ingest_publication *ingest_core::poll() {
     for (std::size_t l = 0; l < layers_.size(); ++l) {
       if (!window_exists(l, k))
         continue;
-      if (!window_complete(l, k))
+      if (!window_complete(l, k, least))
         return nullptr;
       if (std::find(out_[l].begin(), out_[l].end(), false) == out_[l].end())
         return nullptr;
@@ -461,9 +536,7 @@ const ingest_publication *ingest_core::poll() {
       view.k = k;
       view.rounds = {std::max<std::int64_t>(0, anchor + spans_[l].begin),
                      std::min(end, anchor + spans_[l].end)};
-      view.variant =
-          window_variant(*context_, request, k,
-                         shot_rounds_ ? *shot_rounds_ : rounds_cut_ + 1);
+      view.variant = window_variant(*context_, request, k, least);
       view.first_row =
           ring_first_row_[static_cast<std::size_t>(view.rounds.begin) &
                           ring_mask_];
@@ -505,6 +578,7 @@ void ingest_core::reset() {
     if (std::find(pool.begin(), pool.end(), true) != pool.end())
       throw std::logic_error("ingest: reset() with views out");
   rounds_cut_ = 0;
+  cut_bytes_ = 0;
   partial_ = 0;
   formed_ = 0;
   rows_formed_ = 0;

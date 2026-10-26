@@ -2765,6 +2765,15 @@ private:
   std::size_t last_decode_allocations_ = 0;
 };
 
+// A count that ends in an exception stops counting, so the test's own
+// allocations after it are not counted.
+TEST(AllocationCounter, AThrowingRunStopsCounting) {
+  EXPECT_THROW(allocation_counter::during(
+                   [] { throw std::runtime_error("from the run"); }),
+               std::runtime_error);
+  EXPECT_FALSE(allocation_counter::counting);
+}
+
 // On a workspace sized beforehand, receiving a send, solving a window
 // without a decoder and committing allocate nothing, and solving with a
 // decoder allocates only what the decoder's own decode() does in that call.
@@ -2941,18 +2950,18 @@ void expect_view(const ingest_core &core, const shot &s,
 }
 
 // Streams shot s into core in records cut at random, no longer than its
-// limit, ending with a FINAL record that starts at or before the readout
-// round. Every publication is checked against the shot, its views held for
-// a while, checked again and released. @p before_final counts the indices
-// published before the FINAL record.
+// limit, ending with a FINAL record that starts anywhere within a record's
+// length of the shot's end: before the readout round, inside it, or at its
+// end, when the FINAL record is empty. Every publication is checked against the
+// shot, its views held for a while, checked again and released. @p before_final
+// counts the indices published before the FINAL record.
 void expect_streams(ingest_core &core, const shot &s,
                     const std::vector<window_request> &requests,
                     std::mt19937 &rng, std::size_t &before_final) {
   const auto total = s.measurements.size();
   const auto limit = core.record_limit();
-  const auto readout = s.context->measurement_offset(s.R - 1, s.R);
   const auto final_start = std::uniform_int_distribution<std::size_t>(
-      total > limit ? total - limit : 0, readout)(rng);
+      total > limit ? total - limit : 0, total)(rng);
   std::deque<const window_view *> held;
   std::set<std::pair<std::size_t, std::int64_t>> published;
   std::int64_t last_k = std::numeric_limits<std::int64_t>::min();
@@ -3018,6 +3027,27 @@ void expect_streams(ingest_core &core, const shot &s,
   }
 } // end - expect_streams()
 
+// arbitrary_memory_spec with explicit D, whose rounds are 100 measurements
+// wide but whose readout round is one: a record's rounds are bounded by the
+// rounds it can complete before FINAL, not by the narrow readout round.
+dem_chunks_spec one_measurement_readout_spec() {
+  auto spec = arbitrary_memory_spec(5, true);
+  for (auto &phase : spec.phases) {
+    auto &p = phase.spec;
+    if (phase.id == phase_name::dem_init) {
+      p.num_measurements = 100;
+      p.D_sparse = {0, -1, 1, -1, 2, -1, 3, -1};
+    } else if (phase.id == phase_name::dem_bulk) {
+      p.num_measurements = 100;
+      p.D_sparse = {0, 100, -1, 1, 101, -1, 2, 102, -1, 3, 103, -1};
+    } else {
+      p.num_measurements = 1;
+      p.D_sparse = {0, 100, -1, 1, -1, 2, -1, 3, -1};
+    }
+  }
+  return spec;
+}
+
 // Every layout the streaming tests run: the parallel-window layers at two
 // sizes, and a sequential sliding window.
 std::vector<std::vector<window_request>> ingest_layouts() {
@@ -3026,21 +3056,33 @@ std::vector<std::vector<window_request>> ingest_layouts() {
   return {{large.a, large.b}, {small.a, small.b}, {sliding(2, 5)}};
 }
 
-// Every view of every window, in shots of every length up to 40 cut into
-// records at random, holds the rows the whole shot's D forms, on specs with
-// D_sparse and without, with one suffix phase or three, one of them unlike
-// bulk, and with a wider readout round. Windows are handed over before FINAL
-// once complete, and the raw logical value is the readout round's through m2o.
+// Every view of every window, in shots of every length up to 40 and back
+// down, cut into records at random, holds the rows the whole shot's D forms,
+// on specs with D_sparse and without, with one suffix phase or three, one of
+// them unlike bulk, with no prefix or suffix at all, with a first round
+// narrower than the rest, and with a wider readout round or narrower ones,
+// one as narrow as a single measurement beside rounds of a hundred. Windows
+// are handed over before FINAL once complete, and the raw logical value is
+// the readout round's through m2o.
 TEST(IngestCore, StreamsShotsCutAnywhere) {
   std::mt19937 rng(7);
-  for (const auto &spec : {arbitrary_memory_spec(5, true), rep5_spec(),
-                           multi_terminal_memory_spec(5, 3),
-                           distinct_suffix_spec(), wide_readout_spec()}) {
+  for (const auto &spec :
+       {arbitrary_memory_spec(5, true), rep5_spec(),
+        multi_terminal_memory_spec(5, 3), distinct_suffix_spec(),
+        wide_readout_spec(), narrow_readout_spec(),
+        one_measurement_readout_spec(), repeating_only_spec(),
+        widening_spec(true)}) {
     const auto context = std::make_shared<const experiment_template>(spec);
+    std::vector<std::size_t> lengths;
+    // Rising then falling, so a shot follows both a shorter and a longer one.
+    for (auto R = context->min_rounds(); R <= 40; ++R)
+      lengths.push_back(R);
+    for (auto R = std::size_t{40}; R >= context->min_rounds(); --R)
+      lengths.push_back(R);
     for (const auto &requests : ingest_layouts()) {
       ingest_core core(context, layers_of(requests),
                        !context->readout().empty());
-      for (auto R = context->min_rounds(); R <= 40; ++R) {
+      for (const auto R : lengths) {
         SCOPED_TRACE("R=" + std::to_string(R) + ", " +
                      std::to_string(requests.size()) + " layers");
         const shot s(spec, R, rng);
@@ -3099,7 +3141,68 @@ TEST(IngestCore, StreamsAShotOfFixedLength) {
   expect_throw<std::invalid_argument>(
       [&] { core.enqueue(record.data(), 4u * 3u + 1u, false); },
       "ingest: a record runs past the shot's last round, 3 rounds long");
+  // The rejected record left no round formed.
+  EXPECT_EQ(core.poll(), nullptr);
+  expect_throw<std::out_of_range>([&] { core.detectors(0); },
+                                  "ingest: round 0's detectors are not in "
+                                  "the ring");
 } // end - TEST(IngestCore, StreamsAShotOfFixedLength)
+
+// The readout round may arrive before FINAL, in part or whole: a record
+// longer than the rounds before it, then a FINAL record with the rest, or
+// nothing at all. Its measurements are never taken for a bulk round, so the
+// shot's views and logical value are as they would be had FINAL carried it.
+TEST(IngestCore, TakesAReadoutRoundThatArrivesBeforeFinal) {
+  const auto layers = layered(3, 3, 9);
+  const std::vector<window_request> requests{layers.a, layers.b};
+  std::mt19937 rng(23);
+  // Streams s in records of the given lengths, the last of them FINAL, and
+  // checks every view and the logical value.
+  const auto streams = [&](const shot &s, std::vector<std::size_t> lengths) {
+    ingest_core core(s.context, layers_of(requests),
+                     !s.context->readout().empty());
+    std::size_t at = 0;
+    std::size_t views = 0;
+    for (std::size_t i = 0; i < lengths.size(); ++i) {
+      ASSERT_EQ(core.enqueue(s.measurements.data() + at, lengths[i],
+                             i + 1 == lengths.size()),
+                ingest_status::accepted);
+      at += lengths[i];
+      while (const auto *p = core.poll())
+        for (const auto *view : p->views)
+          if (view) {
+            expect_view(core, s, requests, *view);
+            core.release(*view);
+            ++views;
+          }
+    }
+    ASSERT_EQ(at, s.measurements.size());
+    EXPECT_TRUE(core.done());
+    EXPECT_GT(views, 0u);
+    EXPECT_EQ(core.logical(), s.logical());
+  };
+  // 14 rounds of 4 measurements, then a readout round of 5.
+  const shot wide(wide_readout_spec(), 15, rng);
+  ASSERT_EQ(wide.measurements.size(), 61u);
+  ASSERT_NO_FATAL_FAILURE(streams(wide, {60, 1}));
+  ASSERT_NO_FATAL_FAILURE(streams(wide, {48, 13, 0}));
+  // A readout round as wide as bulk, whole before an empty FINAL.
+  const shot even(arbitrary_memory_spec(5, true), 15, rng);
+  ASSERT_NO_FATAL_FAILURE(streams(even, {48, 12, 0}));
+} // end - TEST(IngestCore, TakesAReadoutRoundThatArrivesBeforeFinal)
+
+// A record no longer than the limit is always taken once nothing is held:
+// rounds a record can complete before FINAL are bounded by the rounds cut
+// before it, which a one-measurement readout round does not narrow.
+TEST(IngestCore, TakesAnyLegalRecordWhenNothingIsHeld) {
+  const auto context = std::make_shared<const experiment_template>(
+      one_measurement_readout_spec());
+  const std::vector<std::uint8_t> record(400, 0);
+  ingest_core core(context, layers_of({sliding(2, 5)}), false);
+  ASSERT_EQ(core.record_limit(), 200u);
+  EXPECT_EQ(core.enqueue(record.data(), 99, false), ingest_status::accepted);
+  EXPECT_EQ(core.enqueue(record.data(), 200, false), ingest_status::accepted);
+}
 
 // A record longer than one period of rounds is rejected, and the core takes
 // no more input until it is reset.
@@ -3138,8 +3241,8 @@ TEST(IngestCore, RejectsAFinalRecordThatEndsNoShot) {
         [&] { core.enqueue(record.data(), final_len, true); }, text);
   };
   rejects(0, 3,
-          "ingest: the FINAL record and the partial round before it hold 3 "
-          "measurements, fewer than the readout round's 4");
+          "ingest: the shot holds 3 measurements, fewer than its readout "
+          "round's 4");
   rejects(0, 10,
           "ingest: the FINAL record ends mid-round: round 1 has 2 of its 4 "
           "measurements before the readout round");
@@ -3150,6 +3253,13 @@ TEST(IngestCore, RejectsAFinalRecordThatEndsNoShot) {
           "ingest: the FINAL record ends the shot at 1 round, but the "
           "template's shots have at least " +
               std::to_string(context->min_rounds()));
+  // A failed core hands nothing over, though windows were complete.
+  core.reset();
+  ASSERT_EQ(core.enqueue(record.data(), 48, false), ingest_status::accepted);
+  expect_throw<std::invalid_argument>(
+      [&] { core.enqueue(record.data(), 10, true); },
+      "ingest: the FINAL record ends mid-round");
+  EXPECT_EQ(core.poll(), nullptr);
   core.reset();
   ASSERT_EQ(core.enqueue(record.data(), 2, false), ingest_status::accepted);
   ASSERT_EQ(core.enqueue(record.data(), 34, true), ingest_status::accepted);
@@ -3386,6 +3496,8 @@ public:
   // Decodes one shot of measurements.
   void run(const std::vector<std::uint8_t> &measurements) {
     ingest_->reset();
+    for (auto &core : cores_)
+      core->reset();
     decodes_.clear();
     commits_.clear();
     for (std::size_t at = 0; at < measurements.size();) {
@@ -3531,6 +3643,25 @@ TEST(DecodeWindowCore, PipelineDecodesSingleFaultsAsTheReference) {
   } // end - for(spec)
 } // end - TEST(DecodeWindowCore, PipelineDecodesSingleFaultsAsTheReference)
 
+// One pipeline decodes shots of any length in any order: a shorter shot
+// after a longer one finds no fire of the longer one's windows.
+TEST(DecodeWindowCore, PipelineServesShotsOfAnyLengthInAnyOrder) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  serial_pipeline pipeline(spec, g, "single_error_lut");
+  for (const std::size_t R : {24u, 9u, 17u, 9u, 6u}) {
+    SCOPED_TRACE("R=" + std::to_string(R));
+    parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const production_windows production(pipeline.context(), g, R,
+                                        reference.order(), "single_error_lut");
+    const auto &s = reference.model();
+    for (std::size_t c = 0; c < s.h.size(); c += 3)
+      ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
+          pipeline, reference, production, detectors_of(s, c), R))
+          << "column " << c;
+  }
+}
+
 // The same on sampled shots with PyMatching, where windows commit several
 // faults and send what they leave; the raw logical value is the readout
 // round's through m2o.
@@ -3580,10 +3711,10 @@ TEST(DecodeWindowCore, FiresAllocateNothingBeyondTheDecoder) {
             allocation_counting_lut::decode_allocations);
 } // end - TEST(DecodeWindowCore, FiresAllocateNothingBeyondTheDecoder)
 
-// An input from a producer instance that does not exist is empty: a window
-// fired without its residual has zero imported rows, whatever its slot
-// held before.
-TEST(DecodeWindowCore, AMissingResidualLeavesTheImportsZero) {
+// A window imports rows only when the instance that values them exists, so
+// one fired without its residual is rejected, and its slot keeps the fire
+// it held, imports and all.
+TEST(DecodeWindowCore, AMissingResidualIsRejected) {
   const auto spec = arbitrary_memory_spec(5);
   const auto g = parallel_graph(layered(2, 1, 3));
   constexpr std::size_t R = 30;
@@ -3622,9 +3753,15 @@ TEST(DecodeWindowCore, AMissingResidualLeavesTheImportsZero) {
   EXPECT_EQ(imported(b.fire(0, *p->views[1], with)),
             std::vector<std::uint8_t>(residual.values.begin(),
                                       residual.values.end()));
-  EXPECT_EQ(imported(b.fire(0, *p->views[1], without)),
-            std::vector<std::uint8_t>(residual.values.size(), 0));
-} // end - TEST(DecodeWindowCore, AMissingResidualLeavesTheImportsZero)
+  expect_error([&] { b.fire(0, *p->views[1], without); },
+               "decode_window: window " + std::to_string(p->k) + " imports " +
+                   std::to_string(residual.values.size()) +
+                   " rows, but no residual reaches its imported row 0");
+  ASSERT_NE(b.find(p->k), nullptr);
+  EXPECT_EQ(imported(*b.find(p->k)),
+            std::vector<std::uint8_t>(residual.values.begin(),
+                                      residual.values.end()));
+} // end - TEST(DecodeWindowCore, AMissingResidualIsRejected)
 
 // single_error_lut whose decode() throws while fail_next is set, so a test
 // can fail a fire after it has started rewriting its slot.
@@ -3693,8 +3830,8 @@ TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty) {
 
 // A rejected fire changes nothing: its slot still holds the window it last
 // fired, rows and solution alike, whether a received send is misdirected,
-// the view holds more rounds than its variant, or its rounds are not in
-// the ring.
+// the view holds more rounds than its window, or a later window's rounds
+// are not yet in the ring.
 TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas) {
   const auto spec = arbitrary_memory_spec(5);
   const auto g = parallel_graph(layered(2, 1, 3));
@@ -3740,12 +3877,13 @@ TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas) {
   auto longer = *b_views[1];
   auto later = *b_views[1];
   longer.rounds.end += 1000;
-  later.rounds = {later.rounds.begin + 1000, later.rounds.end + 1000};
+  later.k += 100;
+  later.rounds = {later.rounds.begin + 100 * 5, later.rounds.end + 100 * 5};
   expect_error([&] { b.fire(0, *b_views[1], misdirected); },
                "send 'backward' reaches shot row");
-  expect_error([&] { b.fire(0, longer, {}); },
-               "decode_window: window " + std::to_string(k + 1) +
-                   "'s view holds other rows than the");
+  expect_error([&] { b.fire(0, longer, {}); }, "decode_window: window " +
+                                                   std::to_string(k + 1) +
+                                                   "'s view spans rounds");
   expect_throw<std::out_of_range>([&] { b.fire(0, later, {}); },
                                   "detectors are not in the ring");
   const auto *kept = b.find(k);
@@ -3756,6 +3894,37 @@ TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas) {
   EXPECT_EQ(kept->solution->estimate, estimate);
   EXPECT_EQ(b.find(k + 1), nullptr);
 } // end - TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas)
+
+// A view of another layer's window is rejected even when its variant key
+// and its rows match this layer's: with the default sizes, B's windows are
+// as long as A's, and both layers' bulk keys are empty.
+TEST(DecodeWindowCore, RejectsAnotherLayersViewOfTheSameSize) {
+  const auto g = parallel_graph(layered(3, 3, 9));
+  constexpr std::size_t R = 60;
+  data_artifact_store store;
+  const auto context = store.add_template(arbitrary_memory_spec(5));
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 2);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 8}, {g.layers[1].request, 8}}, false);
+  const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
+  const window_view *b_view = nullptr;
+  for (std::size_t at = 0; !b_view || b_view->variant.position;
+       at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll())
+      if (p->views[1])
+        b_view = p->views[1];
+  }
+  ASSERT_EQ(b_view->rounds.end - b_view->rounds.begin, 9);
+  expect_error([&] { a.fire(0, *b_view, {}); }, "decode_window: window " +
+                                                    std::to_string(b_view->k) +
+                                                    "'s view spans rounds");
+}
 
 // A fire takes only its own layer's windows into existing slots, and a
 // send only onto the rows its mode reaches in the receiving window.
@@ -3798,7 +3967,7 @@ TEST(DecodeWindowCore, RejectsWhatIsNotItsWindow) {
                "decode_window: window 0's variant is none of this layer's");
   expect_error([&] { a.fire(0, *b_views.back(), {}); },
                "decode_window: window " + std::to_string(b_views.back()->k) +
-                   "'s view holds other rows than the");
+                   "'s view spans rounds");
   // A[k].backward is B[k]'s imports, before B[k + 1]'s rows.
   ASSERT_EQ(b_views[1]->k, b_views[0]->k + 1);
   const auto &fired =

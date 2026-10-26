@@ -506,6 +506,12 @@ lower_patterns(std::vector<task_graph_node_config> &nodes,
   std::vector<task_graph_node_config> lowered;
   lowered.reserve(nodes.size());
   for (auto &cfg : nodes) {
+    // A pattern's nodes take its id as their prefix, so a reserved one is
+    // named before lowering hides it.
+    if ((cfg.ensemble || is_parallel_window(cfg)) &&
+        (cfg.id == "measurements" || cfg.id == "dets" || cfg.id == "output"))
+      throw std::invalid_argument("from_topology: node id '" + cfg.id +
+                                  "' is reserved for a synthetic endpoint");
     if (cfg.ensemble)
       wirings.push_back(lower_ensemble(std::move(cfg), lowered, edges));
     else if (is_parallel_window(cfg))

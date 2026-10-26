@@ -26,8 +26,8 @@ namespace cudaq::qec {
 /// each side, with an open input and forward and backward sends; B commits
 /// the gap_rounds before A's commit zone, closed at both ports. Both share
 /// the column options. A's open input with boundary columns takes
-/// boundary_prior, or else the largest prior of a fault that crosses into
-/// the next round.
+/// boundary_prior, or else, over the detectors faults cross into from the
+/// round before, the largest chance that an odd number of them fire.
 /// @param params The pattern's parameters, which are checked against its
 /// schema first.
 /// @param context The template the windows are built on.
@@ -48,9 +48,11 @@ bool is_parallel_window(const task_graph_node_config &cfg);
 /// default, P.ingest reads the logical value into P.sum's third input. The
 /// inner decoder, max_in_flight and verify_residual go to both layers.
 /// @throws std::invalid_argument naming the pattern if it has no id, its
-/// parameters are invalid, it has no dem_chunks template, it is not fed by
-/// exactly one edge into 'input', an edge names another port, or as
-/// parallel_window_requests() does.
+/// parameters are invalid, it has no dem_chunks template, it carries a
+/// stim_dem, a built decoder or flat matrices, which its layers cannot use,
+/// it is not fed by exactly one edge into 'input', an edge names another
+/// port, its output is corrected_logical but its template has no readout
+/// map, or as parallel_window_requests() does.
 void lower_parallel_window(task_graph_node_config cfg,
                            std::vector<task_graph_node_config> &out,
                            std::vector<task_graph_edge> &edges);

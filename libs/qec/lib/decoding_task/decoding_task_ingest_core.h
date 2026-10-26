@@ -60,10 +60,14 @@ enum class ingest_status {
 };
 
 /// Rounds, detectors and window views for one ingest node. The rounds of a
-/// shot are prefix, then bulk, then suffix rounds. Before FINAL a round is
-/// known to be bulk once enough later rounds have arrived that it cannot be
-/// a suffix round, and only then are its detectors formed; a FINAL record
-/// fixes the shot's length and so every remaining round's phase. A round's
+/// shot are prefix, then bulk, then suffix rounds, the last of them the
+/// readout round. Before FINAL, rounds are cut at their widths before the
+/// readout round, and the readout round must end at or past the last
+/// measurement received, which bounds the shot's length from below. A round
+/// is known to be bulk once that bound puts it before the suffix, and only
+/// then are its detectors formed, so measurements of the readout round that
+/// arrive early are never formed as a bulk round. A FINAL record fixes the
+/// shot's length and so every remaining round's phase. A round's
 /// detectors are its phase's D_sparse rows over the previous round's
 /// measurements and its own, or without D_sparse the memory convention.
 ///
@@ -73,7 +77,9 @@ enum class ingest_status {
 /// view copies nothing: it names rounds whose detectors stay in the ring
 /// while an unpublished window or a view out holds them.
 ///
-/// Not thread-safe: one thread enqueues, polls and releases.
+/// Not thread-safe: one thread enqueues, polls, releases and reads views'
+/// detectors. A consumer on another thread must not read detectors() while
+/// enqueue() runs, since enqueue() writes the ring detectors() reads.
 class ingest_core {
 public:
   /// @param context The experiment template.
@@ -89,8 +95,9 @@ public:
               std::vector<ingest_layer> layers, bool read_logical);
 
   /// Take one record of raw measurements, one byte each. A record may cut a
-  /// round anywhere. A FINAL record ends the shot: its readout round is its
-  /// last measurements, with any partial round before it. Allocates nothing.
+  /// round anywhere, and the readout round may arrive in records before the
+  /// FINAL one, which ends the shot and may be empty: the readout round is
+  /// the shot's last measurements. Allocates nothing.
   /// @return deferred, taking nothing, when the ring has no room for the
   /// record's rounds until views are polled or released.
   /// @throws std::invalid_argument if the record is longer than
@@ -99,8 +106,8 @@ public:
   ingest_status enqueue(const std::uint8_t *data, std::size_t len, bool final);
 
   /// The next index whose windows are all complete, with a view of each, or
-  /// null when none is ready or a pool it needs is empty. Valid until the
-  /// next call. Allocates nothing.
+  /// null when none is ready, a pool it needs is empty, or the shot failed.
+  /// Valid until the next call. Allocates nothing.
   const ingest_publication *poll();
 
   /// Return @p view to its pool, once its consumer is done with its rows.
@@ -108,7 +115,7 @@ public:
   void release(const window_view &view);
 
   /// The detectors of round @p r, while a view out or an unpublished window
-  /// holds it.
+  /// holds it. Not to be called while enqueue() runs.
   /// @throws std::out_of_range if round r's detectors are not in the ring.
   std::span<const std::uint8_t> detectors(std::int64_t r) const;
 
@@ -133,6 +140,12 @@ public:
 private:
   /// Measurements in round r, cut before the shot's length is known.
   std::size_t forward_width(std::size_t r) const;
+  /// The fewest rounds the shot can have: its length once FINAL is taken,
+  /// else a length whose readout round ends at or past the last measurement
+  /// received.
+  std::size_t least_shot_rounds() const;
+  /// Form the detectors of every round cut whose phase is known.
+  void form_known_rounds();
   /// The first round still held: by the next unpublished index, or a view
   /// out.
   std::int64_t first_held_round() const;
@@ -146,8 +159,9 @@ private:
   void complete_round(std::size_t width);
   /// Form round r's detectors into the ring.
   void form_detectors(std::size_t r);
-  /// Whether layer @p l's window k is complete.
-  bool window_complete(std::size_t l, std::int64_t k) const;
+  /// Whether layer @p l's window k is complete, in a shot of at least
+  /// @p least rounds.
+  bool window_complete(std::size_t l, std::int64_t k, std::size_t least) const;
   /// Whether layer @p l has a window k.
   bool window_exists(std::size_t l, std::int64_t k) const;
   /// Throws std::invalid_argument for @p what, leaving the core failed.
@@ -175,6 +189,8 @@ private:
   std::vector<const std::vector<std::int64_t> *> suffix_d_;
   std::size_t last_width_ = 0;
   std::size_t min_width_ = 0;
+  std::size_t min_forward_width_ = 0;  ///< The narrowest round cut before FINAL
+  std::size_t fixed_measurements_ = 0; ///< A fixed shot's, when not repeating
   std::size_t max_width_ = 0;
   std::size_t max_rows_ = 0;
   std::size_t record_limit_ = 0;
@@ -182,6 +198,7 @@ private:
   // Per layer: the first index with a window, and the rounds a window spans
   // relative to its anchor.
   std::vector<std::int64_t> first_k_;
+  std::vector<index_range> final_instances_; ///< Once FINAL fixes them
   std::vector<round_range> spans_;
 
   // Raw rounds: the round being cut and those before it whose detectors are
@@ -204,6 +221,7 @@ private:
 
   // The shot.
   std::size_t rounds_cut_ = 0;  ///< Complete rounds
+  std::size_t cut_bytes_ = 0;   ///< Their measurements
   std::size_t partial_ = 0;     ///< Measurements of the round being cut
   std::size_t formed_ = 0;      ///< Rounds whose detectors are formed
   std::size_t rows_formed_ = 0; ///< Their detectors
