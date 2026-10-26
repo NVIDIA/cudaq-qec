@@ -141,6 +141,8 @@ public:
   std::size_t num_variants() const { return variants_.size(); }
   /// The slots.
   std::size_t num_slots() const { return fires_.size(); }
+  /// The most rows send @p s has in any variant.
+  std::size_t max_send_rows(std::size_t s) const;
 
 private:
   /// One variant's model and its decoders: one per slot for the bulk, else

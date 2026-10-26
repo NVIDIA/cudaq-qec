@@ -14198,7 +14198,7 @@ TEST(WindowKinds, BuildTheirNodesFromTheContext) {
   const cudaqx::heterogeneous_map receiving{{"num_receives", std::size_t{2}}};
   std::mt19937 rng(53);
   std::vector<std::uint8_t> m(context->measurement_offset(30, 30));
-  const edge_value *window = nullptr;
+  std::optional<edge_value> window;
   for (auto &x : m)
     x = static_cast<std::uint8_t>(rng() & 1);
   store.add_windows(context, layers.a);
@@ -14227,12 +14227,14 @@ TEST(WindowKinds, BuildTheirNodesFromTheContext) {
   auto *in = dynamic_cast<ingest_node *>(ingest.get());
   ASSERT_NE(in, nullptr);
   EXPECT_EQ(in->outputs(), (std::vector<std::string>{"A", "B", "logical"}));
+  // A's first window, copied while its publication stands.
   for (std::size_t at = 0; !window; at += *in->raw_chunk_limit()) {
     ASSERT_LT(at + *in->raw_chunk_limit(), m.size());
     for (bool more = in->enqueue(m.data() + at, *in->raw_chunk_limit(),
                                  round_type::BULK);
-         more && !window; more = in->publish_next())
-      window = in->streaming_output(0);
+         more; more = in->publish_next())
+      if (!window)
+        window = *in->streaming_output(0);
   }
 
   auto a_ctx = context_of("A", unchecked, layers.a);
@@ -14249,8 +14251,8 @@ TEST(WindowKinds, BuildTheirNodesFromTheContext) {
             (std::vector<std::string>{"input", "receive_0", "receive_1"}));
   // A random window is beyond a single-error table: unchecked, it fires;
   // with verify_residual fail, its solution is rejected.
-  EXPECT_TRUE(a_node->fire(0, {window}));
-  EXPECT_THROW(checked_node->fire(0, {window}), std::runtime_error);
+  EXPECT_TRUE(a_node->fire(0, {&*window}));
+  EXPECT_THROW(checked_node->fire(0, {&*window}), std::runtime_error);
 
   node_build_context bare;
   bare.id = "lonely";

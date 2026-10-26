@@ -5628,8 +5628,11 @@ TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
   for (auto &x : m)
     x = static_cast<std::uint8_t>(rng() & 1);
   store.add_windows(context, g.layers[0].request);
+  store.add_windows(context, g.layers[1].request);
   decode_window_node a(store, context, g.layers[0].request, "single_error_lut",
                        {}, 0, verify_residual_mode::none);
+  decode_window_node b(store, context, g.layers[1].request, "single_error_lut",
+                       {}, 2, verify_residual_mode::none);
   decode_window_node blind(store, context, g.layers[0].request, "blind_decoder",
                            {}, 0, verify_residual_mode::fail);
   ingest_core ingest(context, {{g.layers[0].request, 1}}, false);
@@ -5656,7 +5659,11 @@ TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
   rejects({&window, &window},
           "decode_window: instance 1 has 2 inputs, not the node's 1");
   rejects({nullptr}, "decode_window: instance 1 has no window on its input");
-  rejects({&wrong}, "");
+  rejects({&wrong},
+          "decode_window: instance 1's input 'input' holds no window_rows");
+  expect_error([&] { b.fire(0, {&window, nullptr, &wrong}); },
+               "decode_window: instance 0's input 'receive_1' holds no "
+               "window_send");
   rejects({&window}, "decode_window: instance 1 carries window " +
                          std::to_string(window.get<window_rows>().k) +
                          ", but this shot's instances are " +
@@ -5729,9 +5736,9 @@ TEST(DecodeWindowNode, PublishesUntilTheNextFireOrReset) {
   EXPECT_TRUE(doubtful.streaming_output(0)->get<logical_outcome>().converged);
 } // end - TEST(DecodeWindowNode, PublishesUntilTheNextFireOrReset)
 
-// A fire allocates nothing beyond what its decoder's decode() does, once
-// the node has published as large a frame and sends before: a second shot,
-// over every kind of variant.
+// A fire allocates nothing beyond what its decoder's decode() does, from
+// the first: its send buffers are reserved for their largest variant. Two
+// shots, over every kind of variant.
 TEST(DecodeWindowNode, FiresAllocateNothingBeyondTheDecoder) {
   if (QEC_TEST_SANITIZED)
     GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
@@ -5743,13 +5750,15 @@ TEST(DecodeWindowNode, FiresAllocateNothingBeyondTheDecoder) {
   const parallel_window_reference reference(spec, g, R, "single_error_lut");
   const auto m = memory_measurements(*pipeline.context(), R,
                                      detectors_of(reference.model(), 37));
-  ASSERT_NO_FATAL_FAILURE(pipeline.run(m));
-  allocation_counting_lut::decode_allocations = 0;
-  ASSERT_NO_FATAL_FAILURE(pipeline.run(m));
-  EXPECT_EQ(pipeline.published().size(), reference.windows().size());
-  EXPECT_GT(allocation_counting_lut::decode_allocations, 0u);
-  EXPECT_EQ(pipeline.fire_allocations(),
-            allocation_counting_lut::decode_allocations);
+  for (int shot = 0; shot < 2; ++shot) {
+    SCOPED_TRACE(shot == 0 ? "first shot" : "second shot");
+    allocation_counting_lut::decode_allocations = 0;
+    ASSERT_NO_FATAL_FAILURE(pipeline.run(m));
+    EXPECT_EQ(pipeline.published().size(), reference.windows().size());
+    EXPECT_GT(allocation_counting_lut::decode_allocations, 0u);
+    EXPECT_EQ(pipeline.fire_allocations(),
+              allocation_counting_lut::decode_allocations);
+  }
 } // end - TEST(DecodeWindowNode, FiresAllocateNothingBeyondTheDecoder)
 
 } // namespace cudaq::qec

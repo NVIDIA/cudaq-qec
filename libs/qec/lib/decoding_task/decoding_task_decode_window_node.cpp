@@ -33,9 +33,13 @@ decode_window_node::decode_window_node(
   for (std::size_t i = 0; i < num_receives; ++i)
     inputs_.push_back("receive_" + std::to_string(i));
   outputs_.push_back("output");
-  for (const auto &send : request.sends) {
-    outputs_.push_back(send.id);
+  // Each send's values are reserved for its largest variant, so even the
+  // first fire allocates nothing beyond its decoder.
+  for (std::size_t s = 0; s < request.sends.size(); ++s) {
+    outputs_.push_back(request.sends[s].id);
     sends_.emplace_back(window_send_payload{});
+    sends_.back().get<window_send_payload>().values.reserve(
+        core_.max_send_rows(s));
   }
   frame_.get<logical_outcome>().bits = corrections_;
 } // end - decode_window_node()
@@ -56,12 +60,21 @@ bool decode_window_node::fire(std::int64_t k,
   if (!inputs[0])
     throw std::invalid_argument("decode_window: instance " + std::to_string(k) +
                                 " has no window on its input");
-  const auto &window = inputs[0]->get<window_rows>();
+  const auto *window_input = inputs[0]->get_if<window_rows>();
+  if (!window_input)
+    throw std::invalid_argument("decode_window: instance " + std::to_string(k) +
+                                "'s input 'input' holds no window_rows");
+  const auto &window = *window_input;
   for (std::size_t i = 0; i < receives_.size(); ++i) {
     received_[i] = nullptr;
     if (!inputs[1 + i])
       continue;
-    receives_[i] = receive_of(inputs[1 + i]->get<window_send_payload>());
+    const auto *send = inputs[1 + i]->get_if<window_send_payload>();
+    if (!send)
+      throw std::invalid_argument("decode_window: instance " +
+                                  std::to_string(k) + "'s input '" +
+                                  inputs_[1 + i] + "' holds no window_send");
+    receives_[i] = receive_of(*send);
     received_[i] = &receives_[i];
   }
   if (offset_ && window.k - k != *offset_)

@@ -253,6 +253,14 @@ std::size_t decode_window_core::first_row(const window_rows &window) const {
   return context_->row_offset(begin, R);
 }
 
+// Variants clip a send's rows differently near the shot's ends.
+std::size_t decode_window_core::max_send_rows(std::size_t s) const {
+  std::size_t most = 0;
+  for (const auto &v : variants_)
+    most = std::max(most, v.window->sends.at(s).rows.size());
+  return most;
+}
+
 // The slot count is fixed at construction.
 void decode_window_core::check_slot(std::size_t slot) const {
   if (slot >= fires_.size())
