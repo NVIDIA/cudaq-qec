@@ -205,6 +205,15 @@ private:
 /// realtime decoder config expects for its `D_sparse`.
 std::vector<std::int64_t> d_sparse(const cudaq::M2DSparseMatrix &m2d);
 
+/// @brief Rebase a whole-shot measurement-to-observable map onto the final
+/// phase, as `-1`-terminated rows for `dem_chunk_spec::m2o_sparse`.
+/// @param m2o Whole-shot readout map, one row per observable.
+/// @param first_measurement Index of the final phase's first measurement.
+/// @throws std::invalid_argument if a row reads a measurement outside
+/// `[first_measurement, m2o.num_measurements)`.
+std::vector<std::int64_t> m2o_sparse(const cudaq::M2OSparseMatrix &m2o,
+                                     std::size_t first_measurement);
+
 /// @brief Convert CUDA-Q circuit-analysis M2D output to the QEC-owned sparse
 /// matrix used by decoder_init.
 sparse_binary_matrix m2d_to_sparse(const cudaq::M2DSparseMatrix &m2d);

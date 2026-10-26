@@ -8,6 +8,7 @@
 #include "cuda-qx/core/heterogeneous_map.h"
 #include "cudaq/qec/decoding_task_graph_config.h"
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/window_request.h"
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -124,6 +125,9 @@ struct decoder_config {
   /// H_sparse.empty(). Nonempty H_sparse is exactly the state
   /// expand_dem_chunks() leaves behind, allowing round-trip through YAML.
   std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
+  /// The data_artifacts entry `dem_chunks` names, if it names one rather than
+  /// holding the block; dem_chunks is then a copy of that entry's template.
+  std::string dem_chunks_artifact;
   decoder_custom_args_t decoder_custom_args;
 
   /// Decoder task graph topology.  When set, `type` must be absent and either
@@ -165,6 +169,15 @@ struct decoder_config {
       decoder_custom_args_t node_params;
       /// DEM for this node alone; falls back to the entry-level DEM.
       std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
+      /// The data_artifacts entry `dem_chunks` names, if it names one; the
+      /// field above is then a copy of that entry's template.
+      std::string dem_chunks_artifact;
+      /// An ingest node's layers, sorted by name: each names an output port
+      /// and the window request published on it. Their order carries no
+      /// meaning; parsing YAML sorts them by name, so keep a hand-built list
+      /// sorted for it to round-trip equal. Experimental, as the request
+      /// type is.
+      std::vector<cudaq::qec::experimental::ingest_window> windows;
       /// This node's own matrices, in the entry-level flat form and the same
       /// -1-separated row encoding. Use them for a detector map that follows no
       /// round structure; a node takes these or `dem_chunks`, never both.
@@ -390,8 +403,32 @@ struct syndrome_mapping_config {
   __attribute__((visibility("default"))) void validate() const;
 };
 
+/// One entry of a configuration's `data_artifacts`: data declared once and
+/// named wherever a block is expected. Exactly one kind is set: dem_chunks,
+/// stim_dem, stim_dem_path, window (with its context) or edem_path.
+struct data_artifact {
+  std::string name;
+  /// An experiment template.
+  std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
+  /// A Stim DEM, inline or by file.
+  std::string stim_dem;
+  std::string stim_dem_path;
+  /// A window request, experimental as the request type is, and the name of
+  /// the dem_chunks entry it is built on.
+  std::optional<cudaq::qec::experimental::window_request> window;
+  std::string context;
+  /// A packed .edem file. Reserved: rejected until the cudaq-edem migration.
+  std::string edem_path;
+  /// Optional sha256 of a file-backed entry's bytes, in hexadecimal.
+  std::string sha256;
+  bool operator==(const data_artifact &) const = default;
+};
+
 class multi_decoder_config {
 public:
+  /// Named data, sorted by name, that decoders and nodes reference.
+  /// References are resolved when the configuration is parsed.
+  std::vector<data_artifact> data_artifacts;
   std::vector<decoder_config> decoders;
   /// Optional server-level transport section. The standalone server's CLI
   /// defaults may fill an empty section only for non-GPU-RoCE, host-only

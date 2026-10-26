@@ -194,6 +194,15 @@ void decoding_task_graph::impl::compile_wires() {
   }
   std::vector<compiled_wire> wires; // every wire, in declared edge order
   std::unordered_map<std::string, int> id_map;
+  // No node joins its inputs by index yet, so an index map has nothing to
+  // map, and ignoring it would wire the wrong instances together.
+  for (const auto &e : edges)
+    if (e.index_offset != 0)
+      throw std::invalid_argument("compile_wires: edge " + e.from_node + "." +
+                                  e.from_output + " -> " + e.to_node + "." +
+                                  e.to_input + " has index_offset " +
+                                  std::to_string(e.index_offset) +
+                                  ", but no node joins its inputs by index");
   id_map.reserve(N);
   for (std::size_t i = 0; i < N; ++i)
     id_map[node_ids[i]] = static_cast<int>(i);

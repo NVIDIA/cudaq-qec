@@ -632,6 +632,13 @@ void wire_patterns(const std::vector<ensemble_wiring> &wirings,
 std::unique_ptr<decoding_task_graph>
 decoding_task_graph::assemble(std::unique_ptr<impl> i,
                               task_graph_options options) {
+  // The pool sizes itself from the graph and inherits the process's
+  // affinity; silently ignoring a requested size or pinning would be worse
+  // than refusing it.
+  if (options.async_num_workers || !options.async_worker_cpus.empty())
+    throw std::invalid_argument(
+        "task_graph_options: async_num_workers and async_worker_cpus are not "
+        "applied yet");
   for (std::size_t n = 0; n < i->nodes.size(); ++n)
     require_registered_port_types(*i->nodes[n], i->node_ids[n]);
   i->compile_wires();

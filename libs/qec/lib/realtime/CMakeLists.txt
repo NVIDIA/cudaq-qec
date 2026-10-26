@@ -203,6 +203,7 @@ endif()
 add_library(cudaq-qec-realtime-decoding SHARED
   realtime_decoding.cpp
   config.cpp
+  window_request_yaml.cpp
 )
 
 target_compile_options(cudaq-qec-realtime-decoding 

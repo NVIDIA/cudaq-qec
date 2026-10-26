@@ -315,7 +315,16 @@ struct dem_chunk_spec {
 
   /// Measurements this phase's round adds to the stream, when it differs from
   /// dem_chunks_spec::measurements_per_round (a final data readout, say).
+  /// Like that field, it applies when the phases carry D_sparse rows; without
+  /// them a round adds one measurement per detector.
   std::optional<uint64_t> num_measurements;
+
+  /// Optional readout map, -1-terminated: one row per observable, listing
+  /// the measurements of this phase's own round whose parity is the
+  /// observable's raw value. Only the last phase may carry it. The round has
+  /// its measurement count when the phases carry D_sparse rows, else one
+  /// measurement per detector.
+  std::vector<std::int64_t> m2o_sparse;
 
   /// True when nothing has been set.
   bool is_empty() const;
@@ -419,9 +428,25 @@ struct dem_chunks_spec {
   /// present. See has_D_sparse().
   std::optional<bool> phases_supply_D_sparse;
 
+  /// Optional observable names, one per O_sparse row.
+  std::vector<std::string> observable_names;
+
   /// The measurement count of @p phase's round: its num_measurements, else
   /// measurements_per_round. @throws std::invalid_argument if neither is set.
   uint64_t measurements_of(const dem_chunk_spec &phase) const;
+
+  /// @brief The number of O_sparse rows every phase a connection names
+  /// carries; 0 when no connection names a phase.
+  /// @throws std::invalid_argument if two of those phases disagree.
+  uint64_t num_observables() const;
+
+  /// The detector rows @p phase's round contributes when closed: its to_seam
+  /// band and interior rows. Builds the phase's chunk on each call.
+  /// @param phase The DEM chunk phase whose detector rows are counted.
+  /// @param context Prefix for error messages, as for dem_chunk_from_spec().
+  /// @throws std::invalid_argument if the phase is inconsistent.
+  uint64_t detectors_of(const dem_chunk_spec &phase,
+                        const std::string &context = "dem_chunk") const;
 
   /// @brief Whether the phases supply D, rather than leaving
   /// dem_chunks_to_d_sparse() to apply the memory convention.
@@ -461,6 +486,19 @@ struct dem_chunks_spec {
   /// @throws std::invalid_argument as phase_sequence() and repeating_phase().
   repeating_span repeating_rounds() const;
 
+  /// @brief The phases of a shot's rounds before, of, and after the repeating
+  /// phase.
+  struct phase_layout {
+    std::vector<phase_id> prefix; ///< phases of the rounds before it, in order
+    phase_id repeating;           ///< the repeating phase
+    std::vector<phase_id> suffix; ///< phases of the rounds after it, in order
+  };
+
+  /// @brief The phase layout of a shot of any length, from the shortest
+  /// chain; num_rounds is not consulted. Copies the spec on each call.
+  /// @throws std::invalid_argument as phase_sequence() and repeating_phase().
+  phase_layout layout() const;
+
   /// @brief Expand connections + num_rounds into an ordered phase_id list.
   ///
   /// With a self-loop (repeating phase) and num_rounds = T:
@@ -479,6 +517,12 @@ struct dem_chunks_spec {
   const dem_chunk_spec &get_phase(phase_id id) const;
 
   /// @brief Validate phase specs, connection graph, and seam widths.
+  ///
+  /// Also checks that every connection names a phase with a spec, the phases
+  /// agree on the observable count, observable_names has one unique name per
+  /// observable, and only the last phase carries m2o_sparse, with one row per
+  /// observable inside its round: its measurement count with D_sparse, else
+  /// its detectors.
   /// @throws std::invalid_argument on the first violation.
   void validate() const;
 };

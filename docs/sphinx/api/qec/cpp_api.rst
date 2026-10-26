@@ -261,6 +261,20 @@ I/O types
 Graph
 -----
 
+.. doxygenstruct:: cudaq::qec::experimental::round_range
+    :members:
+
+.. doxygenenum:: cudaq::qec::experimental::port_disposition
+.. doxygenenum:: cudaq::qec::experimental::send_mode
+.. doxygenenum:: cudaq::qec::experimental::input_boundary
+.. doxygenenum:: cudaq::qec::experimental::parallel_resolution
+
+.. doxygenstruct:: cudaq::qec::experimental::window_request
+    :members:
+
+.. doxygenstruct:: cudaq::qec::experimental::ingest_window
+    :members:
+
 .. doxygenstruct:: cudaq::qec::task_graph_edge
     :members:
 

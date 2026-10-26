@@ -497,6 +497,7 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
   node.kind = ns.resolved_kind();
   node.node_params = ns.node_params.map();
   node.max_in_flight = ns.max_in_flight;
+  node.windows = ns.windows;
 
   const auto *kind = cudaq::qec::find_task_graph_node_kind(node.kind);
   if (!kind)
