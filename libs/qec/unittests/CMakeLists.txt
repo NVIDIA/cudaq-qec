@@ -272,11 +272,6 @@ else()
                  "(cudaq-qec-decoding-server not built)")
 endif()
 
-if(TARGET cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck)
-  add_dependencies(CUDAQXQECUnitTests
-    cudaq-qec-realtime-decoding-quantinuum-stubs-linkcheck)
-endif()
-
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/simulation-cqr/simulation_cqr_host.cpp"
    AND TARGET cudaq-qec-realtime-decoding)
   add_executable(test_simulation_cqr_host
