@@ -8,9 +8,9 @@ the tool does not implement a second scheduler or substitute a global or
 sliding-window algorithm.
 
 A QEC build providing the public parallel-window configuration, named model
-artifacts and terminal-readout metadata is required. Older builds fail before
-circuit preparation or output creation. **Parsing and configuration validation
-do not establish that the target runtime can execute the pattern.**
+artifacts and terminal-readout metadata is required. The generator uses those
+APIs directly. **Parsing and configuration validation do not establish that
+the target runtime can execute the pattern.**
 
 ## Build and run
 
@@ -19,8 +19,7 @@ In a full QEC build configured with CUDA-Q, Stim and realtime configuration:
 ```sh
 cmake --build build --target memory-experiment-generator
 build/bin/memory-experiment-generator \
-  --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
-  --decoder-arg=merge_strategy=smallest_weight
+  --distance=3 --rounds=26 --basis=Z --decoder=pymatching
 ```
 
 This is the distance-three reference. A/B commit and buffer widths
@@ -35,20 +34,20 @@ For a longer experiment with two independent patches:
 ```sh
 build/bin/memory-experiment-generator \
   --distance=5 --rounds=1000 --basis=X --logical-qubits=2 \
-  --decoder=pymatching --decoder-arg=merge_strategy=smallest_weight
+  --decoder=pymatching
 ```
 
-Select PyMatching's merge policy explicitly: its error-output default,
-`disallow`, can reject the parallel boundary edges in an A window. The examples
-use `smallest_weight`; the generator preserves the selected policy rather than
-changing decoder defaults. Window-level tests cover explicit policies, but do
-not establish the accuracy or performance of the complete decoding graph.
+For PyMatching, this A/B profile writes `merge_strategy: smallest_weight` when
+no merge policy is supplied. This handles parallel boundary edges in A windows
+without changing PyMatching's own decoder defaults. An explicit
+`--decoder-arg=merge_strategy=...` is preserved, including `independent` or
+`disallow`; the selected policy still has to support the concrete window model.
+Window-level tests do not establish the accuracy or performance of the complete
+decoding graph.
 
 To request four pool workers for each of those two patch graphs, add
 `--workers-per-graph=4`. The generated configuration sets `async_streaming: true`
-and the framework's per-graph worker count to four. It uses `pool_threads` when
-the linked framework provides that executor interface, otherwise the experimental
-window configuration's `async_num_workers` field; it never emits both. The command
+and the framework's per-graph `async_num_workers` count to four. The command
 reports eight configured workers in total, excluding the additional coordinator
 thread for each graph.
 This is a per-graph setting, not a shared process-wide core budget or CPU
@@ -94,6 +93,10 @@ finish before publication; a uniquely reserved sibling holds the incomplete
 write, then the completed file is published atomically without replacement.
 Failures remove only that invocation's temporary file. Concurrent generators
 cannot overwrite each other's result.
+New files use standard permissions (`0666` restricted by the deployment's
+umask); the tool does not change the process umask. The destination filesystem
+must support hard links; unsupported publication fails and removes the staging
+file without falling back to an overwrite.
 
 ## Inputs
 
@@ -138,8 +141,9 @@ That validation must use the framework's authoritative pattern lowering when
 available, requesting fault-column outputs and checking the concrete model and
 parameters. Component tests use the framework's window construction and decode
 helpers; they do not execute the generated pattern. A tiny or whole-shot model
-is not a substitute for those windows; the generator does not maintain a
-backend-name whitelist.
+is not a substitute for those windows. Parameter validation uses registered
+decoder schemas, not a backend-name whitelist. PyMatching has the one
+profile-specific merge-policy default described above.
 When a worker count is supplied, every independent patch receives that same
 per-graph count. The total is checked for overflow before model preparation and
 reported explicitly; no allocation across graphs is invented. Omitting the
@@ -262,8 +266,7 @@ X/Z reference windows. With the sparse window implementation, they exercise
 the framework's preallocated decode workspace and canonical solve/commit
 operations. They use the framework's existing models and helpers, not a
 tool-owned scheduler.
-Base-framework tests check explicit unavailability; positive configuration tests
-require the public pattern.
+Configuration tests use the framework's registered public pattern schema.
 
 Windowed-graph wiring validation applies to concrete `ingest` and
 `decode_window` nodes. It cannot validate the generated `parallel_window`

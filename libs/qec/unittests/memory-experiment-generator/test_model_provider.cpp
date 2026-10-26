@@ -22,11 +22,8 @@
 #include <utility>
 #include <vector>
 
-#if __has_include("../../lib/decoding_task/decoding_task_commitment.h") &&     \
-                  __has_include("../task_graph_test_fixtures.h")
 #include "../../lib/decoding_task/decoding_task_commitment.h"
 #include "../task_graph_test_fixtures.h"
-#endif
 
 namespace cudaq::qec::memory_experiment {
 namespace {
@@ -131,8 +128,6 @@ TEST(MemoryExperimentProvider, BoundedModelMatchesCompleteXMemoryCircuit) {
   compare_with_full_circuit(3, memory_basis::x);
 }
 
-#if __has_include("../../lib/decoding_task/decoding_task_commitment.h") &&     \
-                  __has_include("../task_graph_test_fixtures.h")
 template <typename Window>
 void check_pymatching_window(const Window &window, const std::string &policy) {
   const auto parity = [](const auto &rows,
@@ -255,11 +250,8 @@ void check_pymatching_window(const Window &window, const std::string &policy) {
         });
   }
 }
-#endif
 
 TEST(MemoryExperimentProvider, PyMatchingFaultFramesCommitReferenceWindows) {
-#if __has_include("../../lib/decoding_task/decoding_task_commitment.h") &&     \
-                  __has_include("../task_graph_test_fixtures.h")
   if (!decoder::is_registered("pymatching"))
     GTEST_SKIP() << "Requires the installed PyMatching plugin";
   // Reuse the framework's windows, not a second scheduler. This checks output
@@ -293,9 +285,6 @@ TEST(MemoryExperimentProvider, PyMatchingFaultFramesCommitReferenceWindows) {
       }
     }
   }
-#else
-  GTEST_SKIP() << "Requires the public parallel-window model implementation";
-#endif
 }
 
 TEST(MemoryExperimentProvider, DistanceFiveMatchesCompleteMemoryCircuit) {
@@ -384,54 +373,42 @@ TEST(MemoryExperimentProvider, PublicReadoutAgreesWithTerminalMeasurements) {
     const preparation_request request{{"surface_code", 3, 26, 1, basis}};
     const auto model = prepare_model(request);
     EXPECT_NO_THROW(validate_final_readout(model.chunks, model.final_m2o));
-    // Member-dependent checks keep internal model tests useful with public
-    // builds predating terminal readout metadata, without inventing a schema.
-    [&]<typename Spec>(Spec chunks) {
-      if constexpr (requires { chunks.phases.front().spec.m2o_sparse; }) {
-        ASSERT_NO_THROW(validate_final_readout(chunks, model.final_m2o, true));
-        const auto found = std::find_if(
-            chunks.phases.begin(), chunks.phases.end(),
-            [](const auto &phase) { return !phase.spec.m2o_sparse.empty(); });
-        ASSERT_NE(found, chunks.phases.end());
-        const auto old_id = found->id;
-        const auto renamed = phase_id::from_name("readout_endpoint");
-        found->id = renamed;
-        for (auto &connection : chunks.connections) {
-          if (connection.from_phase == old_id)
-            connection.from_phase = renamed;
-          if (connection.to_phase == old_id)
-            connection.to_phase = renamed;
-        }
-        EXPECT_NO_THROW(validate_final_readout(chunks, model.final_m2o, true));
-        const auto expected = found->spec.m2o_sparse;
-        auto with_unused_phase = chunks;
-        auto unused = with_unused_phase.phases.front();
-        unused.id = phase_id::from_name("unused_phase");
-        unused.spec.m2o_sparse.clear();
-        with_unused_phase.phases.insert(with_unused_phase.phases.begin(),
-                                        std::move(unused));
-        EXPECT_NO_THROW(
-            validate_final_readout(with_unused_phase, model.final_m2o, true));
-        found->spec.m2o_sparse.clear();
-        // Optional readout metadata is insufficient for server configuration.
-        EXPECT_NO_THROW(validate_final_readout(chunks, model.final_m2o));
-        EXPECT_THROW(validate_final_readout(chunks, model.final_m2o, true),
-                     std::invalid_argument);
-        found->spec.m2o_sparse = expected;
-        found->spec.m2o_sparse.front() = model.final_measurements;
-        EXPECT_THROW(validate_final_readout(chunks, model.final_m2o),
-                     std::invalid_argument);
-        found->spec.m2o_sparse = expected;
-        auto &other = chunks.phases.front();
-        ASSERT_NE(other.id, renamed);
-        other.spec.m2o_sparse = expected;
-        EXPECT_THROW(validate_final_readout(chunks, model.final_m2o),
-                     std::invalid_argument);
-      } else {
-        EXPECT_THROW(validate_final_readout(chunks, model.final_m2o, true),
-                     std::invalid_argument);
-      }
-    }(model.chunks);
+    auto chunks = model.chunks;
+    const auto found = std::find_if(
+        chunks.phases.begin(), chunks.phases.end(),
+        [](const auto &phase) { return !phase.spec.m2o_sparse.empty(); });
+    ASSERT_NE(found, chunks.phases.end());
+    const auto old_id = found->id;
+    const auto renamed = phase_id::from_name("readout_endpoint");
+    found->id = renamed;
+    for (auto &connection : chunks.connections) {
+      if (connection.from_phase == old_id)
+        connection.from_phase = renamed;
+      if (connection.to_phase == old_id)
+        connection.to_phase = renamed;
+    }
+    EXPECT_NO_THROW(validate_final_readout(chunks, model.final_m2o));
+    const auto expected = found->spec.m2o_sparse;
+    auto with_unused_phase = chunks;
+    auto unused = with_unused_phase.phases.front();
+    unused.id = phase_id::from_name("unused_phase");
+    unused.spec.m2o_sparse.clear();
+    with_unused_phase.phases.insert(with_unused_phase.phases.begin(),
+                                    std::move(unused));
+    EXPECT_NO_THROW(validate_final_readout(with_unused_phase, model.final_m2o));
+    found->spec.m2o_sparse.clear();
+    EXPECT_THROW(validate_final_readout(chunks, model.final_m2o),
+                 std::invalid_argument);
+    found->spec.m2o_sparse = expected;
+    found->spec.m2o_sparse.front() = model.final_measurements;
+    EXPECT_THROW(validate_final_readout(chunks, model.final_m2o),
+                 std::invalid_argument);
+    found->spec.m2o_sparse = expected;
+    auto &other = chunks.phases.front();
+    ASSERT_NE(other.id, renamed);
+    other.spec.m2o_sparse = expected;
+    EXPECT_THROW(validate_final_readout(chunks, model.final_m2o),
+                 std::invalid_argument);
   }
 }
 

@@ -41,12 +41,6 @@ struct temporary_server_directory {
   }
 };
 
-bool has_pattern_schema() {
-  return find_task_graph_node_kind("parallel_window") &&
-         config::find_decoder_schema(
-             task_graph_node_schema_name("parallel_window"));
-}
-
 server_config_options reference_options() {
   return {.decoder = "single_error_lut",
           .commit_rounds = 3,
@@ -54,73 +48,37 @@ server_config_options reference_options() {
           .gap_rounds = 9};
 }
 
-template <typename Options>
-void expect_worker_policy(const Options &options, std::uint64_t workers) {
-  auto expected = Options{};
+void expect_worker_policy(const task_graph_options &options,
+                          std::uint64_t workers) {
+  auto expected = task_graph_options{};
   expected.async_streaming = true;
-  if constexpr (requires { options.pool_threads; }) {
-    expected.pool_threads = static_cast<std::size_t>(workers);
-    EXPECT_EQ(options, expected);
-  } else if constexpr (requires { options.async_num_workers; }) {
-    expected.async_num_workers = static_cast<std::size_t>(workers);
-    EXPECT_EQ(options, expected);
-  } else {
-    ADD_FAILURE() << "The public pattern requires worker configuration support";
-  }
+  expected.async_num_workers = static_cast<std::size_t>(workers);
+  EXPECT_EQ(options, expected);
 }
 
-template <typename Config>
-void expect_worker_policy_tampering_rejected(Config value,
+void expect_worker_policy_tampering_rejected(config::multi_decoder_config value,
                                              const dem_chunks_spec &model,
                                              std::uint64_t workers) {
   auto &options = value.decoders.back().task_graph->options;
-  if constexpr (
-      requires { options.pool_threads; } ||
-      requires { options.async_num_workers; }) {
-    const auto expected = options;
-    const auto reject = [&] {
-      EXPECT_THROW(validate_server_config(value.to_yaml_str(), model,
-                                          value.decoders.size(), workers),
-                   std::runtime_error);
-      options = expected;
-    };
-    if constexpr (requires { options.pool_threads; }) {
-      options.pool_threads = 0;
-      reject();
-      options.pool_threads = static_cast<std::size_t>(workers + 1);
-      reject();
-      if constexpr (requires { options.async_num_workers; }) {
-        options.async_num_workers = expected.async_num_workers == 1 ? 2 : 1;
-        reject();
-      }
-    } else {
-      options.async_num_workers.reset();
-      reject();
-      options.async_num_workers = static_cast<std::size_t>(workers + 1);
-      reject();
-    }
-    options.async_streaming = false;
-    reject();
-    options.async_queue_capacity = expected.async_queue_capacity == 1 ? 2 : 1;
-    reject();
-    if constexpr (requires { options.pool_affinity; }) {
-      options.pool_affinity.push_back(0);
-      reject();
-    }
-    if constexpr (requires { options.async_worker_cpus; }) {
-      options.async_worker_cpus.push_back(0);
-      reject();
-    }
-    if constexpr (requires { options.async_max_in_flight_records; }) {
-      options.async_max_in_flight_records =
-          expected.async_max_in_flight_records == 1 ? 2 : 1;
-      reject();
-    }
-    options.async_coordinator_cpu = expected.async_coordinator_cpu == 0 ? 1 : 0;
-    reject();
-  } else {
-    ADD_FAILURE() << "The public pattern requires worker configuration support";
-  }
+  const auto expected = options;
+  const auto reject = [&] {
+    EXPECT_THROW(validate_server_config(value.to_yaml_str(), model,
+                                        value.decoders.size(), workers),
+                 std::runtime_error);
+    options = expected;
+  };
+  options.async_num_workers.reset();
+  reject();
+  options.async_num_workers = static_cast<std::size_t>(workers + 1);
+  reject();
+  options.async_streaming = false;
+  reject();
+  options.async_queue_capacity = expected.async_queue_capacity == 1 ? 2 : 1;
+  reject();
+  options.async_worker_cpus.push_back(0);
+  reject();
+  options.async_coordinator_cpu = expected.async_coordinator_cpu == 0 ? 1 : 0;
+  reject();
 }
 
 // Only the parameter schema is replaced, for a real registered decoder. The
@@ -143,18 +101,6 @@ struct scoped_parameter_schema {
   }
 };
 
-TEST(MemoryExperimentServerConfig, MissingPublicCapabilityFailsExplicitly) {
-  if (has_pattern_schema())
-    GTEST_SKIP() << "This build supplies the actual public pattern schema";
-  try {
-    validate_server_config_options(reference_options());
-    FAIL() << "server configuration accepted without the public capability";
-  } catch (const std::invalid_argument &error) {
-    EXPECT_NE(std::string(error.what()).find("public parallel_window"),
-              std::string::npos);
-  }
-}
-
 TEST(MemoryExperimentServerConfig, ConfiguredWorkerTotalIsExplicitAndChecked) {
   auto options = reference_options();
   EXPECT_EQ(configured_worker_total(options, 3), std::nullopt);
@@ -172,8 +118,6 @@ TEST(MemoryExperimentServerConfig, ConfiguredWorkerTotalIsExplicitAndChecked) {
 }
 
 TEST(MemoryExperimentServerConfig, PublicSchemaChecksGeometryAndDecoderArgs) {
-  if (!has_pattern_schema())
-    GTEST_SKIP() << "Requires the real public parallel-window schema";
   auto options = reference_options();
   EXPECT_NO_THROW(validate_server_config_options(options));
   options.gap_rounds.reset();
@@ -209,8 +153,6 @@ TEST(MemoryExperimentServerConfig, PublicSchemaChecksGeometryAndDecoderArgs) {
 
 TEST(MemoryExperimentServerConfig,
      FullYamlRoundtripPreservesTypedPrecisionAndLiteralStrings) {
-  if (!has_pattern_schema())
-    GTEST_SKIP() << "Requires the real public parallel-window schema";
   ASSERT_TRUE(cudaq::qec::decoder::is_registered("single_error_lut"));
   ASSERT_NE(config::find_decoder_schema("single_error_lut"), nullptr);
   const scoped_parameter_schema schema;
@@ -249,8 +191,6 @@ TEST(MemoryExperimentServerConfig,
 
 TEST(MemoryExperimentServerConfig,
      RealNestedDecoderSchemaDoesNotDependOnArgumentOrder) {
-  if (!has_pattern_schema())
-    GTEST_SKIP() << "Requires the real public parallel-window schema";
   auto options = reference_options();
   options.decoder = "sliding_window";
   options.decoder_args = {"inner_decoder_params.lut_error_depth=2",
@@ -262,9 +202,40 @@ TEST(MemoryExperimentServerConfig,
 }
 
 TEST(MemoryExperimentServerConfig,
+     PyMatchingProfileDefaultAndExplicitPoliciesRoundtripForEveryPatch) {
+  if (!cudaq::qec::decoder::is_registered("pymatching"))
+    GTEST_SKIP() << "Requires the installed PyMatching plugin";
+  ASSERT_NE(config::find_decoder_schema("pymatching"), nullptr);
+  auto options = reference_options();
+  options.decoder = "pymatching";
+  ASSERT_NO_THROW(validate_server_config_options(options));
+  const preparation_request request{
+      {"surface_code", 3, 26, 1, memory_basis::z}};
+  const auto model = prepare_model(request);
+  for (const std::string policy :
+       {"", "smallest_weight", "independent", "disallow"}) {
+    SCOPED_TRACE(policy.empty() ? "profile default" : policy);
+    options.decoder_args.clear();
+    if (!policy.empty())
+      options.decoder_args.push_back("merge_strategy=" + policy);
+    const auto yaml = emit_server_config(model, options, 2);
+    const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
+    ASSERT_EQ(parsed.decoders.size(), 2);
+    for (const auto &decoder : parsed.decoders) {
+      ASSERT_TRUE(decoder.task_graph);
+      ASSERT_EQ(decoder.task_graph->nodes.size(), 1);
+      const auto &node = decoder.task_graph->nodes.front();
+      EXPECT_EQ(node.inner_type, "pymatching");
+      const auto &arguments = node.decoder_custom_args.map();
+      EXPECT_EQ(arguments.get<std::string>("merge_strategy"),
+                policy.empty() ? "smallest_weight" : policy);
+      EXPECT_NO_THROW(config::validate_custom_args("pymatching", arguments));
+    }
+  }
+}
+
+TEST(MemoryExperimentServerConfig,
      RealPublicConfigurationRoundtripsSharedModelWithoutExecution) {
-  if (!has_pattern_schema())
-    GTEST_SKIP() << "Requires the real public parallel-window schema";
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
   const auto model = prepare_model(request);
@@ -298,8 +269,6 @@ TEST(MemoryExperimentServerConfig,
 
 TEST(MemoryExperimentServerConfig,
      WorkersPerGraphRoundtripWithoutChangingDecoderOrAffinity) {
-  if (!has_pattern_schema())
-    GTEST_SKIP() << "Requires the real public parallel-window schema";
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
   const auto model = prepare_model(request);
@@ -328,8 +297,6 @@ TEST(MemoryExperimentServerConfig,
 }
 
 TEST(MemoryExperimentServerConfig, BillionRoundConfigurationRemainsCompact) {
-  if (!has_pattern_schema())
-    GTEST_SKIP() << "Requires the real public parallel-window schema";
   preparation_request request{{"surface_code", 3, 26, 1, memory_basis::z}};
   const auto small = prepare_model(request);
   const auto options = reference_options();
@@ -347,8 +314,6 @@ TEST(MemoryExperimentServerConfig, BillionRoundConfigurationRemainsCompact) {
 }
 
 TEST(MemoryExperimentServerConfig, PublishesOnlyServerYamlWithoutOverwriting) {
-  if (!has_pattern_schema())
-    GTEST_SKIP() << "Requires the real public parallel-window schema";
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
   const auto model = prepare_model(request);
@@ -378,8 +343,6 @@ TEST(MemoryExperimentServerConfig, PublishesOnlyServerYamlWithoutOverwriting) {
 
 TEST(MemoryExperimentServerConfig,
      ExistingEntriesAndUnrelatedFilesArePreserved) {
-  if (!has_pattern_schema())
-    GTEST_SKIP() << "Requires the real public parallel-window schema";
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
   const auto model = prepare_model(request);

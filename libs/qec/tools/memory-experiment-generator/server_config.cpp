@@ -8,11 +8,11 @@
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/decoding_task_graph.h"
 #include "cudaq/qec/realtime/decoding_config.h"
-#include <cerrno>
 #include <charconv>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
+#include <llvm/ADT/SmallString.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/FileUtilities.h>
 #include <llvm/Support/raw_ostream.h>
 #include <map>
@@ -30,9 +30,6 @@ constexpr auto node_name = "parallel_memory";
 constexpr auto corrections_output = "corrections";
 constexpr std::uint64_t bulk_mapping_id = 0;
 constexpr std::uint64_t final_mapping_id = 1;
-constexpr auto unavailable_message =
-    "server YAML generation requires the public parallel_window configuration "
-    "and named-model/readout support; this QEC build does not provide it";
 
 using argument_leaves = std::map<std::string, std::string>;
 
@@ -40,23 +37,12 @@ std::vector<config::syndrome_mapping_config> syndrome_mapping() {
   return {{bulk_mapping_id, "bulk", {{}}}, {final_mapping_id, "final", {{}}}};
 }
 
-template <typename Config, typename Model>
-constexpr bool has_public_server_model = requires(Config &value, Model &model) {
-  value.data_artifacts;
-  value.decoders.front().dem_chunks_artifact;
-  model.phases.front().spec.m2o_sparse;
-};
-
-const config::decoder_schema &require_public_server_config() {
-  // These are public, installed registry APIs. Do not register a replacement
-  // schema: old builds must reject this mode instead of emitting guessed YAML.
-  if (!find_task_graph_node_kind(pattern_name))
-    throw std::invalid_argument(unavailable_message);
+const config::decoder_schema &parallel_window_schema() {
   const auto *schema =
       config::find_decoder_schema(task_graph_node_schema_name(pattern_name));
-  if (!schema ||
-      !has_public_server_model<config::multi_decoder_config, dem_chunks_spec>)
-    throw std::invalid_argument(unavailable_message);
+  if (!schema)
+    throw std::runtime_error(
+        "parallel-window configuration schema is not registered");
   return *schema;
 }
 
@@ -210,7 +196,11 @@ cudaqx::heterogeneous_map parse_arguments(const config::decoder_schema &schema,
 
 cudaqx::heterogeneous_map
 decoder_arguments(const server_config_options &options) {
-  const auto leaves = split_arguments(options.decoder_args);
+  auto leaves = split_arguments(options.decoder_args);
+  // A windows introduce parallel boundary edges. Select this profile's merge
+  // policy explicitly, without changing PyMatching defaults or user overrides.
+  if (options.decoder == "pymatching")
+    leaves.try_emplace("merge_strategy", "smallest_weight");
   const auto *schema = config::find_decoder_schema(options.decoder);
   if (!schema) {
     if (leaves.empty())
@@ -248,22 +238,12 @@ void validate_worker_count(std::optional<std::uint64_t> workers) {
     throw std::overflow_error("workers per graph exceeds size_t");
 }
 
-template <typename Options>
-Options execution_options(std::optional<std::uint64_t> workers) {
+task_graph_options execution_options(std::optional<std::uint64_t> workers) {
   validate_worker_count(workers);
-  Options result;
+  task_graph_options result;
   if (workers) {
-    if constexpr (requires { result.pool_threads; }) {
-      result.async_streaming = true;
-      result.pool_threads = static_cast<std::size_t>(*workers);
-    } else if constexpr (requires { result.async_num_workers; }) {
-      result.async_streaming = true;
-      result.async_num_workers = static_cast<std::size_t>(*workers);
-    } else {
-      throw std::invalid_argument(
-          "--workers-per-graph requires public task-graph worker "
-          "configuration support; this QEC build does not provide it");
-    }
+    result.async_streaming = true;
+    result.async_num_workers = static_cast<std::size_t>(*workers);
   }
   return result;
 }
@@ -283,116 +263,104 @@ void validate_patch_count(std::uint64_t patches) {
         "server configuration patch count is out of range");
 }
 
-template <typename Config>
-Config make_configuration(const dem_chunks_spec &model,
-                          const server_config_options &options,
-                          std::uint64_t logical_qubits) {
-  if constexpr (has_public_server_model<Config, dem_chunks_spec>) {
-    Config result;
-    result.syndrome_mapping = syndrome_mapping();
-    auto &artifact = result.data_artifacts.emplace_back();
-    artifact.name = model_name;
-    artifact.dem_chunks = model;
-    const auto inner = decoder_arguments(options);
-    const auto parameters = pattern_arguments(options);
-    const auto policy =
-        execution_options<task_graph_options>(options.workers_per_graph);
-    result.decoders.reserve(static_cast<std::size_t>(logical_qubits));
-    for (std::uint64_t patch = 0; patch < logical_qubits; ++patch) {
-      auto &decoder = result.decoders.emplace_back();
-      decoder.id = static_cast<std::int64_t>(patch);
-      // The public configuration owns resolved models as well as their names;
-      // the serializer and parser require this bounded copy per decoder.
-      decoder.dem_chunks = model;
-      decoder.dem_chunks_artifact = model_name;
-      auto &graph = decoder.task_graph.emplace();
-      graph.options = policy;
-      auto &node = graph.nodes.emplace_back();
-      node.id = node_name;
-      node.type = pattern_name;
-      node.inner_type = options.decoder;
-      node.decoder_custom_args = inner;
-      node.node_params = parameters;
-      graph.edges = {{"measurements", "output", node_name, "input"},
-                     {node_name, "output", "output", "input"}};
-    }
-    return result;
-  } else {
-    throw std::invalid_argument(unavailable_message);
+config::multi_decoder_config
+make_configuration(const dem_chunks_spec &model,
+                   const server_config_options &options,
+                   std::uint64_t logical_qubits) {
+  config::multi_decoder_config result;
+  result.syndrome_mapping = syndrome_mapping();
+  auto &artifact = result.data_artifacts.emplace_back();
+  artifact.name = model_name;
+  artifact.dem_chunks = model;
+  const auto inner = decoder_arguments(options);
+  const auto parameters = pattern_arguments(options);
+  const auto policy = execution_options(options.workers_per_graph);
+  result.decoders.reserve(static_cast<std::size_t>(logical_qubits));
+  for (std::uint64_t patch = 0; patch < logical_qubits; ++patch) {
+    auto &decoder = result.decoders.emplace_back();
+    decoder.id = static_cast<std::int64_t>(patch);
+    // The public configuration owns resolved models as well as their names;
+    // the serializer and parser require this bounded copy per decoder.
+    decoder.dem_chunks = model;
+    decoder.dem_chunks_artifact = model_name;
+    auto &graph = decoder.task_graph.emplace();
+    graph.options = policy;
+    auto &node = graph.nodes.emplace_back();
+    node.id = node_name;
+    node.type = pattern_name;
+    node.inner_type = options.decoder;
+    node.decoder_custom_args = inner;
+    node.node_params = parameters;
+    graph.edges = {{"measurements", "output", node_name, "input"},
+                   {node_name, "output", "output", "input"}};
   }
+  return result;
 }
 
-template <typename Config>
-void validate_configuration(const Config &value,
+void validate_configuration(const config::multi_decoder_config &value,
                             const dem_chunks_spec &expected_model,
                             std::uint64_t logical_qubits,
                             std::optional<std::uint64_t> workers_per_graph) {
-  if constexpr (has_public_server_model<Config, dem_chunks_spec>) {
-    const auto policy =
-        execution_options<task_graph_options>(workers_per_graph);
-    require(value.transport == config::transport_config{} &&
-                value.syndrome_mapping == syndrome_mapping(),
-            "unexpected deployment or syndrome-mapping overrides");
-    require(value.data_artifacts.size() == 1, "expected one shared model");
-    const auto &artifact = value.data_artifacts.front();
-    require(artifact.name == model_name && artifact.dem_chunks &&
-                *artifact.dem_chunks == expected_model,
-            "shared model disagrees with the prepared model");
-    require(value.decoders.size() == logical_qubits,
-            "decoder count disagrees with independent patches");
-    for (std::size_t patch = 0; patch < value.decoders.size(); ++patch) {
-      const auto &decoder = value.decoders[patch];
-      require(decoder.id == static_cast<std::int64_t>(patch),
-              "decoder identity disagrees with patch index");
-      require(decoder.type.empty() && decoder.H_sparse.empty() &&
-                  decoder.D_sparse.empty() && decoder.O_sparse.empty() &&
-                  decoder.block_size == 0 && decoder.syndrome_size == 0 &&
-                  decoder.error_rate_vec.empty() &&
-                  decoder.decoder_custom_args.empty() &&
-                  decoder.dispatch == config::DecoderDispatch::host &&
-                  !decoder.cuda_device_id && decoder.stim_dem_path.empty() &&
-                  decoder.dem_chunks &&
-                  decoder.dem_chunks_artifact == model_name &&
-                  *decoder.dem_chunks == expected_model,
-              "decoder must reference the shared prepared model");
-      require(decoder.task_graph.has_value(), "missing task graph");
-      const auto &graph = *decoder.task_graph;
-      require(
-          graph.type.empty() && graph.inner_type.empty() &&
-              graph.nodes.size() == 1 && graph.options == policy,
-          "expected one pattern with the configured per-graph worker policy");
-      const auto &node = graph.nodes.front();
-      require(node.id == node_name && node.type == pattern_name &&
-                  cudaq::qec::decoder::is_registered(node.inner_type) &&
-                  !node.dem_chunks && node.dem_chunks_artifact.empty() &&
-                  node.H_sparse.empty() && node.D_sparse.empty() &&
-                  node.O_sparse.empty() && node.stim_dem.empty() &&
-                  node.block_size == 0 && node.syndrome_size == 0 &&
-                  node.stim_dem_path.empty() && !node.ensemble &&
-                  node.partition_label.empty() &&
-                  node.partition_columns.empty() && node.windows.empty(),
-              "unexpected parallel-window node or model override");
-      require(node.node_params.map().template get<std::string>("output") ==
-                  corrections_output,
-              "parallel-window output must be corrections");
-      for (const auto &parameter : node.node_params.map())
-        require(parameter.first == "commit_rounds" ||
-                    parameter.first == "buffer_rounds" ||
-                    parameter.first == "gap_rounds" ||
-                    parameter.first == "output",
-                "unexpected parallel-window policy override");
-      const std::vector<task_graph_edge> edges{
-          {"measurements", "output", node_name, "input"},
-          {node_name, "output", "output", "input"}};
-      require(graph.edges == edges, "unexpected parallel-window wiring");
-      const auto &first = value.decoders.front().task_graph->nodes.front();
-      require(node.inner_type == first.inner_type &&
-                  node.decoder_custom_args == first.decoder_custom_args &&
-                  node.node_params == first.node_params,
-              "independent patches must share the decoder recipe and geometry");
-    }
-  } else {
-    throw std::invalid_argument(unavailable_message);
+  const auto policy = execution_options(workers_per_graph);
+  require(value.transport == config::transport_config{} &&
+              value.syndrome_mapping == syndrome_mapping(),
+          "unexpected deployment or syndrome-mapping overrides");
+  require(value.data_artifacts.size() == 1, "expected one shared model");
+  const auto &artifact = value.data_artifacts.front();
+  require(artifact.name == model_name && artifact.dem_chunks &&
+              *artifact.dem_chunks == expected_model,
+          "shared model disagrees with the prepared model");
+  require(value.decoders.size() == logical_qubits,
+          "decoder count disagrees with independent patches");
+  for (std::size_t patch = 0; patch < value.decoders.size(); ++patch) {
+    const auto &decoder = value.decoders[patch];
+    require(decoder.id == static_cast<std::int64_t>(patch),
+            "decoder identity disagrees with patch index");
+    require(decoder.type.empty() && decoder.H_sparse.empty() &&
+                decoder.D_sparse.empty() && decoder.O_sparse.empty() &&
+                decoder.block_size == 0 && decoder.syndrome_size == 0 &&
+                decoder.error_rate_vec.empty() &&
+                decoder.decoder_custom_args.empty() &&
+                decoder.dispatch == config::DecoderDispatch::host &&
+                !decoder.cuda_device_id && decoder.stim_dem_path.empty() &&
+                decoder.dem_chunks &&
+                decoder.dem_chunks_artifact == model_name &&
+                *decoder.dem_chunks == expected_model,
+            "decoder must reference the shared prepared model");
+    require(decoder.task_graph.has_value(), "missing task graph");
+    const auto &graph = *decoder.task_graph;
+    require(graph.type.empty() && graph.inner_type.empty() &&
+                graph.nodes.size() == 1 && graph.options == policy,
+            "expected one pattern with the configured per-graph worker policy");
+    const auto &node = graph.nodes.front();
+    require(node.id == node_name && node.type == pattern_name &&
+                cudaq::qec::decoder::is_registered(node.inner_type) &&
+                !node.dem_chunks && node.dem_chunks_artifact.empty() &&
+                node.H_sparse.empty() && node.D_sparse.empty() &&
+                node.O_sparse.empty() && node.stim_dem.empty() &&
+                node.block_size == 0 && node.syndrome_size == 0 &&
+                node.stim_dem_path.empty() && !node.ensemble &&
+                node.partition_label.empty() &&
+                node.partition_columns.empty() && node.windows.empty(),
+            "unexpected parallel-window node or model override");
+    require(node.node_params.map().get<std::string>("output") ==
+                corrections_output,
+            "parallel-window output must be corrections");
+    for (const auto &parameter : node.node_params.map())
+      require(parameter.first == "commit_rounds" ||
+                  parameter.first == "buffer_rounds" ||
+                  parameter.first == "gap_rounds" ||
+                  parameter.first == "output",
+              "unexpected parallel-window policy override");
+    const std::vector<task_graph_edge> edges{
+        {"measurements", "output", node_name, "input"},
+        {node_name, "output", "output", "input"}};
+    require(graph.edges == edges, "unexpected parallel-window wiring");
+    const auto &first = value.decoders.front().task_graph->nodes.front();
+    require(node.inner_type == first.inner_type &&
+                node.decoder_custom_args == first.decoder_custom_args &&
+                node.node_params == first.node_params,
+            "independent patches must share the decoder recipe and geometry");
   }
 }
 
@@ -412,8 +380,8 @@ configured_worker_total(const server_config_options &options,
 }
 
 void validate_server_config_options(const server_config_options &options) {
-  const auto &schema = require_public_server_config();
-  (void)execution_options<task_graph_options>(options.workers_per_graph);
+  const auto &schema = parallel_window_schema();
+  (void)execution_options(options.workers_per_graph);
   if (options.decoder.empty())
     throw std::invalid_argument("--decoder must not be empty");
   if (!cudaq::qec::decoder::is_registered(options.decoder))
@@ -430,9 +398,8 @@ std::string emit_server_config(const prepared_model &model,
   validate_server_config_options(options);
   (void)configured_worker_total(options, logical_qubits);
   model.chunks.validate();
-  validate_final_readout(model.chunks, model.final_m2o, true);
-  auto value = make_configuration<config::multi_decoder_config>(
-      model.chunks, options, logical_qubits);
+  validate_final_readout(model.chunks, model.final_m2o);
+  auto value = make_configuration(model.chunks, options, logical_qubits);
   const auto yaml = value.to_yaml_str();
   const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
   require(
@@ -447,7 +414,7 @@ void validate_server_config(std::string_view yaml,
                             const dem_chunks_spec &expected_model,
                             std::uint64_t logical_qubits,
                             std::optional<std::uint64_t> workers_per_graph) {
-  (void)require_public_server_config();
+  (void)parallel_window_schema();
   server_config_options options;
   options.workers_per_graph = workers_per_graph;
   (void)configured_worker_total(options, logical_qubits);
@@ -464,14 +431,25 @@ void write_server_config(const preparation_request &request,
   const auto yaml =
       emit_server_config(model, options, request.experiment.logical_qubits);
   // Keep the incomplete write invisible to a server reading the default path.
-  // mkstemp reserves a sibling uniquely and never interprets its directory as
-  // a template; only the trailing XXXXXX characters are replaced.
-  auto temporary = config_file.string() + ".XXXXXX";
-  const auto descriptor = ::mkstemp(temporary.data());
-  if (descriptor < 0)
-    throw std::system_error(errno, std::generic_category(),
-                            "cannot stage server configuration: " +
-                                config_file.string());
+  // Randomize only the suffix: the literal destination may contain '%'.
+  // CreateNew reserves the sibling exclusively; normal file permissions are
+  // restricted by the deployment's umask, without changing that process state.
+  constexpr unsigned max_staging_attempts = 128;
+  std::string temporary;
+  int descriptor = -1;
+  std::error_code stage_error;
+  for (unsigned attempt = 0; attempt < max_staging_attempts; ++attempt) {
+    llvm::SmallString<32> suffix;
+    llvm::sys::fs::createUniquePath("%%%%%%%%%%%%%%%%", suffix, false);
+    temporary = config_file.string() + "." + suffix.str().str();
+    stage_error = llvm::sys::fs::openFileForWrite(temporary, descriptor,
+                                                  llvm::sys::fs::CD_CreateNew);
+    if (stage_error != std::errc::file_exists)
+      break;
+  }
+  if (stage_error)
+    throw std::system_error(stage_error, "cannot stage server configuration: " +
+                                             config_file.string());
   const llvm::FileRemover cleanup(temporary);
   try {
     llvm::raw_fd_ostream stream(descriptor, /*shouldClose=*/true);

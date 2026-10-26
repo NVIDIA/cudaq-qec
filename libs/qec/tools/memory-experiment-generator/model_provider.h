@@ -54,13 +54,11 @@ void validate_prepared_model(const preparation_request &request,
                              const prepared_model &model);
 
 /// Check the public terminal-phase readout against independently validated
-/// raw-logical support. Preparation tests on older frameworks may omit the
-/// public metadata; server configuration generation requires it. Does not
-/// expand the horizon or assume a particular endpoint phase name.
+/// raw-logical support. Terminal metadata is required. Does not expand the
+/// horizon or assume a particular endpoint phase name.
 void validate_final_readout(
     const dem_chunks_spec &chunks,
-    const std::vector<std::vector<std::uint64_t>> &readout,
-    bool required = false);
+    const std::vector<std::vector<std::uint64_t>> &readout);
 
 /// Check that distinct characterization depths can each exercise the retained
 /// prefix, repeated bulk and suffix within the model's measurement layout.

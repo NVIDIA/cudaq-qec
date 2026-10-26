@@ -7,6 +7,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,11 +24,7 @@ except ImportError:
 
 GENERATOR = None
 DECODING_SERVER = None
-EXPECT_PUBLIC_API = "auto"
 CONFIG_ENV = "CUDAQ_QEC_DECODER_CONFIG"
-SERVER_UNAVAILABLE = (
-    "server YAML generation requires the public parallel_window configuration "
-    "and named-model/readout support; this QEC build does not provide it")
 
 
 def generation_options(**overrides):
@@ -46,7 +43,8 @@ def run_program(program,
                 cwd,
                 config_path=None,
                 timeout=90,
-                preexec_fn=None):
+                preexec_fn=None,
+                umask=-1):
     environment = os.environ.copy()
     environment.pop(CONFIG_ENV, None)
     environment.pop("QEC_DECODING_SERVER_CPU_DMA_LATENCY_US", None)
@@ -62,6 +60,7 @@ def run_program(program,
         stderr=subprocess.PIPE,
         timeout=timeout,
         check=False,
+        umask=umask,
     )
 
 
@@ -73,25 +72,18 @@ class GeneratorCliTest(unittest.TestCase):
                 prefix="memory-experiment-api-probe-") as temporary:
             working = Path(temporary)
             result = run_program(GENERATOR, *generation_options(), cwd=working)
-            cls.public_api = result.returncode == 0
-            cls.probe_stderr = result.stderr
-            expected = {"server.yaml"} if cls.public_api else set()
-            if {path.name for path in working.iterdir()} != expected:
+            if result.returncode != 0:
+                raise AssertionError(
+                    f"public configuration generation failed:\n{result.stderr}")
+            if {path.name for path in working.iterdir()} != {"server.yaml"}:
                 raise AssertionError(
                     "capability probe created unexpected files")
-            if not cls.public_api and SERVER_UNAVAILABLE not in result.stderr:
-                raise AssertionError(
-                    f"unexpected capability probe failure:\n{result.stderr}")
-            if EXPECT_PUBLIC_API == "available" and not cls.public_api:
-                raise AssertionError("this test run requires the public API")
-            if EXPECT_PUBLIC_API == "unavailable" and cls.public_api:
-                raise AssertionError("this test run expects the old public API")
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(
             prefix="memory-experiment-cli-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.sequence = 0
 
     def case_directory(self):
@@ -112,12 +104,7 @@ class GeneratorCliTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, detail)
         return result
 
-    def require_public_api(self):
-        if not self.public_api:
-            self.skipTest("linked public parallel-window API is unavailable")
-
     def generate(self, *, extra=(), config_path=None, **overrides):
-        self.require_public_api()
         working = self.case_directory()
         output = Path(config_path) if config_path else Path("server.yaml")
         if not output.is_absolute():
@@ -160,12 +147,7 @@ class GeneratorCliTest(unittest.TestCase):
             graph = decoder["task_graph"]
             if workers is not None:
                 self.assertIs(graph["async_streaming"], True)
-                worker_counts = {
-                    graph[key]
-                    for key in ("pool_threads", "async_num_workers")
-                    if graph.get(key) not in (None, 0)
-                }
-                self.assertEqual(worker_counts, {workers})
+                self.assertEqual(graph["async_num_workers"], workers)
             # C++ round-trip tests check typed edges and framework defaults;
             # do not pin their YAML spelling or omitted optional fields here.
             self.assertEqual(len(graph["nodes"]), 1)
@@ -210,12 +192,6 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertIn("server.yaml", result.stdout)
         self.assertIn(CONFIG_ENV, result.stdout)
         self.assertEqual(list(self.root.iterdir()), [])
-
-    def test_public_api_failure_is_explicit_and_leaves_no_output(self):
-        if self.public_api:
-            self.assertNotIn(SERVER_UNAVAILABLE, self.probe_stderr)
-        else:
-            self.assertIn(SERVER_UNAVAILABLE, self.probe_stderr)
 
     def test_removed_modes_and_file_inputs_are_rejected_without_output(self):
         for name in ("output", "batch-rounds", "replay-shots", "seed",
@@ -276,7 +252,6 @@ class GeneratorCliTest(unittest.TestCase):
                 self.assertEqual(list(working.iterdir()), [])
 
     def test_default_path_never_overwrites_any_existing_entry(self):
-        self.require_public_api()
         for kind in ("file", "directory", "file symlink", "directory symlink",
                      "dangling symlink"):
             with self.subTest(kind=kind):
@@ -314,8 +289,9 @@ class GeneratorCliTest(unittest.TestCase):
 
     def test_shared_environment_overrides_default_and_requires_existing_parent(
             self):
-        self.require_public_api()
-        destination = self.root / "deployment config.yaml"
+        deployment = self.root / "deployment % directory"
+        deployment.mkdir()
+        destination = deployment / "config %.yaml"
         output, document = self.generate(config_path=destination)
         self.assertEqual(output, destination)
         self.assert_server(document)
@@ -333,9 +309,22 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertEqual(list(working.iterdir()), [])
         self.assertFalse(missing.parent.exists())
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX file permissions")
+    def test_published_permissions_follow_deployment_umask(self):
+        for mask in (0o022, 0o027, 0o077):
+            with self.subTest(umask=oct(mask)):
+                working = self.case_directory()
+                result = run_program(GENERATOR,
+                                     *generation_options(),
+                                     cwd=working,
+                                     umask=mask)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = working / "server.yaml"
+                self.assertEqual(stat.S_IMODE(output.stat().st_mode),
+                                 0o666 & ~mask)
+
     def test_concurrent_publication_has_one_winner_without_temporary_residue(
             self):
-        self.require_public_api()
         working = self.case_directory()
         with ThreadPoolExecutor(max_workers=2) as workers:
             futures = [
@@ -398,7 +387,6 @@ class GeneratorCliTest(unittest.TestCase):
                          self.assert_server(multiple, patches=4))
 
     def test_worker_summary_does_not_invent_a_framework_selected_total(self):
-        self.require_public_api()
         working = self.case_directory()
         result = self.invoke(*generation_options(**{"logical-qubits": 3}),
                              cwd=working)
@@ -409,7 +397,6 @@ class GeneratorCliTest(unittest.TestCase):
         self.assert_server(document, patches=3)
 
     def test_workers_per_graph_apply_to_every_patch_not_inner_decoders(self):
-        self.require_public_api()
         for workers in (1, 4):
             with self.subTest(workers=workers):
                 working = self.case_directory()
@@ -429,7 +416,6 @@ class GeneratorCliTest(unittest.TestCase):
                     node = decoder["task_graph"]["nodes"][0]
                     self.assertNotIn("workers_per_graph", node)
                     self.assertNotIn("async_num_workers", node)
-                    self.assertNotIn("pool_threads", node)
                     self.assertEqual(node["inner"]["type"], "single_error_lut")
 
     def test_total_worker_overflow_is_rejected_without_output(self):
@@ -442,7 +428,6 @@ class GeneratorCliTest(unittest.TestCase):
             cwd=working,
             success=False)
         self.assertIn("worker", result.stderr.lower())
-        self.assertNotIn(SERVER_UNAVAILABLE, result.stderr)
         self.assertEqual(list(working.iterdir()), [])
 
     def test_schema_typed_nested_decoder_arguments_are_preserved(self):
@@ -467,18 +452,20 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertEqual(inner["inner_decoder_name"], "multi_error_lut")
         self.assertEqual(inner["inner_decoder_params"]["lut_error_depth"], 2)
 
-    def test_explicit_pymatching_merge_policy_is_preserved_for_every_patch(
+    def test_pymatching_profile_default_and_explicit_policies_for_every_patch(
             self):
-        self.require_public_api()
-        for policy in ("smallest_weight", "independent"):
-            with self.subTest(policy=policy):
+        for requested, expected in ((None, "smallest_weight"),
+                                    ("smallest_weight", "smallest_weight"),
+                                    ("independent",
+                                     "independent"), ("disallow", "disallow")):
+            with self.subTest(policy=requested):
                 working = self.case_directory()
-                result = run_program(GENERATOR,
-                                     *generation_options(
-                                         decoder="pymatching",
-                                         **{"logical-qubits": 2}),
-                                     f"--decoder-arg=merge_strategy={policy}",
-                                     cwd=working)
+                arguments = generation_options(decoder="pymatching",
+                                               **{"logical-qubits": 2})
+                if requested is not None:
+                    arguments.append(
+                        f"--decoder-arg=merge_strategy={requested}")
+                result = run_program(GENERATOR, *arguments, cwd=working)
                 if (result.returncode != 0 and
                         "decoder is not registered in this QEC build: pymatching"
                         in result.stderr):
@@ -492,7 +479,7 @@ class GeneratorCliTest(unittest.TestCase):
                 for decoder in document["decoders"]:
                     inner = decoder["task_graph"]["nodes"][0]["inner"]
                     self.assertEqual(inner["type"], "pymatching")
-                    self.assertEqual(inner["merge_strategy"], policy)
+                    self.assertEqual(inner["merge_strategy"], expected)
 
     def test_bad_decoder_arguments_and_backend_name_leave_no_output(self):
         for arguments in (
@@ -525,7 +512,7 @@ class DecodingServerConfigPathTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(
             prefix="decoding-server-config-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
 
     def invoke(self, *arguments, config_path=None):
         result = run_program(DECODING_SERVER,
@@ -606,12 +593,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--generator", type=Path, required=True)
     parser.add_argument("--decoding-server", type=Path)
-    parser.add_argument("--expect-public-api",
-                        choices=("auto", "available", "unavailable"),
-                        default="auto")
     arguments, remaining = parser.parse_known_args()
     GENERATOR = arguments.generator.resolve()
     DECODING_SERVER = (arguments.decoding_server.resolve()
                        if arguments.decoding_server else None)
-    EXPECT_PUBLIC_API = arguments.expect_public_api
     unittest.main(argv=[sys.argv[0], *remaining])

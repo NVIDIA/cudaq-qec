@@ -62,13 +62,11 @@ void usage() {
          "server.\n"
          "CUDAQ_QEC_DECODER_CONFIG selects a deployment configuration path.\n"
          "The parent must exist; an existing configuration is never replaced.\n"
-         "The linked QEC build must provide the public parallel_window\n"
-         "configuration API. Configuration validation does not establish\n"
-         "that the runtime can execute the pattern.\n"
-         "Server output is corrections, not corrected raw logical values.\n"
+         "Server execution requires parallel-window runtime support.\n"
+         "Decoder output: logical correction bits.\n"
+         "PyMatching uses merge_strategy=smallest_weight unless overridden.\n"
          "Decoder arguments use registered schema types, dotted nested paths,\n"
-         "comma-separated vectors and semicolon-separated matrix rows.\n"
-         "No JSON or YAML parameter input is accepted.\n";
+         "comma-separated vectors and semicolon-separated matrix rows.\n";
 }
 
 } // namespace

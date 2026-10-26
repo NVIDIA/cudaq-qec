@@ -21,23 +21,6 @@
 namespace cudaq::qec::memory_experiment {
 namespace {
 
-// Keep model preparation usable with public frameworks that predate terminal
-// readout metadata. Server emission separately requires the registered public
-// parallel-window interface; no substitute schema or scheduler is installed.
-template <typename Phase>
-bool same_public_readout(const Phase &left, const Phase &right) {
-  if constexpr (requires { left.m2o_sparse; })
-    return left.m2o_sparse == right.m2o_sparse;
-  return true;
-}
-
-template <typename Spec>
-bool same_observable_names(const Spec &left, const Spec &right) {
-  if constexpr (requires { left.observable_names; })
-    return left.observable_names == right.observable_names;
-  return true;
-}
-
 phase_id terminal_phase(const dem_chunks_spec &chunks) {
   // Phase declarations may contain unused entries. Resolve the endpoint of
   // the actual connection chain, never the first disconnected declaration.
@@ -63,41 +46,13 @@ sparse_readout(const std::vector<std::vector<std::uint64_t>> &readout) {
   return result;
 }
 
-template <typename Spec, typename Mapping>
-void attach_readout(Spec &chunks, const Mapping &readout,
+void attach_readout(dem_chunks_spec &chunks,
+                    const cudaq::M2OSparseMatrix &readout,
                     std::size_t first_measurement) {
-  if constexpr (requires { chunks.phases.front().spec.m2o_sparse; }) {
-    const auto last = terminal_phase(chunks);
-    for (auto &phase : chunks.phases)
-      if (phase.id == last)
-        phase.spec.m2o_sparse = m2o_sparse(readout, first_measurement);
-  }
-}
-
-template <typename Spec>
-void check_public_readout(
-    const Spec &chunks, const std::vector<std::vector<std::uint64_t>> &readout,
-    bool required) {
-  if constexpr (requires { chunks.phases.front().spec.m2o_sparse; }) {
-    const auto last = terminal_phase(chunks);
-    const auto expected = sparse_readout(readout);
-    for (const auto &phase : chunks.phases) {
-      const auto &actual = phase.spec.m2o_sparse;
-      if (phase.id == last) {
-        if ((!actual.empty() || required) && actual != expected)
-          throw std::invalid_argument(
-              "memory experiment: terminal m2o_sparse disagrees with "
-              "raw-logical support");
-      } else if (!actual.empty()) {
-        throw std::invalid_argument("memory experiment: m2o_sparse is only "
-                                    "valid on the terminal phase");
-      }
-    }
-  } else if (required) {
-    throw std::invalid_argument(
-        "memory experiment: this framework does not support terminal "
-        "m2o_sparse metadata");
-  }
+  const auto last = terminal_phase(chunks);
+  for (auto &phase : chunks.phases)
+    if (phase.id == last)
+      phase.spec.m2o_sparse = m2o_sparse(readout, first_measurement);
 }
 
 void validate_code_geometry(const experiment_spec &spec) {
@@ -117,7 +72,7 @@ void validate_code_geometry(const experiment_spec &spec) {
 bool same_phase(const dem_chunk_spec &left, const dem_chunk_spec &right) {
   if (left.num_faults != right.num_faults || left.H_sparse != right.H_sparse ||
       left.seam_specs != right.seam_specs || left.O_sparse != right.O_sparse ||
-      left.D_sparse != right.D_sparse || !same_public_readout(left, right) ||
+      left.D_sparse != right.D_sparse || left.m2o_sparse != right.m2o_sparse ||
       left.num_measurements != right.num_measurements ||
       left.error_rates.size() != right.error_rates.size())
     return false;
@@ -132,7 +87,7 @@ bool same_phases(const dem_chunks_spec &left, const dem_chunks_spec &right) {
   if (left.seam != right.seam || left.connections != right.connections ||
       left.measurements_per_round != right.measurements_per_round ||
       left.phases_supply_D_sparse != right.phases_supply_D_sparse ||
-      !same_observable_names(left, right) ||
+      left.observable_names != right.observable_names ||
       left.phases.size() != right.phases.size())
     return false;
   // num_rounds intentionally differs; every retained phase must agree.
@@ -289,8 +244,21 @@ void validate_prepared_model(const preparation_request &request,
 
 void validate_final_readout(
     const dem_chunks_spec &chunks,
-    const std::vector<std::vector<std::uint64_t>> &readout, bool required) {
-  check_public_readout(chunks, readout, required);
+    const std::vector<std::vector<std::uint64_t>> &readout) {
+  const auto last = terminal_phase(chunks);
+  const auto expected = sparse_readout(readout);
+  for (const auto &phase : chunks.phases) {
+    const auto &actual = phase.spec.m2o_sparse;
+    if (phase.id == last) {
+      if (actual != expected)
+        throw std::invalid_argument(
+            "memory experiment: terminal m2o_sparse disagrees with "
+            "raw-logical support");
+    } else if (!actual.empty()) {
+      throw std::invalid_argument("memory experiment: m2o_sparse is only "
+                                  "valid on the terminal phase");
+    }
+  }
 }
 
 void validate_characterization_provenance(const dem_chunks_spec &chunks,
