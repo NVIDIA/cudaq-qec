@@ -70,14 +70,16 @@ public:
 
   /// Fire window view.k into @p slot: copy the view's rows from its ring,
   /// apply each receive, a delta to the window's own rows and a residual to
-  /// its imported ones, then decode and commit. Every received row is
-  /// checked before any is applied. Allocates nothing beyond what the
-  /// decoder's decode() does.
+  /// its imported ones, then decode and commit. The view and every received
+  /// row are checked first, so a rejected fire leaves the slot holding what
+  /// it held; a decoder that fails leaves it empty. Allocates nothing
+  /// beyond what the decoder's decode() does.
   /// @param receives One per receive port: the producer instance's send, or
   /// null when that instance does not exist.
   /// @throws std::invalid_argument if the slot does not exist, the view is
   /// of no variant of this layer or holds other rows than its variant, or a
-  /// received send reaches a row the window does not take in its mode.
+  /// received send reaches a row the window does not take in its mode;
+  /// std::out_of_range if the view's rounds are not in its ring.
   const window_fire &fire(std::size_t slot, const window_view &view,
                           std::span<const window_send_value *const> receives);
 

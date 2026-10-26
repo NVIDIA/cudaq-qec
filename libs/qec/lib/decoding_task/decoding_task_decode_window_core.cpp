@@ -63,13 +63,16 @@ decode_window_core::decode_window_core(
 
 // A send's row i lies at its window's first row plus the send's row, so it
 // is row (that) - (this window's first row) here: a delta must land on an
-// own row and a residual on an imported one. The rows are checked in one
-// pass and applied in a second.
+// own row and a residual on an imported one. The view and every received
+// row are checked before the slot is touched, so a rejected fire changes
+// nothing; the slot is marked unfired while it is rewritten, so a decoder
+// that fails leaves it empty rather than torn.
 const window_fire &
 decode_window_core::fire(std::size_t slot, const window_view &view,
                          std::span<const window_send_value *const> receives) {
   std::size_t v = 0;
   std::size_t row = 0;
+  std::size_t rows = 0;
   if (slot >= fires_.size())
     fail("slot " + std::to_string(slot) + " does not exist; there are " +
          std::to_string(fires_.size()));
@@ -93,18 +96,12 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
     return shot_row < view.first_row ? all : shot_row - view.first_row;
   };
 
-  for (auto r = view.rounds.begin; r < view.rounds.end; ++r) {
-    const auto rows = view.source->detectors(r);
-    if (row + rows.size() > own)
-      break;
-    std::copy(rows.begin(), rows.end(), d.begin() + row);
-    row += rows.size();
-  }
-  if (row != own || view.rounds.empty())
+  // The view's rows, counted until they are too many.
+  for (auto r = view.rounds.begin; r < view.rounds.end && rows <= own; ++r)
+    rows += view.source->detectors(r).size();
+  if (rows != own || view.rounds.empty())
     fail("window " + std::to_string(view.k) + "'s view holds other rows " +
          "than the " + std::to_string(own) + " of its variant");
-  std::fill(d.begin() + own, d.end(), 0);
-
   for (const auto *r : receives) {
     if (!r || !r->send)
       continue;
@@ -122,6 +119,14 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
              " does not take as a " + (delta ? "delta" : "residual"));
     }
   } // end - for(r)
+
+  out.fired = false;
+  for (auto r = view.rounds.begin; r < view.rounds.end; ++r) {
+    const auto round = view.source->detectors(r);
+    std::copy(round.begin(), round.end(), d.begin() + row);
+    row += round.size();
+  }
+  std::fill(d.begin() + own, d.end(), 0);
   for (const auto *r : receives) {
     if (!r || !r->send)
       continue;

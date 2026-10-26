@@ -3057,6 +3057,50 @@ TEST(IngestCore, StreamsShotsCutAnywhere) {
   } // end - for(spec)
 } // end - TEST(IngestCore, StreamsShotsCutAnywhere)
 
+// arbitrary_memory_spec with explicit D as a chain that does not repeat:
+// init, bulk and final, so its shots have exactly three rounds.
+dem_chunks_spec fixed_length_spec() {
+  auto spec = arbitrary_memory_spec(3, true);
+  spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_final}};
+  return spec;
+}
+
+// A template that does not repeat has one shot length: its shots stream as
+// any other's, and a record that runs past its last round is rejected,
+// FINAL or not, however much it holds.
+TEST(IngestCore, StreamsAShotOfFixedLength) {
+  const auto spec = fixed_length_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  const auto layers = layered(3, 3, 9);
+  const std::vector<window_request> requests{layers.a, layers.b};
+  const std::vector<std::uint8_t> record(48, 0);
+  std::mt19937 rng(17);
+  ASSERT_FALSE(context->repeats());
+  ASSERT_EQ(context->min_rounds(), 3u);
+  for (const auto &layout : ingest_layouts()) {
+    ingest_core core(context, layers_of(layout), false);
+    for (int i = 0; i < 5; ++i) {
+      const shot s(spec, 3, rng);
+      std::size_t early = 0;
+      ASSERT_NO_FATAL_FAILURE(expect_streams(core, s, layout, rng, early));
+      core.reset();
+    }
+  }
+  ingest_core core(context, layers_of(requests), false);
+  for (const auto len : {4u * 4u, 4u * 4u + 1u, 4u * 6u + 3u}) {
+    core.reset();
+    expect_throw<std::invalid_argument>(
+        [&] { core.enqueue(record.data(), len, true); },
+        "ingest: the FINAL record runs past the shot's last round, 3 rounds "
+        "long");
+  }
+  core.reset();
+  expect_throw<std::invalid_argument>(
+      [&] { core.enqueue(record.data(), 4u * 3u + 1u, false); },
+      "ingest: a record runs past the shot's last round, 3 rounds long");
+} // end - TEST(IngestCore, StreamsAShotOfFixedLength)
+
 // A record longer than one period of rounds is rejected, and the core takes
 // no more input until it is reset.
 TEST(IngestCore, RejectsARecordLongerThanAPeriod) {
@@ -3581,6 +3625,137 @@ TEST(DecodeWindowCore, AMissingResidualLeavesTheImportsZero) {
   EXPECT_EQ(imported(b.fire(0, *p->views[1], without)),
             std::vector<std::uint8_t>(residual.values.size(), 0));
 } // end - TEST(DecodeWindowCore, AMissingResidualLeavesTheImportsZero)
+
+// single_error_lut whose decode() throws while fail_next is set, so a test
+// can fail a fire after it has started rewriting its slot.
+class failing_lut final : public decoder {
+public:
+  static inline bool fail_next = false;
+
+  failing_lut(decoder_init inputs, decoder_output_request output,
+              const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(get_decoder("single_error_lut", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    if (fail_next)
+      throw std::runtime_error("failing_lut: decode failed");
+    return inner_->decode(syndrome);
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      failing_lut,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<failing_lut>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(failing_lut)
+
+// A fire whose decoder fails has already begun rewriting its slot, so it
+// leaves the slot empty: neither the window it held nor the one that failed
+// is found there.
+TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  store.add_windows(context, g.layers[0].request);
+  decode_window_core a(store, context, g.layers[0].request, "failing_lut", {},
+                       1);
+  ingest_core ingest(context, {{g.layers[0].request, 4}}, false);
+  const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
+  std::vector<const window_view *> views;
+  for (std::size_t at = 0; views.size() < 2; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll())
+      views.push_back(p->views[0]);
+  }
+  failing_lut::fail_next = false;
+  a.fire(0, *views[0], {});
+  ASSERT_NE(a.find(views[0]->k), nullptr);
+  failing_lut::fail_next = true;
+  EXPECT_THROW(a.fire(0, *views[1], {}), std::runtime_error);
+  failing_lut::fail_next = false;
+  EXPECT_EQ(a.find(views[0]->k), nullptr);
+  EXPECT_EQ(a.find(views[1]->k), nullptr);
+} // end - TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty)
+
+// A rejected fire changes nothing: its slot still holds the window it last
+// fired, rows and solution alike, whether a received send is misdirected,
+// the view holds more rounds than its variant, or its rounds are not in
+// the ring.
+TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 40;
+  std::mt19937 rng(19);
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 2);
+  decode_window_core b(store, context, g.layers[1].request, "single_error_lut",
+                       {}, 2);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 8}, {g.layers[1].request, 8}}, false);
+  std::vector<std::uint8_t> m(context->measurement_offset(R, R));
+  std::vector<const window_view *> a_views;
+  std::vector<const window_view *> b_views;
+  for (auto &x : m)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  for (std::size_t at = 0; b_views.size() < 2; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll()) {
+      if (p->views[0])
+        a_views.push_back(p->views[0]);
+      if (p->views[1])
+        b_views.push_back(p->views[1]);
+    }
+  }
+  const auto k = b_views[0]->k;
+  const auto &before = a.fire(0, *a_views[static_cast<std::size_t>(k - 1)], {});
+  const auto &at_k = a.fire(1, *a_views[static_cast<std::size_t>(k)], {});
+  const window_send_value *receives[] = {&before.sends[a.send_index("forward")],
+                                         &at_k.sends[a.send_index("backward")]};
+  const window_send_value *misdirected[] = {
+      nullptr, &at_k.sends[a.send_index("backward")]};
+  const auto &fired = b.fire(0, *b_views[0], receives);
+  const std::vector<std::uint8_t> detectors(fired.detectors.begin(),
+                                            fired.detectors.end());
+  const auto estimate = fired.solution->estimate;
+  auto longer = *b_views[1];
+  auto later = *b_views[1];
+  longer.rounds.end += 1000;
+  later.rounds = {later.rounds.begin + 1000, later.rounds.end + 1000};
+  expect_error([&] { b.fire(0, *b_views[1], misdirected); },
+               "send 'backward' reaches shot row");
+  expect_error([&] { b.fire(0, longer, {}); },
+               "decode_window: window " + std::to_string(k + 1) +
+                   "'s view holds other rows than the");
+  expect_throw<std::out_of_range>([&] { b.fire(0, later, {}); },
+                                  "detectors are not in the ring");
+  const auto *kept = b.find(k);
+  ASSERT_NE(kept, nullptr);
+  EXPECT_EQ(
+      std::vector<std::uint8_t>(kept->detectors.begin(), kept->detectors.end()),
+      detectors);
+  EXPECT_EQ(kept->solution->estimate, estimate);
+  EXPECT_EQ(b.find(k + 1), nullptr);
+} // end - TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas)
 
 // A fire takes only its own layer's windows into existing slots, and a
 // send only onto the rows its mode reaches in the receiving window.

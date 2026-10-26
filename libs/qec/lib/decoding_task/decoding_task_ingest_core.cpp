@@ -347,8 +347,13 @@ ingest_status ingest_core::enqueue(const std::uint8_t *data, std::size_t len,
          "round's " +
          std::to_string(last_width_));
   left = total - last_width_;
+  // A shot that does not repeat has a last round, which the readout round
+  // must be: rounds before it are all prefix rounds, of known width.
   while (left > 0) {
     const auto width = forward_width(r);
+    if (!context_->repeats() && r + 1 >= prefix_rounds_)
+      fail("the FINAL record runs past the shot's last round, " +
+           rounds_text(prefix_rounds_) + " long");
     if (left < width)
       fail("the FINAL record ends mid-round: round " + std::to_string(r) +
            " has " + std::to_string(left) + " of its " + std::to_string(width) +
