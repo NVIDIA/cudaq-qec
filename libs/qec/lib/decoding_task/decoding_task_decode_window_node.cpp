@@ -5,9 +5,9 @@
 
 // The `decode_window` node and its kind: decodes whichever window its
 // `input` carries, applies the deltas and residuals on its `receive_<i>`
-// inputs, and publishes its frame update and one output per send. The kind
-// is registered so configurations that use it parse and validate; building
-// it is not available yet.
+// inputs, and publishes its frame update and one output per send. Its kind
+// builds it from the store, template and layer a windowed topology
+// resolves, with the inner decoder its `inner:` block names.
 
 #include "decoding_task_decode_window_node.h"
 #include "decoding_task_node_kind_registry.h"
@@ -160,9 +160,15 @@ const bool registered = [] {
   register_node_kind(
       std::move(spec), decode_window_params(),
       [](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
-        throw std::invalid_argument(
-            "task graph node '" + ctx.id +
-            "': the 'decode_window' kind is not available yet");
+        if (!ctx.store || !ctx.context || !ctx.layer)
+          throw std::logic_error("task graph node '" + ctx.id +
+                                 "': a decode_window node is built only "
+                                 "within a windowed topology");
+        return std::make_unique<decode_window_node>(
+            *ctx.store, ctx.context, *ctx.layer, ctx.decoder_type,
+            ctx.decoder_params,
+            ctx.node_params->get<std::size_t>("num_receives", 0),
+            verify_residual_of(*ctx.node_params, "decode_window"));
       });
   return true;
 }();

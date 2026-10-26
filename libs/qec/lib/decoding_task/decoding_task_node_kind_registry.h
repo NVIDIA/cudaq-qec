@@ -20,12 +20,14 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace cudaq::qec {
 
+class data_artifact_store;
 class experiment_template;
 
 /// Everything a node factory is handed.  from_topology() resolves the DEM and
@@ -65,6 +67,16 @@ struct node_build_context {
   std::string decoder_type;
   cudaqx::heterogeneous_map decoder_params;
   const cudaqx::heterogeneous_map *node_params = nullptr;
+  /// In a windowed topology: every variant of every layer, built for the
+  /// graph, whose handles outlive it; null elsewhere.
+  const data_artifact_store *store = nullptr;
+  /// An ingest node's template, or that of the ingest node a decode_window
+  /// node reads.
+  std::shared_ptr<const experiment_template> context;
+  /// An ingest node's layers, in port order.
+  std::vector<experimental::ingest_window> windows;
+  /// A decode_window node's layer: the request of the ingest port it reads.
+  std::optional<experimental::window_request> layer;
 };
 
 using node_factory =

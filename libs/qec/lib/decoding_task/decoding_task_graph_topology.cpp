@@ -9,6 +9,7 @@
 // exist once.
 
 #include "decoding_task_commitment.h"
+#include "decoding_task_data_artifacts.h"
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -648,6 +650,56 @@ void wire_patterns(const std::vector<ensemble_wiring> &wirings,
   edges.insert(edges.begin(), handles.begin(), handles.end());
 }
 
+/// The windows a windowed topology's nodes read: one template per ingest
+/// node and every variant of every layer, built once for the graph as
+/// validation checks them. Nodes keep shared handles to what they read, so
+/// the store need not outlive the build.
+struct graph_windows {
+  data_artifact_store store;
+  /// By ingest node.
+  std::map<std::string, std::shared_ptr<const experiment_template>> templates;
+  /// By decode_window node: the ingest node it reads, and its layer.
+  std::map<std::string, std::pair<std::string, window_request>> layers;
+};
+
+// Record in @p windows which template and layer each node reads, from
+// @p layers, each ingest node's, as validate_window_topology() resolved
+// them. It checked every ingest node has a template, and built them and the
+// layers' windows into the store.
+void record_graph_windows(
+    const std::vector<task_graph_node_config> &nodes,
+    const std::map<std::string, std::vector<window_layer>> &layers,
+    graph_windows &windows) {
+  for (const auto &cfg : nodes) {
+    const auto *kind = find_task_graph_node_kind(cfg.kind);
+    if (kind && kind->name == "ingest")
+      windows.templates[cfg.id] = windows.store.add_template(*cfg.dem);
+  }
+  for (const auto &[ingest, ingest_layers] : layers)
+    for (const auto &layer : ingest_layers)
+      windows.layers[layer.node] = {ingest, layer.request};
+}
+
+// Give a windowed node what its builder reads: an ingest node its template
+// and layers, a decode_window node the store, its ingest node's template,
+// its layer and its inner decoder, which it builds per window variant.
+void attach_windows(const task_graph_node_config &cfg,
+                    const graph_windows &windows, node_build_context &ctx) {
+  if (const auto t = windows.templates.find(cfg.id);
+      t != windows.templates.end()) {
+    ctx.store = &windows.store;
+    ctx.context = t->second;
+    ctx.windows = cfg.windows;
+  } else if (const auto l = windows.layers.find(cfg.id);
+             l != windows.layers.end()) {
+    ctx.store = &windows.store;
+    ctx.context = windows.templates.at(l->second.first);
+    ctx.layer = l->second.second;
+    ctx.decoder_type = cfg.decoder_type;
+    ctx.decoder_params = cfg.params;
+  }
+}
+
 } // namespace
 
 std::unique_ptr<decoding_task_graph>
@@ -774,14 +826,17 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
           "' runs as a fire pool, so each copy needs its own inner decoder; "
           "give decoder_type instead of a built decoder");
   } // end - for(cfg)
+  graph_windows windows;
   if (!infer_edges)
-    validate_window_topology(nodes, edges);
+    record_graph_windows(
+        nodes, validate_window_topology(nodes, edges, windows.store), windows);
 
   auto i = std::make_unique<impl>();
   for (auto &cfg : nodes) {
     const auto *kind = find_task_graph_node_kind(cfg.kind);
     const auto *factory = find_node_factory(cfg.kind);
     auto ctx = prepare_node(cfg, *kind);
+    attach_windows(cfg, windows, ctx);
     // The first node carrying a DEM owns the graph's D; a single-node graph
     // also exposes its O.  o_matrix() is not meaningful once outcomes are
     // combined, so a multi-node graph leaves it unset, as combine() does.
@@ -813,6 +868,13 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     i->nodes.push_back(std::move(node));
     i->node_replicas.push_back(std::move(replicas));
   }
+  // The windowed kinds join their inputs by index, which this executor does
+  // not do yet. Their nodes are built first, so a builder's own error is
+  // reported as itself.
+  if (!windows.templates.empty())
+    throw std::invalid_argument(
+        "from_topology: a windowed graph needs an executor that joins inputs "
+        "by index, which is not available yet");
 
   wire_patterns(patterns, i->node_ids, i->nodes, edges);
 

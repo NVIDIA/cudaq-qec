@@ -1609,11 +1609,33 @@ window_graph with_most_likely(window_graph g) {
   return g;
 }
 
-// Calls validate_commitment() on a fresh template of spec.
+// Calls validate_commitment() on a fresh template of spec twice: building
+// the windows for the check alone, and into a store, as a graph's build
+// does. Both must agree, rejecting with the same message or not at all, and
+// a store that passes holds every layer's windows. Rethrows the rejection.
 void validate(const dem_chunks_spec &spec, const window_graph &g) {
-  validate_commitment(std::make_shared<const experiment_template>(spec),
-                      g.layers, g.edges);
-}
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  std::string alone;
+  std::string stored;
+  try {
+    validate_commitment(std::make_shared<const experiment_template>(spec),
+                        g.layers, g.edges);
+  } catch (const std::invalid_argument &e) {
+    alone = e.what();
+  }
+  try {
+    validate_commitment(context, g.layers, g.edges, &store);
+  } catch (const std::invalid_argument &e) {
+    stored = e.what();
+  }
+  EXPECT_EQ(stored, alone);
+  if (!alone.empty())
+    throw std::invalid_argument(alone);
+  for (const auto &layer : g.layers)
+    EXPECT_NO_THROW(store.find_windows(*context, layer.request))
+        << layer.node << "'s windows are not in the store";
+} // end - validate()
 
 // ---------------------------------------------------------------------------
 // Schedule

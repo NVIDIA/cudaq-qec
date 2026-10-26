@@ -6,8 +6,8 @@
 // The `ingest` node and its kind: the only raw-fed node of a windowed graph.
 // It forms detectors from raw rounds and publishes each layer's windows, one
 // output port per entry of its `windows` map, and with `read_logical` the
-// raw logical value on `logical`. The kind is registered so configurations
-// that use it parse and validate; building it is not available yet.
+// raw logical value on `logical`. Its kind builds it from the template and
+// layers a windowed topology resolves.
 
 #include "decoding_task_ingest_node.h"
 #include "decoding_task_node_kind_registry.h"
@@ -203,9 +203,13 @@ const bool registered = [] {
   register_node_kind(
       std::move(spec), ingest_params(),
       [](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
-        throw std::invalid_argument(
-            "task graph node '" + ctx.id +
-            "': the 'ingest' kind is not available yet");
+        if (!ctx.context)
+          throw std::logic_error("task graph node '" + ctx.id +
+                                 "': an ingest node is built only within a "
+                                 "windowed topology");
+        return std::make_unique<ingest_node>(
+            ctx.context, ctx.windows,
+            ctx.node_params->get<bool>("read_logical", false));
       });
   return true;
 }();

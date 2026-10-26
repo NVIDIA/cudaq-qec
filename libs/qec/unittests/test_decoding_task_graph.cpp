@@ -4,9 +4,13 @@
  */
 
 #include "task_graph_test_fixtures.h"
+#include "../lib/decoding_task/decoding_task_data_artifacts.h"
+#include "../lib/decoding_task/decoding_task_decode_window_node.h"
 #include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_graph_utils.h"
+#include "../lib/decoding_task/decoding_task_ingest_node.h"
 #include "../lib/decoding_task/decoding_task_memory_window_node.h"
+#include "../lib/decoding_task/decoding_task_node_kind_registry.h"
 #include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "../lib/decoding_task/decoding_task_predecoder_node.h"
 #include "../lib/decoding_task/decoding_task_window_node.h"
@@ -14171,6 +14175,119 @@ TEST(ParallelWindowLowering, RejectsAReservedId) {
             "' is reserved for a synthetic endpoint");
   } // end - for(id)
 } // end - TEST(ParallelWindowLowering, RejectsAReservedId)
+
+// ---------------------------------------------------------------------------
+// Building the windowed kinds
+// ---------------------------------------------------------------------------
+
+// The ingest and decode_window kinds build their nodes from what a windowed
+// topology resolves: an ingest node from its template and layers, a
+// decode_window node from the store's windows, the template and the layer
+// request of the ingest port it reads, with its receives, inner decoder
+// and verify_residual. Without them neither builds.
+TEST(WindowKinds, BuildTheirNodesFromTheContext) {
+  const auto layers = layered(2, 1, 3);
+  auto spec = arbitrary_memory_spec(5, true);
+  spec.phases.back().spec.m2o_sparse = {0, -1};
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  const cudaqx::heterogeneous_map ingest_params{{"read_logical", true}};
+  const cudaqx::heterogeneous_map unchecked{};
+  const cudaqx::heterogeneous_map failing{
+      {"verify_residual", std::string("fail")}};
+  const cudaqx::heterogeneous_map receiving{{"num_receives", std::size_t{2}}};
+  std::mt19937 rng(53);
+  std::vector<std::uint8_t> m(context->measurement_offset(30, 30));
+  const edge_value *window = nullptr;
+  for (auto &x : m)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  store.add_windows(context, layers.a);
+  store.add_windows(context, layers.b);
+  // The context a windowed topology gives node id: its template, with
+  // @p layer for a decode_window node.
+  const auto context_of = [&](const std::string &id,
+                              const cudaqx::heterogeneous_map &params,
+                              std::optional<window_request> layer) {
+    node_build_context ctx;
+    ctx.id = id;
+    ctx.node_params = &params;
+    ctx.store = &store;
+    ctx.context = context;
+    ctx.layer = std::move(layer);
+    ctx.decoder_type = "single_error_lut";
+    return ctx;
+  };
+  const auto build = [&](const std::string &kind, node_build_context &ctx) {
+    return (*find_node_factory(kind))(ctx);
+  };
+
+  auto ingest_ctx = context_of("ingest", ingest_params, std::nullopt);
+  ingest_ctx.windows = {{"A", layers.a, ""}, {"B", layers.b, ""}};
+  auto ingest = build("ingest", ingest_ctx);
+  auto *in = dynamic_cast<ingest_node *>(ingest.get());
+  ASSERT_NE(in, nullptr);
+  EXPECT_EQ(in->outputs(), (std::vector<std::string>{"A", "B", "logical"}));
+  for (std::size_t at = 0; !window; at += *in->raw_chunk_limit()) {
+    ASSERT_LT(at + *in->raw_chunk_limit(), m.size());
+    for (bool more = in->enqueue(m.data() + at, *in->raw_chunk_limit(),
+                                 round_type::BULK);
+         more && !window; more = in->publish_next())
+      window = in->streaming_output(0);
+  }
+
+  auto a_ctx = context_of("A", unchecked, layers.a);
+  auto checked_ctx = context_of("A", failing, layers.a);
+  auto b_ctx = context_of("B", receiving, layers.b);
+  auto a = build("decode_window", a_ctx);
+  auto checked = build("decode_window", checked_ctx);
+  auto b = build("decode_window", b_ctx);
+  auto *a_node = dynamic_cast<decode_window_node *>(a.get());
+  auto *checked_node = dynamic_cast<decode_window_node *>(checked.get());
+  ASSERT_NE(a_node, nullptr);
+  ASSERT_NE(checked_node, nullptr);
+  EXPECT_EQ(b->inputs(),
+            (std::vector<std::string>{"input", "receive_0", "receive_1"}));
+  // A random window is beyond a single-error table: unchecked, it fires;
+  // with verify_residual fail, its solution is rejected.
+  EXPECT_TRUE(a_node->fire(0, {window}));
+  EXPECT_THROW(checked_node->fire(0, {window}), std::runtime_error);
+
+  node_build_context bare;
+  bare.id = "lonely";
+  bare.node_params = &unchecked;
+  expect_lowering_error([&] { build("ingest", bare); },
+                        "task graph node 'lonely': an ingest node is built "
+                        "only within a windowed topology");
+  expect_lowering_error([&] { build("decode_window", bare); },
+                        "task graph node 'lonely': a decode_window node is "
+                        "built only within a windowed topology");
+} // end - TEST(WindowKinds, BuildTheirNodesFromTheContext)
+
+// from_topology builds a windowed graph's nodes from what it resolves, so a
+// builder's own error is reported as itself, and only then rejects the
+// graph: its nodes join their inputs by index, which this executor does not.
+TEST(WindowKinds, BuildingAWindowedGraphStopsAtTheExecutor) {
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"output", std::string("corrections")}};
+  lowered_pattern p(arbitrary_memory_spec(5), params);
+  lowered_pattern unknown(arbitrary_memory_spec(5), params);
+  unknown.nodes[2].decoder_type = "no_such_decoder";
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(std::move(p.nodes),
+                                           std::move(p.edges));
+      },
+      "from_topology: a windowed graph needs an executor that joins inputs "
+      "by index, which is not available yet");
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(std::move(unknown.nodes),
+                                           std::move(unknown.edges));
+      },
+      "no_such_decoder");
+} // end - TEST(WindowKinds, BuildingAWindowedGraphStopsAtTheExecutor)
 
 // The pattern is registered as one, with its windows, and has no factory.
 TEST(ParallelWindowLowering, IsARegisteredPatternWithWindows) {

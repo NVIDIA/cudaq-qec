@@ -64,6 +64,8 @@ struct construction_d_probe {
   static inline std::vector<float_t> last_decode_syndrome;
 
   static inline captured_model model;
+  /// Every model a d_capture_decoder was constructed with, in order.
+  static inline std::vector<captured_model> models;
 };
 
 class d_capture_decoder : public decoder {
@@ -97,6 +99,7 @@ public:
     captured.num_detectors = in.num_detectors();
     captured.num_error_mechanisms = in.num_error_mechanisms();
     captured.num_observables = in.num_observables();
+    construction_d_probe::models.push_back(captured);
     construction_d_probe::model = std::move(captured);
   }
 
@@ -3173,26 +3176,20 @@ void expect_build_error(
   }
 }
 
-// The kinds are registered for configuration, so a graph naming them parses
-// and validates, and building it says the kinds are not available yet.
-TEST(TaskGraphWindowKinds, BuildingSaysTheKindsAreNotAvailableYet) {
+// A graph naming the windowed kinds parses, validates and builds its
+// nodes, then stops at the executor, which does not join inputs by index
+// yet.
+TEST(TaskGraphWindowKinds, BuildingStopsAtTheExecutor) {
   namespace cfg = cudaq::qec::decoding::config;
-  auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
-  try {
-    cudaq::qec::decoding::host::build_task_graph(parsed.decoders.at(0));
-    ADD_FAILURE() << "the graph built";
-  } catch (const std::exception &e) {
-    EXPECT_NE(std::string(e.what()).find("'ingest'"), std::string::npos)
-        << e.what();
-    EXPECT_NE(std::string(e.what()).find("not available yet"),
-              std::string::npos)
-        << e.what();
-  }
+  expect_build_error(
+      cfg::multi_decoder_config::from_yaml_str(pw_build_yaml()),
+      "from_topology: a windowed graph needs an executor that joins inputs "
+      "by index, which is not available yet");
 }
 
 // Building a windowed graph validates its windows before anything is built,
-// so each mistake is reported with its own message, ahead of the kinds
-// saying they are not available yet.
+// so each mistake is reported with its own message, ahead of the executor
+// saying it cannot run the graph yet.
 TEST(TaskGraphWindowKinds, BuildingValidatesTheWindowsFirst) {
   namespace cfg = cudaq::qec::decoding::config;
   const auto rejects = [](const std::string &from, const std::string &to,
@@ -3308,9 +3305,10 @@ TEST(TaskGraphWindowKinds, BuildingRejectsWindowsWaitingOnTheirOwnIndex) {
   // BuildingRejectsWindowsWaitingOnTheirOwnIndex)
 
 // A window's decoders are built from its window models, so building a graph
-// makes no decoder for a decode_window node from the whole shot: none is
-// constructed before the layout is validated, and a layout mistake is
-// reported as itself.
+// makes no decoder for a decode_window node from the whole shot: every
+// decoder it constructs is one of its layers' windows. None is constructed
+// before the layout is validated, so a layout mistake is reported as
+// itself.
 TEST(TaskGraphWindowKinds, BuildingMakesNoWholeShotDecoderForAWindow) {
   namespace cfg = cudaq::qec::decoding::config;
   auto yaml = pw_build_yaml();
@@ -3323,16 +3321,35 @@ TEST(TaskGraphWindowKinds, BuildingMakesNoWholeShotDecoderForAWindow) {
   std::erase_if(
       mistaken.decoders.at(0).task_graph->edges,
       [](const auto &edge) { return edge.from_output == "backward"; });
-  cudaq::qec::construction_d_probe::model = {};
-  expect_build_error(parsed, "the 'ingest' kind is not available yet");
+  const auto &decoder = parsed.decoders.at(0);
+  const auto &ingest = decoder.task_graph->nodes.at(0);
+  cudaq::qec::data_artifact_store store;
+  const auto context = store.add_template(
+      ingest.dem_chunks ? *ingest.dem_chunks : *decoder.dem_chunks);
+  std::set<std::vector<std::vector<std::uint32_t>>> windows;
+  for (const auto &layer : ingest.windows) {
+    store.add_windows(context, layer.request);
+    for (const auto &[key, window] :
+         store.find_windows(*context, layer.request))
+      windows.insert(window->model.h.canonicalize().to_nested_csr());
+  }
+  auto &models = cudaq::qec::construction_d_probe::models;
+  models.clear();
   expect_build_error(mistaken, "validate_commitment: F3: ");
-  EXPECT_EQ(cudaq::qec::construction_d_probe::model.num_detectors, 0u);
+  EXPECT_TRUE(models.empty());
+  expect_build_error(
+      parsed, "a windowed graph needs an executor that joins inputs by index");
+  ASSERT_FALSE(models.empty());
+  for (const auto &model : models)
+    EXPECT_TRUE(windows.count(model.H))
+        << "a decoder of " << model.num_detectors
+        << " detectors is no window's";
 } // end - TEST(TaskGraphWindowKinds, BuildingMakesNoWholeShotDecoderForAWindow)
 
 // Two ingest nodes with different templates may share a graph as long as
 // their windows meet in no node: graph outputs are separate results, not a
 // node they share. Each pipeline validates on its own, so the build reaches
-// the kinds' own report.
+// the executor's report.
 TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs) {
   namespace cfg = cudaq::qec::decoding::config;
   auto config = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
@@ -3356,7 +3373,8 @@ TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs) {
     edge.to_node = renamed(edge.to_node);
     graph.edges.push_back(edge);
   }
-  expect_build_error(config, "the 'ingest' kind is not available yet");
+  expect_build_error(
+      config, "a windowed graph needs an executor that joins inputs by index");
 } // end - TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs)
 
 // Node ids and parameter types are checked before the window layout, which
@@ -4366,7 +4384,7 @@ TEST(ParallelWindowPattern, ParsesThePatternForm) {
 // end: corrected_logical needs the template's m2o_sparse, and two faults on
 // one detector with different observable effects are ambiguous. With
 // identical twins, or the pattern's conflicting_parallel resolving them in
-// its layers, the build reaches the kinds' own report.
+// its layers, the build reaches the executor's report.
 TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
   namespace cfg = cudaq::qec::decoding::config;
   const auto unpooled = [](std::string yaml) {
@@ -4393,10 +4411,12 @@ TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
                      "of the 3-round shot: commit column 0 (round 0) is "
                      "parallel to column 1 (round 0), which has a different "
                      "observable effect");
-  expect_build_error(cfg::multi_decoder_config::from_yaml_str(twins),
-                     "the 'ingest' kind is not available yet");
-  expect_build_error(cfg::multi_decoder_config::from_yaml_str(resolved),
-                     "the 'ingest' kind is not available yet");
+  expect_build_error(
+      cfg::multi_decoder_config::from_yaml_str(twins),
+      "a windowed graph needs an executor that joins inputs by index");
+  expect_build_error(
+      cfg::multi_decoder_config::from_yaml_str(resolved),
+      "a windowed graph needs an executor that joins inputs by index");
 } // end - TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt)
 
 // Filling the store from the pattern holds every variant of its two layers,
