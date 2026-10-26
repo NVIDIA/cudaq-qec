@@ -59,6 +59,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <set>
@@ -3512,32 +3513,34 @@ CUDAQ_EXT_PT_REGISTER_TYPE(allocation_counting_lut)
 // fires its layers in g's order, each receiving the sends of the producer
 // instances its edges name. Every window's detectors and solution are kept.
 //
-// With a batch width, as the executor's fire pool will: every layer's
-// windows of that many indices fire at once, each on its own thread and
-// slot, a layer after those it receives from, while this thread keeps
-// handing ingest records.
+// With in_flight set, as the executor's fire pools will: each window fires
+// on its own thread once its producers have finished and its slot is free,
+// with no barrier between layers or indices, while this thread hands ingest
+// records, collects finished fires and releases their views. A slot is free
+// once every fire that may receive from its last window has finished, so up
+// to in_flight indices are in flight at once.
 class core_pipeline {
 public:
   core_pipeline(const dem_chunks_spec &spec, const window_graph &g,
                 const std::string &decoder_name,
                 const cudaqx::heterogeneous_map &params = {},
-                std::size_t batch = 0)
-      : graph_(g), context_(store_.add_template(spec)), batch_(batch) {
+                std::size_t in_flight = 0)
+      : graph_(g), context_(store_.add_template(spec)), in_flight_(in_flight) {
     std::vector<ingest_layer> layers;
-    // A batch's views are out together, and a producer's fires of the batch
-    // before stay held for this one's receives.
-    const std::size_t views = batch ? batch : 2;
-    const std::size_t slots = batch ? 2 * batch : 4;
+    for (const auto &e : g.edges)
+      lead_ = std::max(lead_, -e.index_offset);
+    // Serially, a producer's window is still held when its consumers fire.
+    // Pipelined, a slot's last window stays leased to fires up to lead_
+    // indices later.
+    const std::size_t views = in_flight ? in_flight + 1 : 2;
+    const std::size_t slots =
+        in_flight ? in_flight + static_cast<std::size_t>(lead_) : 4;
     for (const auto &layer : g.layers) {
       store_.add_windows(context_, layer.request);
       layers.push_back({layer.request, views});
       cores_.push_back(std::make_unique<decode_window_core>(
           store_, context_, layer.request, decoder_name, params, slots));
     }
-    for (const auto &e : g.edges)
-      if (batch && layer_of(e.from_node) >= layer_of(e.to_node))
-        throw std::logic_error("a batch fires " + e.to_node + " with " +
-                               e.from_node + ", which it receives from");
     ingest_ = std::make_unique<ingest_core>(context_, std::move(layers),
                                             !context_->readout().empty());
   } // end - core_pipeline()
@@ -3549,10 +3552,12 @@ public:
       core->reset();
     decodes_.clear();
     commits_.clear();
+    published_.clear();
+    finished_.clear();
     measurements_ = &measurements;
     at_ = 0;
-    if (batch_) {
-      ASSERT_NO_FATAL_FAILURE(run_batches());
+    if (in_flight_) {
+      ASSERT_NO_FATAL_FAILURE(run_pipelined());
       return;
     }
     while (at_ < measurements.size()) {
@@ -3581,10 +3586,37 @@ public:
   // What the fires themselves allocated, the decoder's included; serial
   // runs only.
   std::size_t fire_allocations() const { return fire_allocations_; }
-  // Records ingest took while a batch's fires ran.
+  // Records ingest took while fires ran.
   std::size_t fed_while_firing() const { return fed_while_firing_; }
+  // Fires begun while a fire of another layer ran.
+  std::size_t fired_beside_other_layers() const {
+    return fired_beside_other_layers_;
+  }
 
 private:
+  // A layer and an index: one window instance.
+  using instance = std::pair<std::size_t, std::int64_t>;
+
+  // A published window waiting for its producers and its slot.
+  struct waiting_fire {
+    std::size_t l = 0;
+    std::int64_t k = 0;
+    const window_view *view = nullptr;
+  };
+
+  // A fire running on its own thread, and the view it reads.
+  struct running_fire {
+    std::thread thread;
+    const window_view *view = nullptr;
+  };
+
+  // What a fire's thread hands back: its record, or why it failed.
+  struct finished_fire {
+    instance at;
+    const window_fire *fire = nullptr;
+    std::string error;
+  };
+
   // Hands ingest the shot's next record, if one is left; false when the
   // ring has no room for it yet.
   bool feed() {
@@ -3615,75 +3647,118 @@ private:
     } // end - for(l)
   } // end - fire_index()
 
-  // Collects batches of indices and fires each, until ingest has handed
-  // over the shot's last index. A batch fires once full, or once neither
-  // a record nor an index is left to take.
-  void run_batches() {
-    std::vector<ingest_publication> batch;
-    while (!ingest_->done() || !batch.empty()) {
-      bool moved = feed();
-      while (batch.size() < batch_) {
-        const auto *p = ingest_->poll();
-        if (!p)
-          break;
-        batch.push_back(*p);
+  // Feeds ingest, queues what it publishes, starts every queued fire that
+  // may start and collects those that have finished, until the shot's last
+  // window has finished. Waits only while fires run.
+  void run_pipelined() {
+    std::deque<waiting_fire> waiting;
+    while (!ingest_->done() || !waiting.empty() || !running_.empty()) {
+      bool moved = false;
+      if (feed()) {
+        moved = true;
+        if (!running_.empty())
+          ++fed_while_firing_;
+      }
+      while (const auto *p = ingest_->poll()) {
+        for (std::size_t l = 0; l < graph_.layers.size(); ++l)
+          if (p->views[l]) {
+            published_.insert({l, p->k});
+            waiting.push_back({l, p->k, p->views[l]});
+          }
         moved = true;
       }
-      if (batch.size() < batch_ && moved)
-        continue;
-      ASSERT_FALSE(batch.empty()) << "ingest took nothing and handed nothing "
-                                     "over";
-      for (std::size_t l = 0; l < graph_.layers.size(); ++l)
-        ASSERT_NO_FATAL_FAILURE(fire_batch(l, batch));
-      for (const auto &p : batch)
-        for (const auto *view : p.views)
-          if (view)
-            ingest_->release(*view);
-      batch.clear();
-    } // end - while(indices)
-  } // end - run_batches()
-
-  // Fires layer l's windows of the batch at once, each on its own thread,
-  // while this thread hands ingest records. Receives are found first, from
-  // layers whose fires have finished.
-  void fire_batch(std::size_t l, const std::vector<ingest_publication> &batch) {
-    std::vector<const window_view *> views;
-    std::vector<std::vector<const window_send_value *>> receives;
-    std::vector<const window_fire *> fired;
-    std::vector<std::string> errors;
-    std::vector<std::thread> threads;
-    std::atomic<std::size_t> finished = 0;
-    for (const auto &p : batch)
-      if (p.views[l]) {
-        views.push_back(p.views[l]);
-        receives.push_back(receives_of(l, p.k));
-      }
-    fired.assign(views.size(), nullptr);
-    errors.resize(views.size());
-    for (std::size_t i = 0; i < views.size(); ++i)
-      threads.emplace_back([&, i] {
-        try {
-          fired[i] =
-              &cores_[l]->fire(slot_of(l, views[i]->k), *views[i], receives[i]);
-        } catch (const std::exception &e) {
-          errors[i] = e.what();
+      for (auto it = waiting.begin(); it != waiting.end();) {
+        if (!may_start(*it, waiting)) {
+          ++it;
+          continue;
         }
-        ++finished;
-      });
-    while (finished < views.size())
-      if (feed())
-        ++fed_while_firing_;
-    for (auto &thread : threads)
-      thread.join();
-    for (std::size_t i = 0; i < views.size(); ++i) {
-      ASSERT_EQ(errors[i], "")
-          << graph_.layers[l].node << "[" << views[i]->k << "]";
-      keep(l, *fired[i]);
+        start(*it);
+        it = waiting.erase(it);
+        moved = true;
+      }
+      moved = collect() || moved;
+      if (!moved && running_.empty()) {
+        ADD_FAILURE() << "the pipeline stalled with " << waiting.size()
+                      << " windows waiting";
+        return;
+      }
+      if (!moved)
+        std::this_thread::yield();
+    } // end - while(windows)
+  } // end - run_pipelined()
+
+  // Whether w's producers have finished and its slot is free: every fire
+  // that may receive from the slot's last window, at an index up to lead_
+  // past it, has finished. Fires are published in index order, so those
+  // still to finish are the waiting and running ones.
+  bool may_start(const waiting_fire &w,
+                 const std::deque<waiting_fire> &waiting) const {
+    const auto slots = static_cast<std::int64_t>(cores_[w.l]->num_slots());
+    const auto lease_end = w.k - slots + lead_;
+    for (const auto &other : waiting)
+      if (other.k <= lease_end)
+        return false;
+    for (const auto &[at, fire] : running_)
+      if (at.second <= lease_end)
+        return false;
+    for (const auto &e : graph_.edges) {
+      const instance producer{layer_of(e.from_node), w.k + e.index_offset};
+      if (e.to_node == graph_.layers[w.l].node && published_.count(producer) &&
+          !finished_.count(producer))
+        return false;
     }
-  } // end - fire_batch()
+    return true;
+  }
+
+  // Starts w on its own thread, with its receives found here.
+  void start(const waiting_fire &w) {
+    auto receives = receives_of(w.l, w.k);
+    const auto slot = slot_of(w.l, w.k);
+    for (const auto &[at, fire] : running_)
+      if (at.first != w.l) {
+        ++fired_beside_other_layers_;
+        break;
+      }
+    running_fire &r = running_[{w.l, w.k}];
+    r.view = w.view;
+    r.thread = std::thread([this, w, slot, receives = std::move(receives)] {
+      finished_fire f{{w.l, w.k}, nullptr, ""};
+      try {
+        f.fire = &cores_[w.l]->fire(slot, *w.view, receives);
+      } catch (const std::exception &e) {
+        f.error = e.what();
+      }
+      const std::lock_guard<std::mutex> lock(finished_mutex_);
+      finished_queue_.push_back(std::move(f));
+    });
+  }
+
+  // Joins the fires that have finished, keeps their records and releases
+  // their views. Returns whether any had.
+  bool collect() {
+    std::vector<finished_fire> done;
+    {
+      const std::lock_guard<std::mutex> lock(finished_mutex_);
+      done.swap(finished_queue_);
+    }
+    for (auto &f : done) {
+      auto &r = running_.at(f.at);
+      r.thread.join();
+      EXPECT_EQ(f.error, "")
+          << graph_.layers[f.at.first].node << "[" << f.at.second << "]";
+      if (f.fire)
+        keep(f.at.first, *f.fire);
+      ingest_->release(*r.view);
+      running_.erase(f.at);
+      finished_.insert(f.at);
+    }
+    return !done.empty();
+  }
 
   // What layer l's window k receives: the sends of the producer instances
-  // its edges name, from fires still held, or null for none.
+  // its edges name, held in the slots they fired into, or null for none. A
+  // producer's slot is not firing: a later window takes it only once the
+  // fires that receive from this one have finished.
   std::vector<const window_send_value *> receives_of(std::size_t l,
                                                      std::int64_t k) const {
     std::vector<const window_send_value *> receives;
@@ -3691,11 +3766,12 @@ private:
       if (e.to_node != graph_.layers[l].node)
         continue;
       const auto port = std::stoul(e.to_input.substr(8)); // "receive_k"
-      const auto &producer = *cores_[layer_of(e.from_node)];
-      const auto *f = producer.find(k + e.index_offset);
+      const auto p = layer_of(e.from_node);
+      const auto &f = cores_[p]->held(slot_of(p, k + e.index_offset));
       receives.resize(std::max(receives.size(), port + 1), nullptr);
-      receives[port] =
-          f ? &f->sends[producer.send_index(e.from_output)] : nullptr;
+      receives[port] = f.fired && f.k == k + e.index_offset
+                           ? &f.sends[cores_[p]->send_index(e.from_output)]
+                           : nullptr;
     }
     return receives;
   }
@@ -3725,15 +3801,24 @@ private:
   window_graph graph_;
   data_artifact_store store_;
   std::shared_ptr<const experiment_template> context_;
-  std::size_t batch_ = 0; ///< Indices fired at once; 0 for one at a time
+  std::size_t in_flight_ = 0; ///< Indices in flight; 0 for one at a time
+  std::int64_t lead_ = 0;     ///< The most indices a receive reaches back
   std::unique_ptr<ingest_core> ingest_;
   std::vector<std::unique_ptr<decode_window_core>> cores_;
   const std::vector<std::uint8_t> *measurements_ = nullptr;
   std::size_t at_ = 0; ///< The shot's measurements handed to ingest
+  // Pipelined: the shot's published and finished windows, the running
+  // fires, and those finished but not yet collected.
+  std::set<instance> published_;
+  std::set<instance> finished_;
+  std::map<instance, running_fire> running_;
+  std::mutex finished_mutex_;
+  std::vector<finished_fire> finished_queue_;
   std::map<std::pair<std::string, std::int64_t>, production_decode> decodes_;
   std::map<std::pair<std::string, std::int64_t>, round_range> commits_;
   std::size_t fire_allocations_ = 0;
   std::size_t fed_while_firing_ = 0;
+  std::size_t fired_beside_other_layers_ = 0;
 };
 
 // The pipeline, run on the measurements behind @p detectors, decodes as the
@@ -3912,8 +3997,9 @@ TEST(DecodeWindowCore, AMissingResidualIsRejected) {
                "decode_window: window " + std::to_string(p->k) + " imports " +
                    std::to_string(residual.values.size()) +
                    " rows, but no residual reaches its imported row 0");
-  ASSERT_NE(b.find(p->k), nullptr);
-  EXPECT_EQ(imported(*b.find(p->k)),
+  ASSERT_TRUE(b.held(0).fired);
+  EXPECT_EQ(b.held(0).k, p->k);
+  EXPECT_EQ(imported(b.held(0)),
             std::vector<std::uint8_t>(residual.values.begin(),
                                       residual.values.end()));
 } // end - TEST(DecodeWindowCore, AMissingResidualIsRejected)
@@ -3953,7 +4039,8 @@ CUDAQ_EXT_PT_REGISTER_TYPE(failing_lut)
 
 // A fire whose decoder fails has already begun rewriting its slot, so it
 // leaves the slot empty: neither the window it held nor the one that failed
-// is found there.
+// is found there. It frees its variant's decoder, so a prefix window whose
+// decode failed may fire again.
 TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty) {
   const auto spec = arbitrary_memory_spec(5);
   const auto g = parallel_graph(layered(2, 1, 3));
@@ -3975,12 +4062,21 @@ TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty) {
   }
   failing_lut::fail_next = false;
   a.fire(0, *views[0], {});
-  ASSERT_NE(a.find(views[0]->k), nullptr);
+  ASSERT_TRUE(a.held(0).fired);
+  ASSERT_EQ(a.held(0).k, views[0]->k);
+  failing_lut::fail_next = true;
+  EXPECT_THROW(a.fire(0, *views[0], {}), std::runtime_error);
+  failing_lut::fail_next = false;
+  EXPECT_FALSE(a.held(0).fired);
+  // The failed fire freed its variant's one decoder.
+  ASSERT_FALSE(views[0]->variant.bulk());
+  EXPECT_EQ(a.fire(0, *views[0], {}).k, views[0]->k);
   failing_lut::fail_next = true;
   EXPECT_THROW(a.fire(0, *views[1], {}), std::runtime_error);
   failing_lut::fail_next = false;
-  EXPECT_EQ(a.find(views[0]->k), nullptr);
-  EXPECT_EQ(a.find(views[1]->k), nullptr);
+  EXPECT_FALSE(a.held(0).fired);
+  expect_error([&] { a.held(1); },
+               "decode_window: slot 1 does not exist; there are 1");
 } // end - TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty)
 
 // single_error_lut that notes a decode() begun while its decoder is still
@@ -4029,31 +4125,164 @@ private:
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(overlap_probe_lut)
 
-// Fires into different slots run at once, as the executor's fire pool runs
-// them, each on its own thread, while ingest takes records on another: no
-// two fires share a decoder, and every window decodes as the reference
-// does. A sanitizer that sees threads reports what they race on.
+// Fires into different slots run at once, as a pipelined executor runs
+// them: each window on its own thread once its producers have finished,
+// with no barrier between layers, while ingest takes records and finished
+// fires are collected on another. No two fires share a decoder, and every
+// window decodes as the reference does, on the parallel layout and on a
+// sliding one whose windows receive from their own layer.
 TEST(DecodeWindowCore, FiresRunAtOnceWhileIngestTakesRecords) {
-  constexpr std::size_t R = 30;    // ten periods: prefix, bulk and terminal
-  constexpr std::size_t batch = 4; // fires at once, as max_in_flight would
+  constexpr std::size_t R = 30;        // ten periods: prefix, bulk, terminal
+  constexpr std::size_t in_flight = 4; // indices at once, as max_in_flight
   const auto spec = arbitrary_memory_spec(5);
-  const auto g = parallel_graph(layered(2, 1, 3));
-  core_pipeline pipeline(spec, g, "overlap_probe_lut", {}, batch);
-  parallel_window_reference reference(spec, g, R, "single_error_lut");
-  const production_windows production(pipeline.context(), g, R,
-                                      reference.order(), "single_error_lut");
-  const auto &s = reference.model();
   overlap_probe_lut::shared = 0;
   overlap_probe_lut::overlapped = false;
-  for (std::size_t c = 0; c < s.h.size(); c += 7)
-    ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
-        pipeline, reference, production, detectors_of(s, c), R))
-        << "column " << c;
+  for (const auto &g :
+       {parallel_graph(layered(2, 1, 3)), sliding_graph(2, 5)}) {
+    SCOPED_TRACE(g.layers[0].node);
+    core_pipeline pipeline(spec, g, "overlap_probe_lut", {}, in_flight);
+    parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const production_windows production(pipeline.context(), g, R,
+                                        reference.order(), "single_error_lut");
+    const auto &s = reference.model();
+    for (std::size_t c = 0; c < s.h.size(); c += 7)
+      ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
+          pipeline, reference, production, detectors_of(s, c), R))
+          << "column " << c;
+    EXPECT_GT(pipeline.fed_while_firing(), 0u)
+        << "ingest took no record while fires ran";
+    if (g.layers.size() > 1)
+      EXPECT_GT(pipeline.fired_beside_other_layers(), 0u)
+          << "no layer's fire began while another layer's ran";
+  } // end - for(g)
   EXPECT_EQ(overlap_probe_lut::shared, 0u) << "fires shared a decoder";
   EXPECT_TRUE(overlap_probe_lut::overlapped) << "no fires ran at once";
-  EXPECT_GT(pipeline.fed_while_firing(), 0u)
-      << "ingest took no record while fires ran";
 } // end - TEST(DecodeWindowCore, FiresRunAtOnceWhileIngestTakesRecords)
+
+// single_error_lut whose decode() counts itself in, then waits until the
+// test opens the gate, so a test can fire again while a fire is decoding.
+class gated_lut final : public decoder {
+public:
+  static inline std::atomic<std::size_t> entered = 0;
+  static inline std::atomic<bool> open = true;
+
+  gated_lut(decoder_init inputs, decoder_output_request output,
+            const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(get_decoder("single_error_lut", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    ++entered;
+    while (!open)
+      std::this_thread::yield();
+    return inner_->decode(syndrome);
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      gated_lut,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<gated_lut>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(gated_lut)
+
+// A prefix or terminal variant has one decoder, so a window fired into a
+// second slot while its first fire decodes is rejected, and that slot keeps
+// what it held; the first fire completes. A bulk window may fire into two
+// slots at once, each with its own decoder.
+TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  store.add_windows(context, g.layers[0].request);
+  decode_window_core a(store, context, g.layers[0].request, "gated_lut", {}, 2);
+  ingest_core ingest(context, {{g.layers[0].request, 8}}, false);
+  const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
+  const window_view *edge = nullptr; // a prefix or terminal window
+  const window_view *bulk = nullptr;
+  std::string errors[2];
+  std::atomic<std::size_t> finished = 0;
+  // Fires view into slot s on its own thread, keeping what it throws.
+  const auto fire_on_thread = [&](std::size_t s, const window_view &view) {
+    return std::thread([&, s] {
+      try {
+        a.fire(s, view, {});
+      } catch (const std::exception &e) {
+        errors[s] = e.what();
+      }
+      ++finished;
+    });
+  };
+  for (std::size_t at = 0; !edge || !bulk; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll()) {
+      if (!p->views[0])
+        continue;
+      if (p->views[0]->variant.bulk() && !bulk)
+        bulk = p->views[0];
+      if (!p->views[0]->variant.bulk() && !edge)
+        edge = p->views[0];
+    }
+  } // end - for(at)
+
+  // Slot 1 holds a bulk window, which a rejected fire leaves there.
+  gated_lut::open = true;
+  ASSERT_EQ(a.fire(1, *bulk, {}).k, bulk->k);
+  // The second fire is rejected before it reaches the decoder, or, were it
+  // not, waits there beside the first until the gate opens.
+  gated_lut::open = false;
+  gated_lut::entered = 0;
+  auto first = fire_on_thread(0, *edge);
+  while (gated_lut::entered < 1)
+    std::this_thread::yield();
+  auto second = fire_on_thread(1, *edge);
+  while (finished < 1 && gated_lut::entered < 2)
+    std::this_thread::yield();
+  gated_lut::open = true;
+  first.join();
+  second.join();
+  EXPECT_EQ(errors[0], "");
+  EXPECT_NE(errors[1].find("decode_window: window " + std::to_string(edge->k) +
+                           "'s variant is decoding in another slot; a window "
+                           "fires into one slot at a time"),
+            std::string::npos)
+      << errors[1];
+  EXPECT_TRUE(a.held(0).fired);
+  EXPECT_EQ(a.held(0).k, edge->k);
+  EXPECT_TRUE(a.held(1).fired);
+  EXPECT_EQ(a.held(1).k, bulk->k);
+  // Once the first fire is done, the window may fire again.
+  EXPECT_EQ(a.fire(1, *edge, {}).k, edge->k);
+
+  // Both fires of a bulk window reach their decoders at once.
+  gated_lut::open = false;
+  gated_lut::entered = 0;
+  finished = 0;
+  errors[0].clear();
+  errors[1].clear();
+  first = fire_on_thread(0, *bulk);
+  second = fire_on_thread(1, *bulk);
+  while (finished < 1 && gated_lut::entered < 2)
+    std::this_thread::yield();
+  EXPECT_EQ(gated_lut::entered, 2u);
+  gated_lut::open = true;
+  first.join();
+  second.join();
+  EXPECT_EQ(errors[0], "");
+  EXPECT_EQ(errors[1], "");
+} // end - TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime)
 
 // A rejected fire changes nothing: its slot still holds the window it last
 // fired, rows and solution alike, whether a received send is misdirected,
@@ -4114,13 +4343,13 @@ TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas) {
   expect_throw<std::out_of_range>([&] { b.fire(0, later, {}); },
                                   "ingest: window " + std::to_string(later.k) +
                                       "'s view does not hold round");
-  const auto *kept = b.find(k);
-  ASSERT_NE(kept, nullptr);
+  const auto &kept = b.held(0);
+  ASSERT_TRUE(kept.fired);
+  EXPECT_EQ(kept.k, k);
   EXPECT_EQ(
-      std::vector<std::uint8_t>(kept->detectors.begin(), kept->detectors.end()),
+      std::vector<std::uint8_t>(kept.detectors.begin(), kept.detectors.end()),
       detectors);
-  EXPECT_EQ(kept->solution->estimate, estimate);
-  EXPECT_EQ(b.find(k + 1), nullptr);
+  EXPECT_EQ(kept.solution->estimate, estimate);
 } // end - TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas)
 
 // A view of another layer's window is rejected even when its variant key

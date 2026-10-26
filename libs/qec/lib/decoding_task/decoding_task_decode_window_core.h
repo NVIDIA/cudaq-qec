@@ -18,6 +18,7 @@
 #include "decoding_task_data_artifacts.h"
 #include "decoding_task_decoding_window.h"
 #include "decoding_task_ingest_core.h"
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -52,10 +53,13 @@ struct window_fire {
 /// Fires one layer's windows. Fires into different slots may run at once,
 /// each on its own thread: each slot has its own buffers and bulk decoder,
 /// and a prefix or terminal variant, which only one window of a shot uses,
-/// has a single decoder. Nothing else may run alongside a fire: reset(),
-/// find() and another fire into the same slot touch what it writes, and a
-/// slot must not fire again while another fire reads its sends. The caller
-/// orders these, as the executor's queues will.
+/// has a single decoder, so a window fires into one slot at a time: a fire
+/// of a prefix or terminal variant while another decodes is rejected. While
+/// a slot fires, held() may read other slots, but nothing may read or fire
+/// that slot, and reset() may not run. A fire's sends are leased to the
+/// fires that receive them: its slot must not fire again until they have
+/// finished. The caller chooses the slots, so it knows which holds which
+/// window, and orders all of this, as the executor's queues will.
 class decode_window_core {
 public:
   /// @param store The store holding every variant of @p request on
@@ -65,7 +69,9 @@ public:
   /// @param decoder_name The inner decoder, one built per slot for the
   /// bulk and one for each other variant.
   /// @param params The inner decoder's parameters.
-  /// @param slots The fires whose results may be held at once.
+  /// @param slots The fires whose results may be held at once, each with
+  /// its own bulk decoder, so decoder memory, a GPU decoder's device memory
+  /// included, grows with it.
   /// @throws std::invalid_argument if @p slots is 0, or as
   /// make_window_decoder() does; std::logic_error if the store lacks a
   /// variant, or a variant's sends are not the request's.
@@ -87,15 +93,19 @@ public:
   /// not of this layer's window k, of one of its variants, holding that
   /// variant's rows, a received send reaches a row the window does not take
   /// in its mode, or an imported row receives no residual;
-  /// std::out_of_range if the view's rounds are not in its ring.
+  /// std::out_of_range if the view's rounds are not in its ring;
+  /// std::logic_error if the view's variant is a prefix or terminal one
+  /// that another slot is decoding.
   const window_fire &fire(std::size_t slot, const window_view &view,
                           std::span<const window_send_value *const> receives);
 
-  /// Start a new shot: no slot holds a fire, so find() names only this
-  /// shot's windows.
+  /// Start a new shot: no slot holds a fire, so held() shows none of an
+  /// earlier shot's windows.
   void reset();
-  /// The fire of window k still held in a slot, or null.
-  const window_fire *find(std::int64_t k) const;
+  /// The fire @p slot holds, unfired when it holds none. Reads only that
+  /// slot, so it may run while other slots fire.
+  /// @throws std::invalid_argument if the slot does not exist.
+  const window_fire &held(std::size_t slot) const;
   /// The index of send @p id among the request's sends.
   /// @throws std::invalid_argument if the request has no such send.
   std::size_t send_index(const std::string &id) const;
@@ -115,6 +125,8 @@ private:
 
   /// Throws std::invalid_argument for @p what.
   [[noreturn]] void fail(const std::string &what) const;
+  /// Throws std::invalid_argument unless @p slot exists.
+  void check_slot(std::size_t slot) const;
 
   std::shared_ptr<const experiment_template> context_;
   window_request request_;
@@ -127,6 +139,9 @@ private:
   /// Per slot, which imported rows a fire's residuals reach, checked before
   /// it writes.
   std::vector<std::vector<std::uint8_t>> covered_;
+  /// Per variant, whether a fire holds its one decoder; set only for prefix
+  /// and terminal variants.
+  std::unique_ptr<std::atomic<bool>[]> decoding_;
 };
 
 } // namespace cudaq::qec

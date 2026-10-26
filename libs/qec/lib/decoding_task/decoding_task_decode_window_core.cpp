@@ -49,6 +49,7 @@ decode_window_core::decode_window_core(
         std::max(imported, window->model.h.num_rows() - window->num_own_rows);
   } // end - for(key)
   covered_.assign(slots, std::vector<std::uint8_t>(imported, 0));
+  decoding_ = std::make_unique<std::atomic<bool>[]>(variants_.size());
   workspaces_.resize(slots);
   detectors_.resize(slots);
   fires_.resize(slots);
@@ -77,9 +78,15 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
   std::size_t v = 0;
   std::size_t row = 0;
   std::size_t rows = 0;
-  if (slot >= fires_.size())
-    fail("slot " + std::to_string(slot) + " does not exist; there are " +
-         std::to_string(fires_.size()));
+  // Frees a prefix or terminal variant's decoder however the fire ends.
+  struct free_on_exit {
+    std::atomic<bool> *decoding = nullptr;
+    ~free_on_exit() {
+      if (decoding)
+        *decoding = false;
+    }
+  } claim;
+  check_slot(slot);
   while (v < variants_.size() && !(variants_[v].key == view.variant))
     ++v;
   if (v == variants_.size())
@@ -145,6 +152,15 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
       fail("window " + std::to_string(view.k) + " imports " +
            std::to_string(all - own) + " rows, but no residual reaches " +
            "its imported row " + std::to_string(i));
+  // A prefix or terminal variant's one decoder is claimed before the slot
+  // is touched, so a second fire of it leaves its slot as it was.
+  if (!view.variant.bulk()) {
+    if (decoding_[v].exchange(true))
+      throw std::logic_error("decode_window: window " + std::to_string(view.k) +
+                             "'s variant is decoding in another slot; a "
+                             "window fires into one slot at a time");
+    claim.decoding = &decoding_[v];
+  }
 
   out.fired = false;
   for (auto r = view.rounds.begin; r < view.rounds.end; ++r) {
@@ -181,12 +197,10 @@ void decode_window_core::reset() {
     f.fired = false;
 }
 
-// The slots are few, so a scan finds the one holding window k.
-const window_fire *decode_window_core::find(std::int64_t k) const {
-  for (const auto &f : fires_)
-    if (f.fired && f.k == k)
-      return &f;
-  return nullptr;
+// Reads nothing of another slot.
+const window_fire &decode_window_core::held(std::size_t slot) const {
+  check_slot(slot);
+  return fires_[slot];
 }
 
 // In the request's order, which every fire's sends follow.
@@ -200,6 +214,13 @@ std::size_t decode_window_core::send_index(const std::string &id) const {
 // Errors name the node kind.
 void decode_window_core::fail(const std::string &what) const {
   throw std::invalid_argument("decode_window: " + what);
+}
+
+// The slot count is fixed at construction.
+void decode_window_core::check_slot(std::size_t slot) const {
+  if (slot >= fires_.size())
+    fail("slot " + std::to_string(slot) + " does not exist; there are " +
+         std::to_string(fires_.size()));
 }
 
 } // namespace cudaq::qec
