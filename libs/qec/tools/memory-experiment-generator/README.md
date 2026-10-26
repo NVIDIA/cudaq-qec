@@ -1,9 +1,10 @@
-# Memory-experiment generator (draft)
+# Memory-experiment generator
 
 This public tool prepares a bounded Surface Code model and writes one
 `server.yaml` containing the framework's public `parallel_window`
 configuration. Experiment, decoder and pattern parameters are command-line
-inputs.
+inputs. The supported scope is finite-length Surface Code experiments;
+execution requires the pending parallel-window runtime.
 The framework owns A/B construction, fault ownership, routing and scheduling;
 the tool does not implement a second scheduler or substitute a global or
 sliding-window algorithm.
@@ -27,8 +28,8 @@ This is the distance-three reference. A/B commit and buffer widths
 default to distance, so the emitted pattern contains `commit_rounds: 3`
 and `buffer_rounds: 3`. The gap is omitted unless explicitly supplied,
 leaving its rule to the framework. The public pattern documents that rule as
-`commit_rounds + 2 * buffer_rounds`, giving 9 for this profile; the draft
-configuration interface does not yet implement the runtime expansion.
+`commit_rounds + 2 * buffer_rounds`, giving 9 for this profile. Executing this
+configuration requires the parallel-window runtime expansion.
 
 For a longer experiment with two independent patches:
 
@@ -106,7 +107,7 @@ Arguments use `--name=value` form; there is no JSON or YAML input format.
 
 | Input | Meaning / default |
 |---|---|
-| `--code` | `surface_code`; other families are rejected in this draft |
+| `--code` | `surface_code`; other code families are not currently supported |
 | `--distance` | Required odd Surface Code distance, at least 3 |
 | `--rounds` | Required finite extraction-cycle count, excluding terminal data readout |
 | `--basis` | Required `X` or `Z` preparation/readout basis |
@@ -214,7 +215,7 @@ Pass-through syndrome mapping ID 0 is BULK; ID 1 is FINAL. A producer must selec
 the terminal mapping correctly. Packet batching and transport-control schedules
 are not model geometry.
 
-This draft leaves transport and CPU placement unset. It does not yet render a
+The generator leaves transport and CPU placement unset. It does not render a
 qualified CPU RoCE/GPU RoCE deployment or adapt the FPGA producer protocol.
 GPU RoCE transport and GPU decoder dispatch are different choices; host A/B
 decoding must not be switched to device dispatch merely to select a wire.
