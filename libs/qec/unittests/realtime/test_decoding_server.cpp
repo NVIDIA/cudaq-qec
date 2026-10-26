@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /// Two-process realtime decoding-server test: this process runs only the
 /// caller (simulated QPU) side; the decoder lives in a separate
@@ -408,6 +405,14 @@ TEST(DecodingServerTwoProcess, TwoProcessHostDispatch) {
 
 TEST(DecodingServerTwoProcess, TwoProcessHostDispatchMultiErrorLut) {
   run_two_process_decode_test("decoding_server_config_multi_error_lut.yaml");
+}
+
+// Same experiment through a decoding_task_graph: the config replaces `type`
+// with a `task_graph` block, so the server takes the build_task_graph path.
+// Reusing the kernel and expected correction is the point -- a single-window
+// graph over the same matrices is indistinguishable on the wire.
+TEST(DecodingServerTwoProcess, TwoProcessHostDispatchTaskGraph) {
+  run_two_process_decode_test("decoding_server_config_task_graph.yaml");
 }
 
 // ---------------------------------------------------------------------------

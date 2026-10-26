@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2025 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <cstdint>
 #include <vector>
@@ -25,6 +22,19 @@ enqueue_syndromes(std::uint64_t decoder_id,
   uint64_t syndrome = cudaq::to_integer(cudaq::to_bools(syndromes));
   cudaq::device_call(enqueue_syndromes_ui64, decoder_id, syndrome_size,
                      syndrome, tag);
+}
+
+__qpu__ void
+enqueue_syndromes_mapped(std::uint64_t decoder_id,
+                         const std::vector<cudaq::measure_result> &syndromes,
+                         std::uint64_t tag, std::uint64_t syndrome_mapping_id) {
+  uint64_t syndrome_size = syndromes.size();
+  uint64_t syndrome = cudaq::to_integer(cudaq::to_bools(syndromes));
+  // Its own wire function, not a wider enqueue_syndromes_ui64: the id is
+  // derived from the name, so this is additive and an older receiver ignores
+  // it rather than misreading a longer payload.
+  cudaq::device_call(enqueue_syndromes_mapped_ui64, decoder_id, syndrome_size,
+                     syndrome, tag, syndrome_mapping_id);
 }
 
 __qpu__ void enqueue_syndromes_test(std::uint64_t decoder_id,

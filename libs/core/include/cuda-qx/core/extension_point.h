@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -187,7 +184,8 @@ public:
    * dlcose happens, the parent registry no longer holds references to code    \
    * that has been unloaded. */                                                \
   __attribute__((destructor)) void cudaq_extension_point_cleanup_##TYPE() {    \
-    TYPE::unregister(TYPE::class_identifier);                                  \
+    /* C++ static strings may already be destroyed when this runs. */          \
+    TYPE::unregister(#TYPE);                                                   \
   }
 
 /// In order to support building CUDA-QX libraries with g++ and building

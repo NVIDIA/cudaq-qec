@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // Memory-circuit-specific DEM function: dem_chunks_to_d_sparse.
 //
@@ -80,17 +77,11 @@ namespace {
 // form exists to avoid.
 std::map<phase_id, uint64_t> detectors_per_phase(const dem_chunks_spec &spec) {
   std::map<phase_id, uint64_t> detectors;
-  const std::vector<seam_id> ids{spec.seam.to_seam, spec.seam.from_seam};
-  for (const auto &entry : spec.phases) {
-    const auto chunk = dem_chunk_from_spec(
-        entry.spec, ids, "dem_chunks." + std::to_string(entry.id.value));
-    detectors[entry.id] = (chunk.has_seam(spec.seam.to_seam)
-                               ? chunk.get_seam(spec.seam.to_seam).num_rows()
-                               : 0) +
-                          uint64_t{chunk.num_interior_rows()};
-  }
+  for (const auto &entry : spec.phases)
+    detectors[entry.id] =
+        spec.detectors_of(entry.spec, "dem_chunks." + entry.id.name());
   return detectors;
-} // end - detectors_per_phase()
+}
 
 } // namespace
 

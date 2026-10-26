@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // Python bindings for extended_dem, dem_stitch/dem_close operations, and the
 // DEM chunk-to-streaming-decoder utility functions.
@@ -186,6 +183,11 @@ void bindExtendedDem(nb::module_ &mod) {
               "Measurements this phase's round adds to the stream, when it\n"
               "differs from DemChunksSpec.measurements_per_round (a final\n"
               "data readout, say). None to use the spec-wide value.")
+      .def_rw("m2o_sparse", &dem_chunk_spec::m2o_sparse,
+              "Optional readout map, -1-terminated, one row per observable\n"
+              "listing the measurements of this phase's own round whose\n"
+              "parity is the observable's raw value. Only the last phase\n"
+              "may carry it.")
       .def("is_empty", &dem_chunk_spec::is_empty,
            "True iff no field has been set.")
       .def("expand", &dem_chunk_spec::expand, nb::arg("ids"),
@@ -269,11 +271,25 @@ void bindExtendedDem(nb::module_ &mod) {
               "phase carrying rows. True declares that the phases supply D\n"
               "even where one contributes no rows; False keeps the memory\n"
               "convention even though rows are present.")
+      .def_rw("observable_names", &dem_chunks_spec::observable_names,
+              "Optional observable names, one per O_sparse row.")
       .def("measurements_of", &dem_chunks_spec::measurements_of,
            nb::arg("phase"),
            "Return the measurement count of the phase's round, which is its\n"
            "num_measurements when set and measurements_per_round otherwise.\n"
            "Raises ValueError if neither is set.")
+      .def(
+          "detectors_of",
+          [](const dem_chunks_spec &spec, const dem_chunk_spec &phase) {
+            return spec.detectors_of(phase);
+          },
+          nb::arg("phase"),
+          "Return the detector rows the phase's round contributes when\n"
+          "closed: its incoming seam band and interior rows.")
+      .def("num_observables", &dem_chunks_spec::num_observables,
+           "Return the number of O_sparse rows every phase a connection\n"
+           "names carries.\n"
+           "Raises ValueError if two phases disagree.")
       .def("has_D_sparse", &dem_chunks_spec::has_D_sparse,
            "True when the phases supply D rather than leaving\n"
            "dem_chunks_to_d_sparse() to apply the memory convention:\n"
@@ -282,6 +298,10 @@ void bindExtendedDem(nb::module_ &mod) {
            "True when no phases or connections have been set.")
       .def("has_repeating_phase", &dem_chunks_spec::has_repeating_phase,
            "True when any connection is a self-loop.")
+      .def("minimum_rounds", &dem_chunks_spec::minimum_rounds,
+           "Shortest chain the connections admit, visiting a repeating phase\n"
+           "once. This is what a streaming spec expands to when nothing else\n"
+           "pins the round count, and the smallest window it can supply.")
       .def("repeating_phase", &dem_chunks_spec::repeating_phase,
            "Return the PhaseId of the self-connected phase.")
       .def("phase_sequence", &dem_chunks_spec::phase_sequence,

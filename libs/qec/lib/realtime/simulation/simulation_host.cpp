@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2025 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "simulation_host.h"
 #include "../realtime_decoding.h"
@@ -22,6 +19,14 @@ simulation_enqueue_syndromes(std::uint64_t decoder_id, boolean_span syndromes,
                              std::uint64_t tag) {
   cudaq::qec::decoding::host::enqueue_syndromes(decoder_id, syndromes.buffer,
                                                 syndromes.length, tag);
+}
+
+extern "C" __attribute__((visibility("default"))) void
+simulation_enqueue_syndromes_mapped(std::uint64_t decoder_id,
+                                    boolean_span syndromes, std::uint64_t tag,
+                                    std::uint64_t syndrome_mapping_id) {
+  cudaq::qec::decoding::host::enqueue_syndromes(
+      decoder_id, syndromes.buffer, syndromes.length, tag, syndrome_mapping_id);
 }
 
 extern "C" __attribute__((visibility("default"))) void

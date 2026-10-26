@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "cuda-qx/core/kwargs_utils.h"
 #include "cuda-qx/core/library_utils.h"
 #include "sparse_matrix_casters.h"
@@ -1266,7 +1263,12 @@ void bindDecoder(nb::module_ &mod) {
     // bits via `cudaq.to_bools(...)`.
     // clang-format off
     static const std::vector<std::string> initFuncNames = {
+        // One entry per kernel name: the registry looks quake code up by bare
+        // name, so a name carrying two would be ambiguous at every lookup.
+        // Every name here must resolve in BOTH the simulation and quantinuum
+        // libraries or import throws.
         "function_enqueue_syndromes._ZN5cudaq3qec8decoding17enqueue_syndromesEmRKSt6vectorINS_14measure_handleESaIS3_EEm.init_func",
+        "function_enqueue_syndromes_mapped._ZN5cudaq3qec8decoding24enqueue_syndromes_mappedEmRKSt6vectorINS_14measure_handleESaIS3_EEmm.init_func",
         "function_enqueue_syndromes_test._ZN5cudaq3qec8decoding22enqueue_syndromes_testEmRKSt6vectorIbSaIbEEm.init_func",
         "function_get_corrections._ZN5cudaq3qec8decoding15get_correctionsEmmb.init_func",
         "function_reset_decoder._ZN5cudaq3qec8decoding13reset_decoderEm.init_func"};

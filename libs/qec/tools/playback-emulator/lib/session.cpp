@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /// @file session.cpp
 /// @brief All session backends: `null` (discard every frame), inproc
@@ -91,15 +88,16 @@ DispatchResult dispatch_rpc(DecodingSession &dec, const std::uint8_t *bytes,
   const auto *header = reinterpret_cast<const RPCHeader *>(bytes);
 
   if (header->function_id == kEnqueueSyndromesFunctionId) {
-    // Mirrors DecodingSession::handle_enqueue: reject anything but the
-    // identity syndrome mapping, and ack OK even on an internal decode
-    // failure -- that surfaces at the next get_corrections instead.
+    // Mirrors DecodingSession::handle_enqueue: resolve the declared round
+    // shape before touching decoder state, and ack OK even on an internal
+    // decode failure -- that surfaces at the next get_corrections instead.
     slot::EnqueueView view;
     if (!slot::parse_enqueue(bytes, size, view))
       return {RpcStatus::BAD_REQUEST, 0};
-    if (view.syndrome_mapping_id != 0)
+    const auto mapping = dec.mapping_table.find(view.syndrome_mapping_id);
+    if (mapping == dec.mapping_table.end())
       return {RpcStatus::BAD_REQUEST, 0};
-    dec.enqueue_core(view);
+    dec.enqueue_core(view, mapping->second.type);
     return {RpcStatus::OK, 0};
   }
 
@@ -714,6 +712,8 @@ std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>>
 make_udp_sessions(
     const std::unordered_map<std::uint64_t, std::string> &endpoints,
     std::uint32_t timeout_ms) {
+  if (timeout_ms == 0)
+    throw std::invalid_argument("udp timeout must be positive");
   std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>> out;
   out.reserve(endpoints.size());
   for (const auto &[id, endpoint] : endpoints) {
@@ -732,7 +732,9 @@ make_udp_sessions(
 
 namespace {
 
-void validate(const cpu_roce_options &opts) {
+void validate(const cpu_roce_options &opts, std::uint32_t timeout_ms) {
+  if (timeout_ms == 0 || opts.connect_timeout_ms == 0)
+    throw std::invalid_argument("cpu_roce timeouts must be positive");
   if (opts.num_slots == 0 || (opts.num_slots & (opts.num_slots - 1)) != 0)
     throw std::invalid_argument(
         "cpu_roce num_slots must be a non-zero power of two");
@@ -1110,7 +1112,7 @@ std::vector<std::pair<std::uint64_t, std::unique_ptr<session>>>
 make_cpu_roce_sessions(
     const std::unordered_map<std::uint64_t, std::string> &endpoints,
     const cpu_roce_options &opts, std::uint32_t timeout_ms) {
-  validate(opts);
+  validate(opts, timeout_ms);
 #ifndef CUDAQ_QEC_PLAYBACK_CPU_ROCE
   throw std::runtime_error(
       "playback emulator was built without CPU RoCE support "

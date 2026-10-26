@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cuda-qx/core/tuple_utils.h"
@@ -43,6 +40,13 @@ void register_decoder_schema(decoder_schema schema) {
   std::lock_guard<std::mutex> lock(schema_registry_mutex());
   auto name = schema.name;
   schema_registry().insert_or_assign(std::move(name), std::move(schema));
+}
+
+/// @brief Remove a task-graph schema while its node-registry lock is held.
+/// @param name Derived task-graph schema name to remove.
+void unregister_task_graph_node_schema(const std::string &name) {
+  std::lock_guard<std::mutex> lock(schema_registry_mutex());
+  schema_registry().erase(name);
 }
 
 const decoder_schema *find_decoder_schema(const std::string &name) {
@@ -178,7 +182,8 @@ void validate_custom_args(const decoder_schema &schema,
         throw std::runtime_error("'" + key + "' is present but '" +
                                  spec->discriminator + "' is not set in " +
                                  context + ".");
-      const auto *nested_schema = find_decoder_schema(discriminator_value);
+      const auto *nested_schema =
+          find_decoder_schema(spec->discriminator_prefix + discriminator_value);
       if (!nested_schema)
         throw std::runtime_error(
             "'" + key + "' does not support " + spec->discriminator + " '" +
@@ -222,7 +227,8 @@ void materialize_default_args(const decoder_schema &schema,
         discriminator_value = args.get<std::string>(spec.discriminator);
       nested_schema = discriminator_value.empty()
                           ? nullptr
-                          : find_decoder_schema(discriminator_value);
+                          : find_decoder_schema(spec.discriminator_prefix +
+                                                discriminator_value);
       if (spec.materialize_empty && nested_schema && !args.contains(spec.key))
         args.insert(spec.key, cudaqx::heterogeneous_map());
     } else if (spec.kind == param_kind::subschema) {
@@ -264,7 +270,8 @@ void drop_non_schema_keys(const decoder_schema &schema,
     } else if (spec->kind == param_kind::discriminated &&
                args.contains(spec->discriminator)) {
       nested_schema =
-          find_decoder_schema(args.get<std::string>(spec->discriminator));
+          find_decoder_schema(spec->discriminator_prefix +
+                              args.get<std::string>(spec->discriminator));
     }
     if (nested_schema)
       if (auto *nested = std::any_cast<cudaqx::heterogeneous_map>(&kv.second))

@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -50,9 +47,9 @@ public:
   virtual void reset() {}
 
   /// True for a source that generates data on demand rather than replaying
-  /// pre-supplied rounds; required for a `stream ... until=NAME`. A
-  /// non-streamed source runs dry mid-runaway and reports SOURCE_EXHAUSTED
-  /// where the experiment needs continued growth.
+  /// pre-supplied rounds; plan() never pre-draws from it. Any source works
+  /// with `stream ... until=NAME`, but a non-streamed one can run dry first,
+  /// ending the stream with SOURCE_EXHAUSTED.
   virtual bool is_streamed() const { return false; }
 };
 
@@ -140,8 +137,8 @@ public:
   /// rounds from the current one.
   void reset() override;
 
-  /// False: data is pregenerated, and cannot be used in contexts where the
-  /// number of rounds is not known ahead of time
+  /// False: data is pregenerated, so a stream draws at most `max_rounds`
+  /// rounds per shot before SOURCE_EXHAUSTED.
   bool is_streamed() const override { return false; }
 
   /// The `max_rounds` given at construction: how many `next_round()` calls

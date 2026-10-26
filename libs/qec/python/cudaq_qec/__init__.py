@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 
 def _ensure_cuda_runtime_loaded():
@@ -115,9 +110,11 @@ generate_timelike_sparse_detector_matrix = qecrt.generate_timelike_sparse_detect
 pcm_to_sparse_vec = qecrt.pcm_to_sparse_vec
 
 multi_decoder_config = qecrt.config.multi_decoder_config
+data_artifact = qecrt.config.data_artifact
 decoder_config = qecrt.config.decoder_config
 decoder_dispatch = qecrt.config.decoder_dispatch
 transport_config = qecrt.config.transport_config
+syndrome_mapping_config = qecrt.config.syndrome_mapping_config
 transport_shape_override = qecrt.config.transport_shape_override
 configure_decoders_from_file = qecrt.config.configure_decoders_from_file
 configure_decoders_from_str = qecrt.config.configure_decoders_from_str
@@ -127,6 +124,15 @@ expand_dem_chunks = qecrt.config.expand_dem_chunks
 decoder_param_schema = qecrt.config.decoder_param_schema
 registered_decoder_schemas = qecrt.config.registered_decoder_schemas
 decoder_config_json_schema = qecrt.config.decoder_config_json_schema
+task_graph_spec = qecrt.config.task_graph_spec
+task_graph_node = qecrt.config.task_graph_node
+task_graph_edge = qecrt.config.task_graph_edge
+experimental = qecrt.experimental
+task_graph_column_range = qecrt.config.task_graph_column_range
+task_graph_ensemble = qecrt.config.task_graph_ensemble
+task_graph_ensemble_member = qecrt.config.task_graph_ensemble_member
+registered_task_graph_node_kinds = \
+    qecrt.config.registered_task_graph_node_kinds
 
 # Deprecated typed decoder-config classes, kept for backward compatibility
 # with the pre-schema API. They warn on construction; new code should assign

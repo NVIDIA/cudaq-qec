@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cudaq/qec/decoder.h"
 #include "cuda-qx/core/library_utils.h"
@@ -683,6 +680,15 @@ bool decoder::enqueue_syndrome(const uint8_t *syndrome,
   return did_decode;
 }
 
+// Unqualified forward on purpose: a plugin overriding the two-argument form
+// must still receive the round.  Qualifying it would silently run the base
+// accumulator instead, with no diagnostic.
+bool decoder::enqueue_syndrome(const uint8_t *syndrome,
+                               std::size_t syndrome_length, round_type type) {
+  (void)type;
+  return enqueue_syndrome(syndrome, syndrome_length);
+}
+
 bool decoder::enqueue_syndrome(const std::vector<uint8_t> &syndrome) {
   return enqueue_syndrome(syndrome.data(), syndrome.size());
 }
@@ -771,6 +777,11 @@ __attribute__((constructor)) void load_decoder_plugins() {
       cudaqx::__internal__::CUDAQXLibraryType::QECDecoders)};
   auto pluginPath = libPath.parent_path() / "decoder-plugins";
   load_plugins(pluginPath.string(), PluginType::DECODER);
+  // Node-kind factories remain callable for the lifetime of this process.
+  // Their plugin handles are deliberately never passed to cleanup_plugins().
+  auto nodePluginPath = libPath.parent_path() / "task-graph-plugins";
+  if (std::filesystem::exists(nodePluginPath))
+    load_plugins(nodePluginPath.string(), PluginType::TASK_GRAPH_NODE);
 }
 
 // Destructor function to clean up only decoder plugins

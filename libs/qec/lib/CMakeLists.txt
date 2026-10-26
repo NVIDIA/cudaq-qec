@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 set(LIBRARY_NAME cudaq-qec)
 set(DECODERS_LIBRARY_NAME cudaq-qec-decoders)
@@ -17,6 +12,7 @@ include(FetchContent)
 add_compile_options(-Wno-attributes) 
 
 find_package(CUDAToolkit REQUIRED)
+find_package(Threads REQUIRED)
 
 # cuStabilizer is shipped inside the cuquantum-python-cuXX pip wheels
 # (FindcuStabilizer auto-discovers it from the active Python environment).
@@ -57,6 +53,26 @@ set(DEM_SOURCES
 
 set(DECODERS_SOURCES
   decoder.cpp
+  decoding_task/decoding_task_edge_value.cpp
+  decoding_task/decoding_task_ensemble_node.cpp
+  decoding_task/decoding_task_graph.cpp
+  decoding_task/decoding_task_graph_executor.cpp
+  decoding_task/decoding_task_selection_strategy.cpp
+  decoding_task/decoding_task_stream_executor.cpp
+  decoding_task/decoding_task_graph_topology.cpp
+  decoding_task/decoding_task_node_kind_registry.cpp
+  decoding_task/decoding_task_predecoder_node.cpp
+  decoding_task/decoding_task_streaming_node.cpp
+  decoding_task/thread_pool.cpp
+  decoding_task/decoding_task_window_node.cpp
+  decoding_task/decoding_task_memory_window_node.cpp
+  decoding_task/decoding_task_xor_node.cpp
+  decoding_task/decoding_task_experiment_template.cpp
+  decoding_task/decoding_task_decoding_window.cpp
+  decoding_task/decoding_task_commitment.cpp
+  decoding_task/decoding_task_ingest_node.cpp
+  decoding_task/decoding_task_decode_window_node.cpp
+  decoding_task/decoding_task_parallel_window_pattern.cpp
   decoder_init.cpp
   decoder_config_payload.cpp
   decoder_config_schema.cpp
@@ -188,6 +204,7 @@ target_link_libraries(${DECODERS_LIBRARY_NAME}
     # decoder::get() consumes the "cuda_device_id" construction parameter
     # (validation via cudaGetDeviceCount + persistent cudaSetDevice pin).
     CUDA::cudart
+    Threads::Threads
 )
 
 if(TARGET ${LIBRARY_NAME})

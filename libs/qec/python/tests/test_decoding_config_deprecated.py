@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the deprecated typed decoder-config classes.
 
 The typed config classes (nv_qldpc_decoder_config and friends) are deprecated
@@ -838,6 +833,9 @@ def test_configure_decoders_from_str_smoke():
     decoder_config.block_size = 10
     decoder_config.syndrome_size = 3
     decoder_config.H_sparse = [1, 2, 3, -1, 6, 7, 8, -1, -1]
+    decoder_config.O_sparse = [0, -1]
+    decoder_config.D_sparse = qec.generate_timelike_sparse_detector_matrix(
+        decoder_config.syndrome_size, 2, include_first_round=False)
     decoder_config.set_decoder_custom_args(nv)
     multi_decoder_config = qec.multi_decoder_config()
     multi_decoder_config.decoders = [decoder_config]

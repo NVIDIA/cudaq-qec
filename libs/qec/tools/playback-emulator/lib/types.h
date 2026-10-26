@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -34,7 +31,8 @@ inline constexpr std::uint32_t kNoSignal = ~std::uint32_t(0);
 /// `stream_min_rounds` and returns, or continues to `stream_max_rounds`
 /// unless `until=` arrives first; `enqueue` is its one-round spelling.
 /// `enqueue_data` is wire-identical but marks a shot boundary, pulling a
-/// source's terminal readout instead of another stabilizer round.
+/// source's terminal readout instead of another stabilizer round, and tags it
+/// FINAL via `run_params::final_mapping_id`.
 enum class operation : std::uint8_t {
   reset,
   stream,

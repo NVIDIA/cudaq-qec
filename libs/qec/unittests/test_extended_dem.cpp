@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // Unit tests for extended_dem, dem_stitch(, seam_name::next_round,
 // seam_name::prev_round), dem_stitch_all(), and dem_close().
@@ -20,6 +17,7 @@
 //   - dem_close() row ordering matches monolithic model
 //   - Per-qubit noise propagates correctly through stitch
 
+#include "task_graph_test_fixtures.h"
 #include "cudaq/qec/code_matrices.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/dem_construction.h"
@@ -951,8 +949,6 @@ TEST(ExtendedDem, StitchMerged_MatchesStitchThenMergeDuplicates) {
 // initial state), bulk owns none of its own and produces detectors only at the
 // seams, and final closes the last seam.
 
-constexpr uint32_t kRep5Checks = 4;
-
 // Build hand-crafted rep5 phase chunks using the new seam-descriptor API.
 // Layout of H:
 //   init:  [interior 4 rows | next_round seam 4 rows]
@@ -963,15 +959,15 @@ extended_dem rep5_phase_init() {
   extended_dem dem;
   // H: interior (round-0 detectors) stacked above the outgoing seam rows
   auto interior = sparse_binary_matrix::from_nested_csr(
-      kRep5Checks, 9, {{0, 1, 5}, {1, 2, 6}, {2, 3, 7}, {3, 4, 8}});
-  auto next_seam = sparse_binary_matrix::from_nested_csr(kRep5Checks, 9,
+      rep5_checks, 9, {{0, 1, 5}, {1, 2, 6}, {2, 3, 7}, {3, 4, 8}});
+  auto next_seam = sparse_binary_matrix::from_nested_csr(rep5_checks, 9,
                                                          {{5}, {6}, {7}, {8}});
   // vstack: interior rows first (indices 0..3), seam rows after (4..7)
   auto combined_cols_int = interior.to_nested_csc();
   auto combined_cols_nxt = next_seam.to_nested_csc();
   // Build by stacking rows of both matrices
   const uint32_t n_cols = 9;
-  const uint32_t n_rows = 2 * kRep5Checks;
+  const uint32_t n_rows = 2 * rep5_checks;
   using idx_t = sparse_binary_matrix::index_type;
   std::vector<std::vector<idx_t>> H_csr;
   auto int_csr = interior.to_nested_csr();
@@ -983,8 +979,8 @@ extended_dem rep5_phase_init() {
   dem.H = sparse_binary_matrix::from_nested_csr(n_rows, n_cols, H_csr);
   dem.O = sparse_binary_matrix::from_nested_csr(1, 9, {{0}});
   dem.error_rates.assign(9, 0.02);
-  // next_round seam at rows [kRep5Checks, 2*kRep5Checks)
-  dem.add_seam(seam_name::next_round, kRep5Checks, 2 * kRep5Checks);
+  // next_round seam at rows [rep5_checks, 2*rep5_checks)
+  dem.add_seam(seam_name::next_round, rep5_checks, 2 * rep5_checks);
   dem.tags = {0, 1, 2, 3}; // tags for next_round seam rows
   return dem;
 }
@@ -992,8 +988,8 @@ extended_dem rep5_phase_init() {
 extended_dem rep5_phase_bulk() {
   extended_dem dem;
   auto prev_seam = sparse_binary_matrix::from_nested_csr(
-      kRep5Checks, 9, {{0, 1, 5}, {1, 2, 6}, {2, 3, 7}, {3, 4, 8}});
-  auto next_seam = sparse_binary_matrix::from_nested_csr(kRep5Checks, 9,
+      rep5_checks, 9, {{0, 1, 5}, {1, 2, 6}, {2, 3, 7}, {3, 4, 8}});
+  auto next_seam = sparse_binary_matrix::from_nested_csr(rep5_checks, 9,
                                                          {{5}, {6}, {7}, {8}});
   using idx_t = sparse_binary_matrix::index_type;
   std::vector<std::vector<idx_t>> H_csr;
@@ -1001,11 +997,11 @@ extended_dem rep5_phase_bulk() {
     H_csr.push_back(r);
   for (auto &r : next_seam.to_nested_csr())
     H_csr.push_back(r);
-  dem.H = sparse_binary_matrix::from_nested_csr(2 * kRep5Checks, 9, H_csr);
+  dem.H = sparse_binary_matrix::from_nested_csr(2 * rep5_checks, 9, H_csr);
   dem.O = sparse_binary_matrix::from_nested_csr(1, 9, {{0}});
   dem.error_rates.assign(9, 0.02);
-  dem.add_seam(seam_name::prev_round, 0, kRep5Checks);
-  dem.add_seam(seam_name::next_round, kRep5Checks, 2 * kRep5Checks);
+  dem.add_seam(seam_name::prev_round, 0, rep5_checks);
+  dem.add_seam(seam_name::next_round, rep5_checks, 2 * rep5_checks);
   dem.tags = {0, 1, 2, 3, 0, 1, 2, 3}; // 4 per seam
   return dem;
 }
@@ -1014,10 +1010,10 @@ extended_dem rep5_phase_final() {
   extended_dem dem;
   using idx_t = sparse_binary_matrix::index_type;
   dem.H = sparse_binary_matrix::from_nested_csr(
-      kRep5Checks, 5, {{0, 1}, {1, 2}, {2, 3}, {3, 4}});
+      rep5_checks, 5, {{0, 1}, {1, 2}, {2, 3}, {3, 4}});
   dem.O = sparse_binary_matrix::from_nested_csr(1, 5, {{0}});
   dem.error_rates.assign(5, 0.02);
-  dem.add_seam(seam_name::prev_round, 0, kRep5Checks);
+  dem.add_seam(seam_name::prev_round, 0, rep5_checks);
   dem.tags = {0, 1, 2, 3};
   return dem;
 }
@@ -1027,14 +1023,14 @@ TEST(ExtendedDemPhases, InitHasNoIncomingSeam) {
   // Init has no prev_round seam (nothing precedes it)
   EXPECT_FALSE(init.has_seam(seam_name::prev_round));
   EXPECT_TRUE(init.has_seam(seam_name::next_round));
-  EXPECT_EQ(init.get_seam(seam_name::next_round).num_rows(), kRep5Checks);
-  EXPECT_EQ(init.num_interior_rows(), kRep5Checks);
+  EXPECT_EQ(init.get_seam(seam_name::next_round).num_rows(), rep5_checks);
+  EXPECT_EQ(init.num_interior_rows(), rep5_checks);
 }
 
 TEST(ExtendedDemPhases, FinalHasNoOutgoingSeam) {
   const auto fin = rep5_phase_final();
   EXPECT_TRUE(fin.has_seam(seam_name::prev_round));
-  EXPECT_EQ(fin.get_seam(seam_name::prev_round).num_rows(), kRep5Checks);
+  EXPECT_EQ(fin.get_seam(seam_name::prev_round).num_rows(), rep5_checks);
   // Final has no next_round seam (nothing follows it)
   EXPECT_FALSE(fin.has_seam(seam_name::next_round));
   EXPECT_EQ(fin.num_interior_rows(), 0u);
@@ -1042,8 +1038,8 @@ TEST(ExtendedDemPhases, FinalHasNoOutgoingSeam) {
 
 TEST(ExtendedDemPhases, BulkOwnsNoInteriorRows) {
   const auto bulk = rep5_phase_bulk();
-  EXPECT_EQ(bulk.get_seam(seam_name::prev_round).num_rows(), kRep5Checks);
-  EXPECT_EQ(bulk.get_seam(seam_name::next_round).num_rows(), kRep5Checks);
+  EXPECT_EQ(bulk.get_seam(seam_name::prev_round).num_rows(), rep5_checks);
+  EXPECT_EQ(bulk.get_seam(seam_name::next_round).num_rows(), rep5_checks);
   EXPECT_EQ(bulk.num_interior_rows(), 0u);
 }
 
@@ -1065,9 +1061,9 @@ TEST(ExtendedDemPhases, StitchInitToBulk) {
                              seam_name::next_round, seam_name::prev_round);
 
   // init's own 4 detectors, then the 4 new seam detectors; bulk adds none.
-  EXPECT_EQ(ab.num_interior_rows(), 2u * kRep5Checks);
+  EXPECT_EQ(ab.num_interior_rows(), 2u * rep5_checks);
   EXPECT_EQ(ab.get_seam(seam_name::prev_round).num_rows(), 0u);
-  EXPECT_EQ(ab.get_seam(seam_name::next_round).num_rows(), kRep5Checks);
+  EXPECT_EQ(ab.get_seam(seam_name::next_round).num_rows(), rep5_checks);
   EXPECT_EQ(ab.num_faults(), 18u);
   EXPECT_EQ(ab.num_observables(), 1u);
 }
@@ -1078,15 +1074,15 @@ TEST(ExtendedDemPhases, SeamRowXorsAdjacentSyndromes) {
   const auto ab = dem_stitch(rep5_phase_init(), rep5_phase_bulk(),
                              seam_name::next_round, seam_name::prev_round);
   const auto rows = ab.H.to_nested_csr();
-  // H has 3*kRep5Checks rows: init interior + contracted seam + bulk next_round
-  ASSERT_EQ(rows.size(), 3u * kRep5Checks);
+  // H has 3*rep5_checks rows: init interior + contracted seam + bulk next_round
+  ASSERT_EQ(rows.size(), 3u * rep5_checks);
 
-  // Contracted seam rows follow init's interior rows (at index kRep5Checks).
-  // Row 0 of the seam block (rows[kRep5Checks]):
+  // Contracted seam rows follow init's interior rows (at index rep5_checks).
+  // Row 0 of the seam block (rows[rep5_checks]):
   // init measurement error 0 (col 5) plus bulk data 0,1 and meas error 0
   // (cols 9+0, 9+1, 9+5 = 9, 10, 14).
   const std::vector<sparse_binary_matrix::index_type> expected{5, 9, 10, 14};
-  EXPECT_EQ(rows[kRep5Checks], expected);
+  EXPECT_EQ(rows[rep5_checks], expected);
 }
 
 // The full init -> bulk -> final chain closes into a flat DEM whose detector
@@ -1102,7 +1098,7 @@ TEST(ExtendedDemPhases, StitchAllAndCloseChain) {
   const auto flat = dem_close(stitched);
   ASSERT_EQ(flat.detector_error_matrix.rank(), 2u);
   // 4 init detectors + 4 (init|bulk) seam + 4 (bulk|final) seam.
-  EXPECT_EQ(flat.detector_error_matrix.shape()[0], 3u * kRep5Checks);
+  EXPECT_EQ(flat.detector_error_matrix.shape()[0], 3u * rep5_checks);
   EXPECT_EQ(flat.detector_error_matrix.shape()[1], 23u);
   EXPECT_EQ(flat.observables_flips_matrix.shape()[0], 1u);
   EXPECT_EQ(flat.error_rates.size(), 23u);
@@ -1118,7 +1114,7 @@ TEST(ExtendedDemPhases, RepeatingBulkAddsOneSeamPerRound) {
     const auto flat = dem_close(dem_stitch_all(phases));
     // init detectors + one seam per adjacency (repeats + 1 of them).
     EXPECT_EQ(flat.detector_error_matrix.shape()[0],
-              (repeats + 2) * kRep5Checks);
+              (repeats + 2) * rep5_checks);
     EXPECT_EQ(flat.detector_error_matrix.shape()[1], 9u * (repeats + 1) + 5u);
   }
 }
@@ -1241,7 +1237,7 @@ TEST(ExtendedDemPhases, PreStitchedPhasesReportTheSameRounds) {
 TEST(ExtendedDemPhases, DetectorCountAgreesWithRoundMaps) {
   for (std::size_t rounds = 2; rounds <= 6; ++rounds) {
     const auto phases = rep5_phases(rounds);
-    const std::size_t want = rounds * kRep5Checks;
+    const std::size_t want = rounds * rep5_checks;
     EXPECT_EQ(dem_close_all(phases).num_detectors(), want);
     EXPECT_EQ(dem_chunks_to_d_sparse(phases).size(), want);
     EXPECT_EQ(dem_chunks_to_detector_round(phases).size(), want);
@@ -1252,17 +1248,17 @@ TEST(ExtendedDemPhases, DetectorCountAgreesWithRoundMaps) {
 TEST(ExtendedDemPhases, DSparseIsTheTimelikeLayout) {
   const uint32_t rounds = 3;
   const auto d_sparse = dem_chunks_to_d_sparse(rep5_phases(rounds));
-  ASSERT_EQ(d_sparse.size(), rounds * kRep5Checks);
+  ASSERT_EQ(d_sparse.size(), rounds * rep5_checks);
 
-  for (uint32_t k = 0; k < kRep5Checks; ++k) {
+  for (uint32_t k = 0; k < rep5_checks; ++k) {
     const std::vector<uint32_t> want{k};
     EXPECT_EQ(d_sparse[k], want);
   }
   for (uint32_t r = 1; r < rounds; ++r)
-    for (uint32_t k = 0; k < kRep5Checks; ++k) {
-      const std::vector<uint32_t> want{(r - 1) * kRep5Checks + k,
-                                       r * kRep5Checks + k};
-      EXPECT_EQ(d_sparse[r * kRep5Checks + k], want);
+    for (uint32_t k = 0; k < rep5_checks; ++k) {
+      const std::vector<uint32_t> want{(r - 1) * rep5_checks + k,
+                                       r * rep5_checks + k};
+      EXPECT_EQ(d_sparse[r * rep5_checks + k], want);
     }
 }
 
@@ -1270,7 +1266,7 @@ TEST(ExtendedDemPhases, DetectorRoundLabelsOneBandPerRound) {
   const int32_t rounds = 3;
   std::vector<int32_t> want;
   for (int32_t r = 0; r < rounds; ++r)
-    want.insert(want.end(), kRep5Checks, r);
+    want.insert(want.end(), rep5_checks, r);
   EXPECT_EQ(dem_chunks_to_detector_round(rep5_phases(rounds)), want);
 }
 
@@ -1301,7 +1297,7 @@ TEST(ExtendedDemPhases, NonContractingSeamThrows) {
 TEST(ExtendedDemPhases, MismatchedSeamTagsThrow) {
   auto bulk = rep5_phase_bulk();
   // Bulk has 2 seams × 4 rows = 8 tags; swap the first two (prev_round seam)
-  ASSERT_EQ(bulk.tags.size(), 2u * kRep5Checks);
+  ASSERT_EQ(bulk.tags.size(), 2u * rep5_checks);
   std::swap(bulk.tags[0], bulk.tags[1]);
 
   const std::vector<extended_dem> permuted{rep5_phase_init(), bulk,
@@ -1313,7 +1309,7 @@ TEST(ExtendedDemPhases, MismatchedSeamTagsThrow) {
 
 TEST(ExtendedDemPhases, CloseAllNonContractingSeamThrows) {
   // Wrong order: init, final, bulk. Width mismatch between final's next_round
-  // (0 rows) and bulk's prev_round (kRep5Checks rows).
+  // (0 rows) and bulk's prev_round (rep5_checks rows).
   const std::vector<extended_dem> broken{rep5_phase_init(), rep5_phase_final(),
                                          rep5_phase_bulk()};
   EXPECT_THROW(dem_close_all(broken), std::invalid_argument);
@@ -1330,42 +1326,6 @@ TEST(ExtendedDemPhases, FullyClosedChunkCannotBeCounted) {
 // ---------------------------------------------------------------------------
 // Declarative phase specs (new API: named phases + connections)
 // ---------------------------------------------------------------------------
-
-// Build a dem_chunks_spec for a d=5 rep code using the new generic API.
-// Phases: init (9 faults), bulk (9 faults), final (5 faults).
-// Seam: next_round → prev_round (standard memory convention).
-dem_chunks_spec rep5_spec(uint64_t num_rounds = 5) {
-  dem_chunks_spec spec;
-  spec.seam = {seam_name::next_round, seam_name::prev_round};
-  spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
-                      {phase_name::dem_bulk, phase_name::dem_bulk},
-                      {phase_name::dem_bulk, phase_name::dem_final}};
-  spec.num_rounds = num_rounds;
-
-  dem_chunk_spec init_spec;
-  init_spec.num_faults = 9;
-  // H_sparse shorthand: assigned to next_round seam only for init
-  init_spec.H_sparse = {0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1, 3, 4, 8, -1};
-  init_spec.O_sparse = {0, -1};
-  init_spec.error_rates.assign(9, 0.02);
-
-  dem_chunk_spec bulk_spec;
-  bulk_spec.num_faults = 9;
-  bulk_spec.H_sparse = {0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1, 3, 4, 8, -1};
-  bulk_spec.O_sparse = {0, -1};
-  bulk_spec.error_rates.assign(9, 0.02);
-
-  dem_chunk_spec final_spec;
-  final_spec.num_faults = 5;
-  final_spec.H_sparse = {0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1};
-  final_spec.O_sparse = {0, -1};
-  final_spec.error_rates.assign(5, 0.02);
-
-  spec.phases.push_back({phase_name::dem_init, init_spec});
-  spec.phases.push_back({phase_name::dem_bulk, bulk_spec});
-  spec.phases.push_back({phase_name::dem_final, final_spec});
-  return spec;
-}
 
 TEST(DemChunkSpec, ValidSpecValidates) {
   EXPECT_NO_THROW(rep5_spec().validate());
@@ -1462,14 +1422,14 @@ TEST(DemChunkSpec, RepeatingRoundsMatchThePhaseSequence) {
 // syndrome, every later round xors against the one before.
 dem_chunks_spec rep5_spec_with_maps(uint64_t num_rounds) {
   auto spec = rep5_spec(num_rounds);
-  spec.measurements_per_round = kRep5Checks;
+  spec.measurements_per_round = rep5_checks;
   for (auto &e : spec.phases) {
     const bool first = e.id == phase_name::dem_init;
-    for (std::int64_t k = 0; k < kRep5Checks; ++k)
+    for (std::int64_t k = 0; k < rep5_checks; ++k)
       if (first)
         e.spec.D_sparse.insert(e.spec.D_sparse.end(), {k, -1});
       else
-        e.spec.D_sparse.insert(e.spec.D_sparse.end(), {k, kRep5Checks + k, -1});
+        e.spec.D_sparse.insert(e.spec.D_sparse.end(), {k, rep5_checks + k, -1});
   }
   return spec;
 }
@@ -1537,17 +1497,17 @@ TEST(DemChunkSpec, ImplicitMemoryMapPreservesZeroLeadingBulkRounds) {
 TEST(DemChunkSpec, PerPhaseMapsAllowRoundsOfDifferentSize) {
   auto spec = rep5_spec_with_maps(3);
   auto &final_spec = rep5_phase(spec, phase_name::dem_final);
-  final_spec.num_measurements = kRep5Checks + 1;
+  final_spec.num_measurements = rep5_checks + 1;
   final_spec.D_sparse.clear();
-  for (std::int64_t k = 0; k < kRep5Checks; ++k)
+  for (std::int64_t k = 0; k < rep5_checks; ++k)
     final_spec.D_sparse.insert(final_spec.D_sparse.end(),
-                               {k, kRep5Checks + k, kRep5Checks + k + 1, -1});
+                               {k, rep5_checks + k, rep5_checks + k + 1, -1});
   const auto d_sparse = dem_chunks_to_d_sparse(spec);
-  ASSERT_EQ(d_sparse.size(), 3 * kRep5Checks);
-  for (uint32_t k = 0; k < kRep5Checks; ++k) {
-    const std::vector<uint32_t> want{kRep5Checks + k, 2 * kRep5Checks + k,
-                                     2 * kRep5Checks + k + 1};
-    EXPECT_EQ(d_sparse[2 * kRep5Checks + k], want);
+  ASSERT_EQ(d_sparse.size(), 3 * rep5_checks);
+  for (uint32_t k = 0; k < rep5_checks; ++k) {
+    const std::vector<uint32_t> want{rep5_checks + k, 2 * rep5_checks + k,
+                                     2 * rep5_checks + k + 1};
+    EXPECT_EQ(d_sparse[2 * rep5_checks + k], want);
   }
 }
 
@@ -1558,9 +1518,9 @@ TEST(DemChunkSpec, PerPhaseMapsCountMeasurementsOnlyTheNextRoundReads) {
   rep5_phase(spec, phase_name::dem_init).D_sparse = {0, -1, 0, -1,
                                                      1, -1, 1, -1};
   const auto d_sparse = dem_chunks_to_d_sparse(spec);
-  for (uint32_t k = 0; k < kRep5Checks; ++k) {
-    const std::vector<uint32_t> want{k, kRep5Checks + k};
-    EXPECT_EQ(d_sparse[kRep5Checks + k], want);
+  for (uint32_t k = 0; k < rep5_checks; ++k) {
+    const std::vector<uint32_t> want{k, rep5_checks + k};
+    EXPECT_EQ(d_sparse[rep5_checks + k], want);
   }
 }
 
@@ -1653,17 +1613,17 @@ TEST(DemChunksRerounding, ReRoundingTracksTheCompactForms) {
 TEST(DemChunkSpec, MeasurementCountKeepsUnreferencedTrailingMeasurements) {
   auto spec = rep5_spec_with_maps(3);
   // Two trailing bits of the final round that no detector row names.
-  rep5_phase(spec, phase_name::dem_final).num_measurements = kRep5Checks + 2;
+  rep5_phase(spec, phase_name::dem_final).num_measurements = rep5_checks + 2;
 
   const auto declared = dem_chunks_measurement_count(spec);
   ASSERT_TRUE(declared.has_value());
-  EXPECT_EQ(*declared, 3 * kRep5Checks + 2);
+  EXPECT_EQ(*declared, 3 * rep5_checks + 2);
 
   uint32_t widest_referenced = 0;
   for (const auto &row : dem_chunks_to_d_sparse(spec))
     for (const auto bit : row)
       widest_referenced = std::max(widest_referenced, bit + 1);
-  EXPECT_EQ(widest_referenced, 3 * kRep5Checks);
+  EXPECT_EQ(widest_referenced, 3 * rep5_checks);
   EXPECT_LT(widest_referenced, *declared);
 }
 
@@ -1677,7 +1637,7 @@ TEST(DemChunkSpec, MeasurementCountSumsEveryRoundOfTheSequence) {
   const auto spec = rep5_spec_with_maps(7);
   const auto declared = dem_chunks_measurement_count(spec);
   ASSERT_TRUE(declared.has_value());
-  EXPECT_EQ(*declared, 7 * kRep5Checks);
+  EXPECT_EQ(*declared, 7 * rep5_checks);
 }
 
 // Emptiness cannot say "mapped, and this phase contributes no detector rows":
@@ -1691,7 +1651,7 @@ TEST(DemChunkSpec, ExplicitMapFlagDistinguishesAbsentFromEmptyRows) {
 
   // Declared present: a phase with no rows is no longer a half-specified map.
   auto zero_rows = rep5_spec(3);
-  zero_rows.measurements_per_round = kRep5Checks;
+  zero_rows.measurements_per_round = rep5_checks;
   zero_rows.phases_supply_D_sparse = true;
   EXPECT_TRUE(zero_rows.has_D_sparse());
 
@@ -1725,27 +1685,27 @@ TEST(DemChunkSpec, PerPhaseMapsAllowAMeasurementFreePhase) {
   // Every bulk detector reads the previous round alone: indices below
   // previous_count name it, and this round contributes nothing to name.
   bulk.D_sparse.clear();
-  for (std::int64_t k = 0; k < kRep5Checks; ++k)
+  for (std::int64_t k = 0; k < rep5_checks; ++k)
     bulk.D_sparse.insert(bulk.D_sparse.end(), {k, -1});
 
   // The round after it must then name its own measurements alone -- see the
   // test below for why it has no other choice.
   auto &final_spec = rep5_phase(spec, phase_name::dem_final);
   final_spec.D_sparse.clear();
-  for (std::int64_t k = 0; k < kRep5Checks; ++k)
+  for (std::int64_t k = 0; k < rep5_checks; ++k)
     final_spec.D_sparse.insert(final_spec.D_sparse.end(), {k, -1});
 
   const auto d_sparse = dem_chunks_to_d_sparse(spec);
-  ASSERT_EQ(d_sparse.size(), 3 * kRep5Checks);
-  for (uint32_t k = 0; k < kRep5Checks; ++k) {
+  ASSERT_EQ(d_sparse.size(), 3 * rep5_checks);
+  for (uint32_t k = 0; k < rep5_checks; ++k) {
     // init reads its own round, bulk reads init's, final reads its own.
     EXPECT_EQ(d_sparse[k], std::vector<uint32_t>{k});
-    EXPECT_EQ(d_sparse[kRep5Checks + k], std::vector<uint32_t>{k});
-    EXPECT_EQ(d_sparse[2 * kRep5Checks + k],
-              std::vector<uint32_t>{kRep5Checks + k});
+    EXPECT_EQ(d_sparse[rep5_checks + k], std::vector<uint32_t>{k});
+    EXPECT_EQ(d_sparse[2 * rep5_checks + k],
+              std::vector<uint32_t>{rep5_checks + k});
   }
   // The gadget adds nothing to the stream, so the shot is two rounds wide.
-  EXPECT_EQ(dem_chunks_measurement_count(spec), 2u * kRep5Checks);
+  EXPECT_EQ(dem_chunks_measurement_count(spec), 2u * rep5_checks);
 }
 
 // ...but the round after it cannot see past it. The window is the previous
@@ -1758,7 +1718,7 @@ TEST(DemChunkSpec, PerPhaseMapsCannotReachPastAMeasurementFreePhase) {
   rep5_phase(spec, phase_name::dem_bulk).num_measurements = 0;
   auto &bulk = rep5_phase(spec, phase_name::dem_bulk);
   bulk.D_sparse.clear();
-  for (std::int64_t k = 0; k < kRep5Checks; ++k)
+  for (std::int64_t k = 0; k < rep5_checks; ++k)
     bulk.D_sparse.insert(bulk.D_sparse.end(), {k, -1});
 
   // The final round differencing against the round before the gadget is the
@@ -1767,19 +1727,19 @@ TEST(DemChunkSpec, PerPhaseMapsCannotReachPastAMeasurementFreePhase) {
   // round's first bit.
   auto &final_spec = rep5_phase(spec, phase_name::dem_final);
   final_spec.D_sparse.clear();
-  for (std::int64_t k = 0; k < kRep5Checks; ++k)
+  for (std::int64_t k = 0; k < rep5_checks; ++k)
     final_spec.D_sparse.insert(final_spec.D_sparse.end(),
-                               {k, kRep5Checks + k, -1});
+                               {k, rep5_checks + k, -1});
   EXPECT_THROW(dem_chunks_to_d_sparse(spec), std::invalid_argument);
 
   // Whatever it does name lands in its own round, never earlier.
   final_spec.D_sparse.clear();
-  for (std::int64_t k = 0; k < kRep5Checks; ++k)
+  for (std::int64_t k = 0; k < rep5_checks; ++k)
     final_spec.D_sparse.insert(final_spec.D_sparse.end(), {k, -1});
   const auto d_sparse = dem_chunks_to_d_sparse(spec);
-  for (uint32_t k = 0; k < kRep5Checks; ++k)
-    EXPECT_EQ(d_sparse[2 * kRep5Checks + k],
-              std::vector<uint32_t>{kRep5Checks + k});
+  for (uint32_t k = 0; k < rep5_checks; ++k)
+    EXPECT_EQ(d_sparse[2 * rep5_checks + k],
+              std::vector<uint32_t>{rep5_checks + k});
 }
 
 // Building D must not expand a chain proportional to the round count. D is
@@ -1791,23 +1751,23 @@ TEST(DemChunkSpec, PerPhaseMapsBuildDWithoutExpandingEveryRound) {
   constexpr uint64_t deep_rounds = 20000;
   auto spec = rep5_spec_with_maps(deep_rounds);
   const auto d_sparse = dem_chunks_to_d_sparse(spec);
-  ASSERT_EQ(d_sparse.size(), deep_rounds * kRep5Checks);
+  ASSERT_EQ(d_sparse.size(), deep_rounds * rep5_checks);
 
   // Spot-check the ends and the middle against the round-local convention:
   // round 0 reads its own syndrome, every later round xors against the one
   // before it.
-  for (uint32_t k = 0; k < kRep5Checks; ++k) {
+  for (uint32_t k = 0; k < rep5_checks; ++k) {
     EXPECT_EQ(d_sparse[k], std::vector<uint32_t>{k});
-    const auto middle = (deep_rounds / 2) * kRep5Checks + k;
+    const auto middle = (deep_rounds / 2) * rep5_checks + k;
     EXPECT_EQ(d_sparse[middle], (std::vector<uint32_t>{
-                                    static_cast<uint32_t>(middle - kRep5Checks),
+                                    static_cast<uint32_t>(middle - rep5_checks),
                                     static_cast<uint32_t>(middle)}));
-    const auto last = (deep_rounds - 1) * kRep5Checks + k;
+    const auto last = (deep_rounds - 1) * rep5_checks + k;
     EXPECT_EQ(d_sparse[last],
-              (std::vector<uint32_t>{static_cast<uint32_t>(last - kRep5Checks),
+              (std::vector<uint32_t>{static_cast<uint32_t>(last - rep5_checks),
                                      static_cast<uint32_t>(last)}));
   }
-  EXPECT_EQ(dem_chunks_measurement_count(spec), deep_rounds * kRep5Checks);
+  EXPECT_EQ(dem_chunks_measurement_count(spec), deep_rounds * rep5_checks);
 }
 
 TEST(DemChunkSpec, PerPhaseMapsMustCoverEveryPhase) {
@@ -1821,7 +1781,7 @@ TEST(DemChunkSpec, PerPhaseMapsNeedAMeasurementCount) {
   spec.measurements_per_round.reset();
   EXPECT_THROW(spec.validate(), std::invalid_argument);
   for (auto &e : spec.phases)
-    e.spec.num_measurements = kRep5Checks;
+    e.spec.num_measurements = rep5_checks;
   EXPECT_NO_THROW(spec.validate());
 }
 
@@ -1832,13 +1792,30 @@ TEST(DemChunkSpec, PerPhaseMapsMustNumberTheChunksDetectors) {
   EXPECT_THROW(dem_chunks_to_d_sparse(spec), std::invalid_argument);
 }
 
+// A phase that fails to build is named in the error.
+TEST(DemChunkSpec, PerPhaseMapsNameAPhaseThatFailsToBuild) {
+  auto spec = rep5_spec_with_maps(3);
+  auto &bulk = rep5_phase(spec, phase_name::dem_bulk);
+  bulk.seam_specs = {{seam_name::prev_round, {bulk.H_sparse, {0, -1}}},
+                     {seam_name::next_round, {bulk.H_sparse, {}}}};
+  bulk.H_sparse.clear();
+  try {
+    dem_chunks_to_d_sparse(spec);
+    ADD_FAILURE() << "a per-seam O_sparse built";
+  } catch (const std::invalid_argument &e) {
+    EXPECT_NE(std::string(e.what()).find("dem_chunks.bulk: per-seam O_sparse"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
 TEST(DemChunkSpec, PerPhaseMapsMustNameMeasurementsInReach) {
   auto spec = rep5_spec_with_maps(3);
-  rep5_phase(spec, phase_name::dem_final).D_sparse.front() = 2 * kRep5Checks;
+  rep5_phase(spec, phase_name::dem_final).D_sparse.front() = 2 * rep5_checks;
   EXPECT_THROW(dem_chunks_to_d_sparse(spec), std::invalid_argument);
 
   auto first = rep5_spec_with_maps(3);
-  rep5_phase(first, phase_name::dem_init).D_sparse.front() = kRep5Checks;
+  rep5_phase(first, phase_name::dem_init).D_sparse.front() = rep5_checks;
   EXPECT_THROW(dem_chunks_to_d_sparse(first), std::invalid_argument);
 
   auto unterminated = rep5_spec_with_maps(3);
@@ -1849,6 +1826,205 @@ TEST(DemChunkSpec, PerPhaseMapsMustNameMeasurementsInReach) {
   rep5_phase(negative, phase_name::dem_final).D_sparse.front() = -2;
   EXPECT_THROW(negative.validate(), std::invalid_argument);
 }
+
+// Expect validate() to reject spec with a message containing text.
+void expect_rejected(const dem_chunks_spec &spec, const std::string &text) {
+  try {
+    spec.validate();
+    ADD_FAILURE() << "expected a rejection naming: " << text;
+  } catch (const std::invalid_argument &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+// Every phase a connection names needs a spec.
+TEST(DemChunkSpec, ConnectionsMustNamePhasesWithSpecs) {
+  auto spec = rep5_spec();
+  spec.connections.push_back(
+      {phase_name::dem_final, phase_id::from_name("readout")});
+  expect_rejected(spec, "names phase 'readout', which has no spec");
+}
+
+// The observable count is the O_sparse row count every phase agrees on.
+TEST(DemChunkSpec, PhasesMustAgreeOnTheObservableCount) {
+  auto streaming = rep5_spec();
+  auto two = rep5_spec();
+  auto none = rep5_spec();
+  streaming.num_rounds.reset();
+  EXPECT_EQ(rep5_spec().num_observables(), 1u);
+  EXPECT_EQ(streaming.num_observables(), 1u);
+
+  rep5_phase(two, phase_name::dem_bulk).O_sparse = {0, -1, 1, -1};
+  expect_rejected(two, "phase 'bulk' has 2 observable rows");
+  EXPECT_THROW(two.num_observables(), std::invalid_argument);
+
+  for (auto &e : none.phases)
+    e.spec.O_sparse.clear();
+  EXPECT_NO_THROW(none.validate());
+  EXPECT_EQ(none.num_observables(), 0u);
+}
+
+// A phase no connection names is never built, so its O_sparse rows are not
+// counted.
+TEST(DemChunkSpec, PhasesOutsideTheChainDoNotCountObservables) {
+  auto spec = rep5_spec(3);
+  auto spare = rep5_phase(spec, phase_name::dem_bulk);
+  spare.O_sparse = {0, -1, 1, -1};
+  spec.phases.push_back({phase_id::from_name("spare"), spare});
+  EXPECT_NO_THROW(spec.validate());
+  EXPECT_EQ(spec.num_observables(), 1u);
+  EXPECT_EQ(dem_chunks_from_spec(spec).size(), 3u);
+}
+
+// observable_names, when given, names each observable once.
+TEST(DemChunkSpec, ObservableNamesNameEachObservableOnce) {
+  auto spec = rep5_spec();
+  auto two = rep5_spec();
+  spec.observable_names = {"Z_L"};
+  EXPECT_NO_THROW(spec.validate());
+  spec.observable_names = {"Z_L", "X_L"};
+  expect_rejected(spec, "2 observable_names for 1 observables");
+
+  for (auto &e : two.phases)
+    e.spec.O_sparse = {0, -1, 1, -1};
+  two.observable_names = {"Z_L", "X_L"};
+  EXPECT_NO_THROW(two.validate());
+  two.observable_names = {"Z_L", "Z_L"};
+  expect_rejected(two, "observable_names repeats 'Z_L'");
+}
+
+// m2o_sparse sits only on the last phase, with one row per observable inside
+// that phase's round.
+TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase) {
+  auto spec = rep5_spec(3);
+  spec.measurements_per_round = rep5_checks;
+  rep5_phase(spec, phase_name::dem_final).m2o_sparse = {0, 3, -1};
+  EXPECT_NO_THROW(spec.validate());
+  auto streaming = spec;
+  streaming.num_rounds.reset();
+  EXPECT_NO_THROW(streaming.validate());
+
+  auto early = spec;
+  rep5_phase(early, phase_name::dem_bulk).m2o_sparse = {0, -1};
+  expect_rejected(early, "only the last phase");
+
+  // A chain that ends on its repeating phase has no readout round.
+  auto open = spec;
+  open.connections = {{phase_name::dem_init, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_bulk}};
+  open.phases.pop_back();
+  rep5_phase(open, phase_name::dem_bulk).m2o_sparse = {0, -1};
+  expect_rejected(open, "only the last phase");
+
+  auto rows = spec;
+  rep5_phase(rows, phase_name::dem_final).m2o_sparse = {0, -1, 1, -1};
+  expect_rejected(rows, "2 m2o_sparse rows for 1 observables");
+
+  auto past = spec;
+  rep5_phase(past, phase_name::dem_final).m2o_sparse = {rep5_checks, -1};
+  expect_rejected(past, "m2o_sparse reads measurement 4, past the 4");
+
+  // Without D_sparse the memory convention fixes the readout round's width,
+  // so the map needs no count; with D_sparse it does.
+  auto uncounted = spec;
+  uncounted.measurements_per_round.reset();
+  EXPECT_NO_THROW(uncounted.validate());
+  auto mapped = rep5_spec_with_maps(3);
+  mapped.measurements_per_round.reset();
+  rep5_phase(mapped, phase_name::dem_final).m2o_sparse = {0, 3, -1};
+  expect_rejected(mapped, "measurement count");
+
+  auto unterminated = spec;
+  rep5_phase(unterminated, phase_name::dem_final).m2o_sparse = {0};
+  expect_rejected(unterminated, "m2o_sparse must end with a -1");
+  auto negative = spec;
+  rep5_phase(negative, phase_name::dem_final).m2o_sparse = {-2, -1};
+  expect_rejected(negative, "m2o_sparse index -2 out of range");
+  auto repeated = spec;
+  rep5_phase(repeated, phase_name::dem_final).m2o_sparse = {1, 1, -1};
+  expect_rejected(repeated, "m2o_sparse duplicate");
+} // end - TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase)
+
+// A branch has two sinks, but the chain has no last phase to read out.
+TEST(DemChunkSpec, ReadoutMapNeedsALinearChain) {
+  auto spec = rep5_spec(3);
+  spec.measurements_per_round = rep5_checks;
+  spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
+                      {phase_name::dem_init, phase_name::dem_final}};
+  rep5_phase(spec, phase_name::dem_bulk).m2o_sparse = {0, -1};
+  rep5_phase(spec, phase_name::dem_final).m2o_sparse = {0, -1};
+  expect_rejected(spec, "multiple non-self outgoing edges");
+}
+
+// layout() orders the phases around the repeating one for a shot of any
+// length, and agrees with repeating_rounds() at a fixed one.
+TEST(DemChunkSpec, LayoutListsThePhasesAroundTheRepeatingOne) {
+  auto spec = multi_terminal_memory_spec(5, 3);
+  auto bare = rep5_spec();
+  auto once = rep5_spec();
+  const std::vector<phase_id> prefix{phase_name::dem_init};
+  const std::vector<phase_id> suffix{phase_id::from_name("terminal0"),
+                                     phase_id::from_name("terminal1"),
+                                     phase_name::dem_final};
+  spec.num_rounds.reset();
+  const auto layout = spec.layout();
+  EXPECT_EQ(layout.prefix, prefix);
+  EXPECT_TRUE(layout.repeating == phase_name::dem_bulk);
+  EXPECT_EQ(layout.suffix, suffix);
+  spec.num_rounds = 9;
+  EXPECT_EQ(spec.repeating_rounds().prefix, layout.prefix.size());
+  EXPECT_EQ(spec.repeating_rounds().suffix, layout.suffix.size());
+
+  bare.phases = {bare.phases[1]};
+  bare.connections = {{phase_name::dem_bulk, phase_name::dem_bulk}};
+  EXPECT_TRUE(bare.layout().prefix.empty());
+  EXPECT_TRUE(bare.layout().suffix.empty());
+  once.connections = {{phase_name::dem_init, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_final}};
+  EXPECT_THROW(once.layout(), std::invalid_argument);
+} // end - TEST(DemChunkSpec, LayoutListsThePhasesAroundTheRepeatingOne)
+
+// detectors_of() counts a phase's incoming seam band in either chunk form.
+TEST(DemChunkSpec, DetectorsOfCountsTheIncomingSeamBand) {
+  const auto spec = rep5_spec();
+  dem_chunk_spec narrow_out;
+  for (const auto &e : spec.phases)
+    EXPECT_EQ(spec.detectors_of(e.spec), rep5_checks);
+  // Per-seam form: three incoming detectors, one outgoing.
+  narrow_out.num_faults = 2;
+  narrow_out.error_rates = {0.01, 0.01};
+  narrow_out.seam_specs = {
+      {seam_name::prev_round, {{0, -1, 1, -1, 0, 1, -1}, {}}},
+      {seam_name::next_round, {{0, -1}, {}}}};
+  EXPECT_EQ(spec.detectors_of(narrow_out), 3u);
+}
+
+// A wider final round's own num_measurements bounds m2o_sparse, once
+// D_sparse rows say how the round's measurements form detectors.
+TEST(DemChunkSpec, ReadoutMapReadsAWiderFinalRound) {
+  auto plain = rep5_spec(3);
+  auto spec = rep5_spec_with_maps(3);
+  auto &final_spec = rep5_phase(spec, phase_name::dem_final);
+  // Without D_sparse every round measures one bit per detector (the memory
+  // convention of dem_chunks_to_d_sparse()), so num_measurements cannot
+  // widen the readout round.
+  plain.measurements_per_round = rep5_checks;
+  rep5_phase(plain, phase_name::dem_final).num_measurements = rep5_checks + 1;
+  rep5_phase(plain, phase_name::dem_final).m2o_sparse = {0, 1, 2, 3, 4, -1};
+  expect_rejected(plain, "m2o_sparse reads measurement 4, past the 4 "
+                         "measurements its round has; without D_sparse");
+
+  // With D_sparse rows, the readout round is as wide as its count.
+  final_spec.num_measurements = rep5_checks + 1;
+  final_spec.D_sparse.clear();
+  for (std::int64_t k = 0; k < rep5_checks; ++k)
+    final_spec.D_sparse.insert(final_spec.D_sparse.end(),
+                               {k, rep5_checks + k, rep5_checks + k + 1, -1});
+  final_spec.m2o_sparse = {0, 1, 2, 3, 4, -1};
+  EXPECT_NO_THROW(spec.validate());
+  final_spec.m2o_sparse = {rep5_checks + 1, -1};
+  expect_rejected(spec, "m2o_sparse reads measurement 5, past the 5");
+} // end - TEST(DemChunkSpec, ReadoutMapReadsAWiderFinalRound)
 
 TEST(DemChunkSpec, NumFaultsMustFitUint32) {
   dem_chunk_spec spec;
@@ -1877,8 +2053,8 @@ TEST(DemChunkSpec, ExpandsToRequestedRoundCount) {
                  chunks.back().get_seam(seam_name::next_round).num_rows() > 0);
     const auto flat = dem_close_all(chunks);
     // rounds seam contractions: the initial-state band (init's prev_round vs
-    // zero) plus (rounds-1) inter-chunk XOR boundaries = rounds * kRep5Checks.
-    EXPECT_EQ(flat.detector_error_matrix.shape()[0], rounds * kRep5Checks);
+    // zero) plus (rounds-1) inter-chunk XOR boundaries = rounds * rep5_checks.
+    EXPECT_EQ(flat.detector_error_matrix.shape()[0], rounds * rep5_checks);
   }
 }
 
@@ -1943,16 +2119,6 @@ TEST(ExtendedDemPhases, MismatchedSeamWidthThrows) {
 // and what is checked here, is the shape of the problem each round poses.
 // ---------------------------------------------------------------------------
 
-// Fault-column offsets of the phase chunks within the closed model, plus a
-// trailing total: chunk i owns columns [offsets[i], offsets[i + 1]).
-std::vector<std::size_t>
-rep5_fault_offsets(const std::vector<extended_dem> &phases) {
-  std::vector<std::size_t> offsets{0};
-  for (const auto &chunk : phases)
-    offsets.push_back(offsets.back() + chunk.num_faults());
-  return offsets;
-}
-
 using dense_block = std::vector<std::vector<uint8_t>>;
 
 dense_block block_of(const cudaqx::tensor<uint8_t> &m, std::size_t row_begin,
@@ -1972,11 +2138,34 @@ dense_block block_of(const cudaqx::tensor<uint8_t> &m, std::size_t row_begin,
 // reach: its own, and its predecessor's.
 dense_block round_band(const std::vector<extended_dem> &phases,
                        std::size_t round) {
-  const auto offsets = rep5_fault_offsets(phases);
+  const auto offsets = dem_chunks_to_fault_offsets(phases);
   const auto closed = dem_close_all(phases);
-  return block_of(closed.detector_error_matrix, round * kRep5Checks,
-                  (round + 1) * kRep5Checks,
+  return block_of(closed.detector_error_matrix, round * rep5_checks,
+                  (round + 1) * rep5_checks,
                   offsets[round == 0 ? 0 : round - 1], offsets[round + 1]);
+}
+
+// Offsets must be cumulative rather than a uniform stride: rep-5's boundary
+// phases carry fewer faults than its bulk, and the closed model concatenates
+// whatever each chunk owns.
+TEST(ExtendedDemStreaming, FaultOffsetsAccumulatePerChunkCounts) {
+  const auto phases = rep5_phases(4);
+  const auto offsets = dem_chunks_to_fault_offsets(phases);
+
+  ASSERT_EQ(offsets.size(), phases.size() + 1);
+  EXPECT_EQ(offsets.front(), 0u);
+  for (std::size_t i = 0; i < phases.size(); ++i)
+    EXPECT_EQ(offsets[i + 1] - offsets[i], phases[i].num_faults())
+        << "chunk " << i;
+  EXPECT_EQ(offsets.back(), dem_close_all(phases).num_error_mechanisms());
+
+  // The final phase is narrower than the bulk, so a uniform stride would have
+  // put offsets.back() past the end of the closed model.
+  EXPECT_LT(phases.back().num_faults(), phases[1].num_faults());
+}
+
+TEST(ExtendedDemStreaming, FaultOffsetsOfNoChunksIsJustTheTotal) {
+  EXPECT_EQ(dem_chunks_to_fault_offsets({}), std::vector<std::size_t>{0});
 }
 
 // The locality claim. A round's detectors are supported entirely on two
@@ -1985,15 +2174,15 @@ dense_block round_band(const std::vector<extended_dem> &phases,
 TEST(ExtendedDemStreaming, BandsTouchOnlyTwoAdjacentChunks) {
   for (std::size_t rounds = 2; rounds <= 7; ++rounds) {
     const auto phases = rep5_phases(rounds);
-    const auto offsets = rep5_fault_offsets(phases);
+    const auto offsets = dem_chunks_to_fault_offsets(phases);
     const auto closed = dem_close_all(phases);
     const auto &H = closed.detector_error_matrix;
-    ASSERT_EQ(H.shape()[0], rounds * kRep5Checks);
+    ASSERT_EQ(H.shape()[0], rounds * rep5_checks);
 
     for (std::size_t round = 0; round < rounds; ++round) {
       const std::size_t lo = offsets[round == 0 ? 0 : round - 1];
       const std::size_t hi = offsets[round + 1];
-      for (std::size_t r = round * kRep5Checks; r < (round + 1) * kRep5Checks;
+      for (std::size_t r = round * rep5_checks; r < (round + 1) * rep5_checks;
            ++r)
         for (std::size_t c = 0; c < H.shape()[1]; ++c)
           if (H.at({r, c}) != 0u)
@@ -2010,7 +2199,7 @@ TEST(ExtendedDemStreaming, BandsTouchOnlyTwoAdjacentChunks) {
 // dimensions -- the identical matrix, for every round and every round count.
 TEST(ExtendedDemStreaming, EveryBulkRoundPosesOneFixedProblem) {
   const auto reference = round_band(rep5_phases(5), 2);
-  ASSERT_EQ(reference.size(), kRep5Checks);
+  ASSERT_EQ(reference.size(), rep5_checks);
   ASSERT_EQ(reference.front().size(), 18u) << "two bulk chunks of 9 faults";
 
   for (std::size_t rounds = 4; rounds <= 9; ++rounds) {
@@ -2044,12 +2233,12 @@ TEST(ExtendedDemStreaming, BoundaryRoundsPoseFixedProblemsToo) {
 TEST(ExtendedDemStreaming, DetectorsNeedOneRoundOfLookback) {
   for (std::size_t rounds = 2; rounds <= 7; ++rounds) {
     const auto d_sparse = dem_chunks_to_d_sparse(rep5_phases(rounds));
-    ASSERT_EQ(d_sparse.size(), rounds * kRep5Checks);
+    ASSERT_EQ(d_sparse.size(), rounds * rep5_checks);
 
     for (std::size_t det = 0; det < d_sparse.size(); ++det) {
-      const std::size_t round = det / kRep5Checks;
-      const std::size_t earliest = (round == 0 ? 0 : round - 1) * kRep5Checks;
-      const std::size_t past_end = (round + 1) * kRep5Checks;
+      const std::size_t round = det / rep5_checks;
+      const std::size_t earliest = (round == 0 ? 0 : round - 1) * rep5_checks;
+      const std::size_t past_end = (round + 1) * rep5_checks;
       for (const auto bit : d_sparse[det])
         EXPECT_TRUE(bit >= earliest && bit < past_end)
             << "rounds=" << rounds << " detector=" << det << " reads bit "
@@ -2081,7 +2270,7 @@ std::vector<extended_dem> step_chunks(const std::vector<extended_dem> &phases,
 TEST(ExtendedDemStreaming, AWindowIsTheExperimentRestrictedToItsOwnChunks) {
   for (std::size_t rounds = 3; rounds <= 8; ++rounds) {
     const auto phases = rep5_phases(rounds);
-    const auto offsets = rep5_fault_offsets(phases);
+    const auto offsets = dem_chunks_to_fault_offsets(phases);
     const auto whole = dem_close_all(phases);
 
     // Steps run 0..R inclusive, the opening and the flush included.
@@ -2091,8 +2280,8 @@ TEST(ExtendedDemStreaming, AWindowIsTheExperimentRestrictedToItsOwnChunks) {
 
       const std::size_t first_chunk = step == 0 ? 0 : step - 1;
       const std::size_t past_chunk = std::min(step, rounds - 1) + 1;
-      const std::size_t row_begin = first_chunk * kRep5Checks;
-      const std::size_t row_end = past_chunk * kRep5Checks;
+      const std::size_t row_begin = first_chunk * rep5_checks;
+      const std::size_t row_end = past_chunk * rep5_checks;
 
       ASSERT_EQ(window.num_detectors(), row_end - row_begin)
           << "rounds=" << rounds << " step=" << step;
@@ -2122,7 +2311,7 @@ TEST(ExtendedDemStreaming, AWindowIsTheExperimentRestrictedToItsOwnChunks) {
 TEST(ExtendedDemStreaming, AWindowCarriesItsChunksObservables) {
   const std::size_t rounds = 5;
   const auto phases = rep5_phases(rounds);
-  const auto offsets = rep5_fault_offsets(phases);
+  const auto offsets = dem_chunks_to_fault_offsets(phases);
   const auto whole = dem_close_all(phases);
 
   for (std::size_t step = 0; step <= rounds; ++step) {

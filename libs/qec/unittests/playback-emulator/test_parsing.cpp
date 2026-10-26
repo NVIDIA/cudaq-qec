@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /// Tests the input format and schedule data model: strict
 /// parsing, arena packing, and tick -> deadline_ns resolution.
@@ -355,15 +352,9 @@ TEST(ParserAdversarial, ArithmeticThatWouldOverflowIsRejectedNotWrapped) {
                       18446744073709551615ull);
 }
 
-TEST(ParserAdversarial, ATickNsOfZeroCollapsesEveryDeadlineToZero) {
-  // tick * 0 == 0: no overflow, every event just fires at t0. Semantically
-  // odd but not a crash -- this documents the current behaviour.
-  for (const char *text : {"0 reset\n", "500 reset\n"}) {
-    SCOPED_TRACE(text);
-    auto sched = parse(text, kTwoDecoders, /*tick_ns=*/0);
-    ASSERT_EQ(sched.events.size(), 1u);
-    EXPECT_EQ(sched.events[0].deadline_ns, 0u);
-  }
+TEST(ParserAdversarial, ATickNsOfZeroIsRejected) {
+  EXPECT_THROW(parse("0 reset\n", kTwoDecoders, /*tick_ns=*/0),
+               std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------
