@@ -129,6 +129,7 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("kind", &task_graph_node_config::kind)
       .def_rw("node_params", &task_graph_node_config::node_params)
       .def_rw("dem", &task_graph_node_config::dem)
+      .def_rw("windows", &task_graph_node_config::windows)
       .def_rw("d_sparse", &task_graph_node_config::d_sparse)
       .def_rw("o_sparse", &task_graph_node_config::o_sparse)
       .def_rw("h_sparse", &task_graph_node_config::h_sparse)
@@ -185,7 +186,13 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("async_coordinator_cpu",
               &task_graph_options::async_coordinator_cpu)
       .def_rw("async_spin_pause_iters",
-              &task_graph_options::async_spin_pause_iters);
+              &task_graph_options::async_spin_pause_iters)
+      .def_rw("async_num_workers", &task_graph_options::async_num_workers,
+              "Pool threads for an asynchronous graph; None sizes the pool\n"
+              "from the graph. Not applied yet: a graph rejects it.")
+      .def_rw("async_worker_cpus", &task_graph_options::async_worker_cpus,
+              "CPUs for the pool threads, round-robin; empty inherits the\n"
+              "process's affinity. Not applied yet: a graph rejects it.");
 
   // -------------------------------------------------------------------------
   // DecodingTaskGraph
