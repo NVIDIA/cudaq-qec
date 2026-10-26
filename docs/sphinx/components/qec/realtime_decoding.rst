@@ -58,7 +58,7 @@ Additional quantum gates can be applied, and only when `get_corrections` is call
 Memory experiment configuration generator
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``memory-experiment-generator`` prepares the model and writes one ``server.yaml``
+``memory-experiment-generator`` prepares the model and writes one YAML file
 for a finite Surface Code memory experiment using the public ``parallel_window``
 configuration. It supports X/Z bases and independent logical patches. For example,
 in a full QEC build with CUDA-Q, Stim and PyMatching:
@@ -67,7 +67,8 @@ in a full QEC build with CUDA-Q, Stim and PyMatching:
 
    cmake --build build --target memory-experiment-generator
    build/bin/memory-experiment-generator \
-     --distance=3 --rounds=26 --basis=Z --decoder=pymatching
+     --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
+     --output=memory.yaml
 
 Rounds count extraction cycles, excluding terminal data-qubit readout; at least
 four cycles and an odd distance of at least three are required. The generated YAML
@@ -76,9 +77,9 @@ syndrome mappings. Output defaults to corrections;
 ``--pattern-arg=output=corrected_logical`` requests the corrected logical outcome.
 ``--help`` lists geometry, decoder, pattern and per-graph worker options.
 
-The generator is a standalone tool. Its default output is ``server.yaml`` in
-the working directory; ``--output=PATH`` selects another destination. Generation
-never overwrites an existing file or symlink. Wait for successful completion,
+The generator is a standalone tool and requires ``--output=PATH``. It has no
+default filename or implicit output location. Generation never overwrites an
+existing file or symlink. Wait for successful completion,
 then pass the file explicitly to ``decoding_server --config=PATH`` when the
 runtime is available. Server configuration discovery and the service's
 environment variables are unchanged. Exit status is zero for successful

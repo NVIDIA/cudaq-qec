@@ -1,7 +1,7 @@
 # Memory-experiment generator
 
 This public tool prepares a bounded Surface Code model and writes one
-`server.yaml` containing the framework's public `parallel_window`
+YAML file containing the framework's public `parallel_window`
 configuration. Experiment, decoder and pattern parameters are command-line
 inputs. The supported scope is finite-length Surface Code experiments;
 execution requires the pending parallel-window runtime.
@@ -21,7 +21,8 @@ In a full QEC build configured with CUDA-Q, Stim and realtime configuration:
 ```sh
 cmake --build build --target memory-experiment-generator
 build/bin/memory-experiment-generator \
-  --distance=3 --rounds=26 --basis=Z --decoder=pymatching
+  --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
+  --output=memory.yaml
 ```
 
 This is the distance-three reference. A/B commit and buffer widths
@@ -36,7 +37,7 @@ For a longer experiment with two independent patches:
 ```sh
 build/bin/memory-experiment-generator \
   --distance=5 --rounds=1000 --basis=X --logical-qubits=2 \
-  --decoder=pymatching
+  --decoder=pymatching --output=long-memory.yaml
 ```
 
 For PyMatching, this A/B profile writes `merge_strategy: smallest_weight` when
@@ -60,9 +61,9 @@ configuration before generating another; the tool never replaces it.
 
 ## Output and server handoff
 
-This is a standalone YAML-generation tool. It writes `server.yaml` in the
-working directory by default; `--output=PATH` selects another file. Relative
-paths resolve from the generator's working directory. The tool does not read
+This is a standalone YAML-generation tool. `--output=PATH` is required;
+there is no default filename or implicit output location. Relative paths
+resolve from the generator's working directory. The tool does not read
 the decoding service's `CUDAQ_QEC_DECODER_CONFIG` environment variable or
 change how the server finds its configuration.
 
@@ -112,7 +113,7 @@ Arguments use `--name=value` form; there is no JSON or YAML input format.
 | `--decoder-arg` | Repeatable `PATH=VALUE`, typed by the registered decoder schema |
 | `--pattern-arg` | Repeatable `PATH=VALUE`, typed by the registered `parallel_window` schema |
 | `--workers-per-graph` | Optional positive pool-worker count for each patch's graph; excludes its coordinator |
-| `--output` | YAML destination; default `server.yaml` in the working directory; parent must exist |
+| `--output` | Required YAML destination; parent must exist; existing entries are never replaced |
 
 Window geometry belongs to the A/B scheduling scheme, not to an individual
 decoder's parameters. Every `parallel_window` configuration requires commit
@@ -141,6 +142,7 @@ arguments, but are validated against the linked framework's registered
 ```sh
 build/bin/memory-experiment-generator \
   --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
+  --output=pattern-memory.yaml \
   --pattern-arg=output=corrected_logical \
   --pattern-arg=boundary_prior=0.01 \
   --pattern-arg=verify_residual=report \

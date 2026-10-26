@@ -16,8 +16,6 @@
 
 namespace {
 
-constexpr auto default_output_filename = "server.yaml";
-
 std::uint64_t integer(std::string_view text, std::string_view flag) {
   std::uint64_t value = 0;
   const auto parsed =
@@ -44,12 +42,13 @@ void usage() {
   std::cout
       << "Usage: memory-experiment-generator --distance=N --rounds=T "
          "--basis=X|Z\n"
-         "       --decoder=NAME [--logical-qubits=N] [--error-rate=P]\n"
+         "       --decoder=NAME --output=PATH [--logical-qubits=N] "
+         "[--error-rate=P]\n"
          "       [--code=surface_code]\n"
          "       [--commit-rounds=N] [--buffer-rounds=N]\n"
          "       [--gap-rounds=N] [--pattern-arg=PATH=VALUE ...]\n"
          "       [--decoder-arg=PATH=VALUE ...]\n"
-         "       [--workers-per-graph=N] [--output=PATH]\n"
+         "       [--workers-per-graph=N]\n"
          "\nGenerates standalone YAML for a Surface Code memory experiment.\n"
          "--distance must be odd and at least 3.\n"
          "--rounds must be at least 4 extraction cycles, excluding readout.\n"
@@ -64,7 +63,7 @@ void usage() {
          "Each patch has its own graph; coordinator threads are additional.\n"
          "Omitting --workers-per-graph preserves framework execution "
          "defaults.\n"
-         "--output defaults to server.yaml in the working directory.\n"
+         "--output=PATH is required; there is no default output file.\n"
          "The parent must exist; an existing configuration is never replaced.\n"
          "Pass the generated path explicitly: decoding_server --config=PATH.\n"
          "Server execution requires parallel-window runtime support.\n"
@@ -113,7 +112,8 @@ int main(int argc, char **argv) {
       if (!values.emplace(name, argument.substr(equals + 1)).second)
         throw std::invalid_argument("duplicate option: --" + name);
     }
-    for (const auto *required : {"distance", "rounds", "basis", "decoder"})
+    for (const auto *required :
+         {"distance", "rounds", "basis", "decoder", "output"})
       if (!values.contains(required))
         throw std::invalid_argument(std::string("missing --") + required);
     // Geometry aliases must not compete with explicit dedicated flags. Other
@@ -167,9 +167,7 @@ int main(int argc, char **argv) {
     const auto total_workers =
         generator::configured_worker_total(options, spec.logical_qubits);
     generator::validate_server_config_options(options);
-    const auto output = std::filesystem::absolute(
-        values.contains("output") ? values.at("output")
-                                  : default_output_filename);
+    const auto output = std::filesystem::absolute(values.at("output"));
     if (std::filesystem::exists(std::filesystem::symlink_status(output)))
       throw std::invalid_argument("configuration already exists: " +
                                   output.string());

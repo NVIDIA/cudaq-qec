@@ -26,6 +26,7 @@ except ImportError:
     raise SystemExit(1 if in_ci else 77)
 
 GENERATOR = None
+OUTPUT_FILENAME = "experiment.yaml"
 
 
 def generation_options(**overrides):
@@ -34,6 +35,7 @@ def generation_options(**overrides):
         "rounds": 26,
         "basis": "Z",
         "decoder": "single_error_lut",
+        "output": OUTPUT_FILENAME,
     }
     values.update(overrides)
     return [f"--{key}={value}" for key, value in values.items()]
@@ -74,7 +76,7 @@ class GeneratorCliTest(unittest.TestCase):
             if result.returncode != 0:
                 raise AssertionError(
                     f"public configuration generation failed:\n{result.stderr}")
-            if {path.name for path in working.iterdir()} != {"server.yaml"}:
+            if {path.name for path in working.iterdir()} != {OUTPUT_FILENAME}:
                 raise AssertionError(
                     "capability probe created unexpected files")
 
@@ -100,17 +102,15 @@ class GeneratorCliTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, detail)
         return result
 
-    def generate(self, *, extra=(), output_path=None, **overrides):
+    def generate(self, *, extra=(), output_path=OUTPUT_FILENAME, **overrides):
         working = self.case_directory()
-        output = Path(output_path) if output_path is not None else Path(
-            "server.yaml")
+        output = Path(output_path)
         if not output.is_absolute():
             output = working / output
-        result = self.invoke(
-            *generation_options(**overrides),
-            *extra,
-            *([f"--output={output_path}"] if output_path is not None else []),
-            cwd=working)
+        result = self.invoke(*generation_options(output=output_path,
+                                                 **overrides),
+                             *extra,
+                             cwd=working)
         self.assertIn(f"Generated server configuration: {output}",
                       result.stdout.splitlines())
         expected = {output.name} if output.parent == working else set()
@@ -197,7 +197,8 @@ class GeneratorCliTest(unittest.TestCase):
                     self.assertNotIn(removed, result.stdout)
                 self.assertIn("at least 3", result.stdout)
                 self.assertIn("at least 4", result.stdout)
-                self.assertIn("server.yaml", result.stdout)
+                self.assertIn("--output=PATH", result.stdout)
+                self.assertNotIn("--output defaults", result.stdout)
                 self.assertNotIn("CUDAQ_QEC_DECODER_CONFIG", result.stdout)
                 self.assertEqual(list(self.root.iterdir()), [])
 
@@ -215,8 +216,8 @@ class GeneratorCliTest(unittest.TestCase):
                 self.assertIn(f"unknown option: --{name}", result.stderr)
                 self.assertEqual(list(working.iterdir()), [])
 
-    def test_only_experiment_and_decoder_inputs_are_required(self):
-        for required in ("distance", "rounds", "basis", "decoder"):
+    def test_experiment_decoder_and_output_inputs_are_required(self):
+        for required in ("distance", "rounds", "basis", "decoder", "output"):
             with self.subTest(option=required):
                 working = self.case_directory()
                 args = [
@@ -261,12 +262,12 @@ class GeneratorCliTest(unittest.TestCase):
                             success=False)
                 self.assertEqual(list(working.iterdir()), [])
 
-    def test_default_path_never_overwrites_any_existing_entry(self):
+    def test_explicit_output_never_overwrites_any_existing_entry(self):
         for kind in ("file", "directory", "file symlink", "directory symlink",
                      "dangling symlink"):
             with self.subTest(kind=kind):
                 working = self.case_directory()
-                output = working / "server.yaml"
+                output = working / OUTPUT_FILENAME
                 if kind == "file":
                     output.write_text("unrelated user content")
                 elif kind == "directory":
@@ -297,7 +298,7 @@ class GeneratorCliTest(unittest.TestCase):
                     self.assertEqual(output.read_text(),
                                      "unrelated user content")
 
-    def test_output_path_overrides_default_and_requires_existing_parent(self):
+    def test_relative_and_absolute_output_paths_require_existing_parent(self):
         deployment = self.root / "deployment % directory"
         deployment.mkdir()
         destination = deployment / "config %.yaml"
@@ -308,18 +309,17 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertEqual(relative.name, "relative config.yaml")
         self.assert_server(document)
         working = self.case_directory()
-        default = working / "server.yaml"
-        default.write_text("unrelated default configuration")
-        self.invoke(*generation_options(), "--output=another.yaml", cwd=working)
-        self.assertEqual(default.read_text(), "unrelated default configuration")
+        unrelated = working / "unrelated.yaml"
+        unrelated.write_text("unrelated configuration")
+        self.invoke(*generation_options(output="another.yaml"), cwd=working)
+        self.assertEqual(unrelated.read_text(), "unrelated configuration")
         self.assert_server(
             yaml.safe_load((working / "another.yaml").read_text()))
         self.assertEqual({entry.name for entry in working.iterdir()},
-                         {"server.yaml", "another.yaml"})
+                         {"unrelated.yaml", "another.yaml"})
         working = self.case_directory()
-        missing = self.root / "missing parent" / "server.yaml"
-        self.invoke(*generation_options(),
-                    f"--output={missing}",
+        missing = self.root / "missing parent" / OUTPUT_FILENAME
+        self.invoke(*generation_options(output=missing),
                     cwd=working,
                     success=False)
         self.assertEqual(list(working.iterdir()), [])
@@ -329,7 +329,7 @@ class GeneratorCliTest(unittest.TestCase):
         deployment = self.root / "deployment.yaml"
         deployment.write_text("unrelated deployment configuration")
         for environment_path in (deployment,
-                                 self.root / "missing" / "server.yaml"):
+                                 self.root / "missing" / "deployment.yaml"):
             with self.subTest(environment_path=environment_path):
                 working = self.case_directory()
                 result = run_program(GENERATOR,
@@ -341,12 +341,25 @@ class GeneratorCliTest(unittest.TestCase):
                                      })
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual({path.name for path in working.iterdir()},
-                                 {"server.yaml"})
+                                 {OUTPUT_FILENAME})
                 self.assert_server(
-                    yaml.safe_load((working / "server.yaml").read_text()))
+                    yaml.safe_load((working / OUTPUT_FILENAME).read_text()))
         self.assertEqual(deployment.read_text(),
                          "unrelated deployment configuration")
         self.assertFalse((self.root / "missing").exists())
+        working = self.case_directory()
+        arguments = [
+            argument for argument in generation_options()
+            if not argument.startswith("--output=")
+        ]
+        result = run_program(
+            GENERATOR,
+            *arguments,
+            cwd=working,
+            environment_overrides={"CUDAQ_QEC_DECODER_CONFIG": str(deployment)})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("missing --output", result.stderr)
+        self.assertEqual(list(working.iterdir()), [])
 
     @unittest.skipUnless(os.name == "posix", "requires POSIX file permissions")
     def test_published_permissions_follow_deployment_umask(self):
@@ -358,7 +371,7 @@ class GeneratorCliTest(unittest.TestCase):
                                      cwd=working,
                                      umask=mask)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                output = working / "server.yaml"
+                output = working / OUTPUT_FILENAME
                 self.assertEqual(stat.S_IMODE(output.stat().st_mode),
                                  0o666 & ~mask)
 
@@ -376,9 +389,9 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertEqual(sum(result.returncode == 0 for result in results), 1,
                          [result.stderr for result in results])
         self.assertEqual({path.name for path in working.iterdir()},
-                         {"server.yaml"})
-        self.assert_server(yaml.safe_load(
-            (working / "server.yaml").read_text()))
+                         {OUTPUT_FILENAME})
+        self.assert_server(
+            yaml.safe_load((working / OUTPUT_FILENAME).read_text()))
 
     @unittest.skipUnless(os.name == "posix", "requires POSIX file-size limits")
     def test_failed_write_removes_its_output_and_allows_retry(self):
@@ -402,15 +415,14 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertIn("cannot write server configuration", result.stderr)
         self.assertEqual(list(working.iterdir()), [])
         self.invoke(*generation_options(), cwd=working)
-        self.assert_server(yaml.safe_load(
-            (working / "server.yaml").read_text()))
+        self.assert_server(
+            yaml.safe_load((working / OUTPUT_FILENAME).read_text()))
 
-    def test_reference_layout_in_both_bases_emits_only_default_server_yaml(
-            self):
+    def test_reference_layout_in_both_bases_emits_only_requested_yaml(self):
         for basis in ("X", "Z"):
             with self.subTest(basis=basis):
                 output, document = self.generate(basis=basis)
-                self.assertEqual(output.name, "server.yaml")
+                self.assertEqual(output.name, OUTPUT_FILENAME)
                 model = self.assert_server(document)
                 self.assertEqual(26 * model["measurements_per_round"] + 9, 217)
 
@@ -586,7 +598,7 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertIn(
             "Workers per graph: framework-selected (total not specified).",
             result.stdout)
-        document = yaml.safe_load((working / "server.yaml").read_text())
+        document = yaml.safe_load((working / OUTPUT_FILENAME).read_text())
         self.assert_server(document, patches=3)
 
     def test_workers_per_graph_apply_to_every_patch_not_inner_decoders(self):
@@ -603,7 +615,8 @@ class GeneratorCliTest(unittest.TestCase):
                     f"Workers per graph: {workers}; graphs: 3; total "
                     f"configured workers: {workers * 3} (excluding coordinators).",
                     result.stdout)
-                document = yaml.safe_load((working / "server.yaml").read_text())
+                document = yaml.safe_load(
+                    (working / OUTPUT_FILENAME).read_text())
                 self.assert_server(document, patches=3, workers=workers)
                 for decoder in document["decoders"]:
                     node = decoder["task_graph"]["nodes"][0]
@@ -666,8 +679,9 @@ class GeneratorCliTest(unittest.TestCase):
                     self.skipTest("PyMatching plugin is not installed")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual({path.name for path in working.iterdir()},
-                                 {"server.yaml"})
-                document = yaml.safe_load((working / "server.yaml").read_text())
+                                 {OUTPUT_FILENAME})
+                document = yaml.safe_load(
+                    (working / OUTPUT_FILENAME).read_text())
                 self.assert_server(document, patches=2)
                 for decoder in document["decoders"]:
                     inner = decoder["task_graph"]["nodes"][0]["inner"]
