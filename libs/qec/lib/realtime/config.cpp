@@ -373,10 +373,10 @@ static void validate_task_graph(const decoder_config &config) {
                                ": task_graph.async_worker_cpus has negative "
                                "CPU " +
                                std::to_string(cpu));
+    // Two workers on one core can be deliberate, so it is a warning.
     if (std::find(cpus.begin(), cpus.begin() + i, cpu) != cpus.begin() + i)
-      throw std::runtime_error(who +
-                               ": task_graph.async_worker_cpus lists CPU " +
-                               std::to_string(cpu) + " twice");
+      CUDA_QEC_WARN("{}: task_graph.async_worker_cpus lists CPU {} twice", who,
+                    cpu);
     if (cpu == tg.options.async_coordinator_cpu)
       throw std::runtime_error(
           who + ": task_graph.async_worker_cpus includes CPU " +
@@ -2782,9 +2782,8 @@ llvm::json::Object task_graph_json_schema() {
                 {"async_worker_cpus",
                  llvm::json::Object{
                      {"type", "array"},
-                     {"items",
-                      llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
-                     {"uniqueItems", true}}},
+                     {"items", llvm::json::Object{{"type", "integer"},
+                                                  {"minimum", 0}}}}},
                 {"nodes",
                  llvm::json::Object{
                      {"type", "array"},

@@ -2953,7 +2953,7 @@ TEST(TaskGraphWindowKinds, ParsesThePlansParallelWindowGraph) {
   EXPECT_EQ(ingest.windows[1], (ingest_window{"B", b}));
   const auto &params = graph.nodes[2].node_params.map();
   EXPECT_EQ(params.get<std::size_t>("num_receives"), 2u);
-  EXPECT_EQ(params.get<std::size_t>("max_in_flight"), 4u);
+  EXPECT_EQ(graph.nodes[2].max_in_flight, 4u);
   EXPECT_EQ(params.get<std::string>("verify_residual"), "report");
   EXPECT_EQ(graph.nodes[2].inner_type, "single_error_lut");
   EXPECT_EQ(graph.edges[3].index_offset, -1);
@@ -3468,7 +3468,7 @@ TEST(ParallelWindowPattern, ParsesThePatternForm) {
   EXPECT_EQ(params.get<std::size_t>("buffer_rounds"), 3u);
   EXPECT_EQ(params.get<std::size_t>("gap_rounds"), 9u);
   EXPECT_EQ(params.get<std::string>("output"), "corrected_logical");
-  EXPECT_EQ(params.get<std::size_t>("max_in_flight"), 4u);
+  EXPECT_EQ(graph.nodes.at(0).max_in_flight, 4u);
   EXPECT_EQ(graph.options.async_num_workers, std::optional<std::size_t>{4});
   EXPECT_EQ(graph.options.async_worker_cpus, (std::vector<int>{4, 5, 6, 7}));
   const auto emitted = parsed.to_yaml_str(200);
@@ -3535,7 +3535,7 @@ TEST(ParallelWindowPattern, RejectsBadParameters) {
                      "parallel_window: conflicting_parallel must be reject "
                      "or most_likely");
   expect_parse_error(pattern_yaml_with("max_in_flight: 4", "max_in_flight: 0"),
-                     "parallel_window: max_in_flight must be at least 1");
+                     "task_graph node 'pw' has max_in_flight 0");
   expect_parse_error(pattern_yaml_with("max_in_flight: 4",
                                        "max_in_flight: 4\n"
                                        "          verify_residual: true"),
@@ -3545,32 +3545,20 @@ TEST(ParallelWindowPattern, RejectsBadParameters) {
 
 // Bad pool options are rejected when parsed, and the graph rejects set ones
 // until the pool applies them.
-TEST(TaskGraphPoolOptions, AreCheckedAndNotAppliedYet) {
+TEST(TaskGraphPoolOptions, AreChecked) {
   expect_parse_error(
       pattern_yaml_with("async_num_workers: 4", "async_num_workers: 0"),
       "task_graph.async_num_workers must be at least 1");
   expect_parse_error(pattern_yaml_with("[4, 5, 6, 7]", "[4, -5]"),
                      "task_graph.async_worker_cpus has negative CPU -5");
-  expect_parse_error(pattern_yaml_with("[4, 5, 6, 7]", "[4, 5, 4]"),
-                     "task_graph.async_worker_cpus lists CPU 4 twice");
+  // Two workers on one CPU only warn.
+  EXPECT_NO_THROW(
+      (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          pattern_yaml_with("[4, 5, 6, 7]", "[4, 5, 4]")));
   expect_parse_error(pattern_yaml_with("[4, 5, 6, 7]", "[2, 5]"),
                      "task_graph.async_worker_cpus includes CPU 2, which "
                      "async_coordinator_cpu uses");
-
-  cudaq::qec::task_graph_options options;
-  std::vector<cudaq::qec::task_graph_node_config> nodes(1);
-  nodes[0].id = "x";
-  nodes[0].kind = "xor";
-  options.async_num_workers = 2;
-  try {
-    cudaq::qec::decoding_task_graph::from_topology(std::move(nodes), {},
-                                                   options);
-    ADD_FAILURE() << "a graph took async_num_workers";
-  } catch (const std::invalid_argument &e) {
-    EXPECT_NE(std::string(e.what()).find("not applied yet"), std::string::npos)
-        << e.what();
-  }
-} // end - TEST(TaskGraphPoolOptions, AreCheckedAndNotAppliedYet)
+} // end - TEST(TaskGraphPoolOptions, AreChecked)
 
 // The chunk form stays the authoritative source, carrying the closed model
 // expand_dem_chunks() would write for any decoder that reads matrices.
@@ -4167,25 +4155,6 @@ TEST(DecoderNodeModelTest, RejectsInvalidAsyncWorkerOptions) {
         (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
             yaml),
         std::runtime_error)
-        << options;
-  }
-}
-
-// A shared CPU is a warning at build and configure time, not a parse error.
-TEST(DecoderNodeModelTest, ParsesSharedWorkerCpus) {
-  ScopedDemFile dem;
-  for (const char *options :
-       {"      async_worker_cpus: [2, 2]\n",
-        "      async_coordinator_cpu: 3\n      async_worker_cpus: [3, 4]\n"}) {
-    auto yaml = node_model_yaml(
-        "          stim_dem_path: " + dem.path().string() + "\n");
-    const std::string marker = "    task_graph:\n";
-    const auto options_at = yaml.find(marker);
-    ASSERT_NE(options_at, std::string::npos);
-    yaml.insert(options_at + marker.size(), options);
-    EXPECT_NO_THROW(
-        (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
-            yaml))
         << options;
   }
 }

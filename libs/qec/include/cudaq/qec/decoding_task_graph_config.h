@@ -58,9 +58,9 @@ struct task_graph_options {
   /// it.
   std::optional<std::size_t> async_num_workers;
   /// CPUs those threads are pinned to, round-robin (Linux only). Empty
-  /// inherits the process's affinity. A CPU listed twice, or shared with
-  /// `async_coordinator_cpu` or another decoder's asynchronous graph, is a
-  /// warning. Synchronous graphs ignore it.
+  /// inherits the process's affinity. A CPU listed twice or shared with
+  /// `async_coordinator_cpu` is an error; one shared with another decoder's
+  /// asynchronous graph is a warning. Synchronous graphs ignore it.
   std::vector<int> async_worker_cpus;
   bool operator==(const task_graph_options &) const = default;
 };

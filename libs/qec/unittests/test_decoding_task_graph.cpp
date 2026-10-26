@@ -9522,13 +9522,19 @@ TEST(DecodingTaskGraph, AsyncStreamingPinsItsCoordinatorWhenRequested) {
                    rep5_spec(5), "single_error_lut", {},
                    {.async_streaming = true, .async_worker_cpus = {-1}}),
                std::invalid_argument);
-  // Sharing a CPU, between workers or with the coordinator, only warns.
+  // Two workers on one CPU only warn; a worker on the coordinator's CPU is
+  // rejected.
   pinned_graph.reset();
   EXPECT_NO_THROW(decoding_task_graph::from_spec(
       rep5_spec(5), "single_error_lut", {},
       {.async_streaming = true,
-       .async_coordinator_cpu = requested_cpu,
        .async_worker_cpus = {requested_cpu, requested_cpu}}));
+  EXPECT_THROW(
+      decoding_task_graph::from_spec(rep5_spec(5), "single_error_lut", {},
+                                     {.async_streaming = true,
+                                      .async_coordinator_cpu = requested_cpu,
+                                      .async_worker_cpus = {requested_cpu}}),
+      std::invalid_argument);
 #endif
 }
 

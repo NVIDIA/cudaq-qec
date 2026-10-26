@@ -632,13 +632,6 @@ void wire_patterns(const std::vector<ensemble_wiring> &wirings,
 std::unique_ptr<decoding_task_graph>
 decoding_task_graph::assemble(std::unique_ptr<impl> i,
                               task_graph_options options) {
-  // The pool sizes itself from the graph and inherits the process's
-  // affinity; silently ignoring a requested size or pinning would be worse
-  // than refusing it.
-  if (options.async_num_workers || !options.async_worker_cpus.empty())
-    throw std::invalid_argument(
-        "task_graph_options: async_num_workers and async_worker_cpus are not "
-        "applied yet");
   for (std::size_t n = 0; n < i->nodes.size(); ++n)
     require_registered_port_types(*i->nodes[n], i->node_ids[n]);
   i->compile_wires();
@@ -655,13 +648,14 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
             "task_graph_options: async_num_workers must be at least 1");
       i->pool_width = *options.async_num_workers;
     }
-    // Sharing a core can be deliberate, so it is a warning, not an error.
+    // The coordinator spins, so a worker on its core is an error; two
+    // workers on one core can be deliberate, so that is a warning.
     for (std::size_t a = 0; a < options.async_worker_cpus.size(); ++a) {
       const int cpu = options.async_worker_cpus[a];
       if (cpu == options.async_coordinator_cpu)
-        CUDA_QEC_WARN("task graph: async_worker_cpus includes the "
-                      "coordinator's CPU {}",
-                      cpu);
+        throw std::invalid_argument(
+            "task_graph_options: async_worker_cpus includes CPU " +
+            std::to_string(cpu) + ", which async_coordinator_cpu uses");
       for (std::size_t b = 0; b < a; ++b)
         if (options.async_worker_cpus[b] == cpu) {
           CUDA_QEC_WARN("task graph: async_worker_cpus lists CPU {} twice",

@@ -293,9 +293,10 @@ process's affinity. Synchronous graphs ignore both.
 
 Pools are per graph: each decoder's asynchronous graph has its own coordinator
 and workers, so a configuration with several runs the sum of their threads.
-Sharing a core can be deliberate, so contention is reported, not rejected: the
-build warns when ``async_worker_cpus`` lists a CPU twice or includes
-``async_coordinator_cpu``, and configuring the decoders warns when two
+The coordinator spins, so an ``async_worker_cpus`` list that includes
+``async_coordinator_cpu`` is rejected when parsed and when built. Sharing a
+core between workers can be deliberate, so a CPU listed twice only warns, as
+does contention across graphs: configuring the decoders warns when two
 asynchronous graphs pin the same CPU, naming both decoders, or when together
 they need more threads than the machine has, naming each graph's count.
 
