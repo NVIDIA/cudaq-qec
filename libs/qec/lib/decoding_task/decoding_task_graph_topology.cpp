@@ -667,6 +667,13 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
     }
     i->pool_worker_cpus.assign(options.async_worker_cpus.begin(),
                                options.async_worker_cpus.end());
+    if (!i->pool_worker_cpus.empty() &&
+        i->pool_worker_cpus.size() < i->pool_width) {
+      CUDA_QEC_WARN("task graph: {} async_worker_cpus for {} workers; the "
+                    "pool is reduced to one worker per CPU",
+                    i->pool_worker_cpus.size(), i->pool_width);
+      i->pool_width = i->pool_worker_cpus.size();
+    }
     std::size_t pooled_fires = 0;
     for (const auto &entry : i->streaming_nodes)
       if (entry.replicas.size() > 1)
@@ -675,11 +682,6 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
       CUDA_QEC_WARN("task graph: {} fire-pool copies but {} async workers; "
                     "some copies can never run concurrently",
                     pooled_fires, i->pool_width);
-    if (!i->pool_worker_cpus.empty() &&
-        i->pool_worker_cpus.size() < i->pool_width)
-      CUDA_QEC_WARN("task graph: {} async_worker_cpus for {} workers; the "
-                    "pool is reduced to one worker per CPU",
-                    i->pool_worker_cpus.size(), i->pool_width);
   }
   // Built once, after the options it depends on have been validated. The
   // parked coordinator cannot start a session before assembly returns. An
@@ -772,7 +774,12 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
                                   "' keeps state across deliveries and "
                                   "cannot run as a fire pool");
     std::vector<std::unique_ptr<task_graph_node>> replicas;
-    for (std::size_t r = 1; r < cfg.max_in_flight; ++r) {
+    if (cfg.max_in_flight > 1 && !options.async_streaming)
+      CUDA_QEC_WARN("from_topology: node '{}' sets max_in_flight {} but the "
+                    "graph is synchronous; one copy is built",
+                    cfg.id, cfg.max_in_flight);
+    for (std::size_t r = 1; options.async_streaming && r < cfg.max_in_flight;
+         ++r) {
       auto replica_ctx = prepare_node(cfg, *kind);
       replicas.push_back((*factory)(replica_ctx));
     }

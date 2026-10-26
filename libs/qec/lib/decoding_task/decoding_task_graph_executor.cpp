@@ -26,20 +26,6 @@
 #include <stdexcept>
 #include <tuple>
 
-// CPU pause hint for spin loops, as cudaq-realtime defines it.
-#ifndef CUDAQ_REALTIME_CPU_RELAX
-#if defined(__x86_64__)
-#include <xmmintrin.h>
-#define CUDAQ_REALTIME_CPU_RELAX() _mm_pause()
-#elif defined(__aarch64__)
-#define CUDAQ_REALTIME_CPU_RELAX() __asm__ volatile("yield" ::: "memory")
-#else
-#define CUDAQ_REALTIME_CPU_RELAX()                                             \
-  do {                                                                         \
-  } while (0)
-#endif
-#endif
-
 namespace cudaq::qec {
 
 namespace {
@@ -112,7 +98,7 @@ struct decoding_task_graph::impl::record_context {
   std::vector<int32_t> dependency_remaining;
   std::vector<std::size_t> root_nodes;
   std::vector<uint8_t> root_done;
-  // Edge deliveries received per topology node in this record.
+  // Edge deliveries a pooled node received in this record.
   std::vector<std::size_t> deliveries_seen;
   // Producer outputs copied at publication, indexed by compiled_wire::id.
   std::vector<edge_value> wire_values;
@@ -248,6 +234,7 @@ struct decoding_task_graph::impl::record_scheduler {
     }
     if (context_count > 1)
       copy_outputs = true;
+    node_deliveries_seen.assign(N, 0);
     for (auto &c : contexts) {
       c.slots.resize(event_capacity);
       c.free_slots.reserve(event_capacity);
@@ -370,6 +357,7 @@ struct decoding_task_graph::impl::record_scheduler {
     for (auto &table : joins)
       for (auto &entry : table)
         entry.used = false;
+    std::fill(node_deliveries_seen.begin(), node_deliveries_seen.end(), 0);
     stop = false;
     error = nullptr;
   }
@@ -496,8 +484,7 @@ struct decoding_task_graph::impl::record_scheduler {
                      const streaming_task_graph_node *capability = nullptr) {
     if (!capability)
       capability = owner.streaming_nodes[si].capability;
-    if (si < owner.streaming_node_staged.size() &&
-        owner.streaming_node_staged[si]) {
+    if (staged(si)) {
       // Each publication is one delta over one commit interval; the record
       // hands them to the output stagers when it retires.
       const auto coverage = capability->streaming_coverage();
@@ -505,14 +492,20 @@ struct decoding_task_graph::impl::record_scheduler {
         return; // nothing to fold from this publication
       const auto n = capability->num_observables();
       const uint8_t *delta = capability->corrections();
-      auto lock = lock_runtime();
-      auto &entry = c.staged[si].emplace_back();
-      entry.coverage = *coverage;
-      if (delta)
-        entry.bits.assign(delta, delta + n);
-      else
-        entry.bits.assign(n, 0);
-      c.node_snapshotted[si] = 1;
+      {
+        auto lock = lock_runtime();
+        auto &entry = c.staged[si].emplace_back();
+        entry.coverage = *coverage;
+        if (delta)
+          entry.bits.assign(delta, delta + n);
+        else
+          entry.bits.assign(n, 0);
+        c.node_snapshotted[si] = 1;
+      }
+      // A replica is cleared before each fire; a record-ordered node is
+      // cleared here so its next publication is a delta as well.
+      if (!pooled(si) && !indexed(si))
+        owner.streaming_nodes[si].capability->clear_corrections();
       return;
     }
     if (pooled(si) || indexed(si)) {
@@ -600,12 +593,14 @@ struct decoding_task_graph::impl::record_scheduler {
       event.index = index;
       const auto id = push_locked(c, event, parent, blocker);
       // Several instances may publish through one wire before any delivery
-      // runs, so an indexed delivery keeps its own copy of the value.
+      // runs, so an indexed delivery takes the record's copy of the value.
+      // The swap hands the wire a buffer of the same type for the next one.
       const auto wire_id = static_cast<std::size_t>(wire.id);
       if (id != no_event && indexed(consumer) && wire.id >= 0 &&
           c.wire_valid[wire_id]) {
-        c.slots[id].value = c.wire_values[wire_id];
+        std::swap(c.slots[id].value, c.wire_values[wire_id]);
         c.slots[id].has_value = true;
+        c.wire_valid[wire_id] = 0;
       }
     }
     notify_workers();
@@ -642,8 +637,14 @@ struct decoding_task_graph::impl::record_scheduler {
           std::to_string(event.wire.from_node));
     const auto k = event.index - event.wire.index_offset;
     const auto slot = static_cast<std::size_t>(event.wire.to_slot);
-    const auto *value =
-        c.slots[id].has_value ? &c.slots[id].value : delivered_value(c, event);
+    // Any copy is made before taking the lock; the entry takes the
+    // delivery's value by swap below.
+    auto &own = c.slots[id];
+    if (!own.has_value)
+      if (const auto *value = delivered_value(c, event)) {
+        own.value = *value;
+        own.has_value = true;
+      }
     auto lock = lock_runtime();
     if (k < 0)
       return; // instances are numbered from 0
@@ -686,8 +687,9 @@ struct decoding_task_graph::impl::record_scheduler {
                              std::to_string(k) + " was delivered twice");
     if (entry->state[slot] == join_entry::missing)
       --entry->pending;
-    if (value) {
-      entry->inputs[slot] = *value;
+    if (own.has_value) {
+      std::swap(entry->inputs[slot], own.value);
+      own.has_value = false;
       entry->state[slot] = join_entry::present;
     } else {
       entry->state[slot] = join_entry::absent;
@@ -808,10 +810,13 @@ struct decoding_task_graph::impl::record_scheduler {
         value && consumer_node->enqueue_edge_value(*value, event.wire.to_slot);
     if (fired)
       (void)publish_streaming(c, id, event.root, event.node, consumer_node);
-    // An edge-fed node completes the window after its last delivery.
-    if (++c.deliveries_seen[consumer] ==
-        owner.streaming_wires_to_count[consumer]) {
-      c.deliveries_seen[consumer] = 0;
+    // An edge-fed node completes the window after its last delivery. A
+    // pooled node counts per record; a record-ordered one counts across
+    // records, as its producers may fire in different ones.
+    auto &seen =
+        pool ? c.deliveries_seen[consumer] : node_deliveries_seen[consumer];
+    if (++seen == owner.streaming_wires_to_count[consumer]) {
+      seen = 0;
       if (pool)
         c.slots[id].releases_pool = true;
       if (!fired)
@@ -881,7 +886,7 @@ struct decoding_task_graph::impl::record_scheduler {
     if (fired)
       c.fired.store(publish_streaming(c, id, event.root, event.node),
                     std::memory_order_relaxed);
-    else if (chunk_type == round_type::FINAL)
+    else if (chunk_type == round_type::FINAL && !staged(event.node))
       snapshot_node(c, event.node); // a FINAL round may commit coverage
     if (next < c.len && take != 0)
       set_continuation(
@@ -904,7 +909,7 @@ struct decoding_task_graph::impl::record_scheduler {
     if (owner.streaming_nodes[event.node].capability->flush())
       c.fired.store(publish_streaming(c, id, event.root, event.node),
                     std::memory_order_relaxed);
-    else if (!pooled(event.node) && !indexed(event.node))
+    else if (!pooled(event.node) && !indexed(event.node) && !staged(event.node))
       snapshot_node(c, event.node); // a pooled copy holds only its last delta
     push(c, {graph_event_kind::streaming_flush_release, event.node}, id,
          no_event, /*wait_for_siblings=*/true);
@@ -1158,6 +1163,12 @@ private:
   bool indexed(std::size_t si) const {
     return !owner.streaming_nodes[si].indexed.empty();
   }
+  // A staged node's deltas arrive only with its publications, so a FINAL
+  // that does not fire has nothing to snapshot.
+  bool staged(std::size_t si) const {
+    return si < owner.streaming_node_staged.size() &&
+           owner.streaming_node_staged[si];
+  }
 
   // Events whose target keeps no state between fires need no record order.
   bool targets_pool(const graph_event &event) const {
@@ -1408,7 +1419,9 @@ private:
         c.slots[completed.next_sibling].previous_sibling =
             completed.previous_sibling;
     }
+    auto value = std::move(completed.value); // keep the slot's typed buffer
     completed = {};
+    completed.value = std::move(value);
     c.free_slots.push_back(id);
     if (c.occupied != 0)
       --c.occupied;
@@ -1476,6 +1489,9 @@ public:
     std::vector<uint8_t> state;
   };
   std::vector<std::deque<join_entry>> joins;
+  // Edge deliveries each record-ordered topology node has received since
+  // its last completion; cleared with the session.
+  std::vector<std::size_t> node_deliveries_seen;
   // By streaming node and input slot: the edge's index offset, and whether
   // an instance exists only if that input is delivered.
   std::vector<std::vector<std::int64_t>> join_offsets;

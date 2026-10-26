@@ -272,10 +272,7 @@ graphs.
 
 In an asynchronous graph, records overlap: the coordinator admits every
 accepted record at once, up to ``async_queue_capacity``, and a later record
-runs ahead on nodes that have finished the earlier ones. Each node still
-processes records in order and results are identical to serial execution;
-only when work runs changes. The coordinator itself runs no node work, so
-ingestion never waits behind a decode.
+runs ahead on nodes that have finished the earlier ones. 
 
 Decoder-server YAML exposes the same policy as ``task_graph.async_streaming``,
 with optional ``async_queue_capacity``, ``async_coordinator_cpu``,
@@ -307,8 +304,8 @@ Fire pools
 
 Any node whose result depends only on the current delivery can run as a
 *fire pool*: set ``max_in_flight`` on its entry and the graph builds that many
-copies of the node, each with its own inner decoder, and lets records fire on
-different copies at once instead of holding the node to one record at a time.
+copies of the node, and lets records fire on different copies at once instead 
+of holding the node to one record at a time.
 A record leases one copy for all of its deliveries, outputs are copied out of
 the copy before anything downstream runs, and each fire's correction delta is
 folded into the node's accumulated corrections when its record retires, so
@@ -318,32 +315,8 @@ results equal serial execution. Kinds that carry state across deliveries
 instance, since every copy needs its own. A pooled node wired to raw
 ``measurements`` is a streaming conflict.
 
-The option applies to any eligible kind. A kind that decodes one
-self-contained window per delivery, such as ``decode_window``, is the natural
-user:
-
-.. code-block:: yaml
-
-   decoders:
-     - id: 0
-       task_graph:
-         nodes:
-           - id: ingest
-             type: ingest
-           - id: A
-             type: decode_window
-             max_in_flight: 4          # four fires of A may run at once
-             inner: {type: pymatching}
-         edges:
-           - {from: measurements, to: ingest}
-           - {from: ingest.A, to: A}
-           - {from: A, to: output}
-         async_streaming: true
-         async_queue_capacity: 16
-       dem_chunks: { ... }
-
-Overlap needs ``async_streaming``; a synchronous graph runs one fire at a
-time. The default pool grows by ``max_in_flight - 1`` workers per pooled node,
+Overlap needs ``async_streaming``; a synchronous graph warns and builds one
+copy. The default pool grows by ``max_in_flight - 1`` workers per pooled node,
 so ``async_num_workers`` is only needed to cap or widen that.
 
 Staged outputs

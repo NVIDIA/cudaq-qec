@@ -290,6 +290,10 @@ void bindDecodingConfig(nb::module_ &mod) {
       .def_rw("from_output", &cudaq::qec::task_graph_edge::from_output)
       .def_rw("to_node", &cudaq::qec::task_graph_edge::to_node)
       .def_rw("to_input", &cudaq::qec::task_graph_edge::to_input)
+      .def_rw("index_offset", &cudaq::qec::task_graph_edge::index_offset,
+              "Consumer instance k reads producer instance k + index_offset, "
+              "between nodes that join their inputs by index; zero or "
+              "negative.")
       .def("__eq__",
            [](const cudaq::qec::task_graph_edge &a,
               const cudaq::qec::task_graph_edge &b) { return a == b; });

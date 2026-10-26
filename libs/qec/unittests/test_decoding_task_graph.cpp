@@ -9510,6 +9510,29 @@ TEST(DecodingTaskGraph, AsyncStreamingPinsItsCoordinatorWhenRequested) {
 #endif
 }
 
+TEST(DecodingTaskGraph, AsyncThreadCountFollowsWorkerCpuCap) {
+#if !defined(__linux__)
+  GTEST_SKIP() << "worker CPU affinity is Linux-only";
+#else
+  cpu_set_t allowed;
+  CPU_ZERO(&allowed);
+  ASSERT_EQ(pthread_getaffinity_np(pthread_self(), sizeof(allowed), &allowed),
+            0);
+  int cpu = 0;
+  while (cpu < CPU_SETSIZE && !CPU_ISSET(cpu, &allowed))
+    ++cpu;
+  ASSERT_LT(cpu, CPU_SETSIZE);
+  // One pinned CPU runs one worker, whatever async_num_workers asks for; the
+  // reported thread count is that worker plus the coordinator.
+  auto graph =
+      decoding_task_graph::from_spec(rep5_spec(5), "single_error_lut", {},
+                                     {.async_streaming = true,
+                                      .async_num_workers = 3,
+                                      .async_worker_cpus = {cpu}});
+  EXPECT_EQ(graph->async_thread_count(), 2u);
+#endif
+}
+
 TEST(DecodingTaskGraph, AsyncStreamingRejectsCoordinatorCpuBelowSentinel) {
   auto probe = std::make_shared<async_stream_probe>();
   EXPECT_THROW(
@@ -12788,6 +12811,16 @@ public:
       valid_ = true;
       return true;
     }
+    if (mode_ == "running") {
+      // Accumulates into its corrections buffer, as a decoder does, and
+      // reports one commit interval per record.
+      correction_ ^= bit;
+      value_out_.get<logical_outcome>().bits[0] = correction_;
+      coverage_ = committed_coverage{records_, records_ + 1};
+      ++records_;
+      valid_ = true;
+      return true;
+    }
     if (static_cast<std::int64_t>(records_) >= limit_) {
       ++records_;
       return false;
@@ -12828,7 +12861,7 @@ public:
   std::size_t num_msyn_per_decode() const override { return 0; }
   std::size_t num_msyn_per_round() const override { return 1; }
   std::size_t num_observables() const override {
-    return mode_ == "join" || mode_ == "logical" ? 1 : 0;
+    return mode_ == "join" || mode_ == "logical" || mode_ == "running" ? 1 : 0;
   }
   bool supports_streaming_input(std::size_t slot) const override {
     return slot < (mode_ == "join" ? 2u : 1u);
@@ -13097,15 +13130,19 @@ TEST(DecodingTaskGraph, FirePoolRejectsRawInput) {
   active_pipeline_probe = std::make_shared<pipeline_probe>();
   std::vector<task_graph_node_config> nodes;
   nodes.push_back(pipeline_node("A", "source", 0, -1, /*max_in_flight=*/2));
-  auto graph = decoding_task_graph::from_topology(
-      std::move(nodes),
-      {{"measurements", "output", "A", "input"},
-       {"A", "output", "output", "input"}},
-      {});
-  EXPECT_FALSE(graph->supports_streaming());
-  EXPECT_NE(graph->streaming_incompatibility_reason().find("fire pool"),
-            std::string::npos)
-      << graph->streaming_incompatibility_reason();
+  // A synchronous graph builds no pool, so the conflict needs an async one,
+  // which refuses to build a graph that cannot stream.
+  try {
+    (void)decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "output", "input"}},
+        {.async_streaming = true});
+    FAIL() << "a pooled node fed raw measurements built";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find("fire pool"), std::string::npos)
+        << e.what();
+  }
 }
 
 TEST(DecodingTaskGraph, FirePoolRejectsStatefulKindsAndBuiltDecoders) {
@@ -13382,6 +13419,35 @@ TEST(DecodingTaskGraph, StagedOutputHoldsWholeShotUntilFinal) {
   graph->enqueue_syndrome(&records[1], 1);
   EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 1u);
   EXPECT_EQ(graph->streaming_result().values[0], records[1]);
+}
+
+TEST(DecodingTaskGraph, StagedRecordOrderedNodePublishesDeltas) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  // N is record-ordered and keeps a running parity in its corrections
+  // buffer. The graph clears it after each snapshot, so every staged delta
+  // covers only its own record rather than the whole prefix again.
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(
+      index_node("N", "running", 1 << 30, 0, -1, 1, /*staged=*/true));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "N", "input"},
+       {"N", "output", "output", "input"}},
+      {});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const std::vector<uint8_t> records = {1, 1, 0, 0, 1};
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  const auto result = graph->streaming_result();
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+  EXPECT_EQ(result.outputs[0].coverage_end_round, records.size());
+  EXPECT_EQ(result.values[0], 1); // the parity of the records
 }
 
 TEST(DecodingTaskGraph, StagedOutputRejectsMixedContributors) {

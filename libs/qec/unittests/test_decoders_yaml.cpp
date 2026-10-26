@@ -3185,11 +3185,16 @@ TEST(ConfigureDecodersLifecycle, WarnsWhenAsyncGraphsContendForCpus) {
   using namespace cudaq::qec::decoding::config;
   if (std::thread::hardware_concurrency() < 2)
     GTEST_SKIP() << "needs two CPUs to pin";
-  // Decoder 0 pins its coordinator to CPU 0 and a worker to CPU 1; decoder 1
-  // pins a worker to CPU 1 too. Synchronous decoder 2 pins CPU 1 as well,
-  // which it ignores. Each async graph asks for as many workers as the
-  // machine has threads, so together they oversubscribe it.
-  const auto workers = std::thread::hardware_concurrency();
+  // Decoder 0 pins its coordinator to CPU 0 and its workers to every other
+  // CPU; decoder 1 pins its workers there too. Synchronous decoder 2 pins
+  // CPU 1 as well, which it ignores. The pool runs one worker per pinned
+  // CPU, so each async graph has as many threads as the machine and
+  // together they oversubscribe it.
+  const auto cpus = std::thread::hardware_concurrency();
+  const auto workers = cpus - 1;
+  std::vector<int> worker_cpus;
+  for (unsigned cpu = 1; cpu < cpus; ++cpu)
+    worker_cpus.push_back(static_cast<int>(cpu));
   const auto async_decoder = [&](int id) {
     auto config = create_test_sample_realtime_decoder_config(id);
     config.task_graph.emplace();
@@ -3198,8 +3203,8 @@ TEST(ConfigureDecodersLifecycle, WarnsWhenAsyncGraphsContendForCpus) {
     config.type.clear();
     config.task_graph->options.async_streaming = true;
     config.task_graph->options.async_queue_capacity = 2;
-    config.task_graph->options.async_worker_cpus = {1};
-    config.task_graph->options.async_num_workers = workers;
+    config.task_graph->options.async_worker_cpus = worker_cpus;
+    config.task_graph->options.async_num_workers = cpus;
     return config;
   };
   multi_decoder_config multi;

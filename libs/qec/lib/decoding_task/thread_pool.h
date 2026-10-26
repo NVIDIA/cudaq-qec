@@ -27,6 +27,20 @@
 #include <type_traits>
 #include <vector>
 
+// CPU pause hint for spin loops, as cudaq-realtime defines it.
+#ifndef CUDAQ_REALTIME_CPU_RELAX
+#if defined(__x86_64__)
+#include <xmmintrin.h>
+#define CUDAQ_REALTIME_CPU_RELAX() _mm_pause()
+#elif defined(__aarch64__)
+#define CUDAQ_REALTIME_CPU_RELAX() __asm__ volatile("yield" ::: "memory")
+#else
+#define CUDAQ_REALTIME_CPU_RELAX()                                             \
+  do {                                                                         \
+  } while (0)
+#endif
+#endif
+
 namespace cudaq::qec::detail {
 
 /// Persistent fork-join pool. The calling thread participates as worker 0;
