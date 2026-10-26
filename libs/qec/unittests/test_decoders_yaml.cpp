@@ -2112,6 +2112,15 @@ decoders:
   EXPECT_NO_THROW(config.validate_custom_args());
 }
 
+TEST(DecoderSchemaTest, CEntryPointReturnsTheSameSchema) {
+  // The C symbol exists for tools that load the library without the Python
+  // package; it must hand out the same document as the C++ function.
+  using namespace cudaq::qec::decoding::config;
+  const char *text = cudaq_qec_decoder_config_json_schema();
+  ASSERT_NE(text, nullptr);
+  EXPECT_EQ(std::string(text), decoder_config_json_schema());
+}
+
 TEST(DecoderSchemaTest, JsonSchemaExportReflectsRegistry) {
   using namespace cudaq::qec::decoding::config;
 

@@ -5,6 +5,7 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 from pathlib import Path
 import stat
@@ -711,6 +712,58 @@ class DecodingServerConfigPathTest(unittest.TestCase):
         self.assertIn("--config", error)
         self.assertNotIn("cannot open config file", error)
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_schema_export_ignores_configuration_paths(self):
+        default = self.root / "server.yaml"
+        malformed = "decoders: [\n"
+        default.write_text(malformed)
+        missing = self.root / "missing deployment" / "server.yaml"
+        exported = self.root / "schema %.json"
+        cases = (
+            (("--export-schema",), None, None),
+            (("--export-schema",), missing, None),
+            (("--export-schema", "--config="), missing, None),
+            (("--config=", "--export-schema"), missing, None),
+            ((f"--export-schema={exported}", "--config="), missing, exported),
+        )
+        for arguments, config_path, output in cases:
+            with self.subTest(arguments=arguments, config_path=config_path):
+                result = run_program(DECODING_SERVER,
+                                     *arguments,
+                                     cwd=self.root,
+                                     config_path=config_path,
+                                     timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                schema = json.loads(
+                    output.read_text() if output else result.stdout)
+                self.assertEqual(
+                    schema["$schema"],
+                    "https://json-schema.org/draft/2020-12/schema")
+                self.assertIn("decoder_params", schema["$defs"])
+                combined = result.stdout + result.stderr
+                self.assertNotIn("QEC_DECODING_SERVER_READY", combined)
+                self.assertNotIn("Loaded decoder configuration:", combined)
+                self.assertEqual(default.read_text(), malformed)
+                self.assertFalse(missing.parent.exists())
+        self.assertEqual({path.name for path in self.root.iterdir()},
+                         {"server.yaml", exported.name})
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX directory removal")
+    def test_schema_export_does_not_resolve_removed_working_directory(self):
+        working = self.root / "removed"
+        working.mkdir()
+        result = run_program(DECODING_SERVER,
+                             "--export-schema",
+                             cwd=working,
+                             config_path="missing/server.yaml",
+                             timeout=15,
+                             preexec_fn=lambda: os.rmdir(working))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        schema = json.loads(result.stdout)
+        self.assertIn("decoder_params", schema["$defs"])
+        self.assertNotIn("QEC_DECODING_SERVER_READY", result.stdout)
+        self.assertNotIn("Loaded decoder configuration:", result.stdout)
+        self.assertFalse(working.exists())
 
     @unittest.skipUnless(os.name == "posix", "requires POSIX directory removal")
     def test_removed_working_directory_does_not_break_help_or_explicit_config(
