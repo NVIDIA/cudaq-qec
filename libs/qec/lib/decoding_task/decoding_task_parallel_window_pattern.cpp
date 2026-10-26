@@ -6,17 +6,19 @@
 // The `parallel_window` pattern: written as one node, wired measurements ->
 // <id> -> output, it stands for the parallel-window graph of an ingest node,
 // two decode_window layers A and B, and their xor. Its kind registers the
-// parameters, so configurations that use it parse and validate, and the
-// graph builder lowers it into those nodes before anything is built.
+// parameters, so configurations that use it parse and validate, and is
+// registered as a pattern: the graph builder lowers it into those nodes
+// before anything is built, and a configuration declares its layers'
+// windows.
 
 #include "decoding_task_parallel_window_pattern.h"
 #include "decoding_task_node_kind_registry.h"
 #include "decoding_task_window_kind_params.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include <algorithm>
-#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace cudaq::qec {
 namespace {
@@ -67,9 +69,11 @@ decoding::config::decoder_schema parallel_window_params() {
   return schema;
 }
 
-// It reads the template and names the layers' inner decoder.
+// It reads the template and names the layers' inner decoder. Its lowering
+// replaces it before the build, and its layers are windows A and B.
 const bool registered = [] {
   task_graph_node_kind_spec spec;
+  node_pattern pattern;
   spec.name = "parallel_window";
   spec.requires_decoder = true;
   spec.requires_dem = true;
@@ -81,13 +85,15 @@ const bool registered = [] {
       {"commit_rounds", experimental::window_round_limit},
       {"buffer_rounds", experimental::window_round_limit},
       {"gap_rounds", experimental::window_round_limit}};
-  register_node_kind(
-      std::move(spec), parallel_window_params(),
-      [](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
-        throw std::logic_error("task graph node '" + ctx.id +
-                               "': the 'parallel_window' pattern is expanded "
-                               "before any node is built");
-      });
+  pattern.lower = lower_parallel_window;
+  pattern.windows = [](const cudaqx::heterogeneous_map &params,
+                       const experiment_template &context) {
+    auto [a, b] = parallel_window_requests(params, context);
+    return node_pattern::window_layers{{"A", std::move(a)},
+                                       {"B", std::move(b)}};
+  };
+  register_pattern_kind(std::move(spec), parallel_window_params(),
+                        std::move(pattern));
   return true;
 }();
 
@@ -184,11 +190,6 @@ parallel_window_requests(const cudaqx::heterogeneous_map &checked,
   bb.columns = columns;
   return {a, bb};
 } // end - parallel_window_requests()
-
-bool is_parallel_window(const task_graph_node_config &cfg) {
-  const auto *kind = find_task_graph_node_kind(cfg.kind);
-  return kind && kind->name == "parallel_window";
-}
 
 // The parameters are checked first, as the builder checks every node's, so
 // a configuration built in code is held to the parsed one's rules. The

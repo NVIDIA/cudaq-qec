@@ -8,7 +8,7 @@
 #include "stim_dem_forms.h"
 #include "../decoding_task/decoding_task_data_artifacts.h"
 #include "../decoding_task/decoding_task_graph_utils.h"
-#include "../decoding_task/decoding_task_parallel_window_pattern.h"
+#include "../decoding_task/decoding_task_node_kind_registry.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -561,8 +561,9 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
     // model per window, so it too takes only the decoder's name and
     // parameters: a decoder built here from the whole shot would go unused,
     // and a failure building it would hide the graph's own errors. A
-    // parallel_window pattern is lowered into such kinds before the build.
-    if (!kind->requires_dem || is_parallel_window(node) ||
+    // pattern kind is lowered before the build, possibly into several nodes,
+    // which one built decoder could not serve, so it too takes the name.
+    if (!kind->requires_dem || cudaq::qec::find_node_pattern(kind->name) ||
         node.dem.has_value() || !ns.stim_dem.empty() ||
         !ns.stim_dem_path.empty()) {
       node.decoder_type = decoder_type;
@@ -1018,6 +1019,14 @@ namespace {
 
 using node_spec = config::decoder_config::task_graph_spec::node_spec;
 
+// Whether @p node's kind is a pattern whose hook declares windows, which are
+// built on the node's template as a layered node's are.
+bool declares_windows(const node_spec &node) {
+  const auto kind_lock = cudaq::qec::lock_node_kind_registry();
+  const auto *pattern = cudaq::qec::find_node_pattern(node.resolved_kind());
+  return pattern && pattern->windows;
+}
+
 // Runs step, giving an error the place it came from. A construction error
 // becomes a configuration error; the store's own logic errors keep their
 // kind, as configuration errors do.
@@ -1082,8 +1091,7 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
     for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
       const auto *spec = node_template(decoder, node);
       const bool own = node.dem_chunks && spec == &*node.dem_chunks;
-      if ((node.windows.empty() && node.resolved_kind() != "parallel_window") ||
-          !spec)
+      if ((node.windows.empty() && !declares_windows(node)) || !spec)
         return;
       at(own ? decoder_name(decoder) + ", node '" + node.id + "'"
              : decoder_name(decoder),
@@ -1134,30 +1142,45 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
       // so name why it does not apply.
       const bool expanded = node.D_sparse.empty() && decoder.dem_chunks &&
                             !decoder.H_sparse.empty();
-      // A pattern's layers are its windows <id>.A and <id>.B.
-      const bool pattern = node.resolved_kind() == "parallel_window";
-      std::pair<experimental::window_request, experimental::window_request>
-          generated;
-      if (node.windows.empty() && !pattern)
-        return;
-      if (!spec)
-        throw std::runtime_error(
+      const auto no_template = [&] {
+        return std::runtime_error(
             where + " has windows but no dem_chunks template" +
             (expanded ? ": its decoder's dem_chunks is expanded into "
                         "H_sparse, and a node beside flat matrices runs on "
                         "them; give the node dem_chunks of its own"
                       : ""));
-      if (pattern) {
-        const auto tmpl = store.find_template(*spec);
-        at(where, [&] {
-          generated = parallel_window_requests(node.node_params.map(), *tmpl);
-        });
-        at(where + ", window '" + node.id + ".A'",
-           [&] { store.add_windows(tmpl, generated.first); });
-        at(where + ", window '" + node.id + ".B'",
-           [&] { store.add_windows(tmpl, generated.second); });
+      };
+      cudaq::qec::node_pattern::window_layers generated;
+      std::shared_ptr<const cudaq::qec::experiment_template> tmpl;
+      bool declared = false;
+      // A pattern's layers are its windows <id>.<layer>. The registry lock
+      // keeps its hook registered while the hook runs, and only then: the
+      // requests it returns are plain data, and building their windows,
+      // the costly part, needs no lock.
+      {
+        const auto kind_lock = cudaq::qec::lock_node_kind_registry();
+        const auto *pattern =
+            cudaq::qec::find_node_pattern(node.resolved_kind());
+        declared = pattern && pattern->windows;
+        if (declared) {
+          if (!spec)
+            throw no_template();
+          tmpl = store.find_template(*spec);
+          at(where, [&] {
+            generated = pattern->windows(node.node_params.map(), *tmpl);
+          });
+        }
+      }
+      if (declared) {
+        for (const auto &[layer, request] : generated)
+          at(where + ", window '" + node.id + "." + layer + "'",
+             [&] { store.add_windows(tmpl, request); });
         return;
       }
+      if (node.windows.empty())
+        return;
+      if (!spec)
+        throw no_template();
       for (const auto &layer : node.windows) {
         const auto layer_where = where + ", layer '" + layer.layer + "'";
         const auto tmpl = store.find_template(*spec);

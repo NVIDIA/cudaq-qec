@@ -6,10 +6,10 @@
 // Internal header: the `parallel_window` pattern's expansion. Written as one
 // node P, wired measurements -> P -> output, the pattern stands for the
 // parallel-window graph: P.ingest with layers A and B, the decode_window
-// nodes P.A and P.B, and their xor P.sum. The graph builder lowers it before
-// any node is checked or built, as it lowers ensembles, so the expanded
-// graph is validated as a hand-written one is. Never included from a public
-// header.
+// nodes P.A and P.B, and their xor P.sum. Its kind is registered as a
+// pattern (see node_pattern), so the graph builder lowers it before any node
+// is checked or built, and the expanded graph is validated as a hand-written
+// one is. Never included from a public header.
 
 #pragma once
 
@@ -37,9 +37,6 @@ namespace cudaq::qec {
 std::pair<experimental::window_request, experimental::window_request>
 parallel_window_requests(const cudaqx::heterogeneous_map &params,
                          const experiment_template &context);
-
-/// Whether @p cfg is a `parallel_window` pattern.
-bool is_parallel_window(const task_graph_node_config &cfg);
 
 /// Lower pattern @p cfg, of id P, into P.ingest, P.A, P.B and P.sum,
 /// appended to @p out in that order, and their edges, appended to

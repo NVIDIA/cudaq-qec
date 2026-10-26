@@ -14167,4 +14167,134 @@ TEST(ParallelWindowLowering, RejectsAReservedId) {
   } // end - for(id)
 } // end - TEST(ParallelWindowLowering, RejectsAReservedId)
 
+// The pattern is registered as one, with its windows, and has no factory.
+TEST(ParallelWindowLowering, IsARegisteredPatternWithWindows) {
+  const auto *pattern = find_node_pattern("parallel_window");
+  ASSERT_NE(pattern, nullptr);
+  EXPECT_TRUE(pattern->lower);
+  EXPECT_TRUE(pattern->windows);
+  EXPECT_EQ(find_node_factory("parallel_window"), nullptr);
+  EXPECT_EQ(find_node_pattern("xor"), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Pattern kinds
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Ids the relay pattern below was lowered for, in order.
+std::vector<std::string> &relay_lowered_ids() {
+  static std::vector<std::string> ids;
+  return ids;
+}
+
+// A pattern kind for the tests below: node R lowers into one streaming node
+// R.inner over the five-round repetition code, which takes R's edges.
+const bool relay_pattern_registered = [] {
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  spec.name = "test_only_relay";
+  spec.requires_decoder = false;
+  spec.requires_dem = false;
+  pattern.lower = [](task_graph_node_config cfg,
+                     std::vector<task_graph_node_config> &out,
+                     std::vector<task_graph_edge> &edges) {
+    const std::string inner = cfg.id + ".inner";
+    relay_lowered_ids().push_back(cfg.id);
+    for (auto &e : edges) {
+      if (e.to_node == cfg.id)
+        e.to_node = inner;
+      if (e.from_node == cfg.id)
+        e.from_node = inner;
+    }
+    out.push_back(rep5_streaming_node(inner));
+  };
+  register_pattern_kind(std::move(spec), {}, std::move(pattern));
+  return true;
+}();
+
+} // namespace
+
+// A pattern kind is lowered by the hook it registered before any node is
+// checked or built, so it needs no factory, and the node it lowers into
+// takes its edges.
+TEST(PatternKind, IsLoweredByItsHookBeforeTheBuild) {
+  std::vector<task_graph_node_config> nodes;
+  task_graph_node_config relay;
+  ASSERT_TRUE(relay_pattern_registered);
+  EXPECT_NE(find_node_pattern("test_only_relay"), nullptr);
+  EXPECT_EQ(find_node_factory("test_only_relay"), nullptr);
+  relay.id = "R";
+  relay.kind = "test_only_relay";
+  nodes.push_back(std::move(relay));
+  relay_lowered_ids().clear();
+  const auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"measurements", "output", "R", "input"},
+                         {"R", "output", "output", "L"}});
+  EXPECT_EQ(relay_lowered_ids(), std::vector<std::string>{"R"});
+  EXPECT_EQ(graph->output_names(), std::vector<std::string>{"L"});
+}
+
+// Any pattern kind inside an ensemble member is rejected, naming its kind,
+// before its hook runs.
+TEST(PatternKind, IsRejectedInsideAnEnsemble) {
+  task_graph_ensemble_spec spec;
+  task_graph_ensemble_spec::member member;
+  task_graph_node_config relay;
+  task_graph_node_config ensemble;
+  std::vector<task_graph_node_config> nodes;
+  ASSERT_TRUE(relay_pattern_registered);
+  relay.id = "r";
+  relay.kind = "test_only_relay";
+  member.nodes.push_back(std::move(relay));
+  member.edges = {{"input", "output", "r", "input"},
+                  {"r", "output", "output", "input"}};
+  spec.members.push_back(std::move(member));
+  spec.join_strategy = "first";
+  ensemble.id = "E";
+  ensemble.ensemble = std::move(spec);
+  nodes.push_back(std::move(ensemble));
+  relay_lowered_ids().clear();
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(
+            std::move(nodes), {{"measurements", "output", "E", "input"},
+                               {"E", "output", "output", "input"}});
+      },
+      "from_topology: ensemble 'E' member 0 has test_only_relay 'r', which "
+      "expands only as a node of the graph");
+  EXPECT_TRUE(relay_lowered_ids().empty());
+} // end - TEST(PatternKind, IsRejectedInsideAnEnsemble)
+
+// A kind either is a pattern or has a factory: registering one form replaces
+// the other, and unregistering removes both. A pattern needs a lowering.
+TEST(PatternKind, RegistrationReplacesTheOtherForm) {
+  const std::string name = "test_only_pattern_or_factory";
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  const node_factory factory =
+      [](node_build_context &) -> std::unique_ptr<task_graph_node> {
+    return nullptr;
+  };
+  spec.name = name;
+  EXPECT_THROW(register_pattern_kind(spec, {}, pattern), std::invalid_argument);
+  pattern.lower = [](task_graph_node_config,
+                     std::vector<task_graph_node_config> &,
+                     std::vector<task_graph_edge> &) {};
+
+  register_pattern_kind(spec, {}, pattern);
+  EXPECT_NE(find_node_pattern(name), nullptr);
+  EXPECT_EQ(find_node_factory(name), nullptr);
+  register_node_kind(spec, {}, factory);
+  EXPECT_EQ(find_node_pattern(name), nullptr);
+  EXPECT_NE(find_node_factory(name), nullptr);
+  register_pattern_kind(spec, {}, pattern);
+  EXPECT_NE(find_node_pattern(name), nullptr);
+  EXPECT_EQ(find_node_factory(name), nullptr);
+  unregister_task_graph_node_kind(name);
+  EXPECT_EQ(find_node_pattern(name), nullptr);
+  EXPECT_EQ(find_task_graph_node_kind(name), nullptr);
+} // end - TEST(PatternKind, RegistrationReplacesTheOtherForm)
+
 } // namespace cudaq::qec

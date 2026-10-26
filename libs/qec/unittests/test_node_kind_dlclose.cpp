@@ -17,6 +17,7 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -28,6 +29,7 @@ namespace {
 
 constexpr const char *plugin_kind = "node_kind_dlclose_plugin";
 constexpr const char *plugin_alias = "node_kind_dlclose_shared_alias";
+constexpr const char *plugin_pattern = "node_kind_dlclose_pattern";
 constexpr const char *host_kind = "node_kind_dlclose_host";
 
 /// @brief Determine whether a canonical node-kind name is registered.
@@ -90,6 +92,40 @@ TEST(NodeKindDlclose, UnregistersPluginCallbacksBeforeUnload) {
   ASSERT_NE(alias_owner, nullptr);
   EXPECT_EQ(alias_owner->name, host_kind);
 } // end - NodeKindDlclose.UnregistersPluginCallbacksBeforeUnload
+
+/// @brief Verify a plugin pattern lowers into the plugin's node kind, and
+/// that its plugin-owned hooks are erased during a real unload.
+TEST(NodeKindDlclose, UnregistersPluginPatternBeforeUnload) {
+  void *handle = dlopen(NODE_KIND_DLCLOSE_PLUGIN_PATH, RTLD_NOW | RTLD_LOCAL);
+  std::vector<task_graph_node_config> nodes;
+  task_graph_node_config node;
+  std::unique_ptr<decoding_task_graph> graph;
+  measurement_results shot;
+  const node_pattern *pattern = nullptr;
+
+  ASSERT_NE(handle, nullptr) << dlerror();
+  pattern = find_node_pattern(plugin_pattern);
+  ASSERT_NE(pattern, nullptr);
+  EXPECT_TRUE(pattern->lower);
+  EXPECT_TRUE(pattern->windows);
+  EXPECT_EQ(find_node_factory(plugin_pattern), nullptr);
+
+  node.id = "plugin_pattern_node";
+  node.kind = plugin_pattern;
+  nodes.push_back(std::move(node));
+  graph = decoding_task_graph::from_topology(std::move(nodes));
+  shot.bits = {1};
+  EXPECT_EQ(graph->run(shot).bits, (std::vector<uint8_t>{1}));
+  graph.reset();
+
+  ASSERT_EQ(dlclose(handle), 0) << dlerror();
+  EXPECT_EQ(find_node_pattern(plugin_pattern), nullptr);
+  EXPECT_EQ(find_task_graph_node_kind(plugin_pattern), nullptr);
+  EXPECT_FALSE(registered_kind_contains(plugin_pattern));
+  EXPECT_EQ(decoding::config::find_decoder_schema(
+                task_graph_node_schema_name(plugin_pattern)),
+            nullptr);
+} // end - NodeKindDlclose.UnregistersPluginPatternBeforeUnload
 
 /// @brief Verify dlclose waits for an active plugin metadata callback.
 TEST(NodeKindDlclose, UnloadWaitsForActivePolicyCallback) {
@@ -211,6 +247,66 @@ TEST(NodeKindDlclose, UnregisterWaitsForActiveFactory) {
   EXPECT_EQ(find_node_factory("node_kind_concurrent_unregister"), nullptr);
 } // end - NodeKindDlclose.UnregisterWaitsForActiveFactory
 
+/// @brief Verify unregister waits until an active lowering has returned.
+TEST(NodeKindDlclose, UnregisterWaitsForActiveLowering) {
+  std::atomic<bool> lowering_entered = false;
+  std::atomic<bool> release_lowering = false;
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  node_kind_registration registration;
+  std::future<void> build_future;
+  std::promise<void> reset_started;
+  std::future<void> reset_started_future = reset_started.get_future();
+  std::future<void> reset_future;
+  const auto lowering_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+
+  spec.name = "node_kind_concurrent_pattern";
+  spec.requires_decoder = false;
+  spec.requires_dem = false;
+  // Throws once released, so the build ends without a node to build.
+  pattern.lower = [&](task_graph_node_config,
+                      std::vector<task_graph_node_config> &,
+                      std::vector<task_graph_edge> &) {
+    lowering_entered.store(true, std::memory_order_release);
+    while (!release_lowering.load(std::memory_order_acquire))
+      std::this_thread::yield();
+    throw std::invalid_argument("node_kind_concurrent_pattern: released");
+  };
+  registration =
+      register_scoped_pattern_kind(std::move(spec), {}, std::move(pattern));
+
+  build_future = std::async(std::launch::async, [] {
+    std::vector<task_graph_node_config> nodes;
+    task_graph_node_config node;
+    node.id = "concurrent_pattern_node";
+    node.kind = "node_kind_concurrent_pattern";
+    nodes.push_back(std::move(node));
+    (void)decoding_task_graph::from_topology(std::move(nodes));
+  });
+
+  while (!lowering_entered.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < lowering_deadline)
+    std::this_thread::yield();
+  if (!lowering_entered.load(std::memory_order_acquire))
+    release_lowering.store(true, std::memory_order_release);
+  ASSERT_TRUE(lowering_entered.load(std::memory_order_acquire));
+
+  reset_future = std::async(std::launch::async, [&] {
+    reset_started.set_value();
+    registration.reset();
+  });
+  reset_started_future.wait();
+  EXPECT_EQ(reset_future.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+
+  release_lowering.store(true, std::memory_order_release);
+  EXPECT_THROW(build_future.get(), std::invalid_argument);
+  EXPECT_NO_THROW(reset_future.get());
+  EXPECT_EQ(find_task_graph_node_kind("node_kind_concurrent_pattern"), nullptr);
+  EXPECT_EQ(find_node_pattern("node_kind_concurrent_pattern"), nullptr);
+} // end - NodeKindDlclose.UnregisterWaitsForActiveLowering
+
 /// @brief Verify an old scoped token cannot erase a replacement registration.
 TEST(NodeKindDlclose, StaleTokenPreservesReplacement) {
   task_graph_node_kind_spec first_spec;
@@ -254,6 +350,47 @@ TEST(NodeKindDlclose, StaleTokenPreservesReplacement) {
                 task_graph_node_schema_name(kind_name)),
             nullptr);
 } // end - NodeKindDlclose.StaleTokenPreservesReplacement
+
+/// @brief Verify a stale pattern token cannot erase the factory kind that
+/// replaced it, and that the replacement left no pattern behind.
+TEST(NodeKindDlclose, StalePatternTokenPreservesReplacement) {
+  task_graph_node_kind_spec pattern_spec;
+  task_graph_node_kind_spec factory_spec;
+  node_pattern pattern;
+  node_kind_registration pattern_registration;
+  node_kind_registration factory_registration;
+  const std::string kind_name = "node_kind_scoped_pattern_replacement";
+  const auto empty_factory =
+      [](node_build_context &) -> std::unique_ptr<task_graph_node> {
+    return nullptr;
+  };
+
+  pattern_spec.name = kind_name;
+  pattern_spec.requires_decoder = false;
+  pattern_spec.requires_dem = false;
+  pattern.lower = [](task_graph_node_config,
+                     std::vector<task_graph_node_config> &,
+                     std::vector<task_graph_edge> &) {};
+  pattern_registration = register_scoped_pattern_kind(std::move(pattern_spec),
+                                                      {}, std::move(pattern));
+  EXPECT_NE(find_node_pattern(kind_name), nullptr);
+
+  factory_spec.name = kind_name;
+  factory_spec.requires_decoder = false;
+  factory_spec.requires_dem = false;
+  factory_registration =
+      register_scoped_node_kind(std::move(factory_spec), {}, empty_factory);
+  EXPECT_EQ(find_node_pattern(kind_name), nullptr);
+
+  pattern_registration.reset();
+  EXPECT_NE(find_task_graph_node_kind(kind_name), nullptr);
+  EXPECT_NE(find_node_factory(kind_name), nullptr);
+  EXPECT_EQ(find_node_pattern(kind_name), nullptr);
+
+  factory_registration.reset();
+  EXPECT_EQ(find_task_graph_node_kind(kind_name), nullptr);
+  EXPECT_EQ(find_node_factory(kind_name), nullptr);
+} // end - NodeKindDlclose.StalePatternTokenPreservesReplacement
 
 } // namespace
 

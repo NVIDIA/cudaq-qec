@@ -7,6 +7,7 @@
 #include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_data_artifacts.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
+#include "../lib/decoding_task/decoding_task_node_kind_registry.h"
 #include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "../lib/realtime/realtime_decoding.h"
 #include "../lib/realtime/window_request_yaml.h"
@@ -4446,6 +4447,61 @@ TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows) {
     }
   }
 } // end - TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows)
+
+// Any pattern kind's windows hook fills the store: it is handed the node's
+// parameters and template, and every variant of each layer it declares is
+// held.
+TEST(PatternKind, FillsTheStoreWithTheWindowsItsHookDeclares) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::fill_data_artifact_store;
+  using cudaq::qec::experimental::port_disposition;
+  const std::string name = "test_only_windowed_pattern";
+  cudaq::qec::task_graph_node_kind_spec spec;
+  cudaq::qec::decoding::config::decoder_schema params;
+  cudaq::qec::node_pattern pattern;
+  cudaq::qec::experimental::window_request closed;
+  std::size_t seen_rounds = 0;
+  closed.period = 1;
+  closed.commit = cudaq::qec::experimental::round_range{0, 1};
+  closed.input.disposition = port_disposition::closed;
+  closed.output.disposition = port_disposition::closed;
+  spec.name = name;
+  spec.requires_decoder = false;
+  params.params.push_back({"rounds", cfg::param_kind::uint64});
+  pattern.lower = [](cudaq::qec::task_graph_node_config,
+                     std::vector<cudaq::qec::task_graph_node_config> &,
+                     std::vector<cudaq::qec::task_graph_edge> &) {};
+  pattern.windows = [&](const cudaqx::heterogeneous_map &node_params,
+                        const cudaq::qec::experiment_template &) {
+    seen_rounds = node_params.get<std::size_t>("rounds");
+    return std::vector<
+        std::pair<std::string, cudaq::qec::experimental::window_request>>{
+        {"C", closed}};
+  };
+  cudaq::qec::register_pattern_kind(spec, params, pattern);
+
+  const auto config = cfg::multi_decoder_config::from_yaml_str(
+      pattern_yaml_with("          type: parallel_window\n"
+                        "          commit_rounds: 3\n"
+                        "          buffer_rounds: 3\n"
+                        "          gap_rounds: 9\n"
+                        "          output: corrected_logical\n"
+                        "          max_in_flight: 4\n"
+                        "          inner: {type: single_error_lut}\n",
+                        "          type: " + name +
+                            "\n"
+                            "          rounds: 5\n"));
+  const auto store = fill_data_artifact_store(config, ".");
+  // The hook captures this test's locals.
+  cudaq::qec::unregister_task_graph_node_kind(name);
+  const auto tmpl = store.find_template(*config.decoders.at(0).dem_chunks);
+  const auto keys = variant_keys(*tmpl, closed);
+  EXPECT_EQ(seen_rounds, 5u);
+  ASSERT_FALSE(keys.empty());
+  for (const auto &key : keys)
+    EXPECT_NE(store.find_window(*tmpl, closed, key), nullptr);
+  EXPECT_EQ(records_of(store, "window").size(), keys.size());
+} // end - TEST(PatternKind, FillsTheStoreWithTheWindowsItsHookDeclares)
 
 // Configuring builds no decoder for a pattern, whose layers build their own
 // from their windows: a pattern beside flat matrices is reported as having

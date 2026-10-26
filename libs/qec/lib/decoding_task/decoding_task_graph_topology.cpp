@@ -12,7 +12,6 @@
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
-#include "decoding_task_parallel_window_pattern.h"
 #include "measurement_frame_lengths.h"
 #include "cudaq/qec/cancellation.h"
 #include "cudaq/qec/candidate_sink.h"
@@ -426,11 +425,12 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
       if (n.ensemble)
         throw std::invalid_argument(member + " nests an ensemble, which is "
                                              "not supported yet");
-      // Its ingest must be fed by measurements alone, never by a fan-out.
-      if (is_parallel_window(n))
-        throw std::invalid_argument(member + " has parallel_window '" + n.id +
-                                    "', which expands only as a node of the "
-                                    "graph");
+      // Member nodes are not lowered, and parallel_window's ingest must be
+      // fed by measurements alone, never by a fan-out.
+      if (find_node_pattern(n.kind))
+        throw std::invalid_argument(
+            member + " has " + find_task_graph_node_kind(n.kind)->name + " '" +
+            n.id + "', which expands only as a node of the graph");
       if (n.id.empty())
         throw std::invalid_argument(member + " has a node without an id");
       n.id = prefix + n.id;
@@ -487,15 +487,18 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
   return wiring;
 }
 
-/// Rewrite every pattern entry of `nodes`, an ensemble or a parallel_window,
-/// into plain nodes, in place, so the result is in topological order
-/// whenever the input was. Only ensembles need wiring once built.
+/// Rewrite every pattern entry of `nodes`, an ensemble or a node of a
+/// pattern kind, into plain nodes, in place, so the result is in topological
+/// order whenever the input was. Only ensembles need wiring once built. The
+/// caller holds the registry lock, which keeps each lowering registered
+/// while it runs.
 std::vector<ensemble_wiring>
 lower_patterns(std::vector<task_graph_node_config> &nodes,
                std::vector<task_graph_edge> &edges) {
   std::vector<ensemble_wiring> wirings;
+  std::vector<task_graph_node_config> lowered;
   if (std::none_of(nodes.begin(), nodes.end(), [](const auto &cfg) {
-        return cfg.ensemble.has_value() || is_parallel_window(cfg);
+        return cfg.ensemble.has_value() || find_node_pattern(cfg.kind);
       }))
     return wirings;
   // A lone pattern gets the single-node wiring before it stops being one
@@ -503,25 +506,26 @@ lower_patterns(std::vector<task_graph_node_config> &nodes,
   if (nodes.size() == 1 && edges.empty())
     edges = {{"measurements", "output", nodes[0].id, "input"},
              {nodes[0].id, "output", "output", "input"}};
-  std::vector<task_graph_node_config> lowered;
   lowered.reserve(nodes.size());
   for (auto &cfg : nodes) {
+    const node_pattern *pattern =
+        cfg.ensemble ? nullptr : find_node_pattern(cfg.kind);
     // A pattern's nodes take its id as their prefix, so a reserved one is
     // named before lowering hides it.
-    if ((cfg.ensemble || is_parallel_window(cfg)) &&
+    if ((cfg.ensemble || pattern) &&
         (cfg.id == "measurements" || cfg.id == "dets" || cfg.id == "output"))
       throw std::invalid_argument("from_topology: node id '" + cfg.id +
                                   "' is reserved for a synthetic endpoint");
     if (cfg.ensemble)
       wirings.push_back(lower_ensemble(std::move(cfg), lowered, edges));
-    else if (is_parallel_window(cfg))
-      lower_parallel_window(std::move(cfg), lowered, edges);
+    else if (pattern)
+      pattern->lower(std::move(cfg), lowered, edges);
     else
       lowered.push_back(std::move(cfg));
-  }
+  } // end - for(cfg)
   nodes = std::move(lowered);
   return wirings;
-}
+} // end - lower_patterns()
 
 /// The static width of a node's `logical_outcome` output, when it has one.
 std::optional<std::size_t>

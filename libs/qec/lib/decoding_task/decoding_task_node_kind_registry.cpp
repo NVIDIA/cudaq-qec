@@ -39,6 +39,11 @@ std::map<std::string, node_factory> &factory_registry() {
   return *registry;
 }
 
+std::map<std::string, node_pattern> &pattern_registry() {
+  static auto *registry = new std::map<std::string, node_pattern>();
+  return *registry;
+}
+
 std::map<std::string, uint64_t> &registration_registry() {
   static auto *registry = new std::map<std::string, uint64_t>();
   return *registry;
@@ -120,6 +125,28 @@ register_task_graph_node_kind_locked(task_graph_node_kind_spec spec,
   return registration_id;
 } // end - register_task_graph_node_kind_locked()
 
+/// @brief Register a pattern kind while holding registry_mutex(). Its
+/// lowering replaces any factory the kind had, and is checked before the kind
+/// is registered, so a rejected pattern leaves the registry unchanged.
+/// @param spec Public metadata describing the node kind.
+/// @param params Parameter schema registered for the node kind.
+/// @param pattern The kind's lowering and optional window declaration.
+/// @return Identity used to prevent an old plugin from removing a replacement.
+uint64_t register_pattern_kind_locked(task_graph_node_kind_spec spec,
+                                      decoding::config::decoder_schema params,
+                                      node_pattern pattern) {
+  const std::string name = spec.name;
+  uint64_t registration_id = 0;
+  if (!pattern.lower)
+    throw std::invalid_argument("register_pattern_kind: pattern kind '" + name +
+                                "' needs a lowering");
+  registration_id =
+      register_task_graph_node_kind_locked(std::move(spec), std::move(params));
+  factory_registry().erase(name);
+  pattern_registry().insert_or_assign(name, std::move(pattern));
+  return registration_id;
+} // end - register_pattern_kind_locked()
+
 /// @brief Remove a current node-kind registration while its image is mapped.
 /// @param name Canonical kind name or alias to unregister.
 /// @param registration_id Expected owner, or zero for unconditional removal.
@@ -139,9 +166,11 @@ void unregister_task_graph_node_kind_locked(const std::string &name,
     else
       ++alias;
 
-  // Destroy the factory first because std::function dispatches its destructor
-  // through plugin code that becomes invalid as soon as dlclose returns.
+  // Destroy the factory or lowering first because std::function dispatches
+  // its destructor through plugin code that becomes invalid as soon as
+  // dlclose returns.
   factory_registry().erase(canonical);
+  pattern_registry().erase(canonical);
   kind_registry().erase(canonical);
   registration_registry().erase(canonical);
   decoding::config::unregister_task_graph_node_schema(
@@ -181,13 +210,23 @@ std::vector<std::string> registered_task_graph_node_kinds() {
   return names;
 }
 
+// A factory replaces any lowering the kind had: a kind is one or the other.
 void register_node_kind(task_graph_node_kind_spec spec,
                         decoding::config::decoder_schema params,
                         node_factory factory) {
   const std::string name = spec.name;
   std::lock_guard<std::recursive_mutex> lock(registry_mutex());
   register_task_graph_node_kind_locked(std::move(spec), std::move(params));
+  pattern_registry().erase(name);
   factory_registry().insert_or_assign(name, std::move(factory));
+}
+
+void register_pattern_kind(task_graph_node_kind_spec spec,
+                           decoding::config::decoder_schema params,
+                           node_pattern pattern) {
+  std::lock_guard<std::recursive_mutex> lock(registry_mutex());
+  register_pattern_kind_locked(std::move(spec), std::move(params),
+                               std::move(pattern));
 }
 
 /// @brief Remove a node kind while plugin-owned callbacks remain callable.
@@ -219,7 +258,24 @@ register_scoped_node_kind(task_graph_node_kind_spec spec,
   std::lock_guard<std::recursive_mutex> lock(registry_mutex());
   const uint64_t registration_id =
       register_task_graph_node_kind_locked(std::move(spec), std::move(params));
+  pattern_registry().erase(name);
   factory_registry().insert_or_assign(name, std::move(factory));
+  return node_kind_registration(std::move(name), registration_id);
+}
+
+/// @brief Register a plugin-owned pattern kind with an unload cleanup token.
+/// @param spec Public metadata describing the node kind.
+/// @param params Parameter schema registered for the node kind.
+/// @param pattern The kind's lowering and optional window declaration.
+/// @return Move-only token that unregisters the kind when destroyed.
+node_kind_registration
+register_scoped_pattern_kind(task_graph_node_kind_spec spec,
+                             decoding::config::decoder_schema params,
+                             node_pattern pattern) {
+  std::string name = spec.name;
+  std::lock_guard<std::recursive_mutex> lock(registry_mutex());
+  const uint64_t registration_id = register_pattern_kind_locked(
+      std::move(spec), std::move(params), std::move(pattern));
   return node_kind_registration(std::move(name), registration_id);
 }
 
@@ -230,6 +286,15 @@ const node_factory *find_node_factory(const std::string &kind) {
     return nullptr;
   auto iter = factory_registry().find(canonical);
   return iter == factory_registry().end() ? nullptr : &iter->second;
+}
+
+const node_pattern *find_node_pattern(const std::string &kind) {
+  std::lock_guard<std::recursive_mutex> lock(registry_mutex());
+  const auto canonical = canonical_locked(kind);
+  if (canonical.empty())
+    return nullptr;
+  auto iter = pattern_registry().find(canonical);
+  return iter == pattern_registry().end() ? nullptr : &iter->second;
 }
 
 } // namespace cudaq::qec
