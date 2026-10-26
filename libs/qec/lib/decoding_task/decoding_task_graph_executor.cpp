@@ -539,8 +539,6 @@ struct decoding_task_graph::impl::record_scheduler {
     const auto node_idx = owner.streaming_nodes[producer].node_index;
     if (!capability)
       capability = owner.streaming_nodes[producer].capability;
-    if (index == no_index)
-      index = capability->published_index().value_or(no_index);
     snapshot_node(c, producer, capability);
     {
       auto lock = lock_runtime();
@@ -550,17 +548,34 @@ struct decoding_task_graph::impl::record_scheduler {
     // consumer's delivery event executes. With one context none can, so the
     // consumer reads the output in place instead; a graph with a fire pool
     // always copies.
+    const auto &wires = owner.streaming_wires_from[node_idx];
     if (copy_outputs)
-      for (const auto &wire : owner.streaming_wires_from[node_idx]) {
+      for (const auto &wire : wires) {
         const auto *value = capability->streaming_output(wire.from_slot);
         const auto wire_id = static_cast<std::size_t>(wire.id);
         if (value)
           c.wire_values[wire_id] = *value;
         c.wire_valid[wire_id] = value != nullptr;
       }
-    publish_wires(c, parent, root, owner.streaming_wires_from[node_idx], index);
-    publish_wires(c, parent, root, owner.completion_wires_from[node_idx],
-                  index);
+    {
+      auto lock = lock_runtime();
+      // Each port carries its own index, unless the fire named one for all
+      // of them. A null port says nothing to an indexed consumer this time.
+      for (const auto &wire : wires) {
+        const auto consumer =
+            static_cast<std::size_t>(owner.streaming_by_node[wire.to_node]);
+        if (indexed(consumer) && !capability->streaming_output(wire.from_slot))
+          continue;
+        const auto wire_index =
+            index != no_index ? index
+                              : capability->published_index(wire.from_slot)
+                                    .value_or(no_index);
+        publish_wire_locked(c, parent, root, wire, wire_index);
+      }
+      publish_wires_locked(c, parent, root,
+                           owner.completion_wires_from[node_idx], index);
+    }
+    notify_workers();
     return true;
   }
 
@@ -574,17 +589,24 @@ struct decoding_task_graph::impl::record_scheduler {
     notify_workers();
   }
 
-  // With `absent`, the publication says instance `index` of the producer
-  // never exists: it carries no value and goes only to indexed consumers,
-  // which file the absence under the instances reading that index.
   void publish_wires_locked(context &c, std::size_t parent, std::size_t root,
                             const std::vector<compiled_wire> &wires,
                             std::int64_t index, bool absent = false) {
-    for (const auto &wire : wires) {
+    for (const auto &wire : wires)
+      publish_wire_locked(c, parent, root, wire, index, absent);
+  }
+
+  // With `absent`, the publication says instance `index` of the producer
+  // never exists: it carries no value and goes only to indexed consumers,
+  // which file the absence under the instances reading that index.
+  void publish_wire_locked(context &c, std::size_t parent, std::size_t root,
+                           const compiled_wire &wire, std::int64_t index,
+                           bool absent = false) {
+    {
       const auto consumer =
           static_cast<std::size_t>(owner.streaming_by_node[wire.to_node]);
       if (absent && !indexed(consumer))
-        continue;
+        return;
       // A record-ordered producer publishes its indices in order, so the
       // ones between its last publication and this one never come: announce
       // them, from the first the consumer reads, before the value itself.
@@ -595,8 +617,8 @@ struct decoding_task_graph::impl::record_scheduler {
         if (!pooled(producer) && !indexed(producer)) {
           const auto from = last == no_index ? wire.index_offset : last + 1;
           for (auto skipped = from; skipped < index; ++skipped)
-            publish_wires_locked(c, parent, root, {wire}, skipped,
-                                 /*absent=*/true);
+            publish_wire_locked(c, parent, root, wire, skipped,
+                                /*absent=*/true);
           last = index;
         }
       }

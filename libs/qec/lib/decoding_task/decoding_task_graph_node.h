@@ -167,12 +167,15 @@ public:
   /// same data cancels it out.  Default: nothing withheld.
   virtual bool flush() { return false; }
 
-  /// Index of the values the node has just published, for consumers that join
-  /// their inputs by index (see indexed_join_node). Default: unindexed.
-  /// A record-ordered node's indices never decrease from one publication to
-  /// the next: once it has published index j, the executor treats a lower
-  /// index a consumer still waits for as one that will never arrive.
-  virtual std::optional<std::int64_t> published_index() const {
+  /// Index of the value the node has just published on output `slot`, for
+  /// consumers that join their inputs by index (see indexed_join_node).
+  /// Default: unindexed. Ports carry their own indices, so one publication
+  /// may put different instances on different ports; a port whose value is
+  /// null says nothing this time and its consumers keep waiting. A
+  /// record-ordered node's indices on a port never decrease from one
+  /// publication to the next: once it has published index j there, the
+  /// executor tells the consumers that the indices it skipped never arrive.
+  virtual std::optional<std::int64_t> published_index(std::size_t slot) const {
     return std::nullopt;
   }
 

@@ -12790,7 +12790,8 @@ public:
     logical_outcome output;
     output.bits = {0};
     output.converged = true;
-    value_out_ = edge_value{std::move(output)};
+    value_out_ = edge_value{output};
+    value_odd_ = edge_value{std::move(output)};
   }
 
   streaming_task_graph_node *streaming() override { return this; }
@@ -12860,6 +12861,11 @@ public:
       std::this_thread::sleep_for(std::chrono::milliseconds(hold_));
     value_out_.get<logical_outcome>().bits[0] = bit;
     published_ = static_cast<std::int64_t>(records_++);
+    // `split` publishes record r on `output` as index r and, on odd records
+    // only, on `odd` as index r + 1: two indices in one publication.
+    odd_valid_ = mode_ == "split" && (published_ % 2) == 1;
+    if (odd_valid_)
+      value_odd_.get<logical_outcome>().bits[0] = bit;
     valid_ = true;
     return true;
   }
@@ -12872,7 +12878,9 @@ public:
     valid_ = true;
     return true;
   }
-  std::optional<std::int64_t> published_index() const override {
+  std::optional<std::int64_t> published_index(std::size_t slot) const override {
+    if (slot == 1)
+      return odd_valid_ ? std::optional{published_ + 1} : std::nullopt;
     return published_;
   }
   bool exact_interval_coverage() const override { return staged_; }
@@ -12885,6 +12893,7 @@ public:
     correction_ = 0;
     parity_ = 0;
     valid_ = false;
+    odd_valid_ = false;
     records_ = 0;
     published_ = 0;
     coverage_.reset();
@@ -12897,20 +12906,23 @@ public:
   bool supports_streaming_input(std::size_t slot) const override {
     return slot < (mode_ == "join" ? 2u : 1u);
   }
+  bool has_output(std::size_t slot) const {
+    return slot == 0 || (mode_ == "split" && slot == 1);
+  }
   std::optional<window_spec> derive_streaming_schedule(
       std::size_t output_slot,
       const std::vector<input_schedule> &inputs) const override {
-    if (output_slot != 0 || inputs.empty())
+    if (!has_output(output_slot) || inputs.empty())
       return std::nullopt;
     return inputs[0].schedule;
   }
   std::optional<edge_value_type> output_type(std::size_t slot) const override {
-    return slot == 0 ? std::optional{edge_value_type("logical_outcome")}
-                     : std::nullopt;
+    return has_output(slot) ? std::optional{edge_value_type("logical_outcome")}
+                            : std::nullopt;
   }
   std::optional<std::size_t>
   output_value_size(std::size_t slot) const override {
-    return slot == 0 ? std::optional<std::size_t>{1} : std::nullopt;
+    return has_output(slot) ? std::optional<std::size_t>{1} : std::nullopt;
   }
   bool accepts_input_type(std::size_t slot,
                           edge_value_type type) const override {
@@ -12919,6 +12931,8 @@ public:
             type == edge_value_type("measurement_results"));
   }
   const edge_value *streaming_output(std::size_t slot) const override {
+    if (slot == 1)
+      return odd_valid_ ? &value_odd_ : nullptr;
     return slot == 0 && valid_ ? &value_out_ : nullptr;
   }
   void execute_indexed(const std::vector<edge_value> &inputs,
@@ -12929,7 +12943,10 @@ public:
     return mode_ == "join" ? std::vector<std::string>{"a", "b"}
                            : std::vector<std::string>{"input"};
   }
-  std::vector<std::string> outputs() const override { return {"output"}; }
+  std::vector<std::string> outputs() const override {
+    return mode_ == "split" ? std::vector<std::string>{"output", "odd"}
+                            : std::vector<std::string>{"output"};
+  }
 
 private:
   std::string id_;
@@ -12943,10 +12960,12 @@ private:
   uint8_t correction_ = 0;
   uint8_t parity_ = 0;
   bool valid_ = false;
+  bool odd_valid_ = false;
   std::size_t records_ = 0;
   std::int64_t published_ = 0;
   std::optional<committed_coverage> coverage_;
   edge_value value_out_;
+  edge_value value_odd_;
 };
 
 static const bool index_probe_registered = [] {
@@ -13314,6 +13333,55 @@ TEST(DecodingTaskGraph, IndexedJoinLearnsAbsenceBeforeFinal) {
   EXPECT_EQ(graph->streaming_result().status,
             task_graph_streaming_status::complete);
   EXPECT_EQ(probe->records("K"), (std::vector<std::size_t>{1, 2, 3}));
+}
+
+TEST(DecodingTaskGraph, PortsPublishTheirOwnIndices) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  // S publishes record r on `output` as index r and, on odd r, on `odd` as
+  // index r + 1 in the same publication; on even r the `odd` port is null
+  // and says nothing. J[k] takes a = S.output[k] and b = S.odd[k], so b is
+  // present for even k >= 2 and absent otherwise, which J learns from the
+  // indices `odd` skips rather than at FINAL.
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("S", "split"));
+  nodes.push_back(index_node("J", "join"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "S", "input"},
+       {"S", "output", "J", "a"},
+       {"S", "odd", "J", "b"},
+       {"J", "output", "output", "input"}},
+      {});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const std::vector<uint8_t> records = {1, 0, 1, 1, 0};
+  const auto expect_fires = [&](std::size_t count) {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    ASSERT_EQ(index_fires.size(), count);
+    for (const auto &fire : index_fires) {
+      const auto k = static_cast<std::size_t>(fire.k);
+      EXPECT_EQ(fire.a, records[k]) << "instance " << k;
+      if (k >= 2 && k % 2 == 0)
+        EXPECT_EQ(fire.b, records[k - 1]) << "instance " << k;
+      else
+        EXPECT_EQ(fire.b, -1) << "instance " << k;
+    }
+  };
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  expect_fires(records.size() - 1); // J[0..3] fired before FINAL
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  expect_fires(records.size());
+  EXPECT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::complete);
 }
 
 TEST(DecodingTaskGraph, IndexedJoinMatchesSynchronousGraph) {
