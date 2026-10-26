@@ -15,6 +15,7 @@
 
 #include "decoding_task_decoding_window.h"
 #include "decoding_task_experiment_template.h"
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -149,6 +150,10 @@ public:
   std::size_t record_limit() const { return record_limit_; }
   /// The rounds the ring holds, fixed at construction.
   std::size_t ring_rounds() const { return ring_mask_ + 1; }
+  /// The first index any layer has a window at, fixed by the layout.
+  std::int64_t first_index() const {
+    return *std::min_element(first_k_.begin(), first_k_.end());
+  }
 
   /// Start a new shot.
   /// @throws std::logic_error if a view is out.

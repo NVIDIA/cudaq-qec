@@ -609,7 +609,7 @@ void ingest_core::reset() {
   formed_ = 0;
   rows_formed_ = 0;
   shot_rounds_.reset();
-  next_index_ = *std::min_element(first_k_.begin(), first_k_.end());
+  next_index_ = first_index();
   index_end_ = 0;
   logical_.clear();
   failed_ = false;

@@ -43,6 +43,7 @@
 #include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
 #include "../lib/decoding_task/decoding_task_ingest_core.h"
+#include "../lib/decoding_task/decoding_task_ingest_node.h"
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/dem_construction_code.h"
@@ -4888,5 +4889,277 @@ TEST(WindowPayloads, AreEdgeValuesRefilledInPlace) {
   EXPECT_EQ(held_rows.get<window_rows>().detectors, rows.detectors);
   EXPECT_EQ(held_send.get<window_send_payload>().values, payload.values);
 } // end - TEST(WindowPayloads, AreEdgeValuesRefilledInPlace)
+
+// ---------------------------------------------------------------------------
+// The ingest node
+// ---------------------------------------------------------------------------
+
+// One publication of an ingest node, as a test keeps it.
+struct node_publication {
+  std::optional<std::int64_t> index;
+  std::vector<std::optional<window_rows>> windows; ///< One per layer
+  std::optional<std::vector<std::uint8_t>> logical;
+  std::optional<streaming_task_graph_node::committed_coverage> coverage;
+};
+
+// The publication @p node holds, copied.
+node_publication current_publication(const ingest_node &node,
+                                     std::size_t layers) {
+  node_publication out;
+  out.index = node.published_index();
+  for (std::size_t l = 0; l < layers; ++l) {
+    const auto *value = node.streaming_output(l);
+    out.windows.push_back(value ? std::optional{value->get<window_rows>()}
+                                : std::nullopt);
+  }
+  if (const auto *value = node.streaming_output(layers))
+    out.logical = value->get<logical_outcome>().bits;
+  out.coverage = node.streaming_coverage();
+  return out;
+}
+
+// Streams shot s into @p node in records cut at random, no longer than its
+// chunk limit, the last of them FINAL, then flushes it, handing over and
+// keeping every publication.
+std::vector<node_publication> stream_into(ingest_node &node, const shot &s,
+                                          std::size_t layers,
+                                          std::mt19937 &rng) {
+  std::vector<node_publication> out;
+  const auto limit = *node.raw_chunk_limit();
+  const auto keep = [&](bool published) {
+    for (bool more = published; more; more = node.publish_next())
+      out.push_back(current_publication(node, layers));
+  };
+  for (std::size_t at = 0; at < s.measurements.size();) {
+    const auto len =
+        std::min(std::uniform_int_distribution<std::size_t>(1, limit)(rng),
+                 s.measurements.size() - at);
+    const auto type = at + len == s.measurements.size() ? round_type::FINAL
+                                                        : round_type::BULK;
+    keep(node.enqueue(s.measurements.data() + at, len, type));
+    at += len;
+  }
+  keep(node.flush());
+  return out;
+} // end - stream_into()
+
+// The windows a node built over @p requests publishes, its layers named
+// L0, L1, ...
+std::vector<experimental::ingest_window>
+named_windows(const std::vector<window_request> &requests) {
+  std::vector<experimental::ingest_window> windows;
+  for (std::size_t l = 0; l < requests.size(); ++l)
+    windows.push_back({"L" + std::to_string(l), requests[l], ""});
+  return windows;
+}
+
+// @p rows is shot s's window k of @p request: its rounds, first row, variant
+// and rows.
+void expect_window_rows(const shot &s, const window_request &request,
+                        std::int64_t k, const window_rows &rows) {
+  const auto placed = place_window(s.context, request, k, s.R);
+  std::vector<std::uint8_t> want;
+  SCOPED_TRACE("window " + std::to_string(k));
+  for (auto r = placed.rounds.begin; r < placed.rounds.end; ++r) {
+    const auto round = s.round(r);
+    want.insert(want.end(), round.begin(), round.end());
+  }
+  EXPECT_EQ(rows.k, k);
+  EXPECT_EQ(rows.rounds, placed.rounds);
+  EXPECT_EQ(rows.first_row,
+            s.context->row_offset(static_cast<std::size_t>(placed.rounds.begin),
+                                  s.R));
+  EXPECT_TRUE(rows.variant == window_variant(*s.context, request, k, s.R));
+  EXPECT_EQ(rows.detectors, want);
+}
+
+// An ingest node publishes each index's windows, numbered from 0, the first
+// index any layer has: every window the shot holds, once, in index order,
+// with the shot's rows, and none it does not. A record may ready several
+// indices, at FINAL all that remain, and each is handed over in turn. With
+// read_logical, flush() then publishes the readout round's logical value,
+// alone, over the whole shot, and only once. One node serves shots of any
+// length in any order.
+TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
+  std::mt19937 rng(29);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  auto layouts = ingest_layouts();
+  // Anchors a period later, so the first window is k = -1 and the node's
+  // numbering is its own.
+  const auto later = shifted(layered(2, 1, 3), layered(2, 1, 3).a.period);
+  layouts.push_back({later.a, later.b});
+  ASSERT_NE(std::min(window_instances(later.a, 30).begin,
+                     window_instances(later.b, 30).begin),
+            0);
+  for (const auto &requests : layouts) {
+    ingest_node node(context, named_windows(requests), true);
+    for (const auto R :
+         {context->min_rounds(), std::size_t{30}, std::size_t{13},
+          std::size_t{22}, context->min_rounds() + 1}) {
+      SCOPED_TRACE("R=" + std::to_string(R) + ", " +
+                   std::to_string(requests.size()) + " layers");
+      const shot s(spec, R, rng);
+      auto first = std::numeric_limits<std::int64_t>::max();
+      auto end = std::numeric_limits<std::int64_t>::min();
+      for (const auto &request : requests) {
+        first = std::min(first, window_instances(request, R).begin);
+        end = std::max(end, window_instances(request, R).end);
+      }
+      const auto got = stream_into(node, s, requests.size(), rng);
+      ASSERT_EQ(got.size(), static_cast<std::size_t>(end - first) + 1);
+      for (std::size_t i = 0; i + 1 < got.size(); ++i) {
+        const auto k = first + static_cast<std::int64_t>(i);
+        ASSERT_EQ(got[i].index, std::optional<std::int64_t>(i));
+        EXPECT_FALSE(got[i].logical.has_value());
+        EXPECT_FALSE(got[i].coverage.has_value());
+        for (std::size_t l = 0; l < requests.size(); ++l) {
+          const auto instances = window_instances(requests[l], R);
+          ASSERT_EQ(got[i].windows[l].has_value(),
+                    k >= instances.begin && k < instances.end)
+              << "layer " << l << ", window " << k;
+          if (got[i].windows[l])
+            expect_window_rows(s, requests[l], k, *got[i].windows[l]);
+        }
+      } // end - for(i)
+      EXPECT_FALSE(got.back().index.has_value());
+      EXPECT_EQ(got.back().logical, s.logical());
+      ASSERT_TRUE(got.back().coverage.has_value());
+      EXPECT_EQ(got.back().coverage->begin_round, 0u);
+      EXPECT_EQ(got.back().coverage->end_round, ingest_node::whole_shot);
+      EXPECT_EQ(std::vector<std::uint8_t>(node.corrections(),
+                                          node.corrections() +
+                                              node.num_observables()),
+                s.logical());
+      EXPECT_FALSE(node.flush());
+      node.reset_streaming_state();
+    } // end - for(R)
+  } // end - for(requests)
+} // end - TEST(IngestNode, PublishesEachIndexsWindowsFromZero)
+
+// An ingest node takes raw measurements on `input`, in chunks no longer
+// than a period of its widest rounds, and offers one port of windows per
+// layer, then, with read_logical, `logical`, of the readout's observables.
+// It streams only.
+TEST(IngestNode, DeclaresItsPorts) {
+  const auto layers = layered(3, 3, 9);
+  const auto context =
+      std::make_shared<const experiment_template>(wide_readout_spec());
+  const std::vector<experimental::ingest_window> windows{{"A", layers.a, ""},
+                                                         {"B", layers.b, ""}};
+  ingest_node reading(context, windows, true);
+  ingest_node not_reading(context, windows, false);
+  const ingest_core core(context, layers_of({layers.a, layers.b}), false);
+  std::vector<edge_value> outputs;
+  EXPECT_EQ(reading.inputs(), std::vector<std::string>{"input"});
+  EXPECT_EQ(reading.outputs(), (std::vector<std::string>{"A", "B", "logical"}));
+  EXPECT_EQ(not_reading.outputs(), (std::vector<std::string>{"A", "B"}));
+  EXPECT_TRUE(reading.output_type(1) == edge_value_type::of<window_rows>());
+  EXPECT_TRUE(reading.output_type(2) == logical_outcome_type);
+  EXPECT_FALSE(not_reading.output_type(2).has_value());
+  EXPECT_TRUE(reading.accepts_input_type(0, measurement_results_type));
+  EXPECT_FALSE(reading.accepts_input_type(0, detection_events_type));
+  EXPECT_TRUE(reading.supports_raw_streaming_input(0));
+  EXPECT_EQ(reading.streaming(),
+            static_cast<streaming_task_graph_node *>(&reading));
+  EXPECT_EQ(reading.raw_chunk_limit(), core.record_limit());
+  EXPECT_EQ(reading.num_observables(), 1u);
+  EXPECT_EQ(not_reading.num_observables(), 0u);
+  expect_throw<std::logic_error>(
+      [&] { reading.execute_indexed({}, outputs); },
+      "ingest: the node streams; it has no one-shot path");
+} // end - TEST(IngestNode, DeclaresItsPorts)
+
+// Every publication is handed over before the node takes more: enqueue()
+// or flush() while some still wait is rejected, naming how many. flush()
+// publishes nothing before FINAL, and the logical value only once.
+TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore) {
+  const auto layers = layered(3, 3, 9);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  std::mt19937 rng(31);
+  const shot s(spec, 40, rng);
+  ingest_node node(context, named_windows({layers.a, layers.b}), true);
+  const auto limit = *node.raw_chunk_limit();
+  const auto total = s.measurements.size();
+  // The FINAL record: the shot's last limit measurements or fewer.
+  const auto final_start = (total - 1) / limit * limit;
+  std::size_t waiting = 0;
+  for (std::size_t at = 0; at < final_start; at += limit)
+    for (bool more =
+             node.enqueue(s.measurements.data() + at, limit, round_type::BULK);
+         more; more = node.publish_next())
+      ;
+  EXPECT_FALSE(node.flush());
+  ASSERT_TRUE(node.enqueue(s.measurements.data() + final_start,
+                           total - final_start, round_type::FINAL));
+  while (node.publish_next())
+    ++waiting;
+  ASSERT_GE(waiting, 1u) << "FINAL readied one index only";
+
+  // Again, holding the FINAL record's publications back.
+  node.reset_streaming_state();
+  for (std::size_t at = 0; at < final_start; at += limit)
+    for (bool more =
+             node.enqueue(s.measurements.data() + at, limit, round_type::BULK);
+         more; more = node.publish_next())
+      ;
+  ASSERT_TRUE(node.enqueue(s.measurements.data() + final_start,
+                           total - final_start, round_type::FINAL));
+  expect_throw<std::logic_error>(
+      [&] { node.flush(); },
+      "ingest: flush() while " + std::to_string(waiting) +
+          " publications wait to be handed over; publish_next() hands each "
+          "over");
+  expect_throw<std::logic_error>(
+      [&] { node.enqueue(nullptr, 0, round_type::BULK); },
+      "ingest: enqueue() while " + std::to_string(waiting) +
+          " publications wait to be handed over");
+  while (node.publish_next())
+    ;
+  EXPECT_TRUE(node.flush());
+  EXPECT_FALSE(node.publish_next());
+  EXPECT_FALSE(node.flush());
+} // end - TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore)
+
+// After a first shot, an ingest node streams a second of the same length in
+// the same records, publications and logical value included, without
+// allocating: windows are copied into buffers kept from the first.
+TEST(IngestNode, StreamsAShotWithoutAllocating) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  const auto layers = layered(3, 3, 9);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  std::mt19937 rng(37);
+  const shot s(spec, 60, rng);
+  ingest_node node(context, named_windows({layers.a, layers.b}), true);
+  const auto limit = *node.raw_chunk_limit();
+  std::size_t allocations = 0;
+  std::size_t published = 0;
+  // Streams the shot, counting the node's own allocations.
+  const auto stream = [&] {
+    allocations = 0;
+    published = 0;
+    for (std::size_t at = 0; at < s.measurements.size(); at += limit) {
+      const auto len = std::min(limit, s.measurements.size() - at);
+      const auto type = at + len == s.measurements.size() ? round_type::FINAL
+                                                          : round_type::BULK;
+      bool more = false;
+      allocations += allocation_counter::during([&] {
+        for (more = node.enqueue(s.measurements.data() + at, len, type); more;
+             more = node.publish_next())
+          published += node.streaming_output(0) != nullptr;
+      });
+    }
+    allocations += allocation_counter::during([&] { node.flush(); });
+    node.reset_streaming_state();
+  };
+  stream();
+  stream();
+  EXPECT_GT(published, 0u);
+  EXPECT_EQ(allocations, 0u);
+} // end - TEST(IngestNode, StreamsAShotWithoutAllocating)
 
 } // namespace cudaq::qec
