@@ -55,7 +55,8 @@ def check_playback(path, expected_shots, expect_no_errors):
     if not rows:
         raise RuntimeError("Playback returned no records")
     for row in rows:
-        expected_status = "100" if row["op"] == "stream" else "0"
+        expected_status = "100" if row["op"] in ("stream",
+                                                 "enqueue_data") else "0"
         if row["status"] != expected_status or row["dispatched"] != "1":
             raise RuntimeError("Incomplete or failed playback event: " +
                                str(row))

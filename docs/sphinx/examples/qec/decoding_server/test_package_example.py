@@ -33,6 +33,7 @@ class PackageExampleTest(unittest.TestCase):
         self.mismatch = "0"
         self.server_errors = 0
         self.client_confirms_routing = True
+        self.final_readout_status = None
 
     def fake_docker(self, *args, check=True):
         self.calls.append(args)
@@ -67,6 +68,11 @@ class PackageExampleTest(unittest.TestCase):
                                     "correction_mismatch"
                                 ])
         writer.writeheader()
+        if self.final_readout_status is not None:
+            writer.writerow(
+                dict(op="enqueue_data",
+                     status=self.final_readout_status,
+                     dispatched="1"))
         writer.writerow(
             dict(op="get_corrections",
                  status=self.status,
@@ -104,6 +110,17 @@ class PackageExampleTest(unittest.TestCase):
 
     def test_not_ready_is_a_failure_and_still_cleans_up(self):
         self.status = "4"
+        with self.assertRaisesRegex(RuntimeError, "failed playback"):
+            self.run_example()
+        self.assert_cleanup()
+
+    def test_enqueue_data_stream_completion_succeeds(self):
+        self.final_readout_status = "100"
+        self.run_example()
+        self.assert_cleanup()
+
+    def test_enqueue_data_rpc_success_is_not_stream_completion(self):
+        self.final_readout_status = "0"
         with self.assertRaisesRegex(RuntimeError, "failed playback"):
             self.run_example()
         self.assert_cleanup()

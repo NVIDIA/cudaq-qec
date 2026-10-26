@@ -176,7 +176,8 @@ A successful run prints:
 
 ``connectivity.csv.server.log`` must report one decode, one correction, and zero
 errors. In the CSV, reset and read use status ``0``; the enqueue is recorded as
-a completed one-round stream with status ``100``. The read contains
+a completed one-round stream with status ``100``. A successful ``enqueue_data``
+final-readout event also uses stream-completion status ``100``. The read contains
 ``read_completed=1``, ``correction_bits=010``, and ``correction_mismatch=0``.
 The launcher checks these completion conditions automatically.
 
