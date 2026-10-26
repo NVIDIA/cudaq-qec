@@ -20,9 +20,11 @@
 #include "cudaq/qec/selection_strategy.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -1978,6 +1980,15 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
     if (io.error())
       return;
 
+    // Decoder construction refuses a negative cuda_device_id (decoder.cpp,
+    // read_cuda_device_id) and the exported schema bounds it at 0; refuse it
+    // here as well, so a document is rejected where its other mistakes are.
+    if (!io.outputting() && config.cuda_device_id.has_value() &&
+        *config.cuda_device_id < 0)
+      throw std::runtime_error("decoder " + std::to_string(config.id) +
+                               ": cuda_device_id must be >= 0 (got " +
+                               std::to_string(*config.cuda_device_id) + ")");
+
     // Task-graph form: task_graph: is set, type: must be absent.
     if (!io.outputting() && config.task_graph.has_value()) {
       if (!config.type.empty())
@@ -2408,8 +2419,17 @@ llvm::json::Object json_schema_for_param(const param_spec &spec) {
   case k::boolean:
     return llvm::json::Object{{"type", "boolean"}};
   case k::int32:
-    return llvm::json::Object{{"type", "integer"}};
+    // The stored type is a 32-bit int; a document that overflows it is
+    // rejected when parsed, so the schema says so too and offline
+    // validation agrees with the parser.
+    return llvm::json::Object{
+        {"type", "integer"},
+        {"minimum", static_cast<int64_t>(std::numeric_limits<int32_t>::min())},
+        {"maximum", static_cast<int64_t>(std::numeric_limits<int32_t>::max())}};
   case k::uint64:
+    // Stored as std::size_t. Only the lower bound is representable: JSON
+    // Schema numbers are IEEE doubles to most validators, and llvm::json
+    // holds int64, so 2^64 - 1 cannot be written exactly.
     return llvm::json::Object{{"type", "integer"}, {"minimum", 0}};
   case k::f64:
     return llvm::json::Object{{"type", "number"}};
@@ -2938,13 +2958,22 @@ std::string decoder_config_json_schema() {
 
   // The fixed decoder_config envelope; keep in sync with
   // MappingTraits<decoder_config> above.
+  // Envelope integers carry the width of their C++ field, like the int32
+  // parameters above, so overflow fails offline as it fails when parsed.
   llvm::json::Object config_properties{
-      {"id", llvm::json::Object{{"type", "integer"}}},
+      {"id",
+       llvm::json::Object{{"type", "integer"},
+                          {"minimum", std::numeric_limits<int64_t>::min()},
+                          {"maximum", std::numeric_limits<int64_t>::max()}}},
       {"type", llvm::json::Object{{"type", "string"}}},
       {"dispatch",
        llvm::json::Object{{"enum", llvm::json::Array{"host", "device_graph"}}}},
       {"cuda_device_id",
-       llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
+       llvm::json::Object{
+           {"type", "integer"},
+           {"minimum", 0},
+           {"maximum",
+            static_cast<int64_t>(std::numeric_limits<int32_t>::max())}}},
       {"block_size", llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
       {"syndrome_size",
        llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
