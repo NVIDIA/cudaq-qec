@@ -2384,33 +2384,6 @@ cudaq::qec::decoding::config::decoder_config::to_yaml_str(int column_wrap) {
 
 namespace cudaq::qec::decoding::config {
 
-std::string dem_chunks_to_yaml_str(const dem_chunks_spec &spec,
-                                   int column_wrap) {
-  spec.validate();
-  // LLVM's mapping interface takes mutable data even while emitting.
-  auto writable = spec;
-  std::string yaml;
-  llvm::raw_string_ostream stream(yaml);
-  llvm::yaml::Output output(stream, nullptr, column_wrap);
-  output << writable;
-  return yaml;
-}
-
-dem_chunks_spec dem_chunks_from_yaml_str(std::string_view yaml) {
-  dem_chunks_spec spec;
-  llvm::yaml::Input input(yaml);
-  input >> spec;
-  if (const auto error = input.error())
-    throw std::runtime_error("Invalid phase-model YAML: " + error.message());
-  try {
-    spec.validate();
-  } catch (const std::invalid_argument &error) {
-    throw std::runtime_error(std::string("Invalid phase-model YAML: ") +
-                             error.what());
-  }
-  return spec;
-}
-
 // ---------------------------------------------------------------------------
 // JSON Schema export
 //

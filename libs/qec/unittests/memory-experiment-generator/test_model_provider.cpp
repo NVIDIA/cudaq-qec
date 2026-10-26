@@ -435,13 +435,21 @@ TEST(MemoryExperimentProvider, PreparationIdentityRejectsAccidentalReuse) {
   EXPECT_NO_THROW(validate_prepared_model(replicated, model));
 }
 
-TEST(MemoryExperimentProvider, PublicModelYamlRoundtripsBothBases) {
+TEST(MemoryExperimentProvider, ModelConfigurationRoundtripsBothBases) {
   namespace config = cudaq::qec::decoding::config;
   for (const auto basis : {memory_basis::x, memory_basis::z}) {
     const preparation_request request{{"surface_code", 3, 26, 1, basis}};
     const auto model = prepare_model(request);
-    const auto yaml = config::dem_chunks_to_yaml_str(model.chunks);
-    EXPECT_EQ(config::dem_chunks_from_yaml_str(yaml), model.chunks);
+    config::decoder_config entry;
+    entry.type = "pymatching";
+    entry.dem_chunks = model.chunks;
+    config::multi_decoder_config configuration;
+    configuration.decoders.push_back(std::move(entry));
+    const auto yaml = configuration.to_yaml_str();
+    const auto parsed = config::multi_decoder_config::from_yaml_str(yaml);
+    ASSERT_EQ(parsed.decoders.size(), 1u);
+    EXPECT_EQ(parsed.decoders.front().dem_chunks, model.chunks);
+    EXPECT_EQ(parsed, configuration);
   }
 }
 

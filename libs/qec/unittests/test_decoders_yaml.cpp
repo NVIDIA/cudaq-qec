@@ -2491,7 +2491,10 @@ TEST(DecoderDemChunksYAMLTest, ParsesAllPhases) {
 
 TEST(MemoryExperimentYaml, PreservesEveryPhaseProbabilityExactly) {
   namespace config = cudaq::qec::decoding::config;
-  auto entry = parse_one(dem_chunks_yaml(3));
+  auto configuration =
+      config::multi_decoder_config::from_yaml_str(dem_chunks_yaml(3));
+  ASSERT_EQ(configuration.decoders.size(), 1u);
+  auto &entry = configuration.decoders.front();
   ASSERT_TRUE(entry.dem_chunks.has_value());
   // A native phase fixture keeps this framework serialization regression
   // independent of circuit characterization and the generator executable.
@@ -2503,22 +2506,25 @@ TEST(MemoryExperimentYaml, PreservesEveryPhaseProbabilityExactly) {
     for (auto &phase : entry.dem_chunks->phases)
       for (auto &rate : phase.spec.error_rates)
         rate = probability;
-    const auto model_yaml = config::dem_chunks_to_yaml_str(*entry.dem_chunks);
-    expect_yaml11_numeric_exponents(model_yaml);
-    EXPECT_EQ(config::dem_chunks_from_yaml_str(model_yaml), *entry.dem_chunks);
+    const auto configuration_yaml = configuration.to_yaml_str();
+    expect_yaml11_numeric_exponents(configuration_yaml);
+    EXPECT_EQ(config::multi_decoder_config::from_yaml_str(configuration_yaml),
+              configuration);
     const auto decoder_yaml = entry.to_yaml_str();
     expect_yaml11_numeric_exponents(decoder_yaml);
     EXPECT_EQ(config::decoder_config::from_yaml_str(decoder_yaml).dem_chunks,
               entry.dem_chunks);
   }
-  EXPECT_THROW(config::dem_chunks_from_yaml_str("unknown_field: 1\n"),
+  EXPECT_THROW(config::multi_decoder_config::from_yaml_str(
+                   dem_chunks_yaml(3) + "\nunknown_field: 1\n"),
                std::runtime_error);
 }
 
 TEST(MemoryExperimentYaml, InvalidPhaseModelUsesConfigurationExceptionType) {
   namespace config = cudaq::qec::decoding::config;
-  const auto entry = parse_one(dem_chunks_yaml(3));
-  auto yaml = config::dem_chunks_to_yaml_str(*entry.dem_chunks);
+  auto configuration =
+      config::multi_decoder_config::from_yaml_str(dem_chunks_yaml(3));
+  auto yaml = configuration.to_yaml_str();
   const auto field = yaml.find("num_rounds:");
   ASSERT_NE(field, std::string::npos);
   const auto value = yaml.find(':', field) + 1;
@@ -2526,11 +2532,9 @@ TEST(MemoryExperimentYaml, InvalidPhaseModelUsesConfigurationExceptionType) {
   ASSERT_NE(end, std::string::npos);
   yaml.replace(value, end - value, " 1");
   try {
-    (void)config::dem_chunks_from_yaml_str(yaml);
+    (void)config::multi_decoder_config::from_yaml_str(yaml);
     FAIL() << "invalid phase-model horizon was accepted";
   } catch (const std::runtime_error &error) {
-    EXPECT_NE(std::string(error.what()).find("Invalid phase-model YAML:"),
-              std::string::npos);
     EXPECT_NE(std::string(error.what()).find("num_rounds"), std::string::npos);
   }
 }

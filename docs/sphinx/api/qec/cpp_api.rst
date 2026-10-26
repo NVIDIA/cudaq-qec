@@ -117,12 +117,6 @@ Chunk types
 .. doxygenfunction:: cudaq::qec::dem_chunks_from_spec
 .. doxygenfunction:: cudaq::qec::memory_dem_chunks_from_decoder_inputs
 
-Phase-model YAML serialization
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. doxygenfunction:: cudaq::qec::decoding::config::dem_chunks_to_yaml_str
-.. doxygenfunction:: cudaq::qec::decoding::config::dem_chunks_from_yaml_str
-
 Stitch, close, and merge
 ------------------------
 
