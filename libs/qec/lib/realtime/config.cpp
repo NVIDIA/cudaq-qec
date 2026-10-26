@@ -3265,3 +3265,10 @@ int configure_decoders_from_str(const char *config_str) {
 void finalize_decoders() { cudaq::qec::decoding::host::finalize_decoders(); }
 
 } // namespace cudaq::qec::decoding::config
+
+extern "C" const char *cudaq_qec_decoder_config_json_schema() {
+  // Regenerated per call; see the declaration for the ownership rule.
+  static std::string buffer;
+  buffer = cudaq::qec::decoding::config::decoder_config_json_schema();
+  return buffer.c_str();
+}
