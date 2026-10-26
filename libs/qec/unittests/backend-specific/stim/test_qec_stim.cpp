@@ -345,14 +345,13 @@ TEST(QECCodeTester, checkTwoQubitBitflipStim) {
   cudaq::set_random_seed(13);
   cudaq::noise_model noise;
   noise.add_all_qubit_channel("x", cudaq::qec::two_qubit_bitflip(0.1), 1);
-  cudaq::set_noise(noise);
+  cudaq::sample_options options{.shots = 100, .noise = noise};
 
-  auto counts1 = cudaq::sample(100, null1{});
+  auto counts1 = cudaq::sample(options, null1{});
   EXPECT_FLOAT_EQ(1.0, counts1.probability("00"));
 
-  auto counts2 = cudaq::sample(100, null2{});
+  auto counts2 = cudaq::sample(options, null2{});
   EXPECT_TRUE(counts2.probability("00") < 0.9);
-  cudaq::unset_noise();
 }
 
 TEST(QECCodeTester, checkBitflip) {
@@ -374,9 +373,8 @@ TEST(QECCodeTester, checkBitflip) {
   cudaq::set_random_seed(13);
   cudaq::noise_model noise;
   noise.add_all_qubit_channel("h", cudaq::bit_flip_channel(0.5));
-  cudaq::set_noise(noise);
-  auto counts2 = cudaq::sample(100, null1{});
-  cudaq::unset_noise();
+  cudaq::sample_options options{.shots = 100, .noise = noise};
+  auto counts2 = cudaq::sample(options, null1{});
   EXPECT_TRUE(counts2.probability("0") < 0.9);
 }
 
