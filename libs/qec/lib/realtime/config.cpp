@@ -1916,8 +1916,15 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
     // Continue accepting the PR765 top-level spelling, but registered decoder
     // configurations are emitted with rates under decoder_custom_args so the
     // established researcher-facing wire YAML does not change.
-    if (!io.outputting() || !schema)
+    if (!io.outputting())
       io.mapOptional("error_rate_vec", config.error_rate_vec);
+    else if (!schema) {
+      std::vector<exact_yaml_double> rates;
+      rates.reserve(config.error_rate_vec.size());
+      for (const auto rate : config.error_rate_vec)
+        rates.push_back({rate});
+      io.mapOptional("error_rate_vec", rates);
+    }
     map_dem_chunks(io, config.dem_chunks, config.dem_chunks_artifact,
                    "decoder " + std::to_string(config.id));
     io.mapOptional("stim_dem_path", config.stim_dem_path, std::string{});

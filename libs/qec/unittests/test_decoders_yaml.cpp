@@ -1778,6 +1778,26 @@ void expect_yaml11_numeric_exponents(const std::string &yaml) {
 
 } // namespace
 
+TEST(DecoderSchemaTest, UnregisteredDecoderRatesRoundtripExactly) {
+  using namespace cudaq::qec::decoding::config;
+  auto decoder = create_test_empty_decoder_config(0);
+  decoder.type = "unregistered_exact_rate_decoder";
+  ASSERT_EQ(find_decoder_schema(decoder.type), nullptr);
+  decoder.error_rate_vec.assign(decoder.block_size, 0.12345678901234567);
+  decoder.error_rate_vec[0] = 1e-6;
+  decoder.error_rate_vec[1] = std::nextafter(0.001, 1.0);
+  decoder.error_rate_vec[2] = std::numeric_limits<double>::denorm_min();
+  decoder.error_rate_vec[3] = std::nextafter(1.0, 0.0);
+  multi_decoder_config original;
+  original.decoders.push_back(std::move(decoder));
+  const auto emitted = original.to_yaml_str(200);
+  expect_yaml11_numeric_exponents(emitted);
+  const auto parsed = multi_decoder_config::from_yaml_str(emitted);
+  EXPECT_EQ(parsed, original);
+  EXPECT_EQ(parsed.decoders.front().error_rate_vec,
+            original.decoders.front().error_rate_vec);
+}
+
 TEST(DecoderSchemaTest, PreservesFloatingPointParametersExactly) {
   using namespace cudaq::qec::decoding::config;
   // Schema-only metadata is enough to exercise configuration serialization;

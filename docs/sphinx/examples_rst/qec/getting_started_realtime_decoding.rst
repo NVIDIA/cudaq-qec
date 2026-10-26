@@ -97,7 +97,7 @@ shared default. This does not change in-process configuration APIs.
 
 .. note::
 
-   DEM-chunk ``error_rates`` and schema-typed floating-point decoder parameters
+   DEM-chunk ``error_rates``, flat ``error_rate_vec`` entries and schema-typed floating-point decoder parameters
    now retain full double precision when configurations are saved. Earlier
    versions rounded these values to six significant digits. Exported YAML text
    may therefore change, including decoder-server configurations and
