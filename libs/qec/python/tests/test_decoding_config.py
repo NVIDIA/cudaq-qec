@@ -1375,10 +1375,14 @@ def test_parallel_window_pattern_validates_against_the_schema():
     del missing["decoders"][0]["task_graph"]["nodes"][0]["commit_rounds"]
     with pytest.raises(jsonschema.ValidationError):
         validator.validate(missing)
+    # Two workers on one CPU only warn when parsed, so the schema allows it.
     repeated = yaml.safe_load(_PATTERN_YAML)
     repeated["decoders"][0]["task_graph"]["async_worker_cpus"] = [4, 4]
+    validator.validate(repeated)
+    negative = yaml.safe_load(_PATTERN_YAML)
+    negative["decoders"][0]["task_graph"]["async_worker_cpus"] = [4, -1]
     with pytest.raises(jsonschema.ValidationError):
-        validator.validate(repeated)
+        validator.validate(negative)
 
 
 # A DEM whose detector coordinates carry the colour a colour-code decoder
@@ -2130,3 +2134,74 @@ def test_object_api_validates_syndrome_mapping():
     assert configure([row(1, "middle", [[]])]) != 0
     assert configure([row(1, "final", [[]]), row(1, "bulk", [[]])]) != 0
     assert configure([row(1, "final", [[0, 1]])]) != 0
+
+
+# --- exported JSON Schema: integer widths and cuda_device_id -----------------
+
+
+def _flat_doc(decoder_type, args):
+    return {
+        "decoders": [{
+            "id": 0,
+            "type": decoder_type,
+            "block_size": 3,
+            "syndrome_size": 3,
+            "H_sparse": [0, -1, 1, -1, 2, -1],
+            "O_sparse": [0, -1, 1, -1, 2, -1],
+            "D_sparse": [0, -1, 1, -1, 2, -1],
+            "decoder_custom_args": args,
+        }]
+    }
+
+
+def test_json_schema_bounds_int32_parameters():
+    # lut_error_depth is stored as a 32-bit int; the parser rejects an
+    # overflowing value, and the schema now says the same.
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads(qec.decoder_config_json_schema())
+    depth = schema["$defs"]["decoder_params"]["multi_error_lut"]["properties"][
+        "lut_error_depth"]
+    assert depth == {"type": "integer", "minimum": -2**31, "maximum": 2**31 - 1}
+    jsonschema.validate(
+        _flat_doc("multi_error_lut", {"lut_error_depth": 2**31 - 1}), schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            _flat_doc("multi_error_lut", {"lut_error_depth": 2**31}), schema)
+    # Envelope integers carry their C++ width too.
+    envelope = schema["$defs"]["decoder_config"]["properties"]
+    assert envelope["id"] == {
+        "type": "integer",
+        "minimum": -2**63,
+        "maximum": 2**63 - 1
+    }
+    assert envelope["cuda_device_id"] == {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2**31 - 1
+    }
+    # uint64 parameters keep only the lower bound (2**64 - 1 is not exactly
+    # representable in JSON).
+    window = schema["$defs"]["decoder_params"]["sliding_window"]["properties"][
+        "window_size"]
+    assert window == {"type": "integer", "minimum": 0}
+
+
+def test_negative_cuda_device_id_is_rejected_when_parsed():
+    text = """decoders:
+  - id: 0
+    type: pymatching
+    cuda_device_id: -1
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0, -1, 1, -1, 2, -1]
+    O_sparse: [0, -1, 1, -1, 2, -1]
+    D_sparse: [0, -1, 1, -1, 2, -1]
+    decoder_custom_args:
+      merge_strategy: smallest_weight
+      error_rate_vec: [0.1, 0.1, 0.1]
+"""
+    with pytest.raises(RuntimeError, match="cuda_device_id must be >= 0"):
+        qec.multi_decoder_config.from_yaml_str(text)
+    parsed = qec.multi_decoder_config.from_yaml_str(
+        text.replace("cuda_device_id: -1", "cuda_device_id: 0"))
+    assert parsed.decoders[0].cuda_device_id == 0

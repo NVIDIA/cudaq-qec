@@ -9,6 +9,7 @@
 #include "cudaq/qec/selection_strategy.h"
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <gtest/gtest.h>
 #include <map>
 #include <thread>
@@ -948,6 +949,59 @@ TEST(EnsembleStreaming, TheJoinRunsOncePerWindowAfterItsMembers) {
   const uint8_t window[2] = {1, 0};
   EXPECT_LT(time_it([&] { EXPECT_TRUE(g->enqueue_syndrome(window, 2)); }), 2s);
   EXPECT_EQ(corrections(*g), marker_bits(1));
+}
+
+TEST(EnsembleStreaming, StrategyIsBuiltOncePerRun) {
+  struct counting_strategy : selection_strategy {
+    std::optional<logical_outcome> offer(const candidate &c) override {
+      return c.result;
+    }
+  };
+  std::atomic<int> built{0};
+  const auto held = register_selection_strategy(
+      "test_counting", {}, [&built](const cudaqx::heterogeneous_map &) {
+        ++built;
+        return std::make_unique<counting_strategy>();
+      });
+  auto g = make_ensemble({{make_probe(1), 1}}, "test_counting", {}, true);
+  const int validated = built;
+  const uint8_t window[2] = {0, 1};
+  for (int i = 0; i < 3; ++i)
+    EXPECT_TRUE(g->enqueue_syndrome(window, 2));
+  EXPECT_EQ(built - validated, 3);
+  EXPECT_EQ(corrections(*g), marker_bits(1));
+}
+
+TEST(EnsembleStreaming, ConcurrentRecordsKeepEachRunsHandles) {
+  if (std::thread::hardware_concurrency() < 4)
+    GTEST_SKIP() << "overlapping runs need at least four CPU threads";
+  // Member b holds record 0 for a while, so the fan-out arms records 1 and 2
+  // before record 0 concludes. Each join must still see its own run's
+  // committed candidate.
+  auto a = make_probe(1), b = make_probe(500, true, /*token_aware=*/false);
+  task_graph_options options;
+  options.async_streaming = true;
+  options.async_queue_capacity = 4;
+  auto g = make_ensemble({{a, 1}, {b, 0}}, "first", {}, true, options);
+  ASSERT_TRUE(g->supports_streaming()) << g->streaming_incompatibility_reason();
+  const uint8_t window[2] = {0, 1};
+  for (int i = 0; i < 2; ++i)
+    EXPECT_FALSE(g->enqueue_syndrome(window, 2));
+  auto final = std::async(std::launch::async, [&] {
+    return g->enqueue_syndrome(window, 2, round_type::FINAL);
+  });
+  // a runs every record while b is still inside its first.
+  const auto deadline = std::chrono::steady_clock::now() + 250ms;
+  while (a->calls < 3 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(1ms);
+  EXPECT_EQ(a->calls, 3);
+  EXPECT_EQ(b->calls, 1);
+  EXPECT_TRUE(final.get());
+  EXPECT_EQ(b->calls, 3);
+  const auto result = g->streaming_result();
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+  EXPECT_EQ(result.generation, 3u);
+  EXPECT_EQ(corrections(*g), marker_bits(1)); // three XORed wins by a
 }
 
 TEST(EnsembleStreaming, AsyncStreamingCommitsEveryWindow) {

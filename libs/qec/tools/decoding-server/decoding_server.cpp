@@ -164,6 +164,10 @@ const char *host_loop_name(HostLoop loop) {
 
 struct ServerConfig {
   std::string config_path;
+  // --export-schema[=FILE]: write the JSON Schema for --config documents and
+  // exit without serving. Empty path means stdout.
+  bool export_schema = false;
+  std::string export_schema_path;
   std::string transport = "udp";
   bool transport_from_cli = false;
   int timeout_sec = 60;
@@ -190,6 +194,7 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
                 << " --config=<decoders.yaml> "
                    "[--transport=<name|/path/to/lib.so>] [--timeout=N] "
                    "[--host-loop=threaded|unified] "
+                   "[--export-schema[=FILE]] "
                    "[provider args, forwarded verbatim: e.g. --port=N "
                    "--num-slots=N --slot-size=N --device=NAME "
                    "--local-ip=ADDR --qp_config=rendezvous|hsb_fpga "
@@ -212,9 +217,19 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
                    "with '_' in <name> mapping to '-'); "
                    "the names and args above are examples, not an "
                    "exhaustive list -- the installation is the source of "
-                   "truth."
+                   "truth.\n"
+                   "--export-schema[=FILE] writes the JSON Schema (draft "
+                   "2020-12) that --config documents must satisfy, generated "
+                   "from the decoders and plugins this installation has "
+                   "loaded, to FILE (default: stdout) and exits without "
+                   "serving. Validate a configuration offline with any JSON "
+                   "Schema tool, or with libs/qec/tools/config-validator."
                 << std::endl;
       return false;
+    } else if (a == "--export-schema" || starts_with(a, "--export-schema=")) {
+      cfg.export_schema = true;
+      if (a.size() > std::strlen("--export-schema="))
+        cfg.export_schema_path = a.substr(std::strlen("--export-schema="));
     } else if (starts_with(a, "--config="))
       cfg.config_path = a.substr(9);
     else if (starts_with(a, "--transport=")) {
@@ -245,11 +260,30 @@ bool parse_args(int argc, char **argv, ServerConfig &cfg) {
     } else
       cfg.provider_args.push_back(a);
   }
-  if (cfg.config_path.empty()) {
+  if (cfg.config_path.empty() && !cfg.export_schema) {
     std::cerr << "ERROR: --config=<decoders.yaml> is required" << std::endl;
     return false;
   }
   return true;
+}
+
+// --export-schema: the decoder plugins were loaded when the decoder library
+// initialised (its constructor scans the decoder-plugins directory next to
+// it), so the registry already describes exactly this installation.
+int export_schema(const ServerConfig &cfg) {
+  const std::string text = config::decoder_config_json_schema();
+  if (cfg.export_schema_path.empty()) {
+    std::cout << text << std::endl;
+    return 0;
+  }
+  std::ofstream out(cfg.export_schema_path);
+  if (!out) {
+    std::cerr << "ERROR: cannot write " << cfg.export_schema_path << std::endl;
+    return 1;
+  }
+  out << text << '\n';
+  std::cerr << "schema written to " << cfg.export_schema_path << std::endl;
+  return 0;
 }
 
 std::atomic<int> g_shutdown{0};
@@ -375,6 +409,8 @@ int main(int argc, char **argv) {
   ServerConfig cfg;
   if (!parse_args(argc, argv, cfg))
     return 1;
+  if (cfg.export_schema)
+    return export_schema(cfg);
 
   // Held for the whole run (env-gated no-op when unset); see the class doc.
   CpuDmaLatencyHold dma_latency_hold;
