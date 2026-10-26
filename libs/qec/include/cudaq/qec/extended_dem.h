@@ -283,6 +283,8 @@ struct seam_spec_entry {
 ///
 /// O_sparse at chunk level maps to extended_dem::O (the decoder observable).
 struct dem_chunk_spec {
+  /// Zero is valid for an explicitly declared noiseless phase with empty
+  /// fault incidence and priors; it does not imply an absent phase.
   uint64_t num_faults = 0;
 
   /// Shorthand: shared H for all seams. Mutually exclusive with seam_specs.

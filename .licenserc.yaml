@@ -35,6 +35,9 @@ header:
     # Plain-text data formats consumed by Stim/decoder tooling, not source.
     - '**/*.stim'
     - '**/*.dem'
+    # Plain-text playback fixtures, consumed as schedule and CSV data.
+    - 'scripts/ci/fixtures/pymatching-smoke.schedule'
+    - 'scripts/ci/fixtures/pymatching-smoke.expected.csv'
     # Auto-generated data
     - 'libs/qec/unittests/decoders/trt_decoder/trt_test_data.h'
     # No actual code, just an explanatory comment (CMake device-link workaround).

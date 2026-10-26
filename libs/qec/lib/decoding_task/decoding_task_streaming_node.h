@@ -36,8 +36,12 @@ public:
 
   bool enqueue(const uint8_t *msyn, std::size_t len, round_type type) override;
   bool enqueue_untagged(const uint8_t *msyn, std::size_t len) override;
+  void begin_input_record(round_type type, std::size_t bytes) override;
+  std::optional<std::size_t> raw_chunk_limit() const override;
   /// Untagged rounds make a fixed-length shot, so a chunk stops at its end.
   std::optional<std::size_t> untagged_chunk_limit() const override {
+    if (native_provider_)
+      return raw_chunk_limit();
     return num_msyn_per_decode() - untagged_fill_;
   }
   bool flush() override;
@@ -52,6 +56,13 @@ public:
   }
   const edge_value *streaming_output(std::size_t slot) const override;
   std::optional<committed_coverage> streaming_coverage() const override;
+  bool has_explicit_streaming_coverage() const override {
+    return native_provider_ != nullptr;
+  }
+  std::optional<window_spec> streaming_schedule() const override {
+    return native_provider_ ? std::nullopt
+                            : streaming_task_graph_node::streaming_schedule();
+  }
 
   void execute_indexed(const std::vector<edge_value> &inputs,
                        std::vector<edge_value> &outputs) const override;
@@ -69,7 +80,7 @@ public:
   decoder *inner_decoder() const override { return dec_.get(); }
 
 private:
-  void capture_inner_corrections(bool final);
+  bool capture_inner_corrections(bool final);
   void publish_inner_frame(const uint8_t *current, bool final);
   logical_outcome decode_one_shot(const measurement_results &m) const;
   logical_outcome project_result(decoder_result result) const;
@@ -78,6 +89,9 @@ private:
   std::shared_ptr<const sparse_binary_matrix> o_;
   std::unique_ptr<decoder> dec_;
   streaming_correction_provider *correction_provider_ = nullptr;
+  native_streaming_decoder_provider *native_provider_ = nullptr;
+  std::size_t input_quantum_ = 0;
+  std::optional<int> native_device_id_;
   uint32_t spr_;
   mutable std::vector<float_t> dets_;
   mutable edge_value last_output_;
@@ -91,6 +105,8 @@ private:
   std::uint64_t completed_rounds_ = 0;
   // The last FINAL shot's rounds, when the decoder reports them.
   std::optional<committed_coverage> final_coverage_;
+  std::optional<committed_coverage> native_coverage_;
+  std::uint64_t native_coverage_end_ = 0;
 };
 
 } // namespace cudaq::qec

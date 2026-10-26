@@ -172,6 +172,28 @@ decoder_init decoder_init::from_dem_chunks(
   return decoder_init(std::move(state));
 } // end - decoder_init::from_dem_chunks()
 
+decoder_init decoder_init::from_dem_chunks_stream(
+    dem_chunks_spec spec,
+    std::optional<sparse_binary_matrix> measurement_to_detectors) {
+  spec.validate();
+  if (!spec.has_repeating_phase())
+    return from_dem_chunks(std::move(spec),
+                           std::move(measurement_to_detectors));
+
+  auto representative = spec;
+  const auto representative_rounds =
+      std::max<std::uint64_t>(2, representative.minimum_rounds());
+  if (spec.num_rounds && *spec.num_rounds < representative_rounds)
+    throw std::invalid_argument(
+        "decoder_init: stream horizon is shorter than its required phases");
+  representative.num_rounds = representative_rounds;
+  auto projected = from_dem_chunks(std::move(representative),
+                                   std::move(measurement_to_detectors));
+  auto state = std::make_shared<impl>(*projected.state_);
+  state->chunks = std::make_shared<const dem_chunks_spec>(std::move(spec));
+  return decoder_init(std::move(state));
+}
+
 decoder_init decoder_init::from_dem_chunks_closed(
     dem_chunks_spec spec,
     std::optional<sparse_binary_matrix> measurement_to_detectors) {

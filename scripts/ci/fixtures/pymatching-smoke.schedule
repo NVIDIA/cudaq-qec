@@ -1,0 +1,24 @@
+0 reset signal=r0
+- enqueue source=0b000 after=r0 signal=e0
++10000 get_corrections 000 after=e0 signal=c0
+- reset after=c0 signal=r1
+- enqueue source=0b001 after=r1 signal=e1
++10000 get_corrections 001 after=e1 signal=c1
+- reset after=c1 signal=r2
+- enqueue source=0b010 after=r2 signal=e2
++10000 get_corrections 010 after=e2 signal=c2
+- reset after=c2 signal=r3
+- enqueue source=0b011 after=r3 signal=e3
++10000 get_corrections 011 after=e3 signal=c3
+- reset after=c3 signal=r4
+- enqueue source=0b100 after=r4 signal=e4
++10000 get_corrections 100 after=e4 signal=c4
+- reset after=c4 signal=r5
+- enqueue source=0b101 after=r5 signal=e5
++10000 get_corrections 101 after=e5 signal=c5
+- reset after=c5 signal=r6
+- enqueue source=0b110 after=r6 signal=e6
++10000 get_corrections 110 after=e6 signal=c6
+- reset after=c6 signal=r7
+- enqueue source=0b111 after=r7 signal=e7
++10000 get_corrections 111 after=e7 signal=c7

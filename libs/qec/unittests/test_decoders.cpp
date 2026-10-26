@@ -358,6 +358,93 @@ TEST(DecoderInputs, DemChunksRejectAnUnsizedStreamAndAMismatchedD) {
       std::invalid_argument);
 }
 
+TEST(DecoderInputs, NativeStreamFactoryPreservesOpenRecipe) {
+  using namespace cudaq::qec;
+  auto spec = rep5_chunks_spec(7);
+  spec.num_rounds.reset();
+  auto representative = spec;
+  representative.num_rounds = representative.minimum_rounds();
+  const auto expected = decoder_init::from_dem_chunks(representative);
+  const auto inputs = decoder_init::from_dem_chunks_stream(spec);
+  EXPECT_EQ(inputs.dem_chunks(), spec);
+  EXPECT_FALSE(inputs.dem_chunks().num_rounds.has_value());
+  EXPECT_FALSE(inputs.has_matrices());
+  EXPECT_EQ(inputs.num_detectors(), expected.num_detectors());
+  EXPECT_EQ(inputs.num_error_mechanisms(), expected.num_error_mechanisms());
+  EXPECT_EQ(inputs.num_observables(), expected.num_observables());
+  EXPECT_THROW(decoder_init::from_dem_chunks(spec), std::invalid_argument);
+  EXPECT_THROW(decoder_init::from_dem_chunks_closed(spec),
+               std::invalid_argument);
+
+  const auto without_d = inputs.decoder_init_without_d();
+  EXPECT_EQ(without_d.dem_chunks(), spec);
+  EXPECT_FALSE(without_d.measurement_to_detectors());
+  observable_output_probe observable(inputs, decode_result_type::observables,
+                                     {});
+  EXPECT_EQ(observable.get_num_observables(), expected.num_observables());
+}
+
+TEST(DecoderInputs, NativeStreamFactoryValidatesRepresentativeD) {
+  using namespace cudaq::qec;
+  auto spec = rep5_chunks_spec(7);
+  const auto finite = decoder_init::from_dem_chunks_stream(spec);
+  EXPECT_EQ(finite.dem_chunks(), spec);
+  auto representative = spec;
+  representative.num_rounds = representative.minimum_rounds();
+  EXPECT_EQ(finite.num_detectors(),
+            decoder_init::from_dem_chunks(representative).num_detectors());
+  spec.num_rounds.reset();
+  const auto sized = decoder_init::from_dem_chunks_stream(spec);
+  std::vector<std::vector<std::uint32_t>> rows(sized.num_detectors(), {0});
+  const auto D = sparse_binary_matrix::from_nested_csr(rows.size(), 1, rows);
+  const auto with_d = decoder_init::from_dem_chunks_stream(spec, D);
+  ASSERT_NE(with_d.measurement_to_detectors(), nullptr);
+  EXPECT_EQ(with_d.measurement_to_detectors()->num_rows(),
+            sized.num_detectors());
+  EXPECT_EQ(with_d.dem_chunks(), spec);
+  const auto wrong_d = sparse_binary_matrix::from_nested_csr(1, 1, {{0}});
+  EXPECT_THROW(decoder_init::from_dem_chunks_stream(spec, wrong_d),
+               std::invalid_argument);
+}
+
+TEST(DecoderInputs, NativeStreamFactoryBoundsFiniteBillionRoundMetadata) {
+  using namespace cudaq::qec;
+  constexpr std::uint64_t large_horizon = 1'000'000'000;
+  const auto spec = rep5_chunks_spec(large_horizon);
+  auto representative = spec;
+  representative.num_rounds = representative.minimum_rounds();
+  const auto expected = decoder_init::from_dem_chunks(representative);
+  const auto inputs = decoder_init::from_dem_chunks_stream(spec);
+  EXPECT_EQ(inputs.dem_chunks().num_rounds, large_horizon);
+  EXPECT_EQ(inputs.num_detectors(), expected.num_detectors());
+  EXPECT_EQ(inputs.num_error_mechanisms(), expected.num_error_mechanisms());
+  EXPECT_EQ(inputs.num_observables(), expected.num_observables());
+  observable_output_probe observable(inputs, decode_result_type::observables,
+                                     {});
+  EXPECT_EQ(observable.get_num_observables(), expected.num_observables());
+}
+
+TEST(DecoderInputs, NativeStreamFactoryValidatesOriginalFiniteHorizon) {
+  using namespace cudaq::qec;
+  auto invalid = rep5_chunks_spec(2);
+  EXPECT_THROW(decoder_init::from_dem_chunks_stream(invalid),
+               std::invalid_argument);
+
+  auto single_phase = rep5_chunks_spec(7);
+  single_phase.phases = {single_phase.phases[1]};
+  single_phase.connections = {{phase_name::dem_bulk, phase_name::dem_bulk}};
+  auto representative = single_phase;
+  representative.num_rounds = 2;
+  const auto expected = decoder_init::from_dem_chunks(representative);
+  const auto finite = decoder_init::from_dem_chunks_stream(single_phase);
+  EXPECT_EQ(finite.num_detectors(), expected.num_detectors());
+  EXPECT_EQ(finite.dem_chunks(), single_phase);
+  single_phase.num_rounds.reset();
+  const auto open = decoder_init::from_dem_chunks_stream(single_phase);
+  EXPECT_EQ(open.num_detectors(), expected.num_detectors());
+  EXPECT_EQ(open.dem_chunks(), single_phase);
+}
+
 // Chains the chunks cannot be contracted along are rejected by both forms, not
 // only by the one that closes them.
 TEST(DecoderInputs, DemChunksRejectAChainThatCannotContract) {
@@ -656,6 +743,25 @@ TEST(DecoderModelMatrices, DeclaredSourceSkipsOnlyThatSourcesMatrices) {
                                            decoder_model_source::stim_dem));
   EXPECT_TRUE(decoder_needs_model_matrices("test_other_unit_decoder",
                                            decoder_model_source::dem_chunks));
+}
+
+TEST(DecoderModelMatrices,
+     BoundedStreamingOptInDoesNotChangeLegacyDeclarations) {
+  using namespace cudaq::qec;
+  const auto source = decoder_model_source::dem_chunks;
+  register_decoder_native_model_source("test_legacy_native_stream", source);
+  EXPECT_FALSE(decoder_uses_native_streaming_source("test_legacy_native_stream",
+                                                    source));
+  register_decoder_native_streaming_source("test_bounded_native_stream",
+                                           source);
+  EXPECT_TRUE(decoder_uses_native_streaming_source("test_bounded_native_stream",
+                                                   source));
+  EXPECT_FALSE(
+      decoder_needs_model_matrices("test_bounded_native_stream", source));
+  EXPECT_FALSE(decoder_uses_native_streaming_source(
+      "test_unknown_native_stream", source));
+  EXPECT_FALSE(decoder_uses_native_streaming_source(
+      "test_bounded_native_stream", decoder_model_source::stim_dem));
 }
 
 // Registering a decoder twice (a reloaded plugin) must not drop or duplicate

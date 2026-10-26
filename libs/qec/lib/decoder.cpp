@@ -136,8 +136,15 @@ decoder::decoder(decoder_init inputs, decoder_output_request requested_output)
   // only when the matrix path is unavailable, since it is the faster of the
   // two and every other source has it.
   if (!inputs_.has_matrices() && inputs_.has_observable_model() &&
-      inputs_.has_dem_chunks())
-    pimpl->chunk_observables = dem_chunks_to_o_chunked(inputs_.dem_chunks());
+      inputs_.has_dem_chunks()) {
+    const auto &chunks = inputs_.dem_chunks();
+    // An open stream has no finite error-frame projection. Observable-only
+    // native decoders own that mapping; finite models retain the helper even
+    // when a plugin uses it internally to produce observable output.
+    if (requested_output.primary == decode_result_type::errors ||
+        chunks.num_rounds || !chunks.has_repeating_phase())
+      pimpl->chunk_observables = dem_chunks_to_o_chunked(chunks);
+  }
   reset_decoder();
 
   // We allow detailed logging of decoder stats via the CUDAQ_QEC_DEBUG_DECODER
@@ -799,6 +806,7 @@ namespace {
 /// only suppresses a repeat log line.
 struct native_model_sources {
   std::set<decoder_model_source> sources;
+  std::set<decoder_model_source> streaming_sources;
   bool checked = false;
   bool warned = false;
 };
@@ -850,6 +858,24 @@ void register_decoder_native_model_source(std::string decoder_name,
                                           decoder_model_source source) {
   std::lock_guard<std::mutex> lock(model_source_registry_mutex());
   model_source_registry()[std::move(decoder_name)].sources.insert(source);
+}
+
+void register_decoder_native_streaming_source(std::string decoder_name,
+                                              decoder_model_source source) {
+  std::lock_guard<std::mutex> lock(model_source_registry_mutex());
+  auto &declared = model_source_registry()[std::move(decoder_name)];
+  declared.sources.insert(source);
+  declared.streaming_sources.insert(source);
+}
+
+bool decoder_uses_native_streaming_source(const std::string &decoder_name,
+                                          decoder_model_source source) {
+  std::lock_guard<std::mutex> lock(model_source_registry_mutex());
+  if (decoder::is_registered(decoder_name))
+    reconcile_declared_names();
+  const auto &registry = model_source_registry();
+  const auto iter = registry.find(decoder_name);
+  return iter != registry.end() && iter->second.streaming_sources.count(source);
 }
 
 // Default true: an undeclared name gets its matrices, which is the correct

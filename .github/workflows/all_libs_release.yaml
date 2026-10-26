@@ -16,6 +16,14 @@ on:
         type: string
         description: Retrieve assets from a draft release with this tag (e.g. docker-files-123)
         required: false
+      plugin_framework_commit:
+        type: string
+        description: Reviewed producer commit for a manifest-based plugin archive
+        required: false
+      required_plugin_ids:
+        type: string
+        description: Semicolon-separated binary provider IDs required in this delivery
+        required: false
 
 jobs:
   build-and-test:
@@ -82,9 +90,16 @@ jobs:
             gh release view -R ${{ inputs.assets_repo }} ${{ inputs.assets_tag }} >> $GITHUB_STEP_SUMMARY
             # Extract the decoder that needs to be embedded in the release
             mkdir -p tmp
-            tar -C tmp -xzvf nv-qldpc-decoder-${{ matrix.runner.arch }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_release.tar.gz
-            test -f tmp/libcudaq-qec-nv-qldpc-decoder.so
-            echo "QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so" >> $GITHUB_ENV
+            legacy_archive=nv-qldpc-decoder-${{ matrix.runner.arch }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_release.tar.gz
+            plugin_archive=qec-private-plugins-${{ matrix.runner.arch }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_release.tar.gz
+            if [[ -f "$legacy_archive" ]]; then
+              tar -C tmp -xzvf "$legacy_archive"
+              test -f tmp/libcudaq-qec-nv-qldpc-decoder.so
+              echo "QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so" >> $GITHUB_ENV
+            elif [[ ! -f "$plugin_archive" ]]; then
+              echo "No supported native plugin delivery was downloaded" >&2
+              exit 1
+            fi
             # The proprietary cudevice archive is optional: it only enables
             # device_graph dispatch in the decoding_server binary and the
             # device-graph realtime tests, neither of which ships in the
@@ -94,6 +109,28 @@ jobs:
             fi
           fi
         shell: bash
+
+      - name: Select manifest-based native plugin delivery
+        env:
+          PLUGIN_FRAMEWORK_COMMIT: ${{ inputs.plugin_framework_commit }}
+          REQUIRED_PLUGIN_IDS: ${{ inputs.required_plugin_ids }}
+          PLUGIN_PLATFORM: ${{ matrix.runner.arch }}
+          PLUGIN_CUDA_VERSION: ${{ matrix.cuda_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="qec-private-plugins-${PLUGIN_PLATFORM}_ubuntu24.04_cuda${PLUGIN_CUDA_VERSION}_release.tar.gz"
+          if [[ -f "$archive" ]]; then
+            [[ "$PLUGIN_FRAMEWORK_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "An exact reviewed plugin_framework_commit is required" >&2; exit 1; }
+            [[ -z "$REQUIRED_PLUGIN_IDS" || "$REQUIRED_PLUGIN_IDS" =~ ^[A-Za-z0-9_-]+(\;[A-Za-z0-9_-]+)*$ ]] || { echo "Invalid required_plugin_ids" >&2; exit 1; }
+            echo "QEC_EXTERNAL_PLUGIN_ARCHIVE=$(pwd)/$archive" >> "$GITHUB_ENV"
+            echo "QEC_EXTERNAL_PLUGIN_FRAMEWORK_COMMIT=$PLUGIN_FRAMEWORK_COMMIT" >> "$GITHUB_ENV"
+            echo "QEC_EXTERNAL_PLUGIN_DELIVERY=native" >> "$GITHUB_ENV"
+            echo "QEC_REQUIRED_EXTERNAL_PLUGINS=$REQUIRED_PLUGIN_IDS" >> "$GITHUB_ENV"
+          elif [[ -n "$REQUIRED_PLUGIN_IDS" ]]; then
+            echo "Required external plugin archive is absent: $archive" >&2
+            exit 1
+          fi
 
       - name: Configure
         id: config

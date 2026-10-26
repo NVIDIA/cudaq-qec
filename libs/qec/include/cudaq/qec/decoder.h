@@ -15,6 +15,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -51,6 +52,22 @@ register_decoder_native_model_source(std::string decoder_name,
 __attribute__((visibility("default"))) bool
 decoder_needs_model_matrices(const std::string &decoder_name,
                              decoder_model_source source);
+
+/// @brief Declare bounded native streaming initialization for a model source.
+/// Also declares native model consumption. Unlike the older native-source
+/// flag, this opts into representative-only D/O and dimension metadata, while
+/// retaining the original finite or open recipe. The constructed decoder must
+/// implement native_streaming_decoder_provider and
+/// streaming_correction_provider.
+__attribute__((visibility("default"))) void
+register_decoder_native_streaming_source(std::string decoder_name,
+                                         decoder_model_source source);
+
+/// @brief Whether a decoder explicitly opted into bounded stream preparation.
+/// False for existing native model consumers and unknown names.
+__attribute__((visibility("default"))) bool
+decoder_uses_native_streaming_source(const std::string &decoder_name,
+                                     decoder_model_source source);
 
 /// @brief The primary result basis requested from a decoder.
 enum class decode_result_type : std::uint8_t {
@@ -202,6 +219,63 @@ struct decoder_result {
   // Manually define the inequality operator
   bool operator!=(const decoder_result &other) const {
     return !(*this == other);
+  }
+};
+
+/// @brief Bounded input hints for a decoder's native raw-measurement stream.
+/// Neither size declares the total shot duration or limits a tagged record.
+struct decoder_streaming_layout {
+  std::size_t input_quantum;
+  std::size_t measurements_per_round;
+  /// Actual CUDA device owning the stream's resources, including a device
+  /// selected by the backend when the user did not request an explicit pin.
+  /// Empty for host-only streams or when the decoder's base pin is sufficient.
+  std::optional<int> cuda_device_id = std::nullopt;
+};
+
+/// @brief Physical rounds newly committed by one native stream publication.
+struct decoder_streaming_coverage {
+  std::uint64_t begin_round;
+  std::uint64_t end_round;
+};
+
+/// @brief Optional native raw-input and variable-cadence decoder capability.
+///
+/// Implement alongside streaming_correction_provider with observable primary
+/// output. This separate interface
+/// leaves both existing decoder and correction-provider vtables unchanged.
+/// A FINAL enqueue accepts the physical terminal record and may defer its
+/// publication. The built-in streaming node performs finalization and reads
+/// terminal output only in its separate flush phase, after enqueue returns,
+/// regardless of the decoder's readiness boolean. Each non-FINAL publication
+/// and final flush publication must report a nonempty coverage interval
+/// contiguous with the previous one in the shot. Mid-stream
+/// clear preserves physical coordinates; reset and post-FINAL clear restart
+/// them at zero. The built-in streaming node forwards raw records, rather than
+/// applying a finite representative's D or imposing its firing schedule.
+class __attribute__((visibility("default"))) native_streaming_decoder_provider {
+public:
+  virtual ~native_streaming_decoder_provider() = default;
+  virtual decoder_streaming_layout streaming_layout() const = 0;
+
+  /// Notification before the graph divides an accepted tagged record. FINAL
+  /// describes its physical final-readout bytes, not an empty end marker.
+  virtual void begin_input_record(round_type, std::size_t) {}
+
+  /// Available room for the next raw fragment, or no graph-level limit. The
+  /// decoder may instead consume whole packets with internal backpressure.
+  virtual std::optional<std::size_t> raw_input_limit() const {
+    return std::nullopt;
+  }
+  virtual std::optional<decoder_streaming_coverage>
+  committed_coverage() const = 0;
+
+  /// Explicit raw-input one-shot entry point. decoder::decode remains detector
+  /// valued. Streaming-only configurations may reject this operation; callers
+  /// must not synthesize a horizon or invert D to manufacture measurements.
+  virtual decoder_result
+  decode_measurements(const std::vector<std::uint8_t> &) {
+    throw std::logic_error("native decoder requires tagged streaming input");
   }
 };
 

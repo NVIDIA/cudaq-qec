@@ -17,6 +17,19 @@ permissions:
   contents: read
 
 jobs:
+  check-packaging-contracts:
+    name: Check plugin and runtime-data packaging contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install CPU packaging test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 cmake g++ binutils patchelf
+      - name: Run archive, workflow and installed-consumer contract tests
+        run: python3 -m unittest discover -s scripts/ci/tests
+
   check-changes:
     name: Check changes
     runs-on: ubuntu-24.04

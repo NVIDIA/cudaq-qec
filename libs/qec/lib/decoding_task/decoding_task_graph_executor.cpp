@@ -660,8 +660,13 @@ bool decoding_task_graph::impl::enqueue_sweep(const uint8_t *syndrome,
                                    const graph_event &event) {
     if (event.kind == graph_event_kind::streaming_raw) {
       auto &node = *streaming_nodes[event.node].capability;
+      if (event.offset == 0)
+        node.begin_input_record(type.value_or(round_type::BULK), len);
       const auto limit =
           type ? node.raw_chunk_limit() : node.untagged_chunk_limit();
+      if (limit && *limit == 0 && event.offset < len)
+        throw std::logic_error(
+            "decoding_task_graph: raw input node cannot make progress");
       const auto take =
           limit ? std::min(*limit, len - event.offset) : len - event.offset;
       const auto *chunk = syndrome ? syndrome + event.offset : nullptr;

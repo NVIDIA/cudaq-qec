@@ -33,6 +33,21 @@ set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 
 find_package(CUDAToolkit REQUIRED)
 
+# Offline binary-delivery contracts run without a GPU or proprietary modules.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME ExternalPlugins.Contracts
+    COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+      -s "${CUDAQX_QEC_SOURCE_DIR}/../../scripts/ci/tests"
+      -p "test_*plugin*.py")
+  set_tests_properties(ExternalPlugins.Contracts PROPERTIES LABELS "packaging")
+  add_test(NAME PlaybackServer.Contracts
+    COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+      -s "${CUDAQX_QEC_SOURCE_DIR}/../../scripts/ci/tests"
+      -p "test_*play*.py")
+  set_tests_properties(PlaybackServer.Contracts PROPERTIES LABELS "packaging;playback")
+endif()
+
 # ==============================================================================
 add_compile_options(-Wno-attributes) 
 
@@ -168,6 +183,56 @@ set_target_properties(test_node_kind_dlclose PROPERTIES
 add_dependencies(test_node_kind_dlclose node_kind_dlclose_plugin)
 add_dependencies(CUDAQXQECUnitTests test_node_kind_dlclose)
 gtest_discover_tests(test_node_kind_dlclose)
+
+# ABI gateway fixtures never enter the ordinary automatic plugin directories.
+set(task_graph_plugin_fixture_root "${CMAKE_CURRENT_BINARY_DIR}/task-graph-plugin-fixtures")
+set(task_graph_plugin_fixture_cases
+  compatible framework_mismatch protocol_mismatch descriptor_size_mismatch
+  context_size_mismatch kind_size_mismatch node_size_mismatch
+  compiler_abi_mismatch string_abi_mismatch missing_describe missing_register
+  static_registration partial_failure collision_kind collision_alias
+  legacy_decoder dependency borrowed_entrypoint)
+foreach(fixture IN LISTS task_graph_plugin_fixture_cases)
+  set(fixture_target "task_graph_plugin_${fixture}")
+  add_library(${fixture_target} SHARED task_graph_plugin_test_module.cpp)
+  target_include_directories(${fixture_target} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../lib
+    $<TARGET_PROPERTY:cudaq-qec-decoders,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:cudaqx-core,INTERFACE_INCLUDE_DIRECTORIES>)
+  string(TOUPPER "${fixture}" fixture_definition)
+  target_compile_definitions(${fixture_target} PRIVATE
+    TASK_GRAPH_PLUGIN_TEST_CASE="${fixture}"
+    "TASK_GRAPH_PLUGIN_TEST_${fixture_definition}=1")
+  target_compile_options(${fixture_target} PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-fno-gnu-unique>)
+  target_link_libraries(${fixture_target} PRIVATE
+    $<TARGET_FILE:cudaq-qec-decoders>)
+  set_target_properties(${fixture_target} PROPERTIES
+    OUTPUT_NAME task_graph_plugin_fixture
+    LIBRARY_OUTPUT_DIRECTORY "${task_graph_plugin_fixture_root}/${fixture}"
+    BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+  add_dependencies(${fixture_target} cudaq-qec-decoders)
+endforeach()
+set_target_properties(task_graph_plugin_dependency PROPERTIES
+  OUTPUT_NAME task_graph_plugin_dependency)
+target_link_libraries(task_graph_plugin_borrowed_entrypoint PRIVATE
+  task_graph_plugin_dependency)
+
+add_executable(test_task_graph_plugin_loader test_task_graph_plugin_loader.cpp)
+target_include_directories(test_task_graph_plugin_loader PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
+target_compile_definitions(test_task_graph_plugin_loader PRIVATE
+  TASK_GRAPH_PLUGIN_FIXTURE_ROOT="${task_graph_plugin_fixture_root}")
+target_link_libraries(test_task_graph_plugin_loader PRIVATE
+  GTest::gtest_main cudaq-qec-decoders ${CMAKE_DL_LIBS})
+set_target_properties(test_task_graph_plugin_loader PROPERTIES
+  ENABLE_EXPORTS ON
+  BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+foreach(fixture IN LISTS task_graph_plugin_fixture_cases)
+  add_dependencies(test_task_graph_plugin_loader "task_graph_plugin_${fixture}")
+endforeach()
+add_dependencies(CUDAQXQECUnitTests test_task_graph_plugin_loader)
+gtest_discover_tests(test_task_graph_plugin_loader)
 
 add_executable(test_dem_construction test_dem_construction.cpp)
 target_link_libraries(test_dem_construction PRIVATE GTest::gtest_main

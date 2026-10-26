@@ -576,8 +576,13 @@ void dem_chunk_spec::expand(const std::vector<seam_id> &ids) {
 }
 
 void dem_chunk_spec::validate(const std::string &context) const {
-  if (num_faults == 0)
-    throw std::invalid_argument(context + ".num_faults must be positive");
+  // A declared phase can be noiseless (for example a perfect terminal
+  // readout). Its H/O rows still carry seam/observable dimensions, but no
+  // fault column or synthetic nonzero prior is required. Keep rejecting an
+  // undeclared default phase; index validation below rejects any fault
+  // reference in a zero-width phase.
+  if (num_faults == 0 && is_empty())
+    throw std::invalid_argument(context + ": phase is undeclared");
   if (num_faults > std::numeric_limits<sparse_binary_matrix::index_type>::max())
     throw std::invalid_argument(context + ".num_faults exceeds uint32_t max");
   if (!H_sparse.empty() && !seam_specs.empty())
@@ -653,7 +658,7 @@ extended_dem dem_chunk_from_spec(const dem_chunk_spec &spec,
       result.tags.push_back(static_cast<uint64_t>(k));
     row_cursor += seam_rows;
   }
-  if (result.H.num_cols() == 0)
+  if (result.H.num_cols() == 0 && result.H.num_rows() == 0)
     result.H = zero_matrix(0, static_cast<uint32_t>(working.num_faults));
 
   result.O = sparse_from_terminated_rows(working.O_sparse, working.num_faults);
@@ -1118,7 +1123,8 @@ extended_dem dem_stitch(const extended_dem &a, const extended_dem &b,
   push(bot_int);
   push(bot);
 
-  if (result_H.num_cols() == 0)
+  // Noiseless chunks still have detector rows and nonempty seam geometry.
+  if (result_H.num_cols() == 0 && result_H.num_rows() == 0)
     result_H = zero_matrix(0, n_total);
 
   extended_dem r;

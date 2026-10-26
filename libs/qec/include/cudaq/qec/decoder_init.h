@@ -105,6 +105,21 @@ public:
                   std::optional<sparse_binary_matrix> measurement_to_detectors =
                       std::nullopt);
 
+  /// @brief Preserve a native streaming phase recipe without closing its
+  /// horizon.
+  ///
+  /// Unlike from_dem_chunks(), an unresolved repeating phase is accepted. For
+  /// either a finite or open repeating recipe, dimensions and optional D
+  /// describe the minimum finite representative, not the eventual shot length
+  /// or the decoder's preferred input quantum. Preparation is bounded by the
+  /// distinct phases even when the declared finite horizon is very large.
+  /// dem_chunks() retains the original optional round count. H, O and rates
+  /// remain unavailable; the decoder owns incremental model preparation.
+  static decoder_init from_dem_chunks_stream(
+      dem_chunks_spec spec,
+      std::optional<sparse_binary_matrix> measurement_to_detectors =
+          std::nullopt);
+
   /// @brief Construct from an authoritative chunked DEM together with its
   /// closed model.
   ///
@@ -188,13 +203,16 @@ public:
   const dem_chunks_spec &dem_chunks() const;
 
   /// @brief Whether H, O and the error rates are available. False only for a
-  /// chunked source built by `from_dem_chunks()`, whose matrix accessors
-  /// throw std::logic_error.
+  /// chunked source built by from_dem_chunks() or from_dem_chunks_stream(),
+  /// whose matrix accessors throw std::logic_error.
   bool has_matrices() const noexcept;
 
   /// Dimensions are stored as source metadata so these accessors never need to
   /// request H or O. For matrix sources they intentionally duplicate the O(1)
-  /// matrix shape values in preparation for compact source alternatives.
+  /// matrix shape values in preparation for compact source alternatives. A
+  /// from_dem_chunks_stream() handle reports its minimum representative's
+  /// dimensions; its original recipe, not these hints, defines the shot
+  /// horizon.
   std::size_t num_detectors() const noexcept;
   std::size_t num_error_mechanisms() const noexcept;
   std::size_t num_observables() const noexcept;

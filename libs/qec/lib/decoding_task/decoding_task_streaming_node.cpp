@@ -6,8 +6,10 @@
 #include "decoding_task_streaming_node.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
+#include "../hardware_guards.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace cudaq::qec {
@@ -90,19 +92,49 @@ streaming_decoder_node::streaming_decoder_node(
     throw std::invalid_argument("streaming node requires D, O, and a decoder");
   correction_provider_ =
       dynamic_cast<streaming_correction_provider *>(dec_.get());
-  if (spr_ == 0 || (equal_rounds && d_->num_cols() % spr_ != 0))
+  native_provider_ =
+      dynamic_cast<native_streaming_decoder_provider *>(dec_.get());
+  if (native_provider_) {
+    if (!correction_provider_)
+      throw std::invalid_argument(
+          "native streaming decoder requires a correction provider");
+    if (dec_->get_result_type() != decode_result_type::observables)
+      throw std::invalid_argument(
+          "native streaming decoder requires observable primary output");
+    const auto layout = native_provider_->streaming_layout();
+    if (layout.input_quantum == 0 || layout.measurements_per_round == 0 ||
+        (layout.cuda_device_id && *layout.cuda_device_id < 0) ||
+        layout.measurements_per_round > std::numeric_limits<uint32_t>::max())
+      throw std::invalid_argument(
+          "native streaming decoder has invalid layout");
+    input_quantum_ = layout.input_quantum;
+    native_device_id_ = layout.cuda_device_id;
+    spr_ = static_cast<uint32_t>(layout.measurements_per_round);
+  }
+  if (spr_ == 0 ||
+      (!native_provider_ && equal_rounds && d_->num_cols() % spr_ != 0))
     throw std::invalid_argument(
         "streaming node syndrome count must be divisible by its round size");
   if (dec_->get_num_observables() != o_->num_rows())
     throw std::invalid_argument(
         "streaming node decoder and O must declare the same observable count");
-  if (dec_->get_num_msyn_per_decode() != d_->num_cols())
+  if (!native_provider_ && dec_->get_num_msyn_per_decode() != d_->num_cols())
     throw std::invalid_argument(
         "streaming node decoder syndrome size must match D column count");
   dets_.assign(d_->num_rows(), 0.0f);
   correction_frame_.assign(o_->num_rows(), 0);
   last_output_ = logical_outcome{};
   last_output_.get<logical_outcome>().bits.assign(o_->num_rows(), 0);
+}
+
+void streaming_decoder_node::begin_input_record(round_type type,
+                                                std::size_t bytes) {
+  if (native_provider_)
+    native_provider_->begin_input_record(type, bytes);
+}
+
+std::optional<std::size_t> streaming_decoder_node::raw_chunk_limit() const {
+  return native_provider_ ? native_provider_->raw_input_limit() : std::nullopt;
 }
 
 // Forward one caller-preserved raw chunk, with its round type, and publish any
@@ -115,16 +147,24 @@ bool streaming_decoder_node::enqueue(const uint8_t *msyn, std::size_t len,
     return false;
   // A tagged shot ends where the decoder says, not where it is metered.
   untagged_fill_ = 0;
-  if (!dec_->enqueue_syndrome(msyn, len, type)) {
+  const bool ready = dec_->enqueue_syndrome(msyn, len, type);
+  if (native_provider_ && type == round_type::FINAL) {
+    // Keep terminal work in the executor's distinct flush phase. In
+    // particular, do not finalize or inspect native publication state while
+    // the raw-input callback still owns its event and buffer lease.
+    pending_inner_input_ = true;
+    return false;
+  }
+  if (!ready) {
     pending_inner_input_ = true;
     return false;
   }
 
-  capture_inner_corrections(type == round_type::FINAL);
+  const bool published = capture_inner_corrections(type == round_type::FINAL);
   // A provisional publication is not the end of the shot. Keep a final flush
   // pending, for a session that closes without FINAL.
   pending_inner_input_ = correction_provider_ && type != round_type::FINAL;
-  return true;
+  return published;
 }
 
 // Forward an untagged chunk as one, keeping the decoder's legacy contract: it
@@ -136,6 +176,14 @@ bool streaming_decoder_node::enqueue_untagged(const uint8_t *msyn,
                                               std::size_t len) {
   if (len == 0)
     return false;
+  if (native_provider_) {
+    if (!dec_->enqueue_syndrome(msyn, len)) {
+      pending_inner_input_ = true;
+      return false;
+    }
+    pending_inner_input_ = true;
+    return capture_inner_corrections(/*final=*/false);
+  }
   untagged_fill_ += len;
   if (untagged_fill_ >= num_msyn_per_decode())
     untagged_fill_ = 0;
@@ -154,20 +202,39 @@ bool streaming_decoder_node::enqueue_untagged(const uint8_t *msyn,
 // Snapshot the inner decoder and expose its correction delta for edge routing.
 // A FINAL shot's rounds follow those of the shots before it in its stream, and
 // end the stream.
-void streaming_decoder_node::capture_inner_corrections(bool final) {
-  publish_inner_frame(
+bool streaming_decoder_node::capture_inner_corrections(bool final) {
+  const auto *current =
       correction_provider_
           ? (final ? correction_provider_->finalize_obs_corrections()
                    : correction_provider_->peek_obs_corrections())
-          : dec_->get_obs_corrections(),
-      final);
+          : dec_->get_obs_corrections();
+  if (native_provider_) {
+    const auto coverage = native_provider_->committed_coverage();
+    if (!coverage || coverage->begin_round >= coverage->end_round)
+      throw std::logic_error(
+          "native streaming decoder publication requires nonempty coverage");
+    // FINAL may only seal an already published prefix. Do not emit that
+    // interval twice or manufacture a zero-width publication for it.
+    if (final && coverage->end_round == native_coverage_end_) {
+      published_final_ = true;
+      return false;
+    }
+    if (coverage->begin_round != native_coverage_end_)
+      throw std::logic_error(
+          "native streaming decoder publication coverage is not contiguous");
+    native_coverage_ =
+        committed_coverage{coverage->begin_round, coverage->end_round};
+    native_coverage_end_ = coverage->end_round;
+  }
+  publish_inner_frame(current, final);
   if (!final || !correction_provider_)
-    return;
+    return true;
   final_coverage_.reset();
   if (const auto rounds = correction_provider_->finalized_round_count())
     final_coverage_ =
         committed_coverage{completed_rounds_, completed_rounds_ + *rounds};
   completed_rounds_ = 0;
+  return true;
 }
 
 // Publish the change in the inner frame since the last publication.
@@ -187,9 +254,9 @@ void streaming_decoder_node::publish_inner_frame(const uint8_t *current,
 bool streaming_decoder_node::flush() {
   if (!pending_inner_input_)
     return false;
-  capture_inner_corrections(/*final=*/true);
+  const bool published = capture_inner_corrections(/*final=*/true);
   pending_inner_input_ = false;
-  return true;
+  return published;
 }
 
 // Return the current graph-owned aggregate correction frame.
@@ -200,6 +267,11 @@ const uint8_t *streaming_decoder_node::corrections() const {
 // Consume published corrections while preserving inner streaming context.
 void streaming_decoder_node::clear_corrections() {
   dec_->clear_corrections();
+  if (native_provider_ && published_final_) {
+    native_coverage_end_ = 0;
+    native_coverage_.reset();
+    published_final_ = false;
+  }
   std::fill(correction_frame_.begin(), correction_frame_.end(), uint8_t{0});
   output_valid_ = false;
 }
@@ -213,11 +285,13 @@ void streaming_decoder_node::reset_streaming_state() {
   untagged_fill_ = 0;
   completed_rounds_ = 0;
   final_coverage_.reset();
+  native_coverage_.reset();
+  native_coverage_end_ = 0;
 }
 
 // Report the validated raw measurement width shared by the decoder and D.
 std::size_t streaming_decoder_node::num_msyn_per_decode() const {
-  return d_->num_cols();
+  return native_provider_ ? input_quantum_ : d_->num_cols();
 }
 
 // Report the configured common graph round unit.
@@ -241,6 +315,8 @@ streaming_decoder_node::streaming_output(std::size_t slot) const {
 // see FINAL; the shot after a FINAL one begins a new stream.
 std::optional<streaming_task_graph_node::committed_coverage>
 streaming_decoder_node::streaming_coverage() const {
+  if (native_provider_)
+    return native_coverage_;
   return published_final_ ? final_coverage_ : std::nullopt;
 }
 
@@ -255,6 +331,9 @@ streaming_decoder_node::project_result(decoder_result result) const {
 // Apply D and run the inner decoder for the non-streaming graph path.
 logical_outcome streaming_decoder_node::decode_one_shot(
     const measurement_results &measurements) const {
+  if (native_provider_)
+    return project_result(
+        native_provider_->decode_measurements(measurements.bits));
   if (measurements.bits.size() < d_->num_cols())
     throw std::out_of_range(
         "streaming node shot has fewer measurements than D requires");
@@ -302,6 +381,19 @@ void streaming_decoder_node::reset_decoder() {
 // Launch native asynchronous decoding and defer projection until collection.
 std::future<logical_outcome> streaming_decoder_node::run_async(
     const measurement_results &measurements) const {
+  if (native_provider_) {
+    const auto o = o_;
+    const bool observables =
+        dec_->get_result_type() == decode_result_type::observables;
+    const int cuda_id = cuda_device_id().value_or(-1);
+    return std::async(std::launch::async, [provider = native_provider_, o,
+                                           observables, cuda_id,
+                                           bits = measurements.bits]() {
+      const detail_affinity::CudaDeviceGuard device(cuda_id);
+      return project_decoder_result(provider->decode_measurements(bits), *o,
+                                    observables);
+    });
+  }
   if (measurements.bits.size() < d_->num_cols())
     throw std::out_of_range(
         "streaming node shot has fewer measurements than D requires");
@@ -320,6 +412,8 @@ std::future<logical_outcome> streaming_decoder_node::run_async(
 
 // Forward a usable inner-decoder CUDA device assignment to graph scheduling.
 std::optional<int> streaming_decoder_node::cuda_device_id() const {
+  if (native_device_id_)
+    return native_device_id_;
   const int id = dec_->get_cuda_device_id();
   return id >= 0 ? std::optional<int>(id) : std::nullopt;
 }

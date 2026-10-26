@@ -272,6 +272,14 @@ void check_declared_dimensions(
 cudaq::qec::decoder_init resolve_dem_chunks_init(
     const cudaq::qec::decoding::config::decoder_config &config) {
   const auto &spec = *config.dem_chunks;
+  if (cudaq::qec::decoder_uses_native_streaming_source(
+          config.type, cudaq::qec::decoder_model_source::dem_chunks)) {
+    auto inputs = cudaq::qec::decoder_init::from_dem_chunks_stream(spec);
+    if (!inputs.has_observable_model())
+      throw std::invalid_argument("streaming model must define observables");
+    check_declared_dimensions(config, inputs, "streaming dem_chunks template");
+    return inputs;
+  }
   std::vector<std::vector<std::uint32_t>> d_rows;
   try {
     d_rows = cudaq::qec::dem_chunks_to_d_sparse(spec);
@@ -429,9 +437,29 @@ std::unique_ptr<cudaq::qec::decoder> create_realtime_decoder(
   CUDA_QEC_INFO("Creating decoder {} of type {}", decoder_config.id,
                 decoder_config.type);
 
+  const bool bounded_streaming_source =
+      inputs.has_dem_chunks() &&
+      cudaq::qec::decoder_uses_native_streaming_source(
+          decoder_config.type, cudaq::qec::decoder_model_source::dem_chunks);
   auto decoder =
       cudaq::qec::get_decoder(decoder_config.type, std::move(inputs), output,
                               prepare_decoder_params(decoder_config));
+  const auto *native =
+      dynamic_cast<cudaq::qec::native_streaming_decoder_provider *>(
+          decoder.get());
+  if (bounded_streaming_source && !native)
+    throw std::invalid_argument(
+        "bounded native streaming declaration requires its provider");
+  if (native) {
+    if (!dynamic_cast<cudaq::qec::streaming_correction_provider *>(
+            decoder.get()))
+      throw std::invalid_argument(
+          "native streaming decoder requires a correction provider");
+    if (decoder->get_result_type() !=
+        cudaq::qec::decode_result_type::observables)
+      throw std::invalid_argument(
+          "native streaming decoder requires observable primary output");
+  }
   decoder->set_decoder_id(decoder_config.id);
 
   // Force plugin initialization before the caller publishes the decoder for
@@ -440,8 +468,11 @@ std::unique_ptr<cudaq::qec::decoder> create_realtime_decoder(
   // Size the dry run from the constructed decoder, not the configuration: a
   // DEM-sourced config leaves syndrome_size unset and derives it from the
   // model.
-  std::vector<cudaq::qec::float_t> syndrome(decoder->get_syndrome_size(), 0.0);
-  decoder->decode(syndrome);
+  if (!native) {
+    std::vector<cudaq::qec::float_t> syndrome(decoder->get_syndrome_size(),
+                                              0.0);
+    decoder->decode(syndrome);
+  }
   auto t2 = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> creation_duration = t1 - t0;
   std::chrono::duration<double> initialization_duration = t2 - t1;
@@ -501,12 +532,13 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
   if (!kind)
     throw std::runtime_error(where + " has unregistered kind '" + node.kind +
                              "'");
+  const auto input_policy = kind->input_policy(node.node_params);
 
   const bool flat = !cfg.H_sparse.empty();
   // A node's own matrices outrank every entry-level form. validate_task_graph()
   // rejects pairing them with dem_chunks, or splitting the D/O pair.
   const bool node_flat = !ns.D_sparse.empty();
-  if (kind->requires_dem) {
+  if (input_policy.requires_dem) {
     if (node_flat) {
       node.d_sparse = parse_flat_sparse_rows(ns.D_sparse, "D_sparse");
       node.o_sparse = parse_flat_sparse_rows(ns.O_sparse, "O_sparse");
@@ -533,7 +565,7 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
     }
   }
 
-  if (kind->requires_decoder) {
+  if (input_policy.requires_decoder) {
     const cudaq::qec::decoder_output_request decoder_output =
         kind->inner_decoder_output(node.node_params);
     const bool decoder_takes_observables =

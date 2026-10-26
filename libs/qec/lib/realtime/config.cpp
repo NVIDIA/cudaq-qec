@@ -313,7 +313,7 @@ static bool task_graph_node_describes_itself(const task_graph_node_spec &node) {
   }
   const auto *kind =
       cudaq::qec::find_task_graph_node_kind(node.resolved_kind());
-  if (kind && !kind->requires_dem)
+  if (kind && !kind->input_policy(node.node_params.map()).requires_dem)
     return true;
   return node.dem_chunks.has_value() || !node.D_sparse.empty();
 }
@@ -434,15 +434,16 @@ static void validate_task_graph(const decoder_config &config) {
           "decoder plugin name and sets windows, which only an ingest node "
           "takes");
     if (kind) {
-      if (kind->requires_decoder && node.inner_type.empty())
+      const auto input_policy = kind->input_policy(node.node_params.map());
+      if (input_policy.requires_decoder && node.inner_type.empty())
         throw std::runtime_error(where + " of kind '" + kind->name +
                                  "' needs an inner decoder: set inner.type");
-      if (!kind->requires_decoder &&
+      if (!input_policy.requires_decoder &&
           (!node.inner_type.empty() || !node.decoder_custom_args.empty()))
         throw std::runtime_error(where + " of kind '" + kind->name +
                                  "' wraps no decoder, so it "
                                  "takes neither inner nor decoder_custom_args");
-      if (!kind->requires_dem && node.dem_chunks.has_value())
+      if (!input_policy.requires_dem && node.dem_chunks.has_value())
         throw std::runtime_error(where + " of kind '" + kind->name +
                                  "' takes no dem_chunks");
       if (!kind->takes_windows && !node.windows.empty())
@@ -452,7 +453,7 @@ static void validate_task_graph(const decoder_config &config) {
       if (kind->takes_windows && node.windows.empty())
         throw std::runtime_error(where + " of kind '" + kind->name +
                                  "' needs at least one window");
-      if (!kind->requires_dem &&
+      if (!input_policy.requires_dem &&
           (!node.H_sparse.empty() || !node.D_sparse.empty() ||
            !node.O_sparse.empty()))
         throw std::runtime_error(where + " of kind '" + kind->name +
@@ -460,7 +461,7 @@ static void validate_task_graph(const decoder_config &config) {
                                  "H_sparse, D_sparse or O_sparse");
       // Either spelling of the model is only ever used to build an inner
       // decoder, so a kind that wraps none has nothing to do with it.
-      if (!kind->requires_decoder &&
+      if (!input_policy.requires_decoder &&
           (!node.stim_dem.empty() || !node.stim_dem_path.empty()))
         throw std::runtime_error(
             where + " of kind '" + kind->name +

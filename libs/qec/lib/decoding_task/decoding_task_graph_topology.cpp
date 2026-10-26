@@ -61,6 +61,7 @@ node_build_context prepare_node(task_graph_node_config &cfg,
                                 const task_graph_node_kind_spec &kind) {
   const std::string where = "from_topology: node '" + cfg.id + "'";
   node_build_context ctx;
+  const auto input_policy = kind.input_policy(cfg.node_params);
   const decoder_output_request decoder_output =
       kind.inner_decoder_output(cfg.node_params);
   const bool decoder_takes_observables =
@@ -73,10 +74,25 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       !cfg.decoder_type.empty() &&
       !decoder_needs_model_matrices(cfg.decoder_type,
                                     decoder_model_source::dem_chunks);
+  const bool bounded_streaming_chunks =
+      native_streaming_chunks &&
+      decoder_uses_native_streaming_source(cfg.decoder_type,
+                                           decoder_model_source::dem_chunks);
   ctx.id = cfg.id;
   ctx.node_params = &cfg.node_params;
+  ctx.prepared_data = std::move(cfg.prepared_data);
 
   const bool has_flat = !cfg.d_sparse.empty();
+  if (input_policy.native_dem_chunks) {
+    if (!cfg.dem || has_flat || !cfg.h_sparse.empty() ||
+        !cfg.o_sparse.empty() || cfg.decoder_instance ||
+        !cfg.decoder_type.empty() || !cfg.stim_dem.empty())
+      throw std::invalid_argument(
+          where + " native kind requires only a dem_chunks phase model");
+    ctx.native_dem_chunks =
+        std::make_shared<const dem_chunks_spec>(std::move(*cfg.dem));
+    return ctx;
+  }
   // A kind applying O itself, including a guarded window, reads an error
   // pattern. Its stim_dem is therefore the node's whole model rather than the
   // inner decoder's alone, so O and H both come from the text and share the
@@ -88,13 +104,20 @@ node_build_context prepare_node(task_graph_node_config &cfg,
         where + " of kind '" + kind.name +
         "' takes its whole model from stim_dem, so it cannot also set dem; "
         "give it the text and a d_sparse to read measurements with");
-  if (kind.requires_dem && !cfg.dem.has_value() && !has_flat)
+  if (input_policy.requires_dem && !cfg.dem.has_value() && !has_flat)
     throw std::invalid_argument(where + " of kind '" + kind.name +
                                 "' needs a DEM: set dem or d_sparse/o_sparse");
-  if (!kind.requires_dem) {
+  if (!input_policy.requires_dem) {
     if (cfg.dem.has_value() || has_flat)
       throw std::invalid_argument(where + " of kind '" + kind.name +
                                   "' takes no DEM");
+    if (input_policy.requires_decoder) {
+      if (!cfg.decoder_instance || !cfg.decoder_type.empty() ||
+          !cfg.stim_dem.empty())
+        throw std::invalid_argument(where + " of kind '" + kind.name +
+                                    "' requires an already-built decoder");
+      ctx.dec = std::move(cfg.decoder_instance);
+    }
     return ctx;
   }
 
@@ -112,8 +135,9 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     dem_chunks_spec working = *cfg.dem;
     if (cfg.node_params.contains("window_size"))
       working.num_rounds = cfg.node_params.get<std::size_t>("window_size");
-    else if (!working.num_rounds.has_value() && working.has_repeating_phase())
-      working.num_rounds = working.minimum_rounds();
+    else if (working.has_repeating_phase() &&
+             (bounded_streaming_chunks || !working.num_rounds.has_value()))
+      working.num_rounds = std::max<std::uint64_t>(2, working.minimum_rounds());
 
     std::vector<extended_dem> chunks;
     if (!native_streaming_chunks)
@@ -187,7 +211,10 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       ctx.spr = static_cast<uint32_t>(*working.measurements_per_round);
       ctx.num_measurements = d_mat.num_cols();
     }
-    prepared_chunks.emplace(std::move(working));
+    // The representative only supplies graph dimensions. A native streaming
+    // decoder must still see the caller's unresolved physical horizon.
+    prepared_chunks.emplace(bounded_streaming_chunks ? *cfg.dem
+                                                     : std::move(working));
   } else {
     if (cfg.node_params.contains("measurement_frame_lengths_file")) {
       flat_frames = detail::read_measurement_frame_lengths(
@@ -258,7 +285,7 @@ node_build_context prepare_node(task_graph_node_config &cfg,
         where + ": H has " + std::to_string(ctx.h->num_rows()) +
         " detector rows but D produces " + std::to_string(ctx.d->num_rows()));
 
-  if (!kind.requires_decoder) {
+  if (!input_policy.requires_decoder) {
     if (cfg.decoder_instance || !cfg.decoder_type.empty())
       throw std::invalid_argument(where + " of kind '" + kind.name +
                                   "' takes no decoder");
@@ -324,8 +351,11 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       if (prepared_chunks &&
           !decoder_needs_model_matrices(cfg.decoder_type,
                                         decoder_model_source::dem_chunks)) {
-        auto native =
-            decoder_init::from_dem_chunks(std::move(*prepared_chunks), *ctx.d);
+        auto native = bounded_streaming_chunks
+                          ? decoder_init::from_dem_chunks_stream(
+                                std::move(*prepared_chunks), *ctx.d)
+                          : decoder_init::from_dem_chunks(
+                                std::move(*prepared_chunks), *ctx.d);
         return decoder_takes_observables ? std::move(native)
                                          : native.without_observables();
       }
@@ -336,6 +366,11 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     }();
     ctx.dec = get_decoder(cfg.decoder_type, std::move(inputs), decoder_output,
                           cfg.params);
+    if (bounded_streaming_chunks &&
+        !dynamic_cast<native_streaming_decoder_provider *>(ctx.dec.get()))
+      throw std::invalid_argument(
+          where +
+          ": bounded native streaming declaration requires its provider");
   }
   return ctx;
 }

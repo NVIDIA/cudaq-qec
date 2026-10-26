@@ -113,6 +113,101 @@ public:
 
 CUDAQ_EXT_PT_REGISTER_TYPE(d_capture_decoder)
 
+// A streaming-only ordinary plugin: constructing it must not trigger a
+// detector-valued dry run or realize an entire finite source horizon.
+class bounded_stream_config_probe final
+    : public decoder,
+      public streaming_correction_provider,
+      public native_streaming_decoder_provider {
+public:
+  bounded_stream_config_probe(decoder_init inputs,
+                              decoder_output_request output)
+      : decoder(std::move(inputs), output),
+        corrections_(get_num_observables(), 0) {}
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    ++decode_calls;
+    throw std::logic_error("probe requires tagged streaming input");
+  }
+  decoder_streaming_layout streaming_layout() const override { return {7, 2}; }
+  std::optional<decoder_streaming_coverage>
+  committed_coverage() const override {
+    return std::nullopt;
+  }
+  const std::uint8_t *peek_obs_corrections() const override {
+    return corrections_.data();
+  }
+  const std::uint8_t *finalize_obs_corrections() override {
+    return corrections_.data();
+  }
+  const decoder_init &source_inputs() const { return get_inputs(); }
+  std::size_t decode_calls = 0;
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      bounded_stream_config_probe,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &) {
+        return std::make_unique<bounded_stream_config_probe>(
+            std::move(inputs), output.value_or(decoder_output_request{
+                                   decode_result_type::observables}));
+      })
+
+private:
+  std::vector<std::uint8_t> corrections_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(bounded_stream_config_probe)
+
+// Contract-invalid plugins must fail before a detector-valued warmup or
+// publication. The counter also detects an accidental legacy fallback.
+class declared_stream_without_provider_probe : public decoder {
+public:
+  declared_stream_without_provider_probe(decoder_init inputs,
+                                         decoder_output_request output)
+      : decoder(std::move(inputs), output) {}
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    ++decode_calls;
+    return {true, std::vector<float_t>(get_num_observables(), 0)};
+  }
+  static inline std::size_t decode_calls = 0;
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      declared_stream_without_provider_probe,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &) {
+        return std::make_unique<declared_stream_without_provider_probe>(
+            std::move(inputs), output.value_or(decoder_output_request{
+                                   decode_result_type::observables}));
+      })
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(declared_stream_without_provider_probe)
+
+class native_stream_without_corrections_probe final
+    : public declared_stream_without_provider_probe,
+      public native_streaming_decoder_provider {
+public:
+  using declared_stream_without_provider_probe::
+      declared_stream_without_provider_probe;
+  decoder_streaming_layout streaming_layout() const override { return {7, 2}; }
+  std::optional<decoder_streaming_coverage>
+  committed_coverage() const override {
+    return std::nullopt;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      native_stream_without_corrections_probe,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &) {
+        return std::make_unique<native_stream_without_corrections_probe>(
+            std::move(inputs), output.value_or(decoder_output_request{
+                                   decode_result_type::observables}));
+      })
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(native_stream_without_corrections_probe)
+
 } // namespace cudaq::qec
 
 namespace {
@@ -3645,6 +3740,91 @@ TEST(ResolveDecoderInputs, ChunkFormLeavesAChunkDecoderWithoutMatrices) {
   ASSERT_NE(inputs.measurement_to_detectors(), nullptr);
   EXPECT_EQ(inputs.measurement_to_detectors()->to_nested_csr(),
             closed.measurement_to_detectors()->to_nested_csr());
+}
+
+TEST(ResolveDecoderInputs,
+     PlainNativeStreamKeepsItsRecipeAndSkipsDetectorWarmup) {
+  using namespace cudaq::qec;
+  register_decoder_native_streaming_source("bounded_stream_config_probe",
+                                           decoder_model_source::dem_chunks);
+  for (const auto rounds : std::array<std::optional<std::uint64_t>, 2>{
+           1'000'000'000, std::nullopt}) {
+    auto config = parse_one(dem_chunks_yaml(5));
+    config.id = 31;
+    config.type = "bounded_stream_config_probe";
+    config.dem_chunks->num_rounds = rounds;
+    auto representative = *config.dem_chunks;
+    representative.num_rounds = representative.minimum_rounds();
+    const auto expected = decoder_init::from_dem_chunks(representative);
+    auto inputs = decoding::host::resolve_decoder_init(
+        config, std::filesystem::current_path());
+    ASSERT_TRUE(inputs.has_dem_chunks());
+    EXPECT_EQ(inputs.dem_chunks().num_rounds, rounds);
+    EXPECT_FALSE(inputs.has_matrices());
+    EXPECT_EQ(inputs.measurement_to_detectors(), nullptr);
+    EXPECT_EQ(inputs.num_detectors(), expected.num_detectors());
+
+    auto instance =
+        decoding::host::create_realtime_decoder(config, std::move(inputs));
+    const auto *probe =
+        dynamic_cast<bounded_stream_config_probe *>(instance.get());
+    ASSERT_NE(probe, nullptr);
+    EXPECT_EQ(probe->decode_calls, 0u);
+    EXPECT_EQ(probe->source_inputs().dem_chunks().num_rounds, rounds);
+    EXPECT_EQ(probe->get_decoder_id(), 31u);
+    EXPECT_EQ(probe->get_num_observables(), expected.num_observables());
+    EXPECT_EQ(probe->source_inputs().measurement_to_detectors(), nullptr);
+    const auto *native =
+        dynamic_cast<const native_streaming_decoder_provider *>(instance.get());
+    ASSERT_NE(native, nullptr);
+    const auto layout = native->streaming_layout();
+    EXPECT_EQ(layout.input_quantum, 7u);
+    EXPECT_EQ(layout.measurements_per_round, 2u);
+    EXPECT_FALSE(layout.cuda_device_id.has_value());
+  }
+}
+
+TEST(ResolveDecoderInputs, PlainBoundedDeclarationRequiresNativeProvider) {
+  using namespace cudaq::qec;
+  register_decoder_native_streaming_source(
+      "declared_stream_without_provider_probe",
+      decoder_model_source::dem_chunks);
+  auto config = parse_one(dem_chunks_yaml(5));
+  config.type = "declared_stream_without_provider_probe";
+  config.dem_chunks->num_rounds.reset();
+  auto inputs = decoding::host::resolve_decoder_init(
+      config, std::filesystem::current_path());
+  ASSERT_FALSE(inputs.has_matrices());
+  ASSERT_EQ(inputs.measurement_to_detectors(), nullptr);
+  declared_stream_without_provider_probe::decode_calls = 0;
+  try {
+    (void)decoding::host::create_realtime_decoder(config, std::move(inputs));
+    ADD_FAILURE() << "expected the bounded declaration to require its provider";
+  } catch (const std::invalid_argument &error) {
+    EXPECT_NE(
+        std::string(error.what()).find("declaration requires its provider"),
+        std::string::npos)
+        << error.what();
+  }
+  EXPECT_EQ(declared_stream_without_provider_probe::decode_calls, 0u);
+}
+
+TEST(ResolveDecoderInputs, PlainNativeProviderRequiresCorrectionProvider) {
+  using namespace cudaq::qec;
+  auto config = parse_one(dem_chunks_yaml(5));
+  config.type = "native_stream_without_corrections_probe";
+  auto inputs = decoding::host::resolve_decoder_init(
+      config, std::filesystem::current_path());
+  declared_stream_without_provider_probe::decode_calls = 0;
+  try {
+    (void)decoding::host::create_realtime_decoder(config, std::move(inputs));
+    ADD_FAILURE() << "expected native streaming to require corrections";
+  } catch (const std::invalid_argument &error) {
+    EXPECT_NE(std::string(error.what()).find("requires a correction provider"),
+              std::string::npos)
+        << error.what();
+  }
+  EXPECT_EQ(declared_stream_without_provider_probe::decode_calls, 0u);
 }
 
 // A config carrying both forms parses as flat, which is what
