@@ -31,12 +31,4 @@ inline void check_verify_residual(const cudaqx::heterogeneous_map &params,
                              value + "'");
 }
 
-/// Throws std::runtime_error, naming @p kind, if max_in_flight is set to 0.
-inline void check_max_in_flight(const cudaqx::heterogeneous_map &params,
-                                const std::string &kind) {
-  if (params.contains("max_in_flight") &&
-      params.get<std::size_t>("max_in_flight") == 0)
-    throw std::runtime_error(kind + ": max_in_flight must be at least 1");
-}
-
 } // namespace cudaq::qec

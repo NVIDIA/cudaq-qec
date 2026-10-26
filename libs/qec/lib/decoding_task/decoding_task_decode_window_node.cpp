@@ -18,16 +18,14 @@
 namespace cudaq::qec {
 namespace {
 
-/// num_receives creates the ports receive_0 ... receive_{n-1};
-/// max_in_flight bounds the windows decoding at once.
+/// num_receives creates the ports receive_0 ... receive_{n-1}. The windows
+/// decoding at once are bounded by the node's max_in_flight.
 decoding::config::decoder_schema decode_window_params() {
   using decoding::config::param_kind;
   decoding::config::decoder_schema schema;
   schema.params.push_back({"num_receives", param_kind::uint64});
-  schema.params.push_back({"max_in_flight", param_kind::uint64});
   schema.params.push_back({"verify_residual", param_kind::string});
   schema.validate = [](const cudaqx::heterogeneous_map &p) {
-    check_max_in_flight(p, "decode_window");
     check_verify_residual(p, "decode_window");
   };
   return schema;

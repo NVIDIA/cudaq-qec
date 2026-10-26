@@ -375,10 +375,10 @@ static void validate_task_graph(const decoder_config &config) {
                                ": task_graph.async_worker_cpus has negative "
                                "CPU " +
                                std::to_string(cpu));
+    // Two workers on one core can be deliberate, so it is a warning.
     if (std::find(cpus.begin(), cpus.begin() + i, cpu) != cpus.begin() + i)
-      throw std::runtime_error(who +
-                               ": task_graph.async_worker_cpus lists CPU " +
-                               std::to_string(cpu) + " twice");
+      CUDA_QEC_WARN("{}: task_graph.async_worker_cpus lists CPU {} twice", who,
+                    cpu);
     if (cpu == tg.options.async_coordinator_cpu)
       throw std::runtime_error(
           who + ": task_graph.async_worker_cpus includes CPU " +
@@ -407,6 +407,9 @@ static void validate_task_graph(const decoder_config &config) {
   for (const auto &node : tg.nodes) {
     if (node.id.empty())
       throw std::runtime_error(who + ": every task_graph node needs an id");
+    if (node.max_in_flight == 0)
+      throw std::runtime_error(who + ": task_graph node '" + node.id +
+                               "' has max_in_flight 0");
     // compile_wires() resolves edges through an id map, which would silently
     // collapse a repeated id onto one node.
     if (std::find(ids.begin(), ids.end(), node.id) != ids.end())
@@ -1541,6 +1544,10 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       io.mapOptional("stim_dem_path", node.stim_dem_path);
       return;
     }
+    if (key == "max_in_flight") {
+      io.mapOptional("max_in_flight", node.max_in_flight);
+      return;
+    }
     if (key == "inner") {
       auto &args = node.decoder_custom_args.map();
       inner_form inner{&node.inner_type, &args};
@@ -1644,6 +1651,8 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       io.mapRequired("stim_dem", node.stim_dem);
     if (!node.stim_dem_path.empty())
       io.mapRequired("stim_dem_path", node.stim_dem_path);
+    if (node.max_in_flight != 1)
+      io.mapRequired("max_in_flight", node.max_in_flight);
     if (!node.node_params.empty()) {
       const auto *schema = cudaq::qec::task_graph_node_params_schema(node.type);
       if (!schema)
@@ -2521,6 +2530,8 @@ llvm::json::Object task_graph_json_schema() {
       {"inner", llvm::json::Object{{"type", "object"},
                                    {"required", llvm::json::Array{"type"}}}},
       {"decoder_custom_args", llvm::json::Object{{"type", "object"}}},
+      {"max_in_flight",
+       llvm::json::Object{{"type", "integer"}, {"minimum", 1}, {"default", 1}}},
       {"dem_chunks",
        llvm::json::Object{{"$ref", "#/$defs/dem_chunks_or_name"}}},
       // An ingest node's layers; each name is also an output port.
@@ -2791,9 +2802,8 @@ llvm::json::Object task_graph_json_schema() {
                 {"async_worker_cpus",
                  llvm::json::Object{
                      {"type", "array"},
-                     {"items",
-                      llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
-                     {"uniqueItems", true}}},
+                     {"items", llvm::json::Object{{"type", "integer"},
+                                                  {"minimum", 0}}}}},
                 {"nodes",
                  llvm::json::Object{
                      {"type", "array"},

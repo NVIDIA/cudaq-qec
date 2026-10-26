@@ -50,7 +50,6 @@ decoding::config::decoder_schema parallel_window_params() {
   schema.params.push_back({"input_boundary", param_kind::string});
   schema.params.push_back({"merge_identical", param_kind::boolean});
   schema.params.push_back({"conflicting_parallel", param_kind::string});
-  schema.params.push_back({"max_in_flight", param_kind::uint64});
   schema.params.push_back({"verify_residual", param_kind::string});
   schema.validate = [](const cudaqx::heterogeneous_map &p) {
     check_positive(p, "commit_rounds");
@@ -70,7 +69,6 @@ decoding::config::decoder_schema parallel_window_params() {
                                  "input_boundary columns; truncate keeps each "
                                  "crossing fault's own prior");
     }
-    check_max_in_flight(p, "parallel_window");
     check_verify_residual(p, "parallel_window");
   };
   return schema;

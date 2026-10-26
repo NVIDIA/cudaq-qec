@@ -206,6 +206,9 @@ struct decoder_config {
       /// spellings; setting both on one node is an error rather than a
       /// precedence.
       std::string stim_dem_path;
+      /// Copies of the node that may fire at once in asynchronous
+      /// streaming; see `task_graph_node_config::max_in_flight`.
+      std::uint64_t max_in_flight = 1;
       /// Which DEM columns this node owns, as a label ("local", "boundary") or
       /// explicit ranges.  Parsed, validated, and emitted; not yet honored at
       /// construction, which rejects a partitioned node.
