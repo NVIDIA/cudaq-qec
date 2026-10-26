@@ -95,6 +95,10 @@ node_build_context prepare_node(task_graph_node_config &cfg,
   if (kind.requires_dem && !cfg.dem.has_value() && !has_flat)
     throw std::invalid_argument(where + " of kind '" + kind.name +
                                 "' needs a DEM: set dem or d_sparse/o_sparse");
+  // A kind reading windows takes its template whole, so the shot is never
+  // expanded into matrices for it.
+  if (kind.takes_windows)
+    return ctx;
   if (!kind.requires_dem) {
     if (cfg.dem.has_value() || has_flat)
       throw std::invalid_argument(where + " of kind '" + kind.name +

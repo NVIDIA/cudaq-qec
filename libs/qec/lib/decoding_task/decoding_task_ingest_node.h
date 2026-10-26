@@ -78,6 +78,8 @@ public:
   std::optional<committed_coverage> streaming_coverage() const override;
   /// The logical value, once published; zero otherwise.
   const uint8_t *corrections() const override { return corrections_.data(); }
+  /// Zero the corrections; after the shot is flushed, start the next shot,
+  /// as a caller does between shots.
   void clear_corrections() override;
   void reset_streaming_state() override;
   std::size_t num_msyn_per_decode() const override {
@@ -121,7 +123,8 @@ private:
   std::size_t current_ = none;
   bool logical_current_ = false;
   bool logical_published_ = false;
-  edge_value logical_; ///< logical_outcome
+  bool flushed_ = false; ///< flush() followed FINAL
+  edge_value logical_;   ///< logical_outcome
   std::vector<std::uint8_t> corrections_;
 };
 

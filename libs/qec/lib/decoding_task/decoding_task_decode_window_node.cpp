@@ -41,8 +41,10 @@ decode_window_node::decode_window_node(
 } // end - decode_window_node()
 
 // Inputs are checked before the core fires, which checks the window and
-// every received row before it touches its slot. Publications are copies,
-// so an executor may keep them after the next fire.
+// every received row before it touches its slot. An executor and ingest
+// may number instances apart from windows, but by one offset a shot.
+// Publications are copies, so an executor may keep them after the next
+// fire; corrections accumulate every fire's frame update by XOR.
 bool decode_window_node::fire(std::int64_t k,
                               const std::vector<const edge_value *> &inputs) {
   published_ = false;
@@ -62,12 +64,18 @@ bool decode_window_node::fire(std::int64_t k,
     receives_[i] = receive_of(inputs[1 + i]->get<window_send_payload>());
     received_[i] = &receives_[i];
   }
+  if (offset_ && window.k - k != *offset_)
+    throw std::invalid_argument(
+        "decode_window: instance " + std::to_string(k) + " carries window " +
+        std::to_string(window.k) + ", but this shot's instances are " +
+        std::to_string(*offset_) + " below their windows");
   const auto &fired = core_.fire(0, window, received_);
   auto &frame = frame_.get<logical_outcome>();
-  std::copy(fired.solution->outputs.frame.begin(),
-            fired.solution->outputs.frame.end(), corrections_.begin());
-  frame.bits = corrections_;
+  frame.bits = fired.solution->outputs.frame;
   frame.converged = fired.solution->converged;
+  for (std::size_t i = 0; i < corrections_.size(); ++i)
+    corrections_[i] ^= frame.bits[i] & 1;
+  offset_ = window.k - k;
   for (std::size_t s = 0; s < sends_.size(); ++s)
     copy_send(fired.sends[s], sends_[s].get<window_send_payload>());
   commit_ = {static_cast<std::uint64_t>(fired.commit.begin),
@@ -128,10 +136,12 @@ void decode_window_node::clear_corrections() {
   std::fill(corrections_.begin(), corrections_.end(), 0);
 }
 
-// A new shot: no slot holds a fire, and nothing is published.
+// A new shot: no slot holds a fire, nothing is published, and instances
+// may be numbered afresh.
 void decode_window_node::reset_streaming_state() {
   core_.reset();
   published_ = false;
+  offset_.reset();
   clear_corrections();
 }
 

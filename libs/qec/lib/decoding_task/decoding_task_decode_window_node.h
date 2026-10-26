@@ -36,7 +36,8 @@ public:
   /// @param decoder_name The inner decoder, and @p params its parameters.
   /// @param num_receives Receive ports: receive_0 ... receive_{n-1}.
   /// @param verify What a fire does with a solution that does not satisfy
-  /// its window's detectors.
+  /// its window's detectors. With report, only the core's fire record says
+  /// whether it held; the node publishes nothing of it yet.
   /// @throws as decode_window_core's constructor does.
   decode_window_node(const data_artifact_store &store,
                      std::shared_ptr<const experiment_template> context,
@@ -49,7 +50,8 @@ public:
   /// Fire instance @p k: its window on inputs[0] and each receive's send,
   /// or null. Publishes its frame update, commit zone and sends.
   /// @throws std::invalid_argument if there are not one input per port,
-  /// the window is absent, or an input holds another type, or as
+  /// the window is absent, an input holds another type, or k is not the
+  /// window's index less the offset of this shot's earlier fires, or as
   /// decode_window_core::fire() does, as do its other exceptions. A fire
   /// that throws publishes nothing.
   bool fire(std::int64_t k, const std::vector<const edge_value *> &inputs);
@@ -76,7 +78,8 @@ public:
   const edge_value *streaming_output(std::size_t slot) const override;
   /// The last fire's commit zone: the rounds its frame update covers.
   std::optional<committed_coverage> streaming_coverage() const override;
-  /// The last fire's frame update; zero once cleared.
+  /// Every fire's frame update since the corrections were last cleared,
+  /// XORed together.
   const uint8_t *corrections() const override { return corrections_.data(); }
   void clear_corrections() override;
   void reset_streaming_state() override;
@@ -102,6 +105,8 @@ private:
   std::vector<edge_value> sends_; ///< window_send_payload, one per send
   committed_coverage commit_{};
   std::vector<std::uint8_t> corrections_;
+  /// A window's index less its instance's, the same for a shot's fires.
+  std::optional<std::int64_t> offset_;
 };
 
 } // namespace cudaq::qec

@@ -91,6 +91,7 @@ bool ingest_node::enqueue(const uint8_t *msyn, std::size_t len,
 bool ingest_node::flush() {
   check_handed_over("flush()");
   clear_publications();
+  flushed_ = core_.shot_rounds().has_value();
   if (!read_logical_ || !core_.shot_rounds() || logical_published_)
     return false;
   std::copy(core_.logical().begin(), core_.logical().end(),
@@ -135,7 +136,13 @@ ingest_node::streaming_coverage() const {
   return committed_coverage{0, whole_shot};
 }
 
+// Clearing the corrections of a flushed shot is how a caller starts the
+// next one, as it is for every streaming node.
 void ingest_node::clear_corrections() {
+  if (flushed_) {
+    reset_streaming_state();
+    return;
+  }
   std::fill(corrections_.begin(), corrections_.end(), 0);
 }
 
@@ -144,7 +151,8 @@ void ingest_node::reset_streaming_state() {
   core_.reset();
   clear_publications();
   logical_published_ = false;
-  clear_corrections();
+  flushed_ = false;
+  std::fill(corrections_.begin(), corrections_.end(), 0);
 }
 
 // A publication's buffers are kept for the next shot, so once every index a

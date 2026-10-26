@@ -103,6 +103,14 @@ decode_window_core::fire(std::size_t slot, const window_rows &window,
       window.variant.terminal
           ? std::min(anchor + span_.end, anchor + *window.variant.terminal)
           : anchor + span_.end};
+  if (window.variant.position && *window.variant.position != window.k)
+    fail("window " + std::to_string(window.k) + " carries window " +
+         std::to_string(*window.variant.position) + "'s variant");
+  if (window.first_row != first_row(window))
+    fail("window " + std::to_string(window.k) + "'s first row is " +
+         std::to_string(window.first_row) + ", not " +
+         std::to_string(first_row(window)) + ", where its round " +
+         std::to_string(window.rounds.begin) + " starts");
   if (window.rounds != rounds)
     fail("window " + std::to_string(window.k) + " spans rounds [" +
          std::to_string(window.rounds.begin) + ", " +
@@ -226,6 +234,23 @@ std::size_t decode_window_core::send_index(const std::string &id) const {
 // Errors name the node kind.
 void decode_window_core::fail(const std::string &what) const {
   throw std::invalid_argument("decode_window: " + what);
+}
+
+// A terminal window's key gives the shot's length. Any other window's
+// rounds come before the shot's suffix, whose rows do not depend on the
+// length, so the shortest length that keeps them there serves.
+std::size_t decode_window_core::first_row(const window_rows &window) const {
+  const auto anchor = request_.offset + window.k * request_.period;
+  const auto begin =
+      static_cast<std::size_t>(std::max<std::int64_t>(0, window.rounds.begin));
+  std::size_t R = context_->min_rounds();
+  if (window.variant.terminal)
+    R = static_cast<std::size_t>(anchor + *window.variant.terminal);
+  else if (context_->repeats())
+    R = std::max(R, static_cast<std::size_t>(
+                        std::max<std::int64_t>(0, window.rounds.end)) +
+                        context_->suffix_rounds());
+  return context_->row_offset(begin, R);
 }
 
 // The slot count is fixed at construction.

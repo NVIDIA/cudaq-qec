@@ -4571,8 +4571,9 @@ TEST(DecodeWindowCore, RejectsAnotherLayersViewOfTheSameSize) {
                    " spans rounds");
 }
 
-// A fire takes only its own layer's windows into existing slots, and a
-// send only onto the rows its mode reaches in the receiving window.
+// A fire takes only its own layer's windows, whose index and first row
+// agree with their key and rounds, into existing slots, and a send only
+// onto the rows its mode reaches in the receiving window.
 TEST(DecodeWindowCore, RejectsWhatIsNotItsWindow) {
   const auto spec = arbitrary_memory_spec(5);
   const auto g = parallel_graph(layered(2, 1, 3));
@@ -4610,6 +4611,18 @@ TEST(DecodeWindowCore, RejectsWhatIsNotItsWindow) {
                "decode_window: slot 2 does not exist; there are 2");
   expect_error([&] { a.fire(0, unknown, {}); },
                "decode_window: window 0's variant is none of this layer's");
+  // A window's index and first row agree with its key and rounds.
+  auto renumbered = rows_of(*a_views[0]);
+  auto misplaced = rows_of(*a_views[1]);
+  ASSERT_EQ(renumbered.variant.position, std::optional<std::int64_t>(0));
+  renumbered.k = 1;
+  misplaced.first_row += 1;
+  expect_error([&] { a.fire(0, renumbered, {}); },
+               "decode_window: window 1 carries window 0's variant");
+  expect_error([&] { a.fire(0, misplaced, {}); },
+               "decode_window: window 1's first row is " +
+                   std::to_string(misplaced.first_row) + ", not " +
+                   std::to_string(misplaced.first_row - 1));
   expect_error([&] { a.fire(0, rows_of(*b_views.back()), {}); },
                "decode_window: window " + std::to_string(b_views.back()->k) +
                    " spans rounds");
@@ -5058,7 +5071,8 @@ TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
                                               node.num_observables()),
                 s.logical());
       EXPECT_FALSE(node.flush());
-      node.reset_streaming_state();
+      // Clearing a flushed shot's corrections starts the next shot.
+      node.clear_corrections();
     } // end - for(R)
   } // end - for(requests)
 } // end - TEST(IngestNode, PublishesEachIndexsWindowsFromZero)
@@ -5116,6 +5130,8 @@ TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore) {
              node.enqueue(s.measurements.data() + at, limit, round_type::BULK);
          more; more = node.publish_next())
       ;
+  // Mid-shot, clearing the corrections keeps the shot.
+  node.clear_corrections();
   EXPECT_FALSE(node.flush());
   ASSERT_TRUE(node.enqueue(s.measurements.data() + final_start,
                            total - final_start, round_type::FINAL));
@@ -5270,6 +5286,7 @@ private:
     published_.clear();
     held_.clear();
     logical_.clear();
+    folded_.assign(nodes_.size(), {});
     fire_allocations_ = 0;
   }
 
@@ -5322,11 +5339,16 @@ private:
     const auto ports = node.outputs();
     auto &p = published_[{graph_.layers[l].node, k}];
     const auto &frame = node.streaming_output(0)->get<logical_outcome>();
+    auto &folded = folded_[l];
     EXPECT_EQ(node.published_index(), std::optional<std::int64_t>(i));
+    folded.resize(frame.bits.size(), 0);
+    for (std::size_t j = 0; j < folded.size(); ++j)
+      folded[j] ^= frame.bits[j];
     EXPECT_EQ(
         std::vector<std::uint8_t>(node.corrections(),
                                   node.corrections() + node.num_observables()),
-        frame.bits);
+        folded)
+        << "the node's corrections fold its fires";
     p.frame = frame.bits;
     p.converged = frame.converged;
     p.commit = *node.streaming_coverage();
@@ -5355,6 +5377,8 @@ private:
   std::map<std::tuple<std::size_t, std::int64_t, std::string>, edge_value>
       held_;
   std::vector<std::uint8_t> logical_;
+  // Each layer's frame updates this shot, XORed together.
+  std::vector<std::vector<std::uint8_t>> folded_;
   std::size_t fire_allocations_ = 0;
 };
 
@@ -5633,6 +5657,11 @@ TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
           "decode_window: instance 1 has 2 inputs, not the node's 1");
   rejects({nullptr}, "decode_window: instance 1 has no window on its input");
   rejects({&wrong}, "");
+  rejects({&window}, "decode_window: instance 1 carries window " +
+                         std::to_string(window.get<window_rows>().k) +
+                         ", but this shot's instances are " +
+                         std::to_string(window.get<window_rows>().k) +
+                         " below their windows");
   ASSERT_TRUE(blind.fire(0, {&quiet}));
   EXPECT_THROW(blind.fire(0, {&window}), std::runtime_error);
   EXPECT_EQ(blind.streaming_output(0), nullptr);
@@ -5674,6 +5703,15 @@ TEST(DecodeWindowNode, PublishesUntilTheNextFireOrReset) {
   EXPECT_EQ(a.streaming_output(0)->get<logical_outcome>().bits, frame);
   EXPECT_EQ(a.published_index(), std::optional<std::int64_t>(7));
   EXPECT_TRUE(a.streaming_coverage().has_value());
+  EXPECT_EQ(std::vector<std::uint8_t>(a.corrections(),
+                                      a.corrections() + a.num_observables()),
+            frame);
+  // Corrections fold every fire: the same frame twice cancels.
+  ASSERT_TRUE(a.fire(7, {&*window}));
+  EXPECT_EQ(
+      std::count(a.corrections(), a.corrections() + a.num_observables(), 1), 0);
+  EXPECT_EQ(a.streaming_output(0)->get<logical_outcome>().bits, frame);
+  ASSERT_TRUE(a.fire(7, {&*window}));
   a.clear_corrections();
   EXPECT_EQ(
       std::count(a.corrections(), a.corrections() + a.num_observables(), 1), 0);

@@ -40,8 +40,9 @@ struct window_send_value {
 
 /// A send as an edge carries it: a window_send_value whose values it owns,
 /// so an executor may copy it into a join and keep it after the sending
-/// slot fires again. Its definition lives in the data artifact store for
-/// the graph's life. It is the edge-value type "window_send".
+/// slot fires again. Its definition lives in the sending window, which
+/// the producing decode_window core holds for its life. It is the
+/// edge-value type "window_send".
 struct window_send_payload {
   std::vector<std::uint8_t> values;
   const window_send *send = nullptr;
@@ -154,6 +155,8 @@ private:
   [[noreturn]] void fail(const std::string &what) const;
   /// Throws std::invalid_argument unless @p slot exists.
   void check_slot(std::size_t slot) const;
+  /// The shot row where @p window's first round starts.
+  std::size_t first_row(const window_rows &window) const;
 
   std::shared_ptr<const experiment_template> context_;
   window_request request_;
