@@ -18,6 +18,7 @@
 #include "decoding_task_data_artifacts.h"
 #include "decoding_task_decoding_window.h"
 #include "decoding_task_ingest_core.h"
+#include "decoding_task_window_kind_params.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -41,8 +42,9 @@ struct window_send_value {
 /// One fire's results, held in its slot until the slot fires again.
 struct window_fire {
   std::int64_t k = 0;
-  bool fired = false; ///< False until the slot first fires
-  round_range commit; ///< The commit zone's rounds: the frame's interval
+  bool fired = false;   ///< False until the slot first fires
+  bool checked = false; ///< Whether verify_residual checked the solution
+  round_range commit;   ///< The commit zone's rounds: the frame's interval
   /// d after receiving: the window's own rows, then its imported ones.
   std::span<const std::uint8_t> detectors;
   /// The estimate, convergence, whether H e = d, and the outputs.
@@ -72,21 +74,24 @@ public:
   /// @param slots The fires whose results may be held at once, each with
   /// its own bulk decoder, so decoder memory, a GPU decoder's device memory
   /// included, grows with it.
+  /// @param verify What a fire does with a solution that does not satisfy
+  /// its detectors.
   /// @throws std::invalid_argument if @p slots is 0, or as
   /// make_window_decoder() does; std::logic_error if the store lacks a
   /// variant, or a variant's sends are not the request's.
   decode_window_core(const data_artifact_store &store,
                      std::shared_ptr<const experiment_template> context,
                      window_request request, const std::string &decoder_name,
-                     const cudaqx::heterogeneous_map &params,
-                     std::size_t slots);
+                     const cudaqx::heterogeneous_map &params, std::size_t slots,
+                     verify_residual_mode verify = verify_residual_mode::none);
 
   /// Fire window view.k into @p slot: copy the view's rows from its ring,
   /// apply each receive, a delta to the window's own rows and a residual to
   /// its imported ones, then decode and commit. The view and every received
   /// row are checked first, so a rejected fire leaves the slot holding what
-  /// it held; a decoder that fails leaves it empty. Allocates nothing
-  /// beyond what the decoder's decode() does.
+  /// it held; a decoder that fails, or a solution that verify_residual fail
+  /// rejects, leaves it empty. Allocates nothing beyond what the decoder's
+  /// decode() does, except for the message of a solution it rejects.
   /// @param receives One per receive port: the producer instance's send, or
   /// null when that instance does not exist.
   /// @throws std::invalid_argument if the slot does not exist, the view is
@@ -95,7 +100,8 @@ public:
   /// in its mode, or an imported row receives no residual;
   /// std::out_of_range if the view's rounds are not in its ring;
   /// std::logic_error if the view's variant is a prefix or terminal one
-  /// that another slot is decoding.
+  /// that another slot is decoding; std::runtime_error if verify_residual
+  /// is fail and the solution does not satisfy the window's detectors.
   const window_fire &fire(std::size_t slot, const window_view &view,
                           std::span<const window_send_value *const> receives);
 
@@ -130,6 +136,7 @@ private:
 
   std::shared_ptr<const experiment_template> context_;
   window_request request_;
+  verify_residual_mode verify_ = verify_residual_mode::none;
   round_range span_; ///< The rounds a window spans, from its anchor
   std::vector<variant> variants_;
   // Per slot, a workspace and a detector buffer for every variant.

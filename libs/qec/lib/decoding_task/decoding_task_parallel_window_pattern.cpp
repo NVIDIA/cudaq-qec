@@ -64,7 +64,7 @@ decoding::config::decoder_schema parallel_window_params() {
                                  "input_boundary columns; truncate keeps each "
                                  "crossing fault's own prior");
     }
-    check_verify_residual(p, "parallel_window");
+    verify_residual_of(p, "parallel_window");
   };
   return schema;
 }

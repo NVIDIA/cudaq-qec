@@ -26,7 +26,7 @@ decoding::config::decoder_schema decode_window_params() {
   schema.params.push_back({"num_receives", param_kind::uint64});
   schema.params.push_back({"verify_residual", param_kind::string});
   schema.validate = [](const cudaqx::heterogeneous_map &p) {
-    check_verify_residual(p, "decode_window");
+    verify_residual_of(p, "decode_window");
   };
   return schema;
 }

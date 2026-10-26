@@ -4079,6 +4079,158 @@ TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty) {
                "decode_window: slot 1 does not exist; there are 1");
 } // end - TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty)
 
+// A decoder that finds no fault, whatever the detectors, and says it
+// converged: its estimate satisfies only a window whose detectors are all
+// zero.
+class blind_decoder final : public decoder {
+public:
+  blind_decoder(decoder_init inputs, decoder_output_request output)
+      : decoder(inputs, output) {}
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    decoder_result result;
+    result.converged = true;
+    result.result.assign(get_block_size(), 0.0);
+    return result;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      blind_decoder,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &) {
+        return std::make_unique<blind_decoder>(
+            std::move(inputs), output.value_or(decoder_output_request{
+                                   decode_result_type::errors}));
+      })
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(blind_decoder)
+
+// verify_residual. With fail, a fire whose solution leaves a detector
+// unexplained throws, naming the window and the first row where H e
+// differs from d, and leaves its slot empty, as a failed decode does. With
+// report, the fire's record says the window was checked and the solution
+// does not hold; with none, that it was not checked. A solution that holds
+// passes all three.
+TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto request = parallel_graph(layered(2, 1, 3)).layers[0].request;
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  std::mt19937 rng(41);
+  std::vector<std::uint8_t> noisy(context->measurement_offset(R, R));
+  const std::vector<std::uint8_t> quiet(noisy.size(), 0);
+  std::size_t own = 0;
+  store.add_windows(context, request);
+  decode_window_core none(store, context, request, "blind_decoder", {}, 1);
+  decode_window_core report(store, context, request, "blind_decoder", {}, 1,
+                            verify_residual_mode::report);
+  decode_window_core fail(store, context, request, "blind_decoder", {}, 1,
+                          verify_residual_mode::fail);
+  ingest_core noisy_ingest(context, {{request, 1}}, false);
+  ingest_core quiet_ingest(context, {{request, 1}}, false);
+  // The first window ingest hands over from a shot of measurements m.
+  const auto first_view = [](ingest_core &ingest,
+                             const std::vector<std::uint8_t> &m) {
+    const ingest_publication *p = nullptr;
+    for (std::size_t at = 0; !p && at + ingest.record_limit() <= m.size();
+         at += ingest.record_limit()) {
+      ingest.enqueue(m.data() + at, ingest.record_limit(), false);
+      p = ingest.poll();
+    }
+    return p ? p->views[0] : nullptr;
+  };
+  for (auto &x : noisy)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  const auto *noisy_view = first_view(noisy_ingest, noisy);
+  const auto *quiet_view = first_view(quiet_ingest, quiet);
+  ASSERT_NE(noisy_view, nullptr);
+  ASSERT_NE(quiet_view, nullptr);
+  for (auto r = noisy_view->rounds.begin; r < noisy_view->rounds.end; ++r)
+    own += noisy_ingest.view_detectors(*noisy_view, r).size();
+
+  const auto &reported = report.fire(0, *noisy_view, {});
+  EXPECT_TRUE(reported.checked);
+  EXPECT_FALSE(reported.solution->satisfied);
+  const auto missed = static_cast<std::size_t>(
+      std::find(reported.detectors.begin(), reported.detectors.end(), 1) -
+      reported.detectors.begin());
+  ASSERT_LT(missed, own);
+  EXPECT_FALSE(none.fire(0, *noisy_view, {}).checked);
+  expect_throw<std::runtime_error>(
+      [&] { fail.fire(0, *noisy_view, {}); },
+      "decode_window: window " + std::to_string(noisy_view->k) +
+          "'s solution does not satisfy its detectors (verify_residual: "
+          "fail): H e first differs from d at its row " +
+          std::to_string(missed) + ", shot row " +
+          std::to_string(noisy_view->first_row + missed));
+  EXPECT_FALSE(fail.held(0).fired);
+
+  for (auto *core : {&none, &report, &fail}) {
+    const auto &f = core->fire(0, *quiet_view, {});
+    EXPECT_TRUE(f.solution->satisfied);
+    EXPECT_EQ(f.checked, core != &none);
+  }
+} // end - TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported)
+
+// With verify_residual fail, a row H e misses among a window's imported
+// rows is named as one: B's own rows are quiet, and a forged residual of
+// ones sets its imported rows.
+TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "blind_decoder", {},
+                       1);
+  decode_window_core b(store, context, g.layers[1].request, "blind_decoder", {},
+                       1, verify_residual_mode::fail);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 4}, {g.layers[1].request, 4}}, false);
+  const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
+  const ingest_publication *p = nullptr;
+  for (std::size_t at = 0; !p || !p->views[1]; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while ((p = ingest.poll()) && !p->views[1])
+      ;
+  }
+  const auto &residual =
+      a.fire(0, *p->views[0], {}).sends[a.send_index("backward")];
+  const std::vector<std::uint8_t> ones(residual.values.size(), 1);
+  const window_send_value forged{ones, residual.send, residual.first_row};
+  const window_send_value *receives[] = {nullptr, &forged};
+  ASSERT_FALSE(ones.empty());
+  expect_throw<std::runtime_error>(
+      [&] { b.fire(0, *p->views[1], receives); },
+      "decode_window: window " + std::to_string(p->k) +
+          "'s solution does not satisfy its detectors (verify_residual: "
+          "fail): H e first differs from d at its imported row 0");
+  EXPECT_FALSE(b.held(0).fired);
+} // end - TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow)
+
+// A node's verify_residual is read as its mode, none when unset; any other
+// spelling is rejected, naming the kind.
+TEST(DecodeWindowCore, VerifyResidualIsReadFromItsParameter) {
+  const auto mode_of = [](const std::string &value) {
+    return verify_residual_of({{"verify_residual", value}}, "decode_window");
+  };
+  EXPECT_EQ(verify_residual_of({}, "decode_window"),
+            verify_residual_mode::none);
+  EXPECT_EQ(mode_of("none"), verify_residual_mode::none);
+  EXPECT_EQ(mode_of("fail"), verify_residual_mode::fail);
+  EXPECT_EQ(mode_of("report"), verify_residual_mode::report);
+  expect_throw<std::runtime_error>(
+      [&] { mode_of("true"); },
+      "decode_window: verify_residual must be none, fail or report; got "
+      "'true'");
+} // end - TEST(DecodeWindowCore, VerifyResidualIsReadFromItsParameter)
+
 // single_error_lut that notes a decode() begun while its decoder is still
 // decoding, and holds each decode a while, so that fires begun together
 // overlap.

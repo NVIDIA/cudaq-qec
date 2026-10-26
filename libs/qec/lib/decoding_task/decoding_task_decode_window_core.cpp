@@ -25,8 +25,9 @@ decode_window_core::decode_window_core(
     const data_artifact_store &store,
     std::shared_ptr<const experiment_template> context, window_request request,
     const std::string &decoder_name, const cudaqx::heterogeneous_map &params,
-    std::size_t slots)
-    : context_(std::move(context)), request_(std::move(request)) {
+    std::size_t slots, verify_residual_mode verify)
+    : context_(std::move(context)), request_(std::move(request)),
+      verify_(verify) {
   std::size_t imported = 0;
   if (slots == 0)
     fail("no slot to fire into");
@@ -70,14 +71,16 @@ decode_window_core::decode_window_core(
 // request's zones at k's anchor, clipped to the shot, whose end a terminal
 // variant gives. The view and every received row are checked before the
 // slot is touched, so a rejected fire changes nothing; the slot is marked
-// unfired while it is rewritten, so a decoder that fails leaves it empty
-// rather than torn.
+// unfired while it is rewritten, so a decoder that fails, or a solution that
+// verify_residual fail rejects, leaves it empty rather than torn. Whether
+// H e = d is always known: solve_window() finds it as it commits.
 const window_fire &
 decode_window_core::fire(std::size_t slot, const window_view &view,
                          std::span<const window_send_value *const> receives) {
   std::size_t v = 0;
   std::size_t row = 0;
   std::size_t rows = 0;
+  std::size_t missed = 0; // The first row H e does not explain
   // Frees a prefix or terminal variant's decoder however the fire ends.
   struct free_on_exit {
     std::atomic<bool> *decoding = nullptr;
@@ -180,8 +183,20 @@ decode_window_core::fire(std::size_t slot, const window_view &view,
   }
 
   solve_window(w, decoders[decoders.size() > 1 ? slot : 0].get(), d, ws);
+  if (verify_ == verify_residual_mode::fail && !ws.solution.satisfied) {
+    while (ws.explained[missed] == (d[missed] & 1))
+      ++missed;
+    throw std::runtime_error(
+        "decode_window: window " + std::to_string(view.k) +
+        "'s solution does not satisfy its detectors (verify_residual: "
+        "fail): H e first differs from d at its " +
+        (missed < own ? "row " + std::to_string(missed) + ", shot row " +
+                            std::to_string(view.first_row + missed)
+                      : "imported row " + std::to_string(missed - own)));
+  }
   out.k = view.k;
   out.fired = true;
+  out.checked = verify_ != verify_residual_mode::none;
   out.commit = {std::max(view.rounds.begin, anchor + request_.commit->begin),
                 std::min(view.rounds.end, anchor + request_.commit->end)};
   out.detectors = d;
