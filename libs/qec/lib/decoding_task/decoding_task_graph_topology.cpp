@@ -941,7 +941,12 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     const auto *kind = find_task_graph_node_kind(cfg.kind);
     const auto *factory = find_node_factory(cfg.kind);
     auto ctx = prepare_node(cfg, *kind);
+    // Copies are built only for an asynchronous graph; what they share, the
+    // first fills.
+    std::shared_ptr<void> shared;
     attach_windows(cfg, windows, ctx);
+    ctx.copies = options.async_streaming ? cfg.max_in_flight : 1;
+    ctx.shared = &shared;
     // The first node carrying a DEM owns the graph's D; a single-node graph
     // also exposes its O.  o_matrix() is not meaningful once outcomes are
     // combined, so a multi-node graph leaves it unset, as combine() does.
@@ -969,6 +974,9 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
       auto replica_ctx = prepare_node(cfg, *kind);
       // Each copy decodes the same windows, so it reads the same store.
       attach_windows(cfg, windows, replica_ctx);
+      replica_ctx.copy = r;
+      replica_ctx.copies = ctx.copies;
+      replica_ctx.shared = &shared;
       replicas.push_back((*factory)(replica_ctx));
     }
     i->node_ids.push_back(cfg.id);

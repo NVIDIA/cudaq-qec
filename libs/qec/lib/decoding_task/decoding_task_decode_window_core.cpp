@@ -217,6 +217,12 @@ void decode_window_core::reset() {
     f.fired = false;
 }
 
+// Touches nothing of another slot.
+void decode_window_core::reset(std::size_t slot) {
+  check_slot(slot);
+  fires_[slot].fired = false;
+}
+
 // Reads nothing of another slot.
 const window_fire &decode_window_core::held(std::size_t slot) const {
   check_slot(slot);

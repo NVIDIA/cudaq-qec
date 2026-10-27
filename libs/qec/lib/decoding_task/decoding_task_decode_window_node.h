@@ -61,6 +61,16 @@ public:
                      std::size_t num_receives, verify_residual_mode verify,
                      std::vector<std::optional<std::int64_t>> guaranteed = {});
 
+  /// Copy @p slot of a node whose copies share @p core, one slot each.
+  /// @param context The experiment template.
+  /// @param num_receives Receive ports: receive_0 ... receive_{n-1}.
+  /// @param guaranteed As for the constructor above.
+  /// @throws std::invalid_argument if @p core has no slot @p slot.
+  decode_window_node(std::shared_ptr<decode_window_core> core, std::size_t slot,
+                     std::shared_ptr<const experiment_template> context,
+                     std::size_t num_receives,
+                     std::vector<std::optional<std::int64_t>> guaranteed = {});
+
   /// Whether an instance exists only with input @p slot: its window.
   bool requires_input(std::size_t slot) const override { return slot == 0; }
   /// Whether receive slot - 1 of instance @p k is guaranteed, from the
@@ -122,7 +132,8 @@ public:
       const std::vector<input_schedule> &inputs) const override;
 
 private:
-  decode_window_core core_;
+  std::shared_ptr<decode_window_core> core_; ///< Shared by the copies
+  std::size_t slot_ = 0;                     ///< This copy's slot
   std::vector<std::string> inputs_;
   std::vector<std::string> outputs_;
   // A fire's receives, as the core takes them, and pointers to the present

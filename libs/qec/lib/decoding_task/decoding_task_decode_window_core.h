@@ -84,8 +84,8 @@ struct window_fire {
 /// that slot, and reset() may not run. A fire's sends are leased to the
 /// fires that receive them: its slot must not fire again until they have
 /// finished. The caller chooses the slots, so it knows which holds which
-/// window, and orders all of this. decode_window_node uses one slot; the
-/// executor runs copies of the node for concurrency.
+/// window, and orders all of this. The copies of a decode_window_node, which
+/// the executor runs for concurrency, share one core, a slot each.
 class decode_window_core {
 public:
   /// @param store The store holding every variant of @p request on
@@ -131,6 +131,12 @@ public:
   /// Start a new shot: no slot holds a fire, so held() shows none of an
   /// earlier shot's windows.
   void reset();
+  /// Start a new shot in @p slot alone, which may run while other slots
+  /// fire.
+  /// @throws std::invalid_argument if the slot does not exist.
+  void reset(std::size_t slot);
+  /// The layer's request.
+  const window_request &request() const { return request_; }
   /// The fire @p slot holds, unfired when it holds none. Reads only that
   /// slot, so it may run while other slots fire.
   /// @throws std::invalid_argument if the slot does not exist.

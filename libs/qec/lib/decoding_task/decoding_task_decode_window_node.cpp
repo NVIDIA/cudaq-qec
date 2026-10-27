@@ -36,18 +36,31 @@ first_guaranteed_receive(const window_request &consumer,
   return window_instances(producer, 0).begin - base - offset;
 }
 
-// One slot: an executor runs copies of the node for fires at once. The
-// frame update has a bit per observable of the template.
+// A node of its own: a core with one slot.
 decode_window_node::decode_window_node(
     const data_artifact_store &store,
     std::shared_ptr<const experiment_template> context, window_request request,
     const std::string &decoder_name, const cudaqx::heterogeneous_map &params,
     std::size_t num_receives, verify_residual_mode verify,
     std::vector<std::optional<std::int64_t>> guaranteed)
-    : core_(store, context, request, decoder_name, params, 1, verify),
-      receives_(num_receives), received_(num_receives, nullptr),
-      frame_(logical_outcome{}), corrections_(context->num_observables(), 0),
+    : decode_window_node(
+          std::make_shared<decode_window_core>(store, context, request,
+                                               decoder_name, params, 1, verify),
+          0, context, num_receives, std::move(guaranteed)) {}
+
+// One copy of the node, in one slot of the core its copies share. The frame
+// update has a bit per observable of the template.
+decode_window_node::decode_window_node(
+    std::shared_ptr<decode_window_core> core, std::size_t slot,
+    std::shared_ptr<const experiment_template> context,
+    std::size_t num_receives,
+    std::vector<std::optional<std::int64_t>> guaranteed)
+    : core_(std::move(core)), slot_(slot), receives_(num_receives),
+      received_(num_receives, nullptr), frame_(logical_outcome{}),
+      corrections_(context->num_observables(), 0),
       guaranteed_(std::move(guaranteed)) {
+  const auto &request = core_->request();
+  core_->held(slot_); // throws unless the slot exists
   inputs_.push_back("input");
   for (std::size_t i = 0; i < num_receives; ++i)
     inputs_.push_back("receive_" + std::to_string(i));
@@ -58,7 +71,7 @@ decode_window_node::decode_window_node(
     outputs_.push_back(request.sends[s].id);
     sends_.emplace_back(window_send_payload{});
     sends_.back().get<window_send_payload>().values.reserve(
-        core_.max_send_rows(s));
+        core_->max_send_rows(s));
   }
   frame_.get<logical_outcome>().bits = corrections_;
 } // end - decode_window_node()
@@ -101,7 +114,7 @@ bool decode_window_node::fire(std::int64_t k,
         "decode_window: instance " + std::to_string(k) + " carries window " +
         std::to_string(window.k) + ", but this shot's instances are " +
         std::to_string(*offset_) + " below their windows");
-  const auto &fired = core_.fire(0, window, received_);
+  const auto &fired = core_->fire(slot_, window, received_);
   auto &frame = frame_.get<logical_outcome>();
   frame.bits = fired.solution->outputs.frame;
   frame.converged = fired.solution->converged;
@@ -203,7 +216,7 @@ void decode_window_node::clear_corrections() {
 // A new shot: no slot holds a fire, nothing is published, and instances
 // may be numbered afresh.
 void decode_window_node::reset_streaming_state() {
-  core_.reset();
+  core_->reset(slot_);
   published_ = false;
   offset_.reset();
   clear_corrections();
@@ -238,11 +251,22 @@ const bool registered = [] {
           throw std::logic_error("task graph node '" + ctx.id +
                                  "': a decode_window node is built only "
                                  "within a windowed topology");
+        // The node's copies share one core, a slot each: the first copy
+        // builds it, with a bulk decoder per copy and one decoder for each
+        // other variant.
+        std::shared_ptr<decode_window_core> core;
+        if (ctx.shared && *ctx.shared)
+          core = std::static_pointer_cast<decode_window_core>(*ctx.shared);
+        else
+          core = std::make_shared<decode_window_core>(
+              *ctx.store, ctx.context, *ctx.layer, ctx.decoder_type,
+              ctx.decoder_params, ctx.copies,
+              verify_residual_of(*ctx.node_params, "decode_window"));
+        if (ctx.shared)
+          *ctx.shared = core;
         return std::make_unique<decode_window_node>(
-            *ctx.store, ctx.context, *ctx.layer, ctx.decoder_type,
-            ctx.decoder_params,
+            core, ctx.copy, ctx.context,
             ctx.node_params->get<std::size_t>("num_receives", 0),
-            verify_residual_of(*ctx.node_params, "decode_window"),
             ctx.guaranteed_receives);
       });
   return true;

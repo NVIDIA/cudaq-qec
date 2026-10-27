@@ -80,6 +80,12 @@ struct node_build_context {
   /// A decode_window node's receives, by index: the first instance from
   /// which each is guaranteed, if any (first_guaranteed_receive()).
   std::vector<std::optional<std::int64_t>> guaranteed_receives;
+  /// Which of the node's copies this build is, of how many; a kind whose
+  /// copies share state keeps it in *shared, which the first copy fills
+  /// and the build keeps for the node's others. Null outside from_topology.
+  std::size_t copy = 0;
+  std::size_t copies = 1;
+  std::shared_ptr<void> *shared = nullptr;
 };
 
 using node_factory =

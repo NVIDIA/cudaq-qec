@@ -6236,6 +6236,68 @@ TEST(WindowedGraph, ReportsTheShotsClosure) {
   }
 } // end - TEST(WindowedGraph, ReportsTheShotsClosure)
 
+// A decoder that counts its constructions and finds no fault.
+class counted_decoder final : public decoder {
+public:
+  static inline std::atomic<std::size_t> built{0};
+
+  counted_decoder(decoder_init inputs, decoder_output_request output)
+      : decoder(inputs, output) {
+    ++built;
+  }
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    decoder_result result;
+    result.converged = true;
+    result.result.assign(get_block_size(), 0.0);
+    return result;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      counted_decoder,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &) {
+        return std::make_unique<counted_decoder>(
+            std::move(inputs), output.value_or(decoder_output_request{
+                                   decode_result_type::errors}));
+      })
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(counted_decoder)
+
+// A node's copies share one core, with a slot per copy: each layer builds a
+// bulk decoder per copy and one decoder for each prefix and terminal
+// variant, not every variant's decoders per copy.
+TEST(WindowedGraph, CopiesShareTheirPrefixAndTerminalDecoders) {
+  const auto spec = wide_readout_spec();
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  const auto g = lowered_graph(spec, params);
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  task_graph_options async;
+  async.async_streaming = true;
+  for (const std::size_t copies : {1, 4}) {
+    SCOPED_TRACE(std::to_string(copies) + " copies");
+    std::vector<task_graph_node_config> nodes;
+    std::size_t want = 0; // bulk per copy, each other variant once
+    for (const auto &layer : g.layers) {
+      store.add_windows(context, layer.request);
+      for (const auto &[key, window] :
+           store.find_windows(*context, layer.request))
+        want += key.bulk() ? copies : 1;
+    }
+    nodes.push_back(pattern_node(spec, params, copies, "counted_decoder"));
+    counted_decoder::built = 0;
+    const auto graph = decoding_task_graph::from_topology(
+        std::move(nodes), pattern_edges(), async);
+    EXPECT_EQ(counted_decoder::built.load(), want);
+  }
+}
+
 // Join tables are preallocated for the most a record can publish: the
 // pattern streamed in whole-round records, each readying several windows,
 // with four copies of each layer, never grows one.
