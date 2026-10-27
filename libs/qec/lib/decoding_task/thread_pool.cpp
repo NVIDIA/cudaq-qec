@@ -19,16 +19,6 @@
 #include <sched.h>
 #endif
 
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) ||             \
-    defined(_M_IX86)
-#include <immintrin.h>
-#define CUDAQ_QEC_CPU_RELAX() _mm_pause()
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#define CUDAQ_QEC_CPU_RELAX() asm volatile("yield" ::: "memory")
-#else
-#define CUDAQ_QEC_CPU_RELAX() ((void)0)
-#endif
-
 namespace cudaq::qec::detail {
 namespace {
 
@@ -184,7 +174,7 @@ void thread_pool::run_phase(std::size_t num_tasks, Trampoline trampoline,
   while (remaining_workers_.load(std::memory_order_acquire) > 0) {
     if (spins < kMainWaitSpinPauseIters) {
       ++spins;
-      CUDAQ_QEC_CPU_RELAX();
+      CUDAQ_REALTIME_CPU_RELAX();
     } else {
       std::this_thread::yield();
     }

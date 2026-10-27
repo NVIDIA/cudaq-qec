@@ -287,6 +287,96 @@ def test_async_streaming_uses_existing_api_with_large_input():
     graph.clear_corrections()
 
 
+def test_async_concurrent_records_match_synchronous_graph():
+    options = qec.TaskGraphOptions()
+    options.async_streaming = True
+    options.async_queue_capacity = 4
+    assert options.async_num_workers is None
+    options.async_num_workers = 2
+    assert options.async_num_workers == 2
+    assert options.async_worker_cpus == []
+    options.async_worker_cpus = [0, 1]
+    assert options.async_worker_cpus == [0, 1]
+    options.async_worker_cpus = []
+    synchronous = qec.DecodingTaskGraph.from_spec(_streaming_spec(),
+                                                  "single_error_lut")
+    asynchronous = qec.DecodingTaskGraph.from_spec(_streaming_spec(),
+                                                   "single_error_lut",
+                                                   options=options)
+    per_round = synchronous.get_num_msyn_per_round()
+    rounds = [bytes(per_round) for _ in range(9)]
+    for data in rounds[:-1]:
+        synchronous.enqueue_syndrome(data)
+        asynchronous.enqueue_syndrome(data)
+    synchronous.enqueue_syndrome(rounds[-1], qec.round_type.FINAL)
+    asynchronous.enqueue_syndrome(rounds[-1], qec.round_type.FINAL)
+    expected = synchronous.streaming_result()
+    actual = asynchronous.streaming_result()
+    assert actual.generation == expected.generation
+    assert bytes(actual.values) == bytes(expected.values)
+    assert actual.status == expected.status
+
+    options.async_worker_cpus = [-1]
+    with pytest.raises(ValueError):
+        qec.DecodingTaskGraph.from_spec(_streaming_spec(),
+                                        "single_error_lut",
+                                        options=options)
+
+
+def test_task_graph_edge_index_offset_needs_an_indexed_consumer():
+    edge = _tg_edge("a", "output")
+    assert edge.index_offset == 0
+    edge.index_offset = -1
+    assert edge.index_offset == -1
+    assert edge != _tg_edge("a", "output")
+    with pytest.raises(ValueError, match="index_offset"):
+        qec.DecodingTaskGraph.from_topology(
+            [_window_node("a")], [_tg_edge("measurements", "a"), edge])
+
+
+def test_from_topology_fire_pool_matches_a_single_copy():
+
+    def build(max_in_flight):
+        combine = qec.TaskGraphNodeConfig()
+        combine.id = "combine"
+        combine.kind = "xor"
+        assert combine.max_in_flight == 1
+        combine.max_in_flight = max_in_flight
+        options = qec.TaskGraphOptions()
+        options.async_streaming = True
+        options.async_queue_capacity = 4
+        return qec.DecodingTaskGraph.from_topology(
+            [_window_node("a"), _window_node("b"), combine],
+            [
+                _tg_edge("measurements", "a"),
+                _tg_edge("measurements", "b"),
+                _tg_edge("a", "combine", to_input="a"),
+                _tg_edge("b", "combine", to_input="b"),
+                _tg_edge("combine", "output"),
+            ],
+            options=options,
+        )
+
+    serial, pooled = build(1), build(2)
+    per_round = serial.get_num_msyn_per_round()
+    rounds = [bytes([i % 2] * per_round) for i in range(5)]
+    for data in rounds[:-1]:
+        serial.enqueue_syndrome(data)
+        pooled.enqueue_syndrome(data)
+    serial.enqueue_syndrome(rounds[-1], qec.round_type.FINAL)
+    pooled.enqueue_syndrome(rounds[-1], qec.round_type.FINAL)
+    expected = serial.streaming_result()
+    actual = pooled.streaming_result()
+    assert actual.status == expected.status
+    assert bytes(actual.values) == bytes(expected.values)
+
+    # A kind that keeps state across deliveries cannot be pooled.
+    window = _window_node("w")
+    window.max_in_flight = 2
+    with pytest.raises(ValueError, match="fire pool"):
+        qec.DecodingTaskGraph.from_topology([window])
+
+
 def _guarded_graph(async_streaming=False):
     node = qec.TaskGraphNodeConfig()
     node.id = "guarded"
