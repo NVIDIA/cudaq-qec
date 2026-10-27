@@ -77,7 +77,9 @@ public:
   /// first instance the build gave it, if any.
   bool input_guaranteed(std::size_t slot, std::int64_t k) const override;
   /// Fire instance @p k: its window on inputs[0] and each receive's send,
-  /// or null. Publishes its frame update, commit zone and sends.
+  /// or null. Publishes its frame update, commit zone and sends, and
+  /// returns true; a solution verify_residual fail rejects publishes
+  /// nothing and returns false, and fire_failure() says why.
   /// @throws std::invalid_argument if there are not one input per port,
   /// the window is absent, an input holds another type, or k is not the
   /// window's index less the offset of this shot's earlier fires, or as
@@ -95,6 +97,8 @@ public:
   std::optional<task_graph_closure> publication_closure() const override;
   /// The fire's decoder's convergence, while its publication stands.
   std::optional<bool> publication_converged() const override;
+  /// The core's message for the last fire's rejected solution, if any.
+  const std::string *fire_failure() const override { return failure_; }
   bool has_one_shot_path() const override { return false; }
 
   /// @throws std::logic_error: the node joins by index; it has no one-shot
@@ -153,6 +157,8 @@ private:
   /// A window's index less its instance's, the same for a shot's fires.
   std::optional<std::int64_t> offset_;
   task_graph_closure closure_ = task_graph_closure::not_checked;
+  /// The last fire's rejection, held by the core's slot; null if none.
+  const std::string *failure_ = nullptr;
   /// By receive: the first instance whose receive is guaranteed, if any.
   std::vector<std::optional<std::int64_t>> guaranteed_;
 };

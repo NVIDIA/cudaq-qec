@@ -53,8 +53,12 @@ decode_window_core::decode_window_core(
     imported =
         std::max(imported, window->model.h.num_rows() - window->num_own_rows);
   } // end - for(key)
+  // Almost every window of a shot is the bulk, so a fire's variant lookup
+  // tries it first.
+  std::stable_partition(variants_.begin(), variants_.end(),
+                        [](const variant &v) { return v.key.bulk(); });
   covered_.assign(slots, std::vector<std::uint8_t>(imported, 0));
-  decoding_ = std::make_unique<std::atomic<bool>[]>(variants_.size());
+  decoding_ = std::make_unique<claim_flag[]>(variants_.size());
   workspaces_.resize(slots);
   detectors_.resize(slots);
   fires_.resize(slots);
@@ -63,7 +67,7 @@ decode_window_core::decode_window_core(
       workspaces_[s].push_back(make_window_workspace(*v.window));
       detectors_[s].emplace_back(v.window->model.h.num_rows(), 0);
     }
-    fires_[s].sends.resize(request_.sends.size());
+    fires_[s].fire.sends.resize(request_.sends.size());
   }
 } // end - decode_window_core()
 
@@ -82,7 +86,8 @@ const window_fire &
 decode_window_core::fire(std::size_t slot, const window_rows &window,
                          std::span<const window_send_value *const> receives) {
   std::size_t v = 0;
-  std::size_t missed = 0; // The first row H e does not explain
+  std::size_t missed = 0;      // The first row H e does not explain
+  std::size_t num_covered = 0; // Imported rows some residual reaches
   // Frees a prefix or terminal variant's decoder however the fire ends.
   struct free_on_exit {
     std::atomic<bool> *decoding = nullptr;
@@ -120,7 +125,7 @@ decode_window_core::fire(std::size_t slot, const window_rows &window,
   const auto &w = *variants_[v].window;
   auto &d = detectors_[slot][v];
   auto &ws = workspaces_[slot][v];
-  auto &out = fires_[slot];
+  auto &out = fires_[slot].fire;
   auto &covered = covered_[slot];
   const auto &decoders = variants_[v].decoders;
   const auto own = w.num_own_rows;
@@ -153,27 +158,34 @@ decode_window_core::fire(std::size_t slot, const window_rows &window,
              std::to_string(r->first_row + r->send->rows[i]) +
              ", which window " + std::to_string(window.k) +
              " does not take as a " + (delta ? "delta" : "residual"));
-      if (!delta)
+      if (!delta && !covered[t - own]) {
         covered[t - own] = 1;
+        ++num_covered;
+      }
     }
   } // end - for(r)
-  for (std::size_t i = 0; i < all - own; ++i)
-    if (!covered[i])
-      fail("window " + std::to_string(window.k) + " imports " +
-           std::to_string(all - own) + " rows, but no residual reaches " +
-           "its imported row " + std::to_string(i));
+  // Only a rejected fire looks for the row that was missed.
+  if (num_covered != all - own) {
+    std::size_t i = 0;
+    while (covered[i])
+      ++i;
+    fail("window " + std::to_string(window.k) + " imports " +
+         std::to_string(all - own) + " rows, but no residual reaches " +
+         "its imported row " + std::to_string(i));
+  }
   // A prefix or terminal variant's one decoder is claimed before the slot
   // is touched, so a second fire of it leaves its slot as it was.
   if (!window.variant.bulk()) {
-    if (decoding_[v].exchange(true))
+    if (decoding_[v].decoding.exchange(true))
       throw std::logic_error("decode_window: window " +
                              std::to_string(window.k) +
                              "'s variant is decoding in another slot; a "
                              "window fires into one slot at a time");
-    claim.decoding = &decoding_[v];
+    claim.decoding = &decoding_[v].decoding;
   }
 
   out.fired = false;
+  out.failure.clear();
   std::copy(window.detectors.begin(), window.detectors.end(), d.begin());
   std::fill(d.begin() + own, d.end(), 0);
   for (const auto *r : receives) {
@@ -190,13 +202,15 @@ decode_window_core::fire(std::size_t slot, const window_rows &window,
   if (verify_ == verify_residual_mode::fail && !ws.solution.satisfied) {
     while (ws.explained[missed] == (d[missed] & 1))
       ++missed;
-    throw std::runtime_error(
+    // Reported, not thrown: the caller decides how the failure surfaces.
+    out.failure =
         "decode_window: window " + std::to_string(window.k) +
         "'s solution does not satisfy its detectors (verify_residual: "
         "fail): H e first differs from d at its " +
         (missed < own ? "row " + std::to_string(missed) + ", shot row " +
                             std::to_string(window.first_row + missed)
-                      : "imported row " + std::to_string(missed - own)));
+                      : "imported row " + std::to_string(missed - own));
+    return out;
   }
   out.k = window.k;
   out.fired = true;
@@ -214,19 +228,19 @@ decode_window_core::fire(std::size_t slot, const window_rows &window,
 // A new shot: no slot holds a fire.
 void decode_window_core::reset() {
   for (auto &f : fires_)
-    f.fired = false;
+    f.fire.fired = false;
 }
 
 // Touches nothing of another slot.
 void decode_window_core::reset(std::size_t slot) {
   check_slot(slot);
-  fires_[slot].fired = false;
+  fires_[slot].fire.fired = false;
 }
 
 // Reads nothing of another slot.
 const window_fire &decode_window_core::held(std::size_t slot) const {
   check_slot(slot);
-  return fires_[slot];
+  return fires_[slot].fire;
 }
 
 // In the request's order, which every fire's sends follow.

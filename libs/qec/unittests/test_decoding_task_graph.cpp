@@ -24,6 +24,7 @@
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/dem_sampling.h"
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/logger.h"
 #include "cudaq/qec/plugin_loader.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include <algorithm>
@@ -14021,8 +14022,8 @@ TEST(DecodingTaskGraph, IndexedJoinFailsOnALostGuaranteedInput) {
 TEST(DecodingTaskGraph, IndexedJoinHandlesManyInstancesPerRecord) {
   ASSERT_TRUE(index_probe_registered);
   auto probe = std::make_shared<pipeline_probe>();
-  // Records of four rounds publish four instances each from T and R, more
-  // than the join table's per-record preallocation; it grows as needed.
+  // Records of four rounds publish four instances each from T and R, which
+  // the join table's preallocation covers.
   auto graph = make_indexed_join_graph(
       probe, {.async_streaming = true, .async_queue_capacity = 2},
       /*limit=*/1 << 30, /*join_copies=*/2);
@@ -14035,6 +14036,45 @@ TEST(DecodingTaskGraph, IndexedJoinHandlesManyInstancesPerRecord) {
   expect_indexed_pairs(rounds, rounds.size());
   EXPECT_EQ(graph->streaming_result().values[0],
             expected_join_parity(rounds, rounds.size()));
+}
+
+// With T stopped after 3 instances, J's later instances wait on their
+// required input until FINAL resolves them, more than the join table's
+// preallocation: it grows rather than fail, and its FINAL flush says so,
+// outside the lock. The grown table serves the next shot, which says
+// nothing.
+TEST(DecodingTaskGraph, IndexedJoinGrowsAndSaysSoOnce) {
+  namespace logging = cudaq::qec::detail;
+  ASSERT_TRUE(index_probe_registered);
+  std::mutex mutex;
+  std::vector<std::string> warnings;
+  logging::forwarder_config config;
+  const std::vector<uint8_t> rounds(40, 0);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_indexed_join_graph(
+      probe, {.async_streaming = true, .async_queue_capacity = 2},
+      /*limit=*/3);
+  config.callback = [&](logging::forwarded_log_record &&record) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (record.level == logging::log_level::warn &&
+        record.message.find("join table") != std::string::npos)
+      warnings.push_back(record.message);
+  };
+  logging::set_forwarder(std::move(config));
+  for (int shot = 0; shot < 2; ++shot) {
+    graph->reset_decoder();
+    for (std::size_t r = 0; r < rounds.size(); ++r)
+      graph->enqueue_syndrome(&rounds[r], 1,
+                              r + 1 == rounds.size() ? round_type::FINAL
+                                                     : round_type::BULK);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete);
+  }
+  logging::flush_logs();
+  logging::clear_forwarder();
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("grew past its"), std::string::npos)
+      << warnings[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -14544,7 +14584,8 @@ TEST(WindowKinds, BuildTheirNodesFromTheContext) {
   // A random window is beyond a single-error table: unchecked, it fires;
   // with verify_residual fail, its solution is rejected.
   EXPECT_TRUE(a_node->fire(0, {&*window}));
-  EXPECT_THROW(checked_node->fire(0, {&*window}), std::runtime_error);
+  EXPECT_FALSE(checked_node->fire(0, {&*window}));
+  EXPECT_NE(checked_node->fire_failure(), nullptr);
 
   node_build_context bare;
   bare.id = "lonely";

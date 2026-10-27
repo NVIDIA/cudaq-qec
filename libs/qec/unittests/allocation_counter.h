@@ -13,6 +13,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <new>
@@ -38,6 +39,24 @@ inline thread_local bool counting = false;
 /// This thread's allocations counted so far.
 inline thread_local std::size_t counted = 0;
 
+/// Whether every thread's allocations are being counted, and how many.
+inline std::atomic<bool> counting_all = false;
+inline std::atomic<std::size_t> counted_all = 0;
+
+/// The allocations made on any thread while @p run runs, as a graph's pool
+/// threads make them. Does not nest. Always 0 under a sanitizer.
+template <typename Run>
+std::size_t on_every_thread_during(const Run &run) {
+  struct restore {
+    ~restore() { counting_all = false; }
+  } guard;
+  counted_all = 0;
+  counting_all = true;
+  run();
+  counting_all = false;
+  return counted_all;
+}
+
 /// The allocations @p run makes on this thread. Calls nest: an inner count
 /// is included in the outer one. Always 0 under a sanitizer.
 template <typename Run>
@@ -62,6 +81,8 @@ void *operator new(std::size_t size) {
   void *p = std::malloc(size == 0 ? 1 : size);
   if (allocation_counter::counting)
     ++allocation_counter::counted;
+  if (allocation_counter::counting_all.load(std::memory_order_relaxed))
+    allocation_counter::counted_all.fetch_add(1, std::memory_order_relaxed);
   if (!p)
     throw std::bad_alloc();
   return p;
@@ -75,6 +96,8 @@ void *operator new(std::size_t size, std::align_val_t align) {
   void *p = std::aligned_alloc(alignment, rounded);
   if (allocation_counter::counting)
     ++allocation_counter::counted;
+  if (allocation_counter::counting_all.load(std::memory_order_relaxed))
+    allocation_counter::counted_all.fetch_add(1, std::memory_order_relaxed);
   if (!p)
     throw std::bad_alloc();
   return p;

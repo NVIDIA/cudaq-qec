@@ -161,6 +161,12 @@ public:
   /// The most indices one record can ready: a record holds at most a
   /// period of rounds, which completes at most two indices, while a FINAL
   /// record readies every index left in the ring.
+  /// The most detector rows a window of layer @p l holds: its span in
+  /// rounds, each of the widest rounds.
+  std::size_t max_window_rows(std::size_t l) const {
+    return static_cast<std::size_t>(spans_.at(l).end - spans_.at(l).begin) *
+           max_rows_;
+  }
   std::size_t max_ready_per_record() const {
     return ring_rounds() / static_cast<std::size_t>(period_) + 2;
   }

@@ -1179,7 +1179,7 @@ void decoding_task_graph::impl::consume_streaming_result() {
       // Consuming a complete shot starts the next one from round 0.
       if (output.status == task_graph_streaming_status::complete) {
         stager.frontier = 0;
-        stager.pending.clear();
+        stager.clear_pending();
       }
     }
     output.status = task_graph_streaming_status::pending;
@@ -1227,7 +1227,7 @@ void decoding_task_graph::impl::reset_streaming_progress() {
     stager.frontier = 0;
     stager.generation = 0;
     stager.has_whole = false;
-    stager.pending.clear();
+    stager.clear_pending();
     std::fill(stager.bits.begin(), stager.bits.end(), uint8_t{0});
     std::fill(stager.whole.begin(), stager.whole.end(), uint8_t{0});
   }
@@ -1268,17 +1268,24 @@ void decoding_task_graph::impl::stage_delta(
                            "stager was sized for");
   const auto at = std::upper_bound(
       stager.pending.begin(), stager.pending.end(), coverage.begin_round,
-      [](std::uint64_t begin, const output_stager::interval &entry) {
-        return begin < entry.begin;
+      [&](std::uint64_t begin, std::size_t entry) {
+        return begin < stager.intervals[entry].begin;
       });
-  stager.pending.insert(at, {coverage.begin_round, coverage.end_round, bits});
+  const auto slot = stager.spare.back();
+  auto &interval = stager.intervals[slot];
   bool advanced = false;
+  stager.spare.pop_back();
+  interval.begin = coverage.begin_round;
+  interval.end = coverage.end_round;
+  interval.bits.assign(bits.begin(), bits.end());
+  stager.pending.insert(at, slot);
   while (!stager.pending.empty() &&
-         stager.pending.front().begin == stager.frontier) {
-    const auto &next = stager.pending.front();
-    fold(stager.bits, next.bits);
-    stager.frontier = next.end;
+         stager.intervals[stager.pending.front()].begin == stager.frontier) {
+    const auto next = stager.pending.front();
+    fold(stager.bits, stager.intervals[next].bits);
+    stager.frontier = stager.intervals[next].end;
     stager.pending.erase(stager.pending.begin());
+    stager.spare.push_back(next);
     advanced = true;
   }
   if (advanced)
@@ -1294,7 +1301,8 @@ void decoding_task_graph::impl::fold_whole_shot(output_stager &stager) {
     throw std::logic_error(
         "decoding_task_graph: a staged output still has an uncommitted "
         "interval starting at round " +
-        std::to_string(stager.pending.front().begin) + " at FINAL");
+        std::to_string(stager.intervals[stager.pending.front()].begin) +
+        " at FINAL");
   for (std::size_t i = 0; i < stager.bits.size(); ++i)
     stager.bits[i] ^= stager.whole[i];
   std::fill(stager.whole.begin(), stager.whole.end(), uint8_t{0});

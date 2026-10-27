@@ -124,7 +124,7 @@ private:
   /// Copy every ready index's windows out of the ring, releasing the views.
   void collect();
   /// Throws std::logic_error, naming @p call, while publications wait.
-  void check_handed_over(const std::string &call) const;
+  void check_handed_over(const char *call) const;
   /// Forget the publications handed over.
   void clear_publications();
 

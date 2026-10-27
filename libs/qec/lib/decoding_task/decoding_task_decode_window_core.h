@@ -73,6 +73,9 @@ struct window_fire {
   /// The estimate, convergence, whether H e = d, and the outputs.
   const window_solution *solution = nullptr;
   std::vector<window_send_value> sends; ///< One per send of the request
+  /// Empty unless verify_residual fail rejected the solution: then why,
+  /// naming the window and the first row where H e differs from d.
+  std::string failure;
 };
 
 /// Fires one layer's windows. Fires into different slots may run at once,
@@ -113,8 +116,9 @@ public:
   /// delta to the window's own rows and a residual to its imported ones,
   /// then decode and commit. The window and every received row are checked
   /// first, so a rejected fire leaves the slot holding what it held; a decoder
-  /// that fails, or a solution that verify_residual fail rejects, leaves it
-  /// empty. Allocates nothing beyond what the decoder's decode() does, except
+  /// that fails leaves it empty. A solution that verify_residual fail rejects
+  /// leaves it empty too, without a throw: the fire record's failure says
+  /// why. Allocates nothing beyond what the decoder's decode() does, except
   /// for the message of a solution it rejects.
   /// @param receives One per receive port: the producer instance's send, or
   /// null when that instance does not exist.
@@ -123,8 +127,7 @@ public:
   /// variant's rows, a received send reaches a row the window does not take
   /// in its mode, or an imported row receives no residual;
   /// std::logic_error if the window's variant is a prefix or terminal one
-  /// that another slot is decoding; std::runtime_error if verify_residual
-  /// is fail and the solution does not satisfy the window's detectors.
+  /// that another slot is decoding.
   const window_fire &fire(std::size_t slot, const window_rows &window,
                           std::span<const window_send_value *const> receives);
 
@@ -175,13 +178,23 @@ private:
   // Per slot, a workspace and a detector buffer for every variant.
   std::vector<std::vector<window_workspace>> workspaces_;
   std::vector<std::vector<std::vector<std::uint8_t>>> detectors_;
-  std::vector<window_fire> fires_;
+  /// One slot's fire, on cache lines of its own: copies fire into
+  /// neighbouring slots at once.
+  struct alignas(64) slot_fire {
+    window_fire fire;
+  };
+  std::vector<slot_fire> fires_;
   /// Per slot, which imported rows a fire's residuals reach, checked before
   /// it writes.
   std::vector<std::vector<std::uint8_t>> covered_;
   /// Per variant, whether a fire holds its one decoder; set only for prefix
   /// and terminal variants.
-  std::unique_ptr<std::atomic<bool>[]> decoding_;
+  /// A claim flag on a cache line of its own, as copies claim variants at
+  /// once.
+  struct alignas(64) claim_flag {
+    std::atomic<bool> decoding{false};
+  };
+  std::unique_ptr<claim_flag[]> decoding_;
 };
 
 } // namespace cudaq::qec

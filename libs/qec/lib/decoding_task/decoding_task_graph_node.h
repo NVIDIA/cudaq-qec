@@ -93,6 +93,10 @@ public:
   virtual std::optional<bool> publication_converged() const {
     return std::nullopt;
   }
+  /// Why the last fire failed, when the node reported a failure rather than
+  /// throw in the fire; null otherwise. The executor fails the graph with
+  /// it, as with an exception the fire throws.
+  virtual const std::string *fire_failure() const { return nullptr; }
   /// Opt-in: the node's inputs may arrive in any order. Sibling deliveries
   /// into a branch that reaches it then need not wait for one another, as
   /// they must when a shared descendant needs ordered delivery. Legal only

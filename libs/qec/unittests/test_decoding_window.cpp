@@ -3507,7 +3507,8 @@ std::vector<std::uint8_t> raw_logical(const experiment_template &t,
 // decoder's.
 class allocation_counting_lut final : public decoder {
 public:
-  static inline std::size_t decode_allocations = 0;
+  /// Atomic: copies of a node decode on several threads.
+  static inline std::atomic<std::size_t> decode_allocations = 0;
 
   allocation_counting_lut(decoder_init inputs, decoder_output_request output,
                           const cudaqx::heterogeneous_map &params)
@@ -4143,7 +4144,7 @@ public:
 CUDAQ_EXT_PT_REGISTER_TYPE(blind_decoder)
 
 // verify_residual. With fail, a fire whose solution leaves a detector
-// unexplained throws, naming the window and the first row where H e
+// unexplained records why, naming the window and the first row where H e
 // differs from d, and leaves its slot empty, as a failed decode does. With
 // report, the fire's record says the window was checked and the solution
 // does not hold; with none, that it was not checked. A solution that holds
@@ -4194,19 +4195,21 @@ TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported) {
       reported.detectors.begin());
   ASSERT_LT(missed, own);
   EXPECT_FALSE(none.fire(0, rows_of(*noisy_view), {}).checked);
-  expect_throw<std::runtime_error>(
-      [&] { fail.fire(0, rows_of(*noisy_view), {}); },
-      "decode_window: window " + std::to_string(noisy_view->k) +
-          "'s solution does not satisfy its detectors (verify_residual: "
-          "fail): H e first differs from d at its row " +
-          std::to_string(missed) + ", shot row " +
-          std::to_string(noisy_view->first_row + missed));
+  EXPECT_EQ(fail.fire(0, rows_of(*noisy_view), {}).failure,
+            "decode_window: window " + std::to_string(noisy_view->k) +
+                "'s solution does not satisfy its detectors "
+                "(verify_residual: fail): H e first differs from d at its "
+                "row " +
+                std::to_string(missed) + ", shot row " +
+                std::to_string(noisy_view->first_row + missed));
   EXPECT_FALSE(fail.held(0).fired);
+  EXPECT_TRUE(report.held(0).failure.empty());
 
   for (auto *core : {&none, &report, &fail}) {
     const auto &f = core->fire(0, rows_of(*quiet_view), {});
     EXPECT_TRUE(f.solution->satisfied);
     EXPECT_EQ(f.checked, core != &none);
+    EXPECT_TRUE(f.failure.empty());
   }
 } // end - TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported)
 
@@ -4242,11 +4245,11 @@ TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow) {
   const window_send_value forged{ones, residual.send, residual.first_row};
   const window_send_value *receives[] = {nullptr, &forged};
   ASSERT_FALSE(ones.empty());
-  expect_throw<std::runtime_error>(
-      [&] { b.fire(0, rows_of(*p->views[1]), receives); },
-      "decode_window: window " + std::to_string(p->k) +
-          "'s solution does not satisfy its detectors (verify_residual: "
-          "fail): H e first differs from d at its imported row 0");
+  EXPECT_EQ(b.fire(0, rows_of(*p->views[1]), receives).failure,
+            "decode_window: window " + std::to_string(p->k) +
+                "'s solution does not satisfy its detectors "
+                "(verify_residual: fail): H e first differs from d at its "
+                "imported row 0");
   EXPECT_FALSE(b.held(0).fired);
 } // end - TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow)
 
@@ -5268,9 +5271,9 @@ TEST(IngestNode, KeepsTheLastPublicationCurrent) {
     EXPECT_EQ(node.streaming_output(l), nullptr) << "port " << l;
 } // end - TEST(IngestNode, KeepsTheLastPublicationCurrent)
 
-// After a first shot, an ingest node streams a second of the same length in
-// the same records, publications and logical value included, without
-// allocating: windows are copied into buffers kept from the first.
+// From its first shot, an ingest node streams a shot, publications and
+// logical value included, FINAL's burst of windows too, without
+// allocating: windows are copied into buffers sized at construction.
 TEST(IngestNode, StreamsAShotWithoutAllocating) {
   if (QEC_TEST_SANITIZED)
     GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
@@ -5303,9 +5306,10 @@ TEST(IngestNode, StreamsAShotWithoutAllocating) {
     node.reset_streaming_state();
   };
   stream();
-  stream();
   EXPECT_GT(published, 0u);
-  EXPECT_EQ(allocations, 0u);
+  EXPECT_EQ(allocations, 0u) << "the first shot allocated";
+  stream();
+  EXPECT_EQ(allocations, 0u) << "the second shot allocated";
 } // end - TEST(IngestNode, StreamsAShotWithoutAllocating)
 
 // ---------------------------------------------------------------------------
@@ -5766,8 +5770,8 @@ TEST(DecodeWindowNode, DeclaresItsPorts) {
 } // end - TEST(DecodeWindowNode, DeclaresItsPorts)
 
 // A fire is given one input per port, a window on `input`, and on each
-// receive a send or nothing; anything else is rejected, and so is a
-// solution the node's verify_residual fails. A rejected fire publishes
+// receive a send or nothing; anything else is rejected. A solution the
+// node's verify_residual fails is reported, not thrown. Either publishes
 // nothing, taking down the publication of the fire before it.
 TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
   const auto g = parallel_graph(layered(2, 1, 3));
@@ -5820,8 +5824,15 @@ TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
                          std::to_string(window.get<window_rows>().k) +
                          " below their windows");
   ASSERT_TRUE(blind.fire(0, {&quiet}));
-  EXPECT_THROW(blind.fire(0, {&window}), std::runtime_error);
+  EXPECT_EQ(blind.fire_failure(), nullptr);
+  EXPECT_FALSE(blind.fire(0, {&window}));
+  ASSERT_NE(blind.fire_failure(), nullptr);
+  EXPECT_NE(blind.fire_failure()->find("does not satisfy its detectors"),
+            std::string::npos);
   EXPECT_EQ(blind.streaming_output(0), nullptr);
+  EXPECT_FALSE(blind.published_index(0).has_value());
+  ASSERT_TRUE(blind.fire(0, {&quiet}));
+  EXPECT_EQ(blind.fire_failure(), nullptr);
 } // end - TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance)
 
 // A fire's publication stands until the next fire or a reset: its frame
@@ -6770,6 +6781,47 @@ TEST(WindowedGraph, AFailedDecodeSurfacesAndAResetRecovers) {
   jitter_lut::reset();
 } // end - TEST(WindowedGraph, AFailedDecodeSurfacesAndAResetRecovers)
 
+// A solution verify_residual fail rejects is raised outside the fire, as a
+// failed decode is: synchronously and asynchronously, a blind decoder's
+// shot with flips fails the graph, naming the window and its row, and
+// reset_decoder() recovers it for a quiet shot.
+TEST(WindowedGraph, ARejectedSolutionFailsTheGraph) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  const parallel_window_reference reference(
+      spec, lowered_graph(spec, load_params()), R, "single_error_lut");
+  const auto flips = detectors_of(reference.model(), 3);
+  const std::vector<std::uint8_t> quiet(flips.size(), 0);
+  auto params = load_params();
+  params.insert("verify_residual", std::string("fail"));
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    task_graph_options options;
+    std::vector<task_graph_node_config> nodes;
+    options.async_streaming = async;
+    nodes.push_back(pattern_node(spec, params, 2, "blind_decoder"));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    const auto record = graph->get_num_msyn_per_round();
+    try {
+      stream_shot(*graph, memory_measurements(tmpl, R, flips), record);
+      graph->streaming_result();
+      ADD_FAILURE() << "a rejected solution went unreported";
+    } catch (const std::runtime_error &e) {
+      const std::string what = e.what();
+      EXPECT_NE(what.find("'s solution does not satisfy its detectors "
+                          "(verify_residual: fail): H e first differs from "
+                          "d at its "),
+                std::string::npos)
+          << what;
+    }
+    graph->reset_decoder();
+    EXPECT_EQ(stream_shot(*graph, memory_measurements(tmpl, R, quiet), record),
+              std::vector<std::uint8_t>(graph->get_num_observables(), 0));
+  } // end - for(async)
+} // end - TEST(WindowedGraph, ARejectedSolutionFailsTheGraph)
+
 // Concurrency is invisible to the result: with decodes finishing in random
 // order, every number of copies and pool threads decodes single faults as
 // the reference does.
@@ -6821,5 +6873,73 @@ TEST(WindowedGraph, OneCopyPerLayerNeverDeadlocks) {
   EXPECT_EQ(run.get(), reference.decode(shot).frame);
   jitter_lut::reset();
 } // end - TEST(WindowedGraph, OneCopyPerLayerNeverDeadlocks)
+
+// Once warmed up, a windowed graph streams a shot allocating nothing on any
+// thread beyond what its decoders' decode() calls do: deliveries reuse their
+// wires' buffers, and staged publications and the output stager reuse
+// theirs. Each buffer grows once it first holds the largest window it will,
+// and buffers circulate between wires and join entries, so warm-up spreads
+// over a few shots. A synchronous graph is deterministic: after its first
+// few shots, every shot allocates only the decoders'. In an asynchronous
+// one, which record context and join entry a window lands in depends on
+// timing; it warms up for good, so over later shots some allocate only the
+// decoders' and all together allocate less than the first one did.
+TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 5);
+  const auto want = reference.decode(shot).frame;
+  const auto m = memory_measurements(tmpl, R, shot);
+  task_graph_options async;
+  async.async_streaming = true;
+  for (const auto &[options, copies] :
+       {std::pair{task_graph_options{}, std::size_t{1}},
+        std::pair{async, std::size_t{4}}}) {
+    SCOPED_TRACE(std::to_string(copies) + " copies");
+    std::vector<task_graph_node_config> nodes;
+    std::vector<std::size_t> extra; // beyond the decoders, by shot
+    nodes.push_back(
+        pattern_node(spec, load_params(), copies, "allocation_counting_lut"));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    const auto record = graph->get_num_msyn_per_round();
+    const auto stream = [&] {
+      for (std::size_t at = 0; at < m.size(); at += record) {
+        const auto len = std::min(record, m.size() - at);
+        graph->enqueue_syndrome(m.data() + at, len,
+                                at + len == m.size() ? round_type::FINAL
+                                                     : round_type::BULK);
+      }
+      graph->streaming_result();
+    };
+    for (int run = 0; run < (options.async_streaming ? 30 : 8); ++run) {
+      graph->reset_decoder();
+      allocation_counting_lut::decode_allocations = 0;
+      const auto all = allocation_counter::on_every_thread_during(stream);
+      ASSERT_EQ(graph->streaming_result().values, want);
+      ASSERT_GE(all, allocation_counting_lut::decode_allocations.load());
+      extra.push_back(all - allocation_counting_lut::decode_allocations);
+    }
+    if (!options.async_streaming) {
+      for (std::size_t run = 4; run < extra.size(); ++run)
+        EXPECT_EQ(extra[run], 0u)
+            << "shot " << run << " allocated beyond its decoders";
+      continue;
+    }
+    const auto later =
+        std::vector<std::size_t>(extra.begin() + 10, extra.end());
+    EXPECT_NE(std::count(later.begin(), later.end(), 0u), 0)
+        << "no later shot allocated only the decoders'";
+    EXPECT_LT(std::accumulate(later.begin(), later.end(), std::size_t{0}),
+              extra.front())
+        << "the graph kept allocating shot after shot";
+  } // end - for(options, copies)
+} // end - TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders)
 
 } // namespace cudaq::qec

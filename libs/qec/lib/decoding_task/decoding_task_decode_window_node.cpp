@@ -84,6 +84,7 @@ decode_window_node::decode_window_node(
 bool decode_window_node::fire(std::int64_t k,
                               const std::vector<const edge_value *> &inputs) {
   published_ = false;
+  failure_ = nullptr;
   if (inputs.size() != inputs_.size())
     throw std::invalid_argument("decode_window: instance " + std::to_string(k) +
                                 " has " + std::to_string(inputs.size()) +
@@ -115,6 +116,10 @@ bool decode_window_node::fire(std::int64_t k,
         std::to_string(window.k) + ", but this shot's instances are " +
         std::to_string(*offset_) + " below their windows");
   const auto &fired = core_->fire(slot_, window, received_);
+  if (!fired.failure.empty()) {
+    failure_ = &fired.failure;
+    return false;
+  }
   auto &frame = frame_.get<logical_outcome>();
   frame.bits = fired.solution->outputs.frame;
   frame.converged = fired.solution->converged;
@@ -224,6 +229,7 @@ void decode_window_node::clear_corrections() {
 void decode_window_node::reset_streaming_state() {
   core_->reset(slot_);
   published_ = false;
+  failure_ = nullptr;
   offset_.reset();
   clear_corrections();
 }

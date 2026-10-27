@@ -166,7 +166,9 @@ struct decoding_task_graph::impl {
 
   // A staged output folds exact commit intervals in round order: a delta
   // waits in `pending` until the frontier reaches its first round. The
-  // contributors' deltas never go through latest_node_corrections.
+  // contributors' deltas never go through latest_node_corrections. Its
+  // intervals are preallocated, and `pending` and `spare` index them, so
+  // staging allocates nothing.
   struct output_stager {
     struct interval {
       std::uint64_t begin = 0;
@@ -179,8 +181,15 @@ struct decoding_task_graph::impl {
     std::vector<uint8_t> bits;  ///< the frame at the frontier
     std::vector<uint8_t> whole; ///< whole-shot deltas held until FINAL
     bool has_whole = false;
-    std::vector<interval> pending; ///< sorted by begin round
-    std::size_t capacity = 0;      ///< fixed at build; overflow is a bug
+    std::vector<interval> intervals;  ///< capacity of them, bits sized
+    std::vector<std::size_t> pending; ///< waiting, sorted by begin round
+    std::vector<std::size_t> spare;   ///< free intervals
+    std::size_t capacity = 0;         ///< fixed at build; overflow is a bug
+    /// Return every waiting interval to the spares.
+    void clear_pending() {
+      spare.insert(spare.end(), pending.begin(), pending.end());
+      pending.clear();
+    }
   };
   std::vector<output_stager> output_stagers;
   std::vector<uint8_t> streaming_node_staged; // by streaming node
@@ -211,7 +220,8 @@ struct decoding_task_graph::impl {
   bool one_shot_streams = false;
   // A record was enqueued since the last reset, or since a completed shot
   // was consumed: one-shot calls through the stream would discard it.
-  bool shot_open = false;
+  // Atomic, as an overlapping enqueue sets it before it is rejected.
+  std::atomic<bool> shot_open{false};
   /// Whether every window reaching output @p k converged this shot.
   bool output_converged(std::size_t k) const;
   // Progress captured when the record being retired began.
