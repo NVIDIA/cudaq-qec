@@ -38,6 +38,8 @@ struct task_graph_edge {
 /// Construction-time execution policy for a decoding task graph.
 struct task_graph_options {
   /// Process streaming records on the graph's persistent coordinator thread.
+  /// Records then overlap: a later record runs ahead on nodes that finished
+  /// the earlier ones, with `async_queue_capacity` records in flight at most.
   bool async_streaming = false;
   /// Maximum public enqueue operations queued or executing. Must be nonzero
   /// when asynchronous.
@@ -49,12 +51,16 @@ struct task_graph_options {
   /// Pause iterations before an active coordinator parks for more input.
   /// Zero disables spinning.
   std::size_t async_spin_pause_iters = 0;
-  /// Pool threads that run fires in an asynchronous graph, not counting the
-  /// coordinator; unset sizes the pool from the graph. A graph rejects it
-  /// until the pool applies it.
+  /// Pool threads that run node fires in an asynchronous graph, not counting
+  /// the coordinator. Unset sizes the pool from the graph: its parallel
+  /// width, including every fire pool's copies, capped by hardware
+  /// concurrency. Must be at least one when set. Synchronous graphs ignore
+  /// it.
   std::optional<std::size_t> async_num_workers;
-  /// CPUs for those pool threads, assigned round-robin; empty inherits the
-  /// process's affinity. A graph rejects it until the pool applies it.
+  /// CPUs those threads are pinned to, round-robin (Linux only). Empty
+  /// inherits the process's affinity. A CPU listed twice or shared with
+  /// `async_coordinator_cpu` is an error; one shared with another decoder's
+  /// asynchronous graph is a warning. Synchronous graphs ignore it.
   std::vector<int> async_worker_cpus;
   bool operator==(const task_graph_options &) const = default;
 };

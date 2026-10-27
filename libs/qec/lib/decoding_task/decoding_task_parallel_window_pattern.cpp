@@ -43,7 +43,6 @@ decoding::config::decoder_schema parallel_window_params() {
   schema.params.push_back({"input_boundary", param_kind::string});
   schema.params.push_back({"merge_identical", param_kind::boolean});
   schema.params.push_back({"conflicting_parallel", param_kind::string});
-  schema.params.push_back({"max_in_flight", param_kind::uint64});
   schema.params.push_back({"verify_residual", param_kind::string});
   schema.validate = [](const cudaqx::heterogeneous_map &p) {
     check_choice(p, "output", "corrected_logical", "corrections");
@@ -71,10 +70,8 @@ const bool registered = [] {
   spec.name = "parallel_window";
   spec.requires_decoder = true;
   spec.requires_dem = true;
-  spec.parameter_minimums = {{"commit_rounds", 1},
-                             {"buffer_rounds", 1},
-                             {"gap_rounds", 1},
-                             {"max_in_flight", 1}};
+  spec.parameter_minimums = {
+      {"commit_rounds", 1}, {"buffer_rounds", 1}, {"gap_rounds", 1}};
   register_node_kind(
       std::move(spec), parallel_window_params(),
       [](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {

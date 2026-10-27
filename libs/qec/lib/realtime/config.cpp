@@ -8,6 +8,7 @@
 #include "llvm/Support/YAMLTraits.h"
 #include "llvm/Support/raw_ostream.h"
 #include "realtime_decoding.h"
+#include "stim_dem_forms.h"
 #include "window_request_yaml_traits.h"
 #include "cudaq/qec/decoder_config_payload.h"
 #include "cudaq/qec/decoder_config_schema.h"
@@ -376,10 +377,10 @@ static void validate_task_graph(const decoder_config &config) {
                                ": task_graph.async_worker_cpus has negative "
                                "CPU " +
                                std::to_string(cpu));
+    // Two workers on one core can be deliberate, so it is a warning.
     if (std::find(cpus.begin(), cpus.begin() + i, cpu) != cpus.begin() + i)
-      throw std::runtime_error(who +
-                               ": task_graph.async_worker_cpus lists CPU " +
-                               std::to_string(cpu) + " twice");
+      CUDA_QEC_WARN("{}: task_graph.async_worker_cpus lists CPU {} twice", who,
+                    cpu);
     if (cpu == tg.options.async_coordinator_cpu)
       throw std::runtime_error(
           who + ": task_graph.async_worker_cpus includes CPU " +
@@ -408,6 +409,9 @@ static void validate_task_graph(const decoder_config &config) {
   for (const auto &node : tg.nodes) {
     if (node.id.empty())
       throw std::runtime_error(who + ": every task_graph node needs an id");
+    if (node.max_in_flight == 0)
+      throw std::runtime_error(who + ": task_graph node '" + node.id +
+                               "' has max_in_flight 0");
     // compile_wires() resolves edges through an id map, which would silently
     // collapse a repeated id onto one node.
     if (std::find(ids.begin(), ids.end(), node.id) != ids.end())
@@ -533,10 +537,7 @@ static void validate_task_graph(const decoder_config &config) {
     // The path is read into stim_dem before the builder runs, so both set
     // would mean one silently losing to the other.
     if (!node.stim_dem.empty() && !node.stim_dem_path.empty())
-      throw std::runtime_error(
-          where +
-          " sets both stim_dem and stim_dem_path; the model comes in exactly "
-          "one form, inline or by file");
+      throw both_stim_forms(where);
 
     // Cross-field rules for the kind's own parameters live in the kind's
     // schema, so this runs the same hook for every kind, present and future.
@@ -1276,11 +1277,12 @@ static void map_dem_chunks(IO &io,
   std::optional<dem_chunks_form> form;
   if (io.outputting()) {
     // An edit made after parsing is kept: the name is written back only while
-    // the copy still equals the entry.
+    // the copy still equals the entry. A name with no copy is written only
+    // while the document holds its entry, which reading resolves it to.
     const auto *entry = written_entry(io, artifact);
-    const bool unedited =
-        entry && entry->dem_chunks && spec && *entry->dem_chunks == *spec;
-    if (unedited || (!spec && !artifact.empty()))
+    const bool named = entry && entry->dem_chunks;
+    const bool unedited = named && spec && *entry->dem_chunks == *spec;
+    if (unedited || (named && !spec))
       io.mapRequired("dem_chunks", artifact);
     else
       io.mapOptional("dem_chunks", spec);
@@ -1301,12 +1303,7 @@ static void map_dem_chunks(IO &io,
               .dem_chunks;
 }
 
-/// The error for a decoder or node given its model both inline and by file.
-static std::runtime_error both_stim_forms(const std::string &where) {
-  return std::runtime_error(
-      where + " sets both stim_dem and stim_dem_path; the model comes in "
-              "exactly one form, inline or by file");
-}
+using cudaq::qec::decoding::config::both_stim_forms;
 
 /// Resolves a stim_dem that names a data_artifacts entry: any value with no
 /// whitespace, which Stim model text always has. The name is kept in @p
@@ -1328,13 +1325,16 @@ static void resolve_stim_dem(IO &io, std::string &text, std::string &path,
 }
 
 /// Writes a model that names an entry as the name while its copy still
-/// equals the entry, as for dem_chunks, and otherwise inline.
+/// equals the entry, as for dem_chunks, and otherwise inline. A name with no
+/// copy is written only while the document holds its entry.
 static void write_stim_dem(IO &io, std::string &text, std::string &path,
                            std::string &artifact) {
   const auto *entry = written_entry(io, artifact);
-  const bool unedited = entry && (!text.empty() || !path.empty()) &&
+  const bool named =
+      entry && (!entry->stim_dem.empty() || !entry->stim_dem_path.empty());
+  const bool unedited = named && (!text.empty() || !path.empty()) &&
                         entry->stim_dem == text && entry->stim_dem_path == path;
-  if (unedited || (text.empty() && path.empty() && !artifact.empty())) {
+  if (unedited || (named && text.empty() && path.empty())) {
     io.mapRequired("stim_dem", artifact);
     return;
   }
@@ -1620,6 +1620,10 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       io.mapOptional("stim_dem_path", node.stim_dem_path);
       return;
     }
+    if (key == "max_in_flight") {
+      io.mapOptional("max_in_flight", node.max_in_flight);
+      return;
+    }
     if (key == "inner") {
       auto &args = node.decoder_custom_args.map();
       inner_form inner{&node.inner_type, &args};
@@ -1721,6 +1725,8 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       io.mapRequired("syndrome_size", node.syndrome_size);
     write_stim_dem(io, node.stim_dem, node.stim_dem_path,
                    node.stim_dem_artifact);
+    if (node.max_in_flight != 1)
+      io.mapRequired("max_in_flight", node.max_in_flight);
     if (!node.node_params.empty()) {
       const auto *schema = cudaq::qec::task_graph_node_params_schema(node.type);
       if (!schema)
@@ -2037,7 +2043,7 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
     const bool from_dem =
         !config.stim_dem_path.empty() || !config.stim_dem.empty();
     const char *dem_key =
-        config.stim_dem_path.empty() ? "stim_dem" : "stim_dem_path";
+        cudaq::qec::decoding::config::stim_dem_key(config.stim_dem_path);
     if (!config.stim_dem_path.empty() && !config.stim_dem.empty())
       throw both_stim_forms("decoder " + std::to_string(config.id));
 
@@ -2608,6 +2614,8 @@ llvm::json::Object task_graph_json_schema() {
       {"inner", llvm::json::Object{{"type", "object"},
                                    {"required", llvm::json::Array{"type"}}}},
       {"decoder_custom_args", llvm::json::Object{{"type", "object"}}},
+      {"max_in_flight",
+       llvm::json::Object{{"type", "integer"}, {"minimum", 1}, {"default", 1}}},
       {"dem_chunks",
        llvm::json::Object{{"$ref", "#/$defs/dem_chunks_or_name"}}},
       // An ingest node's layers; each name is also an output port.
@@ -2890,9 +2898,8 @@ llvm::json::Object task_graph_json_schema() {
                 {"async_worker_cpus",
                  llvm::json::Object{
                      {"type", "array"},
-                     {"items",
-                      llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
-                     {"uniqueItems", true}}},
+                     {"items", llvm::json::Object{{"type", "integer"},
+                                                  {"minimum", 0}}}}},
                 {"nodes",
                  llvm::json::Object{
                      {"type", "array"},
@@ -3386,3 +3393,10 @@ int configure_decoders_from_str(const char *config_str) {
 void finalize_decoders() { cudaq::qec::decoding::host::finalize_decoders(); }
 
 } // namespace cudaq::qec::decoding::config
+
+extern "C" const char *cudaq_qec_decoder_config_json_schema() {
+  // Regenerated per call; see the declaration for the ownership rule.
+  static std::string buffer;
+  buffer = cudaq::qec::decoding::config::decoder_config_json_schema();
+  return buffer.c_str();
+}

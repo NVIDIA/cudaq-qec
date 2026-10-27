@@ -9,6 +9,7 @@
 // allocate; nothing here is on the hot path.
 
 #include "decoding_task_data_artifacts.h"
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -121,23 +122,30 @@ std::string window_bytes(const std::string &template_sha256,
 
 } // namespace
 
-// Pads with a 1 bit, zeros, and the message length in bits, then hashes
-// each 64-byte block (FIPS 180-4, sections 5.1.1 and 6.2).
+// Hashes each whole 64-byte block where it lies, then pads the rest with a 1
+// bit, zeros, and the message length in bits (FIPS 180-4, sections 5.1.1 and
+// 6.2). Only the rest is copied: one tail block, or two when the 8-byte
+// length does not fit after it.
 std::string sha256_hex(std::string_view bytes) {
   std::array<std::uint32_t, 8> h{0x6a09e667, 0xbb67ae85, 0x3c6ef372,
                                  0xa54ff53a, 0x510e527f, 0x9b05688c,
                                  0x1f83d9ab, 0x5be0cd19};
-  std::string padded(bytes);
+  const auto *data = reinterpret_cast<const unsigned char *>(bytes.data());
+  const std::size_t whole = bytes.size() - bytes.size() % 64;
+  const std::size_t rest = bytes.size() - whole;
+  const std::size_t tail_size = rest < 56 ? 64 : 128;
   const std::uint64_t length = std::uint64_t(bytes.size()) * 8;
+  std::array<unsigned char, 128> tail{};
   std::string out;
   char digit[9] = {};
-  padded += static_cast<char>(0x80);
-  while (padded.size() % 64 != 56)
-    padded += '\0';
-  for (int shift = 56; shift >= 0; shift -= 8)
-    padded += static_cast<char>((length >> shift) & 0xff);
-  for (std::size_t i = 0; i < padded.size(); i += 64)
-    sha256_block(h, reinterpret_cast<const unsigned char *>(&padded[i]));
+  for (std::size_t i = 0; i < whole; i += 64)
+    sha256_block(h, data + i);
+  std::copy(data + whole, data + bytes.size(), tail.begin());
+  tail[rest] = 0x80;
+  for (std::size_t i = 0; i < 8; ++i)
+    tail[tail_size - 1 - i] = static_cast<unsigned char>(length >> (8 * i));
+  for (std::size_t i = 0; i < tail_size; i += 64)
+    sha256_block(h, tail.data() + i);
   for (const auto word : h) {
     std::snprintf(digit, sizeof(digit), "%08x", word);
     out += digit;
@@ -238,11 +246,14 @@ data_artifact_store::add_template(const dem_chunks_spec &spec) {
 }
 
 void data_artifact_store::add_stim_dem(std::string_view text) {
-  auto hash = sha256_hex(text);
-  if (stim_dems_.count(hash))
+  add_stim_dem(text, sha256_hex(text));
+}
+
+void data_artifact_store::add_stim_dem(std::string_view text,
+                                       std::string sha256) {
+  if (!stim_dems_.insert(sha256).second)
     return;
-  records_.push_back({"stim_dem", text.size(), hash});
-  stim_dems_.emplace(std::move(hash), std::string(text));
+  records_.push_back({"stim_dem", text.size(), std::move(sha256)});
 }
 
 // Builds each variant key on the store's template, at the first shot length
@@ -254,7 +265,7 @@ void data_artifact_store::add_stim_dem(std::string_view text) {
 void data_artifact_store::add_windows(
     const std::shared_ptr<const experiment_template> &context,
     const window_request &request) {
-  const auto hash = template_hash(*context, "add_windows");
+  const auto hash = template_hash(context->spec(), "add_windows");
   const auto &t = templates_.at(hash).handle;
   const bool readout_map = !t->readout().empty();
   for (auto R = t->min_rounds(); R < variant_probe_rounds(*t, request); ++R) {
@@ -284,11 +295,7 @@ void data_artifact_store::add_windows(
 
 std::shared_ptr<const experiment_template>
 data_artifact_store::find_template(const dem_chunks_spec &spec) const {
-  const auto it = templates_.find(sha256_hex(canonical_bytes(spec)));
-  if (it == templates_.end() || it->second.spec != spec)
-    throw std::logic_error(
-        "data_artifact_store: no template with this content was added");
-  return it->second.handle;
+  return templates_.at(template_hash(spec, "find_template")).handle;
 }
 
 // Never builds: an absent variant is a configuration-time omission.
@@ -296,7 +303,7 @@ std::shared_ptr<const decoding_window>
 data_artifact_store::find_window(const experiment_template &context,
                                  const window_request &request,
                                  const variant_key &key) const {
-  const auto hash = template_hash(context, "find_window");
+  const auto hash = template_hash(context.spec(), "find_window");
   const auto it = windows_.find(sha256_hex(window_bytes(hash, request, key)));
   if (it == windows_.end() || it->second.request != request ||
       it->second.key != key)
@@ -306,13 +313,13 @@ data_artifact_store::find_window(const experiment_template &context,
 }
 
 // By content, as add_template() keys it, so an equal template built
-// elsewhere names the same entry.
-std::string
-data_artifact_store::template_hash(const experiment_template &context,
-                                   const std::string &what) const {
-  auto hash = sha256_hex(canonical_bytes(context.spec()));
+// elsewhere names the same entry. Every lookup of a template comes through
+// here.
+std::string data_artifact_store::template_hash(const dem_chunks_spec &spec,
+                                               const std::string &what) const {
+  auto hash = sha256_hex(canonical_bytes(spec));
   const auto it = templates_.find(hash);
-  if (it == templates_.end() || it->second.spec != context.spec())
+  if (it == templates_.end() || it->second.spec != spec)
     throw std::logic_error("data_artifact_store::" + what +
                            ": no template with this content was added");
   return hash;

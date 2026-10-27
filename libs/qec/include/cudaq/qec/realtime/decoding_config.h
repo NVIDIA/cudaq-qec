@@ -217,6 +217,9 @@ struct decoder_config {
       /// The data_artifacts entry `stim_dem` names, if it names one; one of
       /// the two fields above is then a copy of that entry's text or path.
       std::string stim_dem_artifact;
+      /// Copies of the node that may fire at once in asynchronous
+      /// streaming; see `task_graph_node_config::max_in_flight`.
+      std::uint64_t max_in_flight = 1;
       /// Which DEM columns this node owns, as a label ("local", "boundary") or
       /// explicit ranges.  Parsed, validated, and emitted; not yet honored at
       /// construction, which rejects a partitioned node.
@@ -495,6 +498,20 @@ expand_dem_chunks(decoder_config &config);
 /// representable; a document that passes the JSON Schema may still be
 /// rejected by those hooks when parsed.
 __attribute__((visibility("default"))) std::string decoder_config_json_schema();
+
+} // namespace cudaq::qec::decoding::config
+
+/// C entry point for decoder_config_json_schema(), for callers that have the
+/// installed libraries but not the Python package: a tool can dlopen
+/// libcudaq-qec-realtime-decoding (which pulls in the decoder library, whose
+/// initialiser loads the decoder-plugins directory next to it) and read the
+/// schema of exactly that installation. The returned text lives in a
+/// process-lifetime buffer owned by the library; do not free it. Each call
+/// regenerates it, so plugins loaded after an earlier call are included.
+extern "C" __attribute__((visibility("default"))) const char *
+cudaq_qec_decoder_config_json_schema();
+
+namespace cudaq::qec::decoding::config {
 
 /// @brief Configure the decoders (`multi_decoder_config` variant). This
 /// function configures both local decoders, and if running on remote target

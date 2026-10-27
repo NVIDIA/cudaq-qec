@@ -1271,8 +1271,7 @@ def test_max_in_flight_parser_and_schema_agree():
         json.loads(qec.decoder_config_json_schema()))
     assert "max_in_flight: 4" in _PW_GRAPH_YAML
     bad = _PW_GRAPH_YAML.replace("max_in_flight: 4", "max_in_flight: 0")
-    with pytest.raises(RuntimeError,
-                       match="decode_window: max_in_flight must be at least 1"):
+    with pytest.raises(RuntimeError, match="has max_in_flight 0"):
         qec.multi_decoder_config.from_yaml_str(bad)
     assert not validator.is_valid(yaml.safe_load(bad))
     validator.validate(yaml.safe_load(_PW_GRAPH_YAML))
@@ -1451,10 +1450,14 @@ def test_parallel_window_pattern_validates_against_the_schema():
     del missing["decoders"][0]["task_graph"]["nodes"][0]["commit_rounds"]
     with pytest.raises(jsonschema.ValidationError):
         validator.validate(missing)
+    # Two workers on one CPU only warn when parsed, so the schema allows it.
     repeated = yaml.safe_load(_PATTERN_YAML)
     repeated["decoders"][0]["task_graph"]["async_worker_cpus"] = [4, 4]
+    validator.validate(repeated)
+    negative = yaml.safe_load(_PATTERN_YAML)
+    negative["decoders"][0]["task_graph"]["async_worker_cpus"] = [4, -1]
     with pytest.raises(jsonschema.ValidationError):
-        validator.validate(repeated)
+        validator.validate(negative)
 
 
 # A DEM whose detector coordinates carry the colour a colour-code decoder
