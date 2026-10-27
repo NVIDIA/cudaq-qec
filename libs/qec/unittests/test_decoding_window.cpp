@@ -61,6 +61,7 @@
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
@@ -6480,5 +6481,345 @@ TEST(WindowedGraph, StreamsASlidingWindowAsTheReference) {
     EXPECT_NO_THROW(expect_sliding_streams(async, 4, record));
   }
 } // end - TEST(WindowedGraph, StreamsASlidingWindowAsTheReference)
+
+// ---------------------------------------------------------------------------
+// Windowed graphs under concurrency, load and failure
+// ---------------------------------------------------------------------------
+
+// single_error_lut whose decode() sleeps a random time up to max_delay_us,
+// notes the most decodes running at once for each window size (a layer's
+// bulk windows share one), counts decodes during which a test's record
+// count advanced, and throws while fail is set, so tests can reorder,
+// overlap and fail fires.
+class jitter_lut final : public decoder {
+public:
+  static inline std::atomic<int> max_delay_us = 0;
+  static inline std::atomic<bool> fail = false;
+  static inline std::atomic<std::size_t> running = 0; ///< Decodes now
+  static inline std::atomic<std::size_t> records = 0; ///< A test's count
+  /// Decodes during which records advanced.
+  static inline std::atomic<std::size_t> spanned_records = 0;
+
+  jitter_lut(decoder_init inputs, decoder_output_request output,
+             const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(get_decoder("single_error_lut", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    thread_local std::mt19937 rng(
+        std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    const auto size = syndrome.size();
+    const std::size_t before = records;
+    if (fail)
+      throw std::runtime_error("jitter_lut: decode failed");
+    ++running;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto now = ++at_once_[size];
+      peak_[size] = std::max(peak_[size], now);
+    }
+    if (const int most = max_delay_us; most > 0)
+      std::this_thread::sleep_for(
+          std::chrono::microseconds(rng() % static_cast<unsigned>(most)));
+    auto result = inner_->decode(syndrome);
+    spanned_records += records > before;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      --at_once_[size];
+    }
+    --running;
+    return result;
+  }
+
+  /// The most decodes of one window size that ran at once.
+  static std::size_t peak_of_one_size() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::size_t most = 0;
+    for (const auto &[size, peak] : peak_)
+      most = std::max(most, peak);
+    return most;
+  }
+  static void reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    at_once_.clear();
+    peak_.clear();
+    max_delay_us = 0;
+    fail = false;
+    records = 0;
+    spanned_records = 0;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      jitter_lut,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<jitter_lut>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+  static inline std::mutex mutex_;
+  static inline std::map<std::size_t, std::size_t> at_once_;
+  static inline std::map<std::size_t, std::size_t> peak_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(jitter_lut)
+
+namespace {
+
+// The pattern's parameters for these tests: output corrections.
+cudaqx::heterogeneous_map load_params() {
+  return {{"commit_rounds", std::size_t{2}},
+          {"buffer_rounds", std::size_t{1}},
+          {"gap_rounds", std::size_t{3}},
+          {"output", std::string("corrections")}};
+}
+
+// The pattern over wide_readout_spec() with @p copies of each layer, an
+// asynchronous graph with @p workers pool threads (automatic for 0).
+std::unique_ptr<decoding_task_graph> load_graph(std::size_t copies,
+                                                const std::string &decoder,
+                                                std::size_t workers = 0) {
+  task_graph_options options;
+  std::vector<task_graph_node_config> nodes;
+  options.async_streaming = true;
+  if (workers)
+    options.async_num_workers = workers;
+  nodes.push_back(
+      pattern_node(wide_readout_spec(), load_params(), copies, decoder));
+  return decoding_task_graph::from_topology(std::move(nodes), pattern_edges(),
+                                            options);
+}
+
+} // namespace
+
+// Sampled shots of many faults at long lengths stream asynchronously, with
+// four copies of each layer, as the reference decodes them.
+TEST(WindowedGraph, StreamsSampledShotsAtLongLengths) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  const auto g = lowered_graph(spec, load_params());
+  auto graph = load_graph(4, "single_error_lut");
+  for (const std::size_t R : {37, 100, 257}) {
+    SCOPED_TRACE("R=" + std::to_string(R));
+    parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const auto &s = reference.model();
+    const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+        s.dem.detector_error_matrix, 100, s.dem.error_rates, 43 + R);
+    for (std::size_t i = 0; i < 100; ++i) {
+      const auto shot = row_of(detectors, i);
+      EXPECT_EQ(stream_shot(*graph, memory_measurements(tmpl, R, shot),
+                            graph->get_num_msyn_per_round()),
+                reference.decode(shot).frame)
+          << "shot " << i;
+    }
+  }
+}
+
+// Decodes overlap ingestion and each other: with slow decoders, records are
+// taken while windows decode, and two copies of one layer decode at once;
+// the shot still decodes as the reference does.
+TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 5);
+  const auto m = memory_measurements(tmpl, R, shot);
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 3000;
+  auto graph = load_graph(4, "jitter_lut", 8);
+  const auto record = graph->get_num_msyn_per_round();
+  graph->reset_decoder();
+  for (std::size_t at = 0; at < m.size(); at += record) {
+    const auto len = std::min(record, m.size() - at);
+    const bool last = at + len == m.size();
+    graph->enqueue_syndrome(m.data() + at, len,
+                            last ? round_type::FINAL : round_type::BULK);
+    ++jitter_lut::records;
+    // Records arrive at a pace, as rounds do, not all at once.
+    std::this_thread::sleep_for(std::chrono::microseconds(500));
+  }
+  const auto &result = graph->streaming_result();
+  EXPECT_EQ(
+      std::vector<std::uint8_t>(result.values.begin(), result.values.end()),
+      reference.decode(shot).frame);
+  EXPECT_GT(jitter_lut::spanned_records, 0u)
+      << "no record was taken while a window decoded";
+  EXPECT_GT(jitter_lut::peak_of_one_size(), 1u)
+      << "no two windows of one layer decoded at once";
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther)
+
+// Read mid-shot, with decodes finishing in random order, the output's
+// coverage is [0, frontier) and never shrinks, and its value is exactly the
+// reference windows committed below the frontier, folded.
+TEST(WindowedGraph, MidShotReadsMatchTheirCoverage) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto &s = reference.model();
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 500;
+  auto graph = load_graph(4, "jitter_lut");
+  const auto record = graph->get_num_msyn_per_round();
+  for (std::size_t c = 0; c < s.h.size(); c += 9) {
+    SCOPED_TRACE("column " + std::to_string(c));
+    const auto shot = detectors_of(s, c);
+    const auto want = reference.decode(shot);
+    const auto m = memory_measurements(tmpl, R, shot);
+    std::uint64_t frontier = 0;
+    graph->reset_decoder();
+    for (std::size_t at = 0; at < m.size(); at += record) {
+      const auto len = std::min(record, m.size() - at);
+      graph->enqueue_syndrome(m.data() + at, len,
+                              at + len == m.size() ? round_type::FINAL
+                                                   : round_type::BULK);
+      const auto &result = graph->streaming_result();
+      const auto &output = result.outputs.at(0);
+      std::vector<std::uint8_t> folded(want.frame.size(), 0);
+      EXPECT_EQ(output.coverage_begin_round, 0u);
+      EXPECT_GE(output.coverage_end_round, frontier) << "the frontier shrank";
+      frontier = output.coverage_end_round;
+      for (std::size_t i = 0; i < reference.windows().size(); ++i)
+        if (static_cast<std::uint64_t>(reference.windows()[i].commit.end) <=
+            frontier)
+          for (std::size_t j = 0; j < folded.size(); ++j)
+            folded[j] ^= want.windows[i].frame[j];
+      EXPECT_EQ(
+          std::vector<std::uint8_t>(result.values.begin(), result.values.end()),
+          folded)
+          << "at frontier " << frontier;
+    } // end - for(at)
+    EXPECT_EQ(frontier, R);
+  } // end - for(c)
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, MidShotReadsMatchTheirCoverage)
+
+// Reset and destruction join decodes in flight, and a graph reset with
+// decodes in flight decodes its next shot as the reference does.
+TEST(WindowedGraph, ResetAndDestructionJoinDecodesInFlight) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 4);
+  const auto m = memory_measurements(tmpl, R, shot);
+  // Feeds the shot's first half, none of it FINAL, and waits until a
+  // window decodes.
+  const auto feed_half = [&](decoding_task_graph &graph) {
+    const auto record = graph.get_num_msyn_per_round();
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    graph.reset_decoder();
+    for (std::size_t at = 0; at + record < m.size() / 2; at += record)
+      graph.enqueue_syndrome(m.data() + at, record, round_type::BULK);
+    while (jitter_lut::running == 0 &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    EXPECT_GT(jitter_lut::running, 0u) << "no window was decoding";
+  };
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 2000;
+  {
+    auto graph = load_graph(4, "jitter_lut", 8);
+    feed_half(*graph);
+  } // destroyed with decodes in flight
+  auto graph = load_graph(4, "jitter_lut", 8);
+  feed_half(*graph);
+  graph->reset_decoder();
+  EXPECT_EQ(jitter_lut::running, 0u) << "a reset left decodes running";
+  EXPECT_EQ(stream_shot(*graph, m, graph->get_num_msyn_per_round()),
+            reference.decode(shot).frame);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, ResetAndDestructionJoinDecodesInFlight)
+
+// A decode that fails on a pool thread surfaces on a later call, as an
+// error naming it, and reset_decoder() recovers the graph.
+TEST(WindowedGraph, AFailedDecodeSurfacesAndAResetRecovers) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 2);
+  const auto m = memory_measurements(tmpl, R, shot);
+  jitter_lut::reset();
+  auto graph = load_graph(4, "jitter_lut");
+  jitter_lut::fail = true;
+  try {
+    stream_shot(*graph, m, graph->get_num_msyn_per_round());
+    graph->streaming_result();
+    ADD_FAILURE() << "a failed decode went unreported";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find("jitter_lut: decode failed"),
+              std::string::npos)
+        << e.what();
+  }
+  jitter_lut::fail = false;
+  graph->reset_decoder();
+  EXPECT_EQ(stream_shot(*graph, m, graph->get_num_msyn_per_round()),
+            reference.decode(shot).frame);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, AFailedDecodeSurfacesAndAResetRecovers)
+
+// Concurrency is invisible to the result: with decodes finishing in random
+// order, every number of copies and pool threads decodes single faults as
+// the reference does.
+TEST(WindowedGraph, ConcurrencyIsInvisibleToTheResult) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  const auto g = lowered_graph(spec, load_params());
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 200;
+  for (const std::size_t copies : {1, 2, 4, 8})
+    for (const std::size_t workers : {1, 2, 4, 8}) {
+      SCOPED_TRACE(std::to_string(copies) + " copies, " +
+                   std::to_string(workers) + " workers");
+      auto graph = load_graph(copies, "jitter_lut", workers);
+      for (const std::size_t R : {tmpl.min_rounds(), std::size_t{20}}) {
+        parallel_window_reference reference(spec, g, R, "single_error_lut");
+        const auto &s = reference.model();
+        for (std::size_t c = R % 5; c < s.h.size(); c += 11) {
+          const auto shot = detectors_of(s, c);
+          EXPECT_EQ(stream_shot(*graph, memory_measurements(tmpl, R, shot),
+                                graph->get_num_msyn_per_round()),
+                    reference.decode(shot).frame)
+              << "R=" << R << ", column " << c;
+        }
+      }
+    } // end - for(workers)
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, ConcurrencyIsInvisibleToTheResult)
+
+// With one copy of each layer and slow decoders, a window waiting on
+// another's sends never stops the rest: every window completes within a
+// watchdog's time, and the shot decodes as the reference does.
+TEST(WindowedGraph, OneCopyPerLayerNeverDeadlocks) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 60;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 6);
+  const auto m = memory_measurements(tmpl, R, shot);
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 1000;
+  auto graph = load_graph(1, "jitter_lut", 2);
+  auto run = std::async(std::launch::async, [&] {
+    return stream_shot(*graph, m, graph->get_num_msyn_per_round());
+  });
+  ASSERT_EQ(run.wait_for(std::chrono::seconds(60)), std::future_status::ready)
+      << "the shot did not complete";
+  EXPECT_EQ(run.get(), reference.decode(shot).frame);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, OneCopyPerLayerNeverDeadlocks)
 
 } // namespace cudaq::qec
