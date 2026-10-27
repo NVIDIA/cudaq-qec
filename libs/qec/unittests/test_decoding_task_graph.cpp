@@ -13415,6 +13415,35 @@ TEST(DecodingTaskGraph, IndexedJoinPairsInstancesAcrossRecords) {
   }
 }
 
+// An edge back to its own node, or to an earlier one, is loop-carried: it
+// needs a negative index_offset, and may carry only a value its consumer
+// joins, not corrections, which fold in node order.
+TEST(DecodingTaskGraph, IndexedJoinChecksLoopCarriedEdges) {
+  ASSERT_TRUE(index_probe_registered);
+  const auto refused = [](std::int64_t offset, const std::string &text) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag", 1 << 30));
+    nodes.push_back(index_node("J", "join", 1 << 30));
+    try {
+      decoding_task_graph::from_topology(
+          std::move(nodes), {{"measurements", "output", "A", "input"},
+                             {"A", "output", "T", "input"},
+                             {"T", "output", "J", "a"},
+                             {"J", "output", "J", "b", offset},
+                             {"J", "output", "output", "input"}});
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  refused(0, "edge from node 2 ('J') to node 2 ('J') violates topological "
+             "order");
+  refused(-1, "loop-carried edge J.output -> J.b carries corrections or a "
+              "completion");
+}
+
 TEST(DecodingTaskGraph, IndexedJoinDiscardsInstancesMissingRequiredInput) {
   ASSERT_TRUE(index_probe_registered);
   auto probe = std::make_shared<pipeline_probe>();

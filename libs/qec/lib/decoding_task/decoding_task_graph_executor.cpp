@@ -193,14 +193,21 @@ struct decoding_task_graph::impl::record_scheduler {
         join_required[si][i] =
             owner.streaming_nodes[si].indexed.front()->requires_input(i);
       std::int64_t f = std::numeric_limits<std::int64_t>::max(), e = 0;
+      for (const auto &wire : owner.wires_to[node_idx]) {
+        join_offsets[si][static_cast<std::size_t>(wire.to_slot)] =
+            wire.index_offset;
+        // A loop-carried input publishes instance k + offset ahead of its
+        // consumer's k, from the consumer's own fires; it does not bound how
+        // far the consumer fires.
+        if (wire.loop_carried())
+          e = std::max(e, -wire.index_offset);
+      }
       for (const auto producer : owner.streaming_producers[si]) {
         const auto from = owner.streaming_nodes[producer].node_index;
         for (const auto *wires : {&owner.streaming_wires_from[from],
                                   &owner.completion_wires_from[from]})
           for (const auto &wire : *wires)
-            if (wire.to_node == node_idx) {
-              join_offsets[si][static_cast<std::size_t>(wire.to_slot)] =
-                  wire.index_offset;
+            if (wire.to_node == node_idx && !wire.loop_carried()) {
               const auto lead = fire_lead[producer] - wire.index_offset;
               f = std::min(f, lead);
               e = std::max(e, lead);

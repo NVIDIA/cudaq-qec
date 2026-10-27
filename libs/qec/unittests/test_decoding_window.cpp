@@ -5880,31 +5880,20 @@ stream_shot(decoding_task_graph &graph,
   return {corrections, corrections + graph.get_num_observables()};
 }
 
-// The pattern over wide_readout_spec() with @p output, built with
-// @p options and @p max_in_flight copies of each layer, streams single
-// faults in records of @p record measurements (the graph's round for 0) as
-// the reference decodes them, at every shot length up to 60: with output:
-// corrections its corrections are the reference's frame, and with
-// corrected_logical that frame applied to the raw logical value.
-void expect_pattern_streams(const std::string &output,
-                            const task_graph_options &options,
-                            std::size_t max_in_flight, std::size_t record) {
+// The graph @p graph, of layout @p g over wide_readout_spec(), streams
+// single faults in records of @p record measurements (the graph's round
+// for 0) as the reference decodes them, at every shot length up to 60:
+// with @p corrected false its corrections are the reference's frame, and
+// with it true that frame applied to the raw logical value.
+void expect_graph_streams(decoding_task_graph &graph, const window_graph &g,
+                          bool corrected, std::size_t record) {
   const auto spec = wide_readout_spec();
   const experiment_template tmpl(spec);
-  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
-                                         {"buffer_rounds", std::size_t{1}},
-                                         {"gap_rounds", std::size_t{3}},
-                                         {"output", output}};
-  const auto g = lowered_graph(spec, params);
-  std::vector<task_graph_node_config> nodes;
   std::size_t flipped = 0; // shots whose expected value is not zero
-  nodes.push_back(pattern_node(spec, params, max_in_flight));
-  auto graph = decoding_task_graph::from_topology(std::move(nodes),
-                                                  pattern_edges(), options);
-  ASSERT_TRUE(graph->supports_streaming())
-      << graph->streaming_incompatibility_reason();
+  ASSERT_TRUE(graph.supports_streaming())
+      << graph.streaming_incompatibility_reason();
   if (record == 0)
-    record = graph->get_num_msyn_per_round();
+    record = graph.get_num_msyn_per_round();
   for (auto R = tmpl.min_rounds(); R <= 60; ++R) {
     SCOPED_TRACE("R=" + std::to_string(R));
     parallel_window_reference reference(spec, g, R, "single_error_lut");
@@ -5913,19 +5902,65 @@ void expect_pattern_streams(const std::string &output,
       const auto detectors = detectors_of(s, c);
       const auto measurements = memory_measurements(tmpl, R, detectors);
       auto want = reference.decode(detectors).frame;
-      if (output == "corrected_logical") {
+      if (corrected) {
         const auto logical = raw_logical(tmpl, R, measurements);
         for (std::size_t j = 0; j < want.size(); ++j)
           want[j] ^= logical.at(j);
       }
       flipped += std::count(want.begin(), want.end(), 1) != 0;
-      EXPECT_EQ(stream_shot(*graph, measurements, record), want)
+      EXPECT_EQ(stream_shot(graph, measurements, record), want)
           << "column " << c;
     }
   } // end - for(R)
   // A graph that published nothing would match only zero values.
   EXPECT_GT(flipped, 0u);
-} // end - expect_pattern_streams()
+} // end - expect_graph_streams()
+
+// The pattern over wide_readout_spec() with @p output, built with
+// @p options and @p max_in_flight copies of each layer, streams as the
+// reference decodes, in records of @p record measurements.
+void expect_pattern_streams(const std::string &output,
+                            const task_graph_options &options,
+                            std::size_t max_in_flight, std::size_t record) {
+  const auto spec = wide_readout_spec();
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}},
+                                         {"output", output}};
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, params, max_in_flight));
+  auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                  pattern_edges(), options);
+  expect_graph_streams(*graph, lowered_graph(spec, params),
+                       output == "corrected_logical", record);
+}
+
+// A sliding window W over wide_readout_spec(), written by hand: ingest's
+// one layer feeds W, and W[k-1]'s forward delta W[k]'s receive_0. Built
+// with @p options and @p max_in_flight copies of W, it streams as the
+// reference decodes, in records of @p record measurements.
+void expect_sliding_streams(const task_graph_options &options,
+                            std::size_t max_in_flight, std::size_t record) {
+  const auto g = sliding_graph(2, 5);
+  std::vector<task_graph_node_config> nodes(2);
+  nodes[0].id = "ingest";
+  nodes[0].kind = "ingest";
+  nodes[0].dem = wide_readout_spec();
+  nodes[0].windows = {{"W", g.layers.at(0).request, ""}};
+  nodes[1].id = "W";
+  nodes[1].kind = "decode_window";
+  nodes[1].decoder_type = "single_error_lut";
+  nodes[1].node_params.insert("num_receives", std::size_t{1});
+  nodes[1].max_in_flight = max_in_flight;
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "ingest", "input"},
+       {"ingest", "W", "W", "input"},
+       {"W", "forward", "W", "receive_0", -1},
+       {"W", "output", "output", "input"}},
+      options);
+  expect_graph_streams(*graph, g, false, record);
+}
 
 } // namespace
 
@@ -5944,5 +5979,19 @@ TEST(WindowedGraph, StreamsThePatternAsTheReference) {
       EXPECT_NO_THROW(expect_pattern_streams(output, async, 4, record));
     }
 } // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
+
+// A sliding window, whose sends feed its own next instance, streams as the
+// reference decodes in the same ways: a window waits for its predecessor's
+// delta however many copies could fire.
+TEST(WindowedGraph, StreamsASlidingWindowAsTheReference) {
+  task_graph_options async;
+  async.async_streaming = true;
+  for (const std::size_t record : {std::size_t{0}, std::size_t{5}}) {
+    SCOPED_TRACE("record " + std::to_string(record));
+    EXPECT_NO_THROW(expect_sliding_streams({}, 1, record));
+    EXPECT_NO_THROW(expect_sliding_streams(async, 1, record));
+    EXPECT_NO_THROW(expect_sliding_streams(async, 4, record));
+  }
+} // end - TEST(WindowedGraph, StreamsASlidingWindowAsTheReference)
 
 } // namespace cudaq::qec

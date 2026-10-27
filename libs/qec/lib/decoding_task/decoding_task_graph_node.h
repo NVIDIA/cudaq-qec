@@ -43,6 +43,13 @@ struct compiled_wire {
   int to_slot;   ///< index into that node's inputs vector
   int id = -1;   ///< per-record value buffer for a streaming wire; -1 = none
   std::int64_t index_offset = 0; ///< consumer k reads producer k + offset
+
+  /// Whether the wire runs back to its own node or an earlier one. Its
+  /// negative index_offset keeps the instances acyclic; node-order passes
+  /// skip it.
+  bool loop_carried() const {
+    return from_node >= 0 && to_node >= 0 && from_node >= to_node;
+  }
 };
 
 /// Optional per-round streaming capability. DAG-only nodes do not implement it.

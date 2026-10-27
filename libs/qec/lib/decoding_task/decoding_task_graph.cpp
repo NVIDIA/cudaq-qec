@@ -275,11 +275,24 @@ void decoding_task_graph::impl::compile_wires() {
       ts = static_cast<int>(sit - ins.begin());
     }
 
-    if (fn >= 0 && tn >= 0 && fn >= tn)
+    // An edge back to its own node or an earlier one is loop-carried: with a
+    // negative index_offset each instance reads an earlier one, which the
+    // indexed-join check below requires of its consumer.
+    if (fn >= 0 && tn >= 0 && fn >= tn && e.index_offset >= 0)
       throw std::invalid_argument(
           "compile_wires: edge from node " + std::to_string(fn) + " ('" +
           node_ids[fn] + "') to node " + std::to_string(tn) + " ('" +
           node_ids[tn] + "') violates topological order");
+    // Corrections and completions are ordered and folded by node order, so
+    // a loop-carried edge carries only values its consumer joins.
+    if (fn >= 0 && tn >= 0 && fn >= tn &&
+        (is_done_slot(fn, fs) ||
+         output_type_at(fn, fs) == logical_outcome_type))
+      throw std::invalid_argument(
+          "compile_wires: loop-carried edge " + e.from_node + "." +
+          e.from_output + " -> " + e.to_node + "." + e.to_input +
+          " carries corrections or a completion; it may carry only a value "
+          "its consumer joins by index");
 
     validate_core_edge(nodes, e, fn, fs, tn, ts, output_type_at(fn, fs));
     if (e.index_offset > 0)
@@ -335,7 +348,7 @@ void decoding_task_graph::impl::compile_wires() {
     for (std::size_t node = 0; node < N; ++node) {
       parallel_node_inputs[node].resize(node_input_counts[node]);
       for (const auto &wire : wires_to[node]) {
-        if (wire.from_node < 0)
+        if (wire.from_node < 0 || wire.loop_carried())
           continue;
         ++predecessor_counts[node];
         dependents[static_cast<std::size_t>(wire.from_node)].push_back(node);
@@ -670,7 +683,10 @@ void decoding_task_graph::impl::compile_wires() {
       const int idx = entry.node_index;
       std::vector<streaming_task_graph_node::input_schedule> input_schedules;
       for (const auto &sw : wires_to[idx]) {
-        if (sw.from_node < 0 || streaming_by_node[sw.from_node] < 0)
+        // A loop-carried producer's schedule is not derived yet; its
+        // consumer's schedule follows its forward inputs.
+        if (sw.from_node < 0 || streaming_by_node[sw.from_node] < 0 ||
+            sw.loop_carried())
           continue;
         const auto &producer_schedule =
             effective_schedule[sw.from_node][sw.from_slot];
@@ -809,6 +825,12 @@ void decoding_task_graph::impl::compile_wires() {
       for (const auto &wire : wires_to[node_idx]) {
         if (wire.from_node < 0 || streaming_by_node[wire.from_node] < 0)
           continue;
+        // A loop-carried wire orders instances, not nodes: the consumer's
+        // joins wait for it, and the dependency graph stays acyclic.
+        if (wire.loop_carried()) {
+          ++streaming_wire_count;
+          continue;
+        }
         const auto producer_si =
             static_cast<std::size_t>(streaming_by_node[wire.from_node]);
         streaming_dependents[producer_si].push_back(si);
