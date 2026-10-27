@@ -27,6 +27,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 
 namespace cudaq::qec {
@@ -801,6 +802,73 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
   return std::unique_ptr<decoding_task_graph>(
       new decoding_task_graph(std::move(i)));
 }
+
+// Each ingest node's windows are scheduled apart. Every copy of a node
+// builds a decoder for each variant of its layer, so a variant the shot uses
+// costs the node's copies; copies are built only for an asynchronous graph.
+// Validation built every variant into the store, which hashes each.
+window_schedule describe_schedule(std::vector<task_graph_node_config> nodes,
+                                  std::vector<task_graph_edge> edges,
+                                  const task_graph_options &options,
+                                  std::size_t num_rounds) {
+  auto kind_lock = lock_node_kind_registry();
+  data_artifact_store store;
+  window_schedule out;
+  out.num_rounds = num_rounds;
+  lower_patterns(nodes, edges);
+  // The layout reads parameters with their defaults filled, as built.
+  for (auto &cfg : nodes)
+    if (const auto *kind = find_task_graph_node_kind(cfg.kind))
+      if (const auto *schema = decoding::config::find_decoder_schema(
+              task_graph_node_schema_name(kind->name)))
+        decoding::config::materialize_default_args(*schema, cfg.node_params);
+  for (const auto &[ingest, layers] :
+       validate_window_topology(nodes, edges, store)) {
+    const auto is_layer = [&](const std::string &node) {
+      return std::any_of(
+          layers.begin(), layers.end(),
+          [&](const window_layer &layer) { return layer.node == node; });
+    };
+    const auto ingest_cfg =
+        std::find_if(nodes.begin(), nodes.end(),
+                     [&](const auto &cfg) { return cfg.id == ingest; });
+    std::vector<task_graph_edge> sends;
+    for (const auto &e : edges)
+      if (is_layer(e.from_node) && is_layer(e.to_node))
+        sends.push_back(e);
+    const auto context = store.add_template(*ingest_cfg->dem);
+    const auto layer_of = [&](const std::string &node) -> const auto & {
+      return std::find_if(
+                 layers.begin(), layers.end(),
+                 [&](const window_layer &layer) { return layer.node == node; })
+          ->request;
+    };
+    auto schedule = schedule_windows(context, layers, sends, num_rounds);
+    out.templates[ingest] = store.template_sha256(*context);
+    for (auto &window : schedule.windows) {
+      const auto node =
+          std::find_if(nodes.begin(), nodes.end(),
+                       [&](const auto &cfg) { return cfg.id == window.node; });
+      const bool counted = std::any_of(out.decoders.begin(), out.decoders.end(),
+                                       [&](const variant_decoders &d) {
+                                         return d.node == window.node &&
+                                                d.variant == window.variant;
+                                       });
+      if (!counted)
+        out.decoders.push_back(
+            {window.node, window.variant,
+             options.async_streaming ? node->max_in_flight : std::size_t{1},
+             store.window_sha256(*context, layer_of(window.node),
+                                 window.variant)});
+      out.windows.push_back(std::move(window));
+    }
+  } // end - for(ingest, layers)
+  std::sort(out.decoders.begin(), out.decoders.end(),
+            [](const auto &a, const auto &b) {
+              return std::tie(a.node, a.variant) < std::tie(b.node, b.variant);
+            });
+  return out;
+} // end - describe_schedule()
 
 std::unique_ptr<decoding_task_graph>
 decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,

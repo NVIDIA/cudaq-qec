@@ -6065,6 +6065,104 @@ TEST(WindowedGraph, StreamsThePatternAsTheReference) {
     }
 } // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
 
+// describe_schedule() of the pattern's topology lists exactly the
+// reference's windows at every shot length up to 30: each instance's node,
+// k, rounds, zones, ports and dependencies. Each node builds a decoder per
+// copy for every variant the shot uses: one copy synchronously, four with
+// max_in_flight 4 asynchronously. Each variant's and the template's sha256
+// is the one a store built from the same template and requests records, and
+// distinct variants have distinct hashes. A topology without windows lists
+// none.
+TEST(WindowedGraph, DescribesItsSchedule) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  const auto g = lowered_graph(spec, params);
+  data_artifact_store store; // the same template and requests, held apart
+  const auto context = store.add_template(spec);
+  task_graph_options async;
+  const auto recorded = [&](const std::string &kind,
+                            const std::string &sha256) {
+    return std::any_of(store.records().begin(), store.records().end(),
+                       [&](const data_artifact_record &r) {
+                         return r.kind == kind && r.sha256 == sha256;
+                       });
+  };
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  async.async_streaming = true;
+  for (const auto &[options, copies] :
+       {std::pair{task_graph_options{}, std::size_t{1}},
+        std::pair{async, std::size_t{4}}}) {
+    SCOPED_TRACE(std::to_string(copies) + " copies");
+    for (auto R = tmpl.min_rounds(); R <= 30; ++R) {
+      SCOPED_TRACE("R=" + std::to_string(R));
+      const parallel_window_reference reference(spec, g, R, "single_error_lut");
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pattern_node(spec, params, copies));
+      const auto schedule =
+          describe_schedule(std::move(nodes), pattern_edges(), options, R);
+      std::set<std::pair<std::string, variant_key>> variants;
+      EXPECT_EQ(schedule.num_rounds, R);
+      ASSERT_EQ(schedule.windows.size(), reference.windows().size());
+      for (const auto &rw : reference.windows()) {
+        const auto w =
+            std::find_if(schedule.windows.begin(), schedule.windows.end(),
+                         [&](const scheduled_window &s) {
+                           return s.node == "P." + rw.node && s.k == rw.k;
+                         });
+        ASSERT_NE(w, schedule.windows.end()) << rw.node << "[" << rw.k << "]";
+        EXPECT_EQ(w->rounds, rw.rounds);
+        EXPECT_EQ(w->commit, rw.commit);
+        EXPECT_EQ(w->buffers, rw.buffers);
+        EXPECT_EQ(w->input.exists, rw.input_exists);
+        EXPECT_EQ(w->output.exists, rw.output_exists);
+        ASSERT_EQ(w->inputs.size(), rw.inputs.size());
+        for (std::size_t i = 0; i < rw.inputs.size(); ++i) {
+          EXPECT_EQ(w->inputs[i].from_node, "P." + rw.inputs[i].from_node);
+          EXPECT_EQ(w->inputs[i].k, rw.inputs[i].k);
+          EXPECT_EQ(w->inputs[i].to_input, rw.inputs[i].to_input);
+          EXPECT_EQ(w->inputs[i].exists, rw.inputs[i].exists);
+        }
+        variants.insert({w->node, w->variant});
+      }
+      ASSERT_EQ(schedule.decoders.size(), variants.size());
+      std::set<std::string> hashes;
+      for (const auto &d : schedule.decoders) {
+        const auto &layer = d.node == "P.A" ? g.layers[0] : g.layers[1];
+        EXPECT_TRUE(variants.count({d.node, d.variant})) << d.node;
+        EXPECT_EQ(d.decoders, copies) << d.node;
+        EXPECT_EQ(d.sha256,
+                  store.window_sha256(*context, layer.request, d.variant));
+        EXPECT_TRUE(recorded("window", d.sha256)) << d.node;
+        hashes.insert(d.sha256);
+      }
+      EXPECT_EQ(hashes.size(), schedule.decoders.size());
+      ASSERT_EQ(schedule.templates.size(), 1u);
+      EXPECT_EQ(schedule.templates.at("P.ingest"),
+                store.template_sha256(*context));
+      EXPECT_TRUE(recorded("dem_chunks", schedule.templates.at("P.ingest")));
+    } // end - for(R)
+  } // end - for(options, copies)
+  std::vector<task_graph_node_config> plain(2);
+  plain[0].id = "A";
+  plain[0].kind = "xor";
+  plain[1].id = "B";
+  plain[1].kind = "xor";
+  EXPECT_TRUE(describe_schedule(std::move(plain),
+                                {{"measurements", "output", "A", "a"},
+                                 {"measurements", "output", "A", "b"},
+                                 {"A", "output", "B", "a"},
+                                 {"A", "output", "B", "b"},
+                                 {"B", "output", "output", "input"}},
+                                {}, 10)
+                  .windows.empty());
+} // end - TEST(WindowedGraph, DescribesItsSchedule)
+
 // A shot's closure says whether every window's solution was checked and
 // held: not_checked without verify_residual; closed with report when every
 // solution satisfies its window, as a lookup table's single faults do; and

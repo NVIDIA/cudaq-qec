@@ -299,13 +299,27 @@ std::shared_ptr<const decoding_window>
 data_artifact_store::find_window(const experiment_template &context,
                                  const window_request &request,
                                  const variant_key &key) const {
-  const auto hash = template_hash(context.spec(), "find_window");
-  const auto it = windows_.find(sha256_hex(window_bytes(hash, request, key)));
+  return windows_.at(window_sha256(context, request, key)).handle;
+}
+
+std::string
+data_artifact_store::template_sha256(const experiment_template &context) const {
+  return template_hash(context.spec(), "template_sha256");
+}
+
+// Keyed as add_windows() keys it; a hit must hold this request and key.
+std::string
+data_artifact_store::window_sha256(const experiment_template &context,
+                                   const window_request &request,
+                                   const variant_key &key) const {
+  const auto hash = template_hash(context.spec(), "window_sha256");
+  auto window_hash = sha256_hex(window_bytes(hash, request, key));
+  const auto it = windows_.find(window_hash);
   if (it == windows_.end() || it->second.request != request ||
       it->second.key != key)
     throw std::logic_error("data_artifact_store: the window variant was not "
                            "built at configuration time");
-  return it->second.handle;
+  return window_hash;
 }
 
 // Each key variant_instances() lists, looked up as find_window() does.

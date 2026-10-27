@@ -90,6 +90,17 @@ public:
   find_windows(const experiment_template &context,
                const window_request &request) const;
 
+  /// The sha256 the template with @p context's content is recorded under.
+  /// @throws std::logic_error if it was not added.
+  std::string template_sha256(const experiment_template &context) const;
+
+  /// The sha256 window variant @p key of @p request on the template with
+  /// @p context's content is recorded under.
+  /// @throws std::logic_error if it was not built at configuration time.
+  std::string window_sha256(const experiment_template &context,
+                            const window_request &request,
+                            const variant_key &key) const;
+
   /// Every entry, in the order it was added.
   const std::vector<data_artifact_record> &records() const { return records_; }
 
