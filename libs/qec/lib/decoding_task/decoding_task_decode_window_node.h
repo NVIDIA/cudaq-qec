@@ -93,6 +93,12 @@ public:
   bool supports_streaming_input(std::size_t slot) const override {
     return slot < inputs_.size();
   }
+  /// Every output follows the window input's schedule. Publications follow
+  /// window indices, not rounds; outputs fold by exact coverage, which needs
+  /// no shared schedule, so this only orders the graph's compile.
+  std::optional<window_spec> derive_streaming_schedule(
+      std::size_t output_slot,
+      const std::vector<input_schedule> &inputs) const override;
 
 private:
   decode_window_core core_;

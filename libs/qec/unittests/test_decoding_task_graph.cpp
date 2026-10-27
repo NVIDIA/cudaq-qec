@@ -14269,9 +14269,9 @@ TEST(WindowKinds, BuildTheirNodesFromTheContext) {
 } // end - TEST(WindowKinds, BuildTheirNodesFromTheContext)
 
 // from_topology builds a windowed graph's nodes from what it resolves, so a
-// builder's own error is reported as itself, and only then rejects the
-// graph: its nodes join their inputs by index, which this executor does not.
-TEST(WindowKinds, BuildingAWindowedGraphStopsAtTheExecutor) {
+// builder's own error is reported as itself; a graph whose nodes build
+// streams, its nodes joining their inputs by index.
+TEST(WindowKinds, BuildingAWindowedGraphStreams) {
   const cudaqx::heterogeneous_map params{
       {"commit_rounds", std::size_t{2}},
       {"buffer_rounds", std::size_t{1}},
@@ -14279,20 +14279,17 @@ TEST(WindowKinds, BuildingAWindowedGraphStopsAtTheExecutor) {
   lowered_pattern p(arbitrary_memory_spec(5), params);
   lowered_pattern unknown(arbitrary_memory_spec(5), params);
   unknown.nodes[2].decoder_type = "no_such_decoder";
-  expect_lowering_error(
-      [&] {
-        decoding_task_graph::from_topology(std::move(p.nodes),
-                                           std::move(p.edges));
-      },
-      "from_topology: a windowed graph needs an executor that joins inputs "
-      "by index, which is not available yet");
+  const auto graph = decoding_task_graph::from_topology(std::move(p.nodes),
+                                                        std::move(p.edges));
+  EXPECT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
   expect_lowering_error(
       [&] {
         decoding_task_graph::from_topology(std::move(unknown.nodes),
                                            std::move(unknown.edges));
       },
       "no_such_decoder");
-} // end - TEST(WindowKinds, BuildingAWindowedGraphStopsAtTheExecutor)
+} // end - TEST(WindowKinds, BuildingAWindowedGraphStreams)
 
 // An ingest node keeps a shot's partial rounds and publications across
 // deliveries, so copies of it would split one stream: max_in_flight on it is

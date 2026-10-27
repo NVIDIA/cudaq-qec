@@ -3176,20 +3176,25 @@ void expect_build_error(
   }
 }
 
-// A graph naming the windowed kinds parses, validates and builds its
-// nodes, then stops at the executor, which does not join inputs by index
-// yet.
-TEST(TaskGraphWindowKinds, BuildingStopsAtTheExecutor) {
+// Expect decoder 0 of `config` to build into a graph that can stream.
+void expect_streams(
+    const cudaq::qec::decoding::config::multi_decoder_config &config) {
+  const auto graph =
+      cudaq::qec::decoding::host::build_task_graph(config.decoders.at(0));
+  EXPECT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+}
+
+// A graph naming the windowed kinds parses, validates and builds into a
+// graph the executor streams, joining its windows by index.
+TEST(TaskGraphWindowKinds, BuildingMakesAStreamingGraph) {
   namespace cfg = cudaq::qec::decoding::config;
-  expect_build_error(
-      cfg::multi_decoder_config::from_yaml_str(pw_build_yaml()),
-      "from_topology: a windowed graph needs an executor that joins inputs "
-      "by index, which is not available yet");
+  expect_streams(cfg::multi_decoder_config::from_yaml_str(pw_build_yaml()));
 }
 
 // Building a windowed graph validates its windows before anything is built,
-// so each mistake is reported with its own message, ahead of the executor
-// saying it cannot run the graph yet.
+// so each mistake is reported with its own message, ahead of any builder's
+// or the executor's.
 TEST(TaskGraphWindowKinds, BuildingValidatesTheWindowsFirst) {
   namespace cfg = cudaq::qec::decoding::config;
   const auto rejects = [](const std::string &from, const std::string &to,
@@ -3337,8 +3342,7 @@ TEST(TaskGraphWindowKinds, BuildingMakesNoWholeShotDecoderForAWindow) {
   models.clear();
   expect_build_error(mistaken, "validate_commitment: F3: ");
   EXPECT_TRUE(models.empty());
-  expect_build_error(
-      parsed, "a windowed graph needs an executor that joins inputs by index");
+  expect_streams(parsed);
   ASSERT_FALSE(models.empty());
   for (const auto &model : models)
     EXPECT_TRUE(windows.count(model.H))
@@ -3348,8 +3352,8 @@ TEST(TaskGraphWindowKinds, BuildingMakesNoWholeShotDecoderForAWindow) {
 
 // Two ingest nodes with different templates may share a graph as long as
 // their windows meet in no node: graph outputs are separate results, not a
-// node they share. Each pipeline validates on its own, so the build reaches
-// the executor's report.
+// node they share. Each pipeline validates on its own, and the graph
+// streams.
 TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs) {
   namespace cfg = cudaq::qec::decoding::config;
   auto config = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
@@ -3373,8 +3377,7 @@ TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs) {
     edge.to_node = renamed(edge.to_node);
     graph.edges.push_back(edge);
   }
-  expect_build_error(
-      config, "a windowed graph needs an executor that joins inputs by index");
+  expect_streams(config);
 } // end - TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs)
 
 // Node ids and parameter types are checked before the window layout, which
@@ -4384,7 +4387,7 @@ TEST(ParallelWindowPattern, ParsesThePatternForm) {
 // end: corrected_logical needs the template's m2o_sparse, and two faults on
 // one detector with different observable effects are ambiguous. With
 // identical twins, or the pattern's conflicting_parallel resolving them in
-// its layers, the build reaches the executor's report.
+// its layers, the graph builds and streams.
 TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
   namespace cfg = cudaq::qec::decoding::config;
   const auto unpooled = [](std::string yaml) {
@@ -4411,12 +4414,8 @@ TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
                      "of the 3-round shot: commit column 0 (round 0) is "
                      "parallel to column 1 (round 0), which has a different "
                      "observable effect");
-  expect_build_error(
-      cfg::multi_decoder_config::from_yaml_str(twins),
-      "a windowed graph needs an executor that joins inputs by index");
-  expect_build_error(
-      cfg::multi_decoder_config::from_yaml_str(resolved),
-      "a windowed graph needs an executor that joins inputs by index");
+  expect_streams(cfg::multi_decoder_config::from_yaml_str(twins));
+  expect_streams(cfg::multi_decoder_config::from_yaml_str(resolved));
 } // end - TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt)
 
 // Filling the store from the pattern holds every variant of its two layers,

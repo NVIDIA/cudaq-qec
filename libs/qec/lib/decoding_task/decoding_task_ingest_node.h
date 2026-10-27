@@ -77,6 +77,9 @@ public:
   const edge_value *streaming_output(std::size_t slot) const override;
   /// The logical value's: the whole shot. Windows cover no commit.
   std::optional<committed_coverage> streaming_coverage() const override;
+  /// Every publication reports its coverage exactly: a window's carries no
+  /// delta and none, the logical value's the whole shot, folded at FINAL.
+  bool exact_interval_coverage() const override { return true; }
   /// The logical value, once published; zero otherwise.
   const uint8_t *corrections() const override { return corrections_.data(); }
   /// Zero the corrections; after the shot is flushed, start the next shot,

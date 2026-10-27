@@ -578,18 +578,20 @@ struct decoding_task_graph::impl::record_scheduler {
     // Copy outputs now: a later record may run the producer before the
     // consumer's delivery event executes. With one context none can, so the
     // consumer reads the output in place instead; a graph with a fire pool
-    // always copies.
+    // always copies. The copy is made under the lock that publishes it:
+    // copies of a pooled indexed node may fire for several indices of one
+    // record at once, and share the context's one value per wire.
     const auto &wires = owner.streaming_wires_from[node_idx];
-    if (copy_outputs)
-      for (const auto &wire : wires) {
-        const auto *value = capability->streaming_output(wire.from_slot);
-        const auto wire_id = static_cast<std::size_t>(wire.id);
-        if (value)
-          c.wire_values[wire_id] = *value;
-        c.wire_valid[wire_id] = value != nullptr;
-      }
     {
       auto lock = lock_runtime();
+      if (copy_outputs)
+        for (const auto &wire : wires) {
+          const auto *value = capability->streaming_output(wire.from_slot);
+          const auto wire_id = static_cast<std::size_t>(wire.id);
+          if (value)
+            c.wire_values[wire_id] = *value;
+          c.wire_valid[wire_id] = value != nullptr;
+        }
       // Each port carries its own index, unless the fire named one for all
       // of them. A null port says nothing to an indexed consumer this time.
       for (const auto &wire : wires) {

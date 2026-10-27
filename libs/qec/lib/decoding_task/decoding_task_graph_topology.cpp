@@ -874,14 +874,6 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     i->nodes.push_back(std::move(node));
     i->node_replicas.push_back(std::move(replicas));
   }
-  // The windowed kinds join their inputs by index, which this executor does
-  // not do yet. Their nodes are built first, so a builder's own error is
-  // reported as itself.
-  if (!windows.templates.empty())
-    throw std::invalid_argument(
-        "from_topology: a windowed graph needs an executor that joins inputs "
-        "by index, which is not available yet");
-
   wire_patterns(patterns, i->node_ids, i->nodes, edges);
 
   if (infer_edges) {

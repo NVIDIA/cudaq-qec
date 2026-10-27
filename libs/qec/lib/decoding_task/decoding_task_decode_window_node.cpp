@@ -134,6 +134,17 @@ bool decode_window_node::enqueue(const uint8_t *, std::size_t, round_type) {
       "decode_window: the node takes windows, not raw measurements");
 }
 
+// The window arrives on input 0; without it there is no schedule to hand on.
+std::optional<window_spec> decode_window_node::derive_streaming_schedule(
+    std::size_t output_slot, const std::vector<input_schedule> &inputs) const {
+  if (output_slot >= outputs_.size())
+    return std::nullopt;
+  for (const auto &input : inputs)
+    if (input.slot == 0)
+      return input.schedule;
+  return std::nullopt;
+}
+
 // Nothing stands once a fire has failed, or before the first.
 const edge_value *decode_window_node::streaming_output(std::size_t slot) const {
   if (!published_ || slot >= outputs_.size())
