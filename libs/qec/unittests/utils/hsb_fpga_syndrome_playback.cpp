@@ -11,6 +11,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -1216,6 +1217,8 @@ private:
 // ============================================================================
 
 int main(int argc, char **argv) try {
+  // Keep complete progress lines visible when playback is piped through tee.
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);
   Options options = parse_args(argc, argv);
   if (options.min_loop_shots && !options.loop)
     throw std::invalid_argument("--min-loop-shots requires --loop");
