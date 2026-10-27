@@ -203,6 +203,7 @@ endif()
 add_library(cudaq-qec-realtime-decoding SHARED
   realtime_decoding.cpp
   config.cpp
+  stim_dem_forms.cpp
   window_request_yaml.cpp
 )
 
