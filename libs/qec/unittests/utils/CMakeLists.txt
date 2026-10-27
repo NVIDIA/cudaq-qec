@@ -168,7 +168,9 @@ add_executable(hsb_fpga_syndrome_playback
 target_include_directories(hsb_fpga_syndrome_playback
   PRIVATE "${HOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR}/src"
   # cudaq/qec/realtime/decoder_rpc_wire_format.h (per-round RPC wire format).
-  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
+  # decoding_config.h uses the core heterogeneous map API in both build modes.
+  PRIVATE $<TARGET_PROPERTY:cudaqx-core,INTERFACE_INCLUDE_DIRECTORIES>)
 
 if (DEFINED CUDAQ_INCLUDE_DIR AND CUDAQ_INCLUDE_DIR)
   target_include_directories(hsb_fpga_syndrome_playback
