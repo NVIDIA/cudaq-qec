@@ -80,11 +80,15 @@ jobs:
             ls
             # Show release info (and save to summary)
             gh release view -R ${{ inputs.assets_repo }} ${{ inputs.assets_tag }} >> $GITHUB_STEP_SUMMARY
-            # Extract the decoder that needs to be embedded in the release
+            # Extract the decoders that need to be embedded in the release.
+            # QEC_EXTERNAL_DECODERS is consumed as a CMake list
+            # (libs/qec/CMakeLists.txt), so multiple paths are
+            # semicolon-separated.
             mkdir -p tmp
             tar -C tmp -xzvf nv-qldpc-decoder-${{ matrix.runner.arch }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_release.tar.gz
             test -f tmp/libcudaq-qec-nv-qldpc-decoder.so
-            echo "QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so" >> $GITHUB_ENV
+            test -f tmp/libcudaq-qec-nv-fusion-decoder.so
+            echo "QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so;$(pwd)/tmp/libcudaq-qec-nv-fusion-decoder.so" >> $GITHUB_ENV
             # The proprietary cudevice archive is optional: it only enables
             # device_graph dispatch in the decoding_server binary and the
             # device-graph realtime tests, neither of which ships in the

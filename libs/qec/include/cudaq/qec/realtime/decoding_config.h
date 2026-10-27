@@ -82,15 +82,18 @@ struct decoder_config {
   ///   - Chunk form: dem_chunks (which carries phases, connections, seam, and
   ///     num_rounds internally). The flat fields are derived by expanding the
   ///     phases, and must be omitted.
-  ///   - DEM form: stim_dem_path, the Stim model text itself. The decoder
-  ///     derives its dimensions, observable mapping and error rates from it.
-  ///     H_sparse, O_sparse and error_rate_vec must be omitted; D_sparse is
-  ///     still required, while block_size and syndrome_size are optional
-  ///     checked assertions.
+  ///   - DEM form: stim_dem or stim_dem_path, the Stim model text itself,
+  ///     inline or by file. The decoder derives its dimensions, observable
+  ///     mapping and error rates from it. H_sparse, O_sparse and
+  ///     error_rate_vec must be omitted; D_sparse is still required, while
+  ///     block_size and syndrome_size are optional checked assertions.
   ///
   /// Throughout a configuration, a `*_path` key names a file and a key without
   /// the suffix carries its contents inline: `stim_dem_path` is read from disk,
-  /// while a node's `stim_dem` is the model text itself.
+  /// while `stim_dem` is the model text itself. In YAML, a `stim_dem` with no
+  /// whitespace instead names a data_artifacts Stim DEM entry: any such value
+  /// is taken as a name, which is safe because Stim model text always
+  /// contains whitespace.
   ///
   /// Chunk form stays authoritative: decoder construction hands the chunks to
   /// the decoder, alone for one that declared it reads chunks natively
@@ -105,6 +108,11 @@ struct decoder_config {
   /// resolved against the configuration file's directory, or the process
   /// working directory for a programmatic or raw-string configuration.
   std::string stim_dem_path;
+  /// The same model's text inline; at most one of the two is set.
+  std::string stim_dem;
+  /// The data_artifacts entry `stim_dem` names, if it names one; stim_dem or
+  /// stim_dem_path is then a copy of that entry's text or path.
+  std::string stim_dem_artifact;
   std::vector<std::int64_t> H_sparse;
   std::vector<std::int64_t> O_sparse;
   /// Maps raw measurements to detectors. Orthogonal to the model source and
@@ -206,6 +214,12 @@ struct decoder_config {
       /// spellings; setting both on one node is an error rather than a
       /// precedence.
       std::string stim_dem_path;
+      /// The data_artifacts entry `stim_dem` names, if it names one; one of
+      /// the two fields above is then a copy of that entry's text or path.
+      std::string stim_dem_artifact;
+      /// Copies of the node that may fire at once in asynchronous
+      /// streaming; see `task_graph_node_config::max_in_flight`.
+      std::uint64_t max_in_flight = 1;
       /// Which DEM columns this node owns, as a label ("local", "boundary") or
       /// explicit ranges.  Parsed, validated, and emitted; not yet honored at
       /// construction, which rejects a partitioned node.
@@ -484,6 +498,20 @@ expand_dem_chunks(decoder_config &config);
 /// representable; a document that passes the JSON Schema may still be
 /// rejected by those hooks when parsed.
 __attribute__((visibility("default"))) std::string decoder_config_json_schema();
+
+} // namespace cudaq::qec::decoding::config
+
+/// C entry point for decoder_config_json_schema(), for callers that have the
+/// installed libraries but not the Python package: a tool can dlopen
+/// libcudaq-qec-realtime-decoding (which pulls in the decoder library, whose
+/// initialiser loads the decoder-plugins directory next to it) and read the
+/// schema of exactly that installation. The returned text lives in a
+/// process-lifetime buffer owned by the library; do not free it. Each call
+/// regenerates it, so plugins loaded after an earlier call are included.
+extern "C" __attribute__((visibility("default"))) const char *
+cudaq_qec_decoder_config_json_schema();
+
+namespace cudaq::qec::decoding::config {
 
 /// @brief Configure the decoders (`multi_decoder_config` variant). This
 /// function configures both local decoders, and if running on remote target
