@@ -105,15 +105,40 @@ target_link_libraries(test_thread_pool PRIVATE GTest::gtest_main
 add_dependencies(CUDAQXQECUnitTests test_thread_pool)
 gtest_discover_tests(test_thread_pool)
 
+add_executable(test_hsb_playback_loop utils/test_hsb_playback_loop.cpp)
+target_link_libraries(test_hsb_playback_loop PRIVATE GTest::gtest_main)
+add_dependencies(CUDAQXQECUnitTests test_hsb_playback_loop)
+gtest_discover_tests(test_hsb_playback_loop)
+
+if(UNIX)
+  find_package(Python COMPONENTS Interpreter QUIET)
+  find_program(HSB_PLAYBACK_BASH_EXECUTABLE bash)
+  if(Python_Interpreter_FOUND AND HSB_PLAYBACK_BASH_EXECUTABLE)
+    add_test(NAME hsb_playback_loop_harness
+      COMMAND ${Python_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/utils/test_hsb_playback_loop.py)
+    set_tests_properties(hsb_playback_loop_harness PROPERTIES TIMEOUT 30)
+  endif()
+endif()
+
 add_executable(test_extended_dem test_extended_dem.cpp)
 target_link_libraries(test_extended_dem PRIVATE GTest::gtest_main
                                         cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_extended_dem)
 gtest_discover_tests(test_extended_dem)
 
+add_library(parallel_window_reference STATIC parallel_window_reference.cpp)
+target_link_libraries(parallel_window_reference PUBLIC cudaq-qec-decoders)
+
 add_executable(test_decoding_window test_decoding_window.cpp)
 target_link_libraries(test_decoding_window PRIVATE GTest::gtest_main
-                                           cudaq-qec-decoders)
+                                           parallel_window_reference
+                                           cudaq-qec
+                                           cudaq::cudaq-stim-target)
+set_target_properties(test_decoding_window PROPERTIES
+  BUILD_RPATH
+    "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
+add_dependencies(test_decoding_window cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_decoding_window)
 gtest_discover_tests(test_decoding_window)
 

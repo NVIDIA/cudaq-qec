@@ -21,9 +21,11 @@
 
 namespace cudaq::qec {
 
-/// @brief One instance serves one fan-out. `begin()` is called once per
-/// run when it is armed, and takes the cancellation source and candidate sink
-/// by reference, so that the strategy can request stops and poll candidates. On
+/// @brief One instance serves one run: the fan-out builds a new one from the
+/// registered factory each time it arms a run, so overlapping runs never
+/// share a strategy. `begin()` is called once, when the run is armed, and
+/// takes the cancellation source and candidate sink by reference, so that the
+/// strategy can request stops and poll candidates. On
 /// the pushing member's thread and possibly concurrently, `offer()` is called
 /// for every push, where a value commits the run to it and hard-stops the
 /// other members; a strategy commits at most once per run and ignores every
@@ -73,6 +75,12 @@ __attribute__((visibility("default"))) selection_strategy_registration
 register_selection_strategy(std::string name,
                             decoding::config::decoder_schema params,
                             selection_strategy_factory factory);
+
+/// @brief The factory registered under `name`, for callers that build a
+/// strategy per run and want to resolve the name once.
+/// @throws std::invalid_argument for an unknown name.
+__attribute__((visibility("default"))) selection_strategy_factory
+find_selection_strategy(const std::string &name);
 
 /// @brief Build the strategy registered under `name` from its parameters,
 /// which have been validated against the strategy's schema.
