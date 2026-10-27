@@ -59,6 +59,7 @@ struct scheduled_window {
   window_port output;
   std::vector<window_send> sends;
   std::vector<window_dependency> inputs;
+  bool operator==(const scheduled_window &) const = default;
 };
 
 /// The decoders a node builds for one variant of its layer, and the sha256

@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import threading
 
+import numpy as np
+
 import pytest
 import cudaq_qec as qec
 
@@ -645,3 +647,166 @@ def test_combine_with_unequal_windows_is_batch_only():
     assert combined.run(m).converged
     with pytest.raises(RuntimeError, match="window_size"):
         combined.enqueue_syndrome(bytes(combined.get_num_msyn_per_round()))
+
+
+# ---------------------------------------------------------------------------
+# The parallel_window pattern on the surface code
+# ---------------------------------------------------------------------------
+
+
+def _seam_entry(seam, rows):
+    seam_spec = qec.DemSeamSpec()
+    seam_spec.H_sparse = rows
+    entry = qec.SeamSpecEntry()
+    entry.id = seam
+    entry.spec = seam_spec
+    return entry
+
+
+def _surface_memory(distance, p, x_checks=False):
+    """Phenomenological memory over the distance-d surface code's Z checks,
+    or its X checks: each round every data qubit may flip, touching its
+    checks that round, and every check measurement may fail, touching that
+    check that round and the next; the readout round has data faults only.
+    Returns the spec and the checks and logicals, as rows of qubits."""
+    css = qec.css_matrices_from_code(
+        qec.get_code("surface_code", distance=distance))
+    h = css.hx if x_checks else css.hz
+    logical = css.lx if x_checks else css.lz
+    m, n = h.shape
+    checks = [[int(q) for q in np.nonzero(h[i])[0]] for i in range(m)]
+    logicals = [[int(q) for q in np.nonzero(row)[0]] for row in logical]
+    bulk_rows, next_rows, readout_rows, observables = [], [], [], []
+    for i, qubits in enumerate(checks):
+        bulk_rows += qubits + [n + i, -1]
+        next_rows += [n + i, -1]
+        readout_rows += qubits + [-1]
+    for qubits in logicals:
+        observables += qubits + [-1]
+    bulk = qec.DemChunkSpec()
+    bulk.num_faults = n + m
+    bulk.error_rates = [p] * (n + m)
+    bulk.O_sparse = observables
+    bulk.seam_specs = [
+        _seam_entry(qec.seam_name.prev_round, bulk_rows),
+        _seam_entry(qec.seam_name.next_round, next_rows),
+    ]
+    readout = qec.DemChunkSpec()
+    readout.num_faults = n
+    readout.error_rates = [p] * n
+    readout.O_sparse = observables
+    readout.seam_specs = [_seam_entry(qec.seam_name.prev_round, readout_rows)]
+    seam = qec.SeamConnection()
+    seam.from_seam = qec.seam_name.next_round
+    seam.to_seam = qec.seam_name.prev_round
+    spec = qec.DemChunksSpec()
+    bulk_entry = qec.PhaseSpecEntry()
+    bulk_entry.id = qec.SeamId("bulk")
+    bulk_entry.spec = bulk
+    readout_entry = qec.PhaseSpecEntry()
+    readout_entry.id = qec.SeamId("final")
+    readout_entry.spec = readout
+    spec.phases = [bulk_entry, readout_entry]
+    spec.connections = [
+        _make_connection("bulk", "bulk"),
+        _make_connection("bulk", "final"),
+    ]
+    spec.seam = seam
+    return spec, checks, logicals
+
+
+def _surface_pattern(spec, distance, copies=1, async_streaming=False):
+    """The pattern over spec, decoding with pymatching into corrections."""
+    node = qec.TaskGraphNodeConfig()
+    node.id = "pw"
+    node.kind = "parallel_window"
+    node.dem = spec
+    node.decoder_type = "pymatching"
+    node.params = {"merge_strategy": "smallest_weight"}
+    node.node_params = {
+        "commit_rounds": distance,
+        "buffer_rounds": distance,
+        "gap_rounds": 3 * distance,
+        "output": "corrections",
+    }
+    node.max_in_flight = copies
+    options = qec.TaskGraphOptions()
+    options.async_streaming = async_streaming
+    return qec.DecodingTaskGraph.from_topology([node], options=options)
+
+
+def _stream_shot(graph, measurements):
+    """Stream one shot in records of a round, the last FINAL; its
+    corrections."""
+    record = graph.get_num_msyn_per_round()
+    graph.reset_decoder()
+    at = 0
+    while at + record < len(measurements):
+        graph.enqueue_syndrome(bytes(measurements[at:at + record]))
+        at += record
+    graph.enqueue_syndrome(bytes(measurements[at:]), qec.round_type.FINAL)
+    return list(graph.get_obs_corrections())
+
+
+def _measurements(checks, rounds, data=None, measurement=None):
+    """One measurement per check per round, for a data qubit flipping in
+    a round, as (round, qubit), or a check measurement failing in one, as
+    (round, check): a data flip persists in every later round's checks."""
+    out = []
+    for r in range(rounds):
+        for j, qubits in enumerate(checks):
+            bit = 0
+            if data is not None and r >= data[0] and data[1] in qubits:
+                bit = 1
+            if measurement is not None and measurement == (r, j):
+                bit ^= 1
+            out.append(bit)
+    return out
+
+
+@pytest.mark.parametrize("distance", [3, 5])
+@pytest.mark.parametrize("x_checks", [False, True])
+def test_parallel_window_decodes_surface_code_single_faults(distance, x_checks):
+    """Every single data-qubit flip and check-measurement error, at the
+    shot's start, middle and end, decodes exactly, synchronously and
+    asynchronously with four copies of each layer: a data flip corrects the
+    logicals that hold the qubit, and a measurement error corrects
+    nothing."""
+    rounds = 8 * distance + 1
+    spec, checks, logicals = _surface_memory(distance, 0.01, x_checks)
+    num_qubits = max(max(qubits) for qubits in checks) + 1
+    for graph in (_surface_pattern(spec, distance),
+                  _surface_pattern(spec, distance, 4, True)):
+        for r in (0, rounds // 2, rounds - 1):
+            for q in range(num_qubits):
+                want = [int(q in qubits) for qubits in logicals]
+                got = _stream_shot(graph,
+                                   _measurements(checks, rounds, data=(r, q)))
+                assert got == want, f"data qubit {q} in round {r}"
+        for r in (0, rounds // 2, rounds - 2):
+            for j in range(len(checks)):
+                got = _stream_shot(
+                    graph, _measurements(checks, rounds, measurement=(r, j)))
+                assert got == [0] * len(logicals), f"check {j} in round {r}"
+
+
+def test_parallel_window_surface_code_paths_agree():
+    """On random surface-code shots, synchronous and asynchronous streaming
+    and the one-shot run give the same corrections."""
+    distance = 3
+    rounds = 8 * distance + 1
+    spec, checks, _ = _surface_memory(distance, 0.02)
+    sync = _surface_pattern(spec, distance)
+    asynchronous = _surface_pattern(spec, distance, 4, True)
+    one_shot = _surface_pattern(spec, distance)
+    rng = np.random.default_rng(23)
+    ones = 0
+    for _ in range(50):
+        bits = [int(b) for b in rng.random(rounds * len(checks)) < 0.05]
+        want = _stream_shot(sync, bits)
+        assert _stream_shot(asynchronous, bits) == want
+        m = qec.MeasurementResults()
+        m.bits = bits
+        assert list(one_shot.run(m).bits) == want
+        ones += sum(want)
+    assert ones > 0, "every shot corrected nothing"

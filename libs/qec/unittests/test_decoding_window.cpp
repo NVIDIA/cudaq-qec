@@ -57,6 +57,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <fstream>
@@ -2139,13 +2140,17 @@ using pw_reference::observables_of;
 using pw_reference::parallel_window_reference;
 using pw_reference::syndrome_of;
 
-// Phenomenological memory over the distance-d surface code's Z checks.
-dem_chunks_spec surface_memory_spec(std::size_t distance, double p) {
+// Phenomenological memory over the distance-d surface code's Z checks, or
+// its X checks with @p x_checks.
+dem_chunks_spec surface_memory_spec(std::size_t distance, double p,
+                                    bool x_checks = false) {
   cudaqx::heterogeneous_map options;
   options.insert("distance", distance);
   const auto matrices =
       css_matrices_from_code(*code::get("surface_code", options));
-  return phenomenological_memory_spec(matrices.hz, matrices.lz, p, p);
+  return x_checks
+             ? phenomenological_memory_spec(matrices.hx, matrices.lx, p, p)
+             : phenomenological_memory_spec(matrices.hz, matrices.lz, p, p);
 }
 
 // Detection events of one fault column.
@@ -6952,5 +6957,332 @@ TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders) {
         << "the graph kept allocating shot after shot";
   } // end - for(options, copies)
 } // end - TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders)
+
+// A phase may have no faults: its round's detectors are never flipped, as a
+// circuit's prep round's may not be. A template whose first round has none
+// validates, and the pattern over it, synchronously and asynchronously,
+// decodes every single fault at every shot length up to 30 as the reference
+// does.
+TEST(WindowedGraph, AZeroFaultPhaseStreams) {
+  auto spec = wide_readout_spec();
+  auto &init = phase_of(spec, phase_name::dem_init);
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  init.num_faults = 0;
+  init.error_rates.clear();
+  init.H_sparse = {-1, -1, -1, -1}; // its four detectors
+  init.O_sparse = {-1};
+  ASSERT_NO_THROW(spec.validate());
+  const experiment_template tmpl(spec);
+  const auto g = lowered_graph(spec, params);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    task_graph_options options;
+    std::vector<task_graph_node_config> nodes;
+    options.async_streaming = async;
+    nodes.push_back(pattern_node(spec, params, async ? 4 : 1));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    const auto record = graph->get_num_msyn_per_round();
+    for (auto R = tmpl.min_rounds(); R <= 30; ++R) {
+      parallel_window_reference reference(spec, g, R, "single_error_lut");
+      const auto &s = reference.model();
+      for (std::size_t c = 0; c < s.h.size(); ++c) {
+        const auto detectors = detectors_of(s, c);
+        EXPECT_EQ(stream_shot(*graph, memory_measurements(tmpl, R, detectors),
+                              record),
+                  reference.decode(detectors).frame)
+            << "R=" << R << ", column " << c;
+      }
+    }
+  } // end - for(async)
+} // end - TEST(WindowedGraph, AZeroFaultPhaseStreams)
+
+// ---------------------------------------------------------------------------
+// Accuracy on the surface code
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The pattern's layout for distance @p d: commit and buffer zones of d
+// rounds, and a gap of 3d, as TracksMonolithicMatching lays windows out.
+cudaqx::heterogeneous_map surface_params(std::size_t d) {
+  return {{"commit_rounds", d},
+          {"buffer_rounds", d},
+          {"gap_rounds", 3 * d},
+          {"output", std::string("corrections")}};
+}
+
+// The pattern over @p spec decoding with pymatching, with @p copies of each
+// layer, asynchronous when @p async.
+std::unique_ptr<decoding_task_graph>
+surface_graph(const dem_chunks_spec &spec,
+              const cudaqx::heterogeneous_map &params, std::size_t copies,
+              bool async) {
+  task_graph_options options;
+  std::vector<task_graph_node_config> nodes;
+  options.async_streaming = async;
+  nodes.push_back(pattern_node(spec, params, copies, "pymatching"));
+  nodes.back().params = matching;
+  return decoding_task_graph::from_topology(std::move(nodes), pattern_edges(),
+                                            options);
+}
+
+// Observables monolithic matching over the whole shot @p s predicts.
+std::vector<std::uint8_t>
+monolithic_observables(decoder &monolithic, const pw_reference::shot &s,
+                       const std::vector<std::uint8_t> &syndrome) {
+  const auto out =
+      monolithic.decode(std::vector<float_t>(syndrome.begin(), syndrome.end()));
+  std::vector<std::uint8_t> matched(out.result.size());
+  for (std::size_t j = 0; j < matched.size(); ++j)
+    matched[j] = convert_soft_to_hard(out.result[j]);
+  return observables_of(s, matched);
+}
+
+} // namespace
+
+// The parallel_window pattern, streamed asynchronously with four copies of
+// each layer, decodes sampled surface-code memory as accurately as matching
+// over the whole shot: for the Z and the X checks at d = 3 and 5, its
+// logical error rate is within 0.03 of matching's over 5000 sampled shots,
+// and both are right on the empty shot and on every single fault, which
+// sampling at these sizes seldom reaches. The rates are near 0.10 at d = 3
+// and 0.05 at d = 5, and on this sample differ by at most 2 shots.
+TEST(WindowedGraph, SurfaceCodeTracksMonolithicMatching) {
+  constexpr std::size_t shots = 5000; // the plan's sample size
+  constexpr double tolerance = 0.03;  // the plan's logical error rate band
+  constexpr double p = 0.01;          // well below threshold
+  for (const std::size_t d : {3, 5})
+    for (const bool x_checks : {false, true}) {
+      SCOPED_TRACE("d=" + std::to_string(d) + (x_checks ? ", X" : ", Z"));
+      const auto spec = surface_memory_spec(d, p, x_checks);
+      const auto params = surface_params(d);
+      const experiment_template tmpl(spec);
+      const std::size_t R = 8 * d + 1; // two periods of the layout
+      parallel_window_reference reference(spec, lowered_graph(spec, params), R,
+                                          "pymatching", matching);
+      const auto &s = reference.model();
+      const auto monolithic = make_decoder(s.h, s.row.back(), s.dem.error_rates,
+                                           "pymatching", matching);
+      auto graph = surface_graph(spec, params, 4, true);
+      const auto record = graph->get_num_msyn_per_round();
+      const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+          s.dem.detector_error_matrix, shots, s.dem.error_rates, 29 + d);
+      std::size_t windowed_wrong = 0;
+      std::size_t monolithic_wrong = 0;
+      const auto windowed_of = [&](const std::vector<std::uint8_t> &syndrome) {
+        return stream_shot(*graph, memory_measurements(tmpl, R, syndrome),
+                           record);
+      };
+      for (std::size_t c = 0; c <= s.h.size(); ++c) {
+        std::vector<std::uint8_t> fault(s.h.size(), 0);
+        if (c < s.h.size())
+          fault[c] = 1; // the last pass is the empty shot
+        const auto syndrome = syndrome_of(s, fault);
+        const auto truth = observables_of(s, fault);
+        ASSERT_EQ(windowed_of(syndrome), truth) << "column " << c;
+        ASSERT_EQ(monolithic_observables(*monolithic, s, syndrome), truth)
+            << "column " << c;
+      }
+      for (std::size_t i = 0; i < shots; ++i) {
+        const auto syndrome = row_of(detectors, i);
+        const auto truth = observables_of(s, row_of(errors, i));
+        windowed_wrong += windowed_of(syndrome) != truth;
+        monolithic_wrong +=
+            monolithic_observables(*monolithic, s, syndrome) != truth;
+      }
+      const auto rate = [&](std::size_t wrong) {
+        return static_cast<double>(wrong) / static_cast<double>(shots);
+      };
+      EXPECT_NEAR(rate(windowed_wrong), rate(monolithic_wrong), tolerance)
+          << "windowed " << windowed_wrong << ", monolithic "
+          << monolithic_wrong << " of " << shots;
+      EXPECT_GT(monolithic_wrong, 0u) << "no logical error to compare";
+    } // end - for(x_checks)
+} // end - TEST(WindowedGraph, SurfaceCodeTracksMonolithicMatching)
+
+// The pattern's paths agree on sampled surface-code shots: synchronous and
+// asynchronous streaming, and the one-shot run, give the same frame.
+TEST(WindowedGraph, SurfaceCodePathsAgree) {
+  constexpr std::size_t shots = 200;
+  constexpr std::size_t d = 3;
+  constexpr double p = 0.02; // enough faults that frames vary
+  const auto spec = surface_memory_spec(d, p);
+  const auto params = surface_params(d);
+  const experiment_template tmpl(spec);
+  const std::size_t R = 8 * d + 1;
+  parallel_window_reference reference(spec, lowered_graph(spec, params), R,
+                                      "pymatching", matching);
+  const auto &s = reference.model();
+  auto sync = surface_graph(spec, params, 1, false);
+  auto async = surface_graph(spec, params, 4, true);
+  auto one_shot = surface_graph(spec, params, 1, false);
+  const auto record = sync->get_num_msyn_per_round();
+  const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+      s.dem.detector_error_matrix, shots, s.dem.error_rates, 31);
+  std::size_t ones = 0;
+  for (std::size_t i = 0; i < shots; ++i) {
+    const auto m = memory_measurements(tmpl, R, row_of(detectors, i));
+    const auto want = stream_shot(*sync, m, record);
+    EXPECT_EQ(stream_shot(*async, m, record), want) << "shot " << i;
+    EXPECT_EQ(one_shot->run(measurement_results{m}).bits, want) << "shot " << i;
+    ones += std::count(want.begin(), want.end(), 1);
+  }
+  EXPECT_GT(ones, 0u) << "every frame was 0";
+} // end - TEST(WindowedGraph, SurfaceCodePathsAgree)
+
+// ---------------------------------------------------------------------------
+// Layout comparison (a report, not a gate)
+// ---------------------------------------------------------------------------
+
+// pymatching, timing every decode() across all instances.
+class timed_matching final : public decoder {
+public:
+  static inline std::atomic<std::uint64_t> decode_ns{0};
+  static inline std::atomic<std::uint64_t> decodes{0};
+
+  timed_matching(decoder_init inputs, decoder_output_request output,
+                 const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(decoder::get("pymatching", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    const auto start = std::chrono::steady_clock::now();
+    auto result = inner_->decode(syndrome);
+    decode_ns += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start)
+            .count());
+    ++decodes;
+    return result;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      timed_matching,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<timed_matching>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(timed_matching)
+
+// The plan's layout comparison (PR-8), feeding D14 and D21. Run it with
+// --gtest_also_run_disabled_tests. For the surface code's Z checks at d = 5
+// and 11, phenomenological noise at p = 0.02 and pymatching, it compares the
+// default zone sizes (d, d, 3d) with interior commit (d - 2, d + 1, 3d + 2);
+// an open input with the crossing prior, with a swept boundary_prior, or
+// truncated; and merging identical columns or not. Each line reports the
+// windowed and monolithic logical error rates, the mean and p99 time from
+// the FINAL enqueue to a complete result once the earlier rounds have
+// drained, and the mean window decode time.
+TEST(WindowedGraph, DISABLED_ComparesLayouts) {
+  constexpr double p = 0.02; // logical errors at both distances
+  struct layout {
+    std::string name;
+    std::size_t commit = 0;
+    std::size_t buffer = 0;
+    std::size_t gap = 0;
+  };
+  const std::vector<std::pair<std::string, cudaqx::heterogeneous_map>>
+      boundaries = {
+          {"crossing", {}},
+          {"prior 0.001", {{"boundary_prior", 0.001}}},
+          {"prior 0.01", {{"boundary_prior", 0.01}}},
+          {"prior 0.05", {{"boundary_prior", 0.05}}},
+          {"truncate", {{"input_boundary", std::string("truncate")}}}};
+  std::printf("%3s %-9s %-12s %-5s %9s %9s %10s %10s %10s\n", "d", "layout",
+              "input", "merge", "LER", "LER mono", "FINAL us", "p99 us",
+              "decode us");
+  for (const std::size_t d : {5, 11}) {
+    const std::size_t shots = d == 5 ? 2000 : 500;
+    const std::size_t R = 8 * d + 1;
+    const auto spec = surface_memory_spec(d, p);
+    const experiment_template tmpl(spec);
+    parallel_window_reference reference(spec,
+                                        lowered_graph(spec, surface_params(d)),
+                                        R, "pymatching", matching);
+    const auto &s = reference.model();
+    const auto monolithic = make_decoder(s.h, s.row.back(), s.dem.error_rates,
+                                         "pymatching", matching);
+    const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+        s.dem.detector_error_matrix, shots, s.dem.error_rates, 37 + d);
+    std::size_t monolithic_wrong = 0;
+    std::vector<std::vector<std::uint8_t>> truths;
+    for (std::size_t i = 0; i < shots; ++i) {
+      const auto syndrome = row_of(detectors, i);
+      truths.push_back(observables_of(s, row_of(errors, i)));
+      monolithic_wrong +=
+          monolithic_observables(*monolithic, s, syndrome) != truths.back();
+    }
+    for (const layout &l : {layout{"default", d, d, 3 * d},
+                            layout{"interior", d - 2, d + 1, 3 * d + 2}})
+      for (const auto &[input, extra] : boundaries)
+        for (const bool merge : {false, true}) {
+          task_graph_options options;
+          std::vector<task_graph_node_config> nodes;
+          std::vector<double> final_us;
+          std::size_t wrong = 0;
+          auto params = surface_params(d);
+          params.insert("commit_rounds", l.commit);
+          params.insert("buffer_rounds", l.buffer);
+          params.insert("gap_rounds", l.gap);
+          params.insert("merge_identical", merge);
+          for (const auto &[key, value] : extra)
+            params.insert(key, value);
+          options.async_streaming = true;
+          nodes.push_back(pattern_node(spec, params, 4, "timed_matching"));
+          nodes.back().params = matching;
+          auto graph = decoding_task_graph::from_topology(
+              std::move(nodes), pattern_edges(), options);
+          const auto record = graph->get_num_msyn_per_round();
+          timed_matching::decode_ns = 0;
+          timed_matching::decodes = 0;
+          for (std::size_t i = 0; i < shots; ++i) {
+            const auto m = memory_measurements(tmpl, R, row_of(detectors, i));
+            std::size_t at = 0; // where the FINAL record starts
+            graph->reset_decoder();
+            for (; at + record < m.size(); at += record)
+              graph->enqueue_syndrome(m.data() + at, record, round_type::BULK);
+            (void)graph->streaming_result(); // the earlier rounds drain
+            const auto start = std::chrono::steady_clock::now();
+            graph->enqueue_syndrome(m.data() + at, m.size() - at,
+                                    round_type::FINAL);
+            final_us.push_back(std::chrono::duration<double, std::micro>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count());
+            const auto *frame = graph->get_obs_corrections();
+            wrong +=
+                std::vector<std::uint8_t>(
+                    frame, frame + graph->get_num_observables()) != truths[i];
+          } // end - for(i)
+          std::sort(final_us.begin(), final_us.end());
+          const double mean_final =
+              std::accumulate(final_us.begin(), final_us.end(), 0.0) /
+              static_cast<double>(final_us.size());
+          const double decode_us =
+              static_cast<double>(timed_matching::decode_ns) / 1000.0 /
+              static_cast<double>(
+                  std::max<std::uint64_t>(1, timed_matching::decodes.load()));
+          std::printf("%3zu %-9s %-12s %-5s %9.4f %9.4f %10.1f %10.1f "
+                      "%10.1f\n",
+                      d, l.name.c_str(), input.c_str(), merge ? "on" : "off",
+                      static_cast<double>(wrong) / shots,
+                      static_cast<double>(monolithic_wrong) / shots, mean_final,
+                      final_us[final_us.size() * 99 / 100], decode_us);
+          std::fflush(stdout);
+        } // end - for(merge)
+  } // end - for(d)
+} // end - TEST(WindowedGraph, DISABLED_ComparesLayouts)
 
 } // namespace cudaq::qec

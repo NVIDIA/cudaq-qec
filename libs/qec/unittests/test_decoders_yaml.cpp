@@ -5,6 +5,7 @@
 
 #include "SessionRegistry.h"
 #include "task_graph_test_fixtures.h"
+#include "../lib/decoding_task/decoding_task_commitment.h"
 #include "../lib/decoding_task/decoding_task_data_artifacts.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
 #include "../lib/decoding_task/decoding_task_node_kind_registry.h"
@@ -4466,6 +4467,79 @@ TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows) {
     }
   }
 } // end - TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows)
+
+// A pattern whose template is named in data_artifacts lowers as one with the
+// template inline: the same windows, named <id>.A and <id>.B, the same
+// decoders per variant under the same sha256s, and a store holding the same
+// windows; both build.
+TEST(ParallelWindowPattern, ATemplateByNameLowersAsInline) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::fill_data_artifact_store;
+  const std::string tmpl = R"(
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+)";
+  const std::string graph = R"(
+    task_graph:
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          output: corrections
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+)";
+  const auto inline_form = cfg::multi_decoder_config::from_yaml_str(
+      "decoders:\n  - id: 0\n    dem_chunks:" + tmpl + graph);
+  const auto by_name = cfg::multi_decoder_config::from_yaml_str(
+      "data_artifacts:\n  t:\n    dem_chunks:" + tmpl +
+      "decoders:\n  - id: 0\n    dem_chunks: t\n" + graph);
+  // The 30-round shot of the decoder's pattern node, as its graph lowers it.
+  const auto schedule_of = [](const cfg::multi_decoder_config &config) {
+    const auto &decoder = config.decoders.at(0);
+    const auto &node = decoder.task_graph->nodes.at(0);
+    std::vector<cudaq::qec::task_graph_node_config> nodes(1);
+    nodes[0].id = node.id;
+    nodes[0].kind = node.resolved_kind();
+    nodes[0].dem = *decoder.dem_chunks;
+    nodes[0].node_params = node.node_params.map();
+    nodes[0].decoder_type = "single_error_lut";
+    return cudaq::qec::describe_schedule(std::move(nodes),
+                                         decoder.task_graph->edges, {}, 30);
+  };
+  const auto a = schedule_of(inline_form);
+  const auto b = schedule_of(by_name);
+  std::set<std::string> names;
+  ASSERT_EQ(by_name.decoders.at(0).dem_chunks,
+            inline_form.decoders.at(0).dem_chunks);
+  ASSERT_FALSE(a.windows.empty());
+  EXPECT_EQ(a.windows, b.windows);
+  EXPECT_EQ(a.decoders, b.decoders);
+  EXPECT_EQ(a.templates, b.templates);
+  for (const auto &w : b.windows)
+    names.insert(w.node);
+  EXPECT_EQ(names, (std::set<std::string>{"pw.A", "pw.B"}));
+  EXPECT_EQ(records_of(fill_data_artifact_store(by_name, "."), "window"),
+            records_of(fill_data_artifact_store(inline_form, "."), "window"));
+  EXPECT_NE(
+      cudaq::qec::decoding::host::build_task_graph(by_name.decoders.at(0)),
+      nullptr);
+  EXPECT_NE(
+      cudaq::qec::decoding::host::build_task_graph(inline_form.decoders.at(0)),
+      nullptr);
+} // end - TEST(ParallelWindowPattern, ATemplateByNameLowersAsInline)
 
 // Any pattern kind's windows hook fills the store: it is handed the node's
 // parameters and template, and every variant of each layer it declares is
