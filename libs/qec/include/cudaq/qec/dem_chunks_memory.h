@@ -27,6 +27,8 @@ namespace cudaq::qec {
 
 struct decoder_inputs;
 
+namespace details {
+
 /// Compare validated phase probabilities using the relative tolerance used to
 /// identify a stationary memory-circuit bulk. No absolute tolerance is added,
 /// so zero and arbitrarily small positive probabilities remain distinct.
@@ -34,6 +36,8 @@ inline bool memory_dem_probabilities_equivalent(double left, double right) {
   constexpr double relative_tolerance = 1e-9;
   return std::abs(left - right) <= relative_tolerance * std::max(left, right);
 }
+
+} // namespace details
 
 /// @brief Split a characterized memory circuit into reusable DEM phases.
 ///

@@ -232,7 +232,6 @@ class GeneratorCliTest(unittest.TestCase):
         invalid = {
             "distance": ("3.5", "-3", "+3", "3x", "4", "18446744073709551616"),
             "rounds": ("0", "1", "26.5", "unknown", "18446744073709551616"),
-            "basis": ("Y",),
             "logical-qubits": ("0", "-1", "1.5"),
             "error-rate": ("0", "1", "nan", "inf", "-0.1", "0.1junk"),
             "commit-rounds": ("0", "-1", "1.5"),
@@ -425,6 +424,19 @@ class GeneratorCliTest(unittest.TestCase):
                 self.assertEqual(output.name, OUTPUT_FILENAME)
                 model = self.assert_server(document)
                 self.assertEqual(26 * model["measurements_per_round"] + 9, 217)
+
+    def test_basis_case_is_normalized_and_other_basis_rejected(self):
+        for basis in ("X", "Z"):
+            with self.subTest(basis=basis.lower()):
+                _, upper = self.generate(basis=basis, rounds=4)
+                _, lower = self.generate(basis=basis.lower(), rounds=4)
+                self.assertEqual(lower, upper)
+        working = self.case_directory()
+        result = self.invoke(*generation_options(basis="Y", rounds=4),
+                             cwd=working,
+                             success=False)
+        self.assertIn("--basis must be X or Z", result.stderr)
+        self.assertEqual(list(working.iterdir()), [])
 
     def test_default_geometry_tracks_distance_and_partial_overrides(self):
         for distance in (3, 5):

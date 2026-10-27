@@ -241,8 +241,8 @@ dem_chunks_spec memory_dem_chunks_from_decoder_inputs(
       return false;
     for (std::size_t i = 0; i < rounds[a].size(); ++i) {
       const auto &x = rounds[a][i], &y = rounds[b][i];
-      if (x.key() != y.key() ||
-          !memory_dem_probabilities_equivalent(x.probability, y.probability))
+      if (x.key() != y.key() || !details::memory_dem_probabilities_equivalent(
+                                    x.probability, y.probability))
         return false;
     }
     return true;

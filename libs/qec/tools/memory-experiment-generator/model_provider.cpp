@@ -85,8 +85,8 @@ bool same_phase(const dem_chunk_spec &left, const dem_chunk_spec &right) {
       left.error_rates.size() != right.error_rates.size())
     return false;
   for (std::size_t i = 0; i < left.error_rates.size(); ++i)
-    if (!memory_dem_probabilities_equivalent(left.error_rates[i],
-                                             right.error_rates[i]))
+    if (!details::memory_dem_probabilities_equivalent(left.error_rates[i],
+                                                      right.error_rates[i]))
       return false;
   return true;
 }

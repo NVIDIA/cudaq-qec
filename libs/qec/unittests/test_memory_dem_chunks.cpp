@@ -24,13 +24,14 @@ constexpr std::size_t readout_measurements = 3;
 constexpr std::size_t representative_rounds = 8;
 
 TEST(MemoryDemChunks, ProbabilityComparisonRetainsSmallMechanisms) {
-  EXPECT_TRUE(memory_dem_probabilities_equivalent(0, 0));
-  EXPECT_TRUE(memory_dem_probabilities_equivalent(0.01, 0.01 + 1e-12));
-  EXPECT_FALSE(memory_dem_probabilities_equivalent(0.01, 0.01 + 1e-8));
+  EXPECT_TRUE(details::memory_dem_probabilities_equivalent(0, 0));
+  EXPECT_TRUE(details::memory_dem_probabilities_equivalent(0.01, 0.01 + 1e-12));
+  EXPECT_FALSE(details::memory_dem_probabilities_equivalent(0.01, 0.01 + 1e-8));
   const auto smallest = std::numeric_limits<double>::denorm_min();
-  EXPECT_TRUE(memory_dem_probabilities_equivalent(smallest, smallest));
-  EXPECT_FALSE(memory_dem_probabilities_equivalent(0, smallest));
-  EXPECT_FALSE(memory_dem_probabilities_equivalent(smallest, 2 * smallest));
+  EXPECT_TRUE(details::memory_dem_probabilities_equivalent(smallest, smallest));
+  EXPECT_FALSE(details::memory_dem_probabilities_equivalent(0, smallest));
+  EXPECT_FALSE(
+      details::memory_dem_probabilities_equivalent(smallest, 2 * smallest));
 }
 
 struct fixture_fault {

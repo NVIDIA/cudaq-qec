@@ -52,6 +52,7 @@ void usage() {
          "\nGenerates standalone YAML for a Surface Code memory experiment.\n"
          "--distance must be odd and at least 3.\n"
          "--rounds must be at least 4 extraction cycles, excluding readout.\n"
+         "--basis accepts X or Z in either case.\n"
          "--rounds=T records num_rounds=T+1; runtime shot length comes from "
          "FINAL.\n"
          "Logical-qubit, geometry and worker counts must be positive.\n"
@@ -141,10 +142,11 @@ int main(int argc, char **argv) {
       spec.logical_qubits =
           integer(values.at("logical-qubits"), "--logical-qubits");
     const auto &basis = values.at("basis");
-    if (basis != "X" && basis != "Z")
+    const bool x_basis = basis == "X" || basis == "x";
+    if (!x_basis && basis != "Z" && basis != "z")
       throw std::invalid_argument("--basis must be X or Z");
     spec.basis =
-        basis == "X" ? generator::memory_basis::x : generator::memory_basis::z;
+        x_basis ? generator::memory_basis::x : generator::memory_basis::z;
     if (values.contains("error-rate"))
       request.cnot_error_rate = probability(values.at("error-rate"));
     generator::server_config_options options;

@@ -117,7 +117,7 @@ Arguments use `--name=value` form; there is no JSON or YAML input format.
 | `--code` | `surface_code`; other code families are not currently supported |
 | `--distance` | Required odd Surface Code distance, at least 3 |
 | `--rounds` | Required extraction-cycle horizon T, at least 4, excluding terminal data readout; records `num_rounds: T+1` |
-| `--basis` | Required `X` or `Z` preparation/readout basis |
+| `--basis` | Required `X` or `Z` preparation/readout basis; case-insensitive |
 | `--logical-qubits` | Independent patches sharing one model; default 1 |
 | `--error-rate` | CNOT two-qubit depolarization probability; default 0.001, strictly between 0 and 1 |
 | `--decoder` | Required installed inner decoder name |
