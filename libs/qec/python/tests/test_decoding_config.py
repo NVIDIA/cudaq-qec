@@ -899,7 +899,8 @@ if __name__ == "__main__":
 # --- exported JSON Schema: the two model sources ----------------------------
 #
 # The schema must describe the language the runtime actually accepts. It keys
-# the DEM source on a NON-EMPTY stim_dem_path, matching resolve_decoder_init.
+# the DEM source on a NON-EMPTY stim_dem_path or stim_dem, matching
+# resolve_decoder_init.
 
 
 def _decoder_doc(**overrides):
@@ -941,6 +942,20 @@ def test_json_schema_rejects_both_sources():
 
 def test_json_schema_rejects_neither_source():
     assert not _schema_accepts(_decoder_doc())
+
+
+def test_json_schema_accepts_inline_dem_source():
+    assert _schema_accepts(_decoder_doc(stim_dem="error(0.1) D0 L0\n"))
+    # One word names a data_artifacts entry; the schema sees a string either
+    # way.
+    assert _schema_accepts(_decoder_doc(stim_dem="rep_stim"))
+
+
+def test_json_schema_rejects_both_dem_spellings():
+    assert not _schema_accepts(
+        _decoder_doc(stim_dem="error(0.1) D0 L0\n", stim_dem_path="model.dem"))
+    assert not _schema_accepts(
+        _decoder_doc(stim_dem="error(0.1) D0 L0\n", **_MATRIX_KEYS))
 
 
 def test_json_schema_treats_empty_dem_path_as_matrix_source():
@@ -1304,6 +1319,24 @@ def test_data_artifacts_resolve_references():
     assert layer.request == window_entry.window
     again = qec.multi_decoder_config.from_yaml_str(mdc.to_yaml_str())
     assert again.decoders[0].task_graph.nodes[0].windows[0].artifact == "pw_A"
+
+
+def test_data_artifacts_name_stim_dems():
+    yaml = """
+data_artifacts:
+  tiny:
+    stim_dem: "error(0.1) D0 L0\\nerror(0.1) D0 D1\\n"
+decoders:
+  - id: 0
+    type: multi_error_lut
+    stim_dem: tiny
+    D_sparse: [0, -1, 1, -1]
+"""
+    mdc = qec.multi_decoder_config.from_yaml_str(yaml)
+    decoder = mdc.decoders[0]
+    assert decoder.stim_dem_artifact == "tiny"
+    assert decoder.stim_dem == mdc.data_artifacts[0].stim_dem
+    assert decoder.stim_dem_path == ""
 
 
 def test_data_artifacts_validate_against_the_schema():

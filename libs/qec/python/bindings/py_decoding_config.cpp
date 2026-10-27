@@ -462,6 +462,12 @@ void bindDecodingConfig(nb::module_ &mod) {
               "matrices cannot carry. Inline text, as everywhere else: pass "
               "DEM contents, not a path. The node's own D/O still come from "
               "its dem_chunks.")
+      .def_rw("stim_dem_artifact",
+              &task_graph_spec::node_spec::stim_dem_artifact,
+              "The data_artifacts entry a stim_dem names in YAML, if it\n"
+              "names one: any stim_dem with no whitespace is a name, since\n"
+              "Stim model text always has some. stim_dem or stim_dem_path\n"
+              "then holds a copy of that entry's text or path.")
       .def_rw("partition_label", &task_graph_spec::node_spec::partition_label,
               "Column-ownership label ('local', 'boundary'). Parsed and "
               "emitted; not yet honored at construction.")
@@ -516,6 +522,14 @@ void bindDecodingConfig(nb::module_ &mod) {
           "mutually exclusive with H_sparse, O_sparse and error_rate_vec. "
           "Relative paths resolve against the configuration file's "
           "directory, or the working directory for a programmatic config.")
+      .def_rw("stim_dem", &decoder_config::stim_dem,
+              "The same Stim model's text inline; at most one of stim_dem "
+              "and stim_dem_path is set.")
+      .def_rw("stim_dem_artifact", &decoder_config::stim_dem_artifact,
+              "The data_artifacts entry a stim_dem names in YAML, if it\n"
+              "names one: any stim_dem with no whitespace is a name, since\n"
+              "Stim model text always has some. stim_dem or stim_dem_path\n"
+              "then holds a copy of that entry's text or path.")
       .def_rw("block_size", &decoder_config::block_size)
       .def_rw("syndrome_size", &decoder_config::syndrome_size)
       .def_rw("H_sparse", &decoder_config::H_sparse)
