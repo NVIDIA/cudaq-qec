@@ -56,6 +56,7 @@ jobs:
               - '**/*.py'
             build-all:
               - '.github/actions/build-lib/action.yaml'
+              - 'scripts/ci/test_examples.sh'
               - '.github/actions/build-lib/build_all.sh'
               - '.github/actions/build-lib/setup_custabilizer.sh'
               - '.github/workflows/all_libs.yaml'
@@ -63,6 +64,7 @@ jobs:
               - '**/CMakeLists.txt'
             build-qec:
               - '.github/actions/build-lib/action.yaml'
+              - 'scripts/ci/test_examples.sh'
               - '.github/actions/build-lib/build_qec.sh'
               - '.github/actions/build-lib/setup_custabilizer.sh'
               - '.github/workflows/lib_qec.yaml'
