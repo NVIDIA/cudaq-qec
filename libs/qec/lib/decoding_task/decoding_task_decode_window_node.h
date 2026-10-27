@@ -24,9 +24,10 @@ namespace cudaq::qec {
 
 /// Joins its inputs by index: input 0 is the window, required, and input
 /// 1 + i is receive_i's send, absent where its producer instance does not
-/// exist. Keeps no state between fires, so an executor may run copies of it
-/// at once, each with its own core and decoders. Not thread-safe: one
-/// thread at a time calls every member.
+/// exist. Its only state across fires is the shot's index offset, which
+/// every instance of a shot shares, so an executor may run copies of it at
+/// once, each with its own core and decoders. Not thread-safe: one thread
+/// at a time calls every member of a copy.
 class decode_window_node final : public task_graph_node,
                                  public streaming_task_graph_node,
                                  public indexed_join_node {

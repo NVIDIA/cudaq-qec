@@ -51,6 +51,7 @@
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/dem_construction_code.h"
 #include "cudaq/qec/dem_sampling.h"
+#include "cudaq/qec/logger.h"
 #include "cudaq/qec/pcm_utils.h"
 #include <algorithm>
 #include <array>
@@ -5026,6 +5027,44 @@ void expect_window_rows(const shot &s, const window_request &request,
 // read_logical, flush() then publishes the readout round's logical value,
 // alone, over the whole shot, and only once. One node serves shots of any
 // length in any order.
+// No delivery readies more publications than the node declares, which
+// sizes its consumers' join tables: whole records of every length, the
+// FINAL one readying all that remain, and the logical value's flush.
+TEST(IngestNode, ReadiesNoMoreThanItDeclaresPerDelivery) {
+  std::mt19937 rng(31);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  std::size_t most = 0; // the most one delivery readied
+  for (const auto &requests : ingest_layouts()) {
+    ingest_node node(context, named_windows(requests), true);
+    const auto declared = node.max_publications_per_delivery();
+    const auto limit = *node.raw_chunk_limit();
+    for (auto R = context->min_rounds(); R <= 40; ++R) {
+      SCOPED_TRACE("R=" + std::to_string(R));
+      const shot s(spec, R, rng);
+      const auto &m = s.measurements;
+      node.reset_streaming_state();
+      for (std::size_t at = 0; at < m.size(); at += limit) {
+        const auto len = std::min(limit, m.size() - at);
+        std::size_t readied = 0;
+        for (bool more = node.enqueue(m.data() + at, len,
+                                      at + len == m.size() ? round_type::FINAL
+                                                           : round_type::BULK);
+             more; more = node.publish_next())
+          ++readied;
+        EXPECT_LE(readied, declared) << "record at " << at;
+        most = std::max(most, readied);
+      }
+      std::size_t flushed = 0;
+      for (bool more = node.flush(); more; more = node.publish_next())
+        ++flushed;
+      EXPECT_LE(flushed, declared);
+    }
+  }
+  // A FINAL record readies several windows, so the bound is not one.
+  EXPECT_GT(most, 1u);
+}
+
 TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
   std::mt19937 rng(29);
   const auto spec = wide_readout_spec();
@@ -5979,6 +6018,29 @@ TEST(WindowedGraph, StreamsThePatternAsTheReference) {
       EXPECT_NO_THROW(expect_pattern_streams(output, async, 4, record));
     }
 } // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
+
+// Join tables are preallocated for the most a record can publish: the
+// pattern streamed in whole-round records, each readying several windows,
+// with four copies of each layer, never grows one.
+TEST(WindowedGraph, JoinTablesHoldWhatARecordPublishes) {
+  namespace logging = cudaq::qec::detail;
+  std::mutex mutex;
+  std::vector<std::string> warnings;
+  logging::forwarder_config config;
+  task_graph_options async;
+  config.callback = [&](logging::forwarded_log_record &&record) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (record.level == logging::log_level::warn)
+      warnings.push_back(record.message);
+  };
+  async.async_streaming = true;
+  logging::set_forwarder(std::move(config));
+  EXPECT_NO_THROW(expect_pattern_streams("corrections", async, 4, 0));
+  logging::flush_logs();
+  logging::clear_forwarder();
+  for (const auto &warning : warnings)
+    EXPECT_EQ(warning.find("join table"), std::string::npos) << warning;
+}
 
 // A sliding window, whose sends feed its own next instance, streams as the
 // reference decodes in the same ways: a window waits for its predecessor's

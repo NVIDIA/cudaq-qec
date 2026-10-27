@@ -12,6 +12,7 @@
 
 #include "decoding_task_graph_impl.h"
 #include "../hardware_guards.h"
+#include "cudaq/qec/logger.h"
 
 #include <algorithm>
 #include <atomic>
@@ -163,6 +164,7 @@ struct decoding_task_graph::impl::record_scheduler {
         pool_free(owner.streaming_nodes.size()),
         replica_busy(owner.streaming_nodes.size()),
         joins(owner.streaming_nodes.size()),
+        join_grew(owner.streaming_nodes.size(), 0),
         join_offsets(owner.streaming_nodes.size()),
         join_required(owner.streaming_nodes.size()),
         dropped(owner.streaming_nodes.size()),
@@ -172,9 +174,16 @@ struct decoding_task_graph::impl::record_scheduler {
     const auto N = owner.nodes.size();
     const auto M = owner.streaming_nodes.size();
     // Join leads, in topological order: how far past the newest published
-    // index an indexed node can fire (f) or have an entry created (e).
+    // index an indexed node can fire (f) or have an entry created (e). And
+    // the most each node publishes per delivery: its own, or, fed by edges,
+    // as many as one of its producers' deliveries brings.
     std::vector<std::int64_t> fire_lead(M, 0), entry_lead(M, 0);
+    std::vector<std::size_t> publications(M, 1);
     for (std::size_t si = 0; si < M; ++si) {
+      publications[si] =
+          owner.streaming_nodes[si].capability->max_publications_per_delivery();
+      for (const auto producer : owner.streaming_producers[si])
+        publications[si] = std::max(publications[si], publications[producer]);
       const auto copies = owner.streaming_nodes[si].replicas.size();
       const bool indexed = this->indexed(si);
       if (copies <= 1 && !indexed)
@@ -216,9 +225,13 @@ struct decoding_task_graph::impl::record_scheduler {
       fire_lead[si] = f == std::numeric_limits<std::int64_t>::max() ? 0 : f;
       entry_lead[si] = e;
       // Entries exist only for published values or in-flight producer
-      // outputs: the records in flight bound how far publication runs ahead.
+      // outputs: the records in flight, each a delivery publishing as many
+      // as the node's producers can, bound how far publication runs ahead.
+      std::size_t inflow = 1;
+      for (const auto producer : owner.streaming_producers[si])
+        inflow = std::max(inflow, publications[producer]);
       const auto capacity =
-          context_count + static_cast<std::size_t>(e) + copies;
+          context_count * inflow + static_cast<std::size_t>(e) + copies;
       joins[si].clear();
       for (std::size_t i = 0; i < capacity; ++i)
         add_join_entry(si);
@@ -674,7 +687,7 @@ struct decoding_task_graph::impl::record_scheduler {
         const auto &candidate = c.slots[earlier];
         if (candidate.event.kind != graph_event_kind::streaming_edge)
           continue;
-        if (branches_overlap(candidate.event.node, consumer) &&
+        if (branches_ordered(candidate.event.node, consumer) &&
             (blocker == no_event || candidate.sequence > blocker_sequence)) {
           blocker = earlier;
           blocker_sequence = candidate.sequence;
@@ -750,11 +763,18 @@ struct decoding_task_graph::impl::record_scheduler {
       for (std::size_t i = 0; i < table.size() && index == table.size(); ++i)
         if (!table[i].used)
           index = i;
-      // The preallocation covers one publication per producer per record;
-      // a record carrying several rounds can publish more, so grow instead
-      // of failing. A deque keeps entries in use where they are.
-      if (index == table.size())
+      // The preallocation covers the most a record can publish; should it
+      // fall short, grow rather than fail, saying so once. A deque keeps
+      // entries in use where they are.
+      if (index == table.size()) {
+        if (!join_grew[si]) {
+          join_grew[si] = 1;
+          CUDA_QEC_WARN("decoding_task_graph: the join table of node {} grew "
+                        "past its {} preallocated entries",
+                        node.node_index, table.size());
+        }
         add_join_entry(si);
+      }
     }
     auto *entry = &table[index];
     if (fresh) {
@@ -1375,8 +1395,16 @@ private:
     return branches_overlap(c.root_nodes[earlier], c.root_nodes[later]);
   }
 
+  // Branches that meet at all, which orders unrelated raw roots.
   bool branches_overlap(std::size_t left, std::size_t right) const {
-    return owner.streaming_overlap[left][right] != 0;
+    return owner.streaming_overlap[left][right] !=
+           impl::streaming_overlap_kind::disjoint;
+  }
+  // Branches that meet at a descendant needing ordered delivery, which
+  // orders sibling deliveries.
+  bool branches_ordered(std::size_t left, std::size_t right) const {
+    return owner.streaming_overlap[left][right] ==
+           impl::streaming_overlap_kind::ordered;
   }
 
   bool root_is_ready(const context &c, const graph_event &event,
@@ -1618,6 +1646,7 @@ public:
     std::vector<uint8_t> state;
   };
   std::vector<std::deque<join_entry>> joins;
+  std::vector<uint8_t> join_grew; // by streaming node: warned of growth once
   // Edge deliveries each record-ordered topology node has received since
   // its last completion; cleared with the session.
   std::vector<std::size_t> node_deliveries_seen;

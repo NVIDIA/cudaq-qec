@@ -849,16 +849,31 @@ void decoding_task_graph::impl::compile_wires() {
           streaming_reachability[si][descendant] |=
               streaming_reachability[dependent][descendant];
     }
-    streaming_overlap.assign(M, std::vector<uint8_t>(M, uint8_t{0}));
+    // Two branches meeting only at rendezvous descendants overlap as
+    // rendezvous; one shared descendant needing order makes them ordered. An
+    // indexed descendant does not relax order by itself: the executor orders
+    // a record-ordered sibling's deliveries against the shot's FINAL flush
+    // through it. A node always overlaps itself in order.
+    streaming_overlap.assign(M, std::vector<streaming_overlap_kind>(
+                                    M, streaming_overlap_kind::disjoint));
     for (std::size_t left = 0; left < M; ++left)
-      for (std::size_t right = left; right < M; ++right)
-        for (std::size_t descendant = 0; descendant < M; ++descendant)
-          if (streaming_reachability[left][descendant] &&
-              streaming_reachability[right][descendant]) {
-            streaming_overlap[left][right] = 1;
-            streaming_overlap[right][left] = 1;
-            break;
-          }
+      for (std::size_t right = left; right < M; ++right) {
+        auto kind = left == right ? streaming_overlap_kind::ordered
+                                  : streaming_overlap_kind::disjoint;
+        for (std::size_t descendant = 0;
+             descendant < M && kind != streaming_overlap_kind::ordered;
+             ++descendant) {
+          if (!streaming_reachability[left][descendant] ||
+              !streaming_reachability[right][descendant])
+            continue;
+          const auto &shared = streaming_nodes[descendant];
+          kind = shared.capability->supports_streaming_rendezvous()
+                     ? streaming_overlap_kind::rendezvous
+                     : streaming_overlap_kind::ordered;
+        }
+        streaming_overlap[left][right] = kind;
+        streaming_overlap[right][left] = kind;
+      } // end - for(right)
     if (M > 0)
       streaming_parallel_width = maximum_parallel_width(streaming_dependents);
     // A pooled node fires once per copy concurrently, so the pool needs that
@@ -1273,6 +1288,20 @@ void decoding_task_graph::impl::fail_streaming_progress(
     ++result.result_revision;
 }
 
+// The composed values read the nodes' latest corrections and the stagers'
+// frames, so both are zeroed with the values themselves.
+void decoding_task_graph::impl::hide_streaming_result(
+    const std::string &message) {
+  clear_latest_node_corrections();
+  for (auto &stager : output_stagers) {
+    std::fill(stager.bits.begin(), stager.bits.end(), uint8_t{0});
+    std::fill(stager.whole.begin(), stager.whole.end(), uint8_t{0});
+  }
+  auto &values = streaming_result_state.values;
+  std::fill(values.begin(), values.end(), uint8_t{0});
+  fail_streaming_progress(message);
+}
+
 void decoding_task_graph::impl::clear_latest_node_corrections() {
   for (auto &corrections : latest_node_corrections)
     std::fill(corrections.begin(), corrections.end(), uint8_t{0});
@@ -1483,7 +1512,6 @@ void decoding_task_graph::reset_decoder() {
   const in_flight_guard guard(impl_->in_flight, "reset_decoder");
   impl_->invalidate_async_stream_snapshot();
   impl_->finalized = false;
-  impl_->async_streaming.needs_reset = false;
   impl_->discard_records();
   const auto reset_node = [](task_graph_node &node) {
     if (auto *decoder_backed = node.decoder_backed())
@@ -1491,17 +1519,34 @@ void decoding_task_graph::reset_decoder() {
     else if (auto *streaming = node.streaming())
       streaming->reset_streaming_state();
   };
-  for (auto &node : impl_->nodes)
-    reset_node(*node);
-  for (auto &replicas : impl_->node_replicas)
-    for (auto &replica : replicas)
-      reset_node(*replica);
-  impl_->reset_streaming_progress();
-  if (impl_->async_streaming.enabled) {
+  const auto publish_snapshot = [&] {
+    if (!impl_->async_streaming.enabled)
+      return;
     std::lock_guard<std::mutex> lock(impl_->async_streaming.snapshot_mutex);
     impl_->async_streaming.read_snapshot = impl_->streaming_result_state;
+  };
+  // Before any node resets, the previous result is marked failed and zeroed,
+  // and a clean epoch opens only once every node has reset: a reset that
+  // throws part-way leaves the graph failed, with nothing stale readable,
+  // until a later one succeeds.
+  impl_->hide_streaming_result("reset_decoder: the reset did not complete");
+  impl_->async_streaming.needs_reset = true;
+  publish_snapshot();
+  try {
+    for (auto &node : impl_->nodes)
+      reset_node(*node);
+    for (auto &replicas : impl_->node_replicas)
+      for (auto &replica : replicas)
+        reset_node(*replica);
+  } catch (const std::exception &e) {
+    impl_->fail_streaming_progress(std::string("reset_decoder: ") + e.what());
+    publish_snapshot();
+    throw;
   }
-}
+  impl_->async_streaming.needs_reset = false;
+  impl_->reset_streaming_progress();
+  publish_snapshot();
+} // end - reset_decoder()
 
 std::size_t decoding_task_graph::get_num_msyn_per_decode() const {
   return impl_->n_msyn;

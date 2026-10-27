@@ -84,7 +84,8 @@ struct window_fire {
 /// that slot, and reset() may not run. A fire's sends are leased to the
 /// fires that receive them: its slot must not fire again until they have
 /// finished. The caller chooses the slots, so it knows which holds which
-/// window, and orders all of this, as the executor's queues will.
+/// window, and orders all of this. decode_window_node uses one slot; the
+/// executor runs copies of the node for concurrency.
 class decode_window_core {
 public:
   /// @param store The store holding every variant of @p request on

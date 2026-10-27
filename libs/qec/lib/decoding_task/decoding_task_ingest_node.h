@@ -105,6 +105,9 @@ public:
   std::optional<std::size_t> raw_chunk_limit() const override {
     return core_.record_limit();
   }
+  std::size_t max_publications_per_delivery() const override {
+    return core_.max_ready_per_record();
+  }
   bool supports_raw_streaming_input(std::size_t slot) const override {
     return slot == 0;
   }

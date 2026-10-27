@@ -81,6 +81,13 @@ public:
   /// their deltas in round order behind a frontier, and the output's
   /// coverage is [0, frontier).
   virtual bool exact_interval_coverage() const { return false; }
+  /// Opt-in: the node's inputs may arrive in any order. Sibling deliveries
+  /// into a branch that reaches it then need not wait for one another, as
+  /// they must when a shared descendant needs ordered delivery. Legal only
+  /// when each firing consumes one value per input slot on aligned
+  /// schedules, arrival order does not change the result, and retained
+  /// inputs own their data. Deliveries to the node stay serialised.
+  virtual bool supports_streaming_rendezvous() const { return false; }
   /// Accumulate one raw chunk.  `type` is FINAL only on the chunk that ends a
   /// FINAL round -- the last piece of it this node receives -- and BULK
   /// otherwise.  flush() follows a FINAL round either way, so a kind that
@@ -125,6 +132,11 @@ public:
       return std::nullopt;
     return streaming_schedule();
   }
+
+  /// The most publications one delivery or flush makes current, counting
+  /// the first; publish_next() hands over the rest. Join tables of the
+  /// node's indexed consumers are preallocated from it.
+  virtual std::size_t max_publications_per_delivery() const { return 1; }
 
   /// Room left in this node's accumulator: the most one enqueue() call can
   /// take.  nullopt for a kind that keeps none, which is handed whole chunks.

@@ -126,7 +126,11 @@ struct decoding_task_graph::impl {
   std::vector<std::vector<std::size_t>> streaming_producers;
   std::vector<int32_t> streaming_predecessor_counts;
   std::vector<std::vector<uint8_t>> streaming_reachability;
-  std::vector<std::vector<uint8_t>> streaming_overlap;
+  /// How two streaming nodes' branches meet: not at all; only at
+  /// rendezvous descendants, which take inputs in any order; or at one that
+  /// needs ordered delivery.
+  enum class streaming_overlap_kind : uint8_t { disjoint, rendezvous, ordered };
+  std::vector<std::vector<streaming_overlap_kind>> streaming_overlap;
   std::size_t streaming_parallel_width = 1;
 
   // Sizes cached by compile_wires() so the accessors do not have to nominate a
@@ -278,6 +282,9 @@ struct decoding_task_graph::impl {
   void consume_streaming_result();
   void reset_streaming_progress();
   void fail_streaming_progress(const std::string &message);
+  /// Zero every value the result is composed from and latch @p message, so
+  /// nothing of the previous shot stays readable.
+  void hide_streaming_result(const std::string &message);
   void compose_streaming_values() const;
   void clear_latest_node_corrections();
 

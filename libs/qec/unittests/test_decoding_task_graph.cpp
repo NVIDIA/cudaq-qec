@@ -12294,6 +12294,16 @@ public:
     return out;
   }
 
+  /// Make @p node's reset throw, or none's for an empty name.
+  void fail_reset(std::string node) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    failing_reset_ = std::move(node);
+  }
+  bool reset_fails(const std::string &node) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return node == failing_reset_;
+  }
+
   void record_pair(uint8_t a, uint8_t b) {
     std::lock_guard<std::mutex> lock(mutex_);
     pairs_.emplace_back(a, b);
@@ -12328,6 +12338,7 @@ private:
   std::atomic<std::size_t> pool_in_flight_{0};
   std::atomic<std::size_t> pool_high_water_{0};
   std::string blocked_node_;
+  std::string failing_reset_;
   std::size_t blocked_record_ = std::numeric_limits<std::size_t>::max();
   bool blocking_ = false;
   bool released_ = false;
@@ -12367,7 +12378,9 @@ public:
     const uint8_t bit = value.get<logical_outcome>().bits[0];
     if (mode_ == "skip" && (skipped_++ % 2) == 0)
       return false; // publishes on every other record only
-    if (mode_ == "join") {
+    if (joins()) {
+      // Each input's arrival, logged apart from the node's fires.
+      probe_->log(id_ + "." + inputs()[slot], records_);
       pending_[slot] = bit;
       if (++received_ < 2)
         return false;
@@ -12397,6 +12410,8 @@ public:
   const uint8_t *corrections() const override { return &correction_; }
   void clear_corrections() override { correction_ = 0; }
   void reset_streaming_state() override {
+    if (probe_->reset_fails(id_))
+      throw std::runtime_error("probe node " + id_ + " failed to reset");
     correction_ = 0;
     valid_ = false;
     received_ = 0;
@@ -12415,7 +12430,7 @@ public:
     return mode_ == "source" && slot == 0;
   }
   bool supports_streaming_input(std::size_t slot) const override {
-    return mode_ != "source" && slot < (mode_ == "join" ? 2u : 1u);
+    return mode_ != "source" && slot < (joins() ? 2u : 1u);
   }
   std::optional<window_spec> derive_streaming_schedule(
       std::size_t output_slot,
@@ -12450,10 +12465,15 @@ public:
     outputs[0] = mode_ == "source" ? value_out_ : inputs[0];
   }
   std::vector<std::string> inputs() const override {
-    return mode_ == "join" ? std::vector<std::string>{"a", "b"}
-                           : std::vector<std::string>{"input"};
+    return joins() ? std::vector<std::string>{"a", "b"}
+                   : std::vector<std::string>{"input"};
   }
   std::vector<std::string> outputs() const override { return {"output"}; }
+  bool supports_streaming_rendezvous() const override {
+    return mode_ == "rendezvous";
+  }
+  // `rendezvous` joins as `join` does, opting in to any arrival order.
+  bool joins() const { return mode_ == "join" || mode_ == "rendezvous"; }
 
 private:
   std::string id_;
@@ -13389,6 +13409,149 @@ TEST(DecodingTaskGraph, FirePoolRejectsStatefulKindsAndBuiltDecoders) {
                    {}),
                std::invalid_argument);
 }
+
+// ---------------------------------------------------------------------------
+// Reset failure
+// ---------------------------------------------------------------------------
+
+// A reset that throws part-way leaves the result failed, its values zero,
+// and the graph refusing input, until a later reset succeeds: no stale value
+// is readable, synchronously or asynchronously.
+TEST(DecodingTaskGraph, FailedResetHidesTheResultUntilAResetSucceeds) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(pipeline_node("P", "pass"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "P", "input"},
+         {"P", "output", "output", "input"}},
+        {.async_streaming = async});
+    const uint8_t one = 1;
+    graph->enqueue_syndrome(&one, 1, round_type::FINAL);
+    ASSERT_EQ(graph->streaming_result().values.at(0), 1);
+    probe->fail_reset("P");
+    EXPECT_THROW(graph->reset_decoder(), std::runtime_error);
+    const auto failed = graph->streaming_result();
+    EXPECT_EQ(failed.status, task_graph_streaming_status::failed);
+    EXPECT_EQ(failed.values.at(0), 0) << "a stale value is readable";
+    EXPECT_NE(failed.error.find("probe node P failed to reset"),
+              std::string::npos)
+        << failed.error;
+    EXPECT_ANY_THROW(graph->enqueue_syndrome(&one, 1, round_type::FINAL));
+    probe->fail_reset("");
+    graph->reset_decoder();
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::pending);
+    graph->enqueue_syndrome(&one, 1, round_type::FINAL);
+    EXPECT_EQ(graph->streaming_result().values.at(0), 1);
+  }
+} // end - TEST(DecodingTaskGraph, FailedResetHidesTheResultUntilAResetSucceeds)
+
+// ---------------------------------------------------------------------------
+// Rendezvous joins
+// ---------------------------------------------------------------------------
+
+// measurements -> A -> P -> J.a and A -> J.b, where J joins in @p mode and
+// P relays in @p p_mode, holding records carrying `hold_bit` for `hold_ms`.
+// With @p other, a second joiner R in that mode reads P and A the same way
+// and feeds its own output.
+static std::unique_ptr<decoding_task_graph>
+make_rendezvous_graph(const std::shared_ptr<pipeline_probe> &probe,
+                      const std::string &mode, const std::string &p_mode,
+                      const std::string &other = {}, std::size_t hold_ms = 0,
+                      int hold_bit = -1) {
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(pipeline_node("P", p_mode, hold_ms, hold_bit));
+  nodes.push_back(pipeline_node("J", mode));
+  std::vector<task_graph_edge> edges{{"measurements", "output", "A", "input"},
+                                     {"A", "output", "P", "input"},
+                                     {"P", "output", "J", "a"},
+                                     {"A", "output", "J", "b"},
+                                     {"J", "output", "output", "joined"}};
+  if (!other.empty()) {
+    nodes.push_back(pipeline_node("R", other));
+    edges.push_back({"P", "output", "R", "a"});
+    edges.push_back({"A", "output", "R", "b"});
+    edges.push_back({"R", "output", "output", "other"});
+  }
+  // The graph is one chain, so it would get one worker; a second lets a
+  // delivery run while P blocks.
+  return decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
+                                            {.async_streaming = true,
+                                             .async_queue_capacity = 8,
+                                             .async_num_workers = 2});
+}
+
+// A rendezvous consumer takes its direct input while its other input's
+// producer is still running: A's delivery to J.b does not wait behind its
+// delivery to P.
+TEST(DecodingTaskGraph, RendezvousTakesADirectInputBesideItsAncestor) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_rendezvous_graph(probe, "rendezvous", "pass");
+  const uint8_t one = 1, zero = 0;
+  probe->block_on("P", 0);
+  // A BULK record returns once queued; a FINAL one waits for the shot.
+  graph->enqueue_syndrome(&one, 1, round_type::BULK);
+  ASSERT_TRUE(probe->wait_until_blocking());
+  EXPECT_TRUE(probe->wait_for_count("J.b", 1))
+      << "J.b waited for P, an ancestor of its other input";
+  EXPECT_EQ(probe->count("J.a"), 0u);
+  probe->release();
+  graph->enqueue_syndrome(&zero, 1, round_type::FINAL);
+  EXPECT_EQ(graph->streaming_result().values.at(0), 0); // 1 ^ 1, then 0 ^ 0
+  EXPECT_EQ(probe->count("J"), 2u);
+}
+
+// A shared descendant that has not opted in stays ordered, even beside one
+// that has: J.b waits for P while R.b does not.
+TEST(DecodingTaskGraph, RendezvousLeavesOtherDescendantsOrdered) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_rendezvous_graph(probe, "join", "pass", "rendezvous");
+  const uint8_t one = 1, zero = 0;
+  probe->block_on("P", 0);
+  graph->enqueue_syndrome(&one, 1, round_type::BULK);
+  ASSERT_TRUE(probe->wait_until_blocking());
+  EXPECT_TRUE(probe->wait_for_count("R.b", 1));
+  EXPECT_EQ(probe->count("J.b"), 0u) << "J.b ran before P, which J needs";
+  probe->release();
+  graph->enqueue_syndrome(&zero, 1, round_type::FINAL);
+  EXPECT_EQ(probe->count("J.b"), 2u);
+  EXPECT_EQ(probe->count("R.b"), 2u);
+}
+
+// A rendezvous consumer keeps each publication's values together across many
+// records, with a relay slowed on some of them, and across a reset: every
+// pair J sees is (v ^ 1, v) for one record's v.
+TEST(DecodingTaskGraph, RendezvousKeepsEachRecordsInputsTogether) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph =
+      make_rendezvous_graph(probe, "rendezvous", "invert", {}, 2, /*bit=*/1);
+  const auto records = pipeline_records(24);
+  for (int shot = 0; shot < 2; ++shot) {
+    SCOPED_TRACE("shot " + std::to_string(shot));
+    graph->reset_decoder();
+    for (std::size_t i = 0; i < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1,
+                              i + 1 == records.size() ? round_type::FINAL
+                                                      : round_type::BULK);
+    graph->streaming_result();
+    const auto pairs = probe->pairs();
+    ASSERT_EQ(pairs.size(), records.size() * (shot + 1));
+    for (std::size_t i = records.size() * shot; i < pairs.size(); ++i)
+      EXPECT_EQ(pairs[i].first, pairs[i].second ^ 1) << "pair " << i;
+  }
+} // end - TEST(DecodingTaskGraph, RendezvousKeepsEachRecordsInputsTogether)
 
 // ---------------------------------------------------------------------------
 // Indexed joins
