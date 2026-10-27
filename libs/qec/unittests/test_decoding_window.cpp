@@ -1438,7 +1438,8 @@ TEST(WindowVariants, CountMatchesTheLayout) {
   }
 }
 
-// Windows with equal keys are the same problem up to a shift of rounds.
+// Windows with equal keys are the same problem up to a shift of rounds. A
+// key from bounds found once is the key window_variant() finds.
 TEST(WindowVariants, EqualKeysBuildTheSameWindow) {
   for (const auto &spec : {rep5_spec(), arbitrary_memory_spec(5, true),
                            multi_terminal_memory_spec(5, 3),
@@ -1446,12 +1447,15 @@ TEST(WindowVariants, EqualKeysBuildTheSameWindow) {
     const auto tmpl = std::make_shared<const experiment_template>(spec);
     for (const auto &request : sweep_requests()) {
       std::map<variant_key, decoding_window> first;
+      const auto bounds = variant_bounds_of(*tmpl, request);
       const auto end = variant_probe_rounds(*tmpl, request) + 2 * 12;
       for (auto R = tmpl->min_rounds(); R < end; ++R) {
         const auto instances = window_instances(request, R);
         for (auto k = instances.begin; k < instances.end; ++k) {
           const auto key = window_variant(*tmpl, request, k, R);
           auto w = window_from_dem_chunks(tmpl, request, k, R);
+          EXPECT_TRUE(window_variant(bounds, request, k, R) == key)
+              << "R=" << R << " k=" << k;
           const auto [it, inserted] = first.emplace(key, w);
           if (!inserted)
             EXPECT_NO_THROW(check_same_window_up_to_shift(it->second, w))
@@ -4795,6 +4799,8 @@ TEST(DataArtifactStore, StimDemsAreKeyedByTheirText) {
 // Every variant of a request is built once, at the first shot length that
 // has it, and equal requests from other nodes reuse it. Lookups never build:
 // a variant, request or template the store did not build is a logic error.
+// A lookup by the template's sha256 finds what a lookup by the template
+// does.
 TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
   data_artifact_store store;
   data_artifact_store other;
@@ -4802,6 +4808,7 @@ TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
   const auto request = layered(2, 2, 3).a;
   std::set<variant_key> keys;
   store.add_windows(tmpl, request);
+  const auto digest = store.template_sha256(*tmpl);
   const auto added = store.records().size();
   store.add_windows(tmpl, window_request(request));
   EXPECT_EQ(store.records().size(), added);
@@ -4814,6 +4821,7 @@ TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
       keys.insert(key);
       ASSERT_NE(w, nullptr);
       EXPECT_EQ(store.find_window(*tmpl, request, key), w);
+      EXPECT_EQ(store.find_window(digest, request, key), w);
       EXPECT_NO_THROW(check_same_window_up_to_shift(
           *w, window_from_dem_chunks(tmpl, request, k, R)));
     }
@@ -4826,6 +4834,9 @@ TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
       "was not built at configuration time");
   expect_logic_error(
       [&] { store.find_window(*tmpl, request, variant_key{999, 999}); },
+      "was not built at configuration time");
+  expect_logic_error(
+      [&] { store.find_window(std::string(64, '0'), request, *keys.begin()); },
       "was not built at configuration time");
 } // end - TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild)
 

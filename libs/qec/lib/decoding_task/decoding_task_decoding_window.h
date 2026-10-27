@@ -20,6 +20,7 @@
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/sparse_binary_matrix.h"
 #include "cudaq/qec/window_request.h"
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -160,6 +161,15 @@ struct decoding_window {
 /// @p request must have a commit zone; check_window_request() checks that.
 round_range zone_span(const window_request &request);
 
+/// The rounds of @p zone, relative to a window's anchor, for the window
+/// anchored at @p anchor, clipped to [0, @p end): the shot's rounds, or
+/// those known so far. Every place a window's rounds are found clips so.
+inline round_range clip_rounds(round_range zone, std::int64_t anchor,
+                               std::int64_t end) {
+  return {std::max<std::int64_t>(0, anchor + zone.begin),
+          std::min(end, anchor + zone.end)};
+}
+
 /// The rounds the model of a window of @p request reads, relative to its
 /// anchor: from the round before its first, whose measurements give v_in,
 /// to the end of the chunks it stitches. A window whose reach meets the
@@ -217,6 +227,25 @@ struct variant_key {
 
 /// The variant key of window @p k of @p request in a @p num_rounds shot.
 variant_key window_variant(const experiment_template &context,
+                           const window_request &request, std::int64_t k,
+                           std::size_t num_rounds);
+
+/// What window_variant() reads of a layer and its template, found once by
+/// variant_bounds_of() for a caller that asks per window.
+struct variant_bounds {
+  round_range reach;              ///< model_reach() of the request
+  std::int64_t prefix_rounds = 0; ///< The template's prefix rounds
+  std::int64_t end_rounds = 0;    ///< Rounds kept from the shot's end
+};
+
+/// @p request's variant bounds on @p context.
+/// @throws std::invalid_argument if the request's anchor is invalid.
+variant_bounds variant_bounds_of(const experiment_template &context,
+                                 const window_request &request);
+
+/// window_variant() from @p bounds, those of @p request. Allocates
+/// nothing and does not check the request.
+variant_key window_variant(const variant_bounds &bounds,
                            const window_request &request, std::int64_t k,
                            std::size_t num_rounds);
 

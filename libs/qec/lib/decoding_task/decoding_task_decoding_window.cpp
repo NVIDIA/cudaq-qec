@@ -596,10 +596,7 @@ decoding_window place_window(std::shared_ptr<const experiment_template> context,
   const auto &t = *context;
   const auto R = static_cast<std::int64_t>(num_rounds);
   const auto anchor = request.offset + k * request.period;
-  const auto clip = [&](round_range z) {
-    return round_range{std::max<std::int64_t>(0, anchor + z.begin),
-                       std::min<std::int64_t>(R, anchor + z.end)};
-  };
+  const auto clip = [&](round_range z) { return clip_rounds(z, anchor, R); };
   check_request(request);
   t.row_offset(num_rounds, num_rounds); // throws unless the spec admits R
   const auto relative_end = sorted_zones(request).back().end;
@@ -839,14 +836,30 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
 variant_key window_variant(const experiment_template &context,
                            const window_request &request, std::int64_t k,
                            std::size_t num_rounds) {
-  variant_key key;
+  return window_variant(variant_bounds_of(context, request), request, k,
+                        num_rounds);
+}
+
+// The checks and model_reach() run here, once per layer.
+variant_bounds variant_bounds_of(const experiment_template &context,
+                                 const window_request &request) {
   check_anchor(request);
-  const auto reach = model_reach(context, request);
+  return {model_reach(context, request),
+          static_cast<std::int64_t>(context.prefix_rounds()),
+          end_rounds(context)};
+}
+
+// A window whose reach meets the prefix is a prefix variant, and one whose
+// reach meets the rounds kept from the end is a terminal one.
+variant_key window_variant(const variant_bounds &bounds,
+                           const window_request &request, std::int64_t k,
+                           std::size_t num_rounds) {
+  variant_key key;
   const auto R = static_cast<std::int64_t>(num_rounds);
   const auto anchor = request.offset + k * request.period;
-  if (anchor + reach.begin < static_cast<std::int64_t>(context.prefix_rounds()))
+  if (anchor + bounds.reach.begin < bounds.prefix_rounds)
     key.position = k;
-  if (anchor + reach.end > R - end_rounds(context))
+  if (anchor + bounds.reach.end > R - bounds.end_rounds)
     key.terminal = R - anchor;
   return key;
 }

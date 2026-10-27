@@ -13,6 +13,7 @@
 #include "decoding_task_decode_window_core.h"
 #include "cudaq/qec/decoding_task_graph.h"
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace cudaq::qec {
@@ -40,8 +41,11 @@ decode_window_core::decode_window_core(
     auto &v = variants_.emplace_back();
     v.key = key;
     v.window = window;
-    for (std::size_t s = 0; s < (key.bulk() ? slots : 1); ++s)
+    for (std::size_t s = 0; s < (key.bulk() ? slots : 1); ++s) {
       v.decoders.push_back(make_window_decoder(*window, decoder_name, params));
+      v.workspaces.push_back(make_window_workspace(*window));
+      v.detectors.emplace_back(window->model.h.num_rows(), 0);
+    }
     if (window->sends.size() != request_.sends.size() ||
         !std::equal(window->sends.begin(), window->sends.end(),
                     request_.sends.begin(),
@@ -59,16 +63,9 @@ decode_window_core::decode_window_core(
                         [](const variant &v) { return v.key.bulk(); });
   covered_.assign(slots, std::vector<std::uint8_t>(imported, 0));
   decoding_ = std::make_unique<claim_flag[]>(variants_.size());
-  workspaces_.resize(slots);
-  detectors_.resize(slots);
   fires_.resize(slots);
-  for (std::size_t s = 0; s < slots; ++s) {
-    for (const auto &v : variants_) {
-      workspaces_[s].push_back(make_window_workspace(*v.window));
-      detectors_[s].emplace_back(v.window->model.h.num_rows(), 0);
-    }
-    fires_[s].fire.sends.resize(request_.sends.size());
-  }
+  for (auto &f : fires_)
+    f.fire.sends.resize(request_.sends.size());
 } // end - decode_window_core()
 
 // A send's row i lies at its window's first row plus the send's row, so it
@@ -103,11 +100,11 @@ decode_window_core::fire(std::size_t slot, const window_rows &window,
     fail("window " + std::to_string(window.k) +
          "'s variant is none of this layer's");
   const auto anchor = request_.offset + window.k * request_.period;
-  const round_range rounds{
-      std::max<std::int64_t>(0, anchor + span_.begin),
-      window.variant.terminal
-          ? std::min(anchor + span_.end, anchor + *window.variant.terminal)
-          : anchor + span_.end};
+  // A terminal variant ends the shot; any other ends past its span.
+  const auto rounds = clip_rounds(
+      span_, anchor,
+      window.variant.terminal ? anchor + *window.variant.terminal
+                              : std::numeric_limits<std::int64_t>::max());
   if (window.variant.position && *window.variant.position != window.k)
     fail("window " + std::to_string(window.k) + " carries window " +
          std::to_string(*window.variant.position) + "'s variant");
@@ -122,12 +119,14 @@ decode_window_core::fire(std::size_t slot, const window_rows &window,
          std::to_string(window.rounds.end) + "), not this layer's window " +
          std::to_string(window.k) + "'s [" + std::to_string(rounds.begin) +
          ", " + std::to_string(rounds.end) + ")");
-  const auto &w = *variants_[v].window;
-  auto &d = detectors_[slot][v];
-  auto &ws = workspaces_[slot][v];
+  auto &variant = variants_[v];
+  // The bulk's buffers are this slot's; another variant has one set.
+  const auto set = variant.key.bulk() ? slot : 0;
+  const auto &w = *variant.window;
+  auto &d = variant.detectors[set];
+  auto &ws = variant.workspaces[set];
   auto &out = fires_[slot].fire;
   auto &covered = covered_[slot];
-  const auto &decoders = variants_[v].decoders;
   const auto own = w.num_own_rows;
   const auto all = d.size();
   // The receiving row of row i of send r, or all when it lies before this
@@ -198,7 +197,7 @@ decode_window_core::fire(std::size_t slot, const window_rows &window,
         d[target(*r, i)] = r->values[i] & 1;
   }
 
-  solve_window(w, decoders[decoders.size() > 1 ? slot : 0].get(), d, ws);
+  solve_window(w, variant.decoders[set].get(), d, ws);
   if (verify_ == verify_residual_mode::fail && !ws.solution.satisfied) {
     while (ws.explained[missed] == (d[missed] & 1))
       ++missed;

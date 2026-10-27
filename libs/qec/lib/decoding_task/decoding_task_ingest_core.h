@@ -241,6 +241,7 @@ private:
   std::vector<std::int64_t> first_k_;
   std::vector<index_range> final_instances_; ///< Once FINAL fixes them
   std::vector<round_range> spans_;
+  std::vector<variant_bounds> bounds_; ///< What a window's variant reads
 
   // Raw rounds: the round being cut and those before it whose detectors are
   // not yet formed, with the one before them, whose measurements are v_in.

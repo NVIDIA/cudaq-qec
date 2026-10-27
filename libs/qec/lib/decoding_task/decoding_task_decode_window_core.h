@@ -62,7 +62,10 @@ inline window_send_value receive_of(const window_send_payload &payload) {
   return {payload.values, payload.send, payload.first_row};
 }
 
-/// One fire's results, held in its slot until the slot fires again.
+/// One fire's results, held in its slot until the slot fires again. A
+/// prefix or terminal variant's detectors, solution and sends lie in its
+/// one set of buffers, so they hold until that variant fires again, in
+/// any slot.
 struct window_fire {
   std::int64_t k = 0;
   bool fired = false;   ///< False until the slot first fires
@@ -79,9 +82,10 @@ struct window_fire {
 };
 
 /// Fires one layer's windows. Fires into different slots may run at once,
-/// each on its own thread: each slot has its own buffers and bulk decoder,
+/// each on its own thread: each slot has its own bulk decoder and buffers,
 /// and a prefix or terminal variant, which only one window of a shot uses,
-/// has a single decoder, so a window fires into one slot at a time: a fire
+/// has a single decoder and buffers, so it fires into one slot at a time: a
+/// fire
 /// of a prefix or terminal variant while another decodes is rejected. While
 /// a slot fires, held() may read other slots, but nothing may read or fire
 /// that slot, and reset() may not run. A fire's sends are leased to the
@@ -155,12 +159,15 @@ public:
   std::size_t max_send_rows(std::size_t s) const;
 
 private:
-  /// One variant's model and its decoders: one per slot for the bulk, else
-  /// one.
+  /// One variant's model, and its decoders with a workspace and detector
+  /// buffer each: one per slot for the bulk, else one, as a prefix or
+  /// terminal variant fires in one slot at a time.
   struct variant {
     variant_key key;
     std::shared_ptr<const decoding_window> window;
     std::vector<std::unique_ptr<decoder>> decoders;
+    std::vector<window_workspace> workspaces;
+    std::vector<std::vector<std::uint8_t>> detectors;
   };
 
   /// Throws std::invalid_argument for @p what.
@@ -175,9 +182,6 @@ private:
   verify_residual_mode verify_ = verify_residual_mode::none;
   round_range span_; ///< The rounds a window spans, from its anchor
   std::vector<variant> variants_;
-  // Per slot, a workspace and a detector buffer for every variant.
-  std::vector<std::vector<window_workspace>> workspaces_;
-  std::vector<std::vector<std::vector<std::uint8_t>>> detectors_;
   /// One slot's fire, on cache lines of its own: copies fire into
   /// neighbouring slots at once.
   struct alignas(64) slot_fire {

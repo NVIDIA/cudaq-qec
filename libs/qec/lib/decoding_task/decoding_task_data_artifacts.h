@@ -84,6 +84,13 @@ public:
   std::shared_ptr<const decoding_window>
   find_window(const experiment_template &context, const window_request &request,
               const variant_key &key) const;
+  /// As above, on the template recorded under @p template_digest, as
+  /// template_sha256() gives it, so a caller looking up many variants
+  /// hashes the template once.
+  /// @throws std::logic_error if it was not built at configuration time.
+  std::shared_ptr<const decoding_window>
+  find_window(const std::string &template_digest, const window_request &request,
+              const variant_key &key) const;
 
   /// Every window variant of @p request on the template with @p context's
   /// content, with its key, in the order variant_instances() lists them,
@@ -123,6 +130,10 @@ private:
   /// @throws std::logic_error naming @p what if it holds no such template.
   std::string template_hash(const dem_chunks_spec &spec,
                             const std::string &what) const;
+  /// window_sha256() on the template recorded under @p template_digest.
+  std::string window_hash(const std::string &template_digest,
+                          const window_request &request,
+                          const variant_key &key) const;
 
   std::map<std::string, template_entry> templates_;
   /// The sha256 of each Stim DEM held. A Stim DEM's bytes are its text, so a
