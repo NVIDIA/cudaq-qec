@@ -290,6 +290,9 @@ make_configuration(const dem_chunks_spec &model,
     node.inner_type = options.decoder;
     node.decoder_custom_args = inner;
     node.node_params = parameters;
+    // Each A/B layer may use the whole pool during its burst. The layers
+    // share workers, but each needs its own node copies to overlap windows.
+    node.max_in_flight = options.workers_per_graph.value_or(1);
     graph.edges = {{"measurements", "output", node_name, "input"},
                    {node_name, "output", "output", "input"}};
   }
@@ -338,10 +341,12 @@ void validate_configuration(const config::multi_decoder_config &value,
                 node.H_sparse.empty() && node.D_sparse.empty() &&
                 node.O_sparse.empty() && node.stim_dem.empty() &&
                 node.block_size == 0 && node.syndrome_size == 0 &&
-                node.stim_dem_path.empty() && !node.ensemble &&
-                node.partition_label.empty() &&
+                node.stim_dem_path.empty() && node.stim_dem_artifact.empty() &&
+                !node.ensemble && node.partition_label.empty() &&
                 node.partition_columns.empty() && node.windows.empty(),
             "unexpected parallel-window node or model override");
+    require(node.max_in_flight == workers_per_graph.value_or(1),
+            "layer capacity must match the configured worker pool");
     config::validate_custom_args(parallel_window_schema(),
                                  node.node_params.map(),
                                  "parallel-window configuration");

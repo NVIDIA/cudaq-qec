@@ -25,6 +25,7 @@ struct server_config_options {
   std::vector<std::string> pattern_args;
   /// Pool workers per independent graph, excluding its coordinator. Unset
   /// leaves execution policy to the framework; this is not a shared budget.
+  /// Sets the node's max_in_flight to the same count for each A/B layer.
   std::optional<std::uint64_t> workers_per_graph;
 };
 

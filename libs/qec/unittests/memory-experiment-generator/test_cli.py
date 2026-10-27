@@ -600,6 +600,8 @@ class GeneratorCliTest(unittest.TestCase):
             result.stdout)
         document = yaml.safe_load((working / OUTPUT_FILENAME).read_text())
         self.assert_server(document, patches=3)
+        for decoder in document["decoders"]:
+            self.assertNotIn("max_in_flight", decoder["task_graph"]["nodes"][0])
 
     def test_workers_per_graph_apply_to_every_patch_not_inner_decoders(self):
         for workers in (1, 4):
@@ -620,6 +622,7 @@ class GeneratorCliTest(unittest.TestCase):
                 self.assert_server(document, patches=3, workers=workers)
                 for decoder in document["decoders"]:
                     node = decoder["task_graph"]["nodes"][0]
+                    self.assertEqual(node.get("max_in_flight", 1), workers)
                     self.assertNotIn("workers_per_graph", node)
                     self.assertNotIn("async_num_workers", node)
                     self.assertEqual(node["inner"]["type"], "single_error_lut")

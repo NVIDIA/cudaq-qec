@@ -380,11 +380,14 @@ TEST(MemoryExperimentServerConfig,
         {node.id, "output", "output", "input"}};
     EXPECT_EQ(decoder.task_graph->edges, edges);
     EXPECT_EQ(node.node_params.map().get<std::string>("output"), "corrections");
+    EXPECT_EQ(node.max_in_flight, 1);
+    EXPECT_FALSE(node.node_params.map().contains("max_in_flight"));
   }
 }
 
-TEST(MemoryExperimentServerConfig,
-     WorkersPerGraphRoundtripWithoutChangingDecoderOrAffinity) {
+TEST(
+    MemoryExperimentServerConfig,
+    WorkersPerGraphAlsoConfigureLayerCapacityWithoutChangingDecoderOrAffinity) {
   const preparation_request request{
       {"surface_code", 3, 26, 1, memory_basis::z}};
   const auto model = prepare_model(request);
@@ -396,12 +399,15 @@ TEST(MemoryExperimentServerConfig,
     options.workers_per_graph = workers;
     const auto yaml = emit_server_config(model, options, 3);
     const auto value = config::multi_decoder_config::from_yaml_str(yaml);
+    auto expected_nodes = baseline.decoders.front().task_graph->nodes;
+    expected_nodes.front().max_in_flight = workers;
     ASSERT_EQ(value.decoders.size(), 3);
     for (const auto &decoder : value.decoders) {
       ASSERT_TRUE(decoder.task_graph);
       expect_worker_policy(decoder.task_graph->options, workers);
-      EXPECT_EQ(decoder.task_graph->nodes,
-                baseline.decoders.front().task_graph->nodes);
+      EXPECT_EQ(decoder.task_graph->nodes, expected_nodes);
+      EXPECT_FALSE(decoder.task_graph->nodes.front().node_params.map().contains(
+          "max_in_flight"));
       EXPECT_EQ(decoder.task_graph->edges,
                 baseline.decoders.front().task_graph->edges);
     }

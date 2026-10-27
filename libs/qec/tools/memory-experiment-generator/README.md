@@ -3,11 +3,10 @@
 This public tool prepares a bounded Surface Code model and writes one
 YAML file containing the framework's public `parallel_window`
 configuration. Experiment, decoder and pattern parameters are command-line
-inputs. The supported scope is finite-length Surface Code experiments;
-execution requires the pending parallel-window runtime.
-The framework owns A/B construction, fault ownership, routing and scheduling;
-the tool does not implement a second scheduler or substitute a global or
-sliding-window algorithm.
+inputs. The supported scope is Surface Code memory experiments with a requested
+finite horizon. Executable pattern support and its remaining executor
+integration are tracked in [PR #880](https://github.com/NVIDIA/cudaq-qec/pull/880).
+The framework owns A/B construction, fault ownership, routing and scheduling.
 
 A QEC build providing the public parallel-window configuration, named model
 artifacts and terminal-readout metadata is required. The generator uses those
@@ -29,8 +28,7 @@ This is the distance-three reference. A/B commit and buffer widths
 default to distance, so the emitted pattern contains `commit_rounds: 3`
 and `buffer_rounds: 3`. The gap is omitted unless explicitly supplied,
 leaving its rule to the framework. The public pattern documents that rule as
-`commit_rounds + 2 * buffer_rounds`, giving 9 for this profile. Executing this
-configuration requires the parallel-window runtime expansion.
+`commit_rounds + 2 * buffer_rounds`, giving 9 for this profile.
 
 For a longer experiment with two independent patches:
 
@@ -45,16 +43,32 @@ no merge policy is supplied. This handles parallel boundary edges in A windows
 without changing PyMatching's own decoder defaults. An explicit
 `--decoder-arg=merge_strategy=...` is preserved, including `independent` or
 `disallow`; the selected policy still has to support the concrete window model.
-Window-level tests do not establish the accuracy or performance of the complete
-decoding graph.
 
 To request four pool workers for each of those two patch graphs, add
 `--workers-per-graph=4`. The generated configuration sets `async_streaming: true`
-and the framework's per-graph `async_num_workers` count to four. The command
-reports eight configured workers in total, excluding the additional coordinator
-thread for each graph.
-This is a per-graph setting, not a shared process-wide core budget or CPU
-reservation. The framework must support the worker-pool runtime to execute it.
+and the framework's per-graph `async_num_workers` count to four. It also sets the
+pattern node's `max_in_flight` field to four, which applies to both A and B layers.
+With no worker option, the pool policy remains framework-selected and the node
+retains its default capacity of one.
+
+`max_in_flight` bounds how many windows in each layer may decode concurrently;
+`async_num_workers` bounds pool work across the graph. Dependencies and available
+work can further limit concurrency. Under the node-copy execution model, the
+N-per-layer default permits 2N decode-window node copies sharing N workers;
+they cannot all run together. For N > 1, a runtime warning about that
+oversubscription is expected. Each copy can own variant-specific decoders and
+buffers, so increasing the layer capacity also increases memory use; it does not
+add workers.
+
+The command reports eight configured workers for two four-worker graphs,
+excluding the additional coordinator thread for each graph. This is a per-graph
+setting, not a shared process-wide core budget or CPU reservation.
+
+Start with the synchronous default for inexpensive windows, such as small-distance
+PyMatching: worker handoff overhead can outweigh the decoding work. Workers can
+help when windows are more expensive or have variable decoding times. Measure the
+chosen decoder, distance and arrival workload rather than assuming more workers
+are faster.
 
 These examples are separate configurations. Retain or move an existing
 configuration before generating another; the tool never replaces it.
@@ -86,7 +100,7 @@ not needed. The destination parent must exist. Existing files, directories and
 symlinks are never overwritten. Model and exact YAML round-trip validation
 finish before the output is created exclusively. Concurrent generators cannot
 overwrite each other's result. A detected write or close failure removes the
-file created by that invocation. No hard-link support is required.
+file created by that invocation.
 New files use standard permissions (`0666` restricted by the deployment's
 umask); the tool does not change the process umask. Wait for successful
 completion before reading or passing the file to the server: a reader may
@@ -102,7 +116,7 @@ Arguments use `--name=value` form; there is no JSON or YAML input format.
 |---|---|
 | `--code` | `surface_code`; other code families are not currently supported |
 | `--distance` | Required odd Surface Code distance, at least 3 |
-| `--rounds` | Required finite extraction-cycle count, at least 4, excluding terminal data readout |
+| `--rounds` | Required extraction-cycle horizon T, at least 4, excluding terminal data readout; records `num_rounds: T+1` |
 | `--basis` | Required `X` or `Z` preparation/readout basis |
 | `--logical-qubits` | Independent patches sharing one model; default 1 |
 | `--error-rate` | CNOT two-qubit depolarization probability; default 0.001, strictly between 0 and 1 |
@@ -112,8 +126,17 @@ Arguments use `--name=value` form; there is no JSON or YAML input format.
 | `--gap-rounds` | Optional positive B-layer gap override; omitted otherwise |
 | `--decoder-arg` | Repeatable `PATH=VALUE`, typed by the registered decoder schema |
 | `--pattern-arg` | Repeatable `PATH=VALUE`, typed by the registered `parallel_window` schema |
-| `--workers-per-graph` | Optional positive pool-worker count for each patch's graph; excludes its coordinator |
+| `--workers-per-graph` | Optional positive pool-worker count per patch; also sets the same per-layer window capacity; excludes the coordinator |
 | `--output` | Required YAML destination; parent must exist; existing entries are never replaced |
+
+`--rounds=T` records the requested horizon as `dem_chunks.num_rounds=T+1`,
+including the terminal readout layer. It is not the characterization depth:
+the tool establishes the repeating phase recipe using bounded circuits whose
+internal depths are independent of T. The parallel-window ingest contract uses
+FINAL to discover each shot's actual length and accepts valid lengths at or
+above the repeating model's minimum, rather than requiring the recorded horizon.
+For these Surface Code models the minimum is four extraction cycles plus readout.
+Executing that contract requires the pattern runtime described above.
 
 Window geometry belongs to the A/B scheduling scheme, not to an individual
 decoder's parameters. Every `parallel_window` configuration requires commit
@@ -156,29 +179,12 @@ use `--pattern-arg=input_boundary=truncate` without `boundary_prior`; truncation
 keeps the crossing faults' own priors, so combining those options is rejected.
 Boolean column options use `true` or `false`, for example
 `--pattern-arg=merge_identical=false`. Unknown names, duplicate arguments and
-invalid combinations fail before model preparation. New parameters using
-existing schema types need no generator key-list change; semantic/default
-changes still need validation and may require adaptation.
+invalid combinations fail before model preparation.
 
 The same configuration structure is used for each decoder; its name and
-schema-typed parameters differ. Configuration emission does not qualify a
-decoder's fault-output capability, A/B accuracy or parallel execution.
-The CLI does not construct inner decoders against the actual A/B window models.
-That validation must use the framework's authoritative pattern lowering when
-available, requesting fault-column outputs and checking the concrete model and
-parameters. Component tests use the framework's window construction and decode
-helpers; they do not execute the generated pattern. A tiny or whole-shot model
-is not a substitute for those windows. Parameter validation uses registered
-decoder schemas, not a backend-name whitelist. PyMatching has the one
-profile-specific merge-policy default described above.
-When a worker count is supplied, every independent patch receives that same
-per-graph count. The total is checked for overflow before model preparation and
-reported explicitly; no allocation across graphs is invented. Omitting the
-option preserves framework execution defaults and reports that the worker total
-is unspecified. The count is an execution option, not an inner-decoder argument.
-CPU affinity remains unset, allowing the framework to inherit process affinity;
-the generator neither assigns cores nor duplicates cross-graph overlap checks.
-Configuring workers does not establish runtime availability or measured overlap.
+schema-typed parameters differ. The selected backend must support fault-column
+output for the concrete A/B windows. Parameter validation does not establish
+that compatibility or execute the generated graph.
 
 ## Server configuration and deployment
 
@@ -207,22 +213,10 @@ Pass-through syndrome mapping ID 0 is BULK; ID 1 is FINAL. A producer must selec
 the terminal mapping correctly. Packet batching and transport-control schedules
 are not model geometry.
 
-The generator leaves transport and CPU placement unset. It does not render a
-qualified CPU RoCE/GPU RoCE deployment or adapt the FPGA producer protocol.
-GPU RoCE transport and GPU decoder dispatch are different choices; host A/B
-decoding must not be switched to device dispatch merely to select a wire.
-
-Raw samples, seeds, replay schedules and result-oracle records belong to the
-qualification workflow. The production CLI does not sample measurements.
-Tests sample the compiled memory-circuit kernel through test-only helpers for
-raw records and batching. Raw logical values alone are not expected corrections
-or an accuracy oracle.
-
-Internal UDP assessment is not customer RoCE/FPGA qualification. Installed
-two-process replay needs an executable A/B runtime, a transport-specific
-schedule, correctly tagged FINAL input and independent expected results.
-Real FPGA qualification also needs producer framing, mapping IDs, patch routing
-and lifecycle. A successful YAML parse is not evidence that these work.
+The generator leaves transport and CPU placement unset. Configure these for
+the server deployment and ensure the producer follows the generated record
+layout and BULK/FINAL mapping IDs. The CLI does not sample measurements, create
+replay schedules or adapt the FPGA producer protocol.
 
 ## Counts and bounded preparation
 
@@ -231,20 +225,12 @@ round. There are T+1 raw rounds. Actual D determines detector rows and lookback;
 endpoint counts, including the basis-dependent readout layer, need not equal
 regular counts.
 
-The reference has `26 * 8 + 9 = 217` measurements. The layout test groups
-these as eight 24-bit batches and a terminal batch of `2 * 8 + 9 = 25` bits.
-B0 needs raw rounds `[2,12)` (80 bits); A2 needs `[20,27)` (57 bits). The
-fixture tiles exactly and exercises both experiment edges, but not a terminal
-commit remainder or actual A/B execution.
-
-The provider characterizes 12 and 13 extraction cycles using the public
+The provider characterizes bounded representative circuits using the public
 `decoder_context_from_memory_circuit` API. It compares retained phases,
 probabilities, measurement maps and readout support before retargeting.
-These fixed depths leave margin beyond transient endpoints and check even and
-odd horizons. These depths are internal preparation choices. Preparation and
-stored phases do not grow with requested T; code construction grows with
-distance. No process address-space cap is imposed. This relies on the known
-repeating Surface Code circuit, not inferred periodicity for arbitrary circuits.
+Preparation and stored phases do not grow with requested T; code construction
+grows with distance. This relies on the known repeating Surface Code circuit,
+not inferred periodicity for arbitrary circuits.
 
 The public `memory_dem_chunks_from_decoder_inputs` helper is promoted from
 the Surface Code example. It requires round-major detectors, D lookback of at
@@ -254,14 +240,9 @@ transient phases and merges identical H/O mechanisms with independent XOR
 probabilities. Unsupported faults fail instead of being dropped or replaced.
 
 At least four extraction cycles are required; shorter shots fail without
-rounding. Zero-noise/zero-fault phases await public framework
-dimension-preservation support; probability 1 is rejected before circuit
-analysis. Generated `beforeN`, `bulk` and `afterN` phase names are preserved,
+rounding. Generated `beforeN`, `bulk` and `afterN` phase names are preserved,
 not hardcoded executor bindings. Multiple logical qubits mean independent
 patches, not lattice surgery.
-
-This CLI takes a finite cycle count. An open model alone does not implement an
-unknown-duration producer, terminal flush or admission policy.
 
 ## Build scope and verification
 
@@ -282,33 +263,12 @@ ctest --test-dir build \
 ```
 
 PyYAML is a black-box test dependency only; the installed C++ tool has no
-Python dependency. CTest reports missing PyYAML as a skip with installation
-instructions; CI installs it before testing. CLI tests have a five-minute
-timeout, with measured runtime recorded separately.
+Python dependency. Install it before running the CLI tests.
 
-Tests cover bounded/full-circuit agreement, the reference layout, awkward batches,
-overflow and invalid inputs, exact round trips, huge horizons, independent
-patches, typed decoder arguments, malformed detector maps, default geometry,
-standalone output selection, no-overwrite creation, write-failure cleanup and
-rejection of removed replay/bundle flags. Per-graph worker tests check exact policy
-round trips, independent patches, unchanged defaults and checked worker totals.
-PyMatching tests check explicit merge-policy preservation, fault estimates and
-committed effects on the X/Z reference windows. They construct decoder inputs
-with the framework's kernel forms, decode fault estimates, and apply the
-framework's commit operation. They reuse existing models and helpers rather
-than a tool-owned scheduler.
-Configuration tests use the framework's registered public pattern schema.
-
-Windowed-graph wiring validation applies to concrete `ingest` and
-`decode_window` nodes. It cannot validate the generated `parallel_window`
-pattern's internal wiring until the framework expands that pattern. The
-framework also owns the resulting XOR node and its input count; no additional
-generator argument is needed.
-
-Actual graph construction, same-plan serial/parallel correctness, seam faults,
-sustained overlap, sampled logical accuracy, installed replay and
-cores-versus-capacity/tail-latency measurements remain runtime gates. Model and
-configuration tests do not establish those results.
+Tests cover model agreement with complete circuits, input validation, large
+horizons, schema-typed parameters, round trips, worker settings and safe output
+creation. These checks do not establish full graph execution, decoder accuracy,
+transport compatibility or real-time performance.
 
 ## Generated configuration
 
