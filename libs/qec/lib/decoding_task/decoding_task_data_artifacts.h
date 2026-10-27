@@ -8,7 +8,10 @@
 // content: each entry is keyed by the sha256 of its canonical bytes, so equal
 // content from different decoders or nodes is one entry and one handle. The
 // store is filled at configuration time and never evicted; lookups return
-// handles and never build. Never included from a public header.
+// handles and never build. Stores share templates and window variants of
+// equal content, built once while any store or node holds them, so graphs
+// decoding the same layers hold one copy. Never included from a public
+// header.
 
 #pragma once
 

@@ -5910,6 +5910,60 @@ TEST(DecodeWindowNode, FiresAllocateNothingBeyondTheDecoder) {
   }
 } // end - TEST(DecodeWindowNode, FiresAllocateNothingBeyondTheDecoder)
 
+// Stores share what they build: a second store of the same template and
+// request holds the first one's template and window variants, the same
+// objects, while either lives, and records them as its own. A different
+// template shares nothing. Once every store and holder lets go they are
+// freed: sharing keeps nothing alive.
+TEST(DataArtifactStore, StoresShareWhatTheyBuild) {
+  auto spec = wide_readout_spec();
+  auto other = spec;
+  const auto request = layered(2, 1, 3).a;
+  std::weak_ptr<const experiment_template> kept_template;
+  std::weak_ptr<const decoding_window> kept_window;
+  other.phases.at(0).spec.error_rates.at(0) *= 2;
+  {
+    data_artifact_store first;
+    data_artifact_store second;
+    data_artifact_store third;
+    const auto a = first.add_template(spec);
+    first.add_windows(a, request);
+    const auto b = second.add_template(spec);
+    second.add_windows(b, request);
+    const auto c = third.add_template(other);
+    EXPECT_EQ(a, b);
+    EXPECT_NE(a, c);
+    for (const auto &[key, window] : first.find_windows(*a, request))
+      EXPECT_EQ(window, second.find_window(*b, request, key));
+    EXPECT_EQ(second.records(), first.records());
+    kept_template = a;
+    kept_window = first.find_windows(*a, request).front().second;
+  }
+  EXPECT_TRUE(kept_template.expired());
+  EXPECT_TRUE(kept_window.expired());
+}
+
+// Stores built at once on two threads end up sharing one template and one
+// of each window variant: whichever registers first is kept.
+TEST(DataArtifactStore, StoresBuiltAtOnceShareWhatTheyBuild) {
+  const auto spec = wide_readout_spec();
+  const auto request = layered(3, 2, 2).b;
+  std::array<data_artifact_store, 2> stores;
+  std::array<std::shared_ptr<const experiment_template>, 2> templates;
+  std::vector<std::thread> threads;
+  for (std::size_t i = 0; i < stores.size(); ++i)
+    threads.emplace_back([&, i] {
+      templates[i] = stores[i].add_template(spec);
+      stores[i].add_windows(templates[i], request);
+    });
+  for (auto &thread : threads)
+    thread.join();
+  EXPECT_EQ(templates[0], templates[1]);
+  for (const auto &[key, window] :
+       stores[0].find_windows(*templates[0], request))
+    EXPECT_EQ(window, stores[1].find_window(*templates[1], request, key));
+}
+
 // ---------------------------------------------------------------------------
 // Windowed graphs on the executor
 // ---------------------------------------------------------------------------
