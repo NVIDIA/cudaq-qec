@@ -13038,6 +13038,9 @@ public:
       published_ *= 2;
       second_ready_ = true;
     }
+    // `even` publishes record r as index 2r alone, so odd indices never come.
+    if (mode_ == "even")
+      published_ *= 2;
     valid_ = true;
     return true;
   }
@@ -13928,6 +13931,52 @@ TEST(DecodingTaskGraph, IndexOffsetIsValidatedAtBuild) {
                                          {});
   EXPECT_FALSE(graph->supports_streaming());
 }
+
+// Instances dropped all through a long shot stay dropped: T publishes only
+// even indices, so every odd J, whose a never comes, is dropped as T's next
+// publication passes it. Over thousands of records, with J's copies firing
+// out of order, every even J pairs its own a with R's b and no odd one
+// fires. (The executor keeps only recent drops; one it forgets leaves a
+// stray entry that FINAL discards, so this checks the joins, not the
+// ring's size.)
+TEST(DecodingTaskGraph, IndexedJoinDropsInstancesAllThroughAShot) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "even"));
+  nodes.push_back(index_node("R", "tag"));
+  nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, /*copies=*/2));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "T", "input"},
+       {"A", "output", "R", "input"},
+       {"T", "output", "J", "a"},
+       {"R", "output", "J", "b", /*index_offset=*/-1},
+       {"J", "output", "output", "input"}},
+      {.async_streaming = true, .async_queue_capacity = 8});
+  const auto records = pipeline_records(4000);
+  for (std::size_t i = 0; i < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1,
+                            i + 1 == records.size() ? round_type::FINAL
+                                                    : round_type::BULK);
+  std::lock_guard<std::mutex> lock(index_fires_mutex);
+  ASSERT_EQ(index_fires.size(), records.size());
+  for (const auto &fire : index_fires) {
+    ASSERT_EQ(fire.k % 2, 0) << "J[" << fire.k << "] has no a, yet fired";
+    const auto r = static_cast<std::size_t>(fire.k / 2);
+    EXPECT_EQ(fire.a, records[r]) << "J[" << fire.k << "]";
+    // R numbers every record, so J[k] reads R's record k - 1.
+    if (fire.k > 0 && static_cast<std::size_t>(fire.k - 1) < records.size())
+      EXPECT_EQ(fire.b, records[fire.k - 1]) << "J[" << fire.k << "]";
+  }
+} // end - TEST(DecodingTaskGraph, IndexedJoinDropsInstancesAllThroughAShot)
 
 // An input the consumer guarantees, still missing when the shot ends, was
 // lost: R stops publishing at 3, so J[4] and J[5] never get their b. With b

@@ -237,6 +237,9 @@ struct decoding_task_graph::impl::record_scheduler {
       joins[si].clear();
       for (std::size_t i = 0; i < capacity; ++i)
         add_join_entry(si);
+      // Instances live no further apart than the table holds; twice that
+      // keeps every drop a delivery could still address.
+      dropped[si].ring.assign(2 * capacity, no_index);
       fire_inputs[si].assign(copies,
                              std::vector<const edge_value *>(
                                  owner.node_input_counts[node_idx], nullptr));
@@ -825,8 +828,7 @@ struct decoding_task_graph::impl::record_scheduler {
   }
 
   bool is_dropped(std::size_t si, std::int64_t k) const {
-    const auto &instances = dropped[si];
-    return std::find(instances.begin(), instances.end(), k) != instances.end();
+    return dropped[si].contains(k);
   }
 
   // Instance `k` of node `si` never exists: tell its indexed consumers once,
@@ -835,7 +837,7 @@ struct decoding_task_graph::impl::record_scheduler {
                             std::int64_t k, std::size_t root) {
     if (is_dropped(si, k))
       return;
-    dropped[si].push_back(k);
+    dropped[si].add(k);
     const auto node_idx = owner.streaming_nodes[si].node_index;
     publish_wires_locked(c, parent, root, owner.streaming_wires_from[node_idx],
                          k, /*absent=*/true);
@@ -1671,10 +1673,29 @@ public:
   // an instance exists only if that input is delivered.
   std::vector<std::vector<std::int64_t>> join_offsets;
   std::vector<std::vector<uint8_t>> join_required;
-  // Instances found never to exist before FINAL, by streaming node; each is
-  // announced to the consumers once and never created afterwards. Cleared
-  // when the node's FINAL flush has resolved the shot's instances.
-  std::vector<std::vector<std::int64_t>> dropped;
+  // The most recent instances found never to exist before FINAL, kept in a
+  // ring sized at build so a long shot does not grow it: each is announced
+  // to the consumers once and never created afterwards, and an instance
+  // older than the ring receives no delivery. Cleared when the node's FINAL
+  // flush has resolved the shot's instances.
+  struct dropped_instances {
+    std::vector<std::int64_t> ring; ///< no_index where empty
+    std::size_t next = 0;           ///< The slot the next drop overwrites
+    bool contains(std::int64_t k) const {
+      return std::find(ring.begin(), ring.end(), k) != ring.end();
+    }
+    void add(std::int64_t k) {
+      if (ring.empty())
+        return;
+      ring[next] = k;
+      next = (next + 1) % ring.size();
+    }
+    void clear() {
+      std::fill(ring.begin(), ring.end(), no_index);
+      next = 0;
+    }
+  };
+  std::vector<dropped_instances> dropped;
   // The last index a record-ordered producer published on each value wire,
   // by compiled_wire::id: its indices never decrease, so the ones it skipped
   // are announced as absent when the next one is published. Cleared by the
