@@ -338,7 +338,7 @@ group_fault_columns(const chain_columns &closed, std::size_t first,
           by_first[part.front()] = by_rate(part);
         else
           for (const auto j : part)
-            by_first[j] = {j};
+            by_first[j].assign(1, j);
       continue;
     }
     // An effect's rate is the chance that an odd number of its columns
@@ -789,15 +789,16 @@ window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
     priors[g] = prior;
   } // end - for(g)
   for (std::size_t j = 0; j < V; ++j)
-    h_columns[F + j] = {static_cast<sparse_binary_matrix::index_type>(j)};
+    h_columns[F + j].assign(1,
+                            static_cast<sparse_binary_matrix::index_type>(j));
   for (std::size_t x = 0; x < C; ++x) {
     h_columns[F + V + x] = rows_in_window(crossing[x]);
     o_columns[F + V + x] = closed.observables[crossing[x]];
     priors[F + V + x] = closed.priors[crossing[x]];
   }
   for (std::size_t o = 0; o < K; ++o)
-    o_columns[F + V + C + o] = {
-        static_cast<sparse_binary_matrix::index_type>(o)};
+    o_columns[F + V + C + o].assign(
+        1, static_cast<sparse_binary_matrix::index_type>(o));
   w.model.h =
       sparse_binary_matrix::from_nested_csc(
           static_cast<sparse_binary_matrix::index_type>(rows.size()),
