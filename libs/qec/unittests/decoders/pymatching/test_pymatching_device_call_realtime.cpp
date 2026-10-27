@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cudaq.h"
 #include "cudaq/qec/realtime/decoding.h"
@@ -60,10 +57,10 @@ config::multi_decoder_config make_config() {
   decoder_config.H_sparse = identity_sparse_matrix;
   decoder_config.O_sparse = identity_sparse_matrix;
   decoder_config.D_sparse = identity_sparse_matrix;
+  decoder_config.error_rate_vec =
+      std::vector<double>(kBlockSize, kUniformErrorRate);
 
   cudaqx::heterogeneous_map pymatching_args;
-  pymatching_args.insert("error_rate_vec",
-                         std::vector<double>(kBlockSize, kUniformErrorRate));
   pymatching_args.insert("merge_strategy", "smallest_weight");
   decoder_config.decoder_custom_args = pymatching_args;
 

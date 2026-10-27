@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import pytest
 import numpy as np
 import cudaq
@@ -295,9 +290,47 @@ def test_decoding_from_surface_code_dem_from_memory_circuit(
     assert nLogicalErrorsWithDecoding < nLogicalErrorsWithoutDecoding
 
 
+def test_pymatching_observable_model_does_not_select_output_basis():
+    H = np.eye(2, dtype=np.uint8)
+    O = np.array([[1, 1]], dtype=np.uint8)
+    rates = np.array([0.1, 0.1])
+    syndrome = np.array([1, 0], dtype=np.uint8)
+
+    error_decoder = qec.get_decoder('pymatching', H, O=O, error_rate_vec=rates)
+    error_result = error_decoder.decode(syndrome)
+    np.testing.assert_array_equal(error_result.result, [1.0, 0.0])
+
+    observable_decoder = qec.get_decoder('pymatching',
+                                         H,
+                                         O=O,
+                                         output='observables',
+                                         error_rate_vec=rates)
+    observable_result = observable_decoder.decode(syndrome)
+    np.testing.assert_array_equal(observable_result.result, [1.0])
+
+    parallel_H = np.array([[1, 1]], dtype=np.uint8)
+    parallel_O = np.array([[1, 0]], dtype=np.uint8)
+    parallel_rates = np.array([0.1, 0.2])
+    with pytest.raises(ValueError):
+        qec.get_decoder('pymatching',
+                        parallel_H,
+                        O=parallel_O,
+                        error_rate_vec=parallel_rates)
+    with pytest.raises(ValueError):
+        qec.get_decoder('pymatching',
+                        parallel_H,
+                        O=parallel_O,
+                        output='errors',
+                        error_rate_vec=parallel_rates)
+    qec.get_decoder('pymatching',
+                    parallel_H,
+                    O=parallel_O,
+                    output='observables',
+                    error_rate_vec=parallel_rates)
+
+
 def test_pymatching_decode_to_observable_surface_code_dem():
-    """Test PyMatching with O (observables) matrix: decoder returns observable
-    flips directly.cpp)."""
+    """Test explicit PyMatching observable output on a surface-code DEM."""
     cudaq.set_random_seed(13)
     code = qec.get_code('surface_code', distance=5)
     Lz = code.get_observables_z()
@@ -320,11 +353,12 @@ def test_pymatching_decode_to_observable_surface_code_dem():
         'pymatching',
         dem.detector_error_matrix,
         O=dem.observables_flips_matrix,
+        output='observables',
         error_rate_vec=np.array(dem.error_rates),
     )
 
     dr = decoder.decode_batch(syndromes)
-    # With decode_to_observables=True, each row is observable flips
+    # Constructed for observable output, so each row is observable flips
     # (length num_observables), not error predictions.
     obs_per_shot = np.asarray(dr.result, dtype=np.float64)
     data_predictions = np.round(obs_per_shot).astype(np.uint8).T
@@ -669,6 +703,7 @@ def test_pymatching_decodes_stim_surface_code_dem():
             'pymatching',
             H,
             O=O,
+            output='observables',
             error_rate_vec=rates,
             merge_strategy='independent',
         )
@@ -676,7 +711,7 @@ def test_pymatching_decodes_stim_surface_code_dem():
         pytest.skip(f'pymatching decoder unavailable in this build: {e}')
 
     dr = decoder.decode_batch(syndromes)
-    # With O provided, the decoder returns predicted observable flips.
+    # Constructed for observable output, so these are observable flips.
     obs_per_shot = np.asarray(dr.result, dtype=np.float64)
     data_predictions = np.round(obs_per_shot).astype(np.uint8).flatten()
 
@@ -818,6 +853,10 @@ def test_decoder_context_d_sparse_layout():
         else:
             row.append(v)
     assert rebuilt == [list(r) for r in fc_m2d]
+
+
+def test_d_sparse_does_not_require_explicit_measurement_width():
+    assert qec.d_sparse([[2], [], [0, 4]]) == [2, -1, -1, 0, 4, -1]
 
 
 def test_decoder_context_single_type_code_empty_component():
@@ -1044,6 +1083,48 @@ def test_dem_chunk_spec_round_trips_through_attributes():
     spec = _rep5_spec()
     assert spec.get_phase(qec.SeamId("init")).num_faults == 9
     assert spec.get_phase(qec.SeamId("final")).num_faults == 5
+
+
+def _with_readout(spec, phase, m2o):
+    """Set m2o_sparse on the named phase of spec and return spec."""
+    phases = spec.phases
+    for entry in phases:
+        if entry.id == qec.SeamId(phase):
+            entry.spec.m2o_sparse = m2o
+    spec.phases = phases
+    spec.measurements_per_round = REP5_CHECKS
+    return spec
+
+
+def test_dem_chunks_spec_detectors_of():
+    spec = _rep5_spec()
+    for e in spec.phases:
+        assert spec.detectors_of(e.spec) == REP5_CHECKS
+
+
+def test_dem_chunk_spec_m2o_sparse():
+    s = qec.DemChunkSpec()
+    assert s.m2o_sparse == []
+    s.m2o_sparse = [0, 2, -1]
+    assert s.m2o_sparse == [0, 2, -1]
+    assert not s.is_empty()
+
+
+def test_dem_chunks_spec_readout_map_and_observable_names():
+    spec = _with_readout(_rep5_spec(3), "final", [0, 3, -1])
+    spec.observable_names = ["Z_L"]
+    spec.validate()
+    assert spec.num_observables() == 1
+    assert spec.get_phase(qec.SeamId("final")).m2o_sparse == [0, 3, -1]
+    assert spec.observable_names == ["Z_L"]
+
+    spec.observable_names = ["Z_L", "X_L"]
+    with pytest.raises(ValueError, match="observable_names"):
+        spec.validate()
+    with pytest.raises(ValueError, match="only the last phase"):
+        _with_readout(_rep5_spec(3), "bulk", [0, -1]).validate()
+    with pytest.raises(ValueError, match="past the 4"):
+        _with_readout(_rep5_spec(3), "final", [REP5_CHECKS, -1]).validate()
 
 
 def test_dem_chunks_from_spec_expands_to_round_count():

@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2022 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 import pytest
 import numpy as np
@@ -90,6 +85,7 @@ def create_test_decoder_config_nv_qldpc(decoder_id):
     """
     config = create_test_empty_decoder_config(decoder_id)
     config.type = "nv-qldpc-decoder"
+    config.error_rate_vec = [0.1] * config.block_size
 
     # Create NV-QLDPC decoder configuration (a parameter dict; keys are
     # governed by the decoder's registered schema)
@@ -99,7 +95,6 @@ def create_test_decoder_config_nv_qldpc(decoder_id):
         "use_osd": True,
         "osd_order": 60,
         "osd_method": 3,
-        "error_rate_vec": [0.1] * config.block_size,
         "n_threads": 128,
         "bp_batch_size": 1,
         "osd_batch_size": 16,
@@ -231,12 +226,12 @@ def test_sliding_window_decoder():
         "num_syndromes_per_round": n_syndromes_per_round,
         "straddle_start_round": False,
         "straddle_end_round": True,
-        "error_rate_vec": [0.1] * config.block_size,
         "inner_decoder_name": "multi_error_lut",
         "inner_decoder_params": {
             "lut_error_depth": 2
         },
     }
+    config.error_rate_vec = [0.1] * config.block_size
 
     multi_config.decoders = [config]
 
@@ -268,9 +263,9 @@ def test_sliding_window_boundary_syndromes_roundtrip():
         "step_size": 1,
         "num_syndromes_per_round": 2,
         "num_boundary_syndromes": 1,
-        "error_rate_vec": [0.1] * config.block_size,
         "inner_decoder_name": "single_error_lut",
     }
+    config.error_rate_vec = [0.1] * config.block_size
 
     multi_config.decoders = [config]
 

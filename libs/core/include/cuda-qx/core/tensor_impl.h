@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #pragma once
 
 #include "extension_point.h"
@@ -45,8 +42,8 @@ public:
     if (shape.empty())
       return iter->second(nullptr, {});
 
-    std::size_t size = std::accumulate(shape.begin(), shape.end(), 1,
-                                       std::multiplies<size_t>());
+    std::size_t size = std::accumulate(
+        shape.begin(), shape.end(), std::size_t{1}, std::multiplies<size_t>());
     scalar_type *data = new scalar_type[size]();
     return iter->second(data, shape);
   }

@@ -1,5 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 [build-system]
-requires = ["scikit-build-core>=0.10"]
+requires = ["scikit-build-core>=1.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -12,7 +15,7 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = "LicenseRef-NVIDIA-Proprietary"
 dependencies = [
-  'cuda-quantum-cu13 >= 0.15.1, < 0.16',
+  'cuda-quantum-cu13 >= 0.16.0, < 0.17',
   'cuquantum-python-cu13>=26.03.0',
 ]
 classifiers = [
@@ -35,8 +38,11 @@ Homepage = "https://nvidia.github.io/cudaqx"
 Documentation = "https://nvidia.github.io/cudaqx/components/qec/introduction.html"
 Repository = "https://github.com/NVIDIA/cudaqx"
 
+[[tool.dynamic-metadata]]
+field = "version"
+provider = "scikit_build_core.metadata.setuptools_scm"
+
 [tool.scikit-build]
-metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
 build-dir = "_skbuild"
 build.verbose = true
 cmake.version = ">=3.28"

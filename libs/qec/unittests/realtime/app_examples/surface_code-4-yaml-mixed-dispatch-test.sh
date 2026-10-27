@@ -1,11 +1,6 @@
 #!/bin/bash
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Two-process MIXED-DISPATCH test: one decoding server hosting a host-ring
 # CPU decoder (multi_error_lut) AND a device_graph nv-qldpc decoder (the GPU
@@ -79,6 +74,7 @@ ERR_VEC='[ 0.00666667, 0.00334452, 0.00334452, 0.00334452, 0.00334452, 0.0033445
 cat > "$config" <<EOF
 transport:
   provider:        udp
+  args:            [--port=0]
   device_graph:
     args:          [--pinned-rings]
 decoders:
@@ -99,9 +95,9 @@ decoders:
     H_sparse:        $H_SPARSE
     O_sparse:        $O_SPARSE
     D_sparse:        $D_SPARSE
+    error_rate_vec:  $ERR_VEC
     decoder_custom_args:
       use_sparsity:    true
-      error_rate_vec:  $ERR_VEC
       max_iterations:  50
       clip_value:      200
       bp_method:       3
@@ -117,7 +113,7 @@ decoders:
 EOF
 
 # --- server: wire named by the YAML only (no --transport) ------------------
-CUDAQ_LOG_LEVEL=info "$SERVER" --config="$config" --port=0 --timeout=120 \
+CUDAQ_LOG_LEVEL=info "$SERVER" --config="$config" --timeout=120 \
     > "$server_log" 2>&1 &
 server_pid=$!
 

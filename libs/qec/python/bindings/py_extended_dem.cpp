@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // Python bindings for extended_dem, dem_stitch/dem_close operations, and the
 // DEM chunk-to-streaming-decoder utility functions.
@@ -176,6 +173,21 @@ void bindExtendedDem(nb::module_ &mod) {
               "Observable rows (-1 terminated).")
       .def_rw("error_rates", &dem_chunk_spec::error_rates,
               "One prior per fault column.")
+      .def_rw("D_sparse", &dem_chunk_spec::D_sparse,
+              "Optional measurement-to-detector rows, -1-terminated, one per\n"
+              "detector this chunk contributes when closed. Indices count the\n"
+              "previous round's measurements first, then this round's own.\n"
+              "Either every phase carries rows or none does; with none, D\n"
+              "follows the memory convention of dem_chunks_to_d_sparse().")
+      .def_rw("num_measurements", &dem_chunk_spec::num_measurements,
+              "Measurements this phase's round adds to the stream, when it\n"
+              "differs from DemChunksSpec.measurements_per_round (a final\n"
+              "data readout, say). None to use the spec-wide value.")
+      .def_rw("m2o_sparse", &dem_chunk_spec::m2o_sparse,
+              "Optional readout map, -1-terminated, one row per observable\n"
+              "listing the measurements of this phase's own round whose\n"
+              "parity is the observable's raw value. Only the last phase\n"
+              "may carry it.")
       .def("is_empty", &dem_chunk_spec::is_empty,
            "True iff no field has been set.")
       .def("expand", &dem_chunk_spec::expand, nb::arg("ids"),
@@ -247,10 +259,49 @@ void bindExtendedDem(nb::module_ &mod) {
       .def_rw("num_rounds", &dem_chunks_spec::num_rounds,
               "Total rounds to materialise (None for streaming).\n"
               "Required by phase_sequence() when a self-loop is present.")
+      .def_rw("measurements_per_round",
+              &dem_chunks_spec::measurements_per_round,
+              "Measurements each round adds to the stream, for phases\n"
+              "carrying D_sparse rows. A phase's num_measurements overrides "
+              "it.")
+      .def_rw("phases_supply_D_sparse",
+              &dem_chunks_spec::phases_supply_D_sparse,
+              "Whether the phases carry D_sparse rows, where their\n"
+              "emptiness cannot say so on its own. None infers it from any\n"
+              "phase carrying rows. True declares that the phases supply D\n"
+              "even where one contributes no rows; False keeps the memory\n"
+              "convention even though rows are present.")
+      .def_rw("observable_names", &dem_chunks_spec::observable_names,
+              "Optional observable names, one per O_sparse row.")
+      .def("measurements_of", &dem_chunks_spec::measurements_of,
+           nb::arg("phase"),
+           "Return the measurement count of the phase's round, which is its\n"
+           "num_measurements when set and measurements_per_round otherwise.\n"
+           "Raises ValueError if neither is set.")
+      .def(
+          "detectors_of",
+          [](const dem_chunks_spec &spec, const dem_chunk_spec &phase) {
+            return spec.detectors_of(phase);
+          },
+          nb::arg("phase"),
+          "Return the detector rows the phase's round contributes when\n"
+          "closed: its incoming seam band and interior rows.")
+      .def("num_observables", &dem_chunks_spec::num_observables,
+           "Return the number of O_sparse rows every phase a connection\n"
+           "names carries.\n"
+           "Raises ValueError if two phases disagree.")
+      .def("has_D_sparse", &dem_chunks_spec::has_D_sparse,
+           "True when the phases supply D rather than leaving\n"
+           "dem_chunks_to_d_sparse() to apply the memory convention:\n"
+           "phases_supply_D_sparse when set, else inferred from the rows.")
       .def("is_empty", &dem_chunks_spec::is_empty,
            "True when no phases or connections have been set.")
       .def("has_repeating_phase", &dem_chunks_spec::has_repeating_phase,
            "True when any connection is a self-loop.")
+      .def("minimum_rounds", &dem_chunks_spec::minimum_rounds,
+           "Shortest chain the connections admit, visiting a repeating phase\n"
+           "once. This is what a streaming spec expands to when nothing else\n"
+           "pins the round count, and the smallest window it can supply.")
       .def("repeating_phase", &dem_chunks_spec::repeating_phase,
            "Return the PhaseId of the self-connected phase.")
       .def("phase_sequence", &dem_chunks_spec::phase_sequence,
@@ -381,12 +432,30 @@ void bindExtendedDem(nb::module_ &mod) {
           nb::arg("to_seam") = seam_name::prev_round,
           "Return the round index for each detector in dem_close_all(chunks).");
 
-  mod.def("dem_chunks_to_d_sparse", &dem_chunks_to_d_sparse,
-          nb::arg("dem_chunks"), nb::arg("from_seam") = seam_name::next_round,
-          nb::arg("to_seam") = seam_name::prev_round,
-          "Return the D_sparse measurement-to-detector map (memory exp only).\n"
-          "d_sparse[det_id] lists raw measurement bit positions that\n"
-          "XOR-combine to fire that detector.");
+  mod.def(
+      "dem_chunks_to_d_sparse",
+      nb::overload_cast<const std::vector<extended_dem> &, seam_id, seam_id>(
+          &dem_chunks_to_d_sparse),
+      nb::arg("dem_chunks"), nb::arg("from_seam") = seam_name::next_round,
+      nb::arg("to_seam") = seam_name::prev_round,
+      "Return the D_sparse measurement-to-detector map (memory exp only).\n"
+      "d_sparse[det_id] lists raw measurement bit positions that\n"
+      "XOR-combine to fire that detector.");
+
+  mod.def("dem_chunks_to_d_sparse",
+          nb::overload_cast<const dem_chunks_spec &>(&dem_chunks_to_d_sparse),
+          nb::arg("spec"),
+          "Return the D_sparse map for the closed model of a DemChunksSpec.\n"
+          "With per-phase D_sparse rows each chunk's measurements follow the\n"
+          "previous chunk's in the stream; otherwise this is the memory\n"
+          "convention above over dem_chunks_from_spec(spec).");
+
+  mod.def("dem_chunks_measurement_count", &dem_chunks_measurement_count,
+          nb::arg("spec"),
+          "Return the raw measurements per shot the spec's rounds declare,\n"
+          "or None when it supplies no D_sparse rows or any phase lacks a\n"
+          "count. Not recoverable from the D_sparse rows: a round's trailing\n"
+          "measurements may be read by no detector.");
 
   mod.def("dem_chunks_to_o_sparse", &dem_chunks_to_o_sparse,
           nb::arg("dem_chunks"),

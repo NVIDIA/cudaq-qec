@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
@@ -22,9 +19,23 @@ private:
   std::map<std::string, std::size_t> single_qubit_err_signatures;
 
 public:
-  single_error_lut_example(const cudaq::qec::sparse_binary_matrix &H,
+  single_error_lut_example(cudaq::qec::decoder_init inputs,
+                           decoder_output_request request,
                            const cudaqx::heterogeneous_map &params)
-      : decoder(H) {
+      : decoder(std::move(inputs), request) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "single_error_lut_example does not produce auxiliary outputs");
+    // The requested result form is validated here, at construction, so an
+    // unsupported request fails at setup rather than on the first decode. This
+    // example produces an error frame only; a decoder that can also project to
+    // observables would instead call project_errors_to_observables() before
+    // returning.
+    if (request.primary != decode_result_type::errors)
+      throw std::invalid_argument(
+          "single_error_lut_example produces an error frame only; construct it "
+          "for error output");
+    const auto &H = get_inputs().detector_error_matrix();
     // Decoder-specific constructor arguments can be placed in `params`.
 
     // The loop below sets err_sig[r] = '1' (not XOR-toggle), so canonicalize
@@ -41,7 +52,7 @@ public:
     }
   }
 
-  virtual decoder_result decode(const std::vector<float_t> &syndrome) {
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
     // This is a simple decoder that simply results
     decoder_result result{false, std::vector<float_t>(block_size, 0.0)};
 
@@ -76,11 +87,15 @@ public:
   virtual ~single_error_lut_example() {}
 
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
-      single_error_lut_example, static std::unique_ptr<decoder> create(
-                                    const cudaq::qec::decoder_init &init,
-                                    const cudaqx::heterogeneous_map &params) {
-        return cudaq::qec::make_pcm_decoder<single_error_lut_example>(init,
-                                                                      params);
+      single_error_lut_example,
+      static std::unique_ptr<decoder> create(
+          cudaq::qec::decoder_init inputs,
+          std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<single_error_lut_example>(std::move(inputs),
+                                                          request, params);
       })
 };
 

@@ -1,11 +1,9 @@
-/*******************************************************************************
- * Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <deque>
@@ -347,14 +345,13 @@ TEST(QECCodeTester, checkTwoQubitBitflipStim) {
   cudaq::set_random_seed(13);
   cudaq::noise_model noise;
   noise.add_all_qubit_channel("x", cudaq::qec::two_qubit_bitflip(0.1), 1);
-  cudaq::set_noise(noise);
+  cudaq::sample_options options{.shots = 100, .noise = noise};
 
-  auto counts1 = cudaq::sample(100, null1{});
+  auto counts1 = cudaq::sample(options, null1{});
   EXPECT_FLOAT_EQ(1.0, counts1.probability("00"));
 
-  auto counts2 = cudaq::sample(100, null2{});
+  auto counts2 = cudaq::sample(options, null2{});
   EXPECT_TRUE(counts2.probability("00") < 0.9);
-  cudaq::unset_noise();
 }
 
 TEST(QECCodeTester, checkBitflip) {
@@ -376,9 +373,8 @@ TEST(QECCodeTester, checkBitflip) {
   cudaq::set_random_seed(13);
   cudaq::noise_model noise;
   noise.add_all_qubit_channel("h", cudaq::bit_flip_channel(0.5));
-  cudaq::set_noise(noise);
-  auto counts2 = cudaq::sample(100, null1{});
-  cudaq::unset_noise();
+  cudaq::sample_options options{.shots = 100, .noise = noise};
+  auto counts2 = cudaq::sample(options, null1{});
   EXPECT_TRUE(counts2.probability("0") < 0.9);
 }
 
@@ -452,9 +448,10 @@ TEST(QECCodeTester, checkNoisySampleMemoryCircuitAndDecodeStim) {
       }
       printf("syndrome:\n");
       syndrome.dump();
-      auto [converged, v_result, opt] = decoder->decode(syndrome);
+      auto decoded = decoder->decode(syndrome);
       cudaqx::tensor<uint8_t> result_tensor;
-      cudaq::qec::convert_vec_soft_to_tensor_hard(v_result, result_tensor);
+      cudaq::qec::convert_vec_soft_to_tensor_hard(decoded.result,
+                                                  result_tensor);
       printf("decode result:\n");
       result_tensor.dump();
       cudaqx::tensor<uint8_t> decoded_observables =
@@ -546,9 +543,10 @@ TEST(QECCodeTester, checkNoisySampleMemoryCircuitAndDecodeStim) {
         }
         printf("syndrome:\n");
         syndrome.dump();
-        auto [converged, v_result, opt] = decoder->decode(syndrome);
+        auto decoded = decoder->decode(syndrome);
         cudaqx::tensor<uint8_t> result_tensor;
-        cudaq::qec::convert_vec_soft_to_tensor_hard(v_result, result_tensor);
+        cudaq::qec::convert_vec_soft_to_tensor_hard(decoded.result,
+                                                    result_tensor);
 
         printf("decode result:\n");
         result_tensor.dump();
@@ -616,29 +614,31 @@ TEST(QECCodeTester, checkRealtimeDecodeFromMemoryCircuit) {
 
   auto ctx = cudaq::qec::decoder_context_from_memory_circuit(
       *steane, cudaq::qec::operation::prep0, nRounds, noise);
-  auto [dem, m2d, m2o] = ctx.full_component();
+  auto inputs = ctx.full_component();
+  const auto &dem = inputs.dem;
+  const auto D = cudaq::qec::m2d_to_sparse(inputs.m2d);
+  const auto m2d_rows = D.to_nested_csr();
 
-  ASSERT_FALSE(m2d.rows.empty());
-  EXPECT_EQ(m2d.rows.size(), dem.num_detectors());
+  ASSERT_FALSE(m2d_rows.empty());
+  EXPECT_EQ(m2d_rows.size(), dem.num_detectors());
   ASSERT_EQ(ctx.num_measurements(), nRounds * numCols + numData);
 
   // Inhomogeneous boundary: single-measurement boundary detectors coexist with
   // multi-measurement interior/final ones, so m2d rows are not all one shape.
-  std::size_t minRow = m2d.rows[0].size(), maxRow = m2d.rows[0].size();
-  for (const auto &row : m2d.rows) {
+  std::size_t minRow = m2d_rows[0].size(), maxRow = m2d_rows[0].size();
+  for (const auto &row : m2d_rows) {
     minRow = std::min(minRow, row.size());
     maxRow = std::max(maxRow, row.size());
   }
   EXPECT_LT(minRow, maxRow);
 
-  // Configure the realtime decoder from the decoder_inputs returned by
-  // full_component().
-  auto decoder =
-      cudaq::qec::get_decoder("single_error_lut", dem.detector_error_matrix);
-  decoder->set_O_sparse(
-      cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix));
-  decoder->set_D_sparse(cudaq::qec::d_sparse(m2d));
-  ASSERT_EQ(decoder->get_num_msyn_per_decode(), m2d.num_measurements);
+  // Circuit analysis produces the model; decoder_init is what a decoder is
+  // built from. Bridging the two here is one expression, and it carries O and
+  // D, so construction configures the realtime path completely. There is no
+  // second step, and nothing to re-supply.
+  auto decoder = cudaq::qec::get_decoder("single_error_lut",
+                                         cudaq::qec::decoder_init(dem, D));
+  ASSERT_EQ(decoder->get_num_msyn_per_decode(), D.num_cols());
 
   // Stream numCols ancilla per round, then the final data readout. The window
   // must not decode until that last chunk completes it.
@@ -710,9 +710,8 @@ TEST(QECCodeTester, checkRealtimeStreamedDetectorReduction) {
   const std::size_t numMeas = ctx.num_measurements();
   ASSERT_EQ(numMeas, nRounds * numCols + numData);
 
-  detector_recording_decoder dec(dem.detector_error_matrix);
-  dec.set_O_sparse(cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix));
-  dec.set_D_sparse(cudaq::qec::d_sparse(m2d));
+  detector_recording_decoder dec(
+      cudaq::qec::decoder_init(dem, cudaq::qec::m2d_to_sparse(m2d)));
   ASSERT_EQ(dec.get_num_msyn_per_decode(), numMeas);
 
   std::mt19937 rng(17);
@@ -748,6 +747,62 @@ TEST(QECCodeTester, checkRealtimeStreamedDetectorReduction) {
   EXPECT_GT(total_fired, 0u); // guard against an all-zero pass
 }
 
+// For a d=3 surface-code Z memory, m2o_sparse() gives one row with the three
+// readout records on the Z logical's support, and its parity over the readout
+// round equals the whole-shot observable.
+TEST(QECCodeTester, checkM2oSparseReadsTheFinalPhase) {
+  auto code = cudaq::qec::get_code("surface_code",
+                                   cudaqx::heterogeneous_map{{"distance", 3}});
+  const std::size_t num_rounds = 3;
+  const std::size_t num_data = code->get_num_data_qubits();
+  const auto lz = code->get_observables_z();
+  cudaq::noise_model noise;
+  std::vector<std::size_t> support;
+  std::vector<std::size_t> row;
+  std::mt19937 rng(23);
+  noise.add_all_qubit_channel("x", cudaq::qec::two_qubit_depolarization(0.02),
+                              /*num_controls=*/1);
+
+  auto ctx = cudaq::qec::decoder_context_from_memory_circuit(
+      *code, cudaq::qec::operation::prep0, num_rounds, noise);
+  const auto inputs = ctx.z_component();
+  const std::size_t num_meas = ctx.num_measurements();
+  const std::size_t first = num_meas - num_data;
+  const auto m2o = cudaq::qec::m2o_sparse(inputs.m2o, first);
+
+  ASSERT_EQ(inputs.m2o.rows.size(), 1u);
+  ASSERT_FALSE(m2o.empty());
+  ASSERT_EQ(m2o.back(), -1);
+  ASSERT_EQ(std::count(m2o.begin(), m2o.end(), -1), 1);
+  for (const auto index : m2o)
+    if (index != -1)
+      row.push_back(static_cast<std::size_t>(index));
+  for (std::size_t q = 0; q < num_data; ++q)
+    if (lz.at({0, q}))
+      support.push_back(q);
+  EXPECT_EQ(row.size(), 3u);
+  EXPECT_EQ(row, support);
+
+  for (std::size_t shot = 0; shot < 100; ++shot) {
+    std::vector<uint8_t> meas(num_meas);
+    uint8_t whole = 0;
+    uint8_t local = 0;
+    for (auto &m : meas)
+      m = rng() & 1;
+    for (const auto c : inputs.m2o.rows[0])
+      whole ^= meas[c];
+    for (const auto c : row)
+      local ^= meas[first + c];
+    EXPECT_EQ(local, whole) << "shot " << shot;
+  }
+
+  // Every record must lie in the final phase.
+  EXPECT_THROW(cudaq::qec::m2o_sparse(inputs.m2o, first + 1),
+               std::invalid_argument);
+  EXPECT_THROW(cudaq::qec::m2o_sparse(inputs.m2o, num_meas + 1),
+               std::invalid_argument);
+} // end - TEST(QECCodeTester, checkM2oSparseReadsTheFinalPhase)
+
 namespace {
 bool tensors_equal(const cudaqx::tensor<uint8_t> &a,
                    const cudaqx::tensor<uint8_t> &b) {
@@ -779,21 +834,24 @@ TEST(QECCodeTester, checkDecoderContextAndComponents) {
   auto x = cudaq::qec::x_dem_from_memory_circuit(*steane, prep, nRounds, noise);
 
   // full_component() matches the plain entry point.
-  auto [fc_dem, fc_m2d, fc_m2o] = ctx.full_component();
+  auto fc_inputs = ctx.full_component();
+  const auto &fc_dem = fc_inputs.dem;
   EXPECT_TRUE(
       tensors_equal(fc_dem.detector_error_matrix, dem.detector_error_matrix));
 
   // x_component() / z_component() reproduce the per-type DEMs and partition
   // the detectors without re-running dem_from_kernel.
-  auto [zc_dem, zc_m2d, zc_m2o] = ctx.z_component();
-  auto [xc_dem, xc_m2d, xc_m2o] = ctx.x_component();
+  auto zc_inputs = ctx.z_component();
+  auto xc_inputs = ctx.x_component();
+  const auto &zc_dem = zc_inputs.dem;
+  const auto &xc_dem = xc_inputs.dem;
   EXPECT_TRUE(
       tensors_equal(zc_dem.detector_error_matrix, z.detector_error_matrix));
   EXPECT_TRUE(
       tensors_equal(xc_dem.detector_error_matrix, x.detector_error_matrix));
   EXPECT_EQ(zc_dem.num_detectors() + xc_dem.num_detectors(),
             fc_dem.num_detectors());
-  EXPECT_EQ(zc_m2d.rows.size(), zc_dem.num_detectors());
+  EXPECT_EQ(zc_inputs.m2d.rows.size(), zc_dem.num_detectors());
 }
 
 TEST(QECCodeTester, checkDemFromMemoryCircuit) {
@@ -1040,10 +1098,9 @@ shor9_dem(std::size_t num_rounds,
 }
 
 // Build sliding_window parameters for a boundary-layout DEM.
-cudaqx::heterogeneous_map
-shor9_sliding_params(std::size_t window_size, std::size_t interior,
-                     std::size_t numBoundary,
-                     const std::vector<double> &error_rates) {
+cudaqx::heterogeneous_map shor9_sliding_params(std::size_t window_size,
+                                               std::size_t interior,
+                                               std::size_t numBoundary) {
   cudaqx::heterogeneous_map inner_params;
   inner_params.insert("dummy_param", 1);
   cudaqx::heterogeneous_map params;
@@ -1053,7 +1110,6 @@ shor9_sliding_params(std::size_t window_size, std::size_t interior,
   params.insert("num_boundary_syndromes", numBoundary);
   params.insert("straddle_start_round", false);
   params.insert("straddle_end_round", true);
-  params.insert("error_rate_vec", error_rates);
   params.insert("inner_decoder_name", std::string("single_error_lut"));
   params.insert("inner_decoder_params", inner_params);
   return params;
@@ -1202,9 +1258,8 @@ TEST(QECCodeTester, checkSlidingWindowShor9Boundary) {
         cudaq::qec::decoder::get("single_error_lut", dem.detector_error_matrix);
     // A single window spanning all layers -- should match the full decoder.
     auto sw = cudaq::qec::decoder::get(
-        "sliding_window", dem.detector_error_matrix,
-        shor9_sliding_params(num_layers, interior, numBoundary,
-                             dem.error_rates));
+        "sliding_window", cudaq::qec::decoder_init{dem},
+        shor9_sliding_params(num_layers, interior, numBoundary));
 
     expectObservablesMatchFullDecoder(
         dem, *full, [&](const std::vector<cudaq::qec::float_t> &syndrome) {
@@ -1246,9 +1301,8 @@ TEST(QECCodeTester, checkSlidingWindowShor9Streaming) {
         cudaq::qec::decoder::get("single_error_lut", dem.detector_error_matrix);
     // A genuinely sliding configuration: window of 2 rounds, stepping by 1.
     auto sw = cudaq::qec::decoder::get(
-        "sliding_window", dem.detector_error_matrix,
-        shor9_sliding_params(/*window_size=*/2, interior, numBoundary,
-                             dem.error_rates));
+        "sliding_window", cudaq::qec::decoder_init{dem},
+        shor9_sliding_params(/*window_size=*/2, interior, numBoundary));
 
     expectObservablesMatchFullDecoder(
         dem, *full, [&](const std::vector<cudaq::qec::float_t> &syndrome) {
@@ -1343,16 +1397,24 @@ TEST(QECCodeTester, checkSlidingWindowRealtimeBoundaryStreaming) {
     params.insert("num_boundary_syndromes", B);
     params.insert("straddle_start_round", false);
     params.insert("straddle_end_round", true);
-    params.insert("error_rate_vec", dem.error_rates);
     params.insert("inner_decoder_name", std::string("single_error_lut"));
     params.insert("inner_decoder_params", cudaqx::heterogeneous_map{});
-    return cudaq::qec::decoder::get("sliding_window", dem.detector_error_matrix,
-                                    params);
+    // O comes from the DEM and D is handed in alongside it, so the model is
+    // complete before the decoder exists.
+    std::uint32_t num_measurements = 0;
+    for (const auto &row : D_sparse)
+      for (auto col : row)
+        num_measurements = std::max(num_measurements, col + 1);
+    return cudaq::qec::decoder::get(
+        "sliding_window",
+        cudaq::qec::decoder_init{
+            dem, cudaq::qec::sparse_binary_matrix::from_nested_csr(
+                     static_cast<std::uint32_t>(D_sparse.size()),
+                     num_measurements, D_sparse)},
+        params);
   };
   auto sw = make_sw();     // realtime streaming
   auto sw_ref = make_sw(); // whole-block reference
-  sw->set_D_sparse(D_sparse);
-  sw->set_O_sparse(O_sparse);
 
   // Raw measurements: numRounds*numCols ancilla, then numData data, per shot.
   const std::size_t nShots = 200;

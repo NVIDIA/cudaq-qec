@@ -7,8 +7,8 @@
     The TRT decoder supports loading pre-trained neural network models in ONNX
     format or directly loading pre-built TensorRT engine files for maximum
     performance. It automatically optimizes the model for the target GPU
-    architecture and supports various precision modes (FP16, BF16, INT8, FP8)
-    to balance accuracy and speed.
+    architecture. The network is strongly typed, so TensorRT preserves the
+    data types and quantization encoded in the ONNX model.
 
     Neural network-based decoders can be trained to perform syndrome decoding
     for specific quantum error correction codes and noise models. The TRT decoder
@@ -20,8 +20,14 @@
     <https://nvidia.github.io/cuda-quantum/latest/using/install/local_installation.html#dependencies-and-compatibility>`_
     for a list of valid GPU configurations.
 
+    .. warning::
+      **Breaking change:** ``engine_output_format`` is required. It declares
+      the semantic layout of the TensorRT model's output and is validated
+      against ``H``, ``O``, and any configured global decoder. Existing callers
+      must add the value matching the model they load.
+
     .. note::
-      It is required to create decoders with the `get_decoder` API from the CUDA-QX
+      It is required to create decoders with the `get_decoder` API from the CUDA-Q QEC
       extension points API, such as
 
       .. tab:: Python
@@ -31,7 +37,7 @@
             import cudaq_qec as qec
             import numpy as np
             
-            # Create a simple parity check matrix (not used by the TRT decoder)
+            # H defines the error-frame width and must match the model output.
             H = np.array([[1, 0, 0, 1, 0, 1, 1],
                           [0, 1, 0, 1, 1, 0, 1],
                           [0, 0, 1, 0, 1, 1, 1]], dtype=np.uint8)
@@ -39,12 +45,13 @@
             # Option 1: Load from ONNX model (builds TRT engine)
             trt_dec = qec.get_decoder('trt_decoder', H,
                                       onnx_load_path='model.onnx',
-                                      precision='fp16',
+                                      engine_output_format='errors',
                                       engine_save_path='model.engine')
             
             # Option 2: Load pre-built TRT engine (faster startup)
             trt_dec = qec.get_decoder('trt_decoder', H,
-                                      engine_load_path='model.engine')
+                                      engine_load_path='model.engine',
+                                      engine_output_format='errors')
 
       .. tab:: C++
 
@@ -56,7 +63,7 @@
             std::size_t syndrome_size = 3;
             cudaqx::tensor<uint8_t> H;
 
-            // Create a simple parity check matrix (not used by the TRT decoder)
+            // H defines the error-frame width and must match the model output.
             std::vector<uint8_t> H_vec = {1, 0, 0, 1, 0, 1, 1, 
                                           0, 1, 0, 1, 1, 0, 1,
                                           0, 0, 1, 0, 1, 1, 1};
@@ -65,13 +72,14 @@
             // Option 1: Load from ONNX model (builds TRT engine)
             cudaqx::heterogeneous_map params1;
             params1.insert("onnx_load_path", "model.onnx");
-            params1.insert("precision", "fp16");
+            params1.insert("engine_output_format", std::string("errors"));
             params1.insert("engine_save_path", "model.engine");
             auto trt_dec1 = cudaq::qec::get_decoder("trt_decoder", H, params1);
             
             // Option 2: Load pre-built TRT engine (faster startup)
             cudaqx::heterogeneous_map params2;
             params2.insert("engine_load_path", "model.engine");
+            params2.insert("engine_output_format", std::string("errors"));
             auto trt_dec2 = cudaq::qec::get_decoder("trt_decoder", H, params2);
       
     .. note::
@@ -80,10 +88,11 @@
       for C++, so it supports all the methods in those respective classes.
 
     .. note::
-      The parity check matrix `H` is not used by the TRT decoder. The neural
-      network model encodes the decoding logic, so the parity check matrix is
-      only required to satisfy the decoder interface. You can pass any valid
-      parity check matrix of appropriate dimensions.
+      The TensorRT engine performs inference, but ``H`` is still model data.
+      Its column count defines the error-frame width, validates an
+      ``engine_output_format="errors"`` engine, and supplies the detector model
+      to an optional global decoder. ``H`` and the optional ``O`` must therefore
+      describe the code and index ordering used to train the engine.
 
     .. note::
       **Batch Processing**: The TRT decoder automatically handles batch size
@@ -92,11 +101,29 @@
       using `decode_batch()`, provide syndromes in multiples of the model's
       batch size for optimal performance.
 
-    :param H: Parity check matrix (tensor format). Note: This parameter is not
-              used by the TRT decoder but is required by the decoder interface.
+    :param H: Parity check matrix for the code and error-mechanism ordering used
+              by the TensorRT model.
     :param params: Heterogeneous map of parameters:
 
-        **Required (choose one):**
+        **Required:**
+
+        - `engine_output_format` (string): Semantic layout of one model output.
+          This describes the engine tensor independently of the decoder result
+          contract. Accepted values are:
+
+          - ``"errors"``: one error-frame value per column of ``H``.
+          - ``"residual_detectors"``: residual detector values consumed by the
+            required ``global_decoder``.
+          - ``"observables"``: one value per row of ``O``.
+          - ``"observables_and_residual_detectors"``: an observable prefix
+            followed by residual detectors. With ``global_decoder``, the
+            residuals are decoded and combined with the observable prefix.
+            Alternatively, a C++ ``decoder_output_request`` may request
+            ``observables`` as the primary result and ``residual_detectors`` as
+            an auxiliary output; the prefix is then returned in ``result`` and
+            the residuals in ``opt_results["residual_detectors"]``.
+
+        **Required model source (choose one):**
 
         - `onnx_load_path` (string): Path to ONNX model file. The decoder will
           build a TensorRT engine from this model. Cannot be used together with
@@ -110,19 +137,13 @@
         - `engine_save_path` (string): Path to save the built TensorRT engine.
           Only applicable when using `onnx_load_path`. Saving the engine allows
           for faster initialization in subsequent runs by using `engine_load_path`.
-        - `precision` (string): Precision mode for inference (defaults to "best").
-          Valid options:
-
-          - "fp16": Use FP16 (half precision) - good balance of speed and accuracy
-          - "bf16": Use BF16 (bfloat16) - available on newer GPUs (Ampere+)
-          - "int8": Use INT8 quantization - fastest but requires calibration
-          - "fp8": Use FP8 precision - available on Hopper GPUs
-          - "tf32": Use TensorFloat-32 - available on Ampere+ GPUs
-          - "noTF32": Disable TF32 and use standard FP32
-          - "best": Let TensorRT automatically choose the best precision (default)
-
-          Note: If the requested precision is not supported by the hardware, the
-          decoder will fall back to FP32 with a warning.
+        - `precision` (string): TensorRT build policy (defaults to ``"best"``).
+          ``"best"`` preserves TensorRT's default TF32 policy, ``"tf32"``
+          explicitly enables TF32, and ``"noTF32"`` disables it. The legacy
+          values ``"fp16"``, ``"bf16"``, ``"int8"``, and ``"fp8"`` remain
+          accepted for configuration compatibility, but are ignored because
+          the network is strongly typed. To use those types or quantization,
+          encode them in the ONNX model before loading it.
 
         - `memory_workspace` (size_t): Memory workspace size in bytes for TensorRT
           engine building (defaults to 1GB = 1073741824 bytes). Larger workspaces
@@ -142,20 +163,27 @@
           the batch. The `decode_batch()` method requires the number of syndromes
           to be an integral multiple of the model's batch size.
 
-        - `global_decoder` (string): Name of an optional second-stage "global"
-          decoder to chain after the TensorRT model (composite decoding). The TRT
-          model acts as a first-stage predecoder whose output is passed to the
-          named global decoder (for example ``"pymatching"`` or ``"chromobius"``).
-          When omitted, the TRT model's output is returned directly. See
-          :ref:`the real-time decoding API <python_realtime_decoding_api>` for
-          configuring composite decoding from YAML. Introduced in 0.7.0.
+        - `global_decoder` (string): Name of a second-stage "global" decoder to
+          chain after the TensorRT model (composite decoding). It is required
+          for ``"residual_detectors"``. For
+          ``"observables_and_residual_detectors"``, it is required unless the
+          output contract requests observable primary output and the
+          ``residual_detectors`` auxiliary output. The TRT model acts as a
+          first-stage predecoder whose residual output is passed to the named
+          global decoder (for example ``"pymatching"`` or ``"chromobius"``).
+          It may be omitted for output formats that need no second stage. See
+          :ref:`the real-time decoding API
+          <python_realtime_decoding_api>` for configuring composite decoding
+          from YAML. Introduced in 0.7.0.
+          A cancellation token passed to :code:`decode` or :code:`decode_batch`
+          reaches only this global decoder; TensorRT inference itself is not
+          interruptible.
 
         - `global_decoder_params` (map): Parameters forwarded to the
           `global_decoder`. The accepted keys follow the parameter schema of the
-          named global decoder. When constructing the decoder directly (rather
-          than from YAML), supply `global_decoder_params` (which may be an empty
-          map) whenever `global_decoder` is set; otherwise the global stage is
-          skipped. Introduced in 0.7.0.
+          named global decoder. This is optional; when omitted, the named
+          global decoder is constructed with an empty parameter map.
+          Introduced in 0.7.0.
 
         - `cuda_device_id` (int): Zero-based CUDA device ordinal on which to
           construct the decoder and run every decode. Must be ``>= 0`` and less

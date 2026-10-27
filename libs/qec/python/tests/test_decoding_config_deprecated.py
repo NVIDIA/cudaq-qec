@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the deprecated typed decoder-config classes.
 
 The typed config classes (nv_qldpc_decoder_config and friends) are deprecated
@@ -31,6 +26,7 @@ pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 trt_schema_missing = qec.decoder_param_schema("trt_decoder") is None
 chromobius_schema_missing = qec.decoder_param_schema("chromobius") is None
+pymatching_schema_missing = qec.decoder_param_schema("pymatching") is None
 nv_qldpc_schema_missing = qec.decoder_param_schema("nv-qldpc-decoder") is None
 
 
@@ -114,7 +110,10 @@ def test_deprecated_config_assignable_to_property():
     dc.decoder_custom_args = cfg
     dc.type = "pymatching"
     args = dc.decoder_custom_args
-    assert list(args["error_rate_vec"]) == [0.1, 0.2, 0.3]
+    # Model rates are top-level decoder_config state, so the shim promotes
+    # them out of the per-decoder parameters instead of dropping them.
+    assert "error_rate_vec" not in args
+    assert list(dc.error_rate_vec) == [0.1, 0.2, 0.3]
     assert args["merge_strategy"] == "smallest_weight"
     dc.validate_custom_args()
 
@@ -442,6 +441,9 @@ def test_configure_valid_multi_error_lut_decoders():
     dc.block_size = 10
     dc.syndrome_size = 3
     dc.H_sparse = [1, 2, 3, -1, 6, 7, 8, -1, -1]
+    # The decoding server constructs for observable output, so a server config
+    # must supply an observable mapping.
+    dc.O_sparse = [0, -1]
     dc.D_sparse = qec.generate_timelike_sparse_detector_matrix(
         dc.syndrome_size, 2, include_first_round=False)
     dc.set_decoder_custom_args(nv)
@@ -491,6 +493,7 @@ def test_trt_decoder_config_set_and_get_each_optional(name, meta):
 def test_trt_decoder_config_yaml_roundtrip():
     trt = qec.trt_decoder_config()
     trt.engine_load_path = "/path/to/engine.trt"
+    trt.engine_output_format = "observables"
     trt.precision = "fp16"
     trt.memory_workspace = 1073741824  # 1GB
 
@@ -621,7 +624,8 @@ def test_pymatching_config_yaml_roundtrip():
     # reads back as a plain dict, never a typed config object.
     pm2 = dc2.decoder_custom_args
     assert pm2 is not None
-    assert list(pm2["error_rate_vec"]) == [0.1, 0.2, 0.3]
+    assert "error_rate_vec" not in pm2
+    assert list(dc2.error_rate_vec) == [0.1, 0.2, 0.3]
     assert pm2["merge_strategy"] == "smallest_weight"
 
 
@@ -634,6 +638,7 @@ def test_trt_decoder_chromobius_global_config_yaml_roundtrip():
     chromobius.return_weight = False
 
     trt = qec.trt_decoder_config()
+    trt.engine_output_format = "residual_detectors"
     trt.global_decoder = "chromobius"
     trt.global_decoder_params = chromobius
 
@@ -664,6 +669,61 @@ def test_trt_decoder_chromobius_global_config_yaml_roundtrip():
     assert chromobius2 is not None
     assert chromobius2["ignore_decomposition_failures"] is True
     assert chromobius2["return_weight"] is False
+
+
+@pytest.mark.skipif(
+    trt_schema_missing or pymatching_schema_missing,
+    reason="trt_decoder/pymatching plugins (and their schemas) not available")
+def test_trt_decoder_nested_pymatching_rates_promote_and_roundtrip():
+    # A nested composition carries model rates on the child, which belong to
+    # the top-level model rather than the child's parameters.
+    pm = qec.pymatching_config()
+    pm.error_rate_vec = [0.1, 0.2, 0.3]
+    pm.merge_strategy = "independent"
+
+    trt = qec.trt_decoder_config()
+    trt.engine_output_format = "residual_detectors"
+    trt.global_decoder = "pymatching"
+    trt.global_decoder_params = pm
+
+    dc = qec.decoder_config()
+    dc.id = 0
+    dc.type = "trt_decoder"
+    dc.block_size = 3
+    dc.syndrome_size = 3
+    dc.H_sparse = [0, -1, 1, -1, 2, -1]
+    dc.set_decoder_custom_args(trt)
+
+    assert list(dc.error_rate_vec) == [0.1, 0.2, 0.3]
+    nested = dc.decoder_custom_args["global_decoder_params"]
+    assert "error_rate_vec" not in nested
+    assert nested["merge_strategy"] == "independent"
+    dc.validate_custom_args()
+
+    dc2 = qec.decoder_config.from_yaml_str(dc.to_yaml_str())
+    assert list(dc2.error_rate_vec) == [0.1, 0.2, 0.3]
+    nested2 = dc2.decoder_custom_args["global_decoder_params"]
+    assert "error_rate_vec" not in nested2
+    assert nested2["merge_strategy"] == "independent"
+
+
+@pytest.mark.skipif(
+    trt_schema_missing or pymatching_schema_missing,
+    reason="trt_decoder/pymatching plugins (and their schemas) not available")
+def test_trt_decoder_nested_pymatching_conflicting_rates_rejected():
+    pm = qec.pymatching_config()
+    pm.error_rate_vec = [0.9, 0.9, 0.9]
+
+    trt = qec.trt_decoder_config()
+    trt.engine_output_format = "residual_detectors"
+    trt.global_decoder = "pymatching"
+    trt.global_decoder_params = pm
+
+    dc = qec.decoder_config()
+    dc.type = "trt_decoder"
+    dc.error_rate_vec = [0.1, 0.2, 0.3]
+    with pytest.raises(RuntimeError, match="error_rate_vec is supplied both"):
+        dc.set_decoder_custom_args(trt)
 
 
 # decoder_config tests
@@ -773,6 +833,9 @@ def test_configure_decoders_from_str_smoke():
     decoder_config.block_size = 10
     decoder_config.syndrome_size = 3
     decoder_config.H_sparse = [1, 2, 3, -1, 6, 7, 8, -1, -1]
+    decoder_config.O_sparse = [0, -1]
+    decoder_config.D_sparse = qec.generate_timelike_sparse_detector_matrix(
+        decoder_config.syndrome_size, 2, include_first_round=False)
     decoder_config.set_decoder_custom_args(nv)
     multi_decoder_config = qec.multi_decoder_config()
     multi_decoder_config.decoders = [decoder_config]
@@ -798,6 +861,9 @@ def test_configure_valid_decoders():
     dc.block_size = 10
     dc.syndrome_size = 3
     dc.H_sparse = [1, 2, 3, -1, 6, 7, 8, -1, -1]
+    # The decoding server constructs for observable output, so a server config
+    # must supply an observable mapping.
+    dc.O_sparse = [0, -1]
     dc.D_sparse = qec.generate_timelike_sparse_detector_matrix(
         dc.syndrome_size, 2, include_first_round=False)
     lut_config = qec.multi_error_lut_config()
@@ -848,7 +914,7 @@ def test_configure_valid_pymatching_decoder():
 
 @pytest.mark.parametrize(
     "error_rate_vec",
-    ([0.1, 0.1], [0.0, 0.1, 0.1], [0.1, 0.6, 0.1]),
+    ([0.0, 0.1, 0.1], [0.1, 0.6, 0.1]),
 )
 def test_configure_invalid_pymatching_error_rate_vec(error_rate_vec):
     pm = qec.pymatching_config()
@@ -858,6 +924,17 @@ def test_configure_invalid_pymatching_error_rate_vec(error_rate_vec):
     ret = configure_pymatching_status(pm)
     assert isinstance(ret, int)
     assert ret != 0
+
+
+def test_configure_rejects_pymatching_error_rate_vec_size_mismatch():
+    # Promoted rates are validated with the top-level field, which rejects a
+    # size mismatch by raising rather than through the status code.
+    pm = qec.pymatching_config()
+    pm.error_rate_vec = [0.1, 0.1]
+    pm.merge_strategy = "smallest_weight"
+
+    with pytest.raises(RuntimeError, match="error_rate_vec size"):
+        configure_pymatching_status(pm)
 
 
 def test_configure_invalid_pymatching_merge_strategy():
@@ -893,6 +970,10 @@ def test_configure_invalid_decoders():
     decoder_config.block_size = 10
     decoder_config.syndrome_size = 3
     decoder_config.H_sparse = [1, 2, 3, -1, 6, 7, 8, -1, -1]
+    # A resolvable model, so the failure under test is the unregistered
+    # decoder type at construction rather than an unresolvable configuration.
+    decoder_config.O_sparse = [0, -1]
+    decoder_config.D_sparse = [0, -1, 1, -1, 2, -1]
     decoder_config.set_decoder_custom_args(nv)
 
     multi_decoder_config = qec.multi_decoder_config()
@@ -900,6 +981,110 @@ def test_configure_invalid_decoders():
     ret = qec.configure_decoders(multi_decoder_config)
     assert isinstance(ret, int)
     assert ret != 0
+
+
+def _clear_kind_cache(cls):
+    if "_kind_cache" in cls.__dict__:
+        delattr(cls, "_kind_cache")
+
+
+def test_typed_config_assignment_when_schema_lookup_fails(monkeypatch):
+    # A missing or failing parameter schema is optional: assignment still
+    # stores the value because no kind check can be applied.
+    cls = qec.nv_qldpc_decoder_config
+    _clear_kind_cache(cls)
+
+    def raise_schema(name):
+        raise RuntimeError("schema lookup failed")
+
+    monkeypatch.setattr(qec, "decoder_param_schema", raise_schema)
+    try:
+        cfg = cls()
+        cfg.max_iterations = 50
+        assert cfg.max_iterations == 50
+    finally:
+        _clear_kind_cache(cls)
+
+
+def test_typed_config_equality_and_repr():
+    # Equality is type-plus-set-fields; repr lists those fields in _fields order.
+    a = qec.pymatching_config()
+    a.error_rate_vec = [0.1, 0.2]
+    a.merge_strategy = "smallest_weight"
+    b = qec.pymatching_config()
+    b.error_rate_vec = [0.1, 0.2]
+    b.merge_strategy = "smallest_weight"
+    c = qec.pymatching_config()
+    c.merge_strategy = "disallow"
+    assert a == b
+    assert a != c
+    assert repr(a) == ("pymatching_config(error_rate_vec=[0.1, 0.2], "
+                       "merge_strategy='smallest_weight')")
+    assert repr(c) == "pymatching_config(merge_strategy='disallow')"
+
+
+# A 1-D list: accepted length, but not a list of rows.
+_not_a_matrix = [0.1, 0.2]
+
+
+@pytest.mark.parametrize(
+    "field, kind, bad, expected",
+    [
+        ("use_sparsity", "bool", 1, "a bool"),
+        ("osd_method", "int32", 1.5, "an int"),
+        ("osd_method", "int32", True, "an int"),
+        ("max_iterations", "uint64", -1, "a non-negative int"),
+        ("max_iterations", "uint64", True, "a non-negative int"),
+        ("error_rate", "float64", "0.1", "a float"),
+        ("proc_float", "string", 32, "a str"),
+        ("error_rate_vec", "float64_vec", 0.1, "a list of floats"),
+        ("error_rate_vec", "float64_vec", [0.1, "x"], "a list of floats"),
+        ("explicit_gammas", "float64_matrix", 0.1, "a list of lists of floats"),
+        ("explicit_gammas", "float64_matrix", _not_a_matrix,
+         "a list of lists of floats"),
+        ("srelay_config", "subschema", 5, "a config object or dict"),
+        ("composition", "discriminated", "bp", "a config object or dict"),
+    ],
+)
+def test_nv_qldpc_decoder_config_kind_errors(monkeypatch, field, kind, bad,
+                                             expected):
+    # Drive every schema kind through the public property setters on a real
+    # nv_qldpc_decoder_config field, using a synthetic schema for this image.
+    cls = qec.nv_qldpc_decoder_config
+    _clear_kind_cache(cls)
+
+    def synthetic_schema(name):
+        return [{"key": field, "kind": kind}]
+
+    monkeypatch.setattr(qec, "decoder_param_schema", synthetic_schema)
+    try:
+        cfg = cls()
+        with pytest.raises(
+                TypeError,
+                match=(f"nv_qldpc_decoder_config.{field} expects {expected}, "
+                       f"got {type(bad).__name__}")):
+            setattr(cfg, field, bad)
+    finally:
+        _clear_kind_cache(cls)
+
+
+def test_nv_qldpc_decoder_config_nested_srelay_from_map():
+    # from_heterogeneous_map rebuilds nested srelay_bp_config and round-trips.
+    source = {
+        "use_sparsity": True,
+        "max_iterations": 50,
+        "srelay_config": {
+            "pre_iter": 5,
+            "num_sets": 3,
+        },
+    }
+    cfg = qec.nv_qldpc_decoder_config.from_heterogeneous_map(source)
+    assert isinstance(cfg.srelay_config, qec.qecrt.config.srelay_bp_config)
+    assert cfg.srelay_config.pre_iter == 5
+    assert cfg.srelay_config.num_sets == 3
+    assert cfg.use_sparsity is True
+    assert cfg.max_iterations == 50
+    assert cfg.to_heterogeneous_map() == source
 
 
 if __name__ == "__main__":

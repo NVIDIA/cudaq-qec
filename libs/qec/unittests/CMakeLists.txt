@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # External Dependencies 
 # ==============================================================================
@@ -29,12 +24,20 @@ if (CMAKE_COMPILER_IS_GNUCXX
 endif()
 include(GoogleTest)
 
+# QEC test executables load every decoder plugin from the build tree in a
+# library constructor. With the default POST_BUILD discovery mode, Ninja can
+# run a test executable while another parallel job is still writing a plugin
+# shared library, which can make dlopen fail with SIGBUS. Defer discovery until
+# CTest runs, after the build has completed.
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
+
 find_package(CUDAToolkit REQUIRED)
 
 # ==============================================================================
 add_compile_options(-Wno-attributes) 
 
-add_executable(test_decoders test_decoders.cpp decoders/sample_decoder.cpp)
+add_executable(test_decoders test_decoders.cpp decoders/sample_decoder.cpp
+  decoders/cancellation_probe_decoder.cpp)
 target_include_directories(test_decoders PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
 target_link_libraries(test_decoders PRIVATE GTest::gtest_main cudaq-qec-decoders libstim CUDA::cudart)
 add_dependencies(CUDAQXQECUnitTests test_decoders)
@@ -54,9 +57,12 @@ if(TARGET cudaq-qec-decoding-server)
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-simulation
     cudaq::cudaq)
-  # The DEM-source test constructs chromobius through the plugin loader.
+  # Chromobius is the DEM-native decoder the raw-DEM model source exists for;
+  # link it when this configuration built it so the acceptance tests can run,
+  # and keep main's feature definition for its conditional cases.
   if(TARGET cudaq-qec-chromobius)
     add_dependencies(test_decoders_yaml cudaq-qec-chromobius)
+    target_link_libraries(test_decoders_yaml PRIVATE cudaq-qec-chromobius)
     target_compile_definitions(test_decoders_yaml PRIVATE CUDAQX_QEC_HAS_CHROMOBIUS)
   endif()
   add_dependencies(CUDAQXQECUnitTests test_decoders_yaml)
@@ -93,11 +99,84 @@ target_link_libraries(test_sparse_binary_matrix PRIVATE GTest::gtest_main
 add_dependencies(CUDAQXQECUnitTests test_sparse_binary_matrix)
 gtest_discover_tests(test_sparse_binary_matrix)
 
+add_executable(test_thread_pool test_thread_pool.cpp)
+target_link_libraries(test_thread_pool PRIVATE GTest::gtest_main
+                                               cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_thread_pool)
+gtest_discover_tests(test_thread_pool)
+
 add_executable(test_extended_dem test_extended_dem.cpp)
 target_link_libraries(test_extended_dem PRIVATE GTest::gtest_main
                                         cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_extended_dem)
 gtest_discover_tests(test_extended_dem)
+
+add_library(parallel_window_reference STATIC parallel_window_reference.cpp)
+target_link_libraries(parallel_window_reference PUBLIC cudaq-qec-decoders)
+
+add_executable(test_decoding_window test_decoding_window.cpp)
+target_link_libraries(test_decoding_window PRIVATE GTest::gtest_main
+                                           parallel_window_reference
+                                           cudaq-qec
+                                           cudaq::cudaq-stim-target)
+set_target_properties(test_decoding_window PROPERTIES
+  BUILD_RPATH
+    "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
+add_dependencies(test_decoding_window cudaq-qec-pymatching)
+add_dependencies(CUDAQXQECUnitTests test_decoding_window)
+gtest_discover_tests(test_decoding_window)
+
+add_executable(test_decoding_task_graph test_decoding_task_graph.cpp)
+target_link_libraries(test_decoding_task_graph PRIVATE GTest::gtest_main
+                                              cudaq-qec
+                                              cudaq::cudaq
+                                              cudaq-qec-decoders
+                                              cudaq-qec-realtime-decoding)
+target_include_directories(test_decoding_task_graph PRIVATE
+                           ${CUDAToolkit_INCLUDE_DIRS})
+set_target_properties(test_decoding_task_graph PROPERTIES
+  BUILD_RPATH
+    "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
+add_dependencies(test_decoding_task_graph cudaq-qec-pymatching)
+add_dependencies(CUDAQXQECUnitTests test_decoding_task_graph)
+gtest_discover_tests(test_decoding_task_graph)
+
+add_executable(test_decoding_task_ensemble test_decoding_task_ensemble.cpp)
+target_link_libraries(test_decoding_task_ensemble PRIVATE GTest::gtest_main
+                                                 cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_decoding_task_ensemble)
+gtest_discover_tests(test_decoding_task_ensemble)
+
+add_library(node_kind_dlclose_plugin SHARED node_kind_dlclose_plugin.cpp)
+target_include_directories(node_kind_dlclose_plugin PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib
+  $<TARGET_PROPERTY:cudaq-qec-decoders,INTERFACE_INCLUDE_DIRECTORIES>
+  $<TARGET_PROPERTY:cudaqx-core,INTERFACE_INCLUDE_DIRECTORIES>)
+# GNU-unique symbols make glibc treat a DSO as NODELETE, defeating this test.
+target_compile_options(node_kind_dlclose_plugin PRIVATE
+  $<$<CXX_COMPILER_ID:GNU>:-fno-gnu-unique>)
+# Link only the shared library, not its whole-archive cudaqx-core dependency,
+# whose GNU-unique symbols would also prevent a real unload in debug builds.
+target_link_libraries(node_kind_dlclose_plugin PRIVATE
+  $<TARGET_FILE:cudaq-qec-decoders>)
+set_target_properties(node_kind_dlclose_plugin PROPERTIES
+  BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+add_dependencies(node_kind_dlclose_plugin cudaq-qec-decoders)
+
+add_executable(test_node_kind_dlclose test_node_kind_dlclose.cpp)
+target_include_directories(test_node_kind_dlclose PRIVATE
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
+target_compile_definitions(test_node_kind_dlclose PRIVATE
+  NODE_KIND_DLCLOSE_PLUGIN_PATH="$<TARGET_FILE:node_kind_dlclose_plugin>")
+target_link_libraries(test_node_kind_dlclose PRIVATE
+  GTest::gtest_main
+  cudaq-qec-decoders
+  ${CMAKE_DL_LIBS})
+set_target_properties(test_node_kind_dlclose PROPERTIES
+  BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+add_dependencies(test_node_kind_dlclose node_kind_dlclose_plugin)
+add_dependencies(CUDAQXQECUnitTests test_node_kind_dlclose)
+gtest_discover_tests(test_node_kind_dlclose)
 
 add_executable(test_dem_construction test_dem_construction.cpp)
 target_link_libraries(test_dem_construction PRIVATE GTest::gtest_main
@@ -112,6 +191,11 @@ target_link_libraries(test_dem_construction_code PRIVATE GTest::gtest_main
 add_dependencies(CUDAQXQECUnitTests test_dem_construction_code)
 gtest_discover_tests(test_dem_construction_code)
 
+add_executable(test_cancellation test_cancellation.cpp)
+target_link_libraries(test_cancellation PRIVATE GTest::gtest_main cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_cancellation)
+gtest_discover_tests(test_cancellation)
+
 add_executable(test_logger test_logger.cpp)
 target_link_libraries(test_logger PRIVATE GTest::gtest_main cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_logger)
@@ -119,7 +203,8 @@ gtest_discover_tests(test_logger)
 
 # TensorRT decoder test is only built for x86 architectures
 if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(AMD64|amd64)|(^i.86$)")
-  add_executable(test_trt_decoder ./decoders/trt_decoder/test_trt_decoder.cpp)
+  add_executable(test_trt_decoder ./decoders/trt_decoder/test_trt_decoder.cpp
+    ./decoders/cancellation_probe_decoder.cpp)
 
   # Find TensorRT for the test
   find_path(TENSORRT_INCLUDE_DIR NvInfer.h
@@ -153,6 +238,11 @@ if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(A
   )
 
   target_link_libraries(test_trt_decoder PRIVATE GTest::gtest_main cudaq-qec-decoders cudaq-qec-trt-decoder CUDA::cudart ${TENSORRT_LIBRARY})
+  add_dependencies(test_trt_decoder cudaq-qec-pymatching)
+  # Chromobius is the DEM-native child the raw-DEM nesting case needs.
+  if(TARGET cudaq-qec-chromobius)
+    target_link_libraries(test_trt_decoder PRIVATE cudaq-qec-chromobius)
+  endif()
 
   find_package(Python COMPONENTS Interpreter QUIET)
   if(Python_Interpreter_FOUND)
@@ -166,11 +256,13 @@ if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(A
       set(_trt_dynamic_identity_onnx "${_trt_generated_onnx_dir}/trt_dynamic_identity.onnx")
       set(_trt_uint8_identity_onnx "${_trt_generated_onnx_dir}/trt_uint8_identity.onnx")
       set(_trt_uint8_to_float_onnx "${_trt_generated_onnx_dir}/trt_uint8_to_float.onnx")
+      set(_trt_predecoder_identity_onnx "${_trt_generated_onnx_dir}/trt_predecoder_identity.onnx")
       add_custom_command(
         OUTPUT
           "${_trt_dynamic_identity_onnx}"
           "${_trt_uint8_identity_onnx}"
           "${_trt_uint8_to_float_onnx}"
+          "${_trt_predecoder_identity_onnx}"
         COMMAND ${Python_EXECUTABLE}
           "${CMAKE_CURRENT_SOURCE_DIR}/decoders/trt_decoder/generate_trt_decoder_onnx.py"
           --out-dir "${_trt_generated_onnx_dir}"
@@ -180,12 +272,14 @@ if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(A
         DEPENDS
           "${_trt_dynamic_identity_onnx}"
           "${_trt_uint8_identity_onnx}"
-          "${_trt_uint8_to_float_onnx}")
+          "${_trt_uint8_to_float_onnx}"
+          "${_trt_predecoder_identity_onnx}")
       add_dependencies(test_trt_decoder generate_trt_decoder_onnx)
       target_compile_definitions(test_trt_decoder PRIVATE
         TRT_TEST_DYNAMIC_ONNX_PATH="${_trt_dynamic_identity_onnx}"
         TRT_TEST_UINT8_ONNX_PATH="${_trt_uint8_identity_onnx}"
-        TRT_TEST_UINT8_TO_FLOAT_ONNX_PATH="${_trt_uint8_to_float_onnx}")
+        TRT_TEST_UINT8_TO_FLOAT_ONNX_PATH="${_trt_uint8_to_float_onnx}"
+        TRT_TEST_PREDECODER_ONNX_PATH="${_trt_predecoder_identity_onnx}")
     else()
       message(WARNING "Python package onnx not found. "
                       "Skipping generated TensorRT decoder ONNX fixtures.")
@@ -301,8 +395,8 @@ if(CUDAQ_REALTIME_ROOT AND CMAKE_CUDA_COMPILER)
     message(STATUS "Found cuda-quantum realtime library at ${CUDAQ_REALTIME_LIBRARY}")
     message(STATUS "Found cuda-quantum realtime dispatch library at ${CUDAQ_REALTIME_DISPATCH_LIBRARY}")
   endif()
-  if(CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY)
-    message(STATUS "Found cuda-quantum realtime host dispatch library at ${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}")
+    if(CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY)
+      message(STATUS "Found cuda-quantum realtime host dispatch library at ${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}")
   endif()
 
   if(_have_realtime_for_tests)
@@ -725,6 +819,7 @@ add_subdirectory(backend-specific)
 add_subdirectory(realtime)
 add_subdirectory(decoders/pymatching)
 add_subdirectory(decoders/chromobius)
+add_subdirectory(playback-emulator)
 
 # HSB rig tools (FPGA playback + graph-launched QLDPC bridge)
 if(CUDAQX_QEC_ENABLE_HSB_TOOLS)

@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /// @file test_realtime_decoding.cu
 /// @brief End-to-end test for realtime decoding pipeline with mock decoder.
@@ -31,9 +28,6 @@
 
 // cuda-quantum RPC types/hash helper
 #include "cudaq/realtime/daemon/dispatcher/dispatch_kernel_launch.h"
-
-// cuda-quantum kernel types for graph-aware dispatch
-#include "cudaq/realtime/daemon/dispatcher/kernel_types.h"
 
 // cudaqx mock decoder (sources in unittests/realtime/)
 #include "mock_decode_handler.cuh"

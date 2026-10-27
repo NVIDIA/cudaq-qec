@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 #include "pymatching/sparse_blossom/driver/user_graph.h"
@@ -13,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <vector>
@@ -60,21 +58,24 @@ private:
 
   // Input parameters
   std::vector<double> error_rate_vec;
-  // Default to DISALLOW for the H-only path so that decode() returns an error
-  // vector cleanly indexed by the original H columns. When an O matrix is
-  // provided (decode_to_observables), we switch to INDEPENDENT to match
-  // upstream PyMatching's from_detector_error_model, which always merges
-  // parallel edges under the independence assumption. The user can override
-  // either default via merge_strategy="..." in the params.
+  // Error-output instances default to DISALLOW. Observable-output instances
+  // default to INDEPENDENT to match upstream PyMatching's
+  // from_detector_error_model behavior.
   pm::MERGE_STRATEGY merge_strategy_enum = pm::MERGE_STRATEGY::DISALLOW;
   bool merge_strategy_explicit = false;
 
-  // Map of edge pairs to column indices. This does not seem particularly
-  // efficient.
+  // Construction-time maps preserve the selected column for each merge policy.
   std::map<std::pair<int64_t, int64_t>, size_t> edge2col_idx;
+  std::map<std::pair<int64_t, int64_t>, double> edge2weight;
+  static constexpr auto invalid_error_column =
+      std::numeric_limits<std::size_t>::max();
+  // Immutable, compressed adjacency lookup for error reconstruction. Boundary
+  // edges have a direct index; ordinary neighbors are sorted within each row.
+  std::vector<std::size_t> error_column_offsets, error_columns,
+      boundary_error_columns;
+  std::vector<std::uint32_t> error_column_neighbors;
 
   bool decode_to_observables = false;
-
   // Scratch buffers reused across decode() calls so a steady-state decode
   // allocates nothing. decode() already mutates the shared Mwpm state, so it
   // was never safe to call concurrently on one instance; reusing these adds no
@@ -94,6 +95,65 @@ private:
     return std::make_pair(std::min(node1, node2), std::max(node1, node2));
   }
 
+  void record_error_column(const std::pair<int64_t, int64_t> &edge,
+                           std::size_t column, double weight) {
+    auto [column_it, inserted] = edge2col_idx.try_emplace(edge, column);
+    if (inserted) {
+      edge2weight.emplace(edge, weight);
+      return;
+    }
+
+    const bool replace = merge_strategy_enum == pm::MERGE_STRATEGY::REPLACE;
+    const bool smaller =
+        merge_strategy_enum == pm::MERGE_STRATEGY::SMALLEST_WEIGHT &&
+        weight < edge2weight.at(edge);
+    if (replace || smaller) {
+      column_it->second = column;
+      edge2weight.at(edge) = weight;
+    }
+  }
+
+  void prepare_error_column_lookup(std::size_t detectors) {
+    error_column_offsets.assign(detectors + 1, 0);
+    boundary_error_columns.assign(detectors, invalid_error_column);
+    for (const auto &[edge, column] : edge2col_idx) {
+      if (edge.first == -1)
+        boundary_error_columns.at(edge.second) = column;
+      else
+        ++error_column_offsets.at(edge.first + 1);
+    }
+    for (std::size_t i = 1; i < error_column_offsets.size(); ++i)
+      error_column_offsets[i] += error_column_offsets[i - 1];
+    error_column_neighbors.reserve(error_column_offsets.back());
+    error_columns.reserve(error_column_offsets.back());
+    // std::map iterates canonical pairs in detector/neighbor order, so no
+    // additional sort or change to the chosen error column is required.
+    for (const auto &[edge, column] : edge2col_idx)
+      if (edge.first != -1) {
+        error_column_neighbors.push_back(edge.second);
+        error_columns.push_back(column);
+      }
+    edge2col_idx.clear();
+    edge2weight.clear();
+  }
+
+  std::size_t error_column(const std::pair<int64_t, int64_t> &edge) const {
+    if (edge.first == -1) {
+      const auto column = boundary_error_columns.at(edge.second);
+      if (column != invalid_error_column)
+        return column;
+    } else {
+      const auto begin =
+          error_column_neighbors.begin() + error_column_offsets.at(edge.first);
+      const auto end = error_column_neighbors.begin() +
+                       error_column_offsets.at(edge.first + 1);
+      const auto found = std::lower_bound(begin, end, edge.second);
+      if (found != end && *found == edge.second)
+        return error_columns[found - error_column_neighbors.begin()];
+    }
+    throw std::out_of_range("pymatching: matched edge has no error column");
+  }
+
 #if PERFORM_TIMING
   // 0: reduce syndrome to detection events, 1: matching, 2: total.
   static constexpr size_t NUM_TIMING_STEPS = 3;
@@ -101,12 +161,17 @@ private:
 #endif
 
 public:
-  pymatching(const cudaq::qec::sparse_binary_matrix &H,
+  pymatching(cudaq::qec::decoder_init inputs, decoder_output_request request,
              const cudaqx::heterogeneous_map &params)
-      : decoder(H) {
+      : decoder(std::move(inputs), request) {
+    if (request.has_auxiliary_outputs())
+      throw std::invalid_argument(
+          "pymatching does not produce auxiliary outputs");
+    const auto &H = get_inputs().detector_error_matrix();
+    error_rate_vec = get_inputs().error_rates();
+    decode_to_observables = request.primary == decode_result_type::observables;
 
-    if (params.contains("error_rate_vec")) {
-      error_rate_vec = params.get<std::vector<double>>("error_rate_vec");
+    if (!error_rate_vec.empty()) {
       if (error_rate_vec.size() != block_size) {
         throw std::runtime_error("error_rate_vec must be of size block_size");
       }
@@ -142,39 +207,24 @@ public:
     }
 
     std::vector<std::vector<size_t>> errs2observables(block_size);
-    if (params.contains("O")) {
-      auto O = params.get<cudaqx::tensor<uint8_t>>("O");
-      if (O.rank() != 2) {
+    if (decode_to_observables) {
+      const auto &O = get_inputs().observable_flips_matrix();
+      if (O.num_cols() != block_size)
         throw std::runtime_error(
-            "O must be a 2-dimensional tensor (num_observables x block_size)");
-      }
-      const size_t num_observables = O.shape()[0];
-      if (O.shape()[1] != block_size) {
-        throw std::runtime_error(
-            "O must be of shape (num_observables, block_size); got second "
-            "dimension " +
-            std::to_string(O.shape()[1]) + ", block_size " +
-            std::to_string(block_size));
-      }
-      std::vector<std::vector<uint32_t>> O_sparse;
-      for (size_t i = 0; i < num_observables; i++) {
-        O_sparse.emplace_back();
-        auto *row = &O.at({i, 0});
-        for (size_t j = 0; j < block_size; j++) {
-          if (row[j] > 0) {
-            O_sparse.back().push_back(static_cast<uint32_t>(j));
-            errs2observables[j].push_back(static_cast<uint32_t>(i));
-          }
-        }
-      }
-      this->set_O_sparse(O_sparse);
-      this->set_result_type(decode_result_type::decode_to_obs);
-      decode_to_observables = true;
+            "Observable matrix column count must equal block_size");
+      const auto O_sparse = O.to_nested_csr();
+      for (std::size_t observable = 0; observable < O_sparse.size();
+           ++observable)
+        for (auto error : O_sparse[observable])
+          errs2observables[error].push_back(observable);
       if (!merge_strategy_explicit)
         merge_strategy_enum = pm::MERGE_STRATEGY::INDEPENDENT;
     }
 
-    user_graph = pm::UserGraph(H.num_rows());
+    user_graph =
+        decode_to_observables
+            ? pm::UserGraph(H.num_rows(), get_inputs().num_observables())
+            : pm::UserGraph(H.num_rows());
 
     H.validate_sorted_unique_indices("pymatching");
 
@@ -185,50 +235,23 @@ public:
     // in their original order. This guarantees by construction that result
     // index `col` always maps back to the caller's column `col`.
     std::vector<std::vector<std::uint32_t>> H_e2d = H.to_nested_csc();
-    std::vector<double> column_weights;
-    if (!decode_to_observables)
-      column_weights.resize(block_size, 1.0);
-
-    // Track which column index the graph will associate with a given edge after
-    // merging. The correct column depends on the merge strategy:
-    //   REPLACE        → last column seen wins (overwrite every time)
-    //   SMALLEST_WEIGHT → lower-weight column wins
-    //   KEEP_ORIGINAL, INDEPENDENT → first column seen wins (no overwrite)
-    //   DISALLOW                  → duplicate edges are rejected
-    auto update_edge2col = [&](auto key, double weight, std::size_t col) {
-      auto [it, inserted] = edge2col_idx.emplace(key, col);
-      if (!inserted) {
-        if (merge_strategy_enum == pm::MERGE_STRATEGY::REPLACE) {
-          it->second = col;
-        } else if (merge_strategy_enum == pm::MERGE_STRATEGY::SMALLEST_WEIGHT) {
-          const double prev_weight = column_weights[it->second];
-          if (weight < prev_weight)
-            it->second = col;
-        }
-        // KEEP_ORIGINAL / INDEPENDENT retain the first column. DISALLOW
-        // rejects duplicate edges in add_or_merge_* below.
-      }
-    };
-
     for (std::size_t col = 0; col < block_size; col++) {
       double weight = 1.0;
       if (col < error_rate_vec.size()) {
         weight = -std::log(error_rate_vec[col] / (1.0 - error_rate_vec[col]));
       }
-      if (!decode_to_observables)
-        column_weights[col] = weight;
-
       const auto &col_rows = H_e2d[col];
       if (col_rows.size() == 2) {
         if (!decode_to_observables)
-          update_edge2col(make_canonical_edge(col_rows[0], col_rows[1]), weight,
-                          col);
+          record_error_column(make_canonical_edge(col_rows[0], col_rows[1]),
+                              col, weight);
         user_graph.add_or_merge_edge(col_rows[0], col_rows[1],
                                      errs2observables.at(col), weight, 0.0,
                                      merge_strategy_enum);
       } else if (col_rows.size() == 1) {
         if (!decode_to_observables)
-          update_edge2col(make_canonical_edge(col_rows[0], -1), weight, col);
+          record_error_column(make_canonical_edge(col_rows[0], -1), col,
+                              weight);
         user_graph.add_or_merge_boundary_edge(col_rows[0],
                                               errs2observables.at(col), weight,
                                               0.0, merge_strategy_enum);
@@ -241,6 +264,11 @@ public:
     this->mwpm = decode_to_observables
                      ? &user_graph.get_mwpm()
                      : &user_graph.get_mwpm_with_search_graph();
+    if (!decode_to_observables)
+      prepare_error_column_lookup(H.num_rows());
+    detection_events.reserve(syndrome_size);
+    edges_scratch.reserve(block_size * 2);
+    obs_scratch.resize(get_inputs().num_observables());
 #if PERFORM_TIMING
     std::fill(decode_times.begin(), decode_times.end(), 0.0);
 #endif
@@ -249,15 +277,18 @@ public:
   /// @brief Decode the syndrome using the MWPM decoder.
   /// @param syndrome The syndrome to decode.
   /// @return The decoder result.
-  /// @throws std::runtime_error if no matching solution is found, or if a
-  /// decode is already running on this decoder, or std::out_of_range if an edge
-  /// is not found in the edge2col_idx map.
-  virtual decoder_result decode(const std::vector<float_t> &syndrome) {
+  /// @throws std::runtime_error if no matching solution is found or a decode
+  /// is already running on this decoder, or std::out_of_range if an edge is
+  /// not found in the prepared error-column lookup.
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
     const decode_exclusive_guard guard(decode_active);
+    const auto result_size =
+        decode_to_observables ? get_inputs().num_observables() : block_size;
+    decoder_result result{false, std::vector<float_t>(result_size, float_t{0})};
+    auto *output = result.result.data();
 #if PERFORM_TIMING
     auto t0 = std::chrono::high_resolution_clock::now();
 #endif
-    decoder_result result{false, std::vector<float_t>()};
 
     detection_events.clear();
     detection_events.reserve(syndrome.size());
@@ -269,29 +300,25 @@ public:
 #endif
     if (decode_to_observables) {
       if (mwpm->flooder.graph.num_observables < 64) {
-        result.result.resize(mwpm->flooder.graph.num_observables);
         auto res = pm::decode_detection_events_for_up_to_64_observables(
             *mwpm, detection_events, /*edge_correlations=*/false);
         for (size_t i = 0; i < mwpm->flooder.graph.num_observables; i++) {
-          result.result[i] =
+          output[i] =
               static_cast<float_t>(res.obs_mask & (1ULL << i) ? 1.0 : 0.0);
         }
       } else {
-        result.result.resize(mwpm->flooder.graph.num_observables);
-        assert(O_sparse.size() == mwpm->flooder.graph.num_observables);
         pm::total_weight_int weight = 0;
         // PyMatching XORs its prediction in, so start from a cleared frame.
         obs_scratch.assign(mwpm->flooder.graph.num_observables, 0);
         pm::decode_detection_events(*mwpm, detection_events, obs_scratch.data(),
                                     weight, /*edge_correlations=*/false);
         for (size_t i = 0; i < mwpm->flooder.graph.num_observables; i++) {
-          result.result[i] = static_cast<float_t>(obs_scratch[i]);
+          output[i] = static_cast<float_t>(obs_scratch[i]);
         }
       }
     } else {
       // PyMatching appends to the edge list without clearing it first.
       edges_scratch.clear();
-      result.result.resize(block_size);
       pm::decode_detection_events_to_edges(*mwpm, detection_events,
                                            edges_scratch);
       // Loop over the edge pairs to reconstruct errors.
@@ -299,13 +326,10 @@ public:
       assert(edges.size() % 2 == 0);
       for (size_t i = 0; i < edges.size(); i += 2) {
         auto edge = make_canonical_edge(edges.at(i), edges.at(i + 1));
-        auto col_idx = edge2col_idx.at(edge);
-        result.result[col_idx] = 1.0;
+        auto col_idx = error_column(edge);
+        output[col_idx] = 1.0;
       }
     }
-    // An exception is thrown if no matching solution is found, so we can just
-    // set converged to true.
-    result.converged = true;
 #if PERFORM_TIMING
     auto t2 = std::chrono::high_resolution_clock::now();
     decode_times[0] +=
@@ -318,6 +342,7 @@ public:
         std::chrono::duration_cast<std::chrono::microseconds>(t2 - t0).count() /
         1e6;
 #endif
+    result.converged = true;
     return result;
   }
 
@@ -332,9 +357,12 @@ public:
 
   CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
       pymatching, static std::unique_ptr<decoder> create(
-                      const cudaq::qec::decoder_init &init,
+                      cudaq::qec::decoder_init inputs,
+                      std::optional<decoder_output_request> output,
                       const cudaqx::heterogeneous_map &params) {
-        return cudaq::qec::make_pcm_decoder<pymatching>(init, params);
+        const auto request =
+            output.value_or(decoder_output_request{decode_result_type::errors});
+        return std::make_unique<pymatching>(std::move(inputs), request, params);
       })
 };
 
@@ -351,7 +379,6 @@ struct pymatching_schema_registrar {
     cudaq::qec::decoding::config::register_decoder_schema(
         {"pymatching",
          {
-             {"error_rate_vec", k::f64_vec},
              {"merge_strategy", k::string},
          }});
   }

@@ -1,12 +1,17 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
-find_package(LLVM 22.1.4 EXACT REQUIRED CONFIG)
+# The realtime decoding config parser (config.cpp) uses only llvm::yaml,
+# llvm::json and llvm::raw_ostream from LLVMSupport, whose API is stable across
+# LLVM versions.  The top-level qec project already locates LLVM (honoring
+# LLVM_DIR / LLVM_VERSION_MAJOR / LLVM_VERSION_MINOR) before descending here, so
+# reuse that result rather than pinning an exact version -- any LLVM providing
+# the Support component works, e.g. a distro `llvm-dev`, with no NVIDIA LLVM
+# toolchain required.  Only fall back to a fresh lookup if LLVM was not already
+# found (e.g. this directory configured on its own).
+if(NOT LLVM_FOUND)
+  find_package(LLVM REQUIRED CONFIG)
+endif()
 
 # Enable CUDA for device code
 if(CMAKE_CUDA_COMPILER)
@@ -198,6 +203,7 @@ endif()
 add_library(cudaq-qec-realtime-decoding SHARED
   realtime_decoding.cpp
   config.cpp
+  window_request_yaml.cpp
 )
 
 target_compile_options(cudaq-qec-realtime-decoding 
@@ -240,6 +246,13 @@ if(_CUDAQ_REALTIME_LIB_DIR)
     BUILD_RPATH "${_CUDAQ_REALTIME_LIB_DIR};${CMAKE_BINARY_DIR}/lib"
     INSTALL_RPATH "${_CUDAQ_REALTIME_LIB_DIR};${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}"
   )
+endif()
+
+# In the wheel, libcudaq-qec-decoders.so is installed next to this library and
+# is not grafted by auditwheel, so it must be found via $ORIGIN.
+if(SKBUILD)
+  set_property(TARGET cudaq-qec-realtime-decoding APPEND PROPERTY
+    INSTALL_RPATH "$ORIGIN")
 endif()
 
 

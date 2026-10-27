@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <new>
 
@@ -26,64 +23,102 @@ __device__ mock_decoder *g_mock_decoder = nullptr;
 __device__ void mock_decoder::decode_impl(
     const uint8_t *__restrict__ measurements, uint8_t *__restrict__ corrections,
     std::size_t num_measurements, std::size_t num_observables) {
-  // Thread 0 does the lookup (simple single-threaded implementation for CI)
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
-    // Default: if no match found, output zeros
-    for (std::size_t i = 0; i < num_observables; ++i) {
-      corrections[i] = 0;
-    }
+  // Simple single-threaded lookup for CI.  The dispatch kernel calls the
+  // DEVICE_CALL handler on every thread of its block, so both callers
+  // (mock_decode_rpc and mock_decode_graph_kernel) guard on thread 0 before
+  // calling decode(); this body runs on one thread and has no block-wide
+  // sync.
 
-    // Search for matching measurements in lookup table
-    for (std::size_t entry = 0; entry < ctx_.num_lookup_entries; ++entry) {
-      const uint8_t *entry_measurements =
-          ctx_.lookup_measurements + entry * num_measurements;
+  // Default: if no match found, output zeros
+  for (std::size_t i = 0; i < num_observables; ++i) {
+    corrections[i] = 0;
+  }
 
-      // Check if this entry matches the input
-      bool match = true;
-      for (std::size_t i = 0; i < num_measurements; ++i) {
-        if (entry_measurements[i] != measurements[i]) {
-          match = false;
-          break;
-        }
-      }
+  // Search for matching measurements in lookup table
+  for (std::size_t entry = 0; entry < ctx_.num_lookup_entries; ++entry) {
+    const uint8_t *entry_measurements =
+        ctx_.lookup_measurements + entry * num_measurements;
 
-      if (match) {
-        // Found match - copy expected corrections to output
-        const uint8_t *entry_corrections =
-            ctx_.lookup_corrections + entry * num_observables;
-        for (std::size_t i = 0; i < num_observables; ++i) {
-          corrections[i] = entry_corrections[i];
-        }
+    // Check if this entry matches the input
+    bool match = true;
+    for (std::size_t i = 0; i < num_measurements; ++i) {
+      if (entry_measurements[i] != measurements[i]) {
+        match = false;
         break;
       }
     }
-  }
 
-  // Single-threaded handler; no block-wide sync required.
+    if (match) {
+      // Found match - copy expected corrections to output
+      const uint8_t *entry_corrections =
+          ctx_.lookup_corrections + entry * num_observables;
+      for (std::size_t i = 0; i < num_observables; ++i) {
+        corrections[i] = entry_corrections[i];
+      }
+      break;
+    }
+  }
 }
 
 //==============================================================================
 // DeviceRPCFunction-Compatible Wrapper
 //==============================================================================
 
-__device__ int mock_decode_rpc(const void *input, void *output,
-                               std::uint32_t arg_len,
-                               std::uint32_t max_result_len,
-                               std::uint32_t *result_len) {
+/// Upper bound on the request bytes mock_decode_rpc stages locally so that it
+/// never reads the request after writing the response (see below).
+constexpr std::size_t kMockMaxMeasurementBytes = 1024;
+
+__device__ int mock_decode_rpc(const void *rx_slot, void *tx_slot,
+                               std::size_t slot_size) {
+  using cudaq::realtime::RPCHeader;
+  using cudaq::realtime::RPCResponse;
+
+  // The dispatch kernel runs one block of threads_per_block threads and calls
+  // this handler on every thread of that block with identical arguments,
+  // between two __syncthreads(); blockIdx.x is always 0 and only thread 0's
+  // return value is recorded.  The lookup is single-threaded and the slots
+  // may alias, so thread 0 alone stages the request, decodes and writes the
+  // response; the other threads return before touching either slot.  There
+  // is no barrier below, so the early return is safe.
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return 0;
+
+  // Two-pointer ABI (same form as a HOST_CALL handler, plus a returned
+  // status): the request (RPCHeader + measurements) is in rx_slot and the
+  // corrections go right after the RPCResponse in tx_slot.  The handler owns
+  // response->result_len; the dispatch kernel fills the other header fields
+  // and forces result_len to 0 on a non-zero status.
+  if (slot_size < sizeof(RPCResponse))
+    return -1;
+  const auto *header = static_cast<const RPCHeader *>(rx_slot);
+  const uint8_t *measurements = reinterpret_cast<const uint8_t *>(header + 1);
+  auto *response = static_cast<RPCResponse *>(tx_slot);
+  uint8_t *corrections = reinterpret_cast<uint8_t *>(response + 1);
+  const std::size_t max_result_len = slot_size - sizeof(RPCResponse);
 
   if (g_mock_decoder != nullptr) {
-    const uint8_t *measurements = static_cast<const uint8_t *>(input);
-    uint8_t *corrections = static_cast<uint8_t *>(output);
-
     const auto &ctx = g_mock_decoder->context();
-    g_mock_decoder->decode(measurements, corrections, ctx.num_measurements,
-                           ctx.num_observables);
+    if (ctx.num_observables > max_result_len)
+      return -2; // Error: result does not fit in the TX slot
+    if (ctx.num_measurements > kMockMaxMeasurementBytes)
+      return -3; // Error: request larger than the local staging buffer
 
-    *result_len = static_cast<std::uint32_t>(ctx.num_observables);
+    // On an in-place ring tx_slot aliases rx_slot, so the measurement bytes
+    // and the correction bytes share an address.  decode() zeroes the
+    // corrections before it compares the measurements, so the ABI's
+    // read-the-request-before-writing-the-response rule means staging the
+    // measurements locally first.
+    uint8_t local_measurements[kMockMaxMeasurementBytes];
+    for (std::size_t i = 0; i < ctx.num_measurements; ++i)
+      local_measurements[i] = measurements[i];
+
+    g_mock_decoder->decode(local_measurements, corrections,
+                           ctx.num_measurements, ctx.num_observables);
+
+    response->result_len = static_cast<std::uint32_t>(ctx.num_observables);
     return 0; // Success
   } else {
     // Error: decoder not set
-    *result_len = 0;
     return -1;
   }
 }

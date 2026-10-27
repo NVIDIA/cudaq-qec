@@ -1,15 +1,13 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #pragma once
 
 #include "cudaq/algorithms/dem.h"
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/detector_error_model.h"
+#include "cudaq/qec/sparse_binary_matrix.h"
 #include <cstddef>
 #include <vector>
 
@@ -206,6 +204,19 @@ private:
 /// @brief Flatten an M2DSparseMatrix into the `-1`-terminated sparse vector a
 /// realtime decoder config expects for its `D_sparse`.
 std::vector<std::int64_t> d_sparse(const cudaq::M2DSparseMatrix &m2d);
+
+/// @brief Rebase a whole-shot measurement-to-observable map onto the final
+/// phase, as `-1`-terminated rows for `dem_chunk_spec::m2o_sparse`.
+/// @param m2o Whole-shot readout map, one row per observable.
+/// @param first_measurement Index of the final phase's first measurement.
+/// @throws std::invalid_argument if a row reads a measurement outside
+/// `[first_measurement, m2o.num_measurements)`.
+std::vector<std::int64_t> m2o_sparse(const cudaq::M2OSparseMatrix &m2o,
+                                     std::size_t first_measurement);
+
+/// @brief Convert CUDA-Q circuit-analysis M2D output to the QEC-owned sparse
+/// matrix used by decoder_init.
+sparse_binary_matrix m2d_to_sparse(const cudaq::M2DSparseMatrix &m2d);
 
 /// @brief Given a memory circuit setup, generate a DEM
 /// @param code QEC Code to sample

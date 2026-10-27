@@ -1,27 +1,35 @@
-/*******************************************************************************
- * Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "realtime_decoding.h"
-#include "../hardware_guards.h"
+#include "decode_target.h"
+#include "stim_dem_forms.h"
+#include "../decoding_task/decoding_task_data_artifacts.h"
+#include "../decoding_task/decoding_task_graph_utils.h"
 #include "cudaq/qec/decoder.h"
+#include "cudaq/qec/decoder_config_schema.h"
+#include "cudaq/qec/decoding_task_graph.h"
+#include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/logger.h"
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fmt/core.h>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
 // Optional syndrome capture callback for --save_syndrome feature
 namespace {
@@ -30,6 +38,39 @@ SyndromeCaptureCallback g_syndrome_capture_callback = nullptr;
 } // namespace
 
 std::vector<std::unique_ptr<cudaq::qec::decoder>> g_decoders;
+// Parallel to g_decoders. Populated for task_graph: configs; those slots leave
+// g_decoders[id] null. Dispatch checks g_task_graphs[id] first.
+std::vector<std::unique_ptr<cudaq::qec::decoding_task_graph>> g_task_graphs;
+
+namespace {
+
+// id -> shape, as the configuration declared it.
+std::vector<std::pair<std::uint64_t, cudaq::qec::round_type>>
+    g_syndrome_mapping;
+
+/// The shape of the row `id` names.  Derived, never sent: ids are what the
+/// wire and the kernel API carry.
+cudaq::qec::round_type shape_for_mapping_id(std::uint64_t id) {
+  std::optional<cudaq::qec::round_type> shape;
+
+  if (g_syndrome_mapping.empty()) {
+    // Nothing installed: id 0 is the only id there is and it means BULK.
+    if (id == 0)
+      shape = cudaq::qec::round_type::BULK;
+  } else {
+    for (const auto &[row_id, row_shape] : g_syndrome_mapping)
+      if (row_id == id && !shape)
+        shape = row_shape;
+  }
+
+  if (!shape)
+    throw std::runtime_error("enqueue_syndromes: syndrome_mapping_id " +
+                             std::to_string(id) +
+                             " names no row the configuration declares");
+  return *shape;
+}
+
+} // namespace
 
 // Helper to pack syndrome bits into bytes (8 bits per byte, MSB first for
 // readability)
@@ -51,206 +92,416 @@ static std::vector<uint8_t> pack_syndrome_bits(const uint8_t *syndromes,
 
 namespace cudaq::qec::decoding::host {
 
-/// Read the DEM a decoder entry names.
-std::string read_stim_dem(
-    const cudaq::qec::decoding::config::decoder_config &decoder_config) {
+/// Read a Stim DEM file into the text a decoder is built from. `where` names
+/// the key being resolved, since both the entry-level `stim_dem_path` and a
+/// node's come through here and a bare path is not enough to place the error.
+static std::string read_stim_dem_file(const std::filesystem::path &path,
+                                      std::string_view where) {
   // A directory opens as a stream and fails only when read, past the check
   // below.
   std::error_code ec;
-  if (!std::filesystem::is_regular_file(decoder_config.stim_dem_path, ec))
+  if (!std::filesystem::is_regular_file(path, ec))
     throw std::runtime_error(
-        fmt::format("stim_dem_path is not a readable file: {}",
-                    decoder_config.stim_dem_path));
-  std::ifstream file(decoder_config.stim_dem_path);
+        fmt::format("{} is not a readable file: {}", where, path.string()));
+  // Binary, so the bytes read are the file's: a pinned sha256 hashes them.
+  std::ifstream file(path, std::ios::binary);
   if (!file)
-    throw std::runtime_error(fmt::format(
-        "stim_dem_path could not be opened: {}", decoder_config.stim_dem_path));
-  return std::string((std::istreambuf_iterator<char>(file)),
-                     std::istreambuf_iterator<char>());
+    throw std::runtime_error(
+        fmt::format("{} could not be opened: {}", where, path.string()));
+  try {
+    return std::string((std::istreambuf_iterator<char>(file)),
+                       std::istreambuf_iterator<char>());
+  } catch (const std::exception &error) {
+    throw std::runtime_error(fmt::format("{} could not be read: {} ({})", where,
+                                         path.string(), error.what()));
+  }
 }
+
+/// Read the DEM a decoder entry names.
+std::string read_stim_dem(const std::filesystem::path &dem_path) {
+  return read_stim_dem_file(dem_path, "stim_dem_path");
+}
+
+/// A pin as sha256_hex() writes a hash: lowercase.
+static std::string lowercase_pin(std::string pin) {
+  std::transform(pin.begin(), pin.end(), pin.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return pin;
+}
+
+/// Read a data_artifacts entry's Stim DEM, hashing it once: its inline text,
+/// or its file, resolved against `base_dir` as a decoder's is and checked
+/// against the entry's pin. A pin needs a file, as parsing requires; a
+/// configuration built in code skips the parser. Other kinds of entry give
+/// no text and no hash.
+static stim_dem_read
+read_stim_dem_entry(const config::data_artifact &entry,
+                    const std::filesystem::path &base_dir) {
+  const auto where = "data_artifacts." + entry.name;
+  const auto pinned = lowercase_pin(entry.sha256);
+  std::filesystem::path path(entry.stim_dem_path);
+  stim_dem_read read;
+  if (entry.stim_dem_path.empty() && !entry.sha256.empty())
+    throw std::runtime_error(where + ": sha256 pins a file, so it needs a "
+                                     "file-backed entry such as stim_dem_path");
+  if (entry.stim_dem_path.empty()) {
+    read.text = entry.stim_dem;
+    if (!read.text.empty())
+      read.sha256 = cudaq::qec::sha256_hex(read.text);
+    return read;
+  }
+  if (path.is_relative())
+    path = std::filesystem::absolute(base_dir / path).lexically_normal();
+  read.text = read_stim_dem_file(path, where);
+  read.sha256 = cudaq::qec::sha256_hex(read.text);
+  if (!pinned.empty() && pinned != read.sha256)
+    throw std::runtime_error(where + ": " + entry.stim_dem_path +
+                             " has sha256 " + read.sha256 +
+                             ", but the entry pins " + entry.sha256);
+  return read;
+} // end - read_stim_dem_entry()
 
 cudaqx::heterogeneous_map prepare_decoder_params(
     const cudaq::qec::decoding::config::decoder_config &decoder_config) {
   auto params = decoder_config.decoder_custom_args_to_heterogeneous_map();
-  // Placement knob: surfaced for every decoder type (deliberately before the
-  // decoder-type early return below); consumed by decoder::get() at
-  // construction.
+  // Placement is common factory policy and is consumed by decoder::get().
   if (decoder_config.cuda_device_id.has_value())
     params.insert("cuda_device_id", decoder_config.cuda_device_id.value());
-  const bool is_trt_decoder = decoder_config.type == "trt_decoder";
-  const bool is_pymatching_decoder = decoder_config.type == "pymatching";
-  if (!is_trt_decoder && !is_pymatching_decoder)
-    return params;
-
-  // batch_size > 1 has no effect on the realtime path: enqueue_syndrome decodes
-  // one syndrome per call, so the trt_decoder zero-pads the batch and discards
-  // all but slot 0. Warn rather than reject -- the result is correct, just
-  // wasteful. (Offline decode_batch users set batch_size via a raw params map,
-  // not this realtime config path.)
-  if (is_trt_decoder && params.contains("batch_size") &&
-      params.get<std::size_t>("batch_size") > 1)
-    CUDA_QEC_WARN(
-        "trt_decoder batch_size > 1 has no effect on the realtime decode path "
-        "(one syndrome is decoded per call); the extra batch slots are "
-        "zero-padded and discarded. Use batch_size = 1 for realtime.");
-
-  // The trt_decoder plugin attaches a global decoder only when both
-  // "global_decoder" and "global_decoder_params" are present. Most config
-  // paths materialize defaults for known global decoders, but callers can still
-  // provide a hand-built map with only "global_decoder"; synthesize params here
-  // before the O_sparse early return so that decoder still attaches.
-  const bool has_global_decoder =
-      is_trt_decoder && params.contains("global_decoder") &&
-      !params.get<std::string>("global_decoder").empty();
-  const bool has_pymatching_global =
-      has_global_decoder &&
-      params.get<std::string>("global_decoder") == "pymatching";
-  if (has_global_decoder && !params.contains("global_decoder_params"))
-    params.insert("global_decoder_params", cudaqx::heterogeneous_map());
-
-  // A DEM-native global decoder (chromobius) cannot be built from the parent's
-  // H, so pass the model text down beside it. Decoders that do not ask for it
-  // ignore the key.
-  if (has_global_decoder && !decoder_config.stim_dem_path.empty()) {
-    auto global_decoder_params =
-        params.get<cudaqx::heterogeneous_map>("global_decoder_params");
-    global_decoder_params.insert("stim_dem", read_stim_dem(decoder_config));
-    params.insert("global_decoder_params", global_decoder_params);
-  }
-
-  if (decoder_config.O_sparse.empty())
-    return params;
-
-  const auto num_observables = std::count(decoder_config.O_sparse.begin(),
-                                          decoder_config.O_sparse.end(), -1);
-  if (num_observables == 0)
-    return params;
-
-  auto O = cudaq::qec::pcm_from_sparse_vec(
-      decoder_config.O_sparse, num_observables, decoder_config.block_size);
-  params.insert("O", O);
-
-  // PyMatching consumes the observable matrix through its params; other global
-  // decoders receive only the top-level O until they define a matching
-  // contract.
-  if (has_pymatching_global) {
-    auto global_decoder_params =
-        params.get<cudaqx::heterogeneous_map>("global_decoder_params");
-    global_decoder_params.insert("O", O);
-    params.insert("global_decoder_params", global_decoder_params);
-  }
-
   return params;
 }
 
-std::unique_ptr<cudaq::qec::decoder> create_realtime_decoder(
-    const cudaq::qec::decoding::config::decoder_config &config_in) {
-  if (config_in.id < 0 || static_cast<std::uint64_t>(config_in.id) >
-                              std::numeric_limits<std::uint32_t>::max())
-    throw std::invalid_argument("Decoder ID is outside the uint32_t range: " +
-                                std::to_string(config_in.id));
+namespace {
 
-  // The parser rejects a config describing two forms, but a programmatically
-  // built one never passes through it. These two are what corrupt: chunk
-  // priors over an unrelated model, and an O_sparse that overwrites the
-  // mapping a DEM-native decoder installed for itself.
-  if (!config_in.stim_dem_path.empty() &&
-      (config_in.dem_chunks.has_value() || !config_in.O_sparse.empty()))
+/// Parse the flat -1-terminated sparse encoding into per-row column lists.
+std::vector<std::vector<std::uint32_t>>
+parse_flat_sparse_rows(const std::vector<std::int64_t> &flat,
+                       const char *name) {
+  std::vector<std::vector<std::uint32_t>> rows;
+  std::vector<std::uint32_t> row;
+  // -1 terminates a row; every other value must be a column index that, with
+  // its exclusive upper bound, fits the sparse matrix index type. Narrowing an
+  // out-of-range value would silently alias it onto a real column.
+  constexpr std::int64_t max_column_index =
+      static_cast<std::int64_t>(
+          std::numeric_limits<
+              cudaq::qec::sparse_binary_matrix::index_type>::max()) -
+      1;
+  for (std::int64_t entry : flat) {
+    if (entry == -1) {
+      rows.push_back(std::move(row));
+      row.clear();
+      continue;
+    }
+    if (entry < -1 || entry > max_column_index)
+      throw std::runtime_error(
+          fmt::format("Value in {} vector is out of range: {} (expected -1 as "
+                      "a row terminator, or a column index in [0, {}])",
+                      name, entry, max_column_index));
+    row.push_back(static_cast<std::uint32_t>(entry));
+  }
+  if (!row.empty())
+    rows.push_back(std::move(row));
+
+  return rows;
+}
+
+/// Build D in GF(2)-canonical form, one row per detector. A repeated index in a
+/// row cancels under the realtime detector XOR, so canonicalizing here puts
+/// that rule in the model rather than leaving each consumer to interpret
+/// duplicates its own way.
+/// \p declared_width, when given, is the count the model declares rather than
+/// one inferred from the rows: a round's trailing measurements may be read by
+/// no detector, leaving the decoder expecting a short stream.
+cudaq::qec::sparse_binary_matrix canonical_measurement_to_detectors(
+    const std::vector<std::vector<std::uint32_t>> &detector_rows,
+    std::optional<std::uint64_t> declared_width = std::nullopt) {
+  // Width is taken before cancellation, so a trailing measurement referenced
+  // only by a cancelling pair still counts toward the per-decode width.
+  std::uint32_t num_measurements = 0;
+  for (const auto &r : detector_rows)
+    for (auto column : r)
+      num_measurements = std::max(num_measurements, column + 1);
+
+  if (declared_width) {
+    if (*declared_width > std::numeric_limits<std::uint32_t>::max())
+      throw std::runtime_error(
+          fmt::format("declared measurement count {} exceeds uint32_t max",
+                      *declared_width));
+    // A declaration narrower than the rows is not a width, it is a
+    // contradiction: some detector reads a measurement the stream never
+    // carries.
+    if (*declared_width < num_measurements)
+      throw std::runtime_error(fmt::format(
+          "the model declares {} measurements per shot but a detector reads "
+          "measurement index {}",
+          *declared_width, num_measurements - 1));
+    num_measurements = static_cast<std::uint32_t>(*declared_width);
+  }
+
+  return cudaq::qec::sparse_binary_matrix::from_nested_csr(
+             static_cast<std::uint32_t>(detector_rows.size()), num_measurements,
+             detector_rows)
+      .canonicalize();
+} // end - canonical_measurement_to_detectors()
+
+/// As above, from the flat -1-terminated encoding.
+cudaq::qec::sparse_binary_matrix
+canonical_measurement_to_detectors(const std::vector<std::int64_t> &d_sparse) {
+  std::vector<std::vector<std::uint32_t>> detector_rows;
+  std::vector<std::uint32_t> row;
+  // -1 terminates a row; every other value must be a measurement index that,
+  // with its exclusive upper bound, fits the sparse matrix index type.
+  // Narrowing an out-of-range value would silently alias it onto a real
+  // measurement.
+  constexpr std::int64_t max_measurement_index =
+      static_cast<std::int64_t>(
+          std::numeric_limits<
+              cudaq::qec::sparse_binary_matrix::index_type>::max()) -
+      1;
+  for (std::int64_t entry : d_sparse) {
+    if (entry == -1) {
+      detector_rows.push_back(std::move(row));
+      row.clear();
+      continue;
+    }
+    if (entry < -1 || entry > max_measurement_index)
+      throw std::runtime_error(fmt::format(
+          "Value in D_sparse vector is out of range: {} (expected -1 as a row "
+          "terminator, or a measurement index in [0, {}])",
+          entry, max_measurement_index));
+    row.push_back(static_cast<std::uint32_t>(entry));
+  }
+  if (!row.empty())
+    detector_rows.push_back(std::move(row));
+  return canonical_measurement_to_detectors(detector_rows);
+}
+
+void validate_sparse_indices(const std::vector<std::int64_t> &sparse,
+                             std::uint64_t num_columns, const char *name) {
+  for (auto value : sparse)
+    if (value < -1 ||
+        (value >= 0 && static_cast<std::uint64_t>(value) >= num_columns))
+      throw std::runtime_error(
+          fmt::format("Value in {} vector is out of range: {}", name, value));
+}
+
+void validate_detector_rows(const std::vector<std::int64_t> &d_sparse,
+                            std::int64_t id) {
+  if (!d_sparse.empty() && d_sparse.front() == -1)
     throw std::runtime_error(
-        "dem_chunks and O_sparse must not be set with stim_dem_path for "
-        "decoder " +
-        std::to_string(config_in.id));
+        fmt::format("D_sparse row is empty for decoder {}", id));
+  for (std::size_t i = 0; i + 1 < d_sparse.size(); ++i)
+    if (d_sparse.at(i) == -1 && d_sparse.at(i + 1) == -1)
+      throw std::runtime_error(
+          fmt::format("D_sparse row is empty for decoder {}", id));
+}
 
-  // A chunk-form configuration names its DEM one round at a time. Expand it
-  // here so everything below is written against the flat form only.
+/// A supplied syndrome_size or block_size is only an assertion about the model
+/// named by `source`, which defines both.
+void check_declared_dimensions(
+    const cudaq::qec::decoding::config::decoder_config &config,
+    const cudaq::qec::decoder_init &inputs, const std::string &source,
+    const char *block_size_note = "") {
+  if (config.syndrome_size != 0 &&
+      config.syndrome_size != inputs.num_detectors())
+    throw std::runtime_error(fmt::format(
+        "syndrome_size ({}) does not match the detector count of {} ({})",
+        config.syndrome_size, source, inputs.num_detectors()));
+  if (config.block_size != 0 &&
+      config.block_size != inputs.num_error_mechanisms())
+    throw std::runtime_error(fmt::format(
+        "block_size ({}) does not match the error-mechanism count of {} ({}){}",
+        config.block_size, source, inputs.num_error_mechanisms(),
+        block_size_note));
+}
+
+cudaq::qec::decoder_init resolve_dem_chunks_init(
+    const cudaq::qec::decoding::config::decoder_config &config) {
+  const auto &spec = *config.dem_chunks;
+  std::vector<std::vector<std::uint32_t>> d_rows;
+  try {
+    d_rows = cudaq::qec::dem_chunks_to_d_sparse(spec);
+  } catch (const std::exception &error) {
+    throw std::runtime_error("Cannot expand dem_chunks for decoder " +
+                             std::to_string(config.id) + ": " + error.what());
+  }
+  for (const auto &row : d_rows)
+    if (row.empty())
+      throw std::runtime_error(
+          fmt::format("D_sparse row is empty for decoder {}", config.id));
+
+  const bool needs_matrices = cudaq::qec::decoder_needs_model_matrices(
+      config.type, cudaq::qec::decoder_model_source::dem_chunks);
+  std::optional<cudaq::qec::decoder_init> inputs;
+  try {
+    auto D = canonical_measurement_to_detectors(
+        d_rows, cudaq::qec::dem_chunks_measurement_count(spec));
+    inputs =
+        needs_matrices
+            ? cudaq::qec::decoder_init::from_dem_chunks_closed(spec,
+                                                               std::move(D))
+            : cudaq::qec::decoder_init::from_dem_chunks(spec, std::move(D));
+  } catch (const std::invalid_argument &error) {
+    throw std::runtime_error("Cannot close dem_chunks for decoder " +
+                             std::to_string(config.id) + ": " + error.what());
+  }
+  if (!inputs->has_observable_model())
+    throw std::runtime_error(
+        "dem_chunks for decoder " + std::to_string(config.id) +
+        " flip no observables: the decoding server constructs every decoder "
+        "for observable output, which needs an observable mapping");
+  check_declared_dimensions(config, *inputs, "dem_chunks");
+  return std::move(*inputs);
+}
+
+} // namespace
+
+cudaq::qec::decoder_init resolve_decoder_init(
+    const cudaq::qec::decoding::config::decoder_config &config_in,
+    const std::filesystem::path &base_dir) {
+  const char *dem_key = config::stim_dem_key(config_in.stim_dem_path);
+  if (!config_in.stim_dem_path.empty() && !config_in.stim_dem.empty())
+    throw config::both_stim_forms("decoder " + std::to_string(config_in.id));
+  if ((!config_in.stim_dem_path.empty() || !config_in.stim_dem.empty()) &&
+      config_in.dem_chunks.has_value())
+    throw std::runtime_error(std::string("dem_chunks and ") + dem_key +
+                             " must not both be set for decoder " +
+                             std::to_string(config_in.id) +
+                             "; each describes the whole DEM on its own");
+
+  // A chunk-form configuration names its model one round at a time, and stays
+  // the authoritative source: a decoder that reads chunks gets them alone, and
+  // any other gets them with their closed model.
+  if (config_in.dem_chunks.has_value() && config_in.H_sparse.empty())
+    return resolve_dem_chunks_init(config_in);
+
+  // A chunk form that already carries its expansion is the flat form.
   auto expanded_config = config_in;
-  const auto closed_dem =
-      cudaq::qec::decoding::config::expand_dem_chunks(expanded_config);
+  cudaq::qec::decoding::config::expand_dem_chunks(expanded_config);
   const auto &decoder_config = expanded_config;
+  const auto error_rate_vec = decoder_config.effective_error_rate_vec();
 
   if (decoder_config.D_sparse.empty())
     throw std::runtime_error(
         "D_sparse must be provided in decoder configuration");
-  // pcm_from_sparse_vec() turns an empty H_sparse into an all-zero matrix
-  // rather than failing, so without this check a config that described no DEM
-  // at all would build a decoder whose parity-check matrix decodes nothing. A
-  // DEM-sourced decoder is built from the model text instead, so it has no
-  // H_sparse to check.
-  if (decoder_config.H_sparse.empty() && decoder_config.stim_dem_path.empty())
+  validate_detector_rows(decoder_config.D_sparse, decoder_config.id);
+  auto D = canonical_measurement_to_detectors(decoder_config.D_sparse);
+
+  const bool dem_source =
+      !decoder_config.stim_dem_path.empty() || !decoder_config.stim_dem.empty();
+  if (dem_source) {
+    // The matrix keys are a competing representation of the same model, not
+    // assertions about it, so supplying both leaves no single authority.
+    if (!decoder_config.H_sparse.empty() || !decoder_config.O_sparse.empty() ||
+        !error_rate_vec.empty())
+      throw std::runtime_error(
+          std::string(dem_key) +
+          " is mutually exclusive with H_sparse, O_sparse and "
+          "error_rate_vec; supply exactly one model source");
+
+    // Absolute, not merely normalized: base_dir may itself be relative (a
+    // server started with `configs/decoders.yml`), and a stored relative path
+    // stops resolving once the working directory changes.
+    std::filesystem::path dem_path(decoder_config.stim_dem_path);
+    if (dem_path.is_relative())
+      dem_path =
+          std::filesystem::absolute(base_dir / dem_path).lexically_normal();
+    std::string dem_text = decoder_config.stim_dem.empty()
+                               ? read_stim_dem(dem_path)
+                               : decoder_config.stim_dem;
+
+    // The model is identified by path, so editing a DEM in place leaves the
+    // configuration byte-identical and a reload keeps serving the old model.
+    // Change the path to change the model.
+
+    auto inputs = cudaq::qec::decoder_init::from_stim_dem(std::move(dem_text),
+                                                          std::move(D));
+
+    // Name the model as the decoder gives it: its file, else the entry it
+    // names, whose file with_pinned_stim_dems() may have read into text,
+    // else its own text.
+    std::string source = "stim_dem";
+    if (!decoder_config.stim_dem_path.empty())
+      source = decoder_config.stim_dem_path;
+    else if (!decoder_config.stim_dem_artifact.empty())
+      source = "data_artifacts." + decoder_config.stim_dem_artifact;
+    check_declared_dimensions(
+        decoder_config, inputs, source,
+        ". The derived value is the column count of the flattened matrix "
+        "projection of the DEM, which need not equal a count reported using a "
+        "different decomposition.");
+    return inputs;
+  }
+
+  // Matrix source. These dimensions are needed to interpret the flat sparse
+  // encodings, so they stay required on this branch.
+  if (decoder_config.syndrome_size == 0 || decoder_config.block_size == 0)
     throw std::runtime_error(
-        "H_sparse must be provided to build decoder " +
-        std::to_string(decoder_config.id) +
-        ", either directly or by way of dem_chunks and num_rounds. A "
-        "DEM-native decoder can name a model with stim_dem_path instead.");
+        "block_size and syndrome_size are required for a matrix decoder model");
+  const auto num_H_rows = std::count(decoder_config.H_sparse.begin(),
+                                     decoder_config.H_sparse.end(), -1);
+  if (static_cast<std::uint64_t>(num_H_rows) != decoder_config.syndrome_size)
+    throw std::runtime_error(fmt::format(
+        "Number of rows in H_sparse vector is not equal to syndrome_size: {} "
+        "!= {}",
+        num_H_rows, decoder_config.syndrome_size));
+  validate_sparse_indices(decoder_config.H_sparse, decoder_config.block_size,
+                          "H_sparse");
+  // The realtime path exists to return observable corrections, so a model that
+  // supplies no observable mapping cannot serve it. Without this the decoder
+  // constructs and silently decodes to a zero-length observable frame.
+  if (decoder_config.O_sparse.empty())
+    throw std::runtime_error(
+        "O_sparse is required: the decoding server constructs every decoder "
+        "for observable output, which needs an observable mapping");
+  validate_sparse_indices(decoder_config.O_sparse, decoder_config.block_size,
+                          "O_sparse");
+  if (!error_rate_vec.empty() &&
+      error_rate_vec.size() != decoder_config.block_size)
+    throw std::runtime_error(
+        fmt::format("error_rate_vec size is not equal to block_size: {} != {}",
+                    error_rate_vec.size(), decoder_config.block_size));
+  if (static_cast<std::uint64_t>(D.num_rows()) != decoder_config.syndrome_size)
+    throw std::runtime_error(
+        fmt::format("Number of rows in D_sparse vector is not equal to "
+                    "syndrome_size: {} != {}",
+                    D.num_rows(), decoder_config.syndrome_size));
+
+  auto pcm = cudaq::qec::pcm_from_sparse_vec(decoder_config.H_sparse,
+                                             decoder_config.syndrome_size,
+                                             decoder_config.block_size);
+  const auto num_observables = std::count(decoder_config.O_sparse.begin(),
+                                          decoder_config.O_sparse.end(), -1);
+  auto observable_matrix = cudaq::qec::pcm_from_sparse_vec(
+      decoder_config.O_sparse, num_observables, decoder_config.block_size);
+  return cudaq::qec::decoder_init(std::move(pcm), std::move(observable_matrix),
+                                  error_rate_vec, std::move(D));
+}
+
+std::unique_ptr<cudaq::qec::decoder> create_realtime_decoder(
+    const cudaq::qec::decoding::config::decoder_config &decoder_config,
+    cudaq::qec::decoder_init inputs,
+    cudaq::qec::decoder_output_request output) {
+  if (decoder_config.id < 0 || static_cast<std::uint64_t>(decoder_config.id) >
+                                   std::numeric_limits<std::uint32_t>::max())
+    throw std::invalid_argument("Decoder ID is outside the uint32_t range: " +
+                                std::to_string(decoder_config.id));
 
   auto t0 = std::chrono::high_resolution_clock::now();
   CUDA_QEC_INFO("Creating decoder {} of type {}", decoder_config.id,
                 decoder_config.type);
 
-  // Needed both to construct the decoder and to derive its observable mapping.
-  const std::string stim_dem_text = decoder_config.stim_dem_path.empty()
-                                        ? std::string{}
-                                        : read_stim_dem(decoder_config);
-
-  auto params = prepare_decoder_params(decoder_config);
-  // The phases carry a prior per fault, which the derived matrices do not. A
-  // hand-written flat configuration would have had to pass these through
-  // decoder_custom_args, so supply them here for the ones that did not.
-  if (closed_dem && !params.contains("error_rate_vec"))
-    params.insert("error_rate_vec", closed_dem->error_rates);
-
-  const auto num_observables = std::count(decoder_config.O_sparse.begin(),
-                                          decoder_config.O_sparse.end(), -1);
-
-  std::unique_ptr<cudaq::qec::decoder> decoder;
-  if (!decoder_config.stim_dem_path.empty()) {
-    // A DEM-native decoder is constructed from the model text itself. It
-    // derives its own dimensions and, like chromobius, installs the observable
-    // mapping its results are expressed in, so neither is supplied here.
-    decoder =
-        cudaq::qec::get_decoder(decoder_config.type, stim_dem_text, params);
-    const auto num_D_rows = std::count(decoder_config.D_sparse.begin(),
-                                       decoder_config.D_sparse.end(), -1);
-    if (num_D_rows != static_cast<std::int64_t>(decoder->get_syndrome_size()))
-      throw std::runtime_error(fmt::format(
-          "Number of rows in D_sparse vector is not equal to the number of "
-          "detectors in {}: {} != {}",
-          decoder_config.stim_dem_path, num_D_rows,
-          decoder->get_syndrome_size()));
-  } else {
-    auto pcm = cudaq::qec::pcm_from_sparse_vec(decoder_config.H_sparse,
-                                               decoder_config.syndrome_size,
-                                               decoder_config.block_size);
-    // Materialize O before decoder construction to validate its sparse shape
-    // and column indices for every decoder type. TRT also receives this matrix
-    // in its constructor parameters through prepare_decoder_params() above.
-    (void)cudaq::qec::pcm_from_sparse_vec(
-        decoder_config.O_sparse, num_observables, decoder_config.block_size);
-    decoder = cudaq::qec::get_decoder(decoder_config.type, pcm, params);
-  }
+  auto decoder =
+      cudaq::qec::get_decoder(decoder_config.type, std::move(inputs), output,
+                              prepare_decoder_params(decoder_config));
   decoder->set_decoder_id(decoder_config.id);
-  // A decoder that predicts observables directly installs the mapping its
-  // results are expressed in at construction (chromobius derives an identity
-  // map from the DEM it read), so installing an empty one here would drop it
-  // and leave get_corrections with nowhere to write.
-  if (!decoder_config.O_sparse.empty()) {
-    const bool pymatching_configured_observables =
-        decoder_config.type == "pymatching" && num_observables > 0;
-    if (!pymatching_configured_observables)
-      decoder->set_O_sparse(decoder_config.O_sparse);
-  } else if (!stim_dem_text.empty() && decoder->get_num_observables() == 0) {
-    // DEM form names no O_sparse and the LUT decoders install none, leaving the
-    // realtime path nothing to project onto. dem_from_stim_text() is what
-    // make_pcm_decoder() used, so the columns line up with the decoder's own.
-    const auto dem = cudaq::qec::dem_from_stim_text(stim_dem_text);
-    decoder->set_O_sparse(
-        cudaq::qec::pcm_to_sparse_vec(dem.observables_flips_matrix));
-  }
-  decoder->set_D_sparse(decoder_config.D_sparse);
 
   // Force plugin initialization before the caller publishes the decoder for
   // realtime work. This preserves configure_decoders()'s existing behavior.
   auto t1 = std::chrono::high_resolution_clock::now();
+  // Size the dry run from the constructed decoder, not the configuration: a
+  // DEM-sourced config leaves syndrome_size unset and derives it from the
+  // model.
   std::vector<cudaq::qec::float_t> syndrome(decoder->get_syndrome_size(), 0.0);
   decoder->decode(syndrome);
   auto t2 = std::chrono::high_resolution_clock::now();
@@ -266,9 +517,388 @@ std::unique_ptr<cudaq::qec::decoder> create_realtime_decoder(
   return decoder;
 }
 
+namespace {
+
+// The template a task-graph node's DEM is built from: none for a node with
+// matrices of its own, else its own dem_chunks, else its decoder's while the
+// decoder has no flat matrices. expand_dem_chunks() leaves H_sparse beside
+// dem_chunks, and the flat matrices then outrank it. Shared by
+// translate_task_graph_node() and fill_data_artifact_store(), so a node's
+// windows are built on the template it runs on.
+const cudaq::qec::dem_chunks_spec *
+node_template(const config::decoder_config &cfg,
+              const config::decoder_config::task_graph_spec::node_spec &ns) {
+  if (!ns.D_sparse.empty())
+    return nullptr;
+  if (ns.dem_chunks)
+    return &*ns.dem_chunks;
+  if (cfg.dem_chunks && cfg.H_sparse.empty())
+    return &*cfg.dem_chunks;
+  return nullptr;
+}
+
+} // namespace
+
+/// Translate one `task_graph.nodes` entry into build inputs for the graph.
+///
+/// The DEM falls back from the node's own `dem_chunks` to the entry-level DEM,
+/// which may itself be chunk or flat form. The flat form builds its inner
+/// decoder from the entry-level configuration, H and error rates included.
+cudaq::qec::task_graph_node_config translate_task_graph_node(
+    const cudaq::qec::decoding::config::decoder_config &cfg,
+    const cudaq::qec::decoding::config::decoder_config::task_graph_spec::
+        node_spec &ns,
+    const std::filesystem::path &base_dir) {
+  const std::string where =
+      "decoder " + std::to_string(cfg.id) + ": task_graph node '" + ns.id + "'";
+  if (!ns.partition_label.empty() || !ns.partition_columns.empty())
+    throw std::runtime_error(
+        where +
+        " sets partition, which is not implemented yet: DEM column ownership "
+        "is parsed and validated but not yet honored when building the graph");
+
+  cudaq::qec::task_graph_node_config node;
+  node.id = ns.id;
+  if (ns.ensemble.has_value()) {
+    // A pattern: translate its member nodes (each with the usual DEM fallback
+    // and decoder handling) and hand the pattern itself to the builder, which
+    // lowers it. The pattern node carries no DEM or decoder of its own.
+    cudaq::qec::task_graph_ensemble_spec spec;
+    for (const auto &m : ns.ensemble->members) {
+      cudaq::qec::task_graph_ensemble_spec::member member;
+      for (const auto &member_node : m.nodes)
+        member.nodes.push_back(
+            translate_task_graph_node(cfg, member_node, base_dir));
+      member.edges = m.edges;
+      spec.members.push_back(std::move(member));
+    }
+    spec.join_strategy = ns.ensemble->join_strategy;
+    spec.join_params = ns.ensemble->join_params.map();
+    node.ensemble = std::move(spec);
+    return node;
+  }
+  node.kind = ns.resolved_kind();
+  node.node_params = ns.node_params.map();
+  node.max_in_flight = ns.max_in_flight;
+  node.windows = ns.windows;
+
+  const auto *kind = cudaq::qec::find_task_graph_node_kind(node.kind);
+  if (!kind)
+    throw std::runtime_error(where + " has unregistered kind '" + node.kind +
+                             "'");
+
+  const bool flat = !cfg.H_sparse.empty();
+  // A node's own matrices outrank every entry-level form. validate_task_graph()
+  // rejects pairing them with dem_chunks, or splitting the D/O pair.
+  const bool node_flat = !ns.D_sparse.empty();
+  if (kind->requires_dem) {
+    if (node_flat) {
+      node.d_sparse = parse_flat_sparse_rows(ns.D_sparse, "D_sparse");
+      node.o_sparse = parse_flat_sparse_rows(ns.O_sparse, "O_sparse");
+      if (!ns.H_sparse.empty())
+        node.h_sparse = parse_flat_sparse_rows(ns.H_sparse, "H_sparse");
+    } else if (const auto *tmpl = node_template(cfg, ns))
+      node.dem = *tmpl;
+    else if (flat) {
+      if (cfg.D_sparse.empty() || cfg.O_sparse.empty())
+        throw std::runtime_error(
+            where + " runs on the flat DEM, which requires D_sparse and "
+                    "O_sparse");
+      node.d_sparse = parse_flat_sparse_rows(cfg.D_sparse, "D_sparse");
+      node.o_sparse = parse_flat_sparse_rows(cfg.O_sparse, "O_sparse");
+      // The flat form already requires H to build its inner decoder; hand it
+      // to the node too, for a kind that maps errors back into detector space.
+      node.h_sparse = parse_flat_sparse_rows(cfg.H_sparse, "H_sparse");
+    } else {
+      throw std::runtime_error(where +
+                               " has no DEM: give the node dem_chunks, or the "
+                               "decoder dem_chunks or flat matrices");
+    }
+  }
+
+  if (kind->requires_decoder) {
+    const cudaq::qec::decoder_output_request decoder_output =
+        kind->inner_decoder_output(node.node_params);
+    const bool decoder_takes_observables =
+        kind->inner_decoder_takes_observables(node.node_params);
+    const auto decoder_type = ns.resolved_decoder_type();
+    if (decoder_type.empty())
+      throw std::runtime_error(where + " of kind '" + kind->name +
+                               "' needs an inner decoder name");
+    // Stim DEM text stands in for this node's H when the decoder's model needs
+    // annotations the matrices cannot carry, so it is from_topology() that
+    // builds the decoder either way -- the flat form's usual shortcut of
+    // pre-building one from the entry-level H would ignore the text.
+    if (node.dem.has_value() || !ns.stim_dem.empty() ||
+        !ns.stim_dem_path.empty()) {
+      node.decoder_type = decoder_type;
+      // Both spellings reach the builder as text, so from_topology() and
+      // everything below it never learn which one the document used.
+      // validate_task_graph() has already rejected setting both.
+      node.stim_dem =
+          ns.stim_dem_path.empty()
+              ? ns.stim_dem
+              : read_stim_dem_file(
+                    std::filesystem::path(ns.stim_dem_path).is_absolute()
+                        ? std::filesystem::path(ns.stim_dem_path)
+                        : std::filesystem::absolute(base_dir / ns.stim_dem_path)
+                              .lexically_normal(),
+                    where + " stim_dem_path");
+      node.params = ns.decoder_custom_args.map();
+      if (const auto *schema =
+              cudaq::qec::decoding::config::find_decoder_schema(decoder_type)) {
+        drop_non_schema_keys(*schema, node.params);
+        materialize_default_args(*schema, node.params);
+      }
+      if (cfg.cuda_device_id.has_value())
+        node.params.insert("cuda_device_id", *cfg.cuda_device_id);
+    } else {
+      // Flat form: build the decoder from H and the error rates, the way a
+      // plain flat decoder config does.
+      auto inner_cfg = cfg;
+      inner_cfg.type = decoder_type;
+      inner_cfg.task_graph.reset();
+      inner_cfg.decoder_custom_args = ns.decoder_custom_args;
+      // The entry-level H would pair a decoder with a D of another width, and a
+      // built decoder reaches the builder too opaque to catch it.
+      if (node_flat) {
+        if (ns.H_sparse.empty())
+          throw std::runtime_error(
+              where +
+              " has its own D_sparse and O_sparse but no H_sparse to build its "
+              "inner decoder from, and neither carries one; set the node's "
+              "H_sparse, or give it a stim_dem to build from instead");
+        inner_cfg.H_sparse = ns.H_sparse;
+        inner_cfg.D_sparse = ns.D_sparse;
+        inner_cfg.O_sparse = ns.O_sparse;
+        inner_cfg.block_size = ns.block_size;
+        inner_cfg.syndrome_size = ns.syndrome_size;
+      }
+      // Each flat-matrix node gets its own decoder instance. They re-derive the
+      // model from the same configuration rather than sharing one prebuilt
+      // initialization, which costs a reparse per node and nothing else.
+      auto inputs = resolve_decoder_init(inner_cfg, base_dir);
+      if (!decoder_takes_observables)
+        inputs = inputs.without_observables();
+      node.decoder_instance =
+          create_realtime_decoder(inner_cfg, std::move(inputs), decoder_output);
+    }
+  }
+  return node;
+}
+
+/// Warn when the configuration's asynchronous graphs compete for CPUs: two
+/// pin the same core, or together they need more threads than the machine
+/// has. Either can be deliberate, so neither is an error.
+void warn_async_graph_contention(
+    const std::vector<cudaq::qec::decoding::config::decoder_config> &configs) {
+  struct async_graph {
+    std::int64_t id;
+    std::set<int> cpus;
+    std::size_t threads;
+  };
+  std::vector<async_graph> graphs;
+  for (const auto &cfg : configs) {
+    if (!cfg.task_graph || !cfg.task_graph->options.async_streaming)
+      continue;
+    const auto &options = cfg.task_graph->options;
+    async_graph g{cfg.id, {}, g_task_graphs[cfg.id]->async_thread_count()};
+    if (options.async_coordinator_cpu >= 0)
+      g.cpus.insert(options.async_coordinator_cpu);
+    g.cpus.insert(options.async_worker_cpus.begin(),
+                  options.async_worker_cpus.end());
+    graphs.push_back(std::move(g));
+  }
+  for (std::size_t a = 0; a < graphs.size(); ++a)
+    for (std::size_t b = a + 1; b < graphs.size(); ++b)
+      for (const int cpu : graphs[a].cpus)
+        if (graphs[b].cpus.count(cpu))
+          CUDA_QEC_WARN("decoders {} and {} both pin CPU {}", graphs[a].id,
+                        graphs[b].id, cpu);
+  std::size_t total = 0;
+  std::string per_graph;
+  for (const auto &g : graphs) {
+    total += g.threads;
+    per_graph += fmt::format("{}decoder {}: {}", per_graph.empty() ? "" : ", ",
+                             g.id, g.threads);
+  }
+  const std::size_t hardware_threads = std::thread::hardware_concurrency();
+  if (total > hardware_threads)
+    CUDA_QEC_WARN("the asynchronous task graphs need {} threads on a machine "
+                  "with {} ({})",
+                  total, hardware_threads, per_graph);
+}
+
+/// Build the graph a `task_graph:` configuration describes.
+///
+/// Both forms end up in the same place: a list of node configs and edges handed
+/// to from_topology(). The single-node `{type, inner_type}` form goes through
+/// from_spec(), which is that same translation for a chunk-form DEM.
+std::unique_ptr<cudaq::qec::decoding_task_graph>
+build_task_graph(const cudaq::qec::decoding::config::decoder_config &cfg,
+                 const std::filesystem::path &base_dir) {
+  using node_spec =
+      cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec;
+  const auto &tg = *cfg.task_graph;
+  const std::string who = "decoder " + std::to_string(cfg.id);
+  const bool flat = !cfg.H_sparse.empty();
+
+  if (tg.nodes.empty()) {
+    // An alias is an accepted spelling in this form too, so resolve through the
+    // registry rather than comparing spellings. An unrecognized name stays as
+    // written: unlike a node's `type`, this key never names a decoder plugin,
+    // so there is no window-over-a-plugin reading to fall back to.
+    const auto *kind = cudaq::qec::find_task_graph_node_kind(tg.type);
+    const std::string name = kind ? kind->name : tg.type;
+    if (name != "sliding_window" && name != "single_window")
+      throw std::runtime_error(who + ": unsupported task_graph type '" +
+                               tg.type +
+                               "' (supported: sliding_window, single_window)");
+    node_spec ns;
+    ns.id = "node0";
+    ns.type = name;
+    ns.inner_type = tg.inner_type;
+    ns.decoder_custom_args = cfg.decoder_custom_args;
+    if (flat) {
+      // Pre-expanded matrices are a fixed-round experiment however the type
+      // spelled it, which is what the flat form has always built.
+      ns.type = "single_window";
+      std::vector<cudaq::qec::task_graph_node_config> nodes;
+      nodes.push_back(translate_task_graph_node(cfg, ns, base_dir));
+      return cudaq::qec::decoding_task_graph::from_topology(std::move(nodes),
+                                                            {}, tg.options);
+    }
+    if (!cfg.dem_chunks.has_value())
+      throw std::runtime_error(
+          who + ": task_graph requires either dem_chunks or H_sparse");
+    // from_spec slides only when the round count is unresolved: no num_rounds
+    // and a repeating phase.  single_window states the opposite, so name it for
+    // a streaming spec and it would silently get a sliding window instead.
+    if (name == "single_window" && !cfg.dem_chunks->num_rounds.has_value() &&
+        cfg.dem_chunks->has_repeating_phase())
+      throw std::runtime_error(
+          who + ": task_graph type 'single_window' needs a fixed round count; "
+                "set dem_chunks.num_rounds, or use 'sliding_window' to decode "
+                "a stream of rounds");
+    auto inner_params = cfg.decoder_custom_args_to_heterogeneous_map();
+    if (cfg.cuda_device_id.has_value())
+      inner_params.insert("cuda_device_id", cfg.cuda_device_id.value());
+    return cudaq::qec::decoding_task_graph::from_spec(
+        *cfg.dem_chunks, tg.inner_type, inner_params, tg.options);
+  }
+
+  std::vector<cudaq::qec::task_graph_node_config> nodes;
+  nodes.reserve(tg.nodes.size());
+  for (const auto &ns : tg.nodes)
+    nodes.push_back(translate_task_graph_node(cfg, ns, base_dir));
+
+  // The configuration holds the builder's own edge type, so the wires need no
+  // translation; only the nodes do.
+  return cudaq::qec::decoding_task_graph::from_topology(std::move(nodes),
+                                                        tg.edges, tg.options);
+}
+
+namespace {
+
+// Calls visit on every node of a node list, const or not, including those
+// inside ensemble members.
+template <typename Nodes, typename Visit>
+void for_each_node(Nodes &nodes, Visit &&visit) {
+  for (auto &node : nodes) {
+    visit(node);
+    if (node.ensemble)
+      for (auto &member : node.ensemble->members)
+        for_each_node(member.nodes, visit);
+  }
+}
+
+} // namespace
+
+namespace {
+
+// What read_pinned_stim_dems() read for pinned entry @p entry. The read is
+// the entry's only while its hash is the entry's current pin: by name alone,
+// a map read for another configuration would pass bytes this pin does not
+// name, and a missing read would leave the file unchecked.
+const stim_dem_read &pinned_read(const pinned_stim_dems &pinned,
+                                 const config::data_artifact &entry) {
+  const auto where = "data_artifacts." + entry.name;
+  const auto it = pinned.find(entry.name);
+  if (it == pinned.end())
+    throw std::logic_error(where + " is pinned, but its text was not read "
+                                   "with read_pinned_stim_dems()");
+  if (it->second.sha256 != lowercase_pin(entry.sha256))
+    throw std::logic_error(where + " pins sha256 " + entry.sha256 +
+                           ", but its text was read against " +
+                           it->second.sha256 +
+                           "; read the pins of this configuration");
+  return it->second;
+}
+
+} // namespace
+
+pinned_stim_dems
+read_pinned_stim_dems(const config::multi_decoder_config &config,
+                      const std::filesystem::path &base_dir) {
+  pinned_stim_dems pinned;
+  for (const auto &entry : config.data_artifacts)
+    if (!entry.sha256.empty())
+      pinned[entry.name] = read_stim_dem_entry(entry, base_dir);
+  return pinned;
+}
+
+config::multi_decoder_config
+with_pinned_stim_dems(const config::multi_decoder_config &config,
+                      const std::filesystem::path &base_dir) {
+  return with_pinned_stim_dems(config, read_pinned_stim_dems(config, base_dir));
+}
+
+// Pinned entries are looked up before any copy changes, so a failure leaves
+// the caller's configuration untouched. A copy names an entry only while its
+// path is still the entry's: one edited after parsing is read as it stands.
+config::multi_decoder_config
+with_pinned_stim_dems(const config::multi_decoder_config &config,
+                      const pinned_stim_dems &pinned) {
+  auto out = config;
+  // Each pinned entry's path and checked text, by name.
+  std::map<std::string, std::pair<std::string, std::string>> by_name;
+  const auto use_text = [&](std::string &text, std::string &path,
+                            const std::string &artifact) {
+    const auto it = by_name.find(artifact);
+    if (it == by_name.end() || !text.empty() || path != it->second.first)
+      return;
+    text = it->second.second;
+    path.clear();
+  };
+  for (const auto &entry : config.data_artifacts)
+    if (!entry.sha256.empty())
+      by_name[entry.name] = {entry.stim_dem_path,
+                             pinned_read(pinned, entry).text};
+  for (auto &decoder : out.decoders) {
+    use_text(decoder.stim_dem, decoder.stim_dem_path,
+             decoder.stim_dem_artifact);
+    if (decoder.task_graph)
+      for_each_node(decoder.task_graph->nodes, [&](auto &node) {
+        use_text(node.stim_dem, node.stim_dem_path, node.stim_dem_artifact);
+      });
+  }
+  return out;
+} // end - with_pinned_stim_dems()
+
 int configure_decoders(
-    cudaq::qec::decoding::config::multi_decoder_config &config) {
+    cudaq::qec::decoding::config::multi_decoder_config &config,
+    const std::filesystem::path &base_dir) {
   CUDA_QEC_INFO("Initializing decoders...");
+
+  // Nothing on this path consumes the table yet -- only the decoding server
+  // does -- but a malformed section should fail where it is supplied rather
+  // than silently later, on a different transport.
+  try {
+    config.validate_syndrome_mapping();
+  } catch (const std::exception &e) {
+    CUDA_QEC_WARN("Invalid syndrome_mapping: {}", e.what());
+    return 1;
+  }
 
   const auto &decoder_configs = config.decoders;
 
@@ -298,24 +928,146 @@ int configure_decoders(
     return 3;
   }
 
-  // Create the decoders based on the decoder configs.
+  // Resolve every model before touching any process state. Resolution reads
+  // and parses model files and performs all model validation, so a bad
+  // configuration fails here, with the previously active decoders intact.
+  // Resolution errors propagate as exceptions rather than becoming a status
+  // code, preserving the behavior callers already see for invalid models.
+  const auto absolute_base =
+      std::filesystem::absolute(base_dir).lexically_normal();
+
+  // Decoders and nodes naming a pinned Stim DEM are built from its text, read
+  // once and checked here, before anything is built.
+  const auto pinned = with_pinned_stim_dems(config, absolute_base);
+
+  std::vector<std::optional<cudaq::qec::decoder_init>> resolved(
+      config.decoders.size());
+  // The absolute form of each model path, applied to the caller's
+  // configuration only once the whole configuration has been applied. Rewriting
+  // as we go would leave a caller's config partly rewritten when a later entry
+  // fails to resolve, so a retry against a different base directory would
+  // silently keep the first one.
+  std::vector<std::string> absolute_model_paths(config.decoders.size());
+  for (std::size_t i = 0; i < config.decoders.size(); ++i) {
+    const auto &decoder_config = config.decoders[i];
+    if (!decoder_config.task_graph.has_value())
+      resolved[i].emplace(
+          resolve_decoder_init(pinned.decoders[i], absolute_base));
+    if (!decoder_config.stim_dem_path.empty()) {
+      std::filesystem::path model(decoder_config.stim_dem_path);
+      absolute_model_paths[i] =
+          model.is_relative() ? std::filesystem::absolute(absolute_base / model)
+                                    .lexically_normal()
+                                    .string()
+                              : model.lexically_normal().string();
+    }
+  }
+  // Construction allocates, so replacements are built in place rather than
+  // alongside the old set: a constructor failure can still leave the decoder
+  // set empty. Overlapping both sets would double peak decoder memory, which
+  // is not an acceptable cost here.
   try {
     g_decoders.clear();
     g_decoders.resize(max_decoder_id + 1);
-    for (const auto &decoder_config : decoder_configs) {
-      g_decoders[decoder_config.id] = create_realtime_decoder(decoder_config);
+    g_task_graphs.clear();
+    g_task_graphs.resize(max_decoder_id + 1);
+    for (std::size_t i = 0; i < decoder_configs.size(); ++i) {
+      const auto &cfg = pinned.decoders[i];
+      if (cfg.task_graph.has_value()) {
+        auto graph = build_task_graph(cfg, absolute_base);
+        if (!graph->supports_streaming())
+          throw std::runtime_error(
+              "decoder " + std::to_string(cfg.id) +
+              ": task_graph cannot run on the realtime streaming path: " +
+              graph->streaming_incompatibility_reason());
+        g_task_graphs[cfg.id] = std::move(graph);
+      } else {
+        g_decoders[cfg.id] =
+            create_realtime_decoder(cfg, std::move(*resolved[i]));
+      }
     }
   } catch (const std::exception &e) {
     CUDA_QEC_WARN("Error initializing decoders: {}", e.what());
     return 4;
   }
+  warn_async_graph_contention(decoder_configs);
 
+  // Seeded with the pass-through BULK row: a document declaring only a `final`
+  // row must keep the id every producer sends.
+  g_syndrome_mapping.clear();
+  g_syndrome_mapping.emplace_back(0, cudaq::qec::round_type::BULK);
+  for (const auto &row : config.syndrome_mapping) {
+    const auto shape = row.type == "final" ? cudaq::qec::round_type::FINAL
+                                           : cudaq::qec::round_type::BULK;
+    if (row.id == 0)
+      g_syndrome_mapping.front().second = shape; // an explicit id 0 wins
+    else
+      g_syndrome_mapping.emplace_back(row.id, shape);
+  }
+
+  // The configuration is now in effect. Make its model paths absolute so the
+  // copy that gets cached, published and re-read by the session registry
+  // resolves without knowing the base directory used here.
+  for (std::size_t i = 0; i < config.decoders.size(); ++i)
+    if (!absolute_model_paths[i].empty())
+      config.decoders[i].stim_dem_path = absolute_model_paths[i];
+
+  // Entries' model paths obey the same rule, which keeps a decoder or node
+  // that names one equal to its copy, so the name is still written back.
+  for (auto &entry : config.data_artifacts)
+    if (!entry.stim_dem_path.empty()) {
+      std::filesystem::path model(entry.stim_dem_path);
+      entry.stim_dem_path =
+          (model.is_relative()
+               ? std::filesystem::absolute(absolute_base / model)
+               : model)
+              .lexically_normal()
+              .string();
+    }
+
+  // Node-local model paths obey the same rule. The cached/published
+  // configuration is later rebuilt without the originating file's base_dir.
+  for (auto &decoder_config : config.decoders) {
+    if (!decoder_config.task_graph.has_value())
+      continue;
+    for (auto &node : decoder_config.task_graph->nodes) {
+      if (node.stim_dem_path.empty())
+        continue;
+      std::filesystem::path model(node.stim_dem_path);
+      node.stim_dem_path =
+          (model.is_relative()
+               ? std::filesystem::absolute(absolute_base / model)
+               : model)
+              .lexically_normal()
+              .string();
+    }
+  }
   return 0;
 }
 
 void finalize_decoders() {
   CUDA_QEC_INFO("Finalizing the realtime decoding library.");
+  g_syndrome_mapping.clear();
   g_decoders.clear();
+  g_task_graphs.clear();
+}
+
+void register_task_graph(
+    std::size_t id, std::unique_ptr<cudaq::qec::decoding_task_graph> graph) {
+  if (!graph)
+    throw std::invalid_argument("register_task_graph: graph must not be null");
+  if (!graph->supports_streaming())
+    throw std::invalid_argument(
+        "register_task_graph: graph cannot run on the realtime streaming "
+        "path: " +
+        graph->streaming_incompatibility_reason());
+  const std::size_t needed = id + 1;
+  if (g_decoders.size() < needed)
+    g_decoders.resize(needed);
+  if (g_task_graphs.size() < needed)
+    g_task_graphs.resize(needed);
+  g_decoders[id] = nullptr;
+  g_task_graphs[id] = std::move(graph);
 }
 
 __attribute__((visibility("default"))) void
@@ -328,34 +1080,35 @@ __attribute__((visibility("default"))) void (*_get_syndrome_capture_callback())(
   return g_syndrome_capture_callback;
 }
 
+namespace {
+
+using cudaq::qec::detail_dispatch::decode_target;
+
+/// Resolve an id to its decode endpoint, preferring a registered task graph.
+/// Throws when neither table holds the id.
+decode_target resolve_target(std::size_t decoder_id) {
+  if (decoder_id < g_task_graphs.size() && g_task_graphs[decoder_id])
+    return decode_target(g_task_graphs[decoder_id].get());
+  if (decoder_id < g_decoders.size() && g_decoders[decoder_id])
+    return decode_target(g_decoders[decoder_id].get());
+  throw std::invalid_argument(fmt::format("Decoder {} not found", decoder_id));
+}
+
+} // namespace
+
 void enqueue_syndromes(std::size_t decoder_id, uint8_t *syndromes,
                        std::uint64_t syndrome_length, std::uint64_t tag) {
-  if (decoder_id >= g_decoders.size()) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
-  auto *decoder = g_decoders[decoder_id].get();
-  if (!decoder) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
-  if (syndrome_length == 0) {
-    throw std::invalid_argument("syndrome_length must be greater than 0");
-  }
-  if (!syndromes) {
-    throw std::invalid_argument("syndromes buffer is null");
-  }
-  const auto max_syndromes = decoder->get_num_msyn_per_decode();
-  if (max_syndromes == 0) {
-    throw std::invalid_argument(
-        "Decoder has no measurement syndromes configured");
-  }
-  if (syndrome_length > max_syndromes) {
-    throw std::invalid_argument(
-        fmt::format("syndrome_length ({}) exceeds configured measurement count "
-                    "({})",
-                    syndrome_length, max_syndromes));
-  }
+  // Id 0 is the seeded pass-through row: an untagged enqueue is an ordinary
+  // round without naming one.
+  enqueue_syndromes(decoder_id, syndromes, syndrome_length, tag,
+                    /*syndrome_mapping_id=*/0);
+}
+
+void enqueue_syndromes(std::size_t decoder_id, uint8_t *syndromes,
+                       std::uint64_t syndrome_length, std::uint64_t tag,
+                       std::uint64_t syndrome_mapping_id) {
+  const auto target = resolve_target(decoder_id);
+  target.validate_syndromes(syndromes, syndrome_length);
 
   const auto capture_syndromes = [&] {
     // --save_syndrome feature: record what is actually submitted for decode.
@@ -366,26 +1119,22 @@ void enqueue_syndromes(std::size_t decoder_id, uint8_t *syndromes,
     }
   };
 
-  // Direct-call path: this caller thread runs the decode, but
-  // configure_decoders() constructed every decoder sequentially on one thread,
-  // leaving the LAST decoder's device current. Point the thread at this
-  // decoder's pinned device before decoding (set-if-different; throws on
-  // failure) -- and before the capture callback, so a pin failure cannot
-  // record a round that was never decoded.
-  cudaq::qec::detail_affinity::pin_decode_device(*decoder);
+  // This caller thread runs the decode, but configure_decoders() constructed
+  // every decoder sequentially on one thread, leaving the LAST decoder's device
+  // current. Point the thread at this decoder's pinned device before decoding
+  // (set-if-different; throws on failure) -- and before the capture callback,
+  // so a pin failure cannot record a round that was never decoded.
+  target.pin_device();
   capture_syndromes();
 
-  std::vector<uint8_t> syndrome_u8(syndrome_length);
-  bool did_decode = false;
-  for (std::size_t i = 0; i < syndrome_length; i++) {
-    syndrome_u8[i] = syndromes[i];
-  }
-  std::chrono::duration<double> duration{};
-  auto t0 = std::chrono::high_resolution_clock::now();
-  did_decode =
-      decoder->enqueue_syndrome(syndrome_u8.data(), syndrome_u8.size());
-  auto t1 = std::chrono::high_resolution_clock::now();
-  duration = t1 - t0;
+  const std::vector<uint8_t> syndrome_u8(syndromes,
+                                         syndromes + syndrome_length);
+  const auto t0 = std::chrono::high_resolution_clock::now();
+  const bool did_decode =
+      target.enqueue_syndrome(syndrome_u8.data(), syndrome_u8.size(),
+                              shape_for_mapping_id(syndrome_mapping_id));
+  const auto t1 = std::chrono::high_resolution_clock::now();
+  const std::chrono::duration<double> duration = t1 - t0;
 
   // Consider demoting this to a lower log level.
   // Also consider logging the syndrome (at a lower log level).
@@ -400,53 +1149,187 @@ void get_corrections(std::size_t decoder_id, uint8_t *corrections,
   CUDA_QEC_INFO("Entered get_corrections function decoder_id={}, "
                 "correction_length={}, reset={}",
                 decoder_id, correction_length, reset);
-  if (decoder_id >= g_decoders.size()) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
-  auto *decoder = g_decoders[decoder_id].get();
-  if (!decoder) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
-  }
-  const auto num_observables = decoder->get_num_observables();
-  if (correction_length == 0) {
-    throw std::invalid_argument("correction_length must be greater than 0");
-  }
-  if (!corrections) {
-    throw std::invalid_argument("corrections buffer is null");
-  }
-  if (correction_length != num_observables) {
-    throw std::invalid_argument(
-        fmt::format("correction_length ({}) does not match number of "
-                    "observables ({})",
-                    correction_length, num_observables));
-  }
+
+  const auto target = resolve_target(decoder_id);
+  target.validate_corrections(corrections, correction_length);
 
   // clear_corrections may touch device memory in some plugins.
-  cudaq::qec::detail_affinity::pin_decode_device(*decoder);
-  auto ret = decoder->get_obs_corrections();
-  for (std::size_t i = 0; i < correction_length; ++i) {
+  target.pin_device();
+  const auto *ret = target.obs_corrections();
+  for (std::size_t i = 0; i < correction_length; ++i)
     corrections[i] = ret[i];
-  }
   if (reset)
-    decoder->clear_corrections();
+    target.clear_corrections();
 }
 
 void reset_decoder(std::size_t decoder_id) {
   CUDA_QEC_INFO("Entered reset_decoder for decoder_id={}", decoder_id);
-  if (decoder_id >= g_decoders.size()) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
+
+  const auto target = resolve_target(decoder_id);
+  target.pin_device();
+  target.reset();
+}
+
+namespace {
+
+using node_spec = config::decoder_config::task_graph_spec::node_spec;
+
+// Runs step, giving an error the place it came from. A construction error
+// becomes a configuration error; the store's own logic errors keep their
+// kind.
+template <typename Step>
+void at(const std::string &where, Step &&step) {
+  try {
+    step();
+  } catch (const std::invalid_argument &e) {
+    throw std::runtime_error(where + ": " + e.what());
+  } catch (const std::logic_error &e) {
+    throw std::logic_error(where + ": " + e.what());
   }
-  auto *decoder = g_decoders[decoder_id].get();
-  if (!decoder) {
-    throw std::invalid_argument(
-        fmt::format("Decoder {} not found", decoder_id));
+}
+
+} // namespace
+
+cudaq::qec::data_artifact_store
+fill_data_artifact_store(const config::multi_decoder_config &config,
+                         const std::filesystem::path &base_dir) {
+  return fill_data_artifact_store(config, base_dir,
+                                  read_pinned_stim_dems(config, base_dir));
+}
+
+// Templates first, so window entries and ingest layers find their context;
+// then Stim DEMs, a pinned one from its checked read; then every window
+// variant. Only the templates windows are built on are added:
+// experiment_template is stricter than a plain decoder's dem_chunks, so
+// building every template would reject models that decoders without windows
+// accept.
+cudaq::qec::data_artifact_store
+fill_data_artifact_store(const config::multi_decoder_config &config,
+                         const std::filesystem::path &base_dir,
+                         const pinned_stim_dems &pinned) {
+  cudaq::qec::data_artifact_store store;
+  const auto entry_name = [](const config::data_artifact &entry) {
+    return "data_artifacts." + entry.name;
+  };
+  const auto decoder_name = [](const config::decoder_config &decoder) {
+    return "decoder " + std::to_string(decoder.id);
+  };
+  // A context that names no template is rejected with the window entries
+  // below.
+  for (const auto &entry : config.data_artifacts) {
+    if (!entry.window)
+      continue;
+    const auto context =
+        std::find_if(config.data_artifacts.begin(), config.data_artifacts.end(),
+                     [&](const config::data_artifact &e) {
+                       return e.name == entry.context;
+                     });
+    if (context != config.data_artifacts.end() && context->dem_chunks)
+      at(entry_name(*context),
+         [&] { store.add_template(*context->dem_chunks); });
+  }
+  // The template a node with layers runs on, its own or its decoder's; one
+  // with layers but no template is rejected with the layers below.
+  for (const auto &decoder : config.decoders) {
+    if (!decoder.task_graph)
+      continue;
+    for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
+      const auto *spec = node_template(decoder, node);
+      const bool own = node.dem_chunks && spec == &*node.dem_chunks;
+      if (node.windows.empty() || !spec)
+        return;
+      at(own ? decoder_name(decoder) + ", node '" + node.id + "'"
+             : decoder_name(decoder),
+         [&] { store.add_template(*spec); });
+    });
   }
 
-  cudaq::qec::detail_affinity::pin_decode_device(*decoder);
-  decoder->reset_decoder();
-}
+  // Each read carries its hash, so the store does not hash the text again.
+  for (const auto &entry : config.data_artifacts) {
+    if (!entry.sha256.empty()) {
+      const auto &read = pinned_read(pinned, entry);
+      store.add_stim_dem(read.text, read.sha256);
+    } else if (const auto read = read_stim_dem_entry(entry, base_dir);
+               !read.text.empty()) {
+      store.add_stim_dem(read.text, read.sha256);
+    }
+  }
+
+  for (const auto &entry : config.data_artifacts) {
+    if (!entry.window)
+      continue;
+    const auto context =
+        std::find_if(config.data_artifacts.begin(), config.data_artifacts.end(),
+                     [&](const config::data_artifact &e) {
+                       return e.name == entry.context;
+                     });
+    // Parsing checks the context, but a configuration built in code has not
+    // been parsed.
+    if (entry.context.empty())
+      throw std::runtime_error(entry_name(entry) +
+                               ": a window entry needs a context naming a "
+                               "dem_chunks entry");
+    if (context == config.data_artifacts.end() || !context->dem_chunks)
+      throw std::runtime_error(entry_name(entry) + ": context '" +
+                               entry.context + "' is not a dem_chunks entry");
+    at(entry_name(entry), [&] {
+      store.add_windows(store.find_template(*context->dem_chunks),
+                        *entry.window);
+    });
+  }
+  for (const auto &decoder : config.decoders) {
+    if (!decoder.task_graph)
+      continue;
+    for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
+      const auto where = decoder_name(decoder) + ", node '" + node.id + "'";
+      const auto *spec = node_template(decoder, node);
+      // Expanded chunks keep dem_chunks beside the flat matrices they make,
+      // so name why it does not apply.
+      const bool expanded = node.D_sparse.empty() && decoder.dem_chunks &&
+                            !decoder.H_sparse.empty();
+      if (node.windows.empty())
+        return;
+      if (!spec)
+        throw std::runtime_error(
+            where + " has windows but no dem_chunks template" +
+            (expanded ? ": its decoder's dem_chunks is expanded into "
+                        "H_sparse, and a node beside flat matrices runs on "
+                        "them; give the node dem_chunks of its own"
+                      : ""));
+      for (const auto &layer : node.windows) {
+        const auto layer_where = where + ", layer '" + layer.layer + "'";
+        const auto tmpl = store.find_template(*spec);
+        // A layer builds its own request. While that equals the window entry
+        // it names, as parsing leaves it, the entry describes the layer and
+        // must be on the node's template; an edited layer is written inline
+        // by to_yaml_str(), so its name no longer applies. The window-entry
+        // pass has already checked the entry's context.
+        if (!layer.artifact.empty()) {
+          const auto entry = std::find_if(config.data_artifacts.begin(),
+                                          config.data_artifacts.end(),
+                                          [&](const config::data_artifact &e) {
+                                            return e.name == layer.artifact;
+                                          });
+          if (entry == config.data_artifacts.end() || !entry->window)
+            throw std::runtime_error(layer_where + ": '" + layer.artifact +
+                                     "' is not a window entry");
+          const auto context = std::find_if(
+              config.data_artifacts.begin(), config.data_artifacts.end(),
+              [&](const config::data_artifact &e) {
+                return e.name == entry->context;
+              });
+          if (*entry->window == layer.request &&
+              store.find_template(*context->dem_chunks) != tmpl)
+            throw std::runtime_error(layer_where + ": window entry '" +
+                                     layer.artifact + "' is built on '" +
+                                     entry->context +
+                                     "', a different template from the node's");
+        }
+        at(layer_where, [&] { store.add_windows(tmpl, layer.request); });
+      } // end - for(layer)
+    });
+  } // end - for(decoder)
+  return store;
+} // end - fill_data_artifact_store()
 
 } // namespace cudaq::qec::decoding::host

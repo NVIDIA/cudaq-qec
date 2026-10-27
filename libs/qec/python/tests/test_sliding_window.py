@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2025 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
 import cudaq
@@ -176,12 +171,13 @@ def test_pymatching_parallel_edges_use_observable_faults():
     with pytest.raises(ValueError, match="Parallel edges not permitted"):
         qec.get_decoder("pymatching", H)
 
-    # ASSERT: providing O with merge_strategy='independent' combines the
-    # parallel edges and yields a converged observable-space decode.
+    # ASSERT: explicitly requesting observables permits independent parallel
+    # edge merging; O is model data and does not select the output mode.
     decoder = qec.get_decoder("pymatching",
                               H,
                               O=O,
                               error_rate_vec=error_rates,
+                              output="observables",
                               merge_strategy="independent")
     result = decoder.decode_batch(np.array([[1]], dtype=np.uint8))
 

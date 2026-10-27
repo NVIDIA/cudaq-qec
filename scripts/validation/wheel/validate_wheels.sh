@@ -1,12 +1,7 @@
 #!/bin/bash
 
-# ============================================================================ #
-# Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Create the test image that this script resides in by running this command. You
 # may may to inspect/modify .github/workflows/build_qa_wheel_test.yaml first.
@@ -35,7 +30,7 @@ done
 
 CURRENT_ARCH=$(uname -m)
 PYTHON_VERSIONS=("3.11" "3.12" "3.13")
-TARGETS=("nvidia" "nvidia --option fp64", "qpp-cpu")
+TARGETS=("nvidia" "nvidia --option fp64" "qpp-cpu")
 
 # OpenBLAS can get bogged down on some machines if using too many threads.
 export OMP_NUM_THREADS=8
@@ -82,18 +77,36 @@ test_examples() {
         cuda_major=$(echo ${CUDA_VERSION} | cut -d '.' -f 1)
         cuda_minor=$(echo ${CUDA_VERSION} | cut -d '.' -f 2)
         cuda_no_dot="${cuda_major}${cuda_minor}"
-        pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}
-        if [ "$(uname -m)" == "x86_64" ]; then
-          pip install "tensorrt-cu${cuda_major}==10.13.*" "cuda_toolkit[cudart]==${cuda_major}.${cuda_minor}.*"
-          pip install onnxscript
+        # cu126 torch wheels lack sm_100 (Blackwell) kernels; use the cu128 build
+        # on the 12.x path (runs on 12.6, supports newer GPUs). 13.x keeps its tag.
+        torch_cuda_no_dot="${cuda_no_dot}"
+        if [ "${cuda_major}" == "12" ]; then torch_cuda_no_dot="128"; fi
+        pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${torch_cuda_no_dot}
+        # TensorRT supports CUDA 12+ on x86 and CUDA 13+ on ARM.
+        qec_extras="tensor_network_decoder"
+        if [[ "$(uname -m)" == "x86_64" || "${cuda_major}" == "13" ]]; then
+            qec_extras+=",trt_decoder"
+            if [ "${cuda_major}" == "12" ]; then
+                toolkit_version="12.8.*"
+            else
+                # Keep cudart at the 13.0.48 version required by torch cu130.
+                # 13.0.* currently resolves to toolkit 13.0.3.0 and cudart 13.0.96, conflicting with torch 2.9.0+cu130’s exact cudart 13.0.48.
+                # Toolkit 13.0.0 supplies the compatible 13.0.48.
+                toolkit_version="13.0.0"
+            fi
+            pip install "tensorrt-cu${cuda_major}==10.13.*" "cuda_toolkit[cudart]==${toolkit_version}"
+            pip install onnxscript
         fi
-        pip install cudaq-qec[tensor_network_decoder,trt_decoder] --find-links /root/wheels
+        # Select the intended CUDA-major wheel explicitly. The unsuffixed
+        # metapackage can detect the driver CUDA version and choose cu13 here.
+        pip install "cudaq-qec-cu${cuda_major}[${qec_extras}]" --find-links /root/wheels
         source $CONDA_PREFIX/lib/python${python_version}/site-packages/distributed_interfaces/activate_custom_mpi.sh
         export OMPI_MCA_opal_cuda_support=true OMPI_MCA_btl='^openib'
 
         # Needed for tests:
         pip install pytest
-        # Needed by docs/sphinx/examples/qec/python/pseudo_threshold.py.
+        # matplotlib is only pulled in transitively on x86 (via beliefmatching);
+        # install it explicitly so ARM has it (pseudo_threshold.py imports it).
         pip install matplotlib
 
         if [[ "$(uname -m)" == "x86_64" ]]; then

@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # CMake flags required when CUDA-QX builds CUDA-Q's realtime dependency.
 cudaq_realtime_cmake_cuda_flags() {
   _cudaq_realtime_cuda_flags="${CMAKE_CUDA_FLAGS:-}"

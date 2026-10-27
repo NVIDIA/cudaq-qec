@@ -9,8 +9,8 @@ on:
         default: '0.0.0'
       assets_repo:
         type: string
-        description: Retrieve assets from a draft release from this repo (e.g. NVIDIA/cudaqx)
-        default: 'NVIDIA/cudaqx'
+        description: Retrieve assets from a draft release from this repo (e.g. NVIDIA/cudaq-qec)
+        default: 'NVIDIA/cudaq-qec'
         required: false
       assets_tag:
         type: string
@@ -151,9 +151,13 @@ jobs:
       - name: Save build artifacts
         run: |
           # The decoding server is not shipped in the official release, so
-          # remove it (and its example configs) from the install prefix and
-          # the install manifest before zipping.
-          for f in /usr/local/cudaq/bin/decoding_server*; do
+          # remove its executables (and example configs) as well as the
+          # loadable service-plugin library itself from the install prefix
+          # and the install manifest before zipping. Without removing the
+          # library, the server remained activatable via
+          # CUDAQ_DEVICE_CALL_CHANNEL even with the launcher binary gone.
+          for f in /usr/local/cudaq/bin/decoding_server* \
+                   /usr/local/cudaq/lib/libcudaq-qec-realtime-decoding-server-cqr.so; do
             [ -e "$f" ] || continue
             rm -f "$f"
             sed -i "\#^$f\$#d" \

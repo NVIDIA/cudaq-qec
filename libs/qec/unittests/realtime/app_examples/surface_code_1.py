@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2025 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # For full test script: surface_code-1-test.sh
 #
@@ -33,15 +28,12 @@ sys.tracebacklimit = 999
 # ── decoder configuration helpers ────────────────────────────────────────────
 
 
-def decoder_args(decoder_type: str,
-                 error_rates: list,
-                 params: list = None) -> dict:
+def decoder_args(decoder_type: str, params: list = None) -> dict:
     """Return the custom-args dict for a named decoder, with any
     --param key=value overrides applied on top."""
     if decoder_type == "nv-qldpc-decoder":
         args = {
             "use_sparsity": True,
-            "error_rate_vec": error_rates,
             "max_iterations": 50,
             "bp_method": 3,  # min-sum + dmem (required for relay)
             "composition": 1,  # sequential relay
@@ -57,10 +49,7 @@ def decoder_args(decoder_type: str,
             "gamma_dist": [0.1, 0.2],
         }
     elif decoder_type == "pymatching":
-        args = {
-            "merge_strategy": "smallest_weight",
-            "error_rate_vec": error_rates
-        }
+        args = {"merge_strategy": "smallest_weight"}
     elif decoder_type == "multi_error_lut":
         args = {"lut_error_depth": 2}
     else:
@@ -114,6 +103,7 @@ def build_multi_decoder_config(dem, m2d, num_syndromes_per_round: int,
         dc.H_sparse = qec.pcm_to_sparse_vec(dem.detector_error_matrix)
         dc.O_sparse = qec.pcm_to_sparse_vec(dem.observables_flips_matrix)
         dc.D_sparse = d_sparse_vec
+        dc.error_rate_vec = error_rates
 
         if opts.decoder_type == "sliding_window":
             dc.type = "sliding_window"
@@ -132,16 +122,12 @@ def build_multi_decoder_config(dem, m2d, num_syndromes_per_round: int,
                     True,
                 "inner_decoder_name":
                     opts.sw_inner_decoder,
-                "error_rate_vec":
-                    error_rates,
                 "inner_decoder_params":
-                    decoder_args(opts.sw_inner_decoder, error_rates,
-                                 opts.decoder_params),
+                    decoder_args(opts.sw_inner_decoder, opts.decoder_params),
             }
         else:
             dc.type = opts.decoder_type
             dc.decoder_custom_args = decoder_args(opts.decoder_type,
-                                                  error_rates,
                                                   opts.decoder_params)
 
         decoder_list.append(dc)

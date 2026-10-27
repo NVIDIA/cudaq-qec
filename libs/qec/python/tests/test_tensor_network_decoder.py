@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2025 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 import sys
 import pytest
@@ -686,6 +681,110 @@ def test_decode_batch_all_valid_all_converged(mock_decoder):
     res = mock_decoder(mock, rows=3).decode_batch(np.zeros((3, 2)))
     assert np.all(res.converged)
     np.testing.assert_allclose(res.result[:, 0], [0.8, 0.4, 0.9])
+
+
+def test_error_pairs_noise_model_ndarray_batch():
+    # Ndarray batch must be (N, 2, 2): one 2x2 joint-probability matrix per pair.
+    error_index_pairs = [('e0', 'e1'), ('e2', 'e3')]
+    error_probabilities = np.array([[[0.9, 0.1], [0.2, 0.8]],
+                                    [[0.7, 0.3], [0.4, 0.6]]])
+    tn = error_pairs_noise_model(error_index_pairs, error_probabilities)
+    assert isinstance(tn, TensorNetwork)
+    assert len(tn.tensors) == 2
+    for i, t in enumerate(tn.tensors):
+        # Each slice is a 2-index tensor, not a length-2 vector.
+        np.testing.assert_array_equal(t.data, error_probabilities[i])
+        assert t.inds == error_index_pairs[i]
+        assert "NOISE" in t.tags
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        np.array([[0.9, 0.1], [0.7, 0.3]]),  # (N, 2): one vector per pair
+        np.ones((2, 2, 3)),  # trailing size is not 2x2
+        np.ones((2, 3, 2)),  # middle size is not 2
+        np.ones((2, 2, 2, 2)),  # extra dimension
+    ])
+def test_error_pairs_noise_model_ndarray_rejects_bad_shapes(bad):
+    # Unusable ndarray ranks/shapes must fail in this helper, not later in Quimb.
+    error_index_pairs = [('e0', 'e1'), ('e2', 'e3')]
+    with pytest.raises(AssertionError, match=r"\(N, 2, 2\)"):
+        error_pairs_noise_model(error_index_pairs, bad)
+
+
+def test_factorized_noise_model_rejects_2d_ndarray():
+    # A 2-D batch whose first axis matches the indices is still the wrong rank.
+    error_indices = ['e0', 'e1', 'e2']
+    bad = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
+    with pytest.raises(AssertionError, match="1D array"):
+        factorized_noise_model(error_indices, bad)
+
+
+def test_factorized_noise_model_rejects_tuple():
+    with pytest.raises(TypeError, match="list or numpy array"):
+        factorized_noise_model(['e0', 'e1'], (0.1, 0.2))
+
+
+def test_error_pairs_noise_model_rejects_tuple():
+    pairs = [('e0', 'e1')]
+    mats = (np.array([[0.9, 0.1], [0.2, 0.8]]),)
+    with pytest.raises(TypeError, match="list or numpy array"):
+        error_pairs_noise_model(pairs, mats)
+
+
+def test_decoder_cpu_fallback_custom_inds_and_tn_noise(monkeypatch):
+    # Without CUDA, construction uses the Torch/CPU contractor; custom check
+    # and error names are stored, and a TensorNetwork noise model is reindexed
+    # onto those error names.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    H, logical, noise = make_simple_code()
+    check_inds = ["chk_a", "chk_b"]
+    error_inds = ["err_x", "err_y", "err_z"]
+    tn = factorized_noise_model(["n0", "n1", "n2"], noise)
+    decoder = qec.get_decoder("tensor_network_decoder",
+                              H,
+                              logical_obs=logical,
+                              noise_model=tn,
+                              check_inds=check_inds,
+                              error_inds=error_inds)
+    assert decoder.contractor_config.contractor_name == "torch"
+    assert decoder.contractor_config.backend == "torch"
+    assert decoder.contractor_config.device == "cpu"
+    assert decoder.check_inds == check_inds
+    assert decoder.error_inds == error_inds
+    assert list(decoder.noise_model.outer_inds()) == error_inds
+
+
+@pytest.mark.parametrize("ind_name, inds, n_got", [
+    ("check_inds", ["s0"], 1),
+    ("check_inds", ["s0", "s1", "s2"], 3),
+    ("error_inds", ["e0", "e1"], 2),
+    ("error_inds", ["e0", "e1", "e2", "e3"], 4),
+])
+def test_decoder_custom_inds_length(ind_name, inds, n_got):
+    H, logical, noise = make_simple_code()
+    n_exp = H.shape[0] if ind_name == "check_inds" else H.shape[1]
+    with pytest.raises(
+            AssertionError,
+            match=rf"{ind_name} must have length {n_exp}, but got {n_got}"):
+        qec.get_decoder("tensor_network_decoder",
+                        H,
+                        logical_obs=logical,
+                        noise_model=noise,
+                        **{ind_name: inds})
+
+
+def test_decoder_noise_tn_open_index_count():
+    # A TensorNetwork noise model must expose one open index per error.
+    H, logical, _ = make_simple_code()
+    tn = factorized_noise_model(["n0", "n1"], [0.1, 0.2])
+    with pytest.raises(AssertionError,
+                       match=r"Noise model has 2 open indices, but expected 3"):
+        qec.get_decoder("tensor_network_decoder",
+                        H,
+                        logical_obs=logical,
+                        noise_model=tn)
 
 
 if __name__ == "__main__":

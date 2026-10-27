@@ -1,12 +1,11 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
+
+#include <filesystem>
 
 #include "DecodingSession.h"
 #include "cudaq/qec/realtime/decoding_config.h"
@@ -35,9 +34,14 @@ public:
   /// Same, from an already-parsed config (the in-process application path,
   /// where the config was handed to configure_decoders rather than a file).
   /// \p source_name is used in error messages only.
+  /// \p base_dir is the directory a relative model path (`stim_dem_path`)
+  /// resolves against; the file overload above passes the config's own
+  /// directory. Defaults to the working directory for a config with no
+  /// originating file.
   void load_from_config(
       const cudaq::qec::decoding::config::multi_decoder_config &config,
-      const std::string &source_name);
+      const std::string &source_name,
+      const std::filesystem::path &base_dir = std::filesystem::current_path());
 
   DecodingSession &get(uint64_t decoder_id);
   const DecodingSession &get(uint64_t decoder_id) const;

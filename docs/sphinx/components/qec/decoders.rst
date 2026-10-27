@@ -12,36 +12,126 @@ quantum error correction decoders through the :code:`cudaq::qec::decoder` base c
 Class Structure
 ^^^^^^^^^^^^^^^
 
-The decoder base class defines the core interface for syndrome decoding:
+The decoder base owns immutable model data and fixes the primary and auxiliary
+output contract when an instance is constructed. The relevant interface is:
 
 .. code-block:: cpp
 
     class decoder {
-    protected:
-        std::size_t block_size;       // For [n,k] code, this is n
-        std::size_t syndrome_size;    // For [n,k] code, this is n-k
-        sparse_binary_matrix H;       // Parity check matrix
-
     public:
-        struct decoder_result {
-            bool converged;                 // Decoder convergence status
-            std::vector<float_t> result;    // Soft error probabilities
-        };
+        decoder(decoder_init inputs,
+                decoder_output_request requested_output =
+                    decoder_output_request{decode_result_type::errors});
 
         virtual decoder_result decode(
             const std::vector<float_t>& syndrome) = 0;
 
         virtual std::vector<decoder_result> decode_batch(
             const std::vector<std::vector<float_t>>& syndrome);
+
+        decode_result_type get_result_type() const noexcept;
+        decoder_auxiliary_result_type
+        get_auxiliary_result_type() const noexcept;
+
+    protected:
+        const decoder_init& get_inputs() const noexcept;
+        std::size_t block_size;
+        std::size_t syndrome_size;
     };
 
 Key Components:
 
-* **Parity Check Matrix**: Defines the code structure via the sparse :code:`H` member
-* **Block Size**: Number of physical qubits in the code
-* **Syndrome Size**: Number of stabilizer measurements
-* **Decoder Result**: Contains convergence status and error probabilities
+* **Construction inputs**: :code:`decoder_init` owns ``H`` and optional ``O``,
+  ``D``, error rates, and authoritative Stim DEM text
+* **Fixed output contract**: An instance returns either error frames or
+  observable flips as its primary result and may return requested standardized
+  auxiliary outputs
+* **Block Size**: Number of modeled error mechanisms (columns of ``H``)
+* **Syndrome Size**: Number of detector values (rows of ``H``)
+* **Decoder Result**: Contains convergence status, primary values in the
+  configured error or observable basis, requested standardized auxiliary
+  outputs in ``opt_results``, and optional decoder-specific metadata
 * **Multiple Decoding Modes**: Single syndrome or batch processing
+
+Migrating Existing C++ Decoder Plugins
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This decoder construction contract is a breaking C++ source and ABI change.
+An out-of-tree plugin binary built with the former creator signature cannot be
+loaded by the updated extension registry. Out-of-tree decoder plugins must be
+rebuilt and migrated as follows:
+
+* Replace constructors that take ``H`` with constructors that take
+  :cpp:class:`cudaq::qec::decoder_init` by value and
+  ``decoder_output_request``. Forward both to the base constructor as
+  ``decoder(std::move(inputs), request)``.
+* Read model data through ``get_inputs()``. ``H``, ``O``, ``D``, and
+  ``error_rate_vec`` are framework model data and must not be passed in the
+  heterogeneous custom-parameter map or registered as plugin schema keys.
+* Change custom creator signatures to accept ``decoder_init`` by value,
+  ``std::optional<cudaq::qec::decoder_output_request>``, and the custom
+  parameter map. The removed ``make_pcm_decoder`` helper must not be used.
+* Replace comparisons on the former ``decode_result_type`` creator parameter
+  with comparisons on ``request.primary``. Choose the plugin's default primary
+  basis when the optional request is empty; the presence of ``O`` does not
+  select observable output.
+* Reject unsupported auxiliary requests during construction, for example with
+  ``if (request.has_auxiliary_outputs()) throw std::invalid_argument(...)``.
+  A plugin that accepts ``residual_detectors`` must return them in
+  ``decoder_result::opt_results["residual_detectors"]``.
+* Remove calls to the deleted ``set_O_sparse`` and ``set_D_sparse`` methods.
+  The base constructor now derives the corresponding model state and buffer
+  sizes. A streaming decoder supplies only its layer geometry through
+  ``initialize_streaming_layout`` during construction.
+* Rebuild against the new header: the cancellable ``decode`` and
+  ``decode_batch`` overloads add virtual methods. Override them only if the
+  decoder can honor a stop; the defaults ignore the token.
+
+The main source migration maps old symbols as follows:
+
+.. list-table:: Decoder plugin API migration
+   :header-rows: 1
+
+   * - Removed API
+     - Replacement
+   * - ``decoder::decode_result_type::decode_to_errs``
+     - ``cudaq::qec::decode_result_type::errors``
+   * - ``decoder::decode_result_type::decode_to_obs``
+     - ``cudaq::qec::decode_result_type::observables``
+   * - ``decode_result_type::observables_and_residual_detectors``
+     - ``decoder_output_request{decode_result_type::observables,
+       decoder_auxiliary_result_type::residual_detectors}``
+   * - Creator argument ``std::optional<decode_result_type>``
+     - ``std::optional<decoder_output_request>``; rebuild the plugin because
+       this changes the extension-point ABI
+   * - ``decoder(H)`` and protected ``H``
+     - ``decoder(std::move(inputs), requested_output)`` and
+       ``get_inputs().detector_error_matrix()``
+   * - protected ``O_sparse`` / ``D_sparse``
+     - ``get_inputs().observable_flips_matrix()`` /
+       ``get_inputs().measurement_to_detectors()``
+   * - ``set_result_type(...)``
+     - Choose and validate ``requested_output`` in the constructor; it is
+       immutable afterward
+   * - ``set_O_sparse(...)`` / ``set_D_sparse(...)``
+     - Put ``O`` / ``D`` in ``decoder_init`` before factory construction
+   * - ``on_o_sparse_configured()`` / ``on_d_sparse_configured()``
+     - Perform model-dependent setup in the derived constructor after the base
+       constructor; use ``initialize_streaming_layout(...)`` only for decoder
+       layer geometry
+   * - ``make_pcm_decoder<DecoderT>(...)``
+     - Implement the registered creator with ``decoder_init`` and inspect
+       ``inputs.source()`` / ``inputs.has_stim_dem()`` when source-specific
+       handling is required
+
+For direct callers, construct ``decoder_init`` with the model data and pass a
+:cpp:enum:`cudaq::qec::decode_result_type` to ``get_decoder`` when the result
+basis must be explicit. It converts to a ``decoder_output_request`` with no
+auxiliary outputs. Python callers use ``output="errors"`` or
+``output="observables"``. Python intentionally exposes only the primary result
+basis; composition infrastructure uses ``decoder_output_request`` to request
+standardized auxiliary outputs from a compatible decoder. See the PyMatching
+API for the migration from its former ``O``-implies-observables behavior.
 
 Implementing a New Decoder in C++
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -52,20 +142,28 @@ To implement a new decoder:
 
 .. code-block:: cpp
 
-    class my_decoder : public qec::decoder {
-    private:
-        // Decoder-specific members
-
+    class my_decoder : public cudaq::qec::decoder {
     public:
-        my_decoder(const qec::sparse_binary_matrix& H,
-                  const cudaqx::heterogeneous_map& params)
-            : decoder(H) {
-            // Initialize decoder
+        my_decoder(cudaq::qec::decoder_init inputs,
+                   cudaq::qec::decoder_output_request request,
+                   const cudaqx::heterogeneous_map& params)
+            : cudaq::qec::decoder(std::move(inputs), request) {
+            if (request.has_auxiliary_outputs())
+                throw std::invalid_argument(
+                    "my_decoder does not produce auxiliary outputs");
+            if (request.primary !=
+                cudaq::qec::decode_result_type::errors)
+                throw std::invalid_argument(
+                    "my_decoder produces error frames only");
+
+            const auto& H = get_inputs().detector_error_matrix();
+            // Initialize from H and decoder-specific params.
         }
 
-        decoder_result decode(
-            const std::vector<float_t>& syndrome) override {
-            // Implement decoding logic
+        cudaq::qec::decoder_result decode(
+            const std::vector<cudaq::qec::float_t>& syndrome) override {
+            return {/*converged=*/true,
+                    std::vector<cudaq::qec::float_t>(block_size, 0.0)};
         }
     };
 
@@ -73,24 +171,28 @@ To implement a new decoder:
 
 .. code-block:: cpp
 
-    class my_decoder : public qec::decoder {
+    class my_decoder : public cudaq::qec::decoder {
         // ... constructor and decode() from above ...
 
         CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
             my_decoder,
-            static std::unique_ptr<decoder> create(
-                const qec::decoder_init& init,
+            static std::unique_ptr<cudaq::qec::decoder> create(
+                cudaq::qec::decoder_init inputs,
+                std::optional<cudaq::qec::decoder_output_request> output,
                 const cudaqx::heterogeneous_map& params) {
-                return qec::make_pcm_decoder<my_decoder>(init, params);
+                const auto request = output.value_or(
+                    cudaq::qec::decoder_output_request{
+                        cudaq::qec::decode_result_type::errors});
+                return std::make_unique<my_decoder>(
+                    std::move(inputs), request, params);
             })
     };
 
     CUDAQ_EXT_PT_REGISTER_TYPE(my_decoder)
 
-The :code:`make_pcm_decoder` helper dispatches :code:`decoder_init`. It
-passes a stored sparse PCM directly to the decoder constructor; when the
-variant contains Stim DEM text, it parses the DEM and constructs the sparse
-detector matrix before invoking the same constructor.
+The creator receives an owning ``decoder_init`` handle. Matrix-based plugins
+read its sparse matrix projection; DEM-native plugins first require
+``has_stim_dem()`` and then read ``stim_dem()``.
 
 Example: Lookup Table Decoder
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -99,14 +201,24 @@ Here's a simple lookup table decoder for the Steane code:
 
 .. code-block:: cpp
 
-    class single_error_lut : public decoder {
+    class single_error_lut : public cudaq::qec::decoder {
     private:
         std::map<std::string, std::size_t> single_qubit_err_signatures;
 
     public:
-        single_error_lut(const qec::sparse_binary_matrix& H,
-                          const cudaqx::heterogeneous_map& params)
-            : decoder(H) {
+        single_error_lut(cudaq::qec::decoder_init inputs,
+                         cudaq::qec::decoder_output_request request,
+                         const cudaqx::heterogeneous_map& params)
+            : cudaq::qec::decoder(std::move(inputs), request) {
+            if (request.has_auxiliary_outputs())
+                throw std::invalid_argument(
+                    "single_error_lut does not produce auxiliary outputs");
+            if (request.primary !=
+                cudaq::qec::decode_result_type::errors)
+                throw std::invalid_argument(
+                    "single_error_lut produces error frames only");
+
+            const auto& H = get_inputs().detector_error_matrix();
             // Canonicalize before using each sparse column as an error
             // signature so duplicate row indices cancel over GF(2).
             auto H_e2d = H.canonicalize().to_nested_csc();
@@ -119,10 +231,10 @@ Here's a simple lookup table decoder for the Steane code:
             }
         }
 
-        decoder_result decode(
-            const std::vector<float_t>& syndrome) override {
-            decoder_result result{false,
-                std::vector<float_t>(block_size, 0.0)};
+        cudaq::qec::decoder_result decode(
+            const std::vector<cudaq::qec::float_t>& syndrome) override {
+            cudaq::qec::decoder_result result{false,
+                std::vector<cudaq::qec::float_t>(block_size, 0.0)};
 
             // Convert syndrome to string
             std::string syndrome_str(syndrome_size, '0');
@@ -138,7 +250,22 @@ Here's a simple lookup table decoder for the Steane code:
 
             return result;
         }
+
+        CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+            single_error_lut,
+            static std::unique_ptr<cudaq::qec::decoder> create(
+                cudaq::qec::decoder_init inputs,
+                std::optional<cudaq::qec::decoder_output_request> output,
+                const cudaqx::heterogeneous_map& params) {
+                const auto request = output.value_or(
+                    cudaq::qec::decoder_output_request{
+                        cudaq::qec::decode_result_type::errors});
+                return std::make_unique<single_error_lut>(
+                    std::move(inputs), request, params);
+            })
     };
+
+    CUDAQ_EXT_PT_REGISTER_TYPE(single_error_lut)
 
 Implementing a Decoder in Python
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -256,7 +383,7 @@ Decoding from Stim DEM Text
 
 A DEM does not have to be produced inside CUDA-Q. Decoders can be constructed from either a parity-check matrix or raw Stim detector error model (DEM) text, which is useful when the model is already available in Stim's ``.dem`` format — from a saved file, a Stim workflow, or CUDA-Q DEM generation.
 
-For PCM-based decoders, CUDA-Q QEC parses the DEM text into a detector error matrix and supplies DEM-derived ``O`` and ``error_rate_vec`` defaults when the user does not provide them. C++ decoder plugins that need full Stim DEM metadata can consume the raw DEM string from the decoder construction input. By default, ``get_decoder(..., dem_text)`` and ``dem_from_stim_text(dem_text)`` parse with ``use_decomp_suggestions=False`` — Stim ``^`` decomposition hints are ignored and each ``error(...)`` instruction becomes one matrix column; passing ``use_decomp_suggestions=True`` splits ``^``-separated components into separate columns.
+For native decoders, raw DEM text is authoritative: :cpp:class:`cudaq::qec::decoder_init` retains the text and exposes its parsed ``H``, ``O``, and error rates, and custom parameters cannot override those model inputs. Python-registered decoders cannot consume ``decoder_init`` directly, so the binding instead passes the parsed ``H`` and supplies DEM-derived ``O`` and ``error_rate_vec`` keyword defaults when the Python caller did not provide them. By default, ``get_decoder(..., dem_text)`` and ``dem_from_stim_text(dem_text)`` parse with ``use_decomp_suggestions=False`` — Stim ``^`` decomposition hints are ignored and each ``error(...)`` instruction becomes one matrix column; passing ``use_decomp_suggestions=True`` splits ``^``-separated components into separate columns.
 
 For a runnable example, see :ref:`Decoding From Stim DEM Text <stim_dem_text_example>`.
 
@@ -307,6 +434,12 @@ CUDA-Q QEC provides pre-built decoders for a variety of use cases.
      - Yes
      - Yes
      - Supports Relay BP and BP+OSD
+   * - NVIDIA Fusion Decoder
+     - `"nv-fusion-decoder"`
+     - Yes
+     - Yes
+     - Yes
+     - Multithreaded MWPM decoder optimized for low-latency streaming
    * - Tensor Network Decoder¹
      - `"tensor_network_decoder"`
      - Yes²
@@ -419,6 +552,19 @@ Usage:
         auto d2 = cudaq::qec::get_decoder("nv-qldpc-decoder", H, {{"use_osd", true}, {"bp_batch_size", 100}});
 
 For a runnable example, see :ref:`Getting Started with the NVIDIA QLDPC Decoder <qldpc_decoder_example>`.
+
+NVIDIA Fusion Decoder
+^^^^^^^^^^^^^^^^^^^^^
+
+The ``nv-fusion-decoder`` is a multithreaded minimum-weight perfect matching
+(MWPM) decoder for graphlike error models. It partitions detector data into
+temporal blocks and fuses their solutions to reduce latency in streaming,
+realtime decoding environments. It also supports offline batch decoding.
+
+See the :ref:`Python <nv_fusion_decoder_api_python>` and
+:ref:`C++ <nv_fusion_decoder_api_cpp>` API references for configuration and
+usage details. For benchmark results and reproduction instructions, see
+:doc:`NV-Fusion Decoder Latency </performance/nv_fusion_latency_user_guide>`.
 
 Tensor Network Decoder
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -600,14 +746,13 @@ Usage:
             auto inner_decoder_params = cudaqx::heterogeneous_map{
                 {"use_osd", true}, {"max_iterations", 50}, {"use_sparsity", true}};
             auto opts = cudaqx::heterogeneous_map{
-                {"error_rate_vec", dem.error_rates},
                 {"window_size", 1},
                 {"num_syndromes_per_round", code->get_num_z_stabilizers() + code->get_num_x_stabilizers()},
                 {"num_boundary_syndromes", code->get_num_z_stabilizers()},
                 {"inner_decoder_name", "nv-qldpc-decoder"},
                 {"inner_decoder_params", inner_decoder_params}};
             auto swdec = cudaq::qec::get_decoder("sliding_window",
-                                                 dem.detector_error_matrix, opts);
+                                                 cudaq::qec::decoder_init{dem}, opts);
             return 0;
         }
 
@@ -616,4 +761,3 @@ Output:
 Once a decode step completes, results use the same types as other pre-built
 decoders (:class:`cudaq_qec.Decoder` in Python, :cpp:class:`cudaq::qec::decoder`
 in C++).
-
