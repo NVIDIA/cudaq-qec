@@ -10,8 +10,10 @@
 #include "../lib/realtime/realtime_decoding.h"
 
 #include "SessionRegistry.h"
+#include "task_graph_test_fixtures.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoding_task_graph.h"
+#include "cudaq/qec/logger.h"
 #include "cudaq/qec/realtime/decoder_rpc_wire_format.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include "cudaq/qec/realtime/graph_resources.h"
@@ -24,8 +26,10 @@
 #include <cstdint>
 #include <cstring>
 #include <cuda_runtime_api.h>
+#include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -1477,6 +1481,184 @@ TEST(SessionRegistryLoad, TaskGraphInnerDecoderGetsTheConfiguredId) {
   auto *dec = session->graph->inner_decoder();
   ASSERT_NE(dec, nullptr);
   EXPECT_EQ(dec->get_decoder_id(), 3u);
+}
+
+// ---------------------------------------------------------------------------
+// Windowed graphs
+// ---------------------------------------------------------------------------
+
+// Measurements a round of arbitrary_memory_spec(5, true) carries.
+constexpr std::size_t windowed_round_bits = 4;
+
+// The parallel_window pattern over arbitrary_memory_spec(5, true), decoding
+// with a lookup table into its corrections.
+std::unique_ptr<cudaq::qec::decoding_task_graph> windowed_graph(bool async) {
+  using namespace cudaq::qec;
+  task_graph_node_config node;
+  std::vector<task_graph_node_config> nodes;
+  task_graph_options options;
+  node.id = "P";
+  node.kind = "parallel_window";
+  node.dem = arbitrary_memory_spec(5, true);
+  node.decoder_type = "single_error_lut";
+  node.node_params = {{"commit_rounds", std::size_t{2}},
+                      {"buffer_rounds", std::size_t{1}},
+                      {"gap_rounds", std::size_t{3}},
+                      {"output", std::string("corrections")}};
+  nodes.push_back(std::move(node));
+  options.async_streaming = async;
+  return decoding_task_graph::from_topology(std::move(nodes), {}, options);
+}
+
+// A session's table with a bulk row 0 and a final row 1.
+SyndromeMappingTable bulk_and_final_rows() {
+  return {{0, syndrome_mapping_row{cudaq::qec::round_type::BULK, {{}}}},
+          {1, syndrome_mapping_row{cudaq::qec::round_type::FINAL, {{}}}}};
+}
+
+// An asynchronous windowed graph served through a bulk and a final row. A
+// read mid-shot answers once windows have completed since the last; its
+// coverage only grows, and its frame is the one a synchronous graph shows
+// at that coverage. The final enqueue gives the synchronous graph's frame,
+// and consuming it opens the next shot.
+TEST(DecodingSessionInline, ServesAWindowedGraphMidShotAndAtFinal) {
+  using cudaq::qec::round_type;
+  constexpr std::size_t R = 30;
+  constexpr std::size_t shots = 3;
+  std::size_t matched = 0; // mid-shot reads at a coverage the twin showed
+  std::size_t ones = 0;    // reads whose frame is 1
+  std::uint32_t rid = 0;
+  std::vector<uint8_t> tx(64);
+  std::mt19937 rng(17);
+  auto session = DecodingSession::create(windowed_graph(true),
+                                         /*want_device_graph=*/false,
+                                         bulk_and_final_rows());
+  auto twin = windowed_graph(false);
+  for (std::size_t shot = 0; shot < shots; ++shot) {
+    std::map<std::uint64_t, uint8_t> twin_frame; // by coverage
+    std::uint64_t covered = 0;
+    twin->reset_decoder();
+    for (std::size_t r = 0; r < R; ++r) {
+      const bool last = r + 1 == R;
+      std::vector<uint8_t> bits(windowed_round_bits);
+      for (auto &bit : bits)
+        bit = (rng() & 7) == 0;
+      twin->enqueue_syndrome(bits.data(), bits.size(),
+                             last ? round_type::FINAL : round_type::BULK);
+      const auto &shown = twin->streaming_result();
+      twin_frame[shown.outputs.at(0).coverage_end_round] = shown.values.at(0);
+      auto enqueue = make_cqr_slot(kEnqueueSyndromesFunctionId, ++rid,
+                                   make_enqueue_payload(r, bits, last));
+      session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
+      expect_tx_status(tx, RpcStatus::OK, rid);
+      auto read = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
+                                make_get_corrections_payload(1, false));
+      session->handle_get_corrections(read.data(), tx.data(), read.size());
+      const auto *response = reinterpret_cast<const RPCResponse *>(tx.data());
+      if (!last &&
+          response->status == static_cast<int32_t>(RpcStatus::NOT_READY))
+        continue;
+      expect_tx_status(tx, RpcStatus::OK, rid);
+      const auto &seen = session->graph_result();
+      const auto coverage = seen.outputs.at(0).coverage_end_round;
+      const uint8_t frame = tx[sizeof(RPCResponse)] & 1u;
+      EXPECT_GT(coverage, covered) << "shot " << shot << ", round " << r;
+      covered = coverage;
+      EXPECT_EQ(frame, seen.values.at(0) & 1u);
+      if (const auto it = twin_frame.find(coverage); it != twin_frame.end()) {
+        EXPECT_EQ(frame, it->second & 1u)
+            << "shot " << shot << ", coverage " << coverage;
+        matched += !last;
+      }
+      ones += frame;
+    } // end - for(r)
+    EXPECT_EQ(covered, R);
+    EXPECT_EQ(session->graph_result().values, twin->streaming_result().values);
+    auto consume = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
+                                 make_get_corrections_payload(1, true));
+    session->handle_get_corrections(consume.data(), tx.data(), consume.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+  } // end - for(shot)
+  EXPECT_GE(matched, shots * 3) << "too few mid-shot reads to compare";
+  EXPECT_GT(ones, 0u) << "every frame read was 0";
+}
+
+// A document with one windowed decoder: the pattern over a two-detector
+// chain whose faults stay in their rounds, so its boundary prior is set.
+std::string windowed_yaml(bool async, bool final_row,
+                          const std::string &dispatch) {
+  return std::string(R"(decoders:
+  - id: 0
+    dispatch: )") +
+         dispatch + R"(
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      async_streaming: )" +
+         (async ? "true" : "false") + R"(
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          output: corrections
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+)" + (final_row ? "syndrome_mapping:\n  - {id: 1, type: final}\n" : "");
+}
+
+// What loading @p yaml into a registry logs at warn level.
+std::string warnings_loading(const std::string &yaml) {
+  namespace detail = cudaq::qec::detail;
+  const auto previous = detail::get_log_level();
+  SessionRegistry registry;
+  detail::set_log_level(detail::log_level::warn);
+  testing::internal::CaptureStderr();
+  registry.load_from_config(
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml),
+      "windowed");
+  detail::flush_logs();
+  const auto logged = testing::internal::GetCapturedStderr();
+  detail::set_log_level(previous);
+  return logged;
+}
+
+// A windowed graph's serving settings are checked as it loads: one that runs
+// synchronously, or whose document has no final row to end its shots,
+// loads with a warning naming the decoder; with both, nothing is said; one
+// served by dispatch: device_graph is refused.
+TEST(SessionRegistryLoad, ChecksAWindowedGraphsServingSettings) {
+  const std::string sync = "decoder 0 runs a windowed task graph "
+                           "synchronously";
+  const std::string no_final = "decoder 0 runs a windowed task graph, but "
+                               "syndrome_mapping has no final row";
+  const auto both = warnings_loading(windowed_yaml(true, true, "host"));
+  const auto synchronous = warnings_loading(windowed_yaml(false, true, "host"));
+  const auto unending = warnings_loading(windowed_yaml(true, false, "host"));
+  EXPECT_EQ(both.find("windowed task graph"), std::string::npos) << both;
+  EXPECT_NE(synchronous.find(sync), std::string::npos) << synchronous;
+  EXPECT_EQ(synchronous.find(no_final), std::string::npos) << synchronous;
+  EXPECT_NE(unending.find(no_final), std::string::npos) << unending;
+  EXPECT_EQ(unending.find(sync), std::string::npos) << unending;
+  SessionRegistry registry;
+  EXPECT_THROW(
+      registry.load_from_config(
+          cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+              windowed_yaml(true, true, "device_graph")),
+          "windowed"),
+      std::runtime_error);
 }
 
 } // namespace

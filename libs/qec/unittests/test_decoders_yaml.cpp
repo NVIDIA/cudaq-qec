@@ -5308,6 +5308,82 @@ TEST(ConfigureDecodersLifecycle, WarnsWhenAsyncGraphsContendForCpus) {
       << logged;
 }
 
+// A document with one windowed decoder: the pattern over a two-detector
+// chain whose faults stay in their rounds, so its boundary prior is set.
+std::string windowed_serving_yaml(bool async, bool final_row,
+                                  const std::string &dispatch) {
+  return std::string(R"(decoders:
+  - id: 0
+    dispatch: )") +
+         dispatch + R"(
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      async_streaming: )" +
+         (async ? "true" : "false") + R"(
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          output: corrections
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+)" + (final_row ? "syndrome_mapping:\n  - {id: 1, type: final}\n" : "");
+}
+
+// configure_decoders() warns of a windowed decoder's serving settings: run
+// synchronously, with no final row to end its shots, or with dispatch:
+// device_graph, each named; with async_streaming, a final row and host
+// dispatch, nothing is said. Each still configures.
+TEST(ConfigureDecodersLifecycle, WarnsOfAWindowedGraphsServingSettings) {
+  using namespace cudaq::qec::decoding::config;
+  const auto logged_for = [](const std::string &yaml) {
+    auto config = multi_decoder_config::from_yaml_str(yaml);
+    const auto previous = cudaq::qec::detail::get_log_level();
+    cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::warn);
+    testing::internal::CaptureStderr();
+    const int status = configure_decoders(config);
+    cudaq::qec::detail::flush_logs();
+    const std::string logged = testing::internal::GetCapturedStderr();
+    cudaq::qec::detail::set_log_level(previous);
+    finalize_decoders();
+    EXPECT_EQ(status, 0) << logged;
+    return logged;
+  };
+  const std::string sync = "decoder 0 runs a windowed task graph "
+                           "synchronously";
+  const std::string no_final = "decoder 0 runs a windowed task graph, but "
+                               "syndrome_mapping has no final row";
+  const std::string device = "decoder 0 runs a windowed task graph, which "
+                             "is served with dispatch: host only";
+  const auto quiet = logged_for(windowed_serving_yaml(true, true, "host"));
+  const auto synchronous =
+      logged_for(windowed_serving_yaml(false, true, "host"));
+  const auto unending = logged_for(windowed_serving_yaml(true, false, "host"));
+  const auto on_device =
+      logged_for(windowed_serving_yaml(true, true, "device_graph"));
+  EXPECT_EQ(quiet.find("windowed task graph"), std::string::npos) << quiet;
+  EXPECT_NE(synchronous.find(sync), std::string::npos) << synchronous;
+  EXPECT_EQ(synchronous.find(no_final), std::string::npos) << synchronous;
+  EXPECT_NE(unending.find(no_final), std::string::npos) << unending;
+  EXPECT_EQ(unending.find(sync), std::string::npos) << unending;
+  EXPECT_NE(on_device.find(device), std::string::npos) << on_device;
+  EXPECT_EQ(on_device.find(sync), std::string::npos) << on_device;
+}
+
 TEST(DecoderNodeModelTest, NodeMaxInFlightParsesRoundTripsAndRejectsZero) {
   ScopedDemFile dem;
   auto yaml =

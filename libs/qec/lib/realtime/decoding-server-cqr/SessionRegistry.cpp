@@ -145,6 +145,7 @@ void SessionRegistry::load_from_config(const multi_decoder_config &config,
     }
   }
 
+  cudaq::qec::decoding::host::warn_windowed_serving(config);
   CUDA_QEC_INFO("SessionRegistry: loaded {} decoder session(s)",
                 sessions_.size());
 }
