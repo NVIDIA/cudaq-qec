@@ -866,6 +866,8 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     for (std::size_t r = 1; options.async_streaming && r < cfg.max_in_flight;
          ++r) {
       auto replica_ctx = prepare_node(cfg, *kind);
+      // Each copy decodes the same windows, so it reads the same store.
+      attach_windows(cfg, windows, replica_ctx);
       replicas.push_back((*factory)(replica_ctx));
     }
     i->node_ids.push_back(cfg.id);

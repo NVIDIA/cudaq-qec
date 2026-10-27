@@ -55,10 +55,11 @@ public:
   /// decode_window_core::fire() does, as do its other exceptions. A fire
   /// that throws publishes nothing.
   bool fire(std::int64_t k, const std::vector<const edge_value *> &inputs);
-  /// The index of the instance last fired, while its publication stands.
-  std::optional<std::int64_t> published_index() const;
+  /// The index of the instance last fired, on every port, while its
+  /// publication stands: the frame update and each send are instance k's.
+  std::optional<std::int64_t> published_index(std::size_t slot) const override;
   /// Every publication reports the exact rounds its frame update commits.
-  bool exact_interval_coverage() const { return true; }
+  bool exact_interval_coverage() const override { return true; }
 
   /// @throws std::logic_error: the node joins by index; it has no one-shot
   /// path.

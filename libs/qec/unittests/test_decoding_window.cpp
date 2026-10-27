@@ -4945,7 +4945,12 @@ struct node_publication {
 node_publication current_publication(const ingest_node &node,
                                      std::size_t layers) {
   node_publication out;
-  out.index = node.published_index();
+  out.index = node.published_index(0);
+  // Every window port carries the publication's index; the logical value,
+  // folded over the whole shot, carries none.
+  for (std::size_t l = 0; l < layers; ++l)
+    EXPECT_EQ(node.published_index(l), out.index);
+  EXPECT_FALSE(node.published_index(layers).has_value());
   for (std::size_t l = 0; l < layers; ++l) {
     const auto *value = node.streaming_output(l);
     out.windows.push_back(value ? std::optional{value->get<window_rows>()}
@@ -5065,7 +5070,8 @@ TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
       EXPECT_EQ(got.back().logical, s.logical());
       ASSERT_TRUE(got.back().coverage.has_value());
       EXPECT_EQ(got.back().coverage->begin_round, 0u);
-      EXPECT_EQ(got.back().coverage->end_round, ingest_node::whole_shot);
+      EXPECT_EQ(got.back().coverage->end_round,
+                streaming_task_graph_node::whole_shot);
       EXPECT_EQ(std::vector<std::uint8_t>(node.corrections(),
                                           node.corrections() +
                                               node.num_observables()),
@@ -5308,7 +5314,7 @@ private:
 
   // Fires each layer's window of the current index, in g's order.
   void fire_index() {
-    const auto i = *ingest_->published_index();
+    const auto i = *ingest_->published_index(0);
     for (std::size_t l = 0; l < nodes_.size(); ++l) {
       const auto *window = ingest_->streaming_output(l);
       std::vector<const edge_value *> inputs(nodes_[l]->inputs().size(),
@@ -5340,7 +5346,8 @@ private:
     auto &p = published_[{graph_.layers[l].node, k}];
     const auto &frame = node.streaming_output(0)->get<logical_outcome>();
     auto &folded = folded_[l];
-    EXPECT_EQ(node.published_index(), std::optional<std::int64_t>(i));
+    for (std::size_t s = 0; s < ports.size(); ++s)
+      EXPECT_EQ(node.published_index(s), std::optional<std::int64_t>(i));
     folded.resize(frame.bits.size(), 0);
     for (std::size_t j = 0; j < folded.size(); ++j)
       folded[j] ^= frame.bits[j];
@@ -5605,7 +5612,7 @@ TEST(DecodeWindowNode, DeclaresItsPorts) {
   EXPECT_EQ(b.num_observables(), 1u);
   EXPECT_EQ(b.streaming(), static_cast<streaming_task_graph_node *>(&b));
   EXPECT_EQ(b.streaming_output(0), nullptr);
-  EXPECT_FALSE(b.published_index().has_value());
+  EXPECT_FALSE(b.published_index(0).has_value());
   expect_throw<std::logic_error>(
       [&] { b.execute_indexed({}, outputs); },
       "decode_window: the node joins its inputs by index; it has no one-shot "
@@ -5654,7 +5661,7 @@ TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
     expect_error([&] { a.fire(1, inputs); }, text);
     EXPECT_EQ(a.streaming_output(0), nullptr);
     EXPECT_FALSE(a.streaming_coverage().has_value());
-    EXPECT_FALSE(a.published_index().has_value());
+    EXPECT_FALSE(a.published_index(0).has_value());
   };
   rejects({&window, &window},
           "decode_window: instance 1 has 2 inputs, not the node's 1");
@@ -5708,7 +5715,7 @@ TEST(DecodeWindowNode, PublishesUntilTheNextFireOrReset) {
   ASSERT_TRUE(window.has_value());
   ASSERT_TRUE(a.fire(7, {&*window}));
   EXPECT_EQ(a.streaming_output(0)->get<logical_outcome>().bits, frame);
-  EXPECT_EQ(a.published_index(), std::optional<std::int64_t>(7));
+  EXPECT_EQ(a.published_index(0), std::optional<std::int64_t>(7));
   EXPECT_TRUE(a.streaming_coverage().has_value());
   EXPECT_EQ(std::vector<std::uint8_t>(a.corrections(),
                                       a.corrections() + a.num_observables()),
@@ -5726,7 +5733,7 @@ TEST(DecodeWindowNode, PublishesUntilTheNextFireOrReset) {
   a.reset_streaming_state();
   EXPECT_EQ(a.streaming_output(0), nullptr);
   EXPECT_FALSE(a.streaming_coverage().has_value());
-  EXPECT_FALSE(a.published_index().has_value());
+  EXPECT_FALSE(a.published_index(0).has_value());
 
   blind_decoder::converges = false;
   ASSERT_TRUE(doubtful.fire(0, {&*window}));

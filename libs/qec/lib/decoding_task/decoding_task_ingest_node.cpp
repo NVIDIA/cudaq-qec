@@ -112,8 +112,9 @@ bool ingest_node::publish_next() {
   return false;
 }
 
-std::optional<std::int64_t> ingest_node::published_index() const {
-  if (logical_current_ || current_ == none)
+std::optional<std::int64_t>
+ingest_node::published_index(std::size_t slot) const {
+  if (slot >= layers_ || logical_current_ || current_ == none)
     return std::nullopt;
   return ready_[current_].index;
 }

@@ -98,7 +98,8 @@ bool decode_window_node::fire(std::int64_t k,
   return true;
 } // end - fire()
 
-std::optional<std::int64_t> decode_window_node::published_index() const {
+std::optional<std::int64_t>
+decode_window_node::published_index(std::size_t) const {
   return published_ ? std::optional<std::int64_t>(index_) : std::nullopt;
 }
 

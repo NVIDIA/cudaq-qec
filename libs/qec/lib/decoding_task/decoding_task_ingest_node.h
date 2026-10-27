@@ -34,11 +34,6 @@ namespace cudaq::qec {
 class ingest_node final : public task_graph_node,
                           public streaming_task_graph_node {
 public:
-  /// Coverage end meaning the whole shot, which an executor folds only at
-  /// FINAL, after every round's commits: the logical value's.
-  static constexpr std::uint64_t whole_shot =
-      std::numeric_limits<std::uint64_t>::max();
-
   /// @param context The experiment template.
   /// @param windows The layers, in port order: each one's port name and
   /// request.
@@ -49,9 +44,11 @@ public:
               bool read_logical);
 
   /// Make the next waiting publication current; false when none waits.
-  bool publish_next();
-  /// The current publication's index, or none for the logical value's.
-  std::optional<std::int64_t> published_index() const;
+  bool publish_next() override;
+  /// The current publication's index on a window port; none on `logical`,
+  /// whose value covers the whole shot, and none while the logical value
+  /// is current.
+  std::optional<std::int64_t> published_index(std::size_t slot) const override;
 
   /// @throws std::logic_error: the node streams; it has no one-shot path.
   void execute_indexed(const std::vector<edge_value> &inputs,
