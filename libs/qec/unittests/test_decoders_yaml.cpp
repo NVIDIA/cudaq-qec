@@ -15,6 +15,7 @@
 #include "cudaq/qec/logger.h"
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/realtime/decoding_config.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -5357,6 +5358,118 @@ TEST(StimDemReferences, RejectsBadNames) {
         << e.what();
   }
 } // end - TEST(StimDemReferences, RejectsBadNames)
+
+namespace {
+
+/// The entries of stim_artifacts_yaml(), out of name order, and a sliding
+/// window node; then a DEM-form decoder naming each entry, all as built in
+/// code. The node and the decoders hold `node_name`, `file_name` and
+/// `text_name` as their stim_dem.
+cudaq::qec::decoding::config::multi_decoder_config
+code_built_names(const std::string &dem_path, const std::string &node_name,
+                 const std::string &file_name, const std::string &text_name) {
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          stim_artifacts_yaml(dem_path, node_model_yaml("")));
+  auto decoder = parse_one("decoders:\n" +
+                           stim_dem_decoder("|\n" + indent_lines(kStimDem, 6)));
+  std::reverse(config.data_artifacts.begin(), config.data_artifacts.end());
+  config.decoders.at(0).task_graph->nodes.at(0).stim_dem = node_name;
+  decoder.id = 1;
+  decoder.stim_dem = file_name;
+  config.decoders.push_back(decoder);
+  decoder.id = 2;
+  decoder.stim_dem = text_name;
+  config.decoders.push_back(decoder);
+  return config;
+}
+
+} // namespace
+
+// A configuration built in code names entries as a parsed one does: each
+// decoder and node built from it gets the entry's model, whatever the order
+// of data_artifacts, and the caller's configuration is left as it was.
+TEST(StimDemReferences, CodeBuiltConfigsNameEntries) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  auto config =
+      code_built_names(dem.path(), "inline_text", "by_file", "inline_text");
+  const auto before = config;
+  const auto named = cudaq::qec::decoding::host::with_pinned_stim_dems(
+      config, std::filesystem::current_path());
+  const auto &node = named.decoders.at(0).task_graph->nodes.at(0);
+  const auto &by_file = named.decoders.at(1);
+  const auto &by_text = named.decoders.at(2);
+  const auto &text = config.data_artifacts.at(0).stim_dem;
+  EXPECT_EQ(config, before);
+  EXPECT_EQ(node.stim_dem_artifact, "inline_text");
+  EXPECT_EQ(node.stim_dem, text);
+  EXPECT_EQ(by_file.stim_dem_artifact, "by_file");
+  EXPECT_EQ(by_file.stim_dem_path, dem.path());
+  EXPECT_TRUE(by_file.stim_dem.empty());
+  EXPECT_EQ(by_text.stim_dem_artifact, "inline_text");
+  EXPECT_EQ(by_text.stim_dem, text);
+  EXPECT_EQ(cfg::configure_decoders(config), 0);
+  cfg::finalize_decoders();
+} // end - TEST(StimDemReferences, CodeBuiltConfigsNameEntries)
+
+// A configuration built in code is refused, before anything is built, for
+// the names parsing refuses, its own errors naming the decoder or node.
+TEST(StimDemReferences, CodeBuiltConfigsRejectBadNames) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  const auto refused = [&](cfg::multi_decoder_config config,
+                           const std::string &text) {
+    try {
+      cudaq::qec::decoding::host::with_pinned_stim_dems(
+          config, std::filesystem::current_path());
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+    EXPECT_THROW(cfg::configure_decoders(config), std::runtime_error) << text;
+  };
+  auto spaced = code_built_names(dem.path(), "", "by_file", "inline_text");
+  auto twice = spaced;
+  auto unnamed = spaced;
+  auto none = spaced;
+  spaced.data_artifacts.at(0).name = "inline text";
+  twice.data_artifacts.at(0).name = "by_file";
+  unnamed.data_artifacts.at(0).name.clear();
+  none.data_artifacts.clear();
+  refused(code_built_names(dem.path(), "nowhere", "by_file", "inline_text"),
+          "decoder 0, task_graph node 'w' stim_dem names data_artifacts "
+          "entry 'nowhere', which does not exist");
+  refused(code_built_names(dem.path(), "", "by_file", "nowhere"),
+          "decoder 2 stim_dem names data_artifacts entry 'nowhere', which "
+          "does not exist");
+  refused(none, "decoder 1 stim_dem names data_artifacts entry 'by_file', "
+                "which does not exist");
+  refused(spaced, "data_artifacts entry 'inline text' needs a name "
+                  "without spaces");
+  refused(unnamed, "data_artifacts entry '' needs a name without spaces");
+  refused(twice, "data_artifacts has two entries named 'by_file'");
+} // end - TEST(StimDemReferences, CodeBuiltConfigsRejectBadNames)
+
+// A name holds no spaces, tabs or line breaks, so that a stim_dem naming it
+// is told apart from model text: an entry whose name holds one is refused
+// where it is declared, rather than a decoder naming it being read as a
+// model.
+TEST(StimDemReferences, NamesHaveNoWhitespace) {
+  expect_parse_error(R"(
+data_artifacts:
+  "my dem":
+    stim_dem: "error(0.1) D0 L0\nerror(0.1) D0 D1\n"
+decoders:
+  - id: 0
+    type: multi_error_lut
+    stim_dem: "my dem"
+    D_sparse: [0, -1, 1, -1]
+)",
+                     "data_artifacts entry 'my dem' needs a name without "
+                     "spaces");
+}
 
 // A name's error names its node, and keys arrive in no fixed order, so a
 // node without an id is reported as such rather than as node ''.

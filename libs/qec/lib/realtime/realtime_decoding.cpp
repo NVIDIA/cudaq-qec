@@ -857,13 +857,44 @@ with_pinned_stim_dems(const config::multi_decoder_config &config,
   return with_pinned_stim_dems(config, read_pinned_stim_dems(config, base_dir));
 }
 
-// Pinned entries are looked up before any copy changes, so a failure leaves
-// the caller's configuration untouched. A copy names an entry only while its
-// path is still the entry's: one edited after parsing is read as it stands.
+namespace {
+
+// Resolves each decoder's and node's stim_dem that names a data_artifacts
+// entry, as parsing does, so a configuration built in code names entries as
+// a parsed one does. A parsed copy holds the entry's text or path, never a
+// name, so it is left as it is. The entries are checked as parsing checks
+// them, in name order, which code need not keep.
+void resolve_stim_dem_names(config::multi_decoder_config &config) {
+  auto artifacts = config.data_artifacts;
+  std::sort(artifacts.begin(), artifacts.end(),
+            [](const config::data_artifact &a, const config::data_artifact &b) {
+              return a.name < b.name;
+            });
+  config::validate_data_artifacts(artifacts);
+  for (auto &decoder : config.decoders) {
+    const auto where = "decoder " + std::to_string(decoder.id);
+    config::resolve_stim_dem(artifacts, decoder.stim_dem, decoder.stim_dem_path,
+                             decoder.stim_dem_artifact, where);
+    if (decoder.task_graph)
+      for_each_node(decoder.task_graph->nodes, [&](auto &node) {
+        config::resolve_stim_dem(artifacts, node.stim_dem, node.stim_dem_path,
+                                 node.stim_dem_artifact,
+                                 where + ", task_graph node '" + node.id + "'");
+      });
+  }
+} // end - resolve_stim_dem_names()
+
+} // namespace
+
+// Names are resolved and pinned entries looked up in a copy, so a failure
+// leaves the caller's configuration untouched. A copy names an entry only
+// while its path is still the entry's: one edited after parsing is read as
+// it stands.
 config::multi_decoder_config
 with_pinned_stim_dems(const config::multi_decoder_config &config,
                       const pinned_stim_dems &pinned) {
   auto out = config;
+  resolve_stim_dem_names(out);
   // Each pinned entry's path and checked text, by name.
   std::map<std::string, std::pair<std::string, std::string>> by_name;
   const auto use_text = [&](std::string &text, std::string &path,

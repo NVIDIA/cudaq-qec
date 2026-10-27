@@ -1381,6 +1381,41 @@ decoders:
     assert decoder.stim_dem_path == ""
 
 
+def test_data_artifacts_name_stim_dems_built_in_code():
+    tiny = qec.data_artifact()
+    tiny.name = "tiny"
+    tiny.stim_dem = "error(0.1) D0 L0\nerror(0.1) D0 D1\n"
+    dec = qec.decoder_config()
+    dec.id = 0
+    dec.type = "multi_error_lut"
+    dec.D_sparse = [0, -1, 1, -1]
+    dec.stim_dem = "tiny"
+    mdc = qec.multi_decoder_config()
+    mdc.data_artifacts = [tiny]
+    mdc.decoders = [dec]
+    assert qec.configure_decoders(mdc) == 0
+    qec.finalize_decoders()
+    dec.stim_dem = "nowhere"
+    mdc.decoders = [dec]
+    with pytest.raises(RuntimeError, match="'nowhere', which does not exist"):
+        qec.configure_decoders(mdc)
+
+
+def test_data_artifacts_names_have_no_whitespace():
+    yaml = """
+data_artifacts:
+  "my dem":
+    stim_dem: "error(0.1) D0 L0\\nerror(0.1) D0 D1\\n"
+decoders:
+  - id: 0
+    type: multi_error_lut
+    stim_dem: "my dem"
+    D_sparse: [0, -1, 1, -1]
+"""
+    with pytest.raises(RuntimeError, match="needs a name without spaces"):
+        qec.multi_decoder_config.from_yaml_str(yaml)
+
+
 def test_data_artifacts_validate_against_the_schema():
     jsonschema = pytest.importorskip("jsonschema")
     yaml = pytest.importorskip("yaml")
@@ -1393,6 +1428,28 @@ def test_data_artifacts_validate_against_the_schema():
     two_kinds["data_artifacts"]["rep_memory"]["stim_dem"] = "error(0.1) D0"
     with pytest.raises(jsonschema.ValidationError):
         validator.validate(two_kinds)
+    # The schema refuses a name exactly when the parser does: only the
+    # whitespace that tells model text from a name, not Unicode's.
+    for name, refused in [("rep memory", True), ("rep\tmemory", True),
+                          ("rep\u00a0memory", False), ("rep\vmemory", False)]:
+        renamed = yaml.safe_load(_ARTIFACTS_YAML)
+        renamed["data_artifacts"][name] = renamed["data_artifacts"].pop(
+            "rep_memory")
+        assert (not validator.is_valid(renamed)) == refused, repr(name)
+        entries = {
+            "data_artifacts": {
+                name: {
+                    "stim_dem": "error(0.1) D0 L0"
+                }
+            },
+            "decoders": []
+        }
+        try:
+            qec.multi_decoder_config.from_yaml_str(json.dumps(entries))
+            parsed = True
+        except RuntimeError:
+            parsed = False
+        assert parsed != refused, repr(name)
 
 
 _PATTERN_YAML = """decoders:
