@@ -12,10 +12,6 @@ This page shows how to use the **prebuilt Docker package**. You never build the
 server. The playback examples run without a QPU. The CUDA-Q examples compile
 only the application that sends measurements to the packaged server.
 
-.. contents:: On this page
-   :local:
-   :depth: 2
-
 Intended use cases
 ------------------
 
@@ -181,36 +177,8 @@ final-readout event also uses stream-completion status ``100``. The read contain
 ``read_completed=1``, ``correction_bits=010``, and ``correction_mismatch=0``.
 The launcher checks these completion conditions automatically.
 
-Schedules, sources, and sessions
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-A schedule line is ``<trigger> <operation> [key=value ...]``:
-
-* ``N`` means absolute tick ``N``; ``+N`` means ``N`` ticks after the preceding
-  dispatch; ``-`` means dispatch immediately. Once triggers become relative,
-  all following triggers must remain relative.
-* ``reset`` starts a fresh shot. ``enqueue`` sends one measurement group;
-  ``stream`` sends multiple groups. ``enqueue_data`` sends a source's final
-  data-qubit readout. ``get_corrections`` reads logical corrections.
-* ``session=N`` selects decoder ID ``N``. ``signal=NAME`` signals operation
-  completion; ``after=NAME`` waits for it. An enqueue's completion is an
-  acknowledgement, not a decoding-completion barrier.
-
-Inline bits such as ``source=0b010`` are useful for small checks. Static sources
-read recorded measurement groups from a file. Stim sources generate simulated
-memory-experiment measurements. Python CUDA-Q memory sources require an SDK
-with Python bindings. For the available source parameters, run the packaged
-``playback-emulator --help``.
-
-The playback sessions are ``udp`` (server over UDP), ``cpu_roce`` (server over
-RDMA), ``inproc`` (local decoder), and ``null`` (no decoding). This page uses
-``udp``. CPU RoCE additionally needs a configured RDMA device and matching ring
-geometry; it is not required for any walkthrough here.
-
-The full playback reference is being developed in
-`the playback documentation work <https://github.com/NVIDIA/cudaq-qec/pull/850>`__
-for `issue #835 <https://github.com/NVIDIA/cudaq-qec/issues/835>`__. The commands
-on this page use only the packaged CLI and the schedule syntax above.
+For the packaged emulator's schedule, source, and session options, run
+``playback-emulator --help`` inside the image as shown above.
 
 .. _decoding-server-color-code:
 
