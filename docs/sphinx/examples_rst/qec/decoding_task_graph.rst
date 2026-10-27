@@ -455,6 +455,111 @@ streaming recipe or a fixed-size window, rather than a full-shot matrix model.
      inner: {type: <streaming-decoder>}   # implements enqueue_syndrome()
      dem_chunks: {...}                    # or inherit the entry-level DEM
 
+Parallel windows
+++++++++++++++++
+
+The ``parallel_window`` pattern decodes a stream of rounds of any length in
+windows that decode concurrently. It is written as one node and lowers into an
+``ingest`` node, two layers of ``decode_window`` nodes, ``<id>.A`` and
+``<id>.B``, and an ``xor`` of their outputs:
+
+* each **A** window commits ``commit_rounds`` rounds, decoding them with
+  ``buffer_rounds`` of context on each side, and needs nothing from any other
+  window;
+* each **B** window commits the ``gap_rounds`` between two A windows, after
+  receiving their corrections at its edges.
+
+Every window decodes a model of fixed size with the inner decoder, and windows
+finish in any order; the output folds their corrections in round order, so it
+is a staged output (see `Staged outputs`_).
+
+.. code-block:: yaml
+
+   decoders:
+     - id: 0
+       dem_chunks: {...}                   # one chunk per round
+       task_graph:
+         async_streaming: true
+         nodes:
+           - id: pw
+             type: parallel_window
+             commit_rounds: 5
+             buffer_rounds: 5
+             gap_rounds: 15
+             output: corrections
+             max_in_flight: 4
+             inner: {type: pymatching}
+         edges:
+           - {from: measurements, to: pw}
+           - {from: pw, to: output}
+   syndrome_mapping:
+     - {id: 1, type: final}
+
+The model is a ``dem_chunks`` template whose chunks each span one round and
+whose faults reach at most the next round. A phase may have no faults: its
+detectors are then never flipped, as a circuit's preparation round's may not
+be. The pattern builds every window variant the shot lengths need at
+configuration time.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Parameter
+     - Meaning
+   * - ``commit_rounds``
+     - Rounds an A window commits. Required.
+   * - ``buffer_rounds``
+     - Rounds of context on each side of an A window's commit zone. Required.
+   * - ``gap_rounds``
+     - Rounds a B window commits, between two A windows. Defaults to
+       ``commit_rounds + 2 * buffer_rounds``.
+   * - ``output``
+     - ``corrected_logical`` (default): the logical readout with the
+       correction applied, which needs ``m2o_sparse`` on the final phase.
+       ``corrections``: the correction alone.
+   * - ``input_boundary``
+     - ``columns`` (default): an A window's open input gets one boundary
+       column per detector of the round before it, with one shared prior.
+       ``truncate``: faults crossing in from that round keep their own priors
+       and are never committed.
+   * - ``boundary_prior``
+     - The shared prior of ``columns``. Defaults to the largest prior among
+       the faults that cross into the next round.
+   * - ``merge_identical``
+     - Merge fault columns with identical detectors and observables into one,
+       combining their priors. Default ``false``.
+   * - ``conflicting_parallel``
+     - What to do with identical columns of different observable effect:
+       ``reject`` (default) the configuration, or keep the ``most_likely``.
+   * - ``verify_residual``
+     - Check each window's solution against its detectors: ``none``
+       (default), ``report`` the shot's ``closure`` as ``open`` when one does
+       not hold, or ``fail`` the graph, naming the window and its row.
+
+``max_in_flight`` on the node gives each layer that many copies, which decode
+at once with ``async_streaming``.
+
+**Ending a shot.** A shot ends at its FINAL round, which completes every
+window still open with its terminal variant. Through ``enqueue_syndrome`` the
+last round is passed as ``round_type.FINAL``; through the realtime decoding API
+and the decoding server it names a ``type: final`` row of
+``syndrome_mapping``. Until then a mid-shot read reports the corrections over
+``[0, frontier)``, the rounds whose windows have all committed.
+
+**Serving.** Windows overlap later rounds only with ``async_streaming``. A
+windowed graph is served with ``dispatch: host``: the decoding server refuses
+``device_graph``, since a windowed graph is not one captured decode graph.
+Configuring a windowed decoder that runs synchronously, that has no ``final``
+row, or that names ``device_graph`` logs a warning naming it.
+
+**Results.** Besides the corrections, a shot's result reports ``converged``,
+whether every window's decoder converged, and ``closure``, whether every
+window's solution was checked and held (``closed``), checked and failed
+(``open``), or not checked (``not_checked``). One-shot calls
+(``run``, ``run_all``, ``run_batch``, ``run_async``) stream the shot through
+the same windows.
+
 Ensembles
 +++++++++
 
