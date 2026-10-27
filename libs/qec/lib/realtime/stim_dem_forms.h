@@ -31,10 +31,10 @@ inline constexpr const char *name_breaks = " \t\r\n";
 /// @throws std::runtime_error naming the first bad entry.
 void validate_data_artifacts(const std::vector<data_artifact> &list);
 
-/// Resolves a stim_dem that names an entry of @p artifacts, sorted by name, as
-/// parsing does: a value with none of name_breaks, which Stim model text
-/// always holds, moves to @p artifact, and @p text or @p path becomes a copy of
-/// the entry's text or path. @p where names the decoder or node in errors.
+/// Resolves a stim_dem that names an entry of @p artifacts as parsing does: a
+/// value with none of name_breaks, which Stim model text always holds, moves
+/// to @p artifact, and @p text or @p path becomes a copy of the entry's text
+/// or path. @p where names the decoder or node in errors.
 /// @throws std::runtime_error if no Stim DEM entry has that name, or if the
 /// entry's file meets a @p path of the decoder's or node's own.
 void resolve_stim_dem(const std::vector<data_artifact> &artifacts,
@@ -85,6 +85,13 @@ stim_dem_read read_stim_dem_entry(const config::data_artifact &entry,
 /// against another pin.
 const stim_dem_read &pinned_read(const pinned_stim_dems &pinned,
                                  const config::data_artifact &entry);
+
+/// Resolves each decoder's and node's stim_dem in @p config that names a
+/// data_artifacts entry, as parsing does, so a configuration built in code
+/// names entries as a parsed one does.
+/// @throws std::runtime_error as parsing does for a bad entry or a name no
+/// Stim DEM entry holds.
+void resolve_stim_dem_names(config::multi_decoder_config &config);
 
 /// Calls @p visit on every node of a node list, const or not, including those
 /// inside ensemble members.

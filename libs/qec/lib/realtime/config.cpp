@@ -606,16 +606,15 @@ struct config_parse_context {
   const std::vector<data_artifact_t> *artifacts = nullptr;
 };
 
-/// The entry named @p name in a list sorted by name, or nullptr. Names are
-/// looked up only while a configuration is parsed.
+/// The entry named @p name, or nullptr. A list built in code need not be
+/// sorted, as a parsed one is, so the search is linear; names are looked up
+/// only while a configuration is parsed, written or resolved.
 const data_artifact_t *named_artifact(const std::vector<data_artifact_t> &list,
                                       const std::string &name) {
   const auto it =
-      std::lower_bound(list.begin(), list.end(), name,
-                       [](const data_artifact_t &e, const std::string &n) {
-                         return e.name < n;
-                       });
-  return it != list.end() && it->name == name ? &*it : nullptr;
+      std::find_if(list.begin(), list.end(),
+                   [&](const data_artifact_t &e) { return e.name == name; });
+  return it != list.end() ? &*it : nullptr;
 }
 
 /// The entry a reference may be written back as: the document being written
@@ -646,7 +645,7 @@ std::vector<std::string> artifact_kinds(const data_artifact_t &entry) {
   return kinds;
 }
 
-/// The entry of @p artifacts, sorted by name, that @p name names, which must
+/// The entry of @p artifacts that @p name names, which must
 /// hold one of @p kinds; @p what names them, and @p where the reference, in
 /// messages. Without @p artifacts, the reference was parsed outside a
 /// document that could hold the entry.

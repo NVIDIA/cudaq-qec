@@ -5388,7 +5388,10 @@ code_built_names(const std::string &dem_path, const std::string &node_name,
 
 // A configuration built in code names entries as a parsed one does: each
 // decoder and node built from it gets the entry's model, whatever the order
-// of data_artifacts, and the caller's configuration is left as it was.
+// of data_artifacts. with_pinned_stim_dems() leaves the caller's
+// configuration as it was; configure_decoders() resolves its names once the
+// configuration is in effect, as it makes its paths absolute, so it is
+// written back by name.
 TEST(StimDemReferences, CodeBuiltConfigsNameEntries) {
   namespace cfg = cudaq::qec::decoding::config;
   ScopedServerDemFile dem;
@@ -5409,8 +5412,18 @@ TEST(StimDemReferences, CodeBuiltConfigsNameEntries) {
   EXPECT_TRUE(by_file.stim_dem.empty());
   EXPECT_EQ(by_text.stim_dem_artifact, "inline_text");
   EXPECT_EQ(by_text.stim_dem, text);
-  EXPECT_EQ(cfg::configure_decoders(config), 0);
+  ASSERT_EQ(cfg::configure_decoders(config), 0);
   cfg::finalize_decoders();
+  const auto &entry = config.data_artifacts.at(1);
+  const auto emitted = config.to_yaml_str(200);
+  ASSERT_EQ(entry.name, "by_file");
+  EXPECT_EQ(config.decoders.at(0).task_graph->nodes.at(0).stim_dem_artifact,
+            "inline_text");
+  EXPECT_EQ(config.decoders.at(1).stim_dem_artifact, "by_file");
+  EXPECT_EQ(config.decoders.at(1).stim_dem_path, entry.stim_dem_path);
+  EXPECT_EQ(config.decoders.at(2).stim_dem_artifact, "inline_text");
+  EXPECT_TRUE(writes(emitted, "stim_dem", "by_file")) << emitted;
+  EXPECT_TRUE(writes(emitted, "stim_dem", "inline_text")) << emitted;
 } // end - TEST(StimDemReferences, CodeBuiltConfigsNameEntries)
 
 // A configuration built in code is refused, before anything is built, for
@@ -5428,7 +5441,9 @@ TEST(StimDemReferences, CodeBuiltConfigsRejectBadNames) {
       EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
           << e.what();
     }
+    const auto before = config;
     EXPECT_THROW(cfg::configure_decoders(config), std::runtime_error) << text;
+    EXPECT_EQ(config, before) << text;
   };
   auto spaced = code_built_names(dem.path(), "", "by_file", "inline_text");
   auto twice = spaced;

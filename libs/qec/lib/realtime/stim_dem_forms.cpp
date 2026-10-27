@@ -122,13 +122,8 @@ with_pinned_stim_dems(const config::multi_decoder_config &config,
   return with_pinned_stim_dems(config, read_pinned_stim_dems(config, base_dir));
 }
 
-namespace {
-
-// Resolves each decoder's and node's stim_dem that names a data_artifacts
-// entry, as parsing does, so a configuration built in code names entries as
-// a parsed one does. A parsed copy holds the entry's text or path, never a
-// name, so it is left as it is. The entries are checked as parsing checks
-// them, in name order, which code need not keep.
+// A parsed copy holds the entry's text or path, never a name, so it is left
+// as it is. The entries are checked in name order, which code need not keep.
 void resolve_stim_dem_names(config::multi_decoder_config &config) {
   auto artifacts = config.data_artifacts;
   std::sort(artifacts.begin(), artifacts.end(),
@@ -148,8 +143,6 @@ void resolve_stim_dem_names(config::multi_decoder_config &config) {
       });
   }
 } // end - resolve_stim_dem_names()
-
-} // namespace
 
 // Names are resolved and pinned entries looked up in a copy, so a failure
 // leaves the caller's configuration untouched. A copy names an entry only

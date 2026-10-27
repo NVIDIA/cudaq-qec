@@ -1395,6 +1395,8 @@ def test_data_artifacts_name_stim_dems_built_in_code():
     mdc.decoders = [dec]
     assert qec.configure_decoders(mdc) == 0
     qec.finalize_decoders()
+    assert mdc.decoders[0].stim_dem_artifact == "tiny"
+    assert mdc.decoders[0].stim_dem == tiny.stim_dem
     dec.stim_dem = "nowhere"
     mdc.decoders = [dec]
     with pytest.raises(RuntimeError, match="'nowhere', which does not exist"):

@@ -786,26 +786,10 @@ int configure_decoders(
 
   std::vector<std::optional<cudaq::qec::decoder_init>> resolved(
       config.decoders.size());
-  // The absolute form of each model path, applied to the caller's
-  // configuration only once the whole configuration has been applied. Rewriting
-  // as we go would leave a caller's config partly rewritten when a later entry
-  // fails to resolve, so a retry against a different base directory would
-  // silently keep the first one.
-  std::vector<std::string> absolute_model_paths(config.decoders.size());
-  for (std::size_t i = 0; i < config.decoders.size(); ++i) {
-    const auto &decoder_config = config.decoders[i];
-    if (!decoder_config.task_graph.has_value())
+  for (std::size_t i = 0; i < config.decoders.size(); ++i)
+    if (!config.decoders[i].task_graph.has_value())
       resolved[i].emplace(
           resolve_decoder_init(pinned.decoders[i], absolute_base));
-    if (!decoder_config.stim_dem_path.empty()) {
-      std::filesystem::path model(decoder_config.stim_dem_path);
-      absolute_model_paths[i] =
-          model.is_relative() ? std::filesystem::absolute(absolute_base / model)
-                                    .lexically_normal()
-                                    .string()
-                              : model.lexically_normal().string();
-    }
-  }
   // Construction allocates, so replacements are built in place rather than
   // alongside the old set: a constructor failure can still leave the decoder
   // set empty. Overlapping both sets would double peak decoder memory, which
@@ -849,12 +833,25 @@ int configure_decoders(
       g_syndrome_mapping.emplace_back(row.id, shape);
   }
 
-  // The configuration is now in effect. Make its model paths absolute so the
-  // copy that gets cached, published and re-read by the session registry
-  // resolves without knowing the base directory used here.
-  for (std::size_t i = 0; i < config.decoders.size(); ++i)
-    if (!absolute_model_paths[i].empty())
-      config.decoders[i].stim_dem_path = absolute_model_paths[i];
+  // The configuration is now in effect, so the caller's copy is rewritten
+  // only now: rewriting as we go would leave it partly rewritten when a later
+  // entry fails, and a retry against a different base directory would
+  // silently keep the first one. Names are resolved as parsing resolves
+  // them, so a configuration built in code is written back by name. Model
+  // paths become absolute so the copy that gets cached, published and re-read
+  // by the session registry resolves without knowing the base directory used
+  // here.
+  resolve_stim_dem_names(config);
+  for (auto &decoder_config : config.decoders)
+    if (!decoder_config.stim_dem_path.empty()) {
+      std::filesystem::path model(decoder_config.stim_dem_path);
+      decoder_config.stim_dem_path =
+          (model.is_relative()
+               ? std::filesystem::absolute(absolute_base / model)
+               : model)
+              .lexically_normal()
+              .string();
+    }
 
   // Entries' model paths obey the same rule, which keeps a decoder or node
   // that names one equal to its copy, so the name is still written back.
