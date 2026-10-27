@@ -19,16 +19,35 @@
 
 namespace cudaq::qec {
 
+// The producer instance k + offset exists while its commit zone meets the
+// shot: past its first instance, and, starting no later than the
+// consumer's, whenever the consumer's does. Layers of one ingest share
+// their period.
+std::optional<std::int64_t>
+first_guaranteed_receive(const window_request &consumer,
+                         const window_request &producer, std::int64_t offset,
+                         std::int64_t base) {
+  if (offset >= 0 || consumer.period != producer.period || !consumer.commit ||
+      !producer.commit)
+    return std::nullopt;
+  if (producer.offset + offset * producer.period + producer.commit->begin >
+      consumer.offset + consumer.commit->begin)
+    return std::nullopt;
+  return window_instances(producer, 0).begin - base - offset;
+}
+
 // One slot: an executor runs copies of the node for fires at once. The
 // frame update has a bit per observable of the template.
 decode_window_node::decode_window_node(
     const data_artifact_store &store,
     std::shared_ptr<const experiment_template> context, window_request request,
     const std::string &decoder_name, const cudaqx::heterogeneous_map &params,
-    std::size_t num_receives, verify_residual_mode verify)
+    std::size_t num_receives, verify_residual_mode verify,
+    std::vector<std::optional<std::int64_t>> guaranteed)
     : core_(store, context, request, decoder_name, params, 1, verify),
       receives_(num_receives), received_(num_receives, nullptr),
-      frame_(logical_outcome{}), corrections_(context->num_observables(), 0) {
+      frame_(logical_outcome{}), corrections_(context->num_observables(), 0),
+      guaranteed_(std::move(guaranteed)) {
   inputs_.push_back("input");
   for (std::size_t i = 0; i < num_receives; ++i)
     inputs_.push_back("receive_" + std::to_string(i));
@@ -101,6 +120,15 @@ bool decode_window_node::fire(std::int64_t k,
 std::optional<std::int64_t>
 decode_window_node::published_index(std::size_t) const {
   return published_ ? std::optional<std::int64_t>(index_) : std::nullopt;
+}
+
+// Input 0 is the window, which every instance has; receive i is input i + 1.
+bool decode_window_node::input_guaranteed(std::size_t slot,
+                                          std::int64_t k) const {
+  if (slot == 0 || slot > guaranteed_.size())
+    return false;
+  const auto &first = guaranteed_[slot - 1];
+  return first && k >= *first;
 }
 
 // Windows are decoded as their instances' inputs join, never per shot.
@@ -203,7 +231,8 @@ const bool registered = [] {
             *ctx.store, ctx.context, *ctx.layer, ctx.decoder_type,
             ctx.decoder_params,
             ctx.node_params->get<std::size_t>("num_receives", 0),
-            verify_residual_of(*ctx.node_params, "decode_window"));
+            verify_residual_of(*ctx.node_params, "decode_window"),
+            ctx.guaranteed_receives);
       });
   return true;
 }();

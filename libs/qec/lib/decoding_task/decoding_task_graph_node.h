@@ -252,6 +252,14 @@ public:
   /// streaming_output() and corrections().
   virtual bool fire(std::int64_t k,
                     const std::vector<const edge_value *> &inputs) = 0;
+  /// Whether input `slot` of instance k always has a producer instance when
+  /// instance k exists, from the layout alone. Such an input still missing
+  /// when the shot ends was lost, and fails the graph rather than firing
+  /// absent. Default: no input is guaranteed.
+  virtual bool input_guaranteed(std::size_t /*slot*/,
+                                std::int64_t /*k*/) const {
+    return false;
+  }
 };
 
 /// Core DAG node contract. Optional execution modes are exposed as capabilities

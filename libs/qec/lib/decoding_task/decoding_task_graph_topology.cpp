@@ -10,6 +10,7 @@
 
 #include "decoding_task_commitment.h"
 #include "decoding_task_data_artifacts.h"
+#include "decoding_task_decode_window_node.h"
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
@@ -664,6 +665,8 @@ struct graph_windows {
   std::map<std::string, std::shared_ptr<const experiment_template>> templates;
   /// By decode_window node: the ingest node it reads, and its layer.
   std::map<std::string, std::pair<std::string, window_request>> layers;
+  /// By decode_window node: its receives' guarantees, by receive index.
+  std::map<std::string, std::vector<std::optional<std::int64_t>>> guarantees;
 };
 
 // Record in @p windows which template and layer each node reads, from
@@ -672,6 +675,7 @@ struct graph_windows {
 // layers' windows into the store.
 void record_graph_windows(
     const std::vector<task_graph_node_config> &nodes,
+    const std::vector<task_graph_edge> &edges,
     const std::map<std::string, std::vector<window_layer>> &layers,
     graph_windows &windows) {
   for (const auto &cfg : nodes) {
@@ -679,10 +683,35 @@ void record_graph_windows(
     if (kind && kind->name == "ingest")
       windows.templates[cfg.id] = windows.store.add_template(*cfg.dem);
   }
-  for (const auto &[ingest, ingest_layers] : layers)
-    for (const auto &layer : ingest_layers)
+  for (const auto &[ingest, ingest_layers] : layers) {
+    // Ingest numbers its publications from its layers' first window.
+    auto base = std::numeric_limits<std::int64_t>::max();
+    const auto layer_of = [&](const std::string &node) {
+      const auto it = std::find_if(
+          ingest_layers.begin(), ingest_layers.end(),
+          [&](const window_layer &layer) { return layer.node == node; });
+      return it == ingest_layers.end() ? nullptr : &*it;
+    };
+    for (const auto &layer : ingest_layers) {
       windows.layers[layer.node] = {ingest, layer.request};
-}
+      base = std::min(base, window_instances(layer.request, 0).begin);
+    }
+    // A send between two of its layers, into receive_i; validation has
+    // checked the receive names.
+    for (const auto &e : edges) {
+      const auto *to = layer_of(e.to_node);
+      const auto *from = layer_of(e.from_node);
+      if (!to || !from || e.to_input.rfind("receive_", 0) != 0)
+        continue;
+      const auto receive = std::stoul(e.to_input.substr(8));
+      auto &guarantees = windows.guarantees[e.to_node];
+      if (guarantees.size() <= receive)
+        guarantees.resize(receive + 1);
+      guarantees[receive] = first_guaranteed_receive(to->request, from->request,
+                                                     e.index_offset, base);
+    }
+  } // end - for(ingest)
+} // end - record_graph_windows()
 
 // Give a windowed node what its builder reads: an ingest node its template
 // and layers, a decode_window node the store, its ingest node's template,
@@ -699,6 +728,9 @@ void attach_windows(const task_graph_node_config &cfg,
     ctx.store = &windows.store;
     ctx.context = windows.templates.at(l->second.first);
     ctx.layer = l->second.second;
+    if (const auto g = windows.guarantees.find(cfg.id);
+        g != windows.guarantees.end())
+      ctx.guaranteed_receives = g->second;
     ctx.decoder_type = cfg.decoder_type;
     ctx.decoder_params = cfg.params;
   }
@@ -832,8 +864,9 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
   } // end - for(cfg)
   graph_windows windows;
   if (!infer_edges)
-    record_graph_windows(
-        nodes, validate_window_topology(nodes, edges, windows.store), windows);
+    record_graph_windows(nodes, edges,
+                         validate_window_topology(nodes, edges, windows.store),
+                         windows);
 
   auto i = std::make_unique<impl>();
   for (auto &cfg : nodes) {

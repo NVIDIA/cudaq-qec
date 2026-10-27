@@ -5674,6 +5674,50 @@ TEST(DecodeWindowNode, TakesWindowsFromAnyProducer) {
 // frame update on `output` and each send of its layer on a port named by
 // the send: A sends forward and backward to B. It joins by index and
 // streams only.
+// A receive from an earlier instance is guaranteed from the first index at
+// which its producer exists: in every shot in which the consumer instance
+// exists, so does the producer instance, on parallel layouts, shifted ones
+// and a sliding window, at every shot length up to 60, and only the first
+// instance goes unguaranteed. A residual, at offset 0, and a producer whose
+// commit zone starts after the consumer's, are never guaranteed.
+TEST(DecodeWindowNode, GuaranteesReceivesFromEarlierInstances) {
+  struct receive {
+    window_request consumer;
+    window_request producer;
+  };
+  std::vector<receive> deltas;
+  for (const auto &r :
+       {layered(2, 1, 3), layered(3, 2, 2), shifted(layered(2, 1, 3), -1),
+        shifted(layered(2, 1, 3), 4)})
+    deltas.push_back({r.b, r.a});
+  deltas.push_back({sliding(2, 5), sliding(2, 5)});
+  for (const auto &[consumer, producer] : deltas) {
+    const auto base = std::min(window_instances(consumer, 0).begin,
+                               window_instances(producer, 0).begin);
+    const auto first = first_guaranteed_receive(consumer, producer, -1, base);
+    ASSERT_TRUE(first.has_value());
+    for (std::size_t R = 1; R <= 60; ++R) {
+      const auto c = window_instances(consumer, R);
+      const auto p = window_instances(producer, R);
+      std::size_t unguaranteed = 0; // consumer instances before first
+      for (auto kc = c.begin; kc < c.end; ++kc) {
+        if (kc - base < *first) {
+          ++unguaranteed;
+          continue;
+        }
+        EXPECT_TRUE(kc - 1 >= p.begin && kc - 1 < p.end)
+            << "R=" << R << ", instance " << kc - base;
+      }
+      EXPECT_LE(unguaranteed, 1u) << "R=" << R;
+    }
+  } // end - for(consumer, producer)
+  const auto pw = layered(2, 1, 3);
+  auto later = sliding(2, 5);
+  later.offset += 4;
+  EXPECT_FALSE(first_guaranteed_receive(pw.b, pw.a, 0, 0));
+  EXPECT_FALSE(first_guaranteed_receive(sliding(2, 5), later, -1, 0));
+} // end - TEST(DecodeWindowNode, GuaranteesReceivesFromEarlierInstances)
+
 TEST(DecodeWindowNode, DeclaresItsPorts) {
   const auto g = parallel_graph(layered(2, 1, 3));
   data_artifact_store store;

@@ -12937,7 +12937,8 @@ static std::vector<index_fire> index_fires;
 /// records every fire. `logical` folds every input bit and publishes the
 /// parity once, at flush, over the whole shot. With `staged`, `join`
 /// commits instance k over round [k, k + 1) and `logical` reports whole-shot
-/// coverage, so an output they feed is staged.
+/// coverage, so an output they feed is staged. A `join` with `guaranteed`
+/// at or above 0 declares its `b` guaranteed from that instance on.
 class index_probe_node : public task_graph_node,
                          public streaming_task_graph_node,
                          public indexed_join_node {
@@ -12945,10 +12946,10 @@ public:
   index_probe_node(std::string id, std::string mode, std::int64_t limit,
                    std::size_t hold_ms, int hold_bit, bool staged,
                    std::shared_ptr<pipeline_probe> probe,
-                   std::int64_t first = 0)
+                   std::int64_t first = 0, std::int64_t guaranteed = -1)
       : id_(std::move(id)), mode_(std::move(mode)), limit_(limit),
-        first_(first), hold_(hold_ms), hold_bit_(hold_bit), staged_(staged),
-        probe_(std::move(probe)) {
+        first_(first), guaranteed_(guaranteed), hold_(hold_ms),
+        hold_bit_(hold_bit), staged_(staged), probe_(std::move(probe)) {
     logical_outcome output;
     output.bits = {0};
     output.converged = true;
@@ -12963,6 +12964,9 @@ public:
 
   // indexed_join_node
   bool requires_input(std::size_t slot) const override { return slot == 0; }
+  bool input_guaranteed(std::size_t slot, std::int64_t k) const override {
+    return slot == 1 && guaranteed_ >= 0 && k >= guaranteed_;
+  }
   bool fire(std::int64_t k,
             const std::vector<const edge_value *> &inputs) override {
     const int a = inputs[0]->get<logical_outcome>().bits[0];
@@ -13135,6 +13139,7 @@ private:
   std::string mode_;
   std::int64_t limit_;
   std::int64_t first_;
+  std::int64_t guaranteed_;
   std::size_t hold_;
   int hold_bit_;
   bool staged_;
@@ -13164,6 +13169,8 @@ static const bool index_probe_registered = [] {
   schema.params.push_back({"hold_bit", param_kind::int32, /*required=*/false});
   schema.params.push_back({"staged", param_kind::int32, /*required=*/false});
   schema.params.push_back({"first", param_kind::int32, /*required=*/false});
+  schema.params.push_back(
+      {"guaranteed", param_kind::int32, /*required=*/false});
   register_node_kind(
       std::move(spec), std::move(schema), [](node_build_context &ctx) {
         return std::make_unique<index_probe_node>(
@@ -13172,7 +13179,8 @@ static const bool index_probe_registered = [] {
             ctx.node_params->get<std::size_t>("hold_ms", 0),
             ctx.node_params->get<int>("hold_bit", -1),
             ctx.node_params->get<int>("staged", 0) != 0, active_pipeline_probe,
-            ctx.node_params->get<int>("first", 0));
+            ctx.node_params->get<int>("first", 0),
+            ctx.node_params->get<int>("guaranteed", -1));
       });
   return true;
 }();
@@ -13920,6 +13928,46 @@ TEST(DecodingTaskGraph, IndexOffsetIsValidatedAtBuild) {
                                          {});
   EXPECT_FALSE(graph->supports_streaming());
 }
+
+// An input the consumer guarantees, still missing when the shot ends, was
+// lost: R stops publishing at 3, so J[4] and J[5] never get their b. With b
+// guaranteed the shot fails, naming the input; without, they fire absent.
+TEST(DecodingTaskGraph, IndexedJoinFailsOnALostGuaranteedInput) {
+  ASSERT_TRUE(index_probe_registered);
+  for (const bool guaranteed : {false, true}) {
+    SCOPED_TRACE(guaranteed ? "guaranteed" : "not guaranteed");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("R", "tag", /*limit=*/3));
+    nodes.push_back(index_node("J", "join"));
+    nodes.back().node_params.insert("guaranteed", guaranteed ? 1 : -1);
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes), {{"measurements", "output", "A", "input"},
+                           {"A", "output", "T", "input"},
+                           {"A", "output", "R", "input"},
+                           {"T", "output", "J", "a"},
+                           {"R", "output", "J", "b", /*index_offset=*/-1},
+                           {"J", "output", "output", "input"}});
+    const auto records = pipeline_records(6);
+    try {
+      for (std::size_t i = 0; i < records.size(); ++i)
+        graph->enqueue_syndrome(&records[i], 1,
+                                i + 1 == records.size() ? round_type::FINAL
+                                                        : round_type::BULK);
+      EXPECT_FALSE(guaranteed) << "a lost input went unnoticed";
+      EXPECT_EQ(probe->records("J"),
+                (std::vector<std::size_t>{0, 1, 2, 3, 4, 5}));
+    } catch (const std::exception &e) {
+      EXPECT_TRUE(guaranteed) << e.what();
+      EXPECT_NE(std::string(e.what()).find("input 1 of instance 4"),
+                std::string::npos)
+          << e.what();
+    }
+  }
+} // end - TEST(DecodingTaskGraph, IndexedJoinFailsOnALostGuaranteedInput)
 
 TEST(DecodingTaskGraph, IndexedJoinHandlesManyInstancesPerRecord) {
   ASSERT_TRUE(index_probe_registered);

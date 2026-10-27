@@ -866,6 +866,17 @@ struct decoding_task_graph::impl::record_scheduler {
         entry.used = false;
         continue;
       }
+      // An input whose producer instance exists whenever this one does was
+      // lost on its way, not absent.
+      const auto *joiner = owner.streaming_nodes[si].indexed.front();
+      for (std::size_t i = 0; i < entry.state.size(); ++i)
+        if (entry.state[i] == join_entry::missing &&
+            joiner->input_guaranteed(i, entry.k))
+          throw std::runtime_error(
+              "decoding_task_graph: node " +
+              std::to_string(owner.streaming_nodes[si].node_index) + " input " +
+              std::to_string(i) + " of instance " + std::to_string(entry.k) +
+              " never arrived, though its producer instance exists");
       for (auto &state : entry.state)
         if (state == join_entry::missing)
           state = join_entry::absent;

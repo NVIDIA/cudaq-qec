@@ -22,6 +22,17 @@
 
 namespace cudaq::qec {
 
+/// The first instance k, numbered from @p base as ingest publishes, from
+/// which a receive with @p offset from @p producer's layer always has its
+/// producer instance when @p consumer's instance k exists. An instance exists
+/// while its commit zone meets the shot, so it holds when the offset is
+/// negative and the producer's commit zone starts no later than the
+/// consumer's. None otherwise, as for a residual at offset 0.
+std::optional<std::int64_t>
+first_guaranteed_receive(const window_request &consumer,
+                         const window_request &producer, std::int64_t offset,
+                         std::int64_t base);
+
 /// Joins its inputs by index: input 0 is the window, required, and input
 /// 1 + i is receive_i's send, absent where its producer instance does not
 /// exist. Its only state across fires is the shot's index offset, which
@@ -40,15 +51,21 @@ public:
   /// @param verify What a fire does with a solution that does not satisfy
   /// its window's detectors. With report, only the core's fire record says
   /// whether it held; the node publishes nothing of it yet.
+  /// @param guaranteed By receive, the first instance from which it is
+  /// guaranteed, as first_guaranteed_receive() gives it; none by default.
   /// @throws as decode_window_core's constructor does.
   decode_window_node(const data_artifact_store &store,
                      std::shared_ptr<const experiment_template> context,
                      window_request request, const std::string &decoder_name,
                      const cudaqx::heterogeneous_map &params,
-                     std::size_t num_receives, verify_residual_mode verify);
+                     std::size_t num_receives, verify_residual_mode verify,
+                     std::vector<std::optional<std::int64_t>> guaranteed = {});
 
   /// Whether an instance exists only with input @p slot: its window.
   bool requires_input(std::size_t slot) const override { return slot == 0; }
+  /// Whether receive slot - 1 of instance @p k is guaranteed, from the
+  /// first instance the build gave it, if any.
+  bool input_guaranteed(std::size_t slot, std::int64_t k) const override;
   /// Fire instance @p k: its window on inputs[0] and each receive's send,
   /// or null. Publishes its frame update, commit zone and sends.
   /// @throws std::invalid_argument if there are not one input per port,
@@ -118,6 +135,8 @@ private:
   std::vector<std::uint8_t> corrections_;
   /// A window's index less its instance's, the same for a shot's fires.
   std::optional<std::int64_t> offset_;
+  /// By receive: the first instance whose receive is guaranteed, if any.
+  std::vector<std::optional<std::int64_t>> guaranteed_;
 };
 
 } // namespace cudaq::qec

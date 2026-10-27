@@ -77,6 +77,9 @@ struct node_build_context {
   std::vector<experimental::ingest_window> windows;
   /// A decode_window node's layer: the request of the ingest port it reads.
   std::optional<experimental::window_request> layer;
+  /// A decode_window node's receives, by index: the first instance from
+  /// which each is guaranteed, if any (first_guaranteed_receive()).
+  std::vector<std::optional<std::int64_t>> guaranteed_receives;
 };
 
 using node_factory =
