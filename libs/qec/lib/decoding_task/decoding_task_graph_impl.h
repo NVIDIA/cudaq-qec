@@ -25,6 +25,22 @@
 
 namespace cudaq::qec {
 
+/// Combine closures: not_checked outranks open, which outranks closed, so a
+/// shot is closed only when every window was checked and held. None, for
+/// a node that decodes no window, changes nothing.
+inline std::optional<task_graph_closure>
+combine_closure(std::optional<task_graph_closure> a,
+                std::optional<task_graph_closure> b) {
+  const auto rank = [](task_graph_closure c) {
+    return c == task_graph_closure::closed ? 0
+           : c == task_graph_closure::open ? 1
+                                           : 2;
+  };
+  if (!a || !b)
+    return a ? a : b;
+  return rank(*a) >= rank(*b) ? a : b;
+}
+
 struct decoding_task_graph::impl {
   impl();
 
@@ -185,6 +201,9 @@ struct decoding_task_graph::impl {
   std::vector<std::vector<uint8_t>> latest_node_corrections;
   std::vector<std::optional<streaming_task_graph_node::committed_coverage>>
       latest_node_coverage;
+  // Each node's publications' closures this shot, combined; none before its
+  // first window, or for a node that decodes none.
+  std::vector<std::optional<task_graph_closure>> latest_node_closure;
   // Progress captured when the record being retired began.
   std::uint64_t retiring_generation = 0;
   std::uint64_t retiring_revision = 0;

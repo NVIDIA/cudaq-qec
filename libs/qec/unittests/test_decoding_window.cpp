@@ -5918,14 +5918,16 @@ namespace {
 
 // A parallel_window pattern node P over @p spec with @p params, fed by
 // measurements and read at the output, as from_topology takes it.
-task_graph_node_config pattern_node(const dem_chunks_spec &spec,
-                                    const cudaqx::heterogeneous_map &params,
-                                    std::size_t max_in_flight = 1) {
+task_graph_node_config
+pattern_node(const dem_chunks_spec &spec,
+             const cudaqx::heterogeneous_map &params,
+             std::size_t max_in_flight = 1,
+             const std::string &decoder = "single_error_lut") {
   task_graph_node_config cfg;
   cfg.id = "P";
   cfg.kind = "parallel_window";
   cfg.dem = spec;
-  cfg.decoder_type = "single_error_lut";
+  cfg.decoder_type = decoder;
   cfg.node_params = params;
   cfg.max_in_flight = max_in_flight;
   return cfg;
@@ -6062,6 +6064,79 @@ TEST(WindowedGraph, StreamsThePatternAsTheReference) {
       EXPECT_NO_THROW(expect_pattern_streams(output, async, 4, record));
     }
 } // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
+
+// A shot's closure says whether every window's solution was checked and
+// held: not_checked without verify_residual; closed with report when every
+// solution satisfies its window, as a lookup table's single faults do; and
+// open when one does not, as a blind decoder's on a shot with flips, which
+// still completes. Graph and output agree.
+TEST(WindowedGraph, ReportsTheShotsClosure) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  const auto closure_of = [&](const std::string &verify,
+                              const std::string &decoder,
+                              const std::vector<std::uint8_t> &detectors) {
+    cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                     {"buffer_rounds", std::size_t{1}},
+                                     {"gap_rounds", std::size_t{3}},
+                                     {"output", std::string("corrections")}};
+    if (!verify.empty())
+      params.insert("verify_residual", verify);
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pattern_node(spec, params, 1, decoder));
+    auto graph =
+        decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+    stream_shot(*graph, memory_measurements(tmpl, R, detectors),
+                graph->get_num_msyn_per_round());
+    const auto &result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.outputs.at(0).closure, result.closure);
+    return result.closure;
+  };
+  const parallel_window_reference reference(
+      spec,
+      lowered_graph(spec, {{"commit_rounds", std::size_t{2}},
+                           {"buffer_rounds", std::size_t{1}},
+                           {"gap_rounds", std::size_t{3}}}),
+      R, "single_error_lut");
+  const auto flips = detectors_of(reference.model(), 3);
+  ASSERT_GT(std::count(flips.begin(), flips.end(), 1), 0);
+  EXPECT_EQ(closure_of("", "single_error_lut", flips),
+            task_graph_closure::not_checked);
+  EXPECT_EQ(closure_of("none", "single_error_lut", flips),
+            task_graph_closure::not_checked);
+  EXPECT_EQ(closure_of("report", "single_error_lut", flips),
+            task_graph_closure::closed);
+  EXPECT_EQ(closure_of("report", "blind_decoder", flips),
+            task_graph_closure::open);
+  // A shot read and consumed hands the next one a closure of its own: a
+  // blind decoder's quiet shot after an open one is closed.
+  cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                   {"buffer_rounds", std::size_t{1}},
+                                   {"gap_rounds", std::size_t{3}},
+                                   {"output", std::string("corrections")},
+                                   {"verify_residual", std::string("report")}};
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, params, 1, "blind_decoder"));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  const auto record = graph->get_num_msyn_per_round();
+  const std::vector<std::uint8_t> quiet(flips.size(), 0);
+  for (const auto &[detectors, want] :
+       {std::pair{flips, task_graph_closure::open},
+        std::pair{quiet, task_graph_closure::closed}}) {
+    const auto m = memory_measurements(tmpl, R, detectors);
+    for (std::size_t at = 0; at < m.size(); at += record) {
+      const auto len = std::min(record, m.size() - at);
+      graph->enqueue_syndrome(m.data() + at, len,
+                              at + len == m.size() ? round_type::FINAL
+                                                   : round_type::BULK);
+    }
+    EXPECT_EQ(graph->streaming_result().closure, want);
+    graph->clear_corrections();
+  }
+} // end - TEST(WindowedGraph, ReportsTheShotsClosure)
 
 // Join tables are preallocated for the most a record can publish: the
 // pattern streamed in whole-round records, each readying several windows,

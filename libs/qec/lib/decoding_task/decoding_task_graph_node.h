@@ -81,6 +81,12 @@ public:
   /// their deltas in round order behind a frontier, and the output's
   /// coverage is [0, frontier).
   virtual bool exact_interval_coverage() const { return false; }
+  /// The current publication's closure: for a window, whether its solution
+  /// was checked and held. None for a node that decodes no window, which
+  /// leaves an output's closure as its windows make it.
+  virtual std::optional<task_graph_closure> publication_closure() const {
+    return std::nullopt;
+  }
   /// Opt-in: the node's inputs may arrive in any order. Sibling deliveries
   /// into a branch that reaches it then need not wait for one another, as
   /// they must when a shared descendant needs ordered delivery. Legal only

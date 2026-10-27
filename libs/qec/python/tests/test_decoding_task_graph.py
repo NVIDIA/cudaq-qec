@@ -196,6 +196,9 @@ def test_streaming_result_tracks_independent_outputs_consume_and_reset():
     assert partial.generation == 0
     available = graph.streaming_result()
     assert available.generation == 1
+    # No window checks its solution here, so the shot is not checked.
+    assert available.closure == qec.TaskGraphClosure.NOT_CHECKED
+    assert available.outputs[0].closure == qec.TaskGraphClosure.NOT_CHECKED
     epoch = available.shot_epoch
     revision = available.result_revision
 

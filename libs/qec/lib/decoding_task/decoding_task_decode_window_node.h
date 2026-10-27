@@ -80,6 +80,9 @@ public:
   std::optional<std::int64_t> published_index(std::size_t slot) const override;
   /// Every publication reports the exact rounds its frame update commits.
   bool exact_interval_coverage() const override { return true; }
+  /// not_checked without verify_residual; else closed when the fire's
+  /// solution satisfied its window and open when it did not (report).
+  std::optional<task_graph_closure> publication_closure() const override;
 
   /// @throws std::logic_error: the node joins by index; it has no one-shot
   /// path.
@@ -135,6 +138,7 @@ private:
   std::vector<std::uint8_t> corrections_;
   /// A window's index less its instance's, the same for a shot's fires.
   std::optional<std::int64_t> offset_;
+  task_graph_closure closure_ = task_graph_closure::not_checked;
   /// By receive: the first instance whose receive is guaranteed, if any.
   std::vector<std::optional<std::int64_t>> guaranteed_;
 };

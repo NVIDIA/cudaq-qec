@@ -105,6 +105,9 @@ bool decode_window_node::fire(std::int64_t k,
   auto &frame = frame_.get<logical_outcome>();
   frame.bits = fired.solution->outputs.frame;
   frame.converged = fired.solution->converged;
+  closure_ = !fired.checked              ? task_graph_closure::not_checked
+             : fired.solution->satisfied ? task_graph_closure::closed
+                                         : task_graph_closure::open;
   for (std::size_t i = 0; i < corrections_.size(); ++i)
     corrections_[i] ^= frame.bits[i] & 1;
   offset_ = window.k - k;
@@ -120,6 +123,14 @@ bool decode_window_node::fire(std::int64_t k,
 std::optional<std::int64_t>
 decode_window_node::published_index(std::size_t) const {
   return published_ ? std::optional<std::int64_t>(index_) : std::nullopt;
+}
+
+// Only a standing publication has a closure.
+std::optional<task_graph_closure>
+decode_window_node::publication_closure() const {
+  if (!published_)
+    return std::nullopt;
+  return closure_;
 }
 
 // Input 0 is the window, which every instance has; receive i is input i + 1.

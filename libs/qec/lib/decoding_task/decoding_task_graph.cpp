@@ -899,6 +899,7 @@ void decoding_task_graph::impl::compile_wires() {
       latest_node_corrections[si].assign(
           streaming_nodes[si].capability->num_observables(), 0);
     latest_node_coverage.assign(M, std::nullopt);
+    latest_node_closure.assign(M, std::nullopt);
     reset_streaming_progress();
   }
 
@@ -1029,6 +1030,7 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
       result.outputs.empty() ? 0 : std::numeric_limits<std::uint64_t>::max();
   bool all_outputs_available = !result.outputs.empty();
   bool changed = false;
+  std::optional<task_graph_closure> graph_closure; // over every output
 
   for (std::size_t k = 0; k < result.outputs.size(); ++k) {
     auto &output = result.outputs[k];
@@ -1122,12 +1124,23 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
          output.status == task_graph_streaming_status::complete) &&
         output.generation > 0;
     graph_generation = std::min(graph_generation, output.generation);
+    // The output's closure: its windows' so far, not_checked without one.
+    const auto previous_closure = output.closure;
+    std::optional<task_graph_closure> closure;
+    for (const auto si : contributors)
+      closure = combine_closure(closure, latest_node_closure[si]);
+    output.closure = closure.value_or(task_graph_closure::not_checked);
+    graph_closure = combine_closure(graph_closure, output.closure);
     changed = changed || output.generation != previous_generation ||
               output.coverage_begin_round != previous_begin ||
               output.coverage_end_round != previous_end ||
-              output.status != previous_status;
+              output.status != previous_status ||
+              output.closure != previous_closure;
   }
 
+  changed = changed || result.closure != graph_closure.value_or(
+                                             task_graph_closure::not_checked);
+  result.closure = graph_closure.value_or(task_graph_closure::not_checked);
   result.generation = graph_generation;
   result.status = task_graph_streaming_status::pending;
   if (all_outputs_available)
@@ -1148,6 +1161,10 @@ void decoding_task_graph::impl::consume_streaming_result() {
     ++result.result_revision;
     return;
   }
+  // Consuming a complete shot starts the next one, whose closure is its own.
+  if (result.status == task_graph_streaming_status::complete)
+    std::fill(latest_node_closure.begin(), latest_node_closure.end(),
+              std::nullopt);
   result.status = task_graph_streaming_status::pending;
   for (std::size_t k = 0; k < result.outputs.size(); ++k) {
     auto &output = result.outputs[k];
@@ -1188,11 +1205,15 @@ void decoding_task_graph::impl::reset_streaming_progress() {
   clear_latest_node_corrections();
   std::fill(latest_node_coverage.begin(), latest_node_coverage.end(),
             std::nullopt);
+  std::fill(latest_node_closure.begin(), latest_node_closure.end(),
+            std::nullopt);
+  result.closure = task_graph_closure::not_checked;
   for (auto &output : result.outputs) {
     output.generation = 0;
     output.coverage_begin_round = 0;
     output.coverage_end_round = 0;
     output.status = task_graph_streaming_status::pending;
+    output.closure = task_graph_closure::not_checked;
   }
   for (auto &stager : output_stagers) {
     stager.frontier = 0;

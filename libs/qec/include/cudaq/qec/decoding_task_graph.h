@@ -278,6 +278,8 @@ struct task_graph_output_progress {
   std::uint64_t coverage_begin_round = 0;
   std::uint64_t coverage_end_round = 0;
   task_graph_streaming_status status = task_graph_streaming_status::pending;
+  /// The shot's closure over the windows that reach this output, so far.
+  task_graph_closure closure = task_graph_closure::not_checked;
 };
 
 /// Graph-owned streaming result. `values` contains all named outputs at their
@@ -307,6 +309,8 @@ struct task_graph_streaming_result {
   std::string error;
   std::vector<task_graph_output_progress> outputs;
   std::vector<uint8_t> values;
+  /// The outputs' closures combined: closed only when every output's is.
+  task_graph_closure closure = task_graph_closure::not_checked;
 };
 
 /// @brief Decode pipeline as a composable, testable object.
