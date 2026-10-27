@@ -270,9 +270,9 @@ void lower_parallel_window(task_graph_node_config cfg,
     layer->kind = "decode_window";
     layer->decoder_type = cfg.decoder_type;
     layer->params = cfg.params;
-    if (cfg.node_params.contains("max_in_flight"))
-      layer->node_params.insert(
-          "max_in_flight", cfg.node_params.get<std::size_t>("max_in_flight"));
+    // The layers are the nodes that fire as pools; ingest and the sum keep
+    // one copy.
+    layer->max_in_flight = cfg.max_in_flight;
     if (cfg.node_params.contains("verify_residual"))
       layer->node_params.insert(
           "verify_residual",

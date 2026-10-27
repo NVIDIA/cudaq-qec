@@ -13881,8 +13881,8 @@ struct lowered_pattern {
   std::vector<task_graph_edge> edges{{"measurements", "output", "P", "input"},
                                      {"P", "output", "output", "input"}};
 
-  lowered_pattern(const dem_chunks_spec &spec,
-                  cudaqx::heterogeneous_map params) {
+  lowered_pattern(const dem_chunks_spec &spec, cudaqx::heterogeneous_map params,
+                  std::size_t max_in_flight = 1) {
     task_graph_node_config cfg;
     cfg.id = "P";
     cfg.kind = "parallel_window";
@@ -13890,6 +13890,7 @@ struct lowered_pattern {
     cfg.decoder_type = "single_error_lut";
     cfg.params.insert("lut_size", std::size_t{7});
     cfg.node_params = std::move(params);
+    cfg.max_in_flight = max_in_flight;
     lower_parallel_window(std::move(cfg), nodes, edges);
   }
 };
@@ -13917,12 +13918,13 @@ TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
   spec.phases.back().spec.m2o_sparse = {0, -1};
   auto layers = layered(3, 3, 9);
   layers.a.input.prior = 0.04;
-  const lowered_pattern p(spec, {{"commit_rounds", std::size_t{3}},
-                                 {"buffer_rounds", std::size_t{3}},
-                                 {"gap_rounds", std::size_t{9}},
-                                 {"boundary_prior", 0.04},
-                                 {"max_in_flight", std::size_t{4}},
-                                 {"verify_residual", std::string("report")}});
+  const lowered_pattern p(spec,
+                          {{"commit_rounds", std::size_t{3}},
+                           {"buffer_rounds", std::size_t{3}},
+                           {"gap_rounds", std::size_t{9}},
+                           {"boundary_prior", 0.04},
+                           {"verify_residual", std::string("report")}},
+                          /*max_in_flight=*/4);
   ASSERT_EQ(p.nodes.size(), 4u);
   const auto &ingest = p.nodes[0];
   EXPECT_EQ(ingest.id, "P.ingest");
@@ -13938,11 +13940,14 @@ TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
     EXPECT_FALSE(layer.dem.has_value());
     EXPECT_EQ(layer.decoder_type, "single_error_lut");
     EXPECT_EQ(layer.params.get<std::size_t>("lut_size"), 7u);
-    EXPECT_EQ(layer.node_params.get<std::size_t>("max_in_flight"), 4u);
+    EXPECT_EQ(layer.max_in_flight, 4u);
     EXPECT_EQ(layer.node_params.get<std::string>("verify_residual"), "report");
     EXPECT_EQ(layer.node_params.contains("num_receives"), i == 2);
   }
   EXPECT_EQ(p.nodes[2].node_params.get<std::size_t>("num_receives"), 2u);
+  // Only the layers fire as pools; ingest and the sum keep one copy.
+  EXPECT_EQ(p.nodes[0].max_in_flight, 1u);
+  EXPECT_EQ(p.nodes[3].max_in_flight, 1u);
   EXPECT_EQ(p.nodes[3].id, "P.sum");
   EXPECT_EQ(p.nodes[3].kind, "xor");
   EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 3u);
@@ -13979,7 +13984,7 @@ TEST(ParallelWindowLowering, PassesTheOptionsOn) {
   EXPECT_EQ(p.nodes[0].windows, (std::vector<experimental::ingest_window>{
                                     {"A", layers.a, ""}, {"B", layers.b, ""}}));
   EXPECT_FALSE(p.nodes[0].node_params.contains("read_logical"));
-  EXPECT_FALSE(p.nodes[1].node_params.contains("max_in_flight"));
+  EXPECT_EQ(p.nodes[1].max_in_flight, 1u);
   EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 2u);
   EXPECT_EQ(std::count_if(p.edges.begin(), p.edges.end(),
                           [](const task_graph_edge &e) {
