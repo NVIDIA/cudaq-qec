@@ -113,9 +113,18 @@ target_link_libraries(test_extended_dem PRIVATE GTest::gtest_main
 add_dependencies(CUDAQXQECUnitTests test_extended_dem)
 gtest_discover_tests(test_extended_dem)
 
+add_library(parallel_window_reference STATIC parallel_window_reference.cpp)
+target_link_libraries(parallel_window_reference PUBLIC cudaq-qec-decoders)
+
 add_executable(test_decoding_window test_decoding_window.cpp)
 target_link_libraries(test_decoding_window PRIVATE GTest::gtest_main
-                                           cudaq-qec-decoders)
+                                           parallel_window_reference
+                                           cudaq-qec
+                                           cudaq::cudaq-stim-target)
+set_target_properties(test_decoding_window PROPERTIES
+  BUILD_RPATH
+    "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
+add_dependencies(test_decoding_window cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_decoding_window)
 gtest_discover_tests(test_decoding_window)
 
