@@ -14573,6 +14573,58 @@ TEST(DecodingTaskGraph, IndexedFlushOverlapsEarlierFires) {
   }
 } // end - TEST(DecodingTaskGraph, IndexedFlushOverlapsEarlierFires)
 
+// Decodes leave a worker for everything else: with two workers and J's two
+// copies held mid-fire, T still takes every record, rather than waiting for
+// a fire to finish; released, the shot completes.
+TEST(DecodingTaskGraph, FiresLeaveAWorkerForOtherEvents) {
+  ASSERT_TRUE(index_probe_registered);
+  const std::vector<uint8_t> records = {1, 0, 1, 1, 0, 0, 1, 0, 1, 1};
+  std::mutex mutex;
+  std::condition_variable released;
+  bool release = false;
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  index_fire_hook = [&](std::int64_t) {
+    std::unique_lock<std::mutex> lock(mutex);
+    released.wait_for(lock, std::chrono::seconds(10), [&] { return release; });
+  };
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("R", "tag"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, /*copies=*/2));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "R", "input"},
+       {"A", "output", "T", "input"},
+       {"T", "output", "J", "a"},
+       {"R", "output", "J", "b", /*index_offset=*/-1},
+       {"J", "output", "output", "input"}},
+      {.async_streaming = true,
+       .async_queue_capacity = 16,
+       .async_num_workers = 2});
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  const bool took_every_record = probe->wait_for_count("T", records.size() - 1);
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    release = true;
+  }
+  released.notify_all();
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  const auto result = graph->streaming_result();
+  index_fire_hook = nullptr;
+
+  EXPECT_TRUE(took_every_record) << "T waited for a held fire";
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+  EXPECT_EQ(result.values[0], expected_join_parity(records, records.size()));
+} // end - TEST(DecodingTaskGraph, FiresLeaveAWorkerForOtherEvents)
+
 // ---------------------------------------------------------------------------
 // Staged outputs
 // ---------------------------------------------------------------------------

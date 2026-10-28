@@ -1548,6 +1548,7 @@ decoding_task_graph::streaming_result() const {
 }
 
 void decoding_task_graph::clear_corrections() {
+  impl_->settle_async_streaming();
   if (impl_->async_streaming.enabled &&
       impl_->async_streaming.active.load(std::memory_order_acquire))
     impl_->drain_async_streaming();
@@ -1569,6 +1570,7 @@ void decoding_task_graph::clear_corrections() {
 }
 
 void decoding_task_graph::reset_decoder() {
+  impl_->settle_async_streaming();
   // Counted before the cancel, which ends a shot even if the reset is then
   // refused as overlapping another call.
   impl_->shot_resets.fetch_add(1, std::memory_order_acq_rel);
@@ -1799,6 +1801,7 @@ logical_outcome decoding_task_graph::run(const measurement_results &m) const {
     impl_->require_single_output("run");
     return run_streamed(m, "run").at(0);
   }
+  impl_->settle_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "run");
   return impl_->run_dag(m, "run");
 }
@@ -1854,6 +1857,7 @@ std::vector<logical_outcome>
 decoding_task_graph::run_all(const measurement_results &m) const {
   if (impl_->one_shot_streams)
     return run_streamed(m, "run_all");
+  impl_->settle_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "run_all");
   auto &g = *impl_;
   const auto &sink_wires = g.wires_to.back();
@@ -1885,6 +1889,7 @@ decoding_task_graph::run_async(const measurement_results &m) const {
 
   // Held for the lifetime of the work, not of this call: the inner decode is
   // already on a worker thread by the time we return.
+  impl_->settle_async_streaming();
   auto token = std::make_shared<in_flight_guard>(impl_->in_flight, "run_async");
 
   if (impl_->nodes.size() == 1) {
@@ -1918,6 +1923,7 @@ std::vector<logical_outcome> decoding_task_graph::run_batch(
   }
   // One token for the whole batch, over the unguarded walk: a per-shot guard
   // would leave a detection gap between shots.
+  impl_->settle_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "run_batch");
   std::vector<logical_outcome> results;
   results.reserve(shots.size());

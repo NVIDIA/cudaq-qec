@@ -429,8 +429,13 @@ struct decoding_task_graph::impl {
   void synchronize_async_streaming();
   /// Drain accepted input without flushing, then release graph exclusivity.
   void drain_async_streaming();
-  /// Drain accepted input, flush once, and release graph exclusivity.
+  /// Drain accepted input and flush once. Returns once the result is
+  /// published; a failed session also waits for graph exclusivity to be
+  /// released, and rethrows.
   void finish_async_streaming();
+  /// Wait out a finished session's teardown, which runs after its result is
+  /// published, so the next call finds the graph released. No-op otherwise.
+  void settle_async_streaming();
   /// Discard queued input and release graph exclusivity for reset.
   void cancel_async_streaming();
 

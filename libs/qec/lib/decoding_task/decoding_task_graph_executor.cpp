@@ -439,6 +439,7 @@ struct decoding_task_graph::impl::record_scheduler {
       }
     for (auto &live : join_live)
       live.clear();
+    running_fires = 0;
     std::fill(join_displaced.begin(), join_displaced.end(), 0);
     for (auto &instances : dropped)
       instances.clear();
@@ -1310,6 +1311,7 @@ struct decoding_task_graph::impl::record_scheduler {
   // Run one context to completion with every pool worker, the caller
   // included. Used by the synchronous streaming and one-shot paths.
   void run_single(context &c, int cuda_device_id) {
+    fire_cap = fire_cap_for(owner.parallel_pool->num_threads());
     owner.parallel_pool->run_workers([&](std::size_t /*worker_id*/) {
       execute_loop(cuda_device_id, [&] { return c.occupied == 0; });
     });
@@ -1326,6 +1328,8 @@ struct decoding_task_graph::impl::record_scheduler {
   // every other worker executes node events until the dispatcher ends the
   // session.
   void run_session(int cuda_device_id) {
+    // Worker zero dispatches; the rest execute events.
+    fire_cap = fire_cap_for(owner.parallel_pool->num_threads() - 1);
     spin_while_active = true;
     owner.parallel_pool->run_workers([&](std::size_t worker_id) {
       if (worker_id == 0)
@@ -1388,6 +1392,12 @@ struct decoding_task_graph::impl::record_scheduler {
   }
 
   // ----- Dispatcher support ------------------------------------------------
+
+  // Fires a pool of @p executing workers may run at once; with one worker,
+  // that worker.
+  static std::size_t fire_cap_for(std::size_t executing) {
+    return executing > 1 ? executing - 1 : 1;
+  }
 
   std::unique_lock<std::mutex> lock_runtime() {
     std::unique_lock<std::mutex> lock(mutex, std::defer_lock);
@@ -1589,6 +1599,7 @@ private:
       pool_free[si].pop_back();
       replica_busy[si][selected.pool_slot] = 1;
       selected.releases_pool = true;
+      ++running_fires;
       return;
     }
     if (is_pool_delivery(selected.event)) {
@@ -1607,6 +1618,9 @@ private:
   }
 
   void unclaim_locked(context &c, slot &done) {
+    if (done.event.kind == graph_event_kind::streaming_indexed_fire &&
+        running_fires != 0)
+      --running_fires;
     if (done.pool_slot != no_event) {
       const auto si = done.event.node;
       replica_busy[si][done.pool_slot] = 0;
@@ -1687,8 +1701,10 @@ private:
                                : replica_busy[si][leased] != 0)
           continue;
       }
+      // A fire takes a free copy, and leaves a worker for other events.
       if (candidate.event.kind == graph_event_kind::streaming_indexed_fire &&
-          pool_free[candidate.event.node].empty())
+          (pool_free[candidate.event.node].empty() ||
+           running_fires >= fire_cap))
         continue;
       // Resolving an indexed node's pending instances needs every delivery
       // to it, from any record and any loop-carried producer, filed first.
@@ -1983,6 +1999,11 @@ public:
   // from the mutex every worker takes and the state written under it.
   alignas(64) std::atomic<uint64_t> ready_generation{0};
   alignas(64) std::size_t running = 0;
+  // Indexed fires running, and the most that may: one fewer than the
+  // workers executing events, so ingestion, deliveries and flushes always
+  // have one and are not queued behind decodes.
+  std::size_t running_fires = 0;
+  std::size_t fire_cap = 1;
   uint64_t next_record = 0;
   bool stop = false;
   bool session_done = false;
