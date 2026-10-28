@@ -21,6 +21,7 @@
 #include "cudaq/qec/decoding_task_graph_config.h"
 #include "cudaq/qec/decoding_task_types.h"
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/window_request.h"
 #include <any>
 #include <cstdint>
 #include <functional>
@@ -85,6 +86,9 @@ struct task_graph_node_kind_spec {
   /// Whether the kind exists only as a lowering target and is not part of the
   /// graph description a user writes. The config layer rejects such a `type`.
   bool lowered_only = false;
+  /// Whether the kind reads window requests from a `windows` map, one output
+  /// port per layer. Every other kind rejects `windows`.
+  bool takes_windows = false;
   /// Optional policy deciding whether the inner decoder needs the DEM's
   /// observable model. An absent policy means yes. When the policy returns
   /// false, the topology withholds O and leaves projection to the node.
@@ -203,10 +207,18 @@ struct task_graph_node_config {
   std::string kind = default_task_graph_node_kind;
   /// The kind's own parameters: window_size, step_size, guards, ...
   cudaqx::heterogeneous_map node_params;
+  /// Copies of this node that may fire at once in asynchronous streaming,
+  /// each on its own record. Above one, the kind must keep no state across
+  /// deliveries (`task_graph_node::supports_fire_pool`) and build its inner
+  /// decoder from `decoder_type`, since every copy needs one.
+  std::size_t max_in_flight = 1;
 
   /// DEM for this node. When absent, `d_sparse`/`o_sparse` below supply the
   /// matrices directly.
   std::optional<dem_chunks_spec> dem;
+  /// The layers of a kind that takes windows: each names an output port and
+  /// its window request. Experimental, as the request type is.
+  std::vector<experimental::ingest_window> windows;
   /// Pre-expanded matrices, used when `dem` is absent. Rows are CSR:
   /// `d_sparse` maps measurements to detectors, `o_sparse` fault columns to
   /// observables, and `h_sparse` detectors to the fault columns that trigger
@@ -312,9 +324,11 @@ struct task_graph_streaming_result {
 /// threads, collect one `run_async` before starting the next, and do not
 /// overlap streaming with one-shot calls. Overlap is detected rather than
 /// serialised -- an overlapping call throws `std::logic_error`. An
-/// async-streaming graph instead has one internal coordinator as its sole
-/// node-state mutator; its public streaming calls provide copied input and
-/// coherent snapshots.
+/// async-streaming graph instead has one internal coordinator that dispatches
+/// records to pool workers; its public streaming calls provide copied input
+/// and coherent snapshots. Records overlap, up to `async_queue_capacity` at
+/// once, but each node still sees them in order and every value a record
+/// moves between nodes is buffered per record.
 class decoding_task_graph {
 public:
   /// Construct from an already-built decoder and D/O in nested-row form.
@@ -509,6 +523,10 @@ public:
   /// Whether the compiled graph supports incremental streaming execution.
   /// A false result does not affect run(), run_all(), or other batch APIs.
   bool supports_streaming() const noexcept;
+
+  /// Threads an asynchronous graph owns: its coordinator and the pool workers
+  /// that run fires. Zero for a synchronous graph.
+  std::size_t async_thread_count() const noexcept;
 
   /// Empty when supports_streaming() is true; otherwise the first deterministic
   /// build-time reason streaming execution is unavailable.

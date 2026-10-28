@@ -128,7 +128,9 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("id", &task_graph_node_config::id)
       .def_rw("kind", &task_graph_node_config::kind)
       .def_rw("node_params", &task_graph_node_config::node_params)
+      .def_rw("max_in_flight", &task_graph_node_config::max_in_flight)
       .def_rw("dem", &task_graph_node_config::dem)
+      .def_rw("windows", &task_graph_node_config::windows)
       .def_rw("d_sparse", &task_graph_node_config::d_sparse)
       .def_rw("o_sparse", &task_graph_node_config::o_sparse)
       .def_rw("h_sparse", &task_graph_node_config::h_sparse)
@@ -185,7 +187,13 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("async_coordinator_cpu",
               &task_graph_options::async_coordinator_cpu)
       .def_rw("async_spin_pause_iters",
-              &task_graph_options::async_spin_pause_iters);
+              &task_graph_options::async_spin_pause_iters)
+      .def_rw("async_num_workers", &task_graph_options::async_num_workers,
+              "Pool threads for an asynchronous graph; None sizes the pool\n"
+              "from the graph.")
+      .def_rw("async_worker_cpus", &task_graph_options::async_worker_cpus,
+              "CPUs for the pool threads, round-robin; empty inherits the\n"
+              "process's affinity.");
 
   // -------------------------------------------------------------------------
   // DecodingTaskGraph
@@ -217,7 +225,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       "With TaskGraphOptions.async_streaming enabled, BULK enqueue calls\n"
       "return False after copying input; streaming_result() waits for "
       "accepted\n"
-      "input and returns its completion state.\n"
+      "input and returns its completion state. Records overlap: a later\n"
+      "record runs ahead on nodes that finished the earlier ones.\n"
       "Tagging the last round round_type.FINAL commits what a guarded window\n"
       "withheld; it is the only way to end a stream.")
       .def_static("from_spec", &decoding_task_graph::from_spec, nb::arg("spec"),

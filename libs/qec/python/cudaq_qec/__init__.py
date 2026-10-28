@@ -110,6 +110,7 @@ generate_timelike_sparse_detector_matrix = qecrt.generate_timelike_sparse_detect
 pcm_to_sparse_vec = qecrt.pcm_to_sparse_vec
 
 multi_decoder_config = qecrt.config.multi_decoder_config
+data_artifact = qecrt.config.data_artifact
 decoder_config = qecrt.config.decoder_config
 decoder_dispatch = qecrt.config.decoder_dispatch
 transport_config = qecrt.config.transport_config
@@ -126,6 +127,7 @@ decoder_config_json_schema = qecrt.config.decoder_config_json_schema
 task_graph_spec = qecrt.config.task_graph_spec
 task_graph_node = qecrt.config.task_graph_node
 task_graph_edge = qecrt.config.task_graph_edge
+experimental = qecrt.experimental
 task_graph_column_range = qecrt.config.task_graph_column_range
 task_graph_ensemble = qecrt.config.task_graph_ensemble
 task_graph_ensemble_member = qecrt.config.task_graph_ensemble_member

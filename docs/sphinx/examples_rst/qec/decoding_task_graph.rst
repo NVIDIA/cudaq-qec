@@ -270,15 +270,69 @@ before consuming the result. Each public enqueue remains one queue record, so
 inner streaming decoders observe the same call boundaries as synchronous
 graphs.
 
+In an asynchronous graph, records overlap: the coordinator admits every
+accepted record at once, up to ``async_queue_capacity``, and a later record
+runs ahead on nodes that have finished the earlier ones. 
+
 Decoder-server YAML exposes the same policy as ``task_graph.async_streaming``,
-with optional ``async_queue_capacity``, ``async_coordinator_cpu``, and
-``async_spin_pause_iters`` fields. A nonnegative coordinator CPU requests
-Linux thread affinity and fails graph construction if it cannot be honored.
-It pins the coordinator thread only; decoder-pool workers keep their own
-configured affinity.
-The spin count keeps an active coordinator polling briefly before it parks;
-zero, the default, disables spinning. Reserve that CPU from producer and
-decoder-worker affinity masks when using this low-latency policy.
+with optional ``async_queue_capacity``, ``async_coordinator_cpu``,
+``async_spin_pause_iters``, ``async_num_workers``, and ``async_worker_cpus``
+fields. A nonnegative coordinator CPU requests Linux thread affinity and fails
+graph construction if it cannot be honored. It pins the coordinator thread
+only. The spin count keeps an active coordinator polling briefly before it
+parks; zero, the default, disables spinning. Reserve that CPU from producer
+and worker affinity masks when using this low-latency policy.
+
+``async_num_workers`` sets how many pool threads run node fires in an
+asynchronous graph, not counting the coordinator. Unset, the default, picks
+the graph's parallel width, including every fire pool's copies, capped by
+hardware concurrency; the build warns when the count is below the pooled
+copies. ``async_worker_cpus`` pins those threads round-robin to the listed
+CPUs (Linux only); it is empty by default, so node work inherits the
+process's affinity. Synchronous graphs ignore both.
+
+Pools are per graph: each decoder's asynchronous graph has its own coordinator
+and workers, so a configuration with several runs the sum of their threads.
+The coordinator spins, so an ``async_worker_cpus`` list that includes
+``async_coordinator_cpu`` is rejected when parsed and when built. Sharing a
+core between workers can be deliberate, so a CPU listed twice only warns, as
+does contention across graphs: configuring the decoders warns when two
+asynchronous graphs pin the same CPU, naming both decoders, or when together
+they need more threads than the machine has, naming each graph's count.
+
+Fire pools
+++++++++++
+
+Any node whose result depends only on the current delivery can run as a
+*fire pool*: set ``max_in_flight`` on its entry and the graph builds that many
+copies of the node, and lets records fire on different copies at once instead 
+of holding the node to one record at a time.
+A record leases one copy for all of its deliveries, outputs are copied out of
+the copy before anything downstream runs, and each fire's correction delta is
+folded into the node's accumulated corrections when its record retires, so
+results equal serial execution. Kinds that carry state across deliveries
+(``sliding_window``, ``memory_window``, ``predecoder``, ``streaming``) reject
+``max_in_flight`` above one at build, as does a node given a prebuilt decoder
+instance, since every copy needs its own. A pooled node wired to raw
+``measurements`` is a streaming conflict.
+
+Overlap needs ``async_streaming``; a synchronous graph warns and builds one
+copy. The default pool grows by ``max_in_flight - 1`` workers per pooled node,
+so ``async_num_workers`` is only needed to cap or widen that.
+
+Staged outputs
+++++++++++++++
+
+Nodes that fold into one graph output normally share one firing and commit
+schedule, and the output's coverage follows that schedule. A node whose fires
+commit arbitrary round intervals, possibly out of order, instead reports each
+publication's exact commit interval. An output fed only by such nodes is
+*staged*: the graph holds each delta until every earlier round is committed,
+folds them in round order, and reports coverage ``[0, frontier)`` with the
+value at that frontier. A publication covering the whole shot, such as a raw
+logical readout, is folded only at FINAL, after the frontier reaches the last
+committed round. An output that mixes staged and scheduled contributors is a
+streaming conflict; wire them to separate outputs.
 
 Multi-node graphs (combine)
 ++++++++++++++++++++++++++++

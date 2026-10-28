@@ -190,20 +190,26 @@ def parse_decoder_config(config_file, decoders, O_per_decoder,
                          output_per_decoder):
     print(f'Creating decoders from config file {args.config}...')
     with open(config_file, 'r') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
+        config_text = f.read()
+        config = yaml.load(config_text, Loader=yaml.FullLoader)
+        # A stim_dem or dem_chunks may name a data_artifacts entry. Only the
+        # whole configuration resolves such a name, as the realtime
+        # construction path does, so each decoder's model source is read
+        # from this parse rather than from the raw YAML.
+        resolved_decoders = qec.multi_decoder_config.from_yaml_str(
+            config_text).decoders
         for config_index, decoder in enumerate(config['decoders']):
             # Loop through each decoder in the config.
             decoder_id = decoder.get('id', config_index)
             decoder_custom_args = normalize_error_rate_args(decoder, decoder_id)
+            resolved = resolved_decoders[config_index]
 
             # Chunk-form YAML deliberately omits the flat matrix fields. Use
             # the same bound expansion routine as the realtime construction
             # path so replay sees the identical closed model and priors.
             expanded_chunks = None
-            if decoder.get(
-                    'dem_chunks') is not None and not decoder.get('H_sparse'):
-                expanded_chunks = qec.decoder_config.from_yaml_str(
-                    yaml.safe_dump(decoder))
+            if resolved.dem_chunks is not None and not decoder.get('H_sparse'):
+                expanded_chunks = resolved
                 qec.expand_dem_chunks(expanded_chunks)
 
             # Change these to primitive types. This is annoying to have to do, but I
@@ -222,20 +228,31 @@ def parse_decoder_config(config_file, decoders, O_per_decoder,
                 elif type(value) == bool:
                     decoder_custom_args[key] = bool(value)
             output = output_per_decoder.get(decoder_id, "observables")
-            stim_dem_path = decoder.get('stim_dem_path', '')
-            if stim_dem_path:
+            # The Stim DEM comes inline in stim_dem or by file in
+            # stim_dem_path, either one possibly copied from a data_artifacts
+            # entry, with the same checks as resolve_decoder_init.
+            dem_text = resolved.stim_dem
+            stim_dem_path = resolved.stim_dem_path
+            if dem_text or stim_dem_path:
+                dem_key = 'stim_dem_path' if stim_dem_path else 'stim_dem'
+                if dem_text and stim_dem_path:
+                    raise RuntimeError(
+                        f"decoder {decoder_id} sets both stim_dem and "
+                        "stim_dem_path; the model comes in exactly one form, "
+                        "inline or by file")
                 if (decoder.get('H_sparse') or decoder.get('O_sparse') or
                         'error_rate_vec' in decoder_custom_args):
                     raise RuntimeError(
-                        f"decoder {decoder_id} supplies stim_dem_path together "
+                        f"decoder {decoder_id} supplies {dem_key} together "
                         "with H_sparse, O_sparse, or error_rate_vec; supply "
                         "exactly one model source")
-                if not os.path.isabs(stim_dem_path):
-                    stim_dem_path = os.path.join(
-                        os.path.dirname(os.path.abspath(config_file)),
-                        stim_dem_path)
-                with open(stim_dem_path, 'r') as dem_file:
-                    dem_text = dem_file.read()
+                if stim_dem_path:
+                    if not os.path.isabs(stim_dem_path):
+                        stim_dem_path = os.path.join(
+                            os.path.dirname(os.path.abspath(config_file)),
+                            stim_dem_path)
+                    with open(stim_dem_path, 'r') as dem_file:
+                        dem_text = dem_file.read()
                 dem = qec.dem_from_stim_text(dem_text)
                 O = numpy.asarray(dem.observables_flips_matrix,
                                   dtype=numpy.uint8)

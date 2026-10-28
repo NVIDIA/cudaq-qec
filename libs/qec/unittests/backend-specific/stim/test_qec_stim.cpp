@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <deque>
@@ -344,14 +345,13 @@ TEST(QECCodeTester, checkTwoQubitBitflipStim) {
   cudaq::set_random_seed(13);
   cudaq::noise_model noise;
   noise.add_all_qubit_channel("x", cudaq::qec::two_qubit_bitflip(0.1), 1);
-  cudaq::set_noise(noise);
+  cudaq::sample_options options{.shots = 100, .noise = noise};
 
-  auto counts1 = cudaq::sample(100, null1{});
+  auto counts1 = cudaq::sample(options, null1{});
   EXPECT_FLOAT_EQ(1.0, counts1.probability("00"));
 
-  auto counts2 = cudaq::sample(100, null2{});
+  auto counts2 = cudaq::sample(options, null2{});
   EXPECT_TRUE(counts2.probability("00") < 0.9);
-  cudaq::unset_noise();
 }
 
 TEST(QECCodeTester, checkBitflip) {
@@ -373,9 +373,8 @@ TEST(QECCodeTester, checkBitflip) {
   cudaq::set_random_seed(13);
   cudaq::noise_model noise;
   noise.add_all_qubit_channel("h", cudaq::bit_flip_channel(0.5));
-  cudaq::set_noise(noise);
-  auto counts2 = cudaq::sample(100, null1{});
-  cudaq::unset_noise();
+  cudaq::sample_options options{.shots = 100, .noise = noise};
+  auto counts2 = cudaq::sample(options, null1{});
   EXPECT_TRUE(counts2.probability("0") < 0.9);
 }
 
@@ -747,6 +746,62 @@ TEST(QECCodeTester, checkRealtimeStreamedDetectorReduction) {
   }
   EXPECT_GT(total_fired, 0u); // guard against an all-zero pass
 }
+
+// For a d=3 surface-code Z memory, m2o_sparse() gives one row with the three
+// readout records on the Z logical's support, and its parity over the readout
+// round equals the whole-shot observable.
+TEST(QECCodeTester, checkM2oSparseReadsTheFinalPhase) {
+  auto code = cudaq::qec::get_code("surface_code",
+                                   cudaqx::heterogeneous_map{{"distance", 3}});
+  const std::size_t num_rounds = 3;
+  const std::size_t num_data = code->get_num_data_qubits();
+  const auto lz = code->get_observables_z();
+  cudaq::noise_model noise;
+  std::vector<std::size_t> support;
+  std::vector<std::size_t> row;
+  std::mt19937 rng(23);
+  noise.add_all_qubit_channel("x", cudaq::qec::two_qubit_depolarization(0.02),
+                              /*num_controls=*/1);
+
+  auto ctx = cudaq::qec::decoder_context_from_memory_circuit(
+      *code, cudaq::qec::operation::prep0, num_rounds, noise);
+  const auto inputs = ctx.z_component();
+  const std::size_t num_meas = ctx.num_measurements();
+  const std::size_t first = num_meas - num_data;
+  const auto m2o = cudaq::qec::m2o_sparse(inputs.m2o, first);
+
+  ASSERT_EQ(inputs.m2o.rows.size(), 1u);
+  ASSERT_FALSE(m2o.empty());
+  ASSERT_EQ(m2o.back(), -1);
+  ASSERT_EQ(std::count(m2o.begin(), m2o.end(), -1), 1);
+  for (const auto index : m2o)
+    if (index != -1)
+      row.push_back(static_cast<std::size_t>(index));
+  for (std::size_t q = 0; q < num_data; ++q)
+    if (lz.at({0, q}))
+      support.push_back(q);
+  EXPECT_EQ(row.size(), 3u);
+  EXPECT_EQ(row, support);
+
+  for (std::size_t shot = 0; shot < 100; ++shot) {
+    std::vector<uint8_t> meas(num_meas);
+    uint8_t whole = 0;
+    uint8_t local = 0;
+    for (auto &m : meas)
+      m = rng() & 1;
+    for (const auto c : inputs.m2o.rows[0])
+      whole ^= meas[c];
+    for (const auto c : row)
+      local ^= meas[first + c];
+    EXPECT_EQ(local, whole) << "shot " << shot;
+  }
+
+  // Every record must lie in the final phase.
+  EXPECT_THROW(cudaq::qec::m2o_sparse(inputs.m2o, first + 1),
+               std::invalid_argument);
+  EXPECT_THROW(cudaq::qec::m2o_sparse(inputs.m2o, num_meas + 1),
+               std::invalid_argument);
+} // end - TEST(QECCodeTester, checkM2oSparseReadsTheFinalPhase)
 
 namespace {
 bool tensors_equal(const cudaqx::tensor<uint8_t> &a,
