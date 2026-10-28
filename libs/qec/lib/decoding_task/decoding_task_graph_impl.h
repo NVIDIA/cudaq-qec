@@ -140,6 +140,9 @@ struct decoding_task_graph::impl {
   // branches without imposing a barrier on independent branches.
   std::vector<std::vector<std::size_t>> streaming_dependents;
   std::vector<std::vector<std::size_t>> streaming_producers;
+  // By streaming node: the other nodes that reach it through a loop-carried
+  // wire, which the dependency graph above leaves out.
+  std::vector<std::vector<std::size_t>> streaming_loop_producers;
   std::vector<int32_t> streaming_predecessor_counts;
   std::vector<std::vector<uint8_t>> streaming_reachability;
   /// How two streaming nodes' branches meet: not at all; only at
@@ -218,13 +221,17 @@ struct decoding_task_graph::impl {
   std::vector<std::optional<bool>> latest_node_converged;
   // A node has no one-shot path, so one-shot calls run through the stream.
   bool one_shot_streams = false;
-  // A record was enqueued since the last reset, or since a completed shot
-  // was consumed: one-shot calls through the stream would discard it.
-  // Atomic, as an overlapping enqueue sets it before it is rejected.
+  // A record was accepted since the last reset, or since a completed shot
+  // was consumed, and its shot has not failed: one-shot calls through the
+  // stream would discard it. Atomic, as an overlapping enqueue sets it
+  // before it is rejected, and an asynchronous failure clears it.
   std::atomic<bool> shot_open{false};
   // A one-shot call through the stream is running: held for the whole call,
   // as each step it takes guards only itself.
   std::atomic<bool> one_shot_running{false};
+  // reset_decoder() and clear_corrections() calls, each of which ends a
+  // shot: a one-shot call compares it to tell another call's from its own.
+  std::atomic<std::uint64_t> shot_resets{0};
   /// Whether every window reaching output @p k converged this shot.
   bool output_converged(std::size_t k) const;
   // Progress captured when the record being retired began.
@@ -351,6 +358,10 @@ struct decoding_task_graph::impl {
   /// Process one streaming record and update public result progress.
   bool process_streaming_record(const uint8_t *syndrome, std::size_t len,
                                 std::optional<round_type> type);
+  /// Either public enqueue_syndrome(): opens the shot, unless the record is
+  /// rejected, and runs it synchronously or asynchronously.
+  bool enqueue_record(const uint8_t *syndrome, std::size_t len,
+                      std::optional<round_type> type, int cuda_device_id);
   /// Flush an asynchronously finished stream and update public result progress.
   bool finish_streaming_record();
 

@@ -49,8 +49,8 @@ public:
   /// @param decoder_name The inner decoder, and @p params its parameters.
   /// @param num_receives Receive ports: receive_0 ... receive_{n-1}.
   /// @param verify What a fire does with a solution that does not satisfy
-  /// its window's detectors. With report, only the core's fire record says
-  /// whether it held; the node publishes nothing of it yet.
+  /// its window's detectors. With report, the publication's closure says
+  /// whether it held: see publication_closure().
   /// @param guaranteed By receive, the first instance from which it is
   /// guaranteed, as first_guaranteed_receive() gives it; none by default.
   /// @throws as decode_window_core's constructor does.

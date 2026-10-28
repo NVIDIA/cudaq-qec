@@ -67,7 +67,8 @@ SyndromeMappingTable make_mapping_table(const multi_decoder_config &config) {
 
 void SessionRegistry::load_from_config(const multi_decoder_config &config,
                                        const std::string &source_name,
-                                       const std::filesystem::path &base_dir) {
+                                       const std::filesystem::path &base_dir,
+                                       bool warn_serving) {
   const auto mapping_table = make_mapping_table(config);
   // Decoders and nodes naming a pinned Stim DEM are built from its text, read
   // once and checked against the pin.
@@ -145,7 +146,8 @@ void SessionRegistry::load_from_config(const multi_decoder_config &config,
     }
   }
 
-  cudaq::qec::decoding::host::warn_windowed_serving(config);
+  if (warn_serving)
+    cudaq::qec::decoding::host::warn_windowed_serving(config);
   CUDA_QEC_INFO("SessionRegistry: loaded {} decoder session(s)",
                 sessions_.size());
 }

@@ -12957,6 +12957,8 @@ static std::vector<index_fire> index_fires;
 /// commits instance k over round [k, k + 1) and `logical` reports whole-shot
 /// coverage, so an output they feed is staged. A `join` with `guaranteed`
 /// at or above 0 declares its `b` guaranteed from that instance on.
+/// `join_send` is a `join` that also publishes its value on `send`, typed as
+/// measurements rather than corrections, so it may feed a loop-carried edge.
 class index_probe_node : public task_graph_node,
                          public streaming_task_graph_node,
                          public indexed_join_node {
@@ -12977,8 +12979,9 @@ public:
 
   streaming_task_graph_node *streaming() override { return this; }
   indexed_join_node *indexed_join() override {
-    return mode_ == "join" ? this : nullptr;
+    return joins() ? this : nullptr;
   }
+  bool joins() const { return mode_ == "join" || mode_ == "join_send"; }
 
   // indexed_join_node
   bool requires_input(std::size_t slot) const override { return slot == 0; }
@@ -13085,7 +13088,7 @@ public:
     return true;
   }
   std::optional<std::int64_t> published_index(std::size_t slot) const override {
-    if (slot == 1)
+    if (slot == 1 && mode_ != "join_send")
       return odd_valid_ ? std::optional{published_ + 1} : std::nullopt;
     return published_;
   }
@@ -13108,13 +13111,14 @@ public:
   std::size_t num_msyn_per_decode() const override { return 0; }
   std::size_t num_msyn_per_round() const override { return 1; }
   std::size_t num_observables() const override {
-    return mode_ == "join" || mode_ == "logical" || mode_ == "running" ? 1 : 0;
+    return joins() || mode_ == "logical" || mode_ == "running" ? 1 : 0;
   }
   bool supports_streaming_input(std::size_t slot) const override {
-    return slot < (mode_ == "join" ? 2u : 1u);
+    return slot < (joins() ? 2u : 1u);
   }
   bool has_output(std::size_t slot) const {
-    return slot == 0 || (mode_ == "split" && slot == 1);
+    return slot == 0 ||
+           ((mode_ == "split" || mode_ == "join_send") && slot == 1);
   }
   std::optional<window_spec> derive_streaming_schedule(
       std::size_t output_slot,
@@ -13124,8 +13128,11 @@ public:
     return inputs[0].schedule;
   }
   std::optional<edge_value_type> output_type(std::size_t slot) const override {
-    return has_output(slot) ? std::optional{edge_value_type("logical_outcome")}
-                            : std::nullopt;
+    if (!has_output(slot))
+      return std::nullopt;
+    return slot == 1 && mode_ == "join_send"
+               ? edge_value_type("measurement_results")
+               : edge_value_type("logical_outcome");
   }
   std::optional<std::size_t>
   output_value_size(std::size_t slot) const override {
@@ -13138,6 +13145,8 @@ public:
             type == edge_value_type("measurement_results"));
   }
   const edge_value *streaming_output(std::size_t slot) const override {
+    if (slot == 1 && mode_ == "join_send")
+      return valid_ ? &value_out_ : nullptr;
     if (slot == 1)
       return odd_valid_ ? &value_odd_ : nullptr;
     return slot == 0 && valid_ ? &value_out_ : nullptr;
@@ -13147,10 +13156,12 @@ public:
     outputs[0] = inputs[0];
   }
   std::vector<std::string> inputs() const override {
-    return mode_ == "join" ? std::vector<std::string>{"a", "b"}
-                           : std::vector<std::string>{"input"};
+    return joins() ? std::vector<std::string>{"a", "b"}
+                   : std::vector<std::string>{"input"};
   }
   std::vector<std::string> outputs() const override {
+    if (mode_ == "join_send")
+      return {"output", "send"};
     return mode_ == "split" ? std::vector<std::string>{"output", "odd"}
                             : std::vector<std::string>{"output"};
   }
@@ -14068,6 +14079,56 @@ TEST(DecodingTaskGraph, IndexedJoinFailsOnALostGuaranteedInput) {
     }
   }
 } // end - TEST(DecodingTaskGraph, IndexedJoinFailsOnALostGuaranteedInput)
+
+// A node's flush waits for a producer that reaches it through a
+// loop-carried edge: J1[k] joins T[k] with J2[k - 1], its b guaranteed from
+// instance 1, and J2[k] joins J1[k], so each slow J2 fire feeds J1's next
+// instance, and J2 flushes after J1. When the shot ends J1 is quiet while
+// J2 still fires into it; resolving J1 then would lose that b. Every
+// instance of both fires, synchronously and asynchronously, the latter with
+// workers to spare so the FINAL record's flush runs beside its fires.
+TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer) {
+  ASSERT_TRUE(index_probe_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "asynchronous" : "synchronous");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    task_graph_options options;
+    options.async_streaming = async;
+    if (async)
+      options.async_num_workers = 4;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("J1", "join"));
+    nodes.back().node_params.insert("guaranteed", 1);
+    nodes.push_back(index_node("J2", "join_send", 1 << 30, /*hold_ms=*/20));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J1", "a"},
+         {"J2", "send", "J1", "b", /*index_offset=*/-1},
+         {"J1", "output", "J2", "a"},
+         {"T", "output", "J2", "b", /*index_offset=*/-1},
+         {"J2", "output", "output", "input"}},
+        options);
+    const auto records = pipeline_records(6);
+    for (std::size_t i = 0; i < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1,
+                              i + 1 == records.size() ? round_type::FINAL
+                                                      : round_type::BULK);
+    const auto &result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+        << result.error;
+    const std::vector<std::size_t> all{0, 1, 2, 3, 4, 5};
+    for (const auto *node : {"J1", "J2"}) {
+      auto fired = probe->records(node);
+      std::sort(fired.begin(), fired.end());
+      EXPECT_EQ(fired, all) << node;
+    }
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer)
 
 TEST(DecodingTaskGraph, IndexedJoinHandlesManyInstancesPerRecord) {
   ASSERT_TRUE(index_probe_registered);

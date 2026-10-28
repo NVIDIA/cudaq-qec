@@ -57,6 +57,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -6524,7 +6525,9 @@ TEST(WindowedGraph, StreamsASlidingWindowAsTheReference) {
 // notes the most decodes running at once for each window size (a layer's
 // bulk windows share one), counts decodes during which a test's record
 // count advanced, and throws while fail is set, so tests can reorder,
-// overlap and fail fires.
+// overlap and fail fires. While held, a decode that has started waits at a
+// gate until released, so a test can know decodes are in flight rather than
+// hope to catch one.
 class jitter_lut final : public decoder {
 public:
   static inline std::atomic<int> max_delay_us = 0;
@@ -6552,6 +6555,10 @@ public:
       const auto now = ++at_once_[size];
       peak_[size] = std::max(peak_[size], now);
     }
+    {
+      std::unique_lock<std::mutex> lock(gate_mutex_);
+      gate_.wait(lock, [] { return !held_; });
+    }
     if (const int most = max_delay_us; most > 0)
       std::this_thread::sleep_for(
           std::chrono::microseconds(rng() % static_cast<unsigned>(most)));
@@ -6573,7 +6580,33 @@ public:
       most = std::max(most, peak);
     return most;
   }
+  /// Decodes that start from now on wait at the gate.
+  static void hold() {
+    std::lock_guard<std::mutex> lock(gate_mutex_);
+    held_ = true;
+  }
+  /// Let every waiting and later decode through.
+  static void release() {
+    {
+      std::lock_guard<std::mutex> lock(gate_mutex_);
+      held_ = false;
+    }
+    gate_.notify_all();
+  }
+  /// Release the gate from another thread once @p ready() holds, or after
+  /// ten seconds, so a test blocked joining held decodes still ends.
+  template <typename Ready>
+  static std::thread release_when(Ready ready) {
+    return std::thread([ready] {
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (!ready() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      release();
+    });
+  }
   static void reset() {
+    release();
     std::lock_guard<std::mutex> lock(mutex_);
     at_once_.clear();
     peak_.clear();
@@ -6599,6 +6632,9 @@ private:
   static inline std::mutex mutex_;
   static inline std::map<std::size_t, std::size_t> at_once_;
   static inline std::map<std::size_t, std::size_t> peak_;
+  static inline std::mutex gate_mutex_;
+  static inline std::condition_variable gate_;
+  static inline bool held_ = false;
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(jitter_lut)
 
@@ -6653,9 +6689,11 @@ TEST(WindowedGraph, StreamsSampledShotsAtLongLengths) {
   }
 }
 
-// Decodes overlap ingestion and each other: with slow decoders, records are
-// taken while windows decode, and two copies of one layer decode at once;
-// the shot still decodes as the reference does.
+// Decodes overlap ingestion and each other: records are taken while windows
+// decode, and two copies of one layer decode at once; the shot still
+// decodes as the reference does. Decodes are held at the gate until two of
+// one layer are in flight, so the overlap is certain, not a scheduling
+// accident.
 TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther) {
   const auto spec = wide_readout_spec();
   const experiment_template tmpl(spec);
@@ -6666,8 +6704,13 @@ TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther) {
   const auto m = memory_measurements(tmpl, R, shot);
   jitter_lut::reset();
   jitter_lut::max_delay_us = 3000;
+  jitter_lut::hold();
+  auto releaser = jitter_lut::release_when(
+      [] { return jitter_lut::peak_of_one_size() > 1; });
   auto graph = load_graph(4, "jitter_lut", 8);
-  const auto record = graph->get_num_msyn_per_round();
+  // Records of a period of rounds: held decodes keep their records in
+  // flight, and the queue holds few.
+  const auto record = graph->get_num_msyn_per_decode();
   graph->reset_decoder();
   for (std::size_t at = 0; at < m.size(); at += record) {
     const auto len = std::min(record, m.size() - at);
@@ -6679,6 +6722,7 @@ TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther) {
     std::this_thread::sleep_for(std::chrono::microseconds(500));
   }
   const auto &result = graph->streaming_result();
+  releaser.join();
   EXPECT_EQ(
       std::vector<std::uint8_t>(result.values.begin(), result.values.end()),
       reference.decode(shot).frame);
@@ -6746,13 +6790,15 @@ TEST(WindowedGraph, ResetAndDestructionJoinDecodesInFlight) {
                                       R, "single_error_lut");
   const auto shot = detectors_of(reference.model(), 4);
   const auto m = memory_measurements(tmpl, R, shot);
-  // Feeds the shot's first half, none of it FINAL, and waits until a
-  // window decodes.
+  // Feeds the shot's first half, none of it FINAL, with decodes held at the
+  // gate, and waits until one is in flight there.
   const auto feed_half = [&](decoding_task_graph &graph) {
-    const auto record = graph.get_num_msyn_per_round();
+    // Records of a period of rounds, as held decodes keep theirs in flight.
+    const auto record = graph.get_num_msyn_per_decode();
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(10);
     graph.reset_decoder();
+    jitter_lut::hold();
     for (std::size_t at = 0; at + record < m.size() / 2; at += record)
       graph.enqueue_syndrome(m.data() + at, record, round_type::BULK);
     while (jitter_lut::running == 0 &&
@@ -6760,15 +6806,27 @@ TEST(WindowedGraph, ResetAndDestructionJoinDecodesInFlight) {
       std::this_thread::yield();
     EXPECT_GT(jitter_lut::running, 0u) << "no window was decoding";
   };
+  // Releases the gate a little later, once the caller is likely joining.
+  const auto release_soon = [] {
+    return jitter_lut::release_when([start = std::chrono::steady_clock::now()] {
+      return std::chrono::steady_clock::now() - start >
+             std::chrono::milliseconds(20);
+    });
+  };
   jitter_lut::reset();
   jitter_lut::max_delay_us = 2000;
   {
     auto graph = load_graph(4, "jitter_lut", 8);
     feed_half(*graph);
-  } // destroyed with decodes in flight
+    auto releaser = release_soon();
+    graph.reset(); // destroyed with decodes in flight
+    releaser.join();
+  }
   auto graph = load_graph(4, "jitter_lut", 8);
   feed_half(*graph);
+  auto releaser = release_soon();
   graph->reset_decoder();
+  releaser.join();
   EXPECT_EQ(jitter_lut::running, 0u) << "a reset left decodes running";
   EXPECT_EQ(stream_shot(*graph, m, graph->get_num_msyn_per_round()),
             reference.decode(shot).frame);
@@ -6819,13 +6877,13 @@ TEST(WindowedGraph, OneShotCallsRunOneAtATime) {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(10);
   jitter_lut::reset();
-  jitter_lut::max_delay_us = 20000;
+  jitter_lut::hold();
   auto graph = load_graph(1, "jitter_lut", 2);
   auto first = graph->run_async(m);
   while (jitter_lut::running == 0 &&
          std::chrono::steady_clock::now() < deadline)
     std::this_thread::yield();
-  ASSERT_GT(jitter_lut::running, 0u) << "the first call was not decoding";
+  EXPECT_GT(jitter_lut::running, 0u) << "the first call was not decoding";
   try {
     graph->run(m);
     ADD_FAILURE() << "a concurrent one-shot call ran";
@@ -6834,7 +6892,7 @@ TEST(WindowedGraph, OneShotCallsRunOneAtATime) {
               std::string::npos)
         << e.what();
   }
-  jitter_lut::max_delay_us = 0;
+  jitter_lut::release();
   EXPECT_EQ(first.get().bits, want);
   EXPECT_EQ(graph->run(m).bits, want);
   jitter_lut::reset();
@@ -6865,6 +6923,123 @@ TEST(WindowedGraph, AFailedOneShotLeavesTheGraphReady) {
   EXPECT_EQ(ran.bits,
             std::vector<std::uint8_t>(graph->get_num_observables(), 0));
 } // end - TEST(WindowedGraph, AFailedOneShotLeavesTheGraphReady)
+
+// A one-shot call with no measurements has no FINAL round to end its shot,
+// so it is refused rather than read before the shot completes; the graph
+// then runs a shot as before.
+TEST(WindowedGraph, OneShotsRefuseAnEmptyShot) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, load_params(), 1, "single_error_lut"));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  expect_error([&] { graph->run(measurement_results{}); },
+               "decoding_task_graph::run: a one-shot call needs the shot's "
+               "measurements");
+  const std::vector<std::uint8_t> quiet(tmpl.measurement_offset(R, R), 0);
+  EXPECT_EQ(graph->run(measurement_results{quiet}).bits,
+            std::vector<std::uint8_t>(graph->get_num_observables(), 0));
+} // end - TEST(WindowedGraph, OneShotsRefuseAnEmptyShot)
+
+// An enqueue that is rejected opens no shot, and one whose shot fails
+// leaves nothing to keep, so neither makes one-shot calls refuse: a null
+// record on an asynchronous graph, and a failing decode on a synchronous one.
+TEST(WindowedGraph, RejectedOrFailedEnqueuesLeaveOneShotsReady) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 2);
+  const auto measurements = memory_measurements(tmpl, R, shot);
+  const measurement_results m{measurements};
+  const auto want = reference.decode(shot).frame;
+  jitter_lut::reset();
+  auto asynchronous = load_graph(1, "jitter_lut");
+  EXPECT_THROW(asynchronous->enqueue_syndrome(nullptr, 3, round_type::BULK),
+               std::invalid_argument);
+  EXPECT_EQ(asynchronous->run(m).bits, want);
+
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, load_params(), 1, "jitter_lut"));
+  auto synchronous =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  jitter_lut::fail = true;
+  EXPECT_ANY_THROW(stream_shot(*synchronous, measurements,
+                               synchronous->get_num_msyn_per_round()));
+  jitter_lut::fail = false;
+  EXPECT_EQ(synchronous->run(m).bits, want);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, RejectedOrFailedEnqueuesLeaveOneShotsReady)
+
+// A reset_decoder() overlapping a one-shot call cancels the call's shot, and
+// the call reports that rather than returning the cleared result as its
+// decode: the first window's decode is held at the gate while another thread
+// resets the graph. The graph then runs the shot as the reference does.
+TEST(WindowedGraph, AnOverlappingResetFailsTheOneShotCall) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  // A reset shot reads zero, so take the first fault whose shot decodes to
+  // something else.
+  std::vector<std::uint8_t> shot;
+  std::vector<std::uint8_t> want;
+  for (std::size_t c = 0; c < reference.model().h.size(); ++c) {
+    shot = detectors_of(reference.model(), c);
+    want = reference.decode(shot).frame;
+    if (want != std::vector<std::uint8_t>(want.size(), 0))
+      break;
+  }
+  ASSERT_NE(want, std::vector<std::uint8_t>(want.size(), 0));
+  const measurement_results m{memory_measurements(tmpl, R, shot)};
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  jitter_lut::reset();
+  jitter_lut::hold();
+  // A queue that holds the whole shot, so the call submits its FINAL round
+  // and waits there, on the held decode, for the shot to complete.
+  task_graph_options options;
+  options.async_streaming = true;
+  options.async_num_workers = 2;
+  options.async_queue_capacity = 256;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, load_params(), 1, "jitter_lut"));
+  auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                  pattern_edges(), options);
+  auto call = graph->run_async(m);
+  while (jitter_lut::running == 0 &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_GT(jitter_lut::running, 0u) << "the call was not decoding";
+  // The reset joins the held decode, so the gate opens from another thread.
+  auto releaser =
+      jitter_lut::release_when([start = std::chrono::steady_clock::now()] {
+        return std::chrono::steady_clock::now() - start >
+               std::chrono::milliseconds(20);
+      });
+  // The reset cancels the call's stream even when its guard then finds the
+  // call resetting too and refuses it; either way the call's shot is gone.
+  try {
+    graph->reset_decoder();
+  } catch (const std::logic_error &) {
+  }
+  releaser.join();
+  try {
+    (void)call.get();
+    ADD_FAILURE() << "the call returned a decode of a shot another call reset";
+  } catch (const std::logic_error &e) {
+    EXPECT_NE(
+        std::string(e.what()).find("another call reset or cleared the graph"),
+        std::string::npos)
+        << e.what();
+  }
+  EXPECT_EQ(graph->run(m).bits, want);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, AnOverlappingResetFailsTheOneShotCall)
 
 // A solution verify_residual fail rejects is raised outside the fire, as a
 // failed decode is: synchronously and asynchronously, a blind decoder's
@@ -7203,155 +7378,5 @@ TEST(WindowedGraph, SurfaceCodePathsAgree) {
   }
   EXPECT_GT(ones, 0u) << "every frame was 0";
 } // end - TEST(WindowedGraph, SurfaceCodePathsAgree)
-
-// ---------------------------------------------------------------------------
-// Layout comparison (a report, not a gate)
-// ---------------------------------------------------------------------------
-
-// pymatching, timing every decode() across all instances.
-class timed_matching final : public decoder {
-public:
-  static inline std::atomic<std::uint64_t> decode_ns{0};
-  static inline std::atomic<std::uint64_t> decodes{0};
-
-  timed_matching(decoder_init inputs, decoder_output_request output,
-                 const cudaqx::heterogeneous_map &params)
-      : decoder(inputs, output),
-        inner_(decoder::get("pymatching", inputs, output, params)) {}
-
-  decoder_result decode(const std::vector<float_t> &syndrome) override {
-    const auto start = std::chrono::steady_clock::now();
-    auto result = inner_->decode(syndrome);
-    decode_ns += static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - start)
-            .count());
-    ++decodes;
-    return result;
-  }
-
-  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
-      timed_matching,
-      static std::unique_ptr<decoder> create(
-          decoder_init inputs, std::optional<decoder_output_request> output,
-          const cudaqx::heterogeneous_map &params) {
-        return std::make_unique<timed_matching>(
-            std::move(inputs),
-            output.value_or(decoder_output_request{decode_result_type::errors}),
-            params);
-      })
-
-private:
-  std::unique_ptr<decoder> inner_;
-};
-CUDAQ_EXT_PT_REGISTER_TYPE(timed_matching)
-
-// The plan's layout comparison (PR-8), feeding D14 and D21. Run it with
-// --gtest_also_run_disabled_tests. For the surface code's Z checks at d = 5
-// and 11, phenomenological noise at p = 0.02 and pymatching, it compares the
-// default zone sizes (d, d, 3d) with interior commit (d - 2, d + 1, 3d + 2);
-// an open input with the crossing prior, with a swept boundary_prior, or
-// truncated; and merging identical columns or not. Each line reports the
-// windowed and monolithic logical error rates, the mean and p99 time from
-// the FINAL enqueue to a complete result once the earlier rounds have
-// drained, and the mean window decode time.
-TEST(WindowedGraph, DISABLED_ComparesLayouts) {
-  constexpr double p = 0.02; // logical errors at both distances
-  struct layout {
-    std::string name;
-    std::size_t commit = 0;
-    std::size_t buffer = 0;
-    std::size_t gap = 0;
-  };
-  const std::vector<std::pair<std::string, cudaqx::heterogeneous_map>>
-      boundaries = {
-          {"crossing", {}},
-          {"prior 0.001", {{"boundary_prior", 0.001}}},
-          {"prior 0.01", {{"boundary_prior", 0.01}}},
-          {"prior 0.05", {{"boundary_prior", 0.05}}},
-          {"truncate", {{"input_boundary", std::string("truncate")}}}};
-  std::printf("%3s %-9s %-12s %-5s %9s %9s %10s %10s %10s\n", "d", "layout",
-              "input", "merge", "LER", "LER mono", "FINAL us", "p99 us",
-              "decode us");
-  for (const std::size_t d : {5, 11}) {
-    const std::size_t shots = d == 5 ? 2000 : 500;
-    const std::size_t R = 8 * d + 1;
-    const auto spec = surface_memory_spec(d, p);
-    const experiment_template tmpl(spec);
-    parallel_window_reference reference(spec,
-                                        lowered_graph(spec, surface_params(d)),
-                                        R, "pymatching", matching);
-    const auto &s = reference.model();
-    const auto monolithic = make_decoder(s.h, s.row.back(), s.dem.error_rates,
-                                         "pymatching", matching);
-    const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
-        s.dem.detector_error_matrix, shots, s.dem.error_rates, 37 + d);
-    std::size_t monolithic_wrong = 0;
-    std::vector<std::vector<std::uint8_t>> truths;
-    for (std::size_t i = 0; i < shots; ++i) {
-      const auto syndrome = row_of(detectors, i);
-      truths.push_back(observables_of(s, row_of(errors, i)));
-      monolithic_wrong +=
-          monolithic_observables(*monolithic, s, syndrome) != truths.back();
-    }
-    for (const layout &l : {layout{"default", d, d, 3 * d},
-                            layout{"interior", d - 2, d + 1, 3 * d + 2}})
-      for (const auto &[input, extra] : boundaries)
-        for (const bool merge : {false, true}) {
-          task_graph_options options;
-          std::vector<task_graph_node_config> nodes;
-          std::vector<double> final_us;
-          std::size_t wrong = 0;
-          auto params = surface_params(d);
-          params.insert("commit_rounds", l.commit);
-          params.insert("buffer_rounds", l.buffer);
-          params.insert("gap_rounds", l.gap);
-          params.insert("merge_identical", merge);
-          for (const auto &[key, value] : extra)
-            params.insert(key, value);
-          options.async_streaming = true;
-          nodes.push_back(pattern_node(spec, params, 4, "timed_matching"));
-          nodes.back().params = matching;
-          auto graph = decoding_task_graph::from_topology(
-              std::move(nodes), pattern_edges(), options);
-          const auto record = graph->get_num_msyn_per_round();
-          timed_matching::decode_ns = 0;
-          timed_matching::decodes = 0;
-          for (std::size_t i = 0; i < shots; ++i) {
-            const auto m = memory_measurements(tmpl, R, row_of(detectors, i));
-            std::size_t at = 0; // where the FINAL record starts
-            graph->reset_decoder();
-            for (; at + record < m.size(); at += record)
-              graph->enqueue_syndrome(m.data() + at, record, round_type::BULK);
-            (void)graph->streaming_result(); // the earlier rounds drain
-            const auto start = std::chrono::steady_clock::now();
-            graph->enqueue_syndrome(m.data() + at, m.size() - at,
-                                    round_type::FINAL);
-            final_us.push_back(std::chrono::duration<double, std::micro>(
-                                   std::chrono::steady_clock::now() - start)
-                                   .count());
-            const auto *frame = graph->get_obs_corrections();
-            wrong +=
-                std::vector<std::uint8_t>(
-                    frame, frame + graph->get_num_observables()) != truths[i];
-          } // end - for(i)
-          std::sort(final_us.begin(), final_us.end());
-          const double mean_final =
-              std::accumulate(final_us.begin(), final_us.end(), 0.0) /
-              static_cast<double>(final_us.size());
-          const double decode_us =
-              static_cast<double>(timed_matching::decode_ns) / 1000.0 /
-              static_cast<double>(
-                  std::max<std::uint64_t>(1, timed_matching::decodes.load()));
-          std::printf("%3zu %-9s %-12s %-5s %9.4f %9.4f %10.1f %10.1f "
-                      "%10.1f\n",
-                      d, l.name.c_str(), input.c_str(), merge ? "on" : "off",
-                      static_cast<double>(wrong) / shots,
-                      static_cast<double>(monolithic_wrong) / shots, mean_final,
-                      final_us[final_us.size() * 99 / 100], decode_us);
-          std::fflush(stdout);
-        } // end - for(merge)
-  } // end - for(d)
-} // end - TEST(WindowedGraph, DISABLED_ComparesLayouts)
 
 } // namespace cudaq::qec

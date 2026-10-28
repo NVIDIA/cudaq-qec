@@ -990,18 +990,34 @@ struct decoding_task_graph::impl::record_scheduler {
 
   // Whether no event of any record other than `self`'s flush still targets
   // the pooled or indexed node: its producers' deliveries have all been filed
-  // or run and its own fires have all finished.
-  bool quiescent_locked(const context &self, std::size_t si) const {
+  // or run and its own fires have all finished. With @p asking, one of
+  // `self`'s events is the flush of node `si` asking.
+  bool quiescent_locked(const context &self, std::size_t si,
+                        bool asking = true) const {
     for (const auto busy : replica_busy[si])
       if (busy)
         return false;
     for (const auto *c : active) {
       auto live = c->node_live[si];
-      if (c == &self)
+      if (asking && c == &self)
         --live; // the flush event asking
       if (live != 0)
         return false;
     }
+    return true;
+  }
+
+  // Whether the flush of pooled or indexed node `si` may resolve it: the
+  // node is quiescent, and so is every node feeding it through a
+  // loop-carried wire, whose fires may yet publish into its pending
+  // instances. Such a producer is later in node order, so it flushes after
+  // `si`; waiting for its flush would never end.
+  bool flush_ready_locked(const context &self, std::size_t si) const {
+    if (!quiescent_locked(self, si))
+      return false;
+    for (const auto producer : owner.streaming_loop_producers[si])
+      if (!quiescent_locked(self, producer, /*asking=*/false))
+        return false;
     return true;
   }
 
@@ -1582,10 +1598,10 @@ private:
           pool_free[candidate.event.node].empty())
         continue;
       // Resolving an indexed node's pending instances needs every delivery
-      // to it, from any record, filed first.
+      // to it, from any record and any loop-carried producer, filed first.
       if (candidate.event.kind == graph_event_kind::streaming_flush &&
           targets_pool(candidate.event) &&
-          !quiescent_locked(c, candidate.event.node))
+          !flush_ready_locked(c, candidate.event.node))
         continue;
       // A pooled node keeps no state, so its records need no order.
       if (c.gated && !targets_pool(candidate.event)) {

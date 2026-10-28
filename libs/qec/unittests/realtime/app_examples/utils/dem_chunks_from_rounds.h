@@ -68,8 +68,8 @@ inline cudaq::qec::dem_chunks_spec dem_chunks_from_rounds(
   std::vector<std::vector<std::int64_t>> d_local(R);
   for (std::size_t k = 0; k < d_rows.size(); ++k) {
     if (d_rows[k].empty())
-      throw std::runtime_error("--dem_chunks: detector " + std::to_string(k) +
-                               " reads no measurement");
+      throw std::runtime_error("dem_chunks_from_rounds: detector " +
+                               std::to_string(k) + " reads no measurement");
     std::size_t r = 0;
     for (const auto m : d_rows[k])
       r = std::max(r, round_of(m));
@@ -84,7 +84,8 @@ inline cudaq::qec::dem_chunks_spec dem_chunks_from_rounds(
         d_local[r].push_back(
             m - offset + static_cast<std::int64_t>(r > 0 ? count(r - 1) : 0));
       else
-        throw std::runtime_error("--dem_chunks: detector " + std::to_string(k) +
+        throw std::runtime_error("dem_chunks_from_rounds: detector " +
+                                 std::to_string(k) +
                                  " reads a measurement more than one round "
                                  "before its last");
     }
@@ -95,7 +96,7 @@ inline cudaq::qec::dem_chunks_spec dem_chunks_from_rounds(
   // round, and makes the closed chunks renumber detectors as this DEM does.
   if (!std::is_sorted(det_round.begin(), det_round.end()))
     throw std::runtime_error(
-        "--dem_chunks needs detectors numbered round by round");
+        "dem_chunks_from_rounds: needs detectors numbered round by round");
 
   struct fault {
     double p = 0.0;
@@ -112,7 +113,8 @@ inline cudaq::qec::dem_chunks_spec dem_chunks_from_rounds(
   std::vector<std::uint64_t> column_obs(num_columns, 0);
   const auto o_rows = rows_of(o_sparse);
   if (o_rows.size() > 64)
-    throw std::runtime_error("--dem_chunks supports at most 64 observables");
+    throw std::runtime_error(
+        "dem_chunks_from_rounds: supports at most 64 observables");
   for (std::size_t o = 0; o < o_rows.size(); ++o)
     for (const auto col : o_rows[o])
       column_obs[col] |= std::uint64_t{1} << o;
@@ -120,8 +122,9 @@ inline cudaq::qec::dem_chunks_spec dem_chunks_from_rounds(
   std::vector<std::vector<fault>> rounds(R);
   for (std::size_t col = 0; col < num_columns; ++col) {
     if (columns[col].empty())
-      throw std::runtime_error("--dem_chunks needs every column to flip a "
-                               "detector");
+      throw std::runtime_error(
+          "dem_chunks_from_rounds: needs every column to flip a "
+          "detector");
     const std::size_t r = det_round[columns[col].front()];
     fault f;
     f.p = error_rates[col];
@@ -131,8 +134,9 @@ inline cudaq::qec::dem_chunks_spec dem_chunks_from_rounds(
       // Both directions: an earlier round would land on the outgoing seam,
       // which is the wrong boundary rather than a wider one.
       if (at != r && at != r + 1)
-        throw std::runtime_error("--dem_chunks needs every column within two "
-                                 "consecutive rounds");
+        throw std::runtime_error(
+            "dem_chunks_from_rounds: needs every column within two "
+            "consecutive rounds");
       (at == r ? f.rows : f.next_rows)
           .push_back(static_cast<std::int64_t>(local[det]));
     }
@@ -187,9 +191,9 @@ inline cudaq::qec::dem_chunks_spec dem_chunks_from_rounds(
   while (bulk_last + 1 < R && same(bulk_last + 1, middle))
     ++bulk_last;
   if (bulk_last == bulk_first)
-    throw std::runtime_error("--dem_chunks found no repeating round in " +
-                             std::to_string(num_rounds) +
-                             " rounds; raise --num_rounds");
+    throw std::runtime_error(
+        "dem_chunks_from_rounds: found no repeating round in " +
+        std::to_string(num_rounds) + " rounds; raise num_rounds");
 
   const auto chunk_of = [&](std::size_t r) {
     const auto &faults = rounds[r];

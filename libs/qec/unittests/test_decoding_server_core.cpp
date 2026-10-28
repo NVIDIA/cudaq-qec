@@ -1619,8 +1619,10 @@ std::string windowed_yaml(bool async, bool final_row,
 )" + (final_row ? "syndrome_mapping:\n  - {id: 1, type: final}\n" : "");
 }
 
-// What loading @p yaml into a registry logs at warn level.
-std::string warnings_loading(const std::string &yaml) {
+// What loading @p yaml into a registry logs at warn level, with
+// @p warn_serving passed through.
+std::string warnings_loading(const std::string &yaml,
+                             bool warn_serving = true) {
   namespace detail = cudaq::qec::detail;
   const auto previous = detail::get_log_level();
   SessionRegistry registry;
@@ -1628,7 +1630,7 @@ std::string warnings_loading(const std::string &yaml) {
   testing::internal::CaptureStderr();
   registry.load_from_config(
       cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml),
-      "windowed");
+      "windowed", std::filesystem::current_path(), warn_serving);
   detail::flush_logs();
   const auto logged = testing::internal::GetCapturedStderr();
   detail::set_log_level(previous);
@@ -1659,6 +1661,16 @@ TEST(SessionRegistryLoad, ChecksAWindowedGraphsServingSettings) {
               windowed_yaml(true, true, "device_graph")),
           "windowed"),
       std::runtime_error);
+}
+
+// A config configure_decoders() already warned about loads silently when
+// the caller says so, as the in-process server's does, so each warning is
+// printed once.
+TEST(SessionRegistryLoad, LeavesWarnedServingSettingsUnrepeated) {
+  const auto unwarned = warnings_loading(windowed_yaml(false, false, "host"),
+                                         /*warn_serving=*/false);
+  EXPECT_EQ(unwarned.find("windowed task graph"), std::string::npos)
+      << unwarned;
 }
 
 } // namespace

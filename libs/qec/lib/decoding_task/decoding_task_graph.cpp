@@ -819,6 +819,7 @@ void decoding_task_graph::impl::compile_wires() {
     std::vector<std::vector<std::size_t>> value_dependents(M);
     streaming_dependents.assign(M, {});
     streaming_producers.assign(M, {});
+    streaming_loop_producers.assign(M, {});
     streaming_predecessor_counts.assign(M, 0);
     for (std::size_t si = 0; si < M; ++si) {
       const auto node_idx = streaming_nodes[si].node_index;
@@ -826,8 +827,13 @@ void decoding_task_graph::impl::compile_wires() {
         if (wire.from_node < 0 || streaming_by_node[wire.from_node] < 0)
           continue;
         // A loop-carried wire orders instances, not nodes: the consumer's
-        // joins wait for it, and the dependency graph stays acyclic.
+        // joins wait for it, and the dependency graph stays acyclic. Its
+        // producer is noted for the consumer's flush to wait on.
         if (wire.loop_carried()) {
+          const auto producer_si =
+              static_cast<std::size_t>(streaming_by_node[wire.from_node]);
+          if (producer_si != si)
+            streaming_loop_producers[si].push_back(producer_si);
           ++streaming_wire_count;
           continue;
         }
@@ -1323,6 +1329,8 @@ void decoding_task_graph::impl::fail_streaming_progress(
     output.status = task_graph_streaming_status::failed;
   if (changed)
     ++result.result_revision;
+  // A failed shot holds nothing a one-shot call's reset would discard.
+  shot_open = false;
 }
 
 // The composed values read the nodes' latest corrections and the stagers'
@@ -1463,20 +1471,35 @@ bool decoding_task_graph::impl::finish_streaming_record() {
   }
 }
 
+// The shot is marked open before the record runs, so a one-shot call that
+// checks meanwhile sees it; a record rejected before it opened one leaves
+// it as it was, and a shot that fails clears it (fail_streaming_progress()).
+bool decoding_task_graph::impl::enqueue_record(const uint8_t *syndrome,
+                                               std::size_t len,
+                                               std::optional<round_type> type,
+                                               int cuda_device_id) {
+  const bool was_open = shot_open.exchange(true);
+  try {
+    if (async_streaming.enabled)
+      return enqueue_syndrome_async(syndrome, len, type, cuda_device_id);
+    const in_flight_guard guard(in_flight, "enqueue_syndrome");
+    const bool fired = process_streaming_record(syndrome, len, type);
+    if (streaming_result_state.operation_completed)
+      ++streaming_result_state.completed_operations;
+    return fired;
+  } catch (...) {
+    if (!was_open)
+      shot_open = false;
+    throw;
+  }
+}
+
 // The record stays untagged down to the nodes, so a decoder that tells an
 // untagged round from BULK keeps its legacy fixed-length shot contract.
 bool decoding_task_graph::enqueue_syndrome(const uint8_t *syndrome,
                                            std::size_t len) {
-  impl_->shot_open = true;
-  if (impl_->async_streaming.enabled)
-    return impl_->enqueue_syndrome_async(syndrome, len, std::nullopt,
-                                         cuda_device_id().value_or(-1));
-  const in_flight_guard guard(impl_->in_flight, "enqueue_syndrome");
-  const bool fired =
-      impl_->process_streaming_record(syndrome, len, std::nullopt);
-  if (impl_->streaming_result_state.operation_completed)
-    ++impl_->streaming_result_state.completed_operations;
-  return fired;
+  return impl_->enqueue_record(syndrome, len, std::nullopt,
+                               cuda_device_id().value_or(-1));
 }
 
 bool decoding_task_graph::enqueue_syndrome(const uint8_t *syndrome,
@@ -1484,15 +1507,8 @@ bool decoding_task_graph::enqueue_syndrome(const uint8_t *syndrome,
   if (type == round_type::FINAL && len == 0)
     throw std::invalid_argument("decoding_task_graph: a FINAL round must "
                                 "carry the shot's final measurements");
-  impl_->shot_open = true;
-  if (impl_->async_streaming.enabled)
-    return impl_->enqueue_syndrome_async(syndrome, len, type,
-                                         cuda_device_id().value_or(-1));
-  const in_flight_guard guard(impl_->in_flight, "enqueue_syndrome");
-  const bool fired = impl_->process_streaming_record(syndrome, len, type);
-  if (impl_->streaming_result_state.operation_completed)
-    ++impl_->streaming_result_state.completed_operations;
-  return fired;
+  return impl_->enqueue_record(syndrome, len, type,
+                               cuda_device_id().value_or(-1));
 }
 
 const uint8_t *decoding_task_graph::get_obs_corrections() const {
@@ -1536,6 +1552,7 @@ void decoding_task_graph::clear_corrections() {
       impl_->async_streaming.active.load(std::memory_order_acquire))
     impl_->drain_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "clear_corrections");
+  impl_->shot_resets.fetch_add(1, std::memory_order_acq_rel);
   impl_->invalidate_async_stream_snapshot();
   // This consumes the published accumulator mid-stream. Keep each node's
   // overlap buffer so the next stride still decodes the correct frame.
@@ -1552,6 +1569,9 @@ void decoding_task_graph::clear_corrections() {
 }
 
 void decoding_task_graph::reset_decoder() {
+  // Counted before the cancel, which ends a shot even if the reset is then
+  // refused as overlapping another call.
+  impl_->shot_resets.fetch_add(1, std::memory_order_acq_rel);
   if (impl_->async_streaming.enabled &&
       impl_->async_streaming.active.load(std::memory_order_acquire))
     impl_->cancel_async_streaming();
@@ -1701,6 +1721,24 @@ decoding_task_graph::run_streamed(const measurement_results &m,
   std::vector<logical_outcome> outcomes;
   const auto record = std::max<std::size_t>(get_num_msyn_per_round(), 1);
   const auto &bits = m.bits;
+  // The shot's resets and clears once this call has reset it; any later one
+  // is another call's, which ends this call's shot.
+  std::optional<std::uint64_t> resets;
+  const auto reset_elsewhere = [&] {
+    return resets &&
+           impl_->shot_resets.load(std::memory_order_acquire) != *resets;
+  };
+  const auto ended_elsewhere = [&] {
+    return std::logic_error(
+        std::string("decoding_task_graph::") + who +
+        ": its shot did not complete: another call reset or cleared the "
+        "graph while this one-shot call ran");
+  };
+  // Without measurements no FINAL round ends the shot, so none completes.
+  if (bits.empty())
+    throw std::invalid_argument(std::string("decoding_task_graph::") + who +
+                                ": a one-shot call needs the shot's "
+                                "measurements, and got none");
   // Each step below guards only itself, so without the claim a second call
   // could reset or enqueue into this one's shot.
   if (impl_->one_shot_running.exchange(true, std::memory_order_acq_rel))
@@ -1716,6 +1754,7 @@ decoding_task_graph::run_streamed(const measurement_results &m,
         "first");
   try {
     self.reset_decoder();
+    resets = impl_->shot_resets.load(std::memory_order_acquire);
     for (std::size_t at = 0; at < bits.size(); at += record) {
       const auto len = std::min(record, bits.size() - at);
       self.enqueue_syndrome(bits.data() + at, len,
@@ -1723,6 +1762,11 @@ decoding_task_graph::run_streamed(const measurement_results &m,
                                                     : round_type::BULK);
     }
     const auto &result = self.streaming_result();
+    // A reset or clear from another call leaves a result that is pending,
+    // or that completed from a later round than the shot's first.
+    if (reset_elsewhere() ||
+        result.status != task_graph_streaming_status::complete)
+      throw ended_elsewhere();
     for (std::size_t k = 0; k < result.outputs.size(); ++k) {
       const auto &output = result.outputs[k];
       auto &outcome = outcomes.emplace_back();
@@ -1730,14 +1774,21 @@ decoding_task_graph::run_streamed(const measurement_results &m,
       outcome.bits.assign(first, first + output.value_width);
       outcome.converged = impl_->output_converged(k);
     }
+    // One that came while the result was read may have changed it.
+    if (reset_elsewhere())
+      throw ended_elsewhere();
     self.reset_decoder();
   } catch (...) {
-    // A shot that failed is this call's own; leave the graph reset for the
-    // next, and report the failure, not the shot it left open.
+    // Leave the graph reset for the next call, and report why this one's
+    // shot ended: another call's reset or clear, if it had one, rather than
+    // the error that reset left this call to meet.
+    const bool ended = reset_elsewhere();
     try {
       self.reset_decoder();
     } catch (...) {
     }
+    if (ended)
+      throw ended_elsewhere();
     throw;
   } // end - try
   return outcomes;

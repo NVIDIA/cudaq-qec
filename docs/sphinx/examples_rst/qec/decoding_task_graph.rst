@@ -524,8 +524,9 @@ configuration time.
        ``truncate``: faults crossing in from that round keep their own priors
        and are never committed.
    * - ``boundary_prior``
-     - The shared prior of ``columns``. Defaults to the largest prior among
-       the faults that cross into the next round.
+     - The shared prior of ``columns``. Defaults, over the detectors that
+       faults cross into from the round before, to the largest chance that
+       an odd number of those faults fire.
    * - ``merge_identical``
      - Merge fault columns with identical detectors and observables into one,
        combining their priors. Default ``false``.
