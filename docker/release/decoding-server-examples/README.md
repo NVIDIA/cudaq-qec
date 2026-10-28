@@ -9,7 +9,7 @@ starting point.
 
 | Path | Contents |
 | --- | --- |
-| `~/examples/` | Five surface-code memory experiments with realtime decoding, plus `build.sh` |
+| `~/examples/` | Six surface-code memory experiments with realtime decoding, plus `build.sh` |
 | `/opt/nvidia/cudaq-qec/bin` | `decoding_server`, `playback-emulator`, `hsb_fpga_syndrome_playback`, example server configs |
 
 `nvq++`, the CUDA-Q and QEC headers, and all libraries are on the default
@@ -31,8 +31,8 @@ a separately running `decoding_server`.
 ## Running the examples
 
 All commands assume `cd ~/examples` after `./build.sh`. The programs
-print their options with `--help` (except surface_code-5, which takes only the
-flags shown below).
+print their options with `--help` (except surface_code-5 and -6, which take
+only the flags shown below).
 
 **surface_code-1**: one realtime decoder per logical qubit, circuit-level
 depolarizing noise on the stabilizer CNOTs. Decode in-process:
@@ -90,6 +90,13 @@ decoder, via `cudaq::device_call`'s device-id overload. Self-checking.
 
     CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch \
         ./build/surface_code-5-per-decoder-rings --distance 3 --num_rounds 3 --num_shots 100
+
+**surface_code-6-mapped-enqueue**: a kernel names the `syndrome_mapping` row a
+round belongs to via `enqueue_syndromes_mapped`. Built for the emulated
+Quantinuum target, not stim. Self-checking; `--save_config <file>` writes the
+decoder configuration instead of running.
+
+    ./build/surface_code-6-mapped-enqueue
 
 ## Hardware path (ConnectX NIC required)
 

@@ -13,6 +13,7 @@
 #
 # surface_code-1 and surface_code-4-yaml are built both ways; surface_code-2
 # and -3 are local only; surface_code-5 exists only in lowered form.
+# surface_code-6 targets the emulated Quantinuum backend rather than stim.
 #
 # Usage:  ./build.sh [example ...]        (default: all)
 #         BUILD_DIR=<dir> ./build.sh       (default: ./build)
@@ -39,7 +40,9 @@ LINK_OPTS=(-Wl,--allow-shlib-undefined -Wl,--export-dynamic -lcudaq-realtime-dis
 CQR_LIBS=(-lcudaq-qec-realtime-decoding-simulation-cqr -lcudaq-qec-realtime-decoding-server-cqr -lcudaq-device-call-runtime)
 
 # Compile to an object first, then link, as the in-tree CMake build does
-# (cudaqx_add_device_code compiles with `-c -fPIC`).
+# (cudaqx_add_device_code compiles with `-c -fPIC`). TARGET selects the
+# nvq++ target flags; every example but surface_code-6 uses stim.
+TARGET=(--target stim)
 build() { # build <output> <source> [compile flags...] -- [link args...]
   local out=$1 src=$2; shift 2
   local cflags=() largs=()
@@ -47,9 +50,9 @@ build() { # build <output> <source> [compile flags...] -- [link args...]
   [[ $# -gt 0 ]] && shift
   largs=("$@")
   echo "== $out"
-  nvq++ --target stim -c -fPIC "${cflags[@]}" "$src" -o "$BUILD_DIR/$out.o" 2>&1 \
+  nvq++ "${TARGET[@]}" -c -fPIC "${cflags[@]}" "$src" -o "$BUILD_DIR/$out.o" 2>&1 \
     | grep -v "^warning: The CUDA-Q\|cc.alloca\|^ *%\|^ *\^" || true
-  nvq++ --target stim "$BUILD_DIR/$out.o" -o "$BUILD_DIR/$out" "${largs[@]}" 2>&1 \
+  nvq++ "${TARGET[@]}" "$BUILD_DIR/$out.o" -o "$BUILD_DIR/$out" "${largs[@]}" 2>&1 \
     | grep -v "^warning: The CUDA-Q" || true
   rm -f "$BUILD_DIR/$out.o"
   test -x "$BUILD_DIR/$out"
@@ -74,6 +77,13 @@ if sel surface_code-4-yaml; then
 fi
 if sel surface_code-5-per-decoder-rings; then
   build surface_code-5-per-decoder-rings surface_code-5-per-decoder-rings.cpp -frealtime-lowering -- "${QEC_LIBS[@]}" "${CQR_LIBS[@]}" "${LINK_OPTS[@]}"
+fi
+if sel surface_code-6-mapped-enqueue; then
+  # Emulated Quantinuum target: the mapped-enqueue call travels as its own wire
+  # function on that backend, served by the quantinuum realtime plugin.
+  TARGET=(--target quantinuum --emulate --quantinuum-machine Helios-Fake)
+  build surface_code-6-mapped-enqueue surface_code-6-mapped-enqueue.cpp -- "${QEC_LIBS[@]}" -lcudaq-qec-realtime-decoding-quantinuum -lcudaq-rest-qpu "${LINK_OPTS[@]}"
+  TARGET=(--target stim)
 fi
 
 echo; echo "Built into $BUILD_DIR:"; ls -1 "$BUILD_DIR"
