@@ -161,6 +161,22 @@ TEST(DecodingTaskGraph, UnequalPhaseWidthsRequireATypicalWidth) {
                std::invalid_argument);
 }
 
+// Without D_sparse rows a round measures one bit per detector, so declared
+// counts take no part in the width: they neither widen the stream nor make
+// structurally equal rounds look unequal.
+TEST(DecodingTaskGraph, DeclaredCountsDoNotSetWidthWithoutDSparse) {
+  auto spec = rep5_spec(4);
+  const std::array<uint64_t, 3> declared{1, 3, 5};
+  ASSERT_EQ(spec.phases.size(), declared.size());
+  for (std::size_t i = 0; i < declared.size(); ++i)
+    spec.phases[i].spec.num_measurements = declared[i];
+  spec.measurements_per_round = 7;
+  ASSERT_FALSE(spec.has_D_sparse());
+  auto graph = decoding_task_graph::from_spec(spec, "single_error_lut");
+  EXPECT_EQ(graph->get_num_msyn_per_round(), rep5_checks);
+  EXPECT_EQ(graph->get_num_msyn_per_decode(), 4u * rep5_checks);
+}
+
 TEST(DecodingTaskGraph, PhaseWidthsPreserveWholeShotMeasurementMapping) {
   for (const bool equal : {false, true}) {
     auto spec = phase_width_spec(equal ? std::array<uint64_t, 4>{3, 3, 3, 3}

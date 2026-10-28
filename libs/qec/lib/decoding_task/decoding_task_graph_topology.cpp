@@ -194,6 +194,10 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     // Rounds may differ in width (a first round with one stabilizer type's
     // detectors, a data readout last). Then there is no equal split, and spr
     // is the typical round's, with the whole stream's width kept alongside.
+    // Only phases that supply D_sparse declare their own widths. Without those
+    // rows a round measures one bit per detector, the memory convention of
+    // dem_chunks_to_d_sparse(), which the seam checks already keep consistent;
+    // num_measurements and measurements_per_round then take no part in it.
     bool equal_widths = true;
     if (working.has_D_sparse()) {
       const auto width =
