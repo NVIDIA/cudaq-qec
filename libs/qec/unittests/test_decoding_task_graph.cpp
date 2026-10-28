@@ -8452,11 +8452,11 @@ TEST(DecodingTaskGraph, XorNumInputsNamesItsPorts) {
                std::invalid_argument);
 }
 
-// num_inputs has a maximum, checked before any port is built: from C++, an
-// int -1 reads as the largest size_t, which would otherwise pass the minimum
-// and exhaust memory naming ports.
+// num_inputs has a maximum, checked before any port is built, so a huge count
+// cannot exhaust memory naming ports. An int -1 from C++, which get<size_t>
+// would read as the largest size_t, is rejected as no count at all.
 TEST(DecodingTaskGraph, XorNumInputsHasAMaximum) {
-  const auto rejects = [](const auto num_inputs) {
+  const auto rejects = [](const auto num_inputs, const std::string &text) {
     std::vector<task_graph_node_config> nodes;
     task_graph_node_config sum;
     sum.id = "sum";
@@ -8468,13 +8468,13 @@ TEST(DecodingTaskGraph, XorNumInputsHasAMaximum) {
           std::move(nodes), {{"sum", "output", "output", "input"}});
       ADD_FAILURE() << "an xor of " << num_inputs << " inputs was built";
     } catch (const std::exception &e) {
-      EXPECT_NE(std::string(e.what()).find("num_inputs must be at most 1024"),
-                std::string::npos)
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
           << e.what();
     }
   };
-  rejects(-1);
-  rejects(std::size_t{1025});
+  rejects(-1, "Key 'num_inputs' in from_topology: node 'sum' parameters does "
+              "not hold a non-negative int");
+  rejects(std::size_t{1025}, "num_inputs must be at most 1024");
 }
 
 TEST(DecodingTaskGraph, FromTopologyRejectsAnEmptyGraph) {

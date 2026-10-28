@@ -1869,6 +1869,42 @@ TEST(DecoderSchemaTest, ValidateCustomArgsChecksProgrammaticMaps) {
   EXPECT_THROW(multi.validate_custom_args(), std::runtime_error);
 }
 
+// get<std::size_t> reads a stored int, long or short, so a negative one would
+// read as a huge count and pass any minimum. A uint64 parameter rejects it
+// instead, whichever signed type holds it, and still takes a non-negative one.
+TEST(DecoderSchemaTest, Uint64ParamsRejectNegativeIntegers) {
+  using namespace cudaq::qec::decoding::config;
+  const auto with_count = [](auto count) {
+    cudaqx::heterogeneous_map args;
+    args.insert("count", count);
+    return args;
+  };
+  const auto rejects = [](const cudaqx::heterogeneous_map &args) {
+    try {
+      validate_custom_args("uint64_sign_demo", args);
+      ADD_FAILURE() << "a negative count validated";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(
+                    "Key 'count' in 'uint64_sign_demo' parameters does not "
+                    "hold a non-negative int"),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  register_decoder_schema({"uint64_sign_demo",
+                           {
+                               {"count", param_kind::uint64},
+                           }});
+
+  rejects(with_count(-1));
+  rejects(with_count(-1L));
+  rejects(with_count(short{-1}));
+  EXPECT_NO_THROW(validate_custom_args("uint64_sign_demo", with_count(0)));
+  EXPECT_NO_THROW(validate_custom_args("uint64_sign_demo", with_count(3L)));
+  EXPECT_NO_THROW(
+      validate_custom_args("uint64_sign_demo", with_count(std::size_t{7})));
+}
+
 TEST(DecoderSchemaTest, ProgrammaticConfigsMaterializeSchemaDefaults) {
   using namespace cudaq::qec::decoding::config;
 
@@ -3323,12 +3359,13 @@ TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs) {
 
 // Node ids and parameter types are checked before the window layout, which
 // reads both: a repeated id is named as such, and a parameter of the wrong
-// type is not read as its default.
+// type, or a negative count, is not read as its default or as a huge count.
 TEST(TaskGraphWindowKinds, BuildingChecksIdsAndParametersFirst) {
   namespace cfg = cudaq::qec::decoding::config;
   const auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
   auto repeated = parsed;
   auto mistyped = parsed;
+  auto negative = parsed;
   for (auto &node : repeated.decoders.at(0).task_graph->nodes)
     if (node.id == "sum")
       node.id = "A";
@@ -3336,8 +3373,13 @@ TEST(TaskGraphWindowKinds, BuildingChecksIdsAndParametersFirst) {
     if (node.id == "B") {
       node.node_params.map().insert("num_receives", 2.0);
     }
+  for (auto &node : negative.decoders.at(0).task_graph->nodes)
+    if (node.id == "B")
+      node.node_params.map().insert("num_receives", -1);
   expect_build_error(repeated, "duplicate node id 'A'");
   expect_build_error(mistyped, "Key 'num_receives' in from_topology: node 'B' "
+                               "parameters does not hold a non-negative int");
+  expect_build_error(negative, "Key 'num_receives' in from_topology: node 'B' "
                                "parameters does not hold a non-negative int");
 }
 
@@ -4374,6 +4416,26 @@ TEST(ParallelWindowPattern, RejectsBadParameters) {
                      "parallel_window: verify_residual must be none, fail or "
                      "report; got 'true'");
 } // end - TEST(ParallelWindowPattern, RejectsBadParameters)
+
+// A count built in code as a negative int never reaches the pattern's
+// minimum, which would read it as a huge count and pass it.
+TEST(ParallelWindowPattern, RejectsANegativeCountBuiltInCode) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto parsed = cfg::multi_decoder_config::from_yaml_str(pattern_yaml());
+  auto params = parsed.decoders.at(0).task_graph->nodes.at(0).node_params.map();
+  params.insert("commit_rounds", -1);
+  try {
+    cfg::validate_custom_args(
+        cudaq::qec::task_graph_node_schema_name("parallel_window"), params);
+    ADD_FAILURE() << "a negative commit_rounds validated";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "Key 'commit_rounds' in 'task_graph_node.parallel_window' "
+                  "parameters does not hold a non-negative int"),
+              std::string::npos)
+        << e.what();
+  }
+}
 
 // Bad pool options are rejected when parsed, and the graph rejects set ones
 // until the pool applies them.
