@@ -13224,6 +13224,8 @@ struct index_fire {
 };
 static std::mutex index_fires_mutex;
 static std::vector<index_fire> index_fires;
+/// Called with k as each fire of a `join` starts, when set.
+static std::function<void(std::int64_t)> index_fire_hook;
 
 /// Indexed one-byte probes. `tag` relays its input and publishes with the
 /// index of its own fire ordinal, and publishes nothing from `limit` on.
@@ -13269,6 +13271,8 @@ public:
             const std::vector<const edge_value *> &inputs) override {
     const int a = inputs[0]->get<logical_outcome>().bits[0];
     const int b = inputs[1] ? inputs[1]->get<logical_outcome>().bits[0] : -1;
+    if (index_fire_hook)
+      index_fire_hook(k);
     {
       std::lock_guard<std::mutex> lock(index_fires_mutex);
       index_fires.push_back({k, a, b});
@@ -14504,6 +14508,70 @@ TEST(DecodingTaskGraph, IndexedJoinGrowsAndSaysSoOnce) {
   EXPECT_NE(warnings[0].find("grew past its"), std::string::npos)
       << warnings[0];
 }
+
+// A join with no edge back into itself resolves FINAL's last instances while
+// its earlier fires still run: R publishes up to index 8, so J[9] has a but
+// never b, and the flush fires it with b absent. J[8] holds its fire until
+// J[9]'s starts, which happens only if the flush does not wait for J[8].
+TEST(DecodingTaskGraph, IndexedFlushOverlapsEarlierFires) {
+  if (std::thread::hardware_concurrency() < 4)
+    GTEST_SKIP() << "overlap needs at least four CPU threads";
+  ASSERT_TRUE(index_probe_registered);
+  constexpr std::int64_t last_with_b = 8; // R publishes indices 0..7
+  const std::vector<uint8_t> records = {1, 0, 1, 1, 0, 0, 1, 0, 1, 1};
+  std::mutex mutex;
+  std::condition_variable started;
+  bool terminal_started = false;
+  bool overlapped = false;
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  index_fire_hook = [&](std::int64_t k) {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (k == last_with_b + 1) {
+      terminal_started = true;
+      started.notify_all();
+    } else if (k == last_with_b) {
+      overlapped = started.wait_for(lock, std::chrono::seconds(2),
+                                    [&] { return terminal_started; });
+    }
+  };
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("R", "tag", last_with_b));
+  nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, /*copies=*/2));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      // R's branch first: within a record, a later sibling branch waits for
+      // an earlier one it meets, so T's, which may hold J[8], must not hold
+      // R back from ending its shot.
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "R", "input"},
+       {"A", "output", "T", "input"},
+       {"T", "output", "J", "a"},
+       {"R", "output", "J", "b", /*index_offset=*/-1},
+       {"J", "output", "output", "input"}},
+      {.async_streaming = true, .async_queue_capacity = 16});
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  const auto result = graph->streaming_result();
+  index_fire_hook = nullptr;
+
+  EXPECT_TRUE(overlapped) << "J[9] waited for J[8] to finish";
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    ASSERT_EQ(index_fires.size(), records.size());
+    for (const auto &fire : index_fires)
+      if (fire.k == last_with_b + 1)
+        EXPECT_EQ(fire.b, -1) << "J[9]'s b should be absent";
+  }
+} // end - TEST(DecodingTaskGraph, IndexedFlushOverlapsEarlierFires)
 
 // ---------------------------------------------------------------------------
 // Staged outputs

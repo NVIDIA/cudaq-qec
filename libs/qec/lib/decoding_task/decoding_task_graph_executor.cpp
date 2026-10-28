@@ -36,6 +36,11 @@ constexpr std::int64_t no_index = std::numeric_limits<std::int64_t>::min();
 // session has records in flight; idle sessions park at once.
 constexpr std::size_t kHandoffSpinPauseIters = 4096;
 
+// An indexed node's flush event, in graph_event::offset, once it has resolved
+// its instances and waits only to end the node's shot. Flush events carry no
+// other offset.
+constexpr std::size_t flush_resolved = 1;
+
 enum class graph_event_kind : uint8_t {
   one_shot,
   streaming_raw,
@@ -138,6 +143,8 @@ struct decoding_task_graph::impl::record_context {
   // Release accounting, indexed by streaming node: live events targeting
   // the node and whether this record has handed the node on.
   std::vector<std::uint32_t> node_live;
+  // Of those, the indexed fires.
+  std::vector<std::uint32_t> node_fires_live;
   std::vector<uint8_t> node_released;
   std::size_t occupied = 0;
   std::size_t next_sequence = 0;
@@ -180,6 +187,9 @@ struct decoding_task_graph::impl::record_scheduler {
         pool_free(owner.streaming_nodes.size()),
         replica_busy(owner.streaming_nodes.size()),
         joins(owner.streaming_nodes.size()),
+        join_live(owner.streaming_nodes.size()),
+        join_scan(owner.streaming_nodes.size()),
+        self_fed(owner.streaming_nodes.size(), 0),
         join_grew(owner.streaming_nodes.size(), join_growth::none),
         join_home(owner.streaming_nodes.size(), 1),
         join_displaced(owner.streaming_nodes.size(), 0),
@@ -223,6 +233,7 @@ struct decoding_task_graph::impl::record_scheduler {
       for (const auto &wire : owner.wires_to[node_idx]) {
         join_offsets[si][static_cast<std::size_t>(wire.to_slot)] =
             wire.index_offset;
+        self_fed[si] = self_fed[si] || wire.loop_carried();
         // A loop-carried input publishes instance k + offset ahead of its
         // consumer's k, from the consumer's own fires; it does not bound how
         // far the consumer fires.
@@ -251,6 +262,7 @@ struct decoding_task_graph::impl::record_scheduler {
       const auto capacity =
           context_count * inflow + static_cast<std::size_t>(e) + copies;
       joins[si].clear();
+      join_live[si].clear();
       for (std::size_t i = 0; i < capacity; ++i)
         add_join_entry(si);
       join_home[si] = capacity;
@@ -309,6 +321,7 @@ struct decoding_task_graph::impl::record_scheduler {
       c.node_closure.assign(M, std::nullopt);
       c.node_converged.assign(M, std::nullopt);
       c.node_live.assign(M, 0);
+      c.node_fires_live.assign(M, 0);
       c.node_released.assign(M, 0);
       for (std::size_t i = event_capacity; i-- > 0;)
         c.free_slots.push_back(i);
@@ -371,6 +384,7 @@ struct decoding_task_graph::impl::record_scheduler {
     std::fill(c.node_closure.begin(), c.node_closure.end(), std::nullopt);
     std::fill(c.node_converged.begin(), c.node_converged.end(), std::nullopt);
     std::fill(c.node_live.begin(), c.node_live.end(), 0);
+    std::fill(c.node_fires_live.begin(), c.node_fires_live.end(), 0);
     std::fill(c.node_released.begin(), c.node_released.end(), 0);
     c.occupied = 0;
     c.next_sequence = 0;
@@ -423,6 +437,8 @@ struct decoding_task_graph::impl::record_scheduler {
         entry.used = false;
         entry.displaced = false;
       }
+    for (auto &live : join_live)
+      live.clear();
     std::fill(join_displaced.begin(), join_displaced.end(), 0);
     for (auto &instances : dropped)
       instances.clear();
@@ -852,6 +868,8 @@ struct decoding_task_graph::impl::record_scheduler {
     auto *entry = &table[index];
     if (fresh) {
       entry->used = true;
+      entry->live_at = join_live[si].size();
+      join_live[si].push_back(index);
       entry->displaced = index != join_home_of(si, k);
       join_displaced[si] += entry->displaced;
       entry->k = k;
@@ -930,14 +948,20 @@ struct decoding_task_graph::impl::record_scheduler {
       return home;
     if (join_displaced[si] == 0)
       return table.size();
-    for (std::size_t i = 0; i < table.size(); ++i)
-      if (table[i].used && table[i].displaced && table[i].k == k)
+    for (const auto i : join_live[si])
+      if (table[i].displaced && table[i].k == k)
         return i;
     return table.size();
   }
 
-  // Free a join entry of node si.
+  // Free a join entry of node si, swapping the last used entry into its
+  // place in join_live.
   void release_join_locked(std::size_t si, join_entry &entry) {
+    auto &live = join_live[si];
+    const auto moved = live.back();
+    live[entry.live_at] = moved;
+    joins[si][moved].live_at = entry.live_at;
+    live.pop_back();
     join_displaced[si] -= entry.displaced;
     entry.displaced = false;
     entry.used = false;
@@ -972,7 +996,12 @@ struct decoding_task_graph::impl::record_scheduler {
   bool resolve_joins_locked(context &c, std::size_t parent, std::size_t si,
                             std::size_t root) {
     auto &table = joins[si];
-    for (std::size_t index = 0; index < table.size(); ++index) {
+    // The used entries in table order, the order a full scan took them;
+    // releasing one below reorders join_live, not this copy.
+    auto &scan = join_scan[si];
+    scan.assign(join_live[si].begin(), join_live[si].end());
+    std::sort(scan.begin(), scan.end());
+    for (const auto index : scan) {
       auto &entry = table[index];
       if (!entry.used || entry.pending == 0)
         continue;
@@ -1004,6 +1033,34 @@ struct decoding_task_graph::impl::record_scheduler {
       queue_indexed_fire_locked(c, parent, si, index, root);
     }
     return false;
+  }
+
+  // Whether an indexed node's flush may resolve its instances: no delivery to
+  // it is queued or running. Without a loop-carried edge into the node, its
+  // own fires deliver nothing to it, so those may still run; with one, this
+  // is flush_ready_locked(), as for a pooled node. The second pass, which
+  // ends the node's shot, waits for that too.
+  bool flush_may_start_locked(const context &self,
+                              const graph_event &flush) const {
+    const auto si = flush.node;
+    if (!indexed(si) || self_fed[si] || flush.offset == flush_resolved)
+      return flush_ready_locked(self, si);
+    for (const auto *c : active) {
+      auto live = c->node_live[si] - c->node_fires_live[si];
+      if (c == &self)
+        --live; // the flush event asking
+      if (live != 0)
+        return false;
+    }
+    return true;
+  }
+
+  // Whether no context other than `self` has an event targeting node si.
+  bool others_quiet_locked(const context &self, std::size_t si) const {
+    for (const auto *c : active)
+      if (c != &self && c->node_live[si] != 0)
+        return false;
+    return true;
   }
 
   // Whether no event of any record other than `self`'s flush still targets
@@ -1198,6 +1255,21 @@ struct decoding_task_graph::impl::record_scheduler {
       if (more) { // continue once the queued fires have drained
         push(c, event, id, no_event, /*wait_for_siblings=*/true);
         return;
+      }
+      // Resolved while earlier records' fires may still run (see
+      // flush_may_start_locked): end the node's shot once they finish.
+      if (event.offset != flush_resolved) {
+        bool settled = true;
+        {
+          auto lock = lock_runtime();
+          settled = others_quiet_locked(c, event.node);
+        }
+        if (!settled) {
+          auto resolved = event;
+          resolved.offset = flush_resolved;
+          push(c, resolved, id, no_event, /*wait_for_siblings=*/true);
+          return;
+        }
       }
       // Every instance of the shot is resolved; the next shot's numbering
       // starts over.
@@ -1405,8 +1477,11 @@ private:
     created.occupied = true;
     ++c.occupied;
     const auto target = release_target(event);
-    if (target != no_event)
+    if (target != no_event) {
       ++c.node_live[target];
+      c.node_fires_live[target] +=
+          event.kind == graph_event_kind::streaming_indexed_fire;
+    }
     if (parent != no_event) {
       auto &ancestor = c.slots[parent];
       created.previous_sibling = ancestor.last_child;
@@ -1619,7 +1694,7 @@ private:
       // to it, from any record and any loop-carried producer, filed first.
       if (candidate.event.kind == graph_event_kind::streaming_flush &&
           targets_pool(candidate.event) &&
-          !flush_ready_locked(c, candidate.event.node))
+          !flush_may_start_locked(c, candidate.event))
         continue;
       // A pooled node keeps no state, so its records need no order.
       if (c.gated && !targets_pool(candidate.event)) {
@@ -1690,6 +1765,9 @@ private:
       --running;
     if (!completed.has_continuation) {
       const auto target = release_target(completed.event);
+      if (target != no_event)
+        c.node_fires_live[target] -=
+            completed.event.kind == graph_event_kind::streaming_indexed_fire;
       if (target != no_event && --c.node_live[target] == 0)
         try_release_locked(c, target);
     }
@@ -1815,12 +1893,22 @@ public:
     enum : uint8_t { missing = 0, present = 1, absent = 2 };
     std::int64_t k = 0;
     bool used = false;
-    bool displaced = false; ///< Not at its home, k modulo the preallocation
+    bool displaced = false;  ///< Not at its home, k modulo the preallocation
+    std::size_t live_at = 0; ///< its place in join_live, while used
     std::size_t pending = 0;
     std::vector<edge_value> inputs;
     std::vector<uint8_t> state;
   };
   std::vector<std::deque<join_entry>> joins;
+  // By streaming node: the table indices of its used entries, in no order,
+  // so a flush resolves the shot's instances without scanning the whole
+  // preallocation; and scratch the flush sorts them in. Both are reserved
+  // with the table.
+  std::vector<std::vector<std::size_t>> join_live;
+  std::vector<std::vector<std::size_t>> join_scan;
+  // By streaming node: whether a loop-carried edge feeds it, so its own
+  // fires may still deliver to it.
+  std::vector<uint8_t> self_fed;
   // By streaming node: whether its join table grew, and whether that was
   // reported, which happens once.
   enum class join_growth : uint8_t { none, unreported, reported };
@@ -1879,6 +1967,8 @@ public:
     auto &entry = joins[si].emplace_back();
     entry.inputs.resize(inputs);
     entry.state.assign(inputs, 0);
+    join_live[si].reserve(joins[si].size());
+    join_scan[si].reserve(joins[si].size());
     return entry;
   }
   // Per-replica scratch for the input pointers handed to fire().
