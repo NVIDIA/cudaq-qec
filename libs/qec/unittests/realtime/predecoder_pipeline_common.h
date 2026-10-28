@@ -62,10 +62,10 @@ namespace rt_pipeline = cudaq::qec::realtime::experimental;
 // Pipeline Configuration
 // =============================================================================
 
-/// @brief Maximum number of pipeline ring buffer slots.
-/// @details Shared by the benchmark and bridge so both data sources use the
-/// same ring depth assumptions when staging requests into the realtime
-/// pipeline.
+/// @brief Ring depth of the software-only benchmark's internal pipeline ring.
+/// @details Used by test_realtime_predecoder_w_pymatching only. The FPGA
+/// bridge sizes its ring from --num-pages, one pipeline slot per transceiver
+/// page.
 constexpr size_t NUM_SLOTS = 16;
 
 /// @brief Named configuration for a predecoder pipeline instance.
@@ -313,8 +313,10 @@ struct PyMatchJob {
   int origin_slot;
   /// @brief RPC request ID from the header.
   uint64_t request_id;
-  /// @brief Pointer to the ring buffer data for this slot.
-  void *ring_buffer_ptr;
+  /// @brief Host pointer to the slot's TX area, taken from
+  /// cpu_stage_context::response_buffer. The RPCResponse header followed by
+  /// the DecodeResponse payload is written here before complete_deferred().
+  void *response_buffer;
 };
 
 /// @brief Thread-safe queue for dispatching PyMatching decode jobs.

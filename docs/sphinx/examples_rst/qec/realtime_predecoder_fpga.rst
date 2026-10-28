@@ -7,7 +7,8 @@ AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)
    from source and is not part of any distributed CUDA-Q QEC binaries.
 
 This guide explains how to build, test, and run the AI predecoder + PyMatching
-pipeline over GPU RoCE RDMA using CUDA-Q's realtime host dispatch system.
+pipeline over GPU RoCE RDMA using the cudaq-qec realtime pipeline over the
+``GpuRoceTransceiver`` RDMA transport.
 The pipeline runs a TensorRT-accelerated neural network (the *predecoder*) on
 the GPU to reduce syndrome density, then feeds the residual detectors to a
 pool of PyMatching MWPM decoders on the CPU.  It operates in two
@@ -51,7 +52,7 @@ Software
 - **CUDA Toolkit**: 12.6 or later
 - **TensorRT**: 10.x (headers and libraries)
 - **CUDA-Q SDK**: pre-installed (provides ``libcudaq``, ``libnvqir``, ``nvq++``)
-- **DOCA**: 3.3 or later (for ``gpu_roce_transceiver`` RDMA transport)
+- **DOCA**: 3.4 or later (for ``gpu_roce_transceiver`` RDMA transport)
 - **PyMatching decoder plugin**: the ``cudaq-qec-pymatching`` shared library
   (``libcudaq-qec-pymatching.so``).  Built as part of the CUDA-Q QEC build and
   required at runtime.
@@ -76,14 +77,17 @@ Source Repositories
      - ``main`` branch (or your feature branch)
    * - **cuda-quantum** (realtime)
      - https://github.com/NVIDIA/cuda-quantum
-     - Branch ``releases/v0.14.1``
+     - ``main`` at the ref recorded in cudaq-qec's ``.cudaq_version``
    * - **holoscan-sensor-bridge**
      - https://github.com/nvidia-holoscan/holoscan-sensor-bridge
-     - Tag ``2.6.0-EA2``
+     - Branch ``EA_CUDAQ_10_26`` (cloned and built by
+       ``realtime/scripts/install_devdeps.sh``)
 
-``cuda-quantum`` provides ``libcudaq-realtime`` (the host dispatcher, ring
-buffer management, and dispatch kernel).  ``holoscan-sensor-bridge`` provides
-the ``GpuRoceTransceiver`` library for RDMA transport.
+``cuda-quantum`` provides ``libcudaq-realtime`` (ring buffer helpers and the
+GPU dispatch kernels) and the GpuRoce bridge library.  The host dispatch loop
+that drives the predecoder graphs lives in cudaq-qec's
+``libcudaq-realtime-pipeline``.  ``holoscan-sensor-bridge`` provides the
+``GpuRoceTransceiver`` library for RDMA transport.
 
 .. note::
 
@@ -153,55 +157,37 @@ Building
 --------
 
 Building the FPGA demo requires ``holoscan-sensor-bridge`` and
-``libcudaq-realtime`` with HSB tools enabled.
+``libcudaq-realtime`` with HSB tools enabled.  The steps below are the ones
+cudaq-qec's CI runs (``.github/actions/build-lib/build_qec.sh``).  The
+``install_devdeps.sh`` script in the ``cuda-quantum`` realtime tree installs
+the DOCA GPUNetIO and Holoscan SDK packages with ``apt-get`` (it expects a
+host or container that already ships Mellanox OFED), then clones, patches
+and builds ``holoscan-sensor-bridge`` at branch ``EA_CUDAQ_10_26`` under
+``$HSB_ROOT``.
 
 .. code-block:: bash
 
-   # 1. Clone cuda-quantum (realtime)
+   # 1. Clone cuda-quantum (realtime) at the ref recorded in cudaq-qec/.cudaq_version
+   CUDAQ_REF=$(jq -r '.cudaq.ref' cudaq-qec/.cudaq_version)
    git clone --filter=blob:none --no-checkout \
      https://github.com/NVIDIA/cuda-quantum.git cudaq-realtime-src
    cd cudaq-realtime-src
    git sparse-checkout init --cone
-   git sparse-checkout set realtime
-   git checkout releases/v0.14.1
+   git sparse-checkout set realtime cmake
+   git checkout "$CUDAQ_REF"
    cd ..
 
-   # 2. Build holoscan-sensor-bridge (tag 2.6.0-EA2)
-   #    Requires cmake >= 3.30.4
-   git clone --branch 2.6.0-EA2 \
-     https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
-   cd holoscan-sensor-bridge
+   # 2. Install DOCA/Holoscan SDK and build holoscan-sensor-bridge (EA_CUDAQ_10_26)
+   export HSB_ROOT=/tmp/holoscan-sensor-bridge
+   bash cudaq-realtime-src/realtime/scripts/install_devdeps.sh
 
-   # Strip operators we don't need to avoid configure failures
-   sed -i '/add_subdirectory(audio_packetizer)/d; /add_subdirectory(compute_crc)/d;
-           /add_subdirectory(csi_to_bayer)/d; /add_subdirectory(image_processor)/d;
-           /add_subdirectory(iq_dec)/d; /add_subdirectory(iq_enc)/d;
-           /add_subdirectory(linux_coe_receiver)/d; /add_subdirectory(linux_receiver)/d;
-           /add_subdirectory(packed_format_converter)/d; /add_subdirectory(sub_frame_combiner)/d;
-           /add_subdirectory(udp_transmitter)/d; /add_subdirectory(emulator)/d;
-           /add_subdirectory(sig_gen)/d; /add_subdirectory(sig_viewer)/d' \
-     src/hololink/operators/CMakeLists.txt
-
-   mkdir -p build && cd build
-   cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
-     -DHOLOLINK_BUILD_ONLY_NATIVE=OFF \
-     -DHOLOLINK_BUILD_PYTHON=OFF \
-     -DHOLOLINK_BUILD_TESTS=OFF \
-     -DHOLOLINK_BUILD_TOOLS=OFF \
-     -DHOLOLINK_BUILD_EXAMPLES=OFF \
-     -DHOLOLINK_BUILD_EMULATOR=OFF ..
-   cmake --build . --target gpu_roce_transceiver hololink_core
-   cd ../..
-
-   # 3. Build libcudaq-realtime with HSB tools enabled
-   cd cudaq-realtime-src/realtime && mkdir -p build && cd build
-   cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime \
+   # 3. Build and install libcudaq-realtime with HSB tools enabled
+   cmake -S cudaq-realtime-src/realtime -B cudaq-realtime-src/realtime/build \
+     -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime \
      -DCUDAQ_REALTIME_ENABLE_HSB_TOOLS=ON \
-     -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=../../holoscan-sensor-bridge \
-     -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=../../holoscan-sensor-bridge/build \
-     ..
-   ninja && ninja install
-   cd ../../..
+     -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=$HSB_ROOT \
+     -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=$HSB_ROOT/build
+   cmake --build cudaq-realtime-src/realtime/build --target install
 
    # 4. Build cudaq-qec with HSB tools enabled
    cmake -S cudaq-qec -B cudaq-qec/build \
@@ -212,13 +198,21 @@ Building the FPGA demo requires ``holoscan-sensor-bridge`` and
      -DCUDAQX_ENABLE_LIBS="qec" \
      -DCUDAQX_INCLUDE_TESTS=ON \
      -DCUDAQX_QEC_ENABLE_HSB_TOOLS=ON \
-     -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/path/to/holoscan-sensor-bridge \
-     -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/path/to/holoscan-sensor-bridge/build
+     -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=$HSB_ROOT \
+     -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=$HSB_ROOT/build
    cmake --build cudaq-qec/build --target \
      gpu_roce_predecoder_bridge \
      hsb_fpga_syndrome_playback \
      cudaq-qec-pymatching
 
+.. note::
+
+   The ``gpu_roce_predecoder_bridge`` target is skipped with a CMake warning
+   (``gpu_roce_predecoder_bridge: skipped (missing deps)``) when the GpuRoce
+   bridge libraries from step 3, TensorRT, or the ``cudaq-realtime-pipeline``
+   library are not found.  Check the configure output of step 4 for that
+   warning, and for ``RealtimePipeline: building``, before building the
+   targets.
 
 Emulated End-to-End Test
 ------------------------
@@ -383,7 +377,8 @@ Key parameters for FPGA mode:
    * - ``--data-dir``
      - Path to syndrome data directory
    * - ``--page-size``
-     - Ring buffer slot size in bytes (auto-set per config by default)
+     - Ring buffer slot size in bytes (auto-set per config by default; at
+       least 512, the playback tool's minimum)
    * - ``--num-shots``
      - Number of syndrome shots to play back (limited by FPGA BRAM)
 
@@ -547,10 +542,11 @@ Run Options
      - Number of syndrome shots (limited by FPGA BRAM)
    * - ``--page-size N``
      - Per-config
-     - Ring buffer slot size in bytes
+     - Ring buffer slot size in bytes (at least 512)
    * - ``--num-pages N``
      - ``64``
-     - Number of ring buffer slots
+     - Number of ring buffer slots (power of two; also the pipeline ring
+       depth)
    * - ``--spacing N``
      - *(unset)*
      - Inter-shot spacing in microseconds

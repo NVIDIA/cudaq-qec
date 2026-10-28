@@ -11,10 +11,10 @@
 /// infrastructure to run AI pre-decoding and PyMatching on syndrome data
 /// arriving from an FPGA or emulator.
 ///
-/// GpuRoceTransceiver setup is extracted from bridge_run() (HOST_LOOP path).
-/// The ring buffer pointers from the transceiver are fed into realtime_pipeline
-/// via the external_ringbuffer mechanism, which avoids the double-dispatcher
-/// conflict that would arise from using bridge_run() directly.
+/// The transceiver's RX/TX rings are handed to realtime_pipeline as an
+/// external ring. The pipeline's own dispatcher thread polls rx_flags,
+/// launches the predecoder graphs and clears rx_flags; responses are written
+/// into the TX ring and the transceiver's TX kernel consumes tx_flags.
 
 #include "predecoder_pipeline_common.h"
 
@@ -109,7 +109,8 @@ int main(int argc, char *argv[]) {
           << "  --gpu=N               GPU device ID (default: 0)\n"
           << "  --timeout=N           Timeout in seconds (default: 60)\n"
           << "  --page-size=N         Ring buffer slot size (default: auto)\n"
-          << "  --num-pages=N         Ring buffer slots (default: 128)\n\n"
+          << "  --num-pages=N         Ring buffer slots (default: 128)\n"
+          << "                        Power of two; pipeline ring depth\n\n"
           << "Config overrides (applied after --config preset):\n"
           << "  --distance=N          QEC code distance\n"
           << "  --num-rounds=N        Syndrome measurement rounds\n"
@@ -120,6 +121,15 @@ int main(int argc, char *argv[]) {
           << "  --label=NAME          Config label for reports\n";
       return 0;
     }
+  }
+
+  // The transceiver's TX kernel indexes tx_flags with wqe_idx & (num_pages-1)
+  // and the pipeline ring has one slot per page, so num_pages must be a
+  // non-zero power of two.
+  if (num_pages == 0 || (num_pages & (num_pages - 1)) != 0) {
+    std::cerr << "ERROR: --num-pages must be a non-zero power of two (got "
+              << num_pages << ")" << std::endl;
+    return 1;
   }
 
   auto pcfg_opt = PipelineConfig::from_name(config_name);
@@ -264,6 +274,10 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  // Discrete-GPU hosts need the ring flags and data in CPU+GPU accessible
+  // memory: the pipeline's dispatcher, the CPU stage and the PyMatching
+  // threads read and write the rings from host threads. No-op on an
+  // integrated GPU, where the rings are already CPU-accessible.
   gpu_roce_set_cpu_ring_buffers(transceiver, 1);
 
   if (!gpu_roce_start(transceiver)) {
@@ -290,8 +304,12 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  // -- Build external cudaq_ringbuffer_t from GpuRoceTransceiver pointers
-  // --------------
+  // -- Build external cudaq_ringbuffer_t from GpuRoceTransceiver pointers --
+  // GpuRoce CPU_GPU allocations expose one address that is valid from both
+  // the CPU and the GPU, so the host views equal the device views. The RX and
+  // TX strides must equal the transceiver page size: the RX kernel publishes
+  // slot addresses at page_size intervals and the TX kernel sends from the
+  // page that holds the published address.
 
   cudaq_ringbuffer_t ext_rb{};
   ext_rb.rx_flags = reinterpret_cast<volatile uint64_t *>(rx_ring_flag);
@@ -311,8 +329,9 @@ int main(int argc, char *argv[]) {
 
   rt_pipeline::pipeline_stage_config stage_cfg;
   stage_cfg.num_workers = pcfg.num_workers;
-  stage_cfg.num_slots =
-      std::min(static_cast<size_t>(num_pages), static_cast<size_t>(NUM_SLOTS));
+  // One pipeline slot per transceiver page: the dispatcher's cursor must
+  // visit every page the RX kernel can publish.
+  stage_cfg.num_slots = static_cast<int>(num_pages);
   stage_cfg.slot_size = page_size;
   stage_cfg.cores = {.dispatcher = 2, .consumer = 4, .worker_base = 10};
   stage_cfg.external_ringbuffer = &ext_rb;
@@ -358,8 +377,8 @@ int main(int argc, char *argv[]) {
 
   // -- CPU stage callback ---
   pipeline.set_cpu_stage(
-      [&deferred_outputs, &pymatch_queue, out_sz = model_output_bytes](
-          const rt_pipeline::cpu_stage_context &ctx) -> size_t {
+      [&deferred_outputs, &pymatch_queue, out_sz = model_output_bytes, rb_bases,
+       page_size](const rt_pipeline::cpu_stage_context &ctx) -> size_t {
         auto *wctx = static_cast<WorkerCtx *>(ctx.user_context);
         auto *pd = wctx->predecoder;
 
@@ -375,14 +394,24 @@ int main(int argc, char *argv[]) {
 
         pd->release_job(job.slot_idx);
 
-        auto *rpc_hdr =
-            static_cast<const rt_sdk::RPCHeader *>(job.ring_buffer_ptr);
+        // Host view of the RX page that carried this request.
+        const uint8_t *slot_host = rb_bases.rx_data_host +
+                                   static_cast<size_t>(origin_slot) * page_size;
+        auto *rpc_hdr = reinterpret_cast<const rt_sdk::RPCHeader *>(slot_host);
         uint32_t rid = rpc_hdr->request_id;
+
+        // The TX ring is separate from the RX ring, so the response header
+        // does not inherit the request's identity: echo request_id and
+        // ptp_timestamp into the TX slot now, while the request header is
+        // still readable. The PyMatching thread fills in magic, status,
+        // result_len and the payload later.
+        auto *resp = static_cast<rt_sdk::RPCResponse *>(ctx.response_buffer);
+        resp->request_id = rpc_hdr->request_id;
+        resp->ptp_timestamp = rpc_hdr->ptp_timestamp;
 
         const uint8_t *pred_out = deferred_outputs[origin_slot].data();
         int input_nz = 0;
-        const uint8_t *inp = static_cast<const uint8_t *>(job.ring_buffer_ptr) +
-                             CUDAQ_RPC_HEADER_SIZE;
+        const uint8_t *inp = slot_host + CUDAQ_RPC_HEADER_SIZE;
         for (size_t k = 0; k < out_sz - 1; ++k)
           input_nz += (inp[k] != 0);
         int output_nz = 0;
@@ -395,13 +424,15 @@ int main(int argc, char *argv[]) {
                   << ", predecoder logical_pred=" << (int)pred_out[0]
                   << ", residual_nonzero=" << output_nz << std::endl;
 
-        pymatch_queue.push({origin_slot, rid, job.ring_buffer_ptr});
+        pymatch_queue.push({origin_slot, rid, ctx.response_buffer});
 
         NVTX_POP();
         return rt_pipeline::DEFERRED_COMPLETION;
       });
 
   // -- Completion handler ---
+  // Fires on the thread that publishes the response to the transport (the
+  // PyMatching thread calling complete_deferred); it only counts.
   std::atomic<uint64_t> n_completed{0};
   pipeline.set_completion_handler([&](const rt_pipeline::completion &c) {
     n_completed.fetch_add(1, std::memory_order_relaxed);
@@ -446,12 +477,17 @@ int main(int argc, char *argv[]) {
         auto decode_end = std::chrono::high_resolution_clock::now();
         NVTX_POP();
 
+        // The response lives in the TX ring: job.response_buffer is the TX
+        // slot for origin_slot and complete_deferred publishes its address.
+        // The transceiver's TX kernel sends (published_addr - tx_ring_base),
+        // so a response written anywhere else would not reach the wire.
+        // request_id and ptp_timestamp were echoed by the CPU stage.
         DecodeResponse resp{total_corrections, all_converged ? 1 : 0};
-        char *response_payload =
-            (char *)job.ring_buffer_ptr + sizeof(rt_sdk::RPCResponse);
+        char *response_payload = static_cast<char *>(job.response_buffer) +
+                                 sizeof(rt_sdk::RPCResponse);
         std::memcpy(response_payload, &resp, sizeof(resp));
 
-        auto *header = static_cast<rt_sdk::RPCResponse *>(job.ring_buffer_ptr);
+        auto *header = static_cast<rt_sdk::RPCResponse *>(job.response_buffer);
         header->magic = rt_sdk::RPC_MAGIC_RESPONSE;
         header->status = 0;
         header->result_len = sizeof(resp);

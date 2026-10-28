@@ -262,84 +262,68 @@ install(TARGETS cudaq-qec-realtime-decoding
 )
 
 # ---------------------------------------------------------------------------
-# RealtimePipeline shared library
-# Requires pre-installed cudaq-realtime (set CUDAQ_REALTIME_ROOT)
+# RealtimePipeline shared library (experimental)
 #
-# EXPERIMENTAL / temporarily disabled: realtime_pipeline.cu relies on host
-# dispatch API surface (skip_stream_sweep, caller-owned worker streams, and
-# per-worker pre/post-launch hooks) that was removed upstream in CUDA-Q PR4770
-# ("Split graph launch dispatch from the host ring loop").  Until it is ported
-# to the new graph_launch_engine API, keep this target off by default so CI
-# builds green.  Dependent unit tests (test_realtime_pipeline,
-# test_realtime_predecoder_w_pymatching, gpu_roce bridge) auto-skip when this
-# target does not exist.
+# realtime_pipeline.cu owns its host dispatch loop: it polls the ring buffer's
+# RX flags, launches the per-worker CUDA graphs and publishes the responses
+# itself.  From CUDA-Q it needs only libcudaq-realtime (the
+# cudaq_host_ringbuffer_* slot helpers) and the realtime headers (ring buffer
+# struct, RPC wire format) at or after the revision pinned in .cudaq_version.
+# Built by default whenever cudaq-realtime is found (set CUDAQ_REALTIME_ROOT);
+# set CUDAQX_QEC_ENABLE_REALTIME_PIPELINE=OFF to skip it.  Dependent unit tests
+# (test_realtime_pipeline, test_realtime_predecoder_w_pymatching, gpu_roce
+# bridge) are skipped when this target does not exist.
 # ---------------------------------------------------------------------------
 option(CUDAQX_QEC_ENABLE_REALTIME_PIPELINE
-  "Build the experimental cudaq-realtime-pipeline library (needs porting to \
-the post-PR4770 CUDA-Q graph_launch_engine API)" OFF)
+  "Build the experimental cudaq-realtime-pipeline library (requires cudaq-realtime)" ON)
 
 if(NOT CUDAQX_QEC_ENABLE_REALTIME_PIPELINE)
-  message(STATUS "RealtimePipeline: skipping (experimental; disabled by "
-                 "default -- set CUDAQX_QEC_ENABLE_REALTIME_PIPELINE=ON to build)")
-elseif(CMAKE_CUDA_COMPILER AND CUDAQ_REALTIME_INCLUDE_DIR)
-    cudaq_qec_find_realtime_library(_CUDAQ_RT_LIB
-      NAMES cudaq-realtime
-      PATH_SUFFIXES lib
-    )
-    cudaq_qec_find_realtime_library(_CUDAQ_RT_HD_LIB
-      NAMES cudaq-realtime-host-dispatch
-      PATH_SUFFIXES lib
-    )
+  message(STATUS "RealtimePipeline: skipping (CUDAQX_QEC_ENABLE_REALTIME_PIPELINE=OFF)")
+elseif(CMAKE_CUDA_COMPILER AND CUDAQ_REALTIME_INCLUDE_DIR AND CUDAQ_REALTIME_LIBRARY)
+  message(STATUS "RealtimePipeline: building with CUDAQ_REALTIME_INCLUDE_DIR=${CUDAQ_REALTIME_INCLUDE_DIR}")
 
-    if(_CUDAQ_RT_LIB AND _CUDAQ_RT_HD_LIB)
-      message(STATUS "RealtimePipeline: building with CUDAQ_REALTIME_INCLUDE_DIR=${CUDAQ_REALTIME_INCLUDE_DIR}")
+  add_library(cudaq-realtime-pipeline SHARED
+    realtime_pipeline.cu
+  )
 
-      add_library(cudaq-realtime-pipeline SHARED
-        realtime_pipeline.cu
-      )
+  get_filename_component(_cuda_bin_pl "${CMAKE_CUDA_COMPILER}" DIRECTORY)
+  get_filename_component(_cuda_root_pl "${_cuda_bin_pl}" DIRECTORY)
+  set(_cuda_cccl_include_pl "${_cuda_root_pl}/include/cccl")
 
-      get_filename_component(_cuda_bin_pl "${CMAKE_CUDA_COMPILER}" DIRECTORY)
-      get_filename_component(_cuda_root_pl "${_cuda_bin_pl}" DIRECTORY)
-      set(_cuda_cccl_include_pl "${_cuda_root_pl}/include/cccl")
+  target_include_directories(cudaq-realtime-pipeline
+    PUBLIC
+      $<BUILD_INTERFACE:${CUDAQX_QEC_INCLUDE_DIR}>
+      $<BUILD_INTERFACE:${CUDAQ_REALTIME_INCLUDE_DIR}>
+      $<BUILD_INTERFACE:${_cuda_cccl_include_pl}>
+      $<INSTALL_INTERFACE:include>
+  )
 
-      target_include_directories(cudaq-realtime-pipeline
-        PUBLIC
-          $<BUILD_INTERFACE:${CUDAQX_QEC_INCLUDE_DIR}>
-          $<BUILD_INTERFACE:${CUDAQ_REALTIME_INCLUDE_DIR}>
-          $<BUILD_INTERFACE:${_cuda_cccl_include_pl}>
-          $<INSTALL_INTERFACE:include>
-      )
+  target_link_libraries(cudaq-realtime-pipeline
+    PUBLIC CUDA::cudart_static
+    PRIVATE ${CUDAQ_REALTIME_LIBRARY}
+  )
 
-      target_link_libraries(cudaq-realtime-pipeline
-        PUBLIC CUDA::cudart_static
-        PRIVATE ${_CUDAQ_RT_LIB} ${_CUDAQ_RT_HD_LIB}
-      )
+  option(ENABLE_NVTX "Enable NVTX profiling ranges" OFF)
+  if(ENABLE_NVTX)
+    target_compile_definitions(cudaq-realtime-pipeline PRIVATE ENABLE_NVTX)
+    message(STATUS "NVTX profiling enabled for cudaq-realtime-pipeline")
+  endif()
 
-      option(ENABLE_NVTX "Enable NVTX profiling ranges" OFF)
-      if(ENABLE_NVTX)
-        target_compile_definitions(cudaq-realtime-pipeline PRIVATE ENABLE_NVTX)
-        message(STATUS "NVTX profiling enabled for cudaq-realtime-pipeline")
-      endif()
+  set_target_properties(cudaq-realtime-pipeline PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+    BUILD_RPATH "${_CUDAQ_REALTIME_LIB_DIR};${CMAKE_BINARY_DIR}/lib"
+    INSTALL_RPATH "${_CUDAQ_REALTIME_LIB_DIR};$ORIGIN")
 
-
-      get_filename_component(_CUDAQ_RT_LIB_DIR "${_CUDAQ_RT_LIB}" DIRECTORY)
-      set_target_properties(cudaq-realtime-pipeline PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        POSITION_INDEPENDENT_CODE ON
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
-        BUILD_RPATH "${_CUDAQ_RT_LIB_DIR};${CMAKE_BINARY_DIR}/lib"
-        INSTALL_RPATH "${_CUDAQ_RT_LIB_DIR};$ORIGIN")
-
-      install(TARGETS cudaq-realtime-pipeline
-        COMPONENT qec-lib
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-      )
-    else()
-      message(STATUS "RealtimePipeline: skipping (cudaq-realtime or cudaq-realtime-host-dispatch not found)")
-    endif()
+  install(TARGETS cudaq-realtime-pipeline
+    COMPONENT qec-lib
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
 else()
   if(CMAKE_CUDA_COMPILER)
-    message(STATUS "RealtimePipeline: skipping (CUDAQ_REALTIME_INCLUDE_DIR not set)")
+    message(STATUS "RealtimePipeline: skipping (cudaq-realtime headers or library "
+                   "not found; set CUDAQ_REALTIME_ROOT)")
   endif()
 endif()
 
