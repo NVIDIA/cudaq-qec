@@ -200,6 +200,7 @@ struct decoding_task_graph::impl::record_scheduler {
         dropped(owner.streaming_nodes.size()),
         wire_last(owner.streaming_value_wire_count, no_index),
         fire_inputs(owner.streaming_nodes.size()),
+        fire_entries(owner.streaming_nodes.size()),
         has_waiting_workers(owner.parallel_pool->num_threads() > 1) {
     const auto N = owner.nodes.size();
     const auto M = owner.streaming_nodes.size();
@@ -272,6 +273,7 @@ struct decoding_task_graph::impl::record_scheduler {
       // Instances live no further apart than the table holds; twice that
       // keeps every drop a delivery could still address.
       dropped[si].ring.assign(2 * capacity, no_index);
+      fire_entries[si].assign(copies, nullptr);
       fire_inputs[si].assign(copies,
                              std::vector<const edge_value *>(
                                  owner.node_input_counts[node_idx], nullptr));
@@ -1115,13 +1117,7 @@ struct decoding_task_graph::impl::record_scheduler {
     const auto si = event.node;
     const auto &node = owner.streaming_nodes[si];
     const auto replica = c.slots[id].pool_slot;
-    join_entry *entry_ptr;
-    {
-      // Another record's delivery may be growing the deque.
-      auto lock = lock_runtime();
-      entry_ptr = &joins[si][event.entry];
-    }
-    auto &entry = *entry_ptr;
+    auto &entry = *fire_entries[si][replica];
     auto &inputs = fire_inputs[si][replica];
     for (std::size_t i = 0; i < inputs.size(); ++i)
       inputs[i] =
@@ -1137,13 +1133,15 @@ struct decoding_task_graph::impl::record_scheduler {
       release_join_locked(si, entry);
       throw;
     }
-    {
-      auto lock = lock_runtime();
-      release_join_locked(si, entry);
-    }
-    // A failure the node reported takes the path of a thrown one.
-    if (const auto *failure = capability->fire_failure())
+    // A failure the node reported takes the path of a thrown one. Otherwise
+    // the entry is freed when the fire finishes, under that lock.
+    if (const auto *failure = capability->fire_failure()) {
+      {
+        auto lock = lock_runtime();
+        release_join_locked(si, entry);
+      }
       throw std::runtime_error(*failure);
+    }
     if (fired)
       (void)publish_all(c, id, event.root, si, capability, event.index);
     else
@@ -1355,6 +1353,9 @@ struct decoding_task_graph::impl::record_scheduler {
   void execute_loop(int cuda_device_id, Until &&until) {
     context *active_context = nullptr;
     std::size_t active_id = no_event;
+    // The event this worker ran last, finished under the next lock it takes.
+    context *done_context = nullptr;
+    std::size_t done_id = no_event;
     try {
       detail_affinity::CudaDeviceGuard device_guard(cuda_device_id);
       while (true) {
@@ -1363,6 +1364,10 @@ struct decoding_task_graph::impl::record_scheduler {
         graph_event event;
         {
           auto lock = lock_runtime();
+          if (done_context) {
+            finish_locked(*done_context, done_id);
+            done_context = nullptr;
+          }
           while (id == no_event) {
             if (stop) {
               if (running == 0)
@@ -1393,7 +1398,8 @@ struct decoding_task_graph::impl::record_scheduler {
         active_context = c;
         active_id = id;
         execute(*c, id, event);
-        finish(*c, id);
+        done_context = c;
+        done_id = id;
         active_context = nullptr;
         active_id = no_event;
       }
@@ -1627,6 +1633,7 @@ private:
       pool_free[si].pop_back();
       replica_busy[si][selected.pool_slot] = 1;
       selected.releases_pool = true;
+      fire_entries[si][selected.pool_slot] = &joins[si][selected.event.entry];
       ++running_fires;
       return;
     }
@@ -1789,8 +1796,15 @@ private:
       owner.wake_async_stream();
   }
 
-  void finish(context &c, std::size_t id) {
-    auto lock = lock_runtime();
+  // Finish event @p id, which ran to completion, freeing an indexed fire's
+  // join entry. Its worker calls this under the lock it takes to select its
+  // next event.
+  void finish_locked(context &c, std::size_t id) {
+    if (id < c.slots.size() && c.slots[id].running &&
+        c.slots[id].event.kind == graph_event_kind::streaming_indexed_fire) {
+      const auto si = c.slots[id].event.node;
+      release_join_locked(si, *fire_entries[si][c.slots[id].pool_slot]);
+    }
     if (stop) {
       if (id < c.slots.size() && c.slots[id].running) {
         c.slots[id].running = false;
@@ -2017,6 +2031,10 @@ public:
   }
   // Per-replica scratch for the input pointers handed to fire().
   std::vector<std::vector<std::vector<const edge_value *>>> fire_inputs;
+  // Per streaming node and copy: the join entry the copy's running fire
+  // reads, found when the fire is claimed. A deque keeps its entries in
+  // place as it grows, so the fire reads it without the lock.
+  std::vector<std::vector<join_entry *>> fire_entries;
   // Whether publication copies outputs into the record (several contexts,
   // or a fire pool).
   bool copy_outputs = false;
