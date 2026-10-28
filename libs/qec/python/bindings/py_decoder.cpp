@@ -32,6 +32,7 @@
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 #include <nanobind/trampoline.h>
+#include <thread>
 #include <unordered_map>
 
 namespace nb = nanobind;
@@ -219,7 +220,7 @@ nb::object makeOwnedNdarray(std::unique_ptr<T[]> data,
 
 nb::object decoderResultToNumpy(const std::vector<float_t> &result) {
   const auto num_elements = result.size();
-  auto data = std::make_unique<float_t[]>(num_elements);
+  auto data = std::make_unique_for_overwrite<float_t[]>(num_elements);
   std::copy(result.begin(), result.end(), data.get());
 
   size_t shape[1] = {num_elements};
@@ -245,16 +246,95 @@ nb::object decoderResultsToNumpy(const std::vector<decoder_result> &results) {
     }
   }
 
+  // The rows are copied once into the array handed to NumPy. The buffer is
+  // not zero-initialised (every element is written) and, for a large batch,
+  // the row copies are spread over a few host threads: at 16384 shots of a
+  // 67752-column code this is 8.9 GB of memory-bound work.
   const auto num_elements = num_results * result_size;
-  auto data = std::make_unique<float_t[]>(num_elements);
-
+  auto data = std::make_unique_for_overwrite<float_t[]>(num_elements);
   auto *out = data.get();
-  for (const auto &result : results) {
-    out = std::copy(result.result.begin(), result.result.end(), out);
+  auto copy_rows = [&](std::size_t lo, std::size_t hi) {
+    for (std::size_t i = lo; i < hi; ++i)
+      std::copy(results[i].result.begin(), results[i].result.end(),
+                out + i * result_size);
+  };
+  const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+  const std::size_t nthr =
+      num_elements >= (std::size_t{1} << 22) ? std::min(16u, hw) : 1u;
+  if (nthr <= 1) {
+    copy_rows(0, num_results);
+  } else {
+    std::vector<std::thread> pool;
+    pool.reserve(nthr);
+    for (std::size_t k = 0; k < nthr; ++k)
+      pool.emplace_back(copy_rows, num_results * k / nthr,
+                        num_results * (k + 1) / nthr);
+    for (auto &th : pool)
+      th.join();
   }
 
   size_t shape[2] = {num_results, result_size};
   return makeOwnedNdarray<float_t>(std::move(data), shape);
+}
+
+// Syndromes passed as a NumPy array (any numeric or bool dtype, any layout:
+// nanobind makes a C-contiguous copy when needed) are converted to the
+// decoder's vector form in one pass here. The generic std::vector caster
+// walks a NumPy array element by element through the sequence protocol, which
+// at 16384 x 1728 detectors costs about a second; this is a memory-bound
+// copy. Floating-point input is converted exactly, so soft syndromes are
+// preserved.
+template <typename T>
+void copySyndromeRows(const void *src, std::size_t rows, std::size_t cols,
+                      std::vector<std::vector<float_t>> &out) {
+  const auto *p = static_cast<const T *>(src);
+  out.resize(rows);
+  for (std::size_t i = 0; i < rows; ++i)
+    out[i].assign(p + i * cols, p + (i + 1) * cols);
+}
+
+std::vector<std::vector<float_t>>
+syndromesFromNdarray(const nb::ndarray<nb::ndim<2>, nb::c_contig> &a) {
+  std::vector<std::vector<float_t>> out;
+  const std::size_t rows = a.shape(0), cols = a.shape(1);
+  const auto dt = a.dtype();
+  if (dt == nb::dtype<uint8_t>())
+    copySyndromeRows<uint8_t>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<bool>())
+    copySyndromeRows<bool>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<int8_t>())
+    copySyndromeRows<int8_t>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<double>())
+    copySyndromeRows<double>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<float>())
+    copySyndromeRows<float>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<int32_t>())
+    copySyndromeRows<int32_t>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<int64_t>())
+    copySyndromeRows<int64_t>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<uint16_t>())
+    copySyndromeRows<uint16_t>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<int16_t>())
+    copySyndromeRows<int16_t>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<uint32_t>())
+    copySyndromeRows<uint32_t>(a.data(), rows, cols, out);
+  else if (dt == nb::dtype<uint64_t>())
+    copySyndromeRows<uint64_t>(a.data(), rows, cols, out);
+  else
+    throw nb::type_error("decode_batch: syndrome array must have a bool, "
+                         "integer or floating-point dtype");
+  return out;
+}
+
+std::vector<float_t>
+syndromeFromNdarray(const nb::ndarray<nb::ndim<1>, nb::c_contig> &a) {
+  // Reuse the 2-D conversion on a 1 x n view of the same buffer.
+  const std::size_t shape[2] = {1, a.shape(0)};
+  nb::ndarray<nb::ndim<2>, nb::c_contig> view(
+      const_cast<void *>(a.data()), 2, shape, nb::handle(), nullptr, a.dtype(),
+      a.device_type(), a.device_id());
+  auto rows = syndromesFromNdarray(view);
+  return std::move(rows.front());
 }
 
 nb::object
@@ -556,6 +636,14 @@ void bindDecoder(nb::module_ &mod) {
       )pbdoc")
       .def(
           "decode",
+          [](decoder &decoder,
+             const nb::ndarray<nb::ndim<1>, nb::c_contig> &syndrome) {
+            return decoder.decode(syndromeFromNdarray(syndrome));
+          },
+          "Decode the given syndrome to determine the error correction",
+          nb::arg("syndrome"))
+      .def(
+          "decode",
           [](decoder &decoder, const std::vector<float_t> &syndrome) {
             return decoder.decode(syndrome);
           },
@@ -573,6 +661,18 @@ void bindDecoder(nb::module_ &mod) {
           // The worker dereferences the decoder, and ~async_decoder_result
           // joins it before nanobind drops this reference.
           nb::keep_alive<0, 1>())
+      .def(
+          "decode_batch",
+          [](decoder &decoder,
+             const nb::ndarray<nb::ndim<2>, nb::c_contig> &syndrome) {
+            std::optional<cudaqx::heterogeneous_map> batch_opt_results;
+            auto results = decoder.decode_batch(syndromesFromNdarray(syndrome),
+                                                batch_opt_results);
+            return makeBatchDecoderResult(results, batch_opt_results);
+          },
+          "Decode multiple syndromes (a 2-D array, one syndrome per row) and "
+          "return the results",
+          nb::arg("syndrome"))
       .def(
           "decode_batch",
           [](decoder &decoder,
