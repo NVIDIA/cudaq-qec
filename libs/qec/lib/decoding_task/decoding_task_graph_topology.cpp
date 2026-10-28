@@ -803,10 +803,11 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
       new decoding_task_graph(std::move(i)));
 }
 
-// Each ingest node's windows are scheduled apart. Every copy of a node
-// builds a decoder for each variant of its layer, so a variant the shot uses
-// costs the node's copies; copies are built only for an asynchronous graph.
-// Validation built every variant into the store, which hashes each.
+// Each ingest node's windows are scheduled apart. A node's copies share one
+// core: the bulk variant has a decoder per copy, and every prefix or
+// terminal variant one, which a single window of the shot uses; copies are
+// built only for an asynchronous graph. Validation built every variant into
+// the store, which hashes each.
 window_schedule describe_schedule(std::vector<task_graph_node_config> nodes,
                                   std::vector<task_graph_edge> edges,
                                   const task_graph_options &options,
@@ -857,7 +858,9 @@ window_schedule describe_schedule(std::vector<task_graph_node_config> nodes,
       if (!counted)
         out.decoders.push_back(
             {window.node, window.variant,
-             options.async_streaming ? node->max_in_flight : std::size_t{1},
+             options.async_streaming && window.variant.bulk()
+                 ? node->max_in_flight
+                 : std::size_t{1},
              store.window_sha256(*context, layer_of(window.node),
                                  window.variant)});
       out.windows.push_back(std::move(window));

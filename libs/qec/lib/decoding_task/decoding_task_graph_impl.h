@@ -222,6 +222,9 @@ struct decoding_task_graph::impl {
   // was consumed: one-shot calls through the stream would discard it.
   // Atomic, as an overlapping enqueue sets it before it is rejected.
   std::atomic<bool> shot_open{false};
+  // A one-shot call through the stream is running: held for the whole call,
+  // as each step it takes guards only itself.
+  std::atomic<bool> one_shot_running{false};
   /// Whether every window reaching output @p k converged this shot.
   bool output_converged(std::size_t k) const;
   // Progress captured when the record being retired began.
@@ -321,9 +324,9 @@ struct decoding_task_graph::impl {
   void consume_streaming_result();
   void reset_streaming_progress();
   void fail_streaming_progress(const std::string &message);
-  /// Zero every value the result is composed from and latch @p message, so
-  /// nothing of the previous shot stays readable.
-  void hide_streaming_result(const std::string &message);
+  /// Zero every value the result is composed from and its coverage, and mark
+  /// it pending, so nothing of the previous shot stays readable.
+  void hide_streaming_result();
   void compose_streaming_values() const;
   void clear_latest_node_corrections();
 

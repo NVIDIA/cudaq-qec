@@ -131,6 +131,13 @@ bool decode_window_node::fire(std::int64_t k,
   offset_ = window.k - k;
   for (std::size_t s = 0; s < sends_.size(); ++s)
     copy_send(fired.sends[s], sends_[s].get<window_send_payload>());
+  // A prefix or terminal variant's results lie in its one workspace: a shot
+  // fires each such window once, so nothing rewrites them while they are
+  // copied, which this checks rather than assumes.
+  if (!core_->holds(fired))
+    throw std::logic_error("decode_window: window " + std::to_string(window.k) +
+                           "'s variant fired again in another slot while "
+                           "this fire's results were read");
   commit_ = {static_cast<std::uint64_t>(fired.commit.begin),
              static_cast<std::uint64_t>(fired.commit.end)};
   index_ = k;

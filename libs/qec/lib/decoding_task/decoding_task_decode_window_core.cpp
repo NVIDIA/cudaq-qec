@@ -181,7 +181,9 @@ decode_window_core::fire(std::size_t slot, const window_rows &window,
                              "'s variant is decoding in another slot; a "
                              "window fires into one slot at a time");
     claim.decoding = &decoding_[v].decoding;
+    out.ticket = decoding_[v].fires.fetch_add(1, std::memory_order_acq_rel) + 1;
   }
+  out.variant = v;
 
   out.fired = false;
   out.failure.clear();
@@ -240,6 +242,14 @@ void decode_window_core::reset(std::size_t slot) {
 const window_fire &decode_window_core::held(std::size_t slot) const {
   check_slot(slot);
   return fires_[slot].fire;
+}
+
+// A prefix or terminal variant's results are its one workspace's, which a
+// later claim of the variant rewrites.
+bool decode_window_core::holds(const window_fire &fire) const {
+  return variants_.at(fire.variant).key.bulk() ||
+         decoding_[fire.variant].fires.load(std::memory_order_acquire) ==
+             fire.ticket;
 }
 
 // In the request's order, which every fire's sends follow.

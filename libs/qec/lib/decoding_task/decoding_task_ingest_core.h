@@ -158,20 +158,20 @@ public:
   /// The rounds the ring holds, fixed at construction.
   std::size_t ring_rounds() const { return ring_mask_ + 1; }
   /// The first index any layer has a window at, fixed by the layout.
+  std::int64_t first_index() const {
+    return *std::min_element(first_k_.begin(), first_k_.end());
+  }
   /// The most indices one record can ready: a record holds at most a
   /// period of rounds, which completes at most two indices, while a FINAL
   /// record readies every index left in the ring.
+  std::size_t max_ready_per_record() const {
+    return ring_rounds() / static_cast<std::size_t>(period_) + 2;
+  }
   /// The most detector rows a window of layer @p l holds: its span in
   /// rounds, each of the widest rounds.
   std::size_t max_window_rows(std::size_t l) const {
     return static_cast<std::size_t>(spans_.at(l).end - spans_.at(l).begin) *
            max_rows_;
-  }
-  std::size_t max_ready_per_record() const {
-    return ring_rounds() / static_cast<std::size_t>(period_) + 2;
-  }
-  std::int64_t first_index() const {
-    return *std::min_element(first_k_.begin(), first_k_.end());
   }
 
   /// Start a new shot.

@@ -79,16 +79,19 @@ struct window_fire {
   /// Empty unless verify_residual fail rejected the solution: then why,
   /// naming the window and the first row where H e differs from d.
   std::string failure;
+  std::size_t variant = 0; ///< The variant's index in the core
+  /// A prefix or terminal variant's fire count at this fire: its results
+  /// hold while the count stays.
+  std::uint64_t ticket = 0;
 };
 
 /// Fires one layer's windows. Fires into different slots may run at once,
 /// each on its own thread: each slot has its own bulk decoder and buffers,
 /// and a prefix or terminal variant, which only one window of a shot uses,
 /// has a single decoder and buffers, so it fires into one slot at a time: a
-/// fire
-/// of a prefix or terminal variant while another decodes is rejected. While
-/// a slot fires, held() may read other slots, but nothing may read or fire
-/// that slot, and reset() may not run. A fire's sends are leased to the
+/// fire of a prefix or terminal variant while another decodes is rejected.
+/// While a slot fires, held() may read other slots, but nothing may read or
+/// fire that slot, and reset() may not run. A fire's sends are leased to the
 /// fires that receive them: its slot must not fire again until they have
 /// finished. The caller chooses the slots, so it knows which holds which
 /// window, and orders all of this. The copies of a decode_window_node, which
@@ -148,6 +151,10 @@ public:
   /// slot, so it may run while other slots fire.
   /// @throws std::invalid_argument if the slot does not exist.
   const window_fire &held(std::size_t slot) const;
+  /// Whether @p fire's detectors, solution and sends still hold: always for
+  /// the bulk, and for a prefix or terminal variant until it fires again,
+  /// in any slot. Reads no slot.
+  bool holds(const window_fire &fire) const;
   /// The index of send @p id among the request's sends.
   /// @throws std::invalid_argument if the request has no such send.
   std::size_t send_index(const std::string &id) const;
@@ -197,6 +204,7 @@ private:
   /// once.
   struct alignas(64) claim_flag {
     std::atomic<bool> decoding{false};
+    std::atomic<std::uint64_t> fires{0}; ///< Claims taken
   };
   std::unique_ptr<claim_flag[]> decoding_;
 };

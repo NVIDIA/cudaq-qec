@@ -37,6 +37,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <mutex>
@@ -12304,6 +12305,20 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     return node == failing_reset_;
   }
+  /// Run @p hook as each node resets, or nothing for an empty one.
+  void during_reset(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    reset_hook_ = std::move(hook);
+  }
+  void resetting() {
+    std::function<void()> hook;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      hook = reset_hook_;
+    }
+    if (hook)
+      hook();
+  }
 
   void record_pair(uint8_t a, uint8_t b) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -12340,6 +12355,7 @@ private:
   std::atomic<std::size_t> pool_high_water_{0};
   std::string blocked_node_;
   std::string failing_reset_;
+  std::function<void()> reset_hook_;
   std::size_t blocked_record_ = std::numeric_limits<std::size_t>::max();
   bool blocking_ = false;
   bool released_ = false;
@@ -12411,6 +12427,7 @@ public:
   const uint8_t *corrections() const override { return &correction_; }
   void clear_corrections() override { correction_ = 0; }
   void reset_streaming_state() override {
+    probe_->resetting();
     if (probe_->reset_fails(id_))
       throw std::runtime_error("probe node " + id_ + " failed to reset");
     correction_ = 0;
@@ -13464,6 +13481,39 @@ TEST(DecodingTaskGraph, FailedResetHidesTheResultUntilAResetSucceeds) {
     EXPECT_EQ(graph->streaming_result().values.at(0), 1);
   }
 } // end - TEST(DecodingTaskGraph, FailedResetHidesTheResultUntilAResetSucceeds)
+
+// While a reset that succeeds runs, an asynchronous graph's readers see the
+// result zeroed and pending, not failed: a reader polling during an ordinary
+// reset must not latch an error.
+TEST(DecodingTaskGraph, AResetThatSucceedsNeverReadsAsFailed) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  std::vector<task_graph_streaming_result> seen;
+  const uint8_t one = 1;
+  active_pipeline_probe = probe;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(pipeline_node("P", "pass"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "P", "input"},
+       {"P", "output", "output", "input"}},
+      {.async_streaming = true});
+  graph->enqueue_syndrome(&one, 1, round_type::FINAL);
+  ASSERT_EQ(graph->streaming_result().values.at(0), 1);
+  probe->during_reset([&] { seen.push_back(graph->streaming_result()); });
+  graph->reset_decoder();
+  probe->during_reset({});
+  ASSERT_FALSE(seen.empty());
+  for (const auto &result : seen) {
+    EXPECT_EQ(result.status, task_graph_streaming_status::pending)
+        << result.error;
+    EXPECT_TRUE(result.error.empty()) << result.error;
+    EXPECT_EQ(result.values.at(0), 0) << "a stale value is readable";
+    EXPECT_EQ(result.outputs.at(0).coverage_end_round, 0u);
+  }
+} // end - TEST(DecodingTaskGraph, AResetThatSucceedsNeverReadsAsFailed)
 
 // ---------------------------------------------------------------------------
 // Rendezvous joins

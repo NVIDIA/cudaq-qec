@@ -1327,16 +1327,23 @@ void decoding_task_graph::impl::fail_streaming_progress(
 
 // The composed values read the nodes' latest corrections and the stagers'
 // frames, so both are zeroed with the values themselves.
-void decoding_task_graph::impl::hide_streaming_result(
-    const std::string &message) {
+void decoding_task_graph::impl::hide_streaming_result() {
+  auto &result = streaming_result_state;
   clear_latest_node_corrections();
   for (auto &stager : output_stagers) {
     std::fill(stager.bits.begin(), stager.bits.end(), uint8_t{0});
     std::fill(stager.whole.begin(), stager.whole.end(), uint8_t{0});
   }
-  auto &values = streaming_result_state.values;
-  std::fill(values.begin(), values.end(), uint8_t{0});
-  fail_streaming_progress(message);
+  std::fill(result.values.begin(), result.values.end(), uint8_t{0});
+  result.status = task_graph_streaming_status::pending;
+  result.operation_completed = false;
+  result.error.clear();
+  for (auto &output : result.outputs) {
+    output.status = task_graph_streaming_status::pending;
+    output.coverage_begin_round = 0;
+    output.coverage_end_round = 0;
+  }
+  ++result.result_revision;
 }
 
 void decoding_task_graph::impl::clear_latest_node_corrections() {
@@ -1564,11 +1571,11 @@ void decoding_task_graph::reset_decoder() {
     std::lock_guard<std::mutex> lock(impl_->async_streaming.snapshot_mutex);
     impl_->async_streaming.read_snapshot = impl_->streaming_result_state;
   };
-  // Before any node resets, the previous result is marked failed and zeroed,
-  // and a clean epoch opens only once every node has reset: a reset that
-  // throws part-way leaves the graph failed, with nothing stale readable,
-  // until a later one succeeds.
-  impl_->hide_streaming_result("reset_decoder: the reset did not complete");
+  // Before any node resets, the previous result is zeroed and pending, and a
+  // clean epoch opens only once every node has reset: a reset that throws
+  // part-way leaves the graph failed, with nothing stale readable, until a
+  // later one succeeds. A reader during a reset that succeeds sees no error.
+  impl_->hide_streaming_result();
   impl_->async_streaming.needs_reset = true;
   publish_snapshot();
   try {
@@ -1685,32 +1692,54 @@ bool decoding_task_graph::impl::output_converged(std::size_t k) const {
 std::vector<logical_outcome>
 decoding_task_graph::run_streamed(const measurement_results &m,
                                   const char *who) const {
+  // Releases the call's claim however it ends.
+  struct one_shot_claim {
+    std::atomic<bool> &running;
+    ~one_shot_claim() { running.store(false, std::memory_order_release); }
+  };
   auto &self = const_cast<decoding_task_graph &>(*this);
   std::vector<logical_outcome> outcomes;
+  const auto record = std::max<std::size_t>(get_num_msyn_per_round(), 1);
+  const auto &bits = m.bits;
+  // Each step below guards only itself, so without the claim a second call
+  // could reset or enqueue into this one's shot.
+  if (impl_->one_shot_running.exchange(true, std::memory_order_acq_rel))
+    throw std::logic_error(std::string("decoding_task_graph::") + who +
+                           ": another one-shot call is running on this graph; "
+                           "wait for it to return");
+  const one_shot_claim claim{impl_->one_shot_running};
   if (impl_->shot_open)
     throw std::logic_error(
         std::string("decoding_task_graph::") + who +
         ": the graph runs a shot through its stream, which holds a shot in "
         "progress; finish it and clear_corrections(), or reset_decoder(), "
         "first");
-  self.reset_decoder();
-  const auto record = std::max<std::size_t>(get_num_msyn_per_round(), 1);
-  const auto &bits = m.bits;
-  for (std::size_t at = 0; at < bits.size(); at += record) {
-    const auto len = std::min(record, bits.size() - at);
-    self.enqueue_syndrome(bits.data() + at, len,
-                          at + len == bits.size() ? round_type::FINAL
-                                                  : round_type::BULK);
-  }
-  const auto &result = self.streaming_result();
-  for (std::size_t k = 0; k < result.outputs.size(); ++k) {
-    const auto &output = result.outputs[k];
-    auto &outcome = outcomes.emplace_back();
-    const auto first = result.values.begin() + output.value_offset;
-    outcome.bits.assign(first, first + output.value_width);
-    outcome.converged = impl_->output_converged(k);
-  }
-  self.reset_decoder();
+  try {
+    self.reset_decoder();
+    for (std::size_t at = 0; at < bits.size(); at += record) {
+      const auto len = std::min(record, bits.size() - at);
+      self.enqueue_syndrome(bits.data() + at, len,
+                            at + len == bits.size() ? round_type::FINAL
+                                                    : round_type::BULK);
+    }
+    const auto &result = self.streaming_result();
+    for (std::size_t k = 0; k < result.outputs.size(); ++k) {
+      const auto &output = result.outputs[k];
+      auto &outcome = outcomes.emplace_back();
+      const auto first = result.values.begin() + output.value_offset;
+      outcome.bits.assign(first, first + output.value_width);
+      outcome.converged = impl_->output_converged(k);
+    }
+    self.reset_decoder();
+  } catch (...) {
+    // A shot that failed is this call's own; leave the graph reset for the
+    // next, and report the failure, not the shot it left open.
+    try {
+      self.reset_decoder();
+    } catch (...) {
+    }
+    throw;
+  } // end - try
   return outcomes;
 } // end - run_streamed()
 

@@ -839,6 +839,9 @@ struct decoding_task_graph::impl::record_scheduler {
         if (join_grew[si] == join_growth::none)
           join_grew[si] = join_growth::unreported;
         add_join_entry(si);
+        // Live instances may now lie as far apart as the table holds, and
+        // the dropped ring covers twice that.
+        dropped[si].grow(2 * table.size());
       }
     }
     auto *entry = &table[index];
@@ -1022,7 +1025,15 @@ struct decoding_task_graph::impl::record_scheduler {
           entry.state[i] == join_entry::present ? &entry.inputs[i] : nullptr;
     auto *capability = node.replicas[replica];
     capability->clear_corrections(); // its corrections become this delta
-    const bool fired = node.indexed[replica]->fire(event.index, inputs);
+    bool fired = false;
+    try {
+      fired = node.indexed[replica]->fire(event.index, inputs);
+    } catch (...) {
+      // The entry is freed however the fire ends.
+      auto lock = lock_runtime();
+      release_join_locked(si, entry);
+      throw;
+    }
     {
       auto lock = lock_runtime();
       release_join_locked(si, entry);
@@ -1808,6 +1819,18 @@ public:
         ring[static_cast<std::size_t>(k) % ring.size()] = k;
     }
     void clear() { std::fill(ring.begin(), ring.end(), no_index); }
+    /// Hold @p size instances, keeping the drops held now. Two may share a
+    /// slot of the new size: re-added oldest first, the newer one keeps it.
+    void grow(std::size_t size) {
+      std::vector<std::int64_t> held;
+      for (const auto k : ring)
+        if (k != no_index)
+          held.push_back(k);
+      std::sort(held.begin(), held.end());
+      ring.assign(size, no_index);
+      for (const auto k : held)
+        add(k);
+    }
   };
   std::vector<dropped_instances> dropped;
   // The last index a record-ordered producer published on each value wire,

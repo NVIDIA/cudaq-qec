@@ -144,11 +144,12 @@ validate_window_topology(const std::vector<task_graph_node_config> &nodes,
 /// The windows a @p num_rounds round shot of a topology decodes, as
 /// from_topology() would build it with @p options: every ingest node's
 /// windows, scheduled apart, and the decoders each node builds per variant
-/// the shot uses, one per copy, as an asynchronous graph runs max_in_flight
-/// copies, with the sha256 of each variant and template, as the store
-/// records them. Lowers patterns and validates the windows as from_topology()
-/// does, but builds no node. Internal until cudaq-edem fixes what a window
-/// is; empty for a topology without windows.
+/// the shot uses: one per copy for the bulk, as an asynchronous graph runs
+/// max_in_flight copies, and one for each prefix or terminal variant, which
+/// the copies share; with the sha256 of each variant and template, as the
+/// store records them. Lowers patterns and validates the windows as
+/// from_topology() does, but builds no node. Internal until cudaq-edem fixes
+/// what a window is; empty for a topology without windows.
 /// @throws std::invalid_argument as from_topology() does for the layout, or
 /// if a template admits no shot of @p num_rounds rounds.
 window_schedule describe_schedule(std::vector<task_graph_node_config> nodes,

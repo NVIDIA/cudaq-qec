@@ -4396,8 +4396,9 @@ CUDAQ_EXT_PT_REGISTER_TYPE(gated_lut)
 
 // A prefix or terminal variant has one decoder, so a window fired into a
 // second slot while its first fire decodes is rejected, and that slot keeps
-// what it held; the first fire completes. A bulk window may fire into two
-// slots at once, each with its own decoder.
+// what it held; the first fire completes. Its results lie in the variant's
+// one workspace, so they hold until the variant fires again, in any slot.
+// A bulk window may fire into two slots at once, each with its own decoder.
 TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
   const auto spec = arbitrary_memory_spec(5);
   const auto g = parallel_graph(layered(2, 1, 3));
@@ -4464,8 +4465,13 @@ TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
   EXPECT_EQ(a.held(0).k, edge->k);
   EXPECT_TRUE(a.held(1).fired);
   EXPECT_EQ(a.held(1).k, bulk->k);
-  // Once the first fire is done, the window may fire again.
+  // Once the first fire is done, the window may fire again, and the first
+  // fire's results no longer hold.
+  EXPECT_TRUE(a.holds(a.held(0)));
+  EXPECT_TRUE(a.holds(a.held(1)));
   EXPECT_EQ(a.fire(1, rows_of(*edge), {}).k, edge->k);
+  EXPECT_FALSE(a.holds(a.held(0)));
+  EXPECT_TRUE(a.holds(a.held(1)));
 
   // Both fires of a bulk window reach their decoders at once.
   gated_lut::open = false;
@@ -6150,8 +6156,9 @@ TEST(WindowedGraph, StreamsThePatternAsTheReference) {
 // describe_schedule() of the pattern's topology lists exactly the
 // reference's windows at every shot length up to 30: each instance's node,
 // k, rounds, zones, ports and dependencies. Each node builds a decoder per
-// copy for every variant the shot uses: one copy synchronously, four with
-// max_in_flight 4 asynchronously. Each variant's and the template's sha256
+// copy for the bulk variant, one copy synchronously and four with
+// max_in_flight 4 asynchronously, and one for each prefix or terminal
+// variant, which its copies share. Each variant's and the template's sha256
 // is the one a store built from the same template and requests records, and
 // distinct variants have distinct hashes. A topology without windows lists
 // none.
@@ -6217,7 +6224,7 @@ TEST(WindowedGraph, DescribesItsSchedule) {
       for (const auto &d : schedule.decoders) {
         const auto &layer = d.node == "P.A" ? g.layers[0] : g.layers[1];
         EXPECT_TRUE(variants.count({d.node, d.variant})) << d.node;
-        EXPECT_EQ(d.decoders, copies) << d.node;
+        EXPECT_EQ(d.decoders, d.variant.bulk() ? copies : 1u) << d.node;
         EXPECT_EQ(d.sha256,
                   store.window_sha256(*context, layer.request, d.variant));
         EXPECT_TRUE(recorded("window", d.sha256)) << d.node;
@@ -6796,6 +6803,68 @@ TEST(WindowedGraph, AFailedDecodeSurfacesAndAResetRecovers) {
             reference.decode(shot).frame);
   jitter_lut::reset();
 } // end - TEST(WindowedGraph, AFailedDecodeSurfacesAndAResetRecovers)
+
+// One one-shot call runs on a graph at a time: while one decodes, another
+// is refused as concurrent, rather than its rounds mixed into the first's
+// stream; once the first returns, the next runs.
+TEST(WindowedGraph, OneShotCallsRunOneAtATime) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 2);
+  const measurement_results m{memory_measurements(tmpl, R, shot)};
+  const auto want = reference.decode(shot).frame;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 20000;
+  auto graph = load_graph(1, "jitter_lut", 2);
+  auto first = graph->run_async(m);
+  while (jitter_lut::running == 0 &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  ASSERT_GT(jitter_lut::running, 0u) << "the first call was not decoding";
+  try {
+    graph->run(m);
+    ADD_FAILURE() << "a concurrent one-shot call ran";
+  } catch (const std::logic_error &e) {
+    EXPECT_NE(std::string(e.what()).find("another one-shot call is running"),
+              std::string::npos)
+        << e.what();
+  }
+  jitter_lut::max_delay_us = 0;
+  EXPECT_EQ(first.get().bits, want);
+  EXPECT_EQ(graph->run(m).bits, want);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, OneShotCallsRunOneAtATime)
+
+// A one-shot call that fails mid-shot leaves the graph ready for the next:
+// a blind decoder under verify_residual fail rejects a shot with flips, and
+// a quiet shot then runs.
+TEST(WindowedGraph, AFailedOneShotLeavesTheGraphReady) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  auto params = load_params();
+  std::vector<task_graph_node_config> nodes;
+  params.insert("verify_residual", std::string("fail"));
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto flips = detectors_of(reference.model(), 3);
+  const std::vector<std::uint8_t> quiet(flips.size(), 0);
+  nodes.push_back(pattern_node(spec, params, 1, "blind_decoder"));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  EXPECT_THROW(
+      graph->run(measurement_results{memory_measurements(tmpl, R, flips)}),
+      std::runtime_error);
+  const auto ran =
+      graph->run(measurement_results{memory_measurements(tmpl, R, quiet)});
+  EXPECT_EQ(ran.bits,
+            std::vector<std::uint8_t>(graph->get_num_observables(), 0));
+} // end - TEST(WindowedGraph, AFailedOneShotLeavesTheGraphReady)
 
 // A solution verify_residual fail rejects is raised outside the fire, as a
 // failed decode is: synchronously and asynchronously, a blind decoder's

@@ -553,12 +553,13 @@ windowed graph is served with ``dispatch: host``: the decoding server refuses
 Configuring a windowed decoder that runs synchronously, that has no ``final``
 row, or that names ``device_graph`` logs a warning naming it.
 
-**Results.** Besides the corrections, a shot's result reports ``converged``,
-whether every window's decoder converged, and ``closure``, whether every
-window's solution was checked and held (``closed``), checked and failed
-(``open``), or not checked (``not_checked``). One-shot calls
-(``run``, ``run_all``, ``run_batch``, ``run_async``) stream the shot through
-the same windows.
+**Results.** Besides the corrections, a streaming result and each of its
+outputs report ``closure``: whether every window's solution was checked and
+held (``closed``), checked and failed (``open``), or not checked
+(``not_checked``). One-shot calls (``run``, ``run_all``, ``run_batch``,
+``run_async``) stream the shot through the same windows, and their
+``logical_outcome`` reports ``converged``: whether every window's decoder
+converged.
 
 Ensembles
 +++++++++
