@@ -364,6 +364,18 @@ void validate_configuration(const config::multi_decoder_config &value,
 
 } // namespace
 
+bool requires_graphlike_memory_model(const server_config_options &options) {
+  const auto &name = options.decoder;
+  if (name == "pymatching" || name == "nv-fusion-decoder")
+    return true;
+  if (name == "nv-qldpc-decoder" || name == "single_error_lut" ||
+      name == "multi_error_lut")
+    return false;
+  throw std::invalid_argument(
+      "no verified Surface Code parallel-window model profile for decoder '" +
+      name + "'");
+}
+
 std::optional<std::uint64_t>
 configured_worker_total(const server_config_options &options,
                         std::uint64_t logical_qubits) {
@@ -386,6 +398,7 @@ void validate_server_config_options(const server_config_options &options) {
     throw std::invalid_argument(
         "decoder is not registered in this QEC build: " + options.decoder);
   (void)pattern_arguments(options);
+  (void)requires_graphlike_memory_model(options);
   (void)decoder_arguments(options);
 }
 

@@ -425,6 +425,37 @@ class GeneratorCliTest(unittest.TestCase):
                 model = self.assert_server(document)
                 self.assertEqual(26 * model["measurements_per_round"] + 9, 217)
 
+    def test_model_factorization_follows_backend(self):
+
+        def maximum_fault_degree(model):
+            maximum = 0
+            for phase in model["phases"]:
+                spec = phase["spec"]
+                degree = [0] * spec["num_faults"]
+                for seam in spec["seam_specs"]:
+                    for column in seam["spec"]["H_sparse"]:
+                        if column >= 0:
+                            degree[column] += 1
+                maximum = max(maximum, *degree)
+            return maximum
+
+        _, lut = self.generate(decoder="multi_error_lut", rounds=6)
+        self.assertGreater(
+            maximum_fault_degree(self.assert_server(lut, rounds=6)), 2)
+        working = self.case_directory()
+        result = run_program(GENERATOR,
+                             *generation_options(decoder="pymatching",
+                                                 rounds=6),
+                             cwd=working)
+        if result.returncode != 0:
+            self.assertIn(
+                "decoder is not registered in this QEC build: "
+                "pymatching", result.stderr)
+            return
+        matching = yaml.safe_load((working / OUTPUT_FILENAME).read_text())
+        self.assertLessEqual(
+            maximum_fault_degree(self.assert_server(matching, rounds=6)), 2)
+
     def test_basis_case_is_normalized_and_other_basis_rejected(self):
         for basis in ("X", "Z"):
             with self.subTest(basis=basis.lower()):
@@ -651,28 +682,6 @@ class GeneratorCliTest(unittest.TestCase):
         self.assertIn("worker", result.stderr.lower())
         self.assertEqual(list(working.iterdir()), [])
 
-    def test_schema_typed_nested_decoder_arguments_are_preserved(self):
-        _, document = self.generate(
-            decoder="sliding_window",
-            extra=(
-                "--decoder-arg=inner_decoder_params.lut_error_depth=2",
-                "--decoder-arg=window_size=6",
-                "--decoder-arg=step_size=3",
-                "--decoder-arg=num_syndromes_per_round=8",
-                "--decoder-arg=num_boundary_syndromes=0",
-                "--decoder-arg=straddle_start_round=true",
-                "--decoder-arg=straddle_end_round=false",
-                "--decoder-arg=inner_decoder_name=multi_error_lut",
-            ))
-        self.assert_server(document)
-        inner = document["decoders"][0]["task_graph"]["nodes"][0]["inner"]
-        self.assertEqual(inner["type"], "sliding_window")
-        self.assertIs(type(inner["window_size"]), int)
-        self.assertIs(inner["straddle_start_round"], True)
-        self.assertIs(inner["straddle_end_round"], False)
-        self.assertEqual(inner["inner_decoder_name"], "multi_error_lut")
-        self.assertEqual(inner["inner_decoder_params"]["lut_error_depth"], 2)
-
     def test_pymatching_profile_default_and_explicit_policies_for_every_patch(
             self):
         for requested, expected in ((None, "smallest_weight"),
@@ -723,6 +732,16 @@ class GeneratorCliTest(unittest.TestCase):
         self.invoke(*generation_options(decoder="not_a_registered_decoder"),
                     cwd=working,
                     success=False)
+        self.assertEqual(list(working.iterdir()), [])
+
+    def test_incompatible_window_backend_fails_before_model_generation(self):
+        working = self.case_directory()
+        result = self.invoke(*generation_options(decoder="sliding_window"),
+                             "--decoder-arg=inner_decoder_name=multi_error_lut",
+                             cwd=working,
+                             success=False)
+        self.assertIn("no verified Surface Code parallel-window model profile",
+                      result.stderr)
         self.assertEqual(list(working.iterdir()), [])
 
 

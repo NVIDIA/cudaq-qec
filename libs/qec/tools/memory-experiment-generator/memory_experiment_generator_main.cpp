@@ -71,6 +71,8 @@ void usage() {
          "The parent must exist; an existing configuration is never replaced.\n"
          "Pass the generated path explicitly: decoding_server --config=PATH.\n"
          "Server execution requires parallel-window runtime support.\n"
+         "A/B model profiles: pymatching, nv-fusion-decoder,\n"
+         "nv-qldpc-decoder, single_error_lut, multi_error_lut.\n"
          "Pattern output defaults to corrections (logical correction bits).\n"
          "PyMatching uses merge_strategy=smallest_weight unless overridden.\n"
          "Pattern and decoder arguments use registered types and dotted "
@@ -172,6 +174,8 @@ int main(int argc, char **argv) {
     const auto total_workers =
         generator::configured_worker_total(options, spec.logical_qubits);
     generator::validate_server_config_options(options);
+    request.decompose_errors =
+        generator::requires_graphlike_memory_model(options);
     const auto output = std::filesystem::absolute(values.at("output"));
     if (std::filesystem::exists(std::filesystem::symlink_status(output)))
       throw std::invalid_argument("configuration already exists: " +

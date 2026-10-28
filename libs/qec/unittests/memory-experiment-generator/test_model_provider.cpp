@@ -51,9 +51,11 @@ canonical_faults(const detector_error_model &dem) {
 }
 
 void compare_with_full_circuit(std::uint64_t distance, memory_basis basis,
-                               std::uint64_t extraction_rounds = 26) {
-  const preparation_request request{
+                               std::uint64_t extraction_rounds = 26,
+                               bool decompose_errors = true) {
+  preparation_request request{
       {"surface_code", distance, extraction_rounds, 1, basis}};
+  request.decompose_errors = decompose_errors;
   const auto prepared = prepare_model(request);
   ASSERT_EQ(prepared.chunks.num_rounds, extraction_rounds + 1);
 
@@ -263,6 +265,17 @@ TEST(MemoryExperimentProvider, PyMatchingFaultFramesCommitReferenceWindows) {
 TEST(MemoryExperimentProvider, DistanceFiveMatchesCompleteMemoryCircuit) {
   compare_with_full_circuit(5, memory_basis::z);
   compare_with_full_circuit(5, memory_basis::x);
+}
+
+TEST(MemoryExperimentProvider,
+     UndecomposedHyperedgesMatchCompleteMemoryCircuit) {
+  for (const auto distance : {3, 5})
+    for (const auto basis : {memory_basis::x, memory_basis::z}) {
+      SCOPED_TRACE(distance);
+      SCOPED_TRACE(basis == memory_basis::x ? "X" : "Z");
+      compare_with_full_circuit(distance, basis, 6,
+                                /*decompose_errors=*/false);
+    }
 }
 
 TEST(MemoryExperimentProvider,

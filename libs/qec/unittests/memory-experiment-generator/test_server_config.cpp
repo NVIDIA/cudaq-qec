@@ -110,6 +110,26 @@ TEST(MemoryExperimentServerConfig, ConfiguredWorkerTotalIsExplicitAndChecked) {
   EXPECT_THROW(configured_worker_total(options, 2), std::overflow_error);
 }
 
+TEST(MemoryExperimentServerConfig, ModelDecompositionFollowsDirectDecoder) {
+  auto options = reference_options();
+  for (const auto *decoder :
+       {"single_error_lut", "multi_error_lut", "nv-qldpc-decoder"}) {
+    options.decoder = decoder;
+    EXPECT_FALSE(requires_graphlike_memory_model(options)) << decoder;
+  }
+  for (const auto *decoder : {"pymatching", "nv-fusion-decoder"}) {
+    options.decoder = decoder;
+    EXPECT_TRUE(requires_graphlike_memory_model(options)) << decoder;
+  }
+  for (const auto *decoder :
+       {"ising", "trt_decoder", "chromobius", "sliding_window"}) {
+    options.decoder = decoder;
+    EXPECT_THROW(requires_graphlike_memory_model(options),
+                 std::invalid_argument)
+        << decoder;
+  }
+}
+
 TEST(MemoryExperimentServerConfig, PublicSchemaChecksGeometryAndDecoderArgs) {
   auto options = reference_options();
   EXPECT_NO_THROW(validate_server_config_options(options));
@@ -308,15 +328,10 @@ TEST(MemoryExperimentServerConfig,
   }
 }
 
-TEST(MemoryExperimentServerConfig,
-     RealNestedDecoderSchemaDoesNotDependOnArgumentOrder) {
+TEST(MemoryExperimentServerConfig, NestedWindowDecoderIsNotAnABInnerBackend) {
   auto options = reference_options();
   options.decoder = "sliding_window";
-  options.decoder_args = {"inner_decoder_params.lut_error_depth=2",
-                          "straddle_start_round=true", "window_size=6",
-                          "step_size=3", "inner_decoder_name=multi_error_lut"};
-  EXPECT_NO_THROW(validate_server_config_options(options));
-  options.decoder_args.push_back("step_size=4");
+  options.decoder_args = {"inner_decoder_name=multi_error_lut"};
   EXPECT_THROW(validate_server_config_options(options), std::invalid_argument);
 }
 

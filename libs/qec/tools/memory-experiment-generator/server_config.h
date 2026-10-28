@@ -29,6 +29,11 @@ struct server_config_options {
   std::optional<std::uint64_t> workers_per_graph;
 };
 
+/// Select decomposition for a verified Surface Code model profile. Matching
+/// uses graphlike columns; BP and LUT retain joint hyperedges. Other model
+/// profiles need separate characterization and are not emitted by this tool.
+bool requires_graphlike_memory_model(const server_config_options &options);
+
 /// Checked total across independent patches, excluding coordinator threads.
 /// An unset per-graph count leaves the total unspecified. Validate before
 /// circuit preparation or allocating per-patch configuration entries.
