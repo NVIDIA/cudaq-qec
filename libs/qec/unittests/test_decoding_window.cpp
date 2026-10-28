@@ -6236,6 +6236,98 @@ TEST(WindowedGraph, ReportsTheShotsClosure) {
   }
 } // end - TEST(WindowedGraph, ReportsTheShotsClosure)
 
+// The one-shot paths run a windowed graph's shot through its stream: run,
+// run_all, run_batch and run_async give the reference's frame for single
+// faults at every shot length up to 24, synchronously and asynchronously
+// with four copies, report that every window converged, and leave the
+// graph reset for the next call or stream.
+TEST(WindowedGraph, RunsOneShotsThroughItsStream) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  const auto g = lowered_graph(spec, params);
+  task_graph_options async;
+  async.async_streaming = true;
+  for (const auto &[options, copies] :
+       {std::pair{task_graph_options{}, std::size_t{1}},
+        std::pair{async, std::size_t{4}}}) {
+    SCOPED_TRACE(std::to_string(copies) + " copies");
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pattern_node(spec, params, copies));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    for (auto R = tmpl.min_rounds(); R <= 24; ++R) {
+      SCOPED_TRACE("R=" + std::to_string(R));
+      parallel_window_reference reference(spec, g, R, "single_error_lut");
+      const auto &s = reference.model();
+      std::vector<measurement_results> shots;
+      std::vector<std::vector<std::uint8_t>> wants;
+      for (std::size_t c = R % 7; c < s.h.size(); c += 7) {
+        const auto detectors = detectors_of(s, c);
+        const measurement_results m{memory_measurements(tmpl, R, detectors)};
+        const auto want = reference.decode(detectors).frame;
+        const auto run = graph->run(m);
+        EXPECT_EQ(run.bits, want) << "column " << c;
+        EXPECT_TRUE(run.converged);
+        EXPECT_EQ(graph->run_all(m).at(0).bits, want) << "column " << c;
+        EXPECT_EQ(graph->run_async(m).get().bits, want) << "column " << c;
+        shots.push_back(m);
+        wants.push_back(want);
+      }
+      const auto batch = graph->run_batch(shots);
+      ASSERT_EQ(batch.size(), wants.size());
+      for (std::size_t i = 0; i < batch.size(); ++i)
+        EXPECT_EQ(batch[i].bits, wants[i]) << "shot " << i;
+      EXPECT_EQ(graph->streaming_result().generation, 0u);
+    } // end - for(R)
+  } // end - for(options, copies)
+} // end - TEST(WindowedGraph, RunsOneShotsThroughItsStream)
+
+// A one-shot call refuses while a streaming shot is open, or while a
+// completed shot is unread, rather than discard it, and runs once the
+// shot is consumed or the graph reset. converged is false when a window's
+// decoder did not converge.
+TEST(WindowedGraph, OneShotsWaitForAnOpenShot) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, params, 1, "blind_decoder"));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  const std::vector<std::uint8_t> quiet(tmpl.measurement_offset(R, R), 0);
+  const measurement_results m{quiet};
+  const auto refuses = [&] {
+    try {
+      graph->run(m);
+      ADD_FAILURE() << "a one-shot call discarded an open shot";
+    } catch (const std::logic_error &e) {
+      EXPECT_NE(std::string(e.what()).find("shot in progress"),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  graph->enqueue_syndrome(quiet.data(), 1, round_type::BULK);
+  refuses();
+  graph->reset_decoder();
+  EXPECT_TRUE(graph->run(m).converged);
+  stream_shot(*graph, quiet, graph->get_num_msyn_per_round());
+  refuses(); // complete, but not read and consumed
+  graph->clear_corrections();
+  blind_decoder::converges = false;
+  EXPECT_FALSE(graph->run(m).converged);
+  blind_decoder::converges = true;
+} // end - TEST(WindowedGraph, OneShotsWaitForAnOpenShot)
+
 // A decoder that counts its constructions and finds no fault.
 class counted_decoder final : public decoder {
 public:

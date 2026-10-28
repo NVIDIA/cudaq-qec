@@ -979,6 +979,7 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
       replica_ctx.shared = &shared;
       replicas.push_back((*factory)(replica_ctx));
     }
+    i->one_shot_streams = i->one_shot_streams || !node->has_one_shot_path();
     i->node_ids.push_back(cfg.id);
     i->nodes.push_back(std::move(node));
     i->node_replicas.push_back(std::move(replicas));

@@ -121,6 +121,8 @@ struct decoding_task_graph::impl::record_context {
   std::vector<std::uint32_t> node_published;
   // Each node's publications' closures in this record, combined.
   std::vector<std::optional<task_graph_closure>> node_closure;
+  // And whether each one's decoder converged.
+  std::vector<std::optional<bool>> node_converged;
   // Release accounting, indexed by streaming node: live events targeting
   // the node and whether this record has handed the node on.
   std::vector<std::uint32_t> node_live;
@@ -279,6 +281,7 @@ struct decoding_task_graph::impl::record_scheduler {
       c.pool_replica.assign(M, no_event);
       c.node_published.assign(M, 0);
       c.node_closure.assign(M, std::nullopt);
+      c.node_converged.assign(M, std::nullopt);
       c.node_live.assign(M, 0);
       c.node_released.assign(M, 0);
       for (std::size_t i = event_capacity; i-- > 0;)
@@ -333,6 +336,7 @@ struct decoding_task_graph::impl::record_scheduler {
     std::fill(c.pool_replica.begin(), c.pool_replica.end(), no_event);
     std::fill(c.node_published.begin(), c.node_published.end(), 0);
     std::fill(c.node_closure.begin(), c.node_closure.end(), std::nullopt);
+    std::fill(c.node_converged.begin(), c.node_converged.end(), std::nullopt);
     std::fill(c.node_live.begin(), c.node_live.end(), 0);
     std::fill(c.node_released.begin(), c.node_released.end(), 0);
     c.occupied = 0;
@@ -603,6 +607,9 @@ struct decoding_task_graph::impl::record_scheduler {
       ++c.node_published[producer];
       c.node_closure[producer] = combine_closure(
           c.node_closure[producer], capability->publication_closure());
+      if (const auto converged = capability->publication_converged())
+        c.node_converged[producer] =
+            c.node_converged[producer].value_or(true) && *converged;
     }
     // Copy outputs now: a later record may run the producer before the
     // consumer's delivery event executes. With one context none can, so the
@@ -1808,6 +1815,10 @@ void decoding_task_graph::impl::apply_record_context(record_context &c) {
     latest_node_closure[si] =
         combine_closure(latest_node_closure[si], c.node_closure[si]);
     c.node_closure[si].reset();
+    if (c.node_converged[si])
+      latest_node_converged[si] =
+          latest_node_converged[si].value_or(true) && *c.node_converged[si];
+    c.node_converged[si].reset();
   }
 }
 

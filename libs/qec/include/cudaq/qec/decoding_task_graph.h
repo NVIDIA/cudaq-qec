@@ -558,7 +558,15 @@ public:
 
   /// Walk the node/edge DAG for one shot: detect(m) then execute each node.
   ///
-  /// Does not touch the streaming accumulation buffer.
+  /// Does not touch the streaming accumulation buffer, except in a graph
+  /// whose nodes decode only a stream, such as a windowed one: that graph
+  /// runs the shot through its stream, from a reset graph, in rounds with
+  /// FINAL on the last, and leaves it reset. `converged` is then whether
+  /// every window reaching the output converged.
+  ///
+  /// @throws std::logic_error if such a graph holds a shot in progress, or a
+  /// completed shot not yet consumed with clear_corrections(): run() would
+  /// discard it.
   ///
   /// @throws std::logic_error if more than one edge reaches `output`: a
   /// multi-output program reduced to its first output is a different program,
@@ -652,6 +660,9 @@ private:
   /// Wraps a compiled impl. Only assemble() calls this, so no graph can reach a
   /// caller without having gone through compile_wires().
   explicit decoding_task_graph(std::unique_ptr<impl> i);
+  /// run_all() through the stream, for a graph whose nodes decode only one.
+  std::vector<logical_outcome> run_streamed(const measurement_results &m,
+                                            const char *who) const;
 
   /// Finish a hand-filled impl: compile its string edges to wires and wrap it.
   /// The one path every builder ends on.

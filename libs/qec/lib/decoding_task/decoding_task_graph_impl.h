@@ -204,6 +204,16 @@ struct decoding_task_graph::impl {
   // Each node's publications' closures this shot, combined; none before its
   // first window, or for a node that decodes none.
   std::vector<std::optional<task_graph_closure>> latest_node_closure;
+  // Each node's publications this shot: whether every one's decoder
+  // converged; none before its first window.
+  std::vector<std::optional<bool>> latest_node_converged;
+  // A node has no one-shot path, so one-shot calls run through the stream.
+  bool one_shot_streams = false;
+  // A record was enqueued since the last reset, or since a completed shot
+  // was consumed: one-shot calls through the stream would discard it.
+  bool shot_open = false;
+  /// Whether every window reaching output @p k converged this shot.
+  bool output_converged(std::size_t k) const;
   // Progress captured when the record being retired began.
   std::uint64_t retiring_generation = 0;
   std::uint64_t retiring_revision = 0;

@@ -146,6 +146,12 @@ decode_window_node::publication_closure() const {
   return closure_;
 }
 
+std::optional<bool> decode_window_node::publication_converged() const {
+  if (!published_)
+    return std::nullopt;
+  return frame_.get<logical_outcome>().converged;
+}
+
 // Input 0 is the window, which every instance has; receive i is input i + 1.
 bool decode_window_node::input_guaranteed(std::size_t slot,
                                           std::int64_t k) const {

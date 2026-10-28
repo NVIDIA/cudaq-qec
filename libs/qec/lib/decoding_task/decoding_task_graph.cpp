@@ -900,6 +900,7 @@ void decoding_task_graph::impl::compile_wires() {
           streaming_nodes[si].capability->num_observables(), 0);
     latest_node_coverage.assign(M, std::nullopt);
     latest_node_closure.assign(M, std::nullopt);
+    latest_node_converged.assign(M, std::nullopt);
     reset_streaming_progress();
   }
 
@@ -1162,9 +1163,13 @@ void decoding_task_graph::impl::consume_streaming_result() {
     return;
   }
   // Consuming a complete shot starts the next one, whose closure is its own.
-  if (result.status == task_graph_streaming_status::complete)
+  if (result.status == task_graph_streaming_status::complete) {
     std::fill(latest_node_closure.begin(), latest_node_closure.end(),
               std::nullopt);
+    std::fill(latest_node_converged.begin(), latest_node_converged.end(),
+              std::nullopt);
+    shot_open = false;
+  }
   result.status = task_graph_streaming_status::pending;
   for (std::size_t k = 0; k < result.outputs.size(); ++k) {
     auto &output = result.outputs[k];
@@ -1207,6 +1212,9 @@ void decoding_task_graph::impl::reset_streaming_progress() {
             std::nullopt);
   std::fill(latest_node_closure.begin(), latest_node_closure.end(),
             std::nullopt);
+  std::fill(latest_node_converged.begin(), latest_node_converged.end(),
+            std::nullopt);
+  shot_open = false;
   result.closure = task_graph_closure::not_checked;
   for (auto &output : result.outputs) {
     output.generation = 0;
@@ -1444,6 +1452,7 @@ bool decoding_task_graph::impl::finish_streaming_record() {
 // untagged round from BULK keeps its legacy fixed-length shot contract.
 bool decoding_task_graph::enqueue_syndrome(const uint8_t *syndrome,
                                            std::size_t len) {
+  impl_->shot_open = true;
   if (impl_->async_streaming.enabled)
     return impl_->enqueue_syndrome_async(syndrome, len, std::nullopt,
                                          cuda_device_id().value_or(-1));
@@ -1460,6 +1469,7 @@ bool decoding_task_graph::enqueue_syndrome(const uint8_t *syndrome,
   if (type == round_type::FINAL && len == 0)
     throw std::invalid_argument("decoding_task_graph: a FINAL round must "
                                 "carry the shot's final measurements");
+  impl_->shot_open = true;
   if (impl_->async_streaming.enabled)
     return impl_->enqueue_syndrome_async(syndrome, len, type,
                                          cuda_device_id().value_or(-1));
@@ -1650,7 +1660,57 @@ decoder *decoding_task_graph::inner_decoder() const {
 // One-shot and batch execution interface
 // ---------------------------------------------------------------------------
 
+// Absent windows contribute nothing, so an output no window reaches is
+// converged.
+bool decoding_task_graph::impl::output_converged(std::size_t k) const {
+  for (const auto si : output_streaming_nodes[k])
+    if (!latest_node_converged[si].value_or(true))
+      return false;
+  return true;
+}
+
+// A graph whose nodes decode only a stream runs a shot through it: from a
+// reset graph, in rounds with FINAL on the last, reading every output, and
+// leaving the graph reset. Each step is a public operation that guards
+// itself, as the asynchronous session holds the graph while it runs, so
+// this mutates the graph through its implementation alone.
+std::vector<logical_outcome>
+decoding_task_graph::run_streamed(const measurement_results &m,
+                                  const char *who) const {
+  auto &self = const_cast<decoding_task_graph &>(*this);
+  std::vector<logical_outcome> outcomes;
+  if (impl_->shot_open)
+    throw std::logic_error(
+        std::string("decoding_task_graph::") + who +
+        ": the graph runs a shot through its stream, which holds a shot in "
+        "progress; finish it and clear_corrections(), or reset_decoder(), "
+        "first");
+  self.reset_decoder();
+  const auto record = std::max<std::size_t>(get_num_msyn_per_round(), 1);
+  const auto &bits = m.bits;
+  for (std::size_t at = 0; at < bits.size(); at += record) {
+    const auto len = std::min(record, bits.size() - at);
+    self.enqueue_syndrome(bits.data() + at, len,
+                          at + len == bits.size() ? round_type::FINAL
+                                                  : round_type::BULK);
+  }
+  const auto &result = self.streaming_result();
+  for (std::size_t k = 0; k < result.outputs.size(); ++k) {
+    const auto &output = result.outputs[k];
+    auto &outcome = outcomes.emplace_back();
+    const auto first = result.values.begin() + output.value_offset;
+    outcome.bits.assign(first, first + output.value_width);
+    outcome.converged = impl_->output_converged(k);
+  }
+  self.reset_decoder();
+  return outcomes;
+} // end - run_streamed()
+
 logical_outcome decoding_task_graph::run(const measurement_results &m) const {
+  if (impl_->one_shot_streams) {
+    impl_->require_single_output("run");
+    return run_streamed(m, "run").at(0);
+  }
   const in_flight_guard guard(impl_->in_flight, "run");
   return impl_->run_dag(m, "run");
 }
@@ -1704,6 +1764,8 @@ logical_outcome decoding_task_graph::impl::run_dag(const measurement_results &m,
 
 std::vector<logical_outcome>
 decoding_task_graph::run_all(const measurement_results &m) const {
+  if (impl_->one_shot_streams)
+    return run_streamed(m, "run_all");
   const in_flight_guard guard(impl_->in_flight, "run_all");
   auto &g = *impl_;
   const auto &sink_wires = g.wires_to.back();
@@ -1727,6 +1789,11 @@ decoding_task_graph::run_async(const measurement_results &m) const {
   // The single-node fast path bypasses run_dag(), so validate before selecting
   // either path or arming the in-flight guard.
   impl_->require_single_output("run_async");
+  // Through the stream, on another thread; an asynchronous graph's session
+  // overlaps the shot's rounds.
+  if (impl_->one_shot_streams)
+    return std::async(std::launch::async,
+                      [this, m] { return run_streamed(m, "run_async").at(0); });
 
   // Held for the lifetime of the work, not of this call: the inner decode is
   // already on a worker thread by the time we return.
@@ -1754,6 +1821,13 @@ decoding_task_graph::run_async(const measurement_results &m) const {
 
 std::vector<logical_outcome> decoding_task_graph::run_batch(
     const std::vector<measurement_results> &shots) const {
+  if (impl_->one_shot_streams) {
+    std::vector<logical_outcome> results;
+    impl_->require_single_output("run_batch");
+    for (const auto &m : shots)
+      results.push_back(run_streamed(m, "run_batch").at(0));
+    return results;
+  }
   // One token for the whole batch, over the unguarded walk: a per-shot guard
   // would leave a detection gap between shots.
   const in_flight_guard guard(impl_->in_flight, "run_batch");

@@ -93,6 +93,9 @@ public:
   /// not_checked without verify_residual; else closed when the fire's
   /// solution satisfied its window and open when it did not (report).
   std::optional<task_graph_closure> publication_closure() const override;
+  /// The fire's decoder's convergence, while its publication stands.
+  std::optional<bool> publication_converged() const override;
+  bool has_one_shot_path() const override { return false; }
 
   /// @throws std::logic_error: the node joins by index; it has no one-shot
   /// path.

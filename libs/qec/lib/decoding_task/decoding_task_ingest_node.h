@@ -63,6 +63,7 @@ public:
   /// A shot's partial rounds and publications carry across deliveries, so
   /// copies would split one stream.
   bool supports_fire_pool() const override { return false; }
+  bool has_one_shot_path() const override { return false; }
 
   /// Take one chunk of a record; true when it readied a publication, which
   /// is then current.

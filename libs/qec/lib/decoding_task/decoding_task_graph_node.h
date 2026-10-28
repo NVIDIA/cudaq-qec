@@ -87,6 +87,12 @@ public:
   virtual std::optional<task_graph_closure> publication_closure() const {
     return std::nullopt;
   }
+  /// Whether the current publication's decoder converged; none for a node
+  /// that decodes no window. A one-shot call through the stream reports
+  /// whether every window reaching the output converged.
+  virtual std::optional<bool> publication_converged() const {
+    return std::nullopt;
+  }
   /// Opt-in: the node's inputs may arrive in any order. Sibling deliveries
   /// into a branch that reaches it then need not wait for one another, as
   /// they must when a shared descendant needs ordered delivery. Legal only
@@ -283,6 +289,9 @@ public:
   /// is never entered concurrently by two graph operations.
   virtual void execute_indexed(const std::vector<edge_value> &inputs,
                                std::vector<edge_value> &outputs) const = 0;
+  /// Whether execute_indexed() decodes a whole shot. A graph with a node
+  /// that cannot runs one-shot calls through its stream instead.
+  virtual bool has_one_shot_path() const { return true; }
 
   /// Input name declarations — used once at construction by compile_wires().
   virtual std::vector<std::string> inputs() const = 0;
