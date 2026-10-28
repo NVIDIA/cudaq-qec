@@ -14130,6 +14130,46 @@ TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer) {
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer)
 
+// An instance fires once, however its inputs are told absent: J[k] joins
+// T[k] with T[k - 1], so J[0]'s b is absent by its offset. T's first
+// publication carries T[0] for J[0]'s a and, on the other wire, the news
+// that its index -1 never comes, for J[0]'s b. Delivered after a, that news
+// must not fire J[0] again. Every instance fires exactly once,
+// synchronously and asynchronously.
+TEST(DecodingTaskGraph, IndexedJoinFiresEachInstanceOnce) {
+  ASSERT_TRUE(index_probe_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "asynchronous" : "synchronous");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    task_graph_options options;
+    options.async_streaming = async;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("J", "join"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"T", "output", "J", "b", /*index_offset=*/-1},
+         {"J", "output", "output", "input"}},
+        options);
+    const auto records = pipeline_records(4);
+    for (std::size_t i = 0; i < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1,
+                              i + 1 == records.size() ? round_type::FINAL
+                                                      : round_type::BULK);
+    const auto &result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+        << result.error;
+    auto fired = probe->records("J");
+    std::sort(fired.begin(), fired.end());
+    EXPECT_EQ(fired, (std::vector<std::size_t>{0, 1, 2, 3}));
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, IndexedJoinFiresEachInstanceOnce)
+
 TEST(DecodingTaskGraph, IndexedJoinHandlesManyInstancesPerRecord) {
   ASSERT_TRUE(index_probe_registered);
   auto probe = std::make_shared<pipeline_probe>();

@@ -717,13 +717,15 @@ struct decoding_task_graph::impl::record_scheduler {
         return;
       // A record-ordered producer publishes its indices in order, so the
       // ones between its last publication and this one never come: announce
-      // them, from the first the consumer reads, before the value itself.
+      // them, from index 0 or the one after its last, before the value
+      // itself. None is below 0: an instance reading one there already knows
+      // it absent from the wire's offset.
       if (!absent && index != no_index && indexed(consumer) && wire.id >= 0) {
         const auto producer =
             static_cast<std::size_t>(owner.streaming_by_node[wire.from_node]);
         auto &last = wire_last[static_cast<std::size_t>(wire.id)];
         if (!pooled(producer) && !indexed(producer)) {
-          const auto from = last == no_index ? wire.index_offset : last + 1;
+          const auto from = last == no_index ? 0 : last + 1;
           for (auto skipped = from; skipped < index; ++skipped)
             publish_wire_locked(c, parent, root, wire, skipped,
                                 /*absent=*/true);
@@ -868,8 +870,21 @@ struct decoding_task_graph::impl::record_scheduler {
                              std::to_string(node.node_index) + " input " +
                              std::to_string(slot) + " of instance " +
                              std::to_string(k) + " was delivered twice");
-    if (entry->state[slot] == join_entry::missing)
+    // An input already known absent changes nothing when told so again, and
+    // the delivery that completed the instance has queued its one fire;
+    // queuing another would fire it twice. A value for it is a producer
+    // publishing an index it said never comes.
+    if (entry->state[slot] == join_entry::absent) {
+      if (own.has_value)
+        throw std::logic_error(
+            "decoding_task_graph: node " + std::to_string(node.node_index) +
+            " input " + std::to_string(slot) + " of instance " +
+            std::to_string(k) + " was delivered after it was known absent");
+      if (!fresh || entry->pending != 0)
+        return;
+    } else {
       --entry->pending;
+    }
     if (own.has_value) {
       // The entry's old buffer, of this wire's type, goes back in the slot's
       // place, to be reused.
