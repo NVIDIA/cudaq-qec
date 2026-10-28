@@ -211,7 +211,7 @@ void check_pymatching_window(const decoding_window &window,
     EXPECT_EQ(decoded.result.size(), forms.h.num_cols());
     if (decoded.result.size() != forms.h.num_cols())
       return solution;
-    solution.estimate.assign(window.model.num_error_mechanisms(), 0);
+    solution.estimate.assign(forms.o.num_cols(), 0);
     for (std::size_t column = 0; column < decoded.result.size(); ++column) {
       EXPECT_TRUE(std::isfinite(decoded.result[column]));
       EXPECT_TRUE(decoded.result[column] == 0 || decoded.result[column] == 1);

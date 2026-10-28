@@ -4,8 +4,8 @@ This public tool prepares a bounded Surface Code model and writes one
 YAML file containing the framework's public `parallel_window`
 configuration. Experiment, decoder and pattern parameters are command-line
 inputs. The supported scope is Surface Code memory experiments with a requested
-finite horizon. Executable pattern support and its remaining executor
-integration are tracked in [PR #880](https://github.com/NVIDIA/cudaq-qec/pull/880).
+finite horizon. Executable pattern support and server integration are tracked
+in [PR #885](https://github.com/NVIDIA/cudaq-qec/pull/885).
 The framework owns A/B construction, fault ownership, routing and scheduling.
 
 A QEC build providing the public parallel-window configuration, named model
@@ -13,9 +13,40 @@ artifacts and terminal-readout metadata is required. The generator uses those
 APIs directly. **Parsing and configuration validation do not establish that
 the target runtime can execute the pattern.**
 
-## Build and run
+## Run in the decoding-server image
 
-In a full QEC build configured with CUDA-Q, Stim and realtime configuration:
+The decoding-server Docker image includes the compiled generator and its
+runtime dependencies. No source checkout, compiler or Python installation is
+needed to generate YAML. Inside the image:
+
+```sh
+memory-experiment-generator \
+  --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
+  --output=memory.yaml
+```
+
+To save the file on the host, bind an existing output directory into the
+container. Set `DECODING_IMAGE` to the decoding-server image tag for your CUDA
+version, then run from that directory:
+
+```sh
+docker run --rm --volume "$PWD:/configs" \
+  --entrypoint memory-experiment-generator "$DECODING_IMAGE" \
+  --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
+  --output=/configs/memory.yaml
+```
+
+Both executables are installed under `/opt/nvidia/cudaq-qec/bin`, on the image's
+`PATH`. The generator does not contact or start the server. After successful
+generation, give the same file to `decoding_server --config=PATH` in an image
+with executable parallel-window support. Official release archives omit both
+the standalone server and generator; use the decoding-server image for this
+workflow.
+
+### Building for development
+
+For library development, a full QEC build configured with CUDA-Q, Stim and
+realtime configuration also provides the tool:
 
 ```sh
 cmake --build build --target memory-experiment-generator
@@ -33,7 +64,7 @@ leaving its rule to the framework. The public pattern documents that rule as
 For a longer experiment with two independent patches:
 
 ```sh
-build/bin/memory-experiment-generator \
+memory-experiment-generator \
   --distance=5 --rounds=1000 --basis=X --logical-qubits=2 \
   --decoder=pymatching --output=long-memory.yaml
 ```
@@ -85,10 +116,10 @@ Once the target runtime supports the generated pattern, pass the file to the
 server explicitly. For example, with an existing destination directory:
 
 ```sh
-build/bin/memory-experiment-generator \
+memory-experiment-generator \
   --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
   --output=/path/to/configs/memory.yaml
-build/bin/decoding_server --config=/path/to/configs/memory.yaml
+decoding_server --config=/path/to/configs/memory.yaml
 ```
 
 The generator neither starts the server nor configures its transport. The

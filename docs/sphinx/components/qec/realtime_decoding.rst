@@ -61,14 +61,26 @@ Memory experiment configuration generator
 ``memory-experiment-generator`` prepares the model and writes one YAML file
 for a Surface Code memory experiment with a requested finite horizon using the
 public ``parallel_window`` configuration. It supports X/Z bases and independent
-logical patches. In a full QEC build with CUDA-Q, Stim and PyMatching:
+logical patches. The decoding-server Docker image includes the generator;
+there is no need to clone or build the library to generate a configuration.
+Inside the image, run:
 
 .. code-block:: bash
 
-   cmake --build build --target memory-experiment-generator
-   build/bin/memory-experiment-generator \
+   memory-experiment-generator \
      --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
      --output=memory.yaml
+
+To keep the YAML on the host, mount an existing output directory when starting
+the container. For example, with ``DECODING_IMAGE`` set to the decoding-server
+image tag for your CUDA version:
+
+.. code-block:: bash
+
+   docker run --rm --volume "$PWD:/configs" \
+     --entrypoint memory-experiment-generator "$DECODING_IMAGE" \
+     --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
+     --output=/configs/memory.yaml
 
 ``--rounds=T`` records ``dem_chunks.num_rounds=T+1``: T extraction cycles plus
 terminal data-qubit readout. At least four cycles and an odd distance of at least
@@ -98,9 +110,10 @@ partial output file, which must be removed before retrying.
    The target server must support executable parallel-window graphs.
    A server without that support reports
    ``the 'parallel_window' pattern is not available yet`` and exits with status
-   one. Official release archives currently omit both the standalone server and
-   generator. Build from a full QEC checkout for development; parsing the YAML
-   does not establish end-to-end decoding or performance.
+   one. Use an image containing executable parallel-window support. Official
+   release archives currently omit both the standalone server and generator;
+   use the decoding-server image instead. Parsing the YAML does not establish
+   end-to-end decoding or performance.
 
 See Also
 ^^^^^^^^
