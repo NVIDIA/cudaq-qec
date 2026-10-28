@@ -8,16 +8,21 @@
 // window rows, columns, ports, sends and measurement maps against a dense
 // slice of the whole shot; the window spec's nine-SEC example; the spec's
 // invalid constructions; the column-handling options and parallel-column
-// conflicts; variant keys and translation invariance; the kernel's forms;
-// the window schedule and commitment validation: row finalization (F1-F4)
-// checked against the built windows, each failure's own message, send and
-// receive matching, and ambiguous parallel commit columns; the serial
-// parallel-window reference: its windows match the schedule and its models
-// the production ones, single faults decode exactly, each send is needed,
-// sampled shots are sound and the production windows commit, send and
-// update the frame as it does, and the logical error rate tracks monolithic
-// matching; and the data artifact store: sha256, canonical content, shared
-// entries, templates as content, and lookups that never build.
+// conflicts; variant keys and translation invariance; the sparse model in
+// the kernel's forms, and a window whose dense model would take gigabytes
+// building in little memory; the window schedule and commitment validation:
+// row finalization (F1-F4) checked against the built windows, each failure's
+// own message, send and receive matching, and ambiguous parallel commit
+// columns; the serial parallel-window reference: its windows match the
+// schedule and its models the production ones, single faults decode exactly,
+// each send is needed, sampled shots are sound and the production windows
+// commit, send and update the frame as it does, the production windows,
+// received and decoded serially, decode as it does, and the logical error
+// rate tracks monolithic matching; receiving a send, a window with nothing
+// to decode, the decoder a window takes, and a decode step that allocates
+// nothing per shot; and the data artifact store: sha256, canonical
+// content, shared entries, templates as content, and lookups that never
+// build.
 
 #include "parallel_window_reference.h"
 #include "task_graph_test_fixtures.h"
@@ -32,11 +37,14 @@
 #include "cudaq/qec/pcm_utils.h"
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <numeric>
 #include <random>
 #include <set>
@@ -44,6 +52,69 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
+
+// Whether a sanitizer runs this build. Its allocator replaces operator new,
+// aborts on a refused allocation instead of returning null, and reserves
+// address space of its own.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define WINDOW_TESTS_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define WINDOW_TESTS_SANITIZED 1
+#endif
+#endif
+#ifndef WINDOW_TESTS_SANITIZED
+#define WINDOW_TESTS_SANITIZED 0
+#endif
+
+#if !WINDOW_TESTS_SANITIZED
+namespace {
+// This thread's allocations while counting_allocations is set, so a test can
+// check that a per-shot call allocates nothing.
+thread_local bool counting_allocations = false;
+thread_local std::size_t allocations_counted = 0;
+} // namespace
+
+// The global allocation functions, plain and aligned, counting; operator
+// new[] and the nothrow forms call these.
+void *operator new(std::size_t size) {
+  void *p = std::malloc(size == 0 ? 1 : size);
+  if (counting_allocations)
+    ++allocations_counted;
+  if (!p)
+    throw std::bad_alloc();
+  return p;
+}
+
+// aligned_alloc takes a size that is a whole number of alignments.
+void *operator new(std::size_t size, std::align_val_t align) {
+  const auto alignment = static_cast<std::size_t>(align);
+  const auto rounded =
+      (std::max(size, std::size_t{1}) + alignment - 1) / alignment * alignment;
+  void *p = std::aligned_alloc(alignment, rounded);
+  if (counting_allocations)
+    ++allocations_counted;
+  if (!p)
+    throw std::bad_alloc();
+  return p;
+}
+
+void operator delete(void *p) noexcept { std::free(p); }
+
+void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+
+void operator delete(void *p, std::align_val_t) noexcept { std::free(p); }
+
+void operator delete(void *p, std::size_t, std::align_val_t) noexcept {
+  std::free(p);
+}
+#endif
 
 namespace cudaq::qec {
 namespace {
@@ -372,11 +443,18 @@ std::vector<std::vector<uint8_t>> h_block(const whole_shot &s,
   return out;
 }
 
+// The window's model as dense matrices, H padded with the logical-error
+// columns it leaves out.
+detector_error_model dense(const decoding_window &w) {
+  return dense_model(w.model);
+}
+
 // Entries of the window model's H, for its rows and columns [begin, end).
 std::vector<std::vector<uint8_t>>
 window_h(const decoding_window &w, std::size_t col_begin, std::size_t col_end) {
   std::vector<std::vector<uint8_t>> out;
-  const auto &h = w.model.detector_error_matrix;
+  const auto model = dense(w);
+  const auto &h = model.detector_error_matrix;
   for (std::size_t r = 0; r < h.shape()[0]; ++r) {
     auto &line = out.emplace_back();
     for (auto c = col_begin; c < col_end; ++c)
@@ -407,6 +485,7 @@ TEST(DecodingWindow, MatchesTheWholeShot) {
         const auto instances = window_instances(request, R);
         for (auto k = instances.begin; k < instances.end; ++k) {
           const auto w = window_from_dem_chunks(tmpl, request, k, R);
+          const auto model = dense(w);
           auto rows = rows_of(shot, w.rounds);
           const auto imports = rows_of(shot, w.output.imports);
           SCOPED_TRACE("k=" + std::to_string(k));
@@ -419,9 +498,9 @@ TEST(DecodingWindow, MatchesTheWholeShot) {
                             shot.column[w.rounds.end]));
           for (std::size_t c = 0; c < w.num_fault_columns; ++c) {
             const auto shot_c = shot.column[w.rounds.begin] + c;
-            EXPECT_EQ(w.model.error_rates[c], shot.model.error_rates[shot_c]);
+            EXPECT_EQ(w.model.priors[c], shot.model.error_rates[shot_c]);
             for (std::size_t o = 0; o < tmpl->num_observables(); ++o)
-              EXPECT_EQ(w.model.observables_flips_matrix.at({o, c}),
+              EXPECT_EQ(model.observables_flips_matrix.at({o, c}),
                         shot.model.observables_flips_matrix.at({o, shot_c}));
           }
           EXPECT_EQ(w.commit_columns.begin,
@@ -463,8 +542,9 @@ TEST(DecodingWindow, OpenInputAddsBoundaryColumns) {
   const auto a = layered(2, 2, 3).a;
   const std::size_t R = 12;
   const auto w = window_from_dem_chunks(tmpl, a, 1, R);
-  const auto &h = w.model.detector_error_matrix;
-  const auto &o = w.model.observables_flips_matrix;
+  const auto model = dense(w);
+  const auto &h = model.detector_error_matrix;
+  const auto &o = model.observables_flips_matrix;
   const auto first = w.num_fault_columns;
   const auto seam = tmpl->row_offset(w.rounds.begin + 1, R) -
                     tmpl->row_offset(w.rounds.begin, R);
@@ -487,7 +567,7 @@ TEST(DecodingWindow, OpenInputAddsBoundaryColumns) {
       EXPECT_EQ(o.at({j, c}), j == i ? 1 : 0);
   }
   for (auto c = first; c < h.shape()[1]; ++c)
-    EXPECT_EQ(w.model.error_rates[c], 0.01);
+    EXPECT_EQ(w.model.priors[c], 0.01);
   EXPECT_LE(w.commit_columns.end, first);
 } // end - TEST(DecodingWindow, OpenInputAddsBoundaryColumns)
 
@@ -588,8 +668,9 @@ TEST(DecodingWindow, MatchesTheChunkAdapter) {
               w.input.exists && w.input.disposition == port_disposition::open;
           ASSERT_EQ(w.num_crossing_columns, 0u);
           const auto adapter = chunk_adapter(*tmpl, w.rounds, block, R);
-          const auto &h = w.model.detector_error_matrix;
-          const auto &o = w.model.observables_flips_matrix;
+          const auto model = dense(w);
+          const auto &h = model.detector_error_matrix;
+          const auto &o = model.observables_flips_matrix;
           const auto F = w.num_fault_columns;
           const auto V = w.num_virtual_outcome_columns;
           SCOPED_TRACE("k=" + std::to_string(k));
@@ -628,6 +709,7 @@ TEST(DecodingWindow, ClosedInputAndOpenOutputMatchGetPcmForRounds) {
   const auto instances = window_instances(request, R);
   for (auto k = instances.begin; k < instances.end; ++k) {
     const auto w = window_from_dem_chunks(tmpl, request, k, R);
+    const auto model = dense(w);
     const auto [pcm, first, last] = get_pcm_for_rounds(
         shot.model.detector_error_matrix, rep5_checks, w.rounds.begin,
         w.rounds.end - 1, false, w.output.exists);
@@ -636,7 +718,7 @@ TEST(DecodingWindow, ClosedInputAndOpenOutputMatchGetPcmForRounds) {
     ASSERT_EQ(pcm.shape()[1], w.num_fault_columns);
     for (std::size_t r = 0; r < pcm.shape()[0]; ++r)
       for (std::size_t c = 0; c < pcm.shape()[1]; ++c)
-        EXPECT_EQ(pcm.at({r, c}), w.model.detector_error_matrix.at({r, c}));
+        EXPECT_EQ(pcm.at({r, c}), model.detector_error_matrix.at({r, c}));
   } // end - for(k)
 } // end - TEST(DecodingWindow, ClosedInputAndOpenOutputMatchGetPcmForRounds)
 
@@ -717,8 +799,8 @@ TEST(DecodingWindow, NineSecExample) {
   EXPECT_GE(meas(6), w.commit_columns.begin);
   EXPECT_LT(meas(6), w.commit_columns.end);
 
-  std::vector<uint8_t> d(w.model.detector_error_matrix.shape()[0], 0);
-  std::vector<uint8_t> e(w.model.detector_error_matrix.shape()[1], 0);
+  std::vector<uint8_t> d(w.model.h.num_rows(), 0);
+  std::vector<uint8_t> e(w.model.o.num_cols(), 0);
   for (const std::int64_t sec : {3, 4, 6, 7})
     d[sec - w.rounds.begin] = 1;
   e[meas(3)] = e[meas(6)] = 1;
@@ -747,7 +829,8 @@ TEST(DecodingWindow, SendsMatchTheWholeShot) {
   const auto instances = window_instances(a, R);
   for (auto k = instances.begin; k < instances.end; ++k) {
     const auto w = window_from_dem_chunks(tmpl, a, k, R);
-    const auto &h = w.model.detector_error_matrix;
+    const auto model = dense(w);
+    const auto &h = model.detector_error_matrix;
     std::vector<uint8_t> d(h.shape()[0]);
     std::vector<uint8_t> e(h.shape()[1]);
     SCOPED_TRACE("k=" + std::to_string(k));
@@ -1071,8 +1154,9 @@ dem_chunks_spec duplicate_columns_spec() {
 std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
 column_of(const decoding_window &w, std::size_t c) {
   std::pair<std::vector<uint8_t>, std::vector<uint8_t>> out;
-  const auto &h = w.model.detector_error_matrix;
-  const auto &o = w.model.observables_flips_matrix;
+  const auto model = dense(w);
+  const auto &h = model.detector_error_matrix;
+  const auto &o = model.observables_flips_matrix;
   for (std::size_t r = 0; r < h.shape()[0]; ++r)
     out.first.push_back(h.at({r, c}));
   for (std::size_t i = 0; i < o.shape()[0]; ++i)
@@ -1121,12 +1205,11 @@ TEST(DecodingWindowColumns, MergeIdenticalMergesWithinAZone) {
       ++seen[source];
       EXPECT_EQ(column_of(w, c), column_of(plain, source)) << c;
       EXPECT_EQ(zone_of(plain, source, 8), zone_of(plain, sources[0], 8));
-      EXPECT_LE(plain.model.error_rates[source],
-                plain.model.error_rates[sources[0]]);
-      prior = prior + plain.model.error_rates[source] -
-              2 * prior * plain.model.error_rates[source];
+      EXPECT_LE(plain.model.priors[source], plain.model.priors[sources[0]]);
+      prior = prior + plain.model.priors[source] -
+              2 * prior * plain.model.priors[source];
     }
-    EXPECT_NEAR(w.model.error_rates[c], prior, 1e-12);
+    EXPECT_NEAR(w.model.priors[c], prior, 1e-12);
     const bool in_commit = zone_of(plain, sources[0], 8) == 0;
     EXPECT_EQ(in_commit,
               c >= w.commit_columns.begin && c < w.commit_columns.end);
@@ -1135,8 +1218,7 @@ TEST(DecodingWindowColumns, MergeIdenticalMergesWithinAZone) {
   // The commit zone's first chunk: 0 and 1 merge, reported against 1.
   const auto merged = w.commit_columns.begin;
   EXPECT_EQ(w.fault_column_sources[merged], (std::vector<std::size_t>{17, 16}));
-  EXPECT_NEAR(w.model.error_rates[merged], 0.01 + 0.02 - 2 * 0.01 * 0.02,
-              1e-12);
+  EXPECT_NEAR(w.model.priors[merged], 0.01 + 0.02 - 2 * 0.01 * 0.02, 1e-12);
   // In the last chunk, 4 and 5 agree inside the window; round 9 differs.
   EXPECT_EQ(column_of(plain, 44), column_of(plain, 45));
   for (const auto &sources : w.fault_column_sources)
@@ -1178,7 +1260,7 @@ TEST(DecodingWindowColumns, MostLikelyKeepsTheMoreLikelyResponse) {
     EXPECT_EQ(w.fault_column_sources[c],
               (std::vector<std::size_t>{reported, 18 + 19 - reported}));
     EXPECT_EQ(column_of(w, c), column_of(plain, reported));
-    EXPECT_NEAR(w.model.error_rates[c], prior, 1e-12);
+    EXPECT_NEAR(w.model.priors[c], prior, 1e-12);
     EXPECT_EQ(w.fault_column_sources[w.commit_columns.begin],
               (std::vector<std::size_t>{16}));
   };
@@ -1227,7 +1309,7 @@ TEST(DecodingWindowColumns, MostLikelyWeighsEachEffectsFaultsTogether) {
   const double x = 0.01 + 0.01 - 2 * 0.01 * 0.01;
   EXPECT_EQ(*merged, (std::vector<std::size_t>{20, 26, 21}));
   EXPECT_EQ(column_of(w, c), column_of(plain, 20));
-  EXPECT_NEAR(w.model.error_rates[c], x + 0.015 - 2 * x * 0.015, 1e-12);
+  EXPECT_NEAR(w.model.priors[c], x + 0.015 - 2 * x * 0.015, 1e-12);
 } // end - TEST(DecodingWindowColumns,
   // MostLikelyWeighsEachEffectsFaultsTogether)
 
@@ -1298,6 +1380,7 @@ TEST(DecodingWindowColumns, TruncateMatchesGetPcmForRounds) {
   const auto instances = window_instances(request, R);
   for (auto k = instances.begin; k < instances.end; ++k) {
     const auto w = window_from_dem_chunks(tmpl, request, k, R);
+    const auto model = dense(w);
     const auto [pcm, first, last] = get_pcm_for_rounds(
         shot.model.detector_error_matrix, rep5_checks, w.rounds.begin,
         w.rounds.end - 1, true, w.output.exists);
@@ -1311,12 +1394,12 @@ TEST(DecodingWindowColumns, TruncateMatchesGetPcmForRounds) {
     // get_pcm_for_rounds() keeps shot order: the crossing columns first.
     for (std::size_t r = 0; r < pcm.shape()[0]; ++r) {
       for (std::size_t c = 0; c < C; ++c)
-        EXPECT_EQ(pcm.at({r, c}), w.model.detector_error_matrix.at({r, F + c}));
+        EXPECT_EQ(pcm.at({r, c}), model.detector_error_matrix.at({r, F + c}));
       for (std::size_t c = 0; c < F; ++c)
-        EXPECT_EQ(pcm.at({r, C + c}), w.model.detector_error_matrix.at({r, c}));
+        EXPECT_EQ(pcm.at({r, C + c}), model.detector_error_matrix.at({r, c}));
     }
     for (std::size_t c = 0; c < C; ++c)
-      EXPECT_EQ(w.model.error_rates[F + c],
+      EXPECT_EQ(w.model.priors[F + c],
                 shot.model.error_rates[shot.column[w.rounds.begin - 1] + c]);
     EXPECT_LE(w.commit_columns.end, F);
   } // end - for(k)
@@ -1441,9 +1524,10 @@ TEST(WindowVariants, BulkWindowsAreTranslationInvariant) {
       "windows 1 and 2 differ in their input port");
 } // end - TEST(WindowVariants, BulkWindowsAreTranslationInvariant)
 
-// The kernel's forms: H over the decoder's columns as canonical CSC, O and
-// the priors over every column; converting back loses nothing.
-TEST(WindowKernelForms, RoundTripWithoutLoss) {
+// The model is in the kernel's forms: H over the decoder's columns and O
+// over every column, both canonical CSC, and a prior per column. The dense
+// view pads H with the logical-error columns, which touch no detector.
+TEST(WindowModel, HoldsTheKernelForms) {
   const auto tmpl =
       std::make_shared<const experiment_template>(narrow_readout_spec());
   auto request = layered(2, 2, 3).a;
@@ -1452,22 +1536,98 @@ TEST(WindowKernelForms, RoundTripWithoutLoss) {
       request.input = {port_disposition::open, std::nullopt,
                        input_boundary::truncate};
     const auto w = window_from_dem_chunks(tmpl, request, 1, 14);
-    const auto forms = kernel_forms(w);
-    const auto back = model_from_kernel_forms(forms);
-    const auto csc = forms.h.to_nested_csc();
-    EXPECT_EQ(forms.h.num_cols(), w.num_decoder_columns());
-    EXPECT_EQ(forms.o.num_cols(), w.model.num_error_mechanisms());
-    for (const auto &column : csc)
-      EXPECT_TRUE(std::is_sorted(column.begin(), column.end()));
-    EXPECT_EQ(back.error_rates, w.model.error_rates);
-    ASSERT_EQ(back.detector_error_matrix.shape(),
-              w.model.detector_error_matrix.shape());
-    ASSERT_EQ(back.observables_flips_matrix.shape(),
-              w.model.observables_flips_matrix.shape());
-    for (std::size_t c = 0; c < w.model.num_error_mechanisms(); ++c)
-      EXPECT_EQ(column_of(w, c), column_of(decoding_window{.model = back}, c));
+    const auto model = dense(w);
+    const auto total = w.num_decoder_columns() + w.num_logical_error_columns;
+    const std::vector<std::size_t> shape{w.model.h.num_rows(), total};
+    SCOPED_TRACE(truncate ? "truncate" : "columns");
+    EXPECT_EQ(w.num_logical_error_columns, truncate ? 0u : 1u);
+    EXPECT_EQ(w.model.h.layout(), sparse_binary_matrix_layout::csc);
+    EXPECT_EQ(w.model.o.layout(), sparse_binary_matrix_layout::csc);
+    EXPECT_NO_THROW(w.model.h.validate_sorted_unique_indices());
+    EXPECT_NO_THROW(w.model.o.validate_sorted_unique_indices());
+    EXPECT_EQ(w.model.h.num_cols(), w.num_decoder_columns());
+    EXPECT_EQ(w.model.o.num_cols(), total);
+    EXPECT_EQ(w.model.priors.size(), total);
+    ASSERT_EQ(model.detector_error_matrix.shape(), shape);
+    EXPECT_EQ(model.error_rates, w.model.priors);
+    for (std::size_t r = 0; r < shape[0]; ++r)
+      for (auto c = w.num_decoder_columns(); c < total; ++c)
+        EXPECT_EQ(model.detector_error_matrix.at({r, c}), 0);
   } // end - for(truncate)
-} // end - TEST(WindowKernelForms, RoundTripWithoutLoss)
+} // end - TEST(WindowModel, HoldsTheKernelForms)
+
+// The large-window test caps its own address space, which needs Linux's
+// /proc to measure what the process already maps.
+#if defined(__linux__)
+
+// A capped address space proves nothing under a sanitizer, whose allocator
+// aborts on a refused allocation and reserves address space of its own.
+constexpr bool sanitized = WINDOW_TESTS_SANITIZED;
+
+// A repetition-code memory over n bits: n - 1 detectors a round.
+dem_chunks_spec repetition_memory_spec(std::size_t n) {
+  using index = sparse_binary_matrix::index_type;
+  std::vector<std::vector<index>> checks(n - 1);
+  for (std::size_t i = 0; i + 1 < n; ++i)
+    checks[i] = {static_cast<index>(i), static_cast<index>(i + 1)};
+  const auto hz = sparse_binary_matrix::from_nested_csr(
+      static_cast<index>(n - 1), static_cast<index>(n), checks);
+  const auto lz =
+      sparse_binary_matrix::from_nested_csr(1, static_cast<index>(n), {{0}});
+  return phenomenological_memory_spec(hz, lz, 0.01, 0.01);
+}
+
+// Bytes of address space the process maps.
+std::size_t mapped_bytes() {
+  std::ifstream statm("/proc/self/statm");
+  std::size_t pages = 0;
+  statm >> pages;
+  return pages * static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+}
+
+// An A window over a 3000-bit repetition memory: 10 rounds of 2999 rows and
+// 5999 fault columns, then 2999 boundary columns and 1 logical-error column.
+// That is about 2 GB as a dense H and a few megabytes sparse, and it builds
+// within a little address space beyond what the process maps. The child
+// lowers only its soft limit, which needs no privilege, and proves the limit
+// refuses a dense H before building, by reserving that much address space:
+// an mmap the compiler cannot remove, as it may an unused malloc. Its exit
+// code says which step failed: 1 the shape, 2 setting the limit, 3 a limit
+// that admits the dense H.
+TEST(DecodingWindowDeathTest, BuildsLargeWindowsSparsely) {
+  if (sanitized)
+    GTEST_SKIP() << "a sanitizer's allocator aborts on a refused allocation";
+  constexpr std::size_t bits = 3000;          // 2999 detectors a round
+  constexpr std::size_t headroom = 256 << 20; // under a seventh of dense H
+  constexpr std::size_t rows = 10 * (bits - 1);
+  constexpr std::size_t columns = 10 * (2 * bits - 1) + bits;
+  const auto tmpl =
+      std::make_shared<const experiment_template>(repetition_memory_spec(bits));
+  const auto request = layered(4, 3, 6).a;
+  const auto build = [&] {
+    rlimit limit{};
+    void *dense = MAP_FAILED;
+    if (getrlimit(RLIMIT_AS, &limit) != 0)
+      std::exit(2);
+    limit.rlim_cur =
+        std::min<rlim_t>(mapped_bytes() + headroom, limit.rlim_max);
+    if (setrlimit(RLIMIT_AS, &limit) != 0)
+      std::exit(2);
+    dense = mmap(nullptr, rows * columns, PROT_NONE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (dense != MAP_FAILED) {
+      munmap(dense, rows * columns);
+      std::exit(3);
+    }
+    const auto w = window_from_dem_chunks(tmpl, request, 1, 40);
+    std::exit(w.model.h.num_rows() == rows && w.model.o.num_cols() == columns
+                  ? 0
+                  : 1);
+  };
+  EXPECT_EXIT(build(), testing::ExitedWithCode(0), "");
+} // end - TEST(DecodingWindowDeathTest, BuildsLargeWindowsSparsely)
+
+#endif // defined(__linux__)
 
 // ---------------------------------------------------------------------------
 // Window schedule and commitment validation
@@ -1645,7 +1805,8 @@ void expect_sound(const dem_chunks_spec &spec, const window_graph &g) {
       const auto instances = window_instances(layer.request, R);
       for (auto k = instances.begin; k < instances.end; ++k) {
         const auto w = window_from_dem_chunks(tmpl, layer.request, k, R);
-        const auto &model = w.model.detector_error_matrix;
+        const auto full = dense(w);
+        const auto &model = full.detector_error_matrix;
         const auto first_row = tmpl->row_offset(w.rounds.begin, R);
         const auto first_column = tmpl->column_offset(w.rounds.begin, R);
         for (std::size_t i = 0; i < model.shape()[0]; ++i) {
@@ -1946,7 +2107,8 @@ TEST(CommitmentParallel, AcceptsBoundaryTwinsOfBufferColumns) {
       std::make_shared<const experiment_template>(twin_spec(false));
   auto requests = layered(2, 2, 3);
   const auto w = window_from_dem_chunks(tmpl, requests.a, 1, 14);
-  const auto &h = w.model.detector_error_matrix;
+  const auto model = dense(w);
+  const auto &h = model.detector_error_matrix;
   // Round 3's fault 4 has the same rows as boundary column 3.
   for (std::size_t r = 0; r < h.shape()[0]; ++r)
     EXPECT_EQ(h.at({r, 4}), h.at({r, w.num_fault_columns + 3}));
@@ -2112,8 +2274,9 @@ void expect_models_match(const std::shared_ptr<const experiment_template> &t,
   for (std::size_t i = 0; i < windows.size(); ++i) {
     const auto &rw = windows[i];
     const auto w = window_from_dem_chunks(t, request_of(g, rw.node), rw.k, R);
-    const auto &h = w.model.detector_error_matrix;
-    const auto &o = w.model.observables_flips_matrix;
+    const auto model = dense(w);
+    const auto &h = model.detector_error_matrix;
+    const auto &o = model.observables_flips_matrix;
     const auto &columns = reference.decoder_columns(i);
     SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
     ASSERT_EQ(w.num_own_rows, rw.num_own_rows);
@@ -2121,7 +2284,7 @@ void expect_models_match(const std::shared_ptr<const experiment_template> &t,
     ASSERT_EQ(w.num_decoder_columns(), columns.size());
     for (std::size_t c = 0; c < columns.size(); ++c) {
       EXPECT_EQ(column_rows(h, c), columns[c]) << "column " << c;
-      EXPECT_EQ(w.model.error_rates[c], reference.priors(i)[c]) << c;
+      EXPECT_EQ(w.model.priors[c], reference.priors(i)[c]) << c;
     }
     for (std::size_t c = 0; c < rw.columns.size(); ++c)
       EXPECT_EQ(column_rows(o, c), s.o[rw.columns[c]]) << "column " << c;
@@ -2313,6 +2476,419 @@ TEST(ParallelWindowReference, TracksMonolithicMatching) {
     } // end - for(g)
   } // end - for(d)
 } // end - TEST(ParallelWindowReference, TracksMonolithicMatching)
+
+// The shot rows of a window's model rows: its own rounds' rows, then its
+// imports', as the template lays out the shot.
+std::vector<std::size_t> shot_rows(const decoding_window &w) {
+  const auto &t = *w.context;
+  const auto R = w.shot_rounds;
+  std::vector<std::size_t> rows;
+  for (auto r = t.row_offset(w.rounds.begin, R);
+       r < t.row_offset(w.rounds.end, R); ++r)
+    rows.push_back(r);
+  if (!w.output.imports.empty())
+    for (auto r = t.row_offset(w.output.imports.begin, R);
+         r < t.row_offset(w.output.imports.end, R); ++r)
+      rows.push_back(r);
+  return rows;
+}
+
+// One production window's decode, with the detectors it decoded.
+struct production_decode {
+  std::vector<std::uint8_t> detectors;
+  window_solution solution;
+};
+
+// Every window of g in an R-round shot, built, received and decoded by the
+// production code alone, one at a time in the reference's order: a window's
+// detectors come from the shot by the template's offsets, and what its
+// producers sent arrives through receive_send(). Each window keeps one
+// workspace for every shot, as a node would.
+class production_windows {
+public:
+  production_windows(const std::shared_ptr<const experiment_template> &t,
+                     const window_graph &g, std::size_t R,
+                     const std::vector<std::size_t> &order,
+                     const std::string &decoder_name,
+                     const cudaqx::heterogeneous_map &params = {})
+      : schedule_(schedule_windows(t, g.layers, g.edges, R)), order_(order) {
+    for (std::size_t i = 0; i < schedule_.windows.size(); ++i) {
+      const auto &s = schedule_.windows[i];
+      index_[{s.node, s.k}] = i;
+      windows_.push_back(
+          window_from_dem_chunks(t, request_of(g, s.node), s.k, R));
+      decoders_.push_back(
+          make_window_decoder(windows_.back(), decoder_name, params));
+      workspaces_.push_back(make_window_workspace(windows_.back()));
+    }
+  }
+
+  // Each window's decode of one shot's detection events, in schedule order.
+  std::vector<production_decode> decode(const std::vector<std::uint8_t> &shot) {
+    std::vector<production_decode> out(windows_.size());
+    for (const auto i : order_) {
+      auto &d = out[i];
+      for (const auto row : shot_rows(windows_[i]))
+        d.detectors.push_back(shot[row]);
+      for (const auto &input : schedule_.windows[i].inputs) {
+        if (!input.exists)
+          continue;
+        const auto p = index_.at({input.from_node, input.k});
+        const auto &sends = windows_[p].sends;
+        const auto send = static_cast<std::size_t>(
+            std::find_if(sends.begin(), sends.end(),
+                         [&](const window_send &x) {
+                           return x.id == input.from_output;
+                         }) -
+            sends.begin());
+        receive_send(windows_[i], windows_[p], send,
+                     out[p].solution.outputs.sends.at(send), d.detectors);
+      }
+      solve_window(windows_[i], decoders_[i].get(), d.detectors,
+                   workspaces_[i]);
+      d.solution = workspaces_[i].solution;
+    } // end - for(i)
+    return out;
+  } // end - decode()
+
+  const std::vector<decoding_window> &windows() const { return windows_; }
+
+private:
+  window_schedule schedule_;
+  std::vector<std::size_t> order_;
+  std::map<std::pair<std::string, std::int64_t>, std::size_t> index_;
+  std::vector<decoding_window> windows_;
+  std::vector<std::unique_ptr<decoder>> decoders_;
+  std::vector<window_workspace> workspaces_;
+};
+
+// Each production window's decode equals the reference's bit for bit: its
+// detectors after receiving, its estimate over the decoder's columns,
+// convergence and H e = d, and the faults it commits, its sends and its frame
+// update.
+void expect_decodes_match(const parallel_window_reference &reference,
+                          const production_windows &production,
+                          const std::vector<production_decode> &got,
+                          const pw_reference::result &want) {
+  for (std::size_t i = 0; i < got.size(); ++i) {
+    const auto &rw = reference.windows()[i];
+    const auto &w = production.windows()[i];
+    const auto &mine = got[i].solution;
+    const auto &theirs = want.windows[i];
+    std::vector<std::size_t> committed;
+    for (std::size_t c = 0; c < rw.num_faults; ++c)
+      if (mine.outputs.committed[c])
+        committed.push_back(rw.columns[c]);
+    SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
+    ASSERT_EQ(got[i].detectors, theirs.detectors);
+    ASSERT_EQ(std::vector<std::uint8_t>(mine.estimate.begin(),
+                                        mine.estimate.begin() +
+                                            w.num_decoder_columns()),
+              theirs.estimate);
+    ASSERT_EQ(mine.converged, theirs.converged);
+    ASSERT_EQ(mine.satisfied, theirs.satisfied);
+    ASSERT_EQ(committed, theirs.committed);
+    ASSERT_EQ(mine.outputs.sends, theirs.sends);
+    ASSERT_EQ(mine.outputs.frame, theirs.frame);
+  } // end - for(i)
+} // end - expect_decodes_match()
+
+// The production windows, decoded serially with their own decoders, decode
+// every single fault as the reference does, window by window, for every
+// layout and shot length up to 30.
+TEST(ParallelWindowReference, ProductionDecodesSingleFaultsAlike) {
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3),
+        surface_memory_spec(3, 0.01)}) {
+    const auto tmpl = std::make_shared<const experiment_template>(spec);
+    for (const auto &g : swept_layouts()) {
+      for (auto R = tmpl->min_rounds(); R <= 30; ++R) {
+        parallel_window_reference reference(spec, g, R, "single_error_lut");
+        production_windows production(tmpl, g, R, reference.order(),
+                                      "single_error_lut");
+        const auto &s = reference.model();
+        SCOPED_TRACE("R=" + std::to_string(R));
+        for (std::size_t c = 0; c < s.h.size(); ++c) {
+          const auto detectors = detectors_of(s, c);
+          ASSERT_NO_FATAL_FAILURE(expect_decodes_match(
+              reference, production, production.decode(detectors),
+              reference.decode(detectors)))
+              << "column " << c;
+        }
+      } // end - for(R)
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(ParallelWindowReference, ProductionDecodesSingleFaultsAlike)
+
+// The same on sampled shots with PyMatching, where windows commit several
+// faults and send what they leave.
+TEST(ParallelWindowReference, ProductionDecodesSampledShotsAlike) {
+  constexpr std::size_t R = 20;       // two periods of each layout
+  constexpr std::size_t shots = 2000; // a few hundred with several faults
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), surface_memory_spec(3, 0.02)}) {
+    const auto tmpl = std::make_shared<const experiment_template>(spec);
+    for (const auto &g : {parallel_graph(layered(3, 3, 9)),
+                          parallel_graph(interior_commit(3, 3, 9)),
+                          parallel_graph(with_truncate(layered(3, 3, 9)))}) {
+      parallel_window_reference reference(spec, g, R, "pymatching", matching);
+      production_windows production(tmpl, g, R, reference.order(), "pymatching",
+                                    matching);
+      const auto &s = reference.model();
+      const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+          s.dem.detector_error_matrix, shots, s.dem.error_rates, 17);
+      for (std::size_t i = 0; i < shots; ++i) {
+        const auto syndrome = row_of(detectors, i);
+        ASSERT_NO_FATAL_FAILURE(expect_decodes_match(
+            reference, production, production.decode(syndrome),
+            reference.decode(syndrome)))
+            << "shot " << i;
+      }
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(ParallelWindowReference, ProductionDecodesSampledShotsAlike)
+
+// A send reaches its receiver only on the rows it is meant for: a delta on
+// its own rows and a residual on its imports, in the same shot, one value per
+// row. Delivered to the wrong window, or with the wrong values, it is
+// rejected.
+TEST(DecodingWindow, ReceiveSendRejectsRowsItCannotTake) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto layers = layered(2, 2, 3);
+  const std::size_t R = 20;
+  const auto a = window_from_dem_chunks(tmpl, layers.a, 1, R);
+  const auto b = window_from_dem_chunks(tmpl, layers.b, 1, R);
+  const auto next_b = window_from_dem_chunks(tmpl, layers.b, 2, R);
+  const auto other_shot = window_from_dem_chunks(tmpl, layers.b, 2, R + 1);
+  const std::vector<std::uint8_t> forward(a.sends[0].rows.size(), 1);
+  const std::vector<std::uint8_t> backward(a.sends[1].rows.size(), 1);
+  auto detectors = std::vector<std::uint8_t>(next_b.model.h.num_rows(), 0);
+  ASSERT_EQ(a.sends[0].id, "forward");
+  ASSERT_EQ(a.sends[1].id, "backward");
+  // A[1].forward reaches B[2]'s own rows; A[1].backward is B[1]'s imports.
+  receive_send(next_b, a, 0, forward, detectors);
+  EXPECT_EQ(std::count(detectors.begin(), detectors.end(), 1),
+            static_cast<std::ptrdiff_t>(forward.size()));
+  detectors.assign(b.model.h.num_rows(), 0);
+  receive_send(b, a, 1, backward, detectors);
+  EXPECT_EQ(std::count(detectors.begin(), detectors.end(), 1),
+            static_cast<std::ptrdiff_t>(backward.size()));
+  EXPECT_THROW(receive_send(b, a, 0, forward, detectors),
+               std::invalid_argument);
+  EXPECT_THROW(receive_send(next_b, a, 1, backward, detectors),
+               std::invalid_argument);
+  EXPECT_THROW(receive_send(next_b, a, 0, {1}, detectors),
+               std::invalid_argument);
+  EXPECT_THROW(receive_send(other_shot, a, 0, forward, detectors),
+               std::invalid_argument);
+  EXPECT_THROW(receive_send(next_b, a, 2, forward, detectors),
+               std::invalid_argument);
+} // end - TEST(DecodingWindow, ReceiveSendRejectsRowsItCannotTake)
+
+// A window with nothing to decode has no decoder: its estimate is zero, it
+// commits nothing, and it explains its detectors only when they are zero.
+TEST(DecodingWindow, AWindowWithoutADecoderCommitsNothing) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto w = window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, 20);
+  std::vector<std::uint8_t> detectors(w.model.h.num_rows(), 0);
+  auto ws = make_window_workspace(w);
+  solve_window(w, nullptr, detectors, ws);
+  const auto quiet = ws.solution;
+  detectors[0] = 1;
+  solve_window(w, nullptr, detectors, ws);
+  const auto loud = ws.solution;
+  EXPECT_EQ(quiet.estimate, std::vector<std::uint8_t>(w.model.o.num_cols(), 0));
+  EXPECT_TRUE(quiet.satisfied);
+  EXPECT_FALSE(loud.satisfied);
+  EXPECT_EQ(loud.outputs.frame,
+            std::vector<std::uint8_t>(w.model.o.num_rows(), 0));
+  EXPECT_NE(make_window_decoder(w, "single_error_lut"), nullptr);
+}
+
+// A decoder whose params make it misreport what a window decoder must be:
+// observables instead of fault columns, or one detector or column more than
+// the window has.
+class window_misfit_probe final : public decoder {
+public:
+  window_misfit_probe(decoder_init inputs,
+                      const cudaqx::heterogeneous_map &params)
+      : decoder(std::move(inputs),
+                decoder_output_request{params.get<bool>("observables", false)
+                                           ? decode_result_type::observables
+                                           : decode_result_type::errors}) {
+    syndrome_size += params.get<std::size_t>("extra_rows", 0);
+    block_size += params.get<std::size_t>("extra_columns", 0);
+  }
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    return {true, std::vector<float_t>(block_size, 0.0)};
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      window_misfit_probe,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request>,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<window_misfit_probe>(std::move(inputs), params);
+      })
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(window_misfit_probe)
+
+// A window's decoder must return fault columns, take the window's rows and
+// return its decoder columns; any other is rejected when it is made.
+TEST(DecodingWindow, MakeWindowDecoderRejectsADecoderThatDoesNotFit) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto w = window_from_dem_chunks(tmpl, layered(2, 2, 3).a, 1, 20);
+  const auto rows = std::to_string(w.model.h.num_rows());
+  const auto columns = std::to_string(w.num_decoder_columns());
+  const auto made = [&](const cudaqx::heterogeneous_map &params) {
+    return
+        [&w, params] { make_window_decoder(w, "window_misfit_probe", params); };
+  };
+  EXPECT_NE(make_window_decoder(w, "window_misfit_probe"), nullptr);
+  expect_error(made({{"observables", true}}),
+               "make_window_decoder: decoder 'window_misfit_probe' returns "
+               "observables");
+  expect_error(made({{"extra_rows", std::size_t{1}}}),
+               "make_window_decoder: decoder 'window_misfit_probe' takes " +
+                   std::to_string(w.model.h.num_rows() + 1) +
+                   " detectors and returns " + columns,
+               "window 1 has " + rows + " rows and " + columns);
+  expect_error(made({{"extra_columns", std::size_t{1}}}),
+               "takes " + rows + " detectors and returns " +
+                   std::to_string(w.num_decoder_columns() + 1));
+} // end - TEST(DecodingWindow, MakeWindowDecoderRejectsADecoderThatDoesNotFit)
+
+// A workspace serves only a window of its own size: solving or committing on
+// another window's is rejected before anything is written.
+TEST(DecodingWindow, AWorkspaceServesOnlyItsOwnWindow) {
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto layers = layered(2, 2, 3);
+  const auto a = window_from_dem_chunks(tmpl, layers.a, 1, 20);
+  const auto b = window_from_dem_chunks(tmpl, layers.b, 1, 20);
+  const std::vector<std::uint8_t> detectors(a.model.h.num_rows(), 0);
+  auto a_ws = make_window_workspace(a);
+  auto b_ws = make_window_workspace(b);
+  ASSERT_NE(a.model.h.num_rows(), b.model.h.num_rows());
+  expect_error([&] { solve_window(a, nullptr, detectors, b_ws); },
+               "solve_window: the workspace is not sized for window 1");
+  expect_error([&] { commit_window(a, detectors, b_ws); },
+               "commit_window: the workspace is not sized for window 1");
+  // One value short of a send.
+  a_ws.solution.outputs.sends.back().pop_back();
+  expect_error([&] { commit_window(a, detectors, a_ws); },
+               "commit_window: the workspace is not sized for window 1");
+}
+
+#if !WINDOW_TESTS_SANITIZED
+// Decodes with @p inner, counting what each of its decode() calls
+// allocates, so a test can tell its caller's allocations from the decoder's
+// own in the same call.
+class allocation_counting_decoder final : public decoder {
+public:
+  allocation_counting_decoder(const decoding_window &window,
+                              std::unique_ptr<decoder> inner)
+      : decoder(decoder_init(window.model.h)), inner_(std::move(inner)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    const auto before = allocations_counted;
+    auto result = inner_->decode(syndrome);
+    last_decode_allocations_ = allocations_counted - before;
+    return result;
+  }
+
+  std::size_t last_decode_allocations() const {
+    return last_decode_allocations_;
+  }
+
+private:
+  std::unique_ptr<decoder> inner_;
+  std::size_t last_decode_allocations_ = 0;
+};
+#endif
+
+// On a workspace sized beforehand, receiving a send, solving a window
+// without a decoder and committing allocate nothing, and solving with a
+// decoder allocates only what the decoder's own decode() does in that call.
+// The results match a fresh workspace's, so nothing is left over from the
+// last shot.
+TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot) {
+#if WINDOW_TESTS_SANITIZED
+  GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator new";
+#else
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto layers = layered(2, 2, 3);
+  const std::size_t R = 20;
+  const auto a = window_from_dem_chunks(tmpl, layers.a, 1, R);
+  const auto next_b = window_from_dem_chunks(tmpl, layers.b, 2, R);
+  allocation_counting_decoder dec(a,
+                                  make_window_decoder(a, "single_error_lut"));
+  const std::vector<std::uint8_t> forward(a.sends[0].rows.size(), 1);
+  std::vector<std::uint8_t> b_detectors(next_b.model.h.num_rows(), 0);
+  std::vector<std::uint8_t> a_detectors(a.model.h.num_rows(), 0);
+  auto a_ws = make_window_workspace(a);
+  auto b_ws = make_window_workspace(next_b);
+  const auto allocations = [](const auto &run) {
+    allocations_counted = 0;
+    counting_allocations = true;
+    run();
+    counting_allocations = false;
+    return allocations_counted;
+  };
+  // The detectors fault column c of A flips.
+  const auto fault = [&](std::size_t c) {
+    std::vector<std::uint8_t> d(a.model.h.num_rows(), 0);
+    for (auto p = a.model.h.ptr()[c]; p < a.model.h.ptr()[c + 1]; ++p)
+      d[a.model.h.indices()[p]] = 1;
+    return d;
+  };
+  // ws holds what a fresh workspace's decode of the same detectors gives.
+  const auto expect_fresh = [](const decoding_window &w, decoder *d,
+                               const std::vector<std::uint8_t> &detectors,
+                               const window_workspace &ws) {
+    auto fresh = make_window_workspace(w);
+    solve_window(w, d, detectors, fresh);
+    EXPECT_EQ(ws.solution.estimate, fresh.solution.estimate);
+    EXPECT_EQ(ws.solution.satisfied, fresh.solution.satisfied);
+    EXPECT_EQ(ws.solution.outputs.committed, fresh.solution.outputs.committed);
+    EXPECT_EQ(ws.solution.outputs.sends, fresh.solution.outputs.sends);
+    EXPECT_EQ(ws.solution.outputs.frame, fresh.solution.outputs.frame);
+  };
+  // The counter sees plain and aligned allocations alike.
+  ASSERT_EQ(allocations([] {
+              constexpr std::align_val_t line{64}; // a cache line
+              ::operator delete(::operator new(8));
+              ::operator delete(::operator new(8, line), line);
+            }),
+            2u);
+  // A first shot commits A's first commit column, leaving its estimate,
+  // sends and frame in the workspace.
+  a_detectors = fault(a.commit_columns.begin);
+  solve_window(a, &dec, a_detectors, a_ws);
+  ASSERT_EQ(a_ws.solution.outputs.committed[a.commit_columns.begin], 1);
+  // The next shot commits another.
+  a_detectors = fault(a.commit_columns.begin + 1);
+  EXPECT_EQ(
+      allocations([&] { receive_send(next_b, a, 0, forward, b_detectors); }),
+      0u);
+  EXPECT_EQ(
+      allocations([&] { solve_window(next_b, nullptr, b_detectors, b_ws); }),
+      0u);
+  EXPECT_EQ(allocations([&] { commit_window(next_b, b_detectors, b_ws); }), 0u);
+  // Counted first, so that the decoder's count read next is this call's.
+  const auto solved =
+      allocations([&] { solve_window(a, &dec, a_detectors, a_ws); });
+  EXPECT_EQ(solved, dec.last_decode_allocations());
+  EXPECT_EQ(a_ws.solution.outputs.committed[a.commit_columns.begin], 0);
+  expect_fresh(a, &dec, a_detectors, a_ws);
+  expect_fresh(next_b, nullptr, b_detectors, b_ws);
+#endif
+} // end - TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot)
 
 // ---------------------------------------------------------------------------
 // Data artifact store

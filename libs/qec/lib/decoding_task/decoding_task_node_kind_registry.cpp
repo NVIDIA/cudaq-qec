@@ -5,6 +5,7 @@
 
 #include "decoding_task_node_kind_registry.h"
 
+#include <algorithm>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -78,6 +79,36 @@ register_task_graph_node_kind_locked(task_graph_node_kind_spec spec,
   // The schema name is derived, not supplied, so a kind cannot register its
   // parameters under a name the config layer would not look them up by.
   params.name = task_graph_node_schema_name(spec.name);
+  // The bounds are checked before the kind's own rules, wherever its
+  // parameters are validated, so parsing enforces what the schema publishes.
+  for (const auto *bounds :
+       {&spec.parameter_minimums, &spec.parameter_maximums})
+    for (const auto &[key, bound] : *bounds)
+      if (std::none_of(params.params.begin(), params.params.end(),
+                       [&](const decoding::config::param_spec &p) {
+                         return p.key == key &&
+                                p.kind == decoding::config::param_kind::uint64;
+                       }))
+        throw std::invalid_argument(
+            "register_task_graph_node_kind: kind '" + spec.name +
+            "' has a bound for '" + key +
+            "', which is not one of its uint64 parameters");
+  if (!spec.parameter_minimums.empty() || !spec.parameter_maximums.empty())
+    params.validate = [kind = spec.name, minimums = spec.parameter_minimums,
+                       maximums = spec.parameter_maximums,
+                       rules = std::move(params.validate)](
+                          const cudaqx::heterogeneous_map &p) {
+      for (const auto &[key, least] : minimums)
+        if (p.contains(key) && p.get<std::size_t>(key) < least)
+          throw std::runtime_error(kind + ": " + key + " must be at least " +
+                                   std::to_string(least));
+      for (const auto &[key, most] : maximums)
+        if (p.contains(key) && p.get<std::size_t>(key) > most)
+          throw std::runtime_error(kind + ": " + key + " must be at most " +
+                                   std::to_string(most));
+      if (rules)
+        rules(p);
+    };
   decoding::config::register_decoder_schema(std::move(params));
 
   for (const auto &alias : spec.aliases)

@@ -177,6 +177,9 @@ public:
   const std::vector<double> &priors(std::size_t i) const {
     return priors_.at(i);
   }
+  /// Window indices with every producer before its consumers: the order
+  /// decode() runs them in.
+  const std::vector<std::size_t> &order() const { return order_; }
 
 private:
   shot shot_;

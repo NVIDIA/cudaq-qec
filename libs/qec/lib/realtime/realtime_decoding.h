@@ -123,15 +123,19 @@ __attribute__((visibility("default"))) pinned_stim_dems read_pinned_stim_dems(
     const cudaq::qec::decoding::config::multi_decoder_config &config,
     const std::filesystem::path &base_dir);
 
-/// A copy of `config` in which each decoder and task-graph node that names a
-/// pinned Stim DEM entry, by an unedited copy of its path, holds the entry's
-/// text in place of the path, so a model built from the copy is the one
-/// checked. Reads the pins with read_pinned_stim_dems().
+/// A copy of `config` in which each decoder's and task-graph node's
+/// `stim_dem` that names a data_artifacts entry is resolved as parsing
+/// resolves it, so a configuration built in code names entries too; and in
+/// which each one that names a pinned Stim DEM entry, by an unedited copy of
+/// its path, holds the entry's text in place of the path, so a model built
+/// from the copy is the one checked. Reads the pins with
+/// read_pinned_stim_dems().
 ///
 /// @param base_dir Directory a relative `stim_dem_path` resolves against, as
 /// for resolve_decoder_init().
 /// @throws std::runtime_error naming the entry if a pinned file cannot be read
-/// or does not match its sha256.
+/// or does not match its sha256, and as parsing does for a bad entry or a
+/// name no Stim DEM entry holds.
 __attribute__((visibility("default")))
 cudaq::qec::decoding::config::multi_decoder_config
 with_pinned_stim_dems(

@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Internal header: parameter checks shared by the windowed-decoding node
-// kinds, decode_window and the parallel_window pattern, which pass both
-// parameters through to the layers they describe.
+// Internal header: the verify_residual check shared by the windowed-decoding
+// node kinds, decode_window and the parallel_window pattern, which passes the
+// parameter through to the layers it describes. Their minimums are declared
+// with the kinds.
 
 #pragma once
 
