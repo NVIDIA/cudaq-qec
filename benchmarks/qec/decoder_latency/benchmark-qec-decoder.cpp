@@ -38,6 +38,7 @@
 
 #include "benchmark_instance_pool.h"
 #include "stim.h"
+#include "utils/dem_chunks_from_rounds.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -82,7 +83,13 @@ using cudaq::qec::benchmark::run_instances;
 using cudaq::qec::benchmark::sum_instance_results;
 using cudaq::qec::benchmark::worker_threads_per_instance;
 
-enum class execution_kind { decoder, task_graph, task_graph_async };
+enum class execution_kind {
+  decoder,
+  task_graph,
+  task_graph_async,
+  parallel_window,
+  parallel_window_async
+};
 
 // Render one execution selector in row names and configuration output.
 std::string execution_name(execution_kind kind) {
@@ -93,8 +100,24 @@ std::string execution_name(execution_kind kind) {
     return "task-graph";
   case execution_kind::task_graph_async:
     return "task-graph-async";
+  case execution_kind::parallel_window:
+    return "parallel-window";
+  case execution_kind::parallel_window_async:
+    return "parallel-window-async";
   }
   return "unknown";
+}
+
+// Whether @p kind runs its graph on the asynchronous executor.
+bool is_async(execution_kind kind) {
+  return kind == execution_kind::task_graph_async ||
+         kind == execution_kind::parallel_window_async;
+}
+
+// Whether @p kind decodes through a parallel_window node.
+bool is_windowed(execution_kind kind) {
+  return kind == execution_kind::parallel_window ||
+         kind == execution_kind::parallel_window_async;
 }
 
 // ── Options
@@ -130,6 +153,14 @@ struct options {
   std::size_t async_queue_capacity = 8;
   bool dedicate_async_coordinator = false;
   std::size_t async_spin_pause_iters = 0;
+  // parallel_window layout. 0 = unset: d committed and d buffer rounds per
+  // window, in gaps of 3d rounds, as the realtime app examples use.
+  std::size_t commit_rounds = 0;
+  std::size_t buffer_rounds = 0;
+  std::size_t gap_rounds = 0;
+  // Copies of each window layer that may decode at once. 4, as the
+  // pattern's accuracy test streams with; only async rows use more than 1.
+  std::size_t max_in_flight = 4;
   // Result form every decoder is built with. Streaming reads observable
   // corrections either way.
   cudaq::qec::decode_result_type output =
@@ -139,6 +170,9 @@ struct options {
   cudaq::qec::decoder_model_source source =
       cudaq::qec::decoder_model_source::matrices;
   bool emit_csv = false;
+  // Paced streaming: time the tail from when FINAL was due, not from when
+  // the producer reached it.
+  bool tail_from_schedule = false;
   std::vector<std::pair<std::string, std::string>> extra_params;
 };
 
@@ -184,10 +218,15 @@ void print_usage(const char *argv0) {
       << "                             decoder choose its own schedule\n"
       << "  --round_interval_us T      pace streaming rounds by T "
          "microseconds\n"
+      << "  --tail_from_schedule       paced streaming: time the tail from\n"
+      << "                             when FINAL was due, charging a\n"
+      << "                             producer that fell behind its pacing\n"
       << "  --mode M                   batch, stream, or both (default both)\n"
-      << "  --executions E[,...]       decoder, task-graph, or "
-         "task-graph-async\n"
-      << "                             (default decoder)\n"
+      << "  --executions E[,...]       decoder, task-graph, "
+         "task-graph-async,\n"
+      << "                             parallel-window, or\n"
+      << "                             parallel-window-async (default "
+         "decoder)\n"
       << "  --async_queue_capacity N   async task-graph records in flight "
          "(default: 8; 0 reserves one shot)\n"
       << "  --dedicate_async_coordinator\n"
@@ -205,6 +244,14 @@ void print_usage(const char *argv0) {
       << "                             per-round DEM chunks of the same "
          "model,\n"
       << "                             padded to one detector width per round\n"
+      << "  --commit_rounds N          parallel-window rounds each window\n"
+      << "                             commits (default: distance)\n"
+      << "  --buffer_rounds N          parallel-window buffer rounds on each\n"
+      << "                             side (default: distance)\n"
+      << "  --gap_rounds N             parallel-window rounds between A\n"
+      << "                             windows (default: 3 * distance)\n"
+      << "  --max_in_flight N          parallel-window copies of each layer\n"
+      << "                             (default 4; async rows only)\n"
       << "  --param KEY=VALUE          extra param forwarded to all decoders\n"
       << "                             (repeatable; auto-typed)\n"
       << "  --csv                      emit machine-readable CSV rows\n"
@@ -254,10 +301,14 @@ std::vector<execution_kind> parse_executions(const std::string &text) {
       out.push_back(execution_kind::task_graph);
     else if (value == "task-graph-async")
       out.push_back(execution_kind::task_graph_async);
+    else if (value == "parallel-window")
+      out.push_back(execution_kind::parallel_window);
+    else if (value == "parallel-window-async")
+      out.push_back(execution_kind::parallel_window_async);
     else
       throw std::invalid_argument(
-          "--executions entries must be decoder, task-graph, or "
-          "task-graph-async");
+          "--executions entries must be decoder, task-graph, "
+          "task-graph-async, parallel-window, or parallel-window-async");
   }
   return out;
 }
@@ -295,6 +346,10 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
     }
     if (arg == "--pin_instances") {
       opts.auto_pin = true;
+      continue;
+    }
+    if (arg == "--tail_from_schedule") {
+      opts.tail_from_schedule = true;
       continue;
     }
     if (arg == "--dedicate_async_coordinator") {
@@ -357,6 +412,14 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
       opts.async_queue_capacity = std::stoull(val);
     } else if (arg == "--async_spin_pause_iters") {
       opts.async_spin_pause_iters = std::stoull(val);
+    } else if (arg == "--commit_rounds") {
+      opts.commit_rounds = std::stoull(val);
+    } else if (arg == "--buffer_rounds") {
+      opts.buffer_rounds = std::stoull(val);
+    } else if (arg == "--gap_rounds") {
+      opts.gap_rounds = std::stoull(val);
+    } else if (arg == "--max_in_flight") {
+      opts.max_in_flight = std::stoull(val);
     } else if (arg == "--output") {
       if (val == "observables") {
         opts.output = cudaq::qec::decode_result_type::observables;
@@ -432,6 +495,20 @@ bool parse_args(int argc, char **argv, options &opts, int &exit_code) {
     std::cerr << "error: --output errors applies to --executions decoder "
                  "only; a task-graph node reads observables from its inner "
                  "decoder\n";
+    exit_code = 1;
+    return false;
+  }
+  if (opts.source == cudaq::qec::decoder_model_source::dem_chunks &&
+      std::any_of(opts.executions.begin(), opts.executions.end(),
+                  is_windowed)) {
+    std::cerr << "error: --source chunks does not apply to parallel-window "
+                 "executions, which build their windows from their own "
+                 "per-round chunks\n";
+    exit_code = 1;
+    return false;
+  }
+  if (opts.max_in_flight == 0) {
+    std::cerr << "error: --max_in_flight must be positive\n";
     exit_code = 1;
     return false;
   }
@@ -671,6 +748,9 @@ struct dem_matrices {
   std::vector<uint64_t> column_obs;
   // The same model as per-round chunks, for --source chunks.
   std::optional<cudaq::qec::dem_chunks_spec> chunks;
+  // The model as one chunk per measurement round, with its D, for
+  // parallel-window rows.
+  std::optional<cudaq::qec::dem_chunks_spec> window_chunks;
 };
 
 // Extract H, O, and priors from the decomposed DEM without depending on
@@ -948,6 +1028,37 @@ observable_rows_of(const dem_matrices &m) {
   return rows;
 }
 
+// Set @p m's window_chunks: the unpadded model as one chunk per measurement
+// round, by the realtime app examples' chunker. A rotated_memory_z round
+// measures every ancilla, d^2 - 1 of them, and the readout every data qubit;
+// round_widths cannot say so, since Stim's first round holds only Z
+// detectors and so reads only part of its round.
+void add_window_chunks(dem_matrices &m, const benchmark_data &data,
+                       std::size_t distance, std::size_t rounds) {
+  const std::size_t num_data = distance * distance;
+  const std::size_t per_round = num_data - 1;
+  const auto total =
+      static_cast<std::size_t>(data.circuit.count_measurements());
+  std::vector<std::int64_t> h_sparse, d_sparse;
+  if (total != rounds * per_round + num_data)
+    throw std::runtime_error("parallel-window execution expected " +
+                             std::to_string(rounds * per_round + num_data) +
+                             " measurements, d^2 - 1 per round and d^2 at "
+                             "readout, but the circuit has " +
+                             std::to_string(total));
+  for (const auto &row : m.H.to_nested_csr()) {
+    h_sparse.insert(h_sparse.end(), row.begin(), row.end());
+    h_sparse.push_back(-1);
+  }
+  for (const auto &row : data.measurement_map) {
+    d_sparse.insert(d_sparse.end(), row.begin(), row.end());
+    d_sparse.push_back(-1);
+  }
+  m.window_chunks =
+      dem_chunks_from_rounds(h_sparse, cudaq::qec::pcm_to_sparse_vec(m.O),
+                             m.priors, d_sparse, rounds, per_round, num_data);
+} // end - add_window_chunks()
+
 // The model's measurement-to-detector map: one row per detector, naming the
 // measurement records it XORs. The decoder folds arriving rounds through this
 // on the streaming path, which is why the benchmark supplies the real map
@@ -1013,9 +1124,8 @@ bool wants_machine_sized_threads(const options &opts) {
 std::size_t auto_thread_share(const options &opts, std::size_t instances,
                               execution_kind execution) {
   core_layout layout = layout_for(opts, instances);
-  if (opts.dedicate_async_coordinator &&
-      execution == execution_kind::task_graph_async && layout.base >= 0 &&
-      layout.width > 1)
+  if (opts.dedicate_async_coordinator && is_async(execution) &&
+      layout.base >= 0 && layout.width > 1)
     --layout.width;
 
   // A single unpinned instance genuinely does have the machine to itself, so
@@ -1405,10 +1515,17 @@ uint64_t stream_shot(benchmark_target &target, const benchmark_data &data,
     work += elapsed_us(rs, clock_type::now());
     offset += round_widths[r];
   }
+  const auto final_due =
+      shot_start +
+      static_cast<int64_t>(round_widths.size() - 1) * opts.round_interval;
   if (opts.round_interval.count() > 0)
-    spin_until(shot_start + static_cast<int64_t>(round_widths.size() - 1) *
-                                opts.round_interval);
-  const auto tail_start = clock_type::now();
+    spin_until(final_due);
+  // From when FINAL was due, a producer that fell behind its pacing (a
+  // synchronous graph decoding inline) is charged for its lateness.
+  const auto tail_start =
+      opts.tail_from_schedule && opts.round_interval.count() > 0
+          ? std::min(final_due, clock_type::now())
+          : clock_type::now();
   target.enqueue(syn.data() + offset, round_widths.back(), /*final=*/true);
   const auto enqueue_done = clock_type::now();
   const uint64_t corrections = target.corrections();
@@ -1519,6 +1636,62 @@ measurement pool_measurement(const instance_pool_result &pool,
   return result;
 } // end - pool_measurement()
 
+// The executor options of a graph row: async rows queue @p round_widths'
+// rounds when the capacity is 0, and may pin the coordinator.
+cudaq::qec::task_graph_options
+graph_options_for(const options &opts, const sweep_point &point,
+                  const std::vector<std::size_t> &round_widths,
+                  int coordinator_cpu) {
+  cudaq::qec::task_graph_options graph_options;
+  graph_options.async_streaming = is_async(point.execution);
+  graph_options.async_queue_capacity = opts.async_queue_capacity == 0
+                                           ? round_widths.size()
+                                           : opts.async_queue_capacity;
+  graph_options.async_coordinator_cpu = coordinator_cpu;
+  graph_options.async_spin_pause_iters = opts.async_spin_pause_iters;
+  return graph_options;
+}
+
+// One parallel_window node over the per-round chunks, decoding each window
+// with the point's decoder and reporting observable corrections. An unset
+// layout takes the app examples' d committed rounds, d buffer rounds, and
+// gaps of 3d.
+std::unique_ptr<cudaq::qec::decoding_task_graph>
+make_window_graph(const options &opts, const dem_matrices &matrices,
+                  const cudaqx::heterogeneous_map &dec_params,
+                  const sweep_point &point,
+                  const cudaq::qec::task_graph_options &graph_options) {
+  const std::size_t d = point.distance;
+  const auto or_default = [](std::size_t value, std::size_t fallback) {
+    return value != 0 ? value : fallback;
+  };
+  std::vector<cudaq::qec::task_graph_node_config> nodes(1);
+  auto &node = nodes.front();
+  node.id = "pw";
+  node.kind = "parallel_window";
+  node.dem = *matrices.window_chunks;
+  node.decoder_type = point.decoder_name;
+  node.params = dec_params;
+  // A window decodes to errors, whose columns pymatching's default
+  // `disallow` strategy rejects when two share a detector pair; the app
+  // examples keep the lighter of such edges.
+  if (point.decoder_name == "pymatching" &&
+      !node.params.contains("merge_strategy"))
+    node.params.insert("merge_strategy", std::string("smallest_weight"));
+  // A synchronous graph builds one copy of each layer whatever it is asked.
+  node.max_in_flight = is_async(point.execution) ? opts.max_in_flight : 1;
+  node.node_params = cudaqx::heterogeneous_map{
+      {"commit_rounds", or_default(opts.commit_rounds, d)},
+      {"buffer_rounds", or_default(opts.buffer_rounds, d)},
+      {"gap_rounds", or_default(opts.gap_rounds, 3 * d)},
+      {"output", std::string("corrections")}};
+  return cudaq::qec::decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "pw", "input"},
+       {"pw", "output", "output", "input"}},
+      graph_options);
+} // end - make_window_graph()
+
 // Run one sweep point across its decoder instances and return the pooled row.
 //
 // Every instance builds its own decoder inside its own thread rather than
@@ -1532,11 +1705,16 @@ measurement run_point(const options &opts, const benchmark_data &data,
                       bench_mode mode, const sweep_point &point) {
   std::vector<std::unique_ptr<benchmark_target>> targets(point.instances);
   instance_work work;
+  const auto warm = [&](benchmark_target &target) {
+    if (mode == bench_mode::stream)
+      warmup_stream(target, data, opts, round_widths);
+    else
+      warmup_batch(target, data, matrices, opts);
+  };
 
   work.setup = [&](std::size_t instance) {
     int coordinator_cpu = -1;
-    if (point.execution == execution_kind::task_graph_async &&
-        opts.dedicate_async_coordinator) {
+    if (is_async(point.execution) && opts.dedicate_async_coordinator) {
       const auto block =
           resolve_instance_cpus(instance, layout_for(opts, point.instances),
                                 std::thread::hardware_concurrency());
@@ -1546,6 +1724,13 @@ measurement run_point(const options &opts, const benchmark_data &data,
       if (!pin_error.empty())
         throw std::runtime_error(
             "failed to reserve the async coordinator CPU: " + pin_error);
+    }
+    if (is_windowed(point.execution)) {
+      targets[instance] = std::make_unique<benchmark_target>(make_window_graph(
+          opts, matrices, dec_params, point,
+          graph_options_for(opts, point, round_widths, coordinator_cpu)));
+      warm(*targets[instance]);
+      return;
     }
     std::optional<cudaq::qec::sparse_binary_matrix> D;
     // A graph node folds the measurement record through its own D before
@@ -1615,24 +1800,13 @@ measurement run_point(const options &opts, const benchmark_data &data,
       node.decoder_instance = std::move(dec);
       std::vector<cudaq::qec::task_graph_node_config> nodes;
       nodes.push_back(std::move(node));
-      cudaq::qec::task_graph_options graph_options;
-      graph_options.async_streaming =
-          point.execution == execution_kind::task_graph_async;
-      graph_options.async_queue_capacity = opts.async_queue_capacity == 0
-                                               ? round_widths.size()
-                                               : opts.async_queue_capacity;
-      graph_options.async_coordinator_cpu = coordinator_cpu;
-      graph_options.async_spin_pause_iters = opts.async_spin_pause_iters;
       targets[instance] = std::make_unique<benchmark_target>(
-          cudaq::qec::decoding_task_graph::from_topology(std::move(nodes), {},
-                                                         graph_options));
+          cudaq::qec::decoding_task_graph::from_topology(
+              std::move(nodes), {},
+              graph_options_for(opts, point, round_widths, coordinator_cpu)));
     }
 
-    if (mode == bench_mode::stream) {
-      warmup_stream(*targets[instance], data, opts, round_widths);
-    } else {
-      warmup_batch(*targets[instance], data, matrices, opts);
-    }
+    warm(*targets[instance]);
   }; // end - work.setup
 
   work.run = [&](std::size_t instance, instance_result &out) {
@@ -1798,14 +1972,14 @@ void print_tail_decomposition(const std::vector<measurement> &rows,
 
 void print_csv_row(const options &opts, const std::string &mode,
                    const measurement &row) {
-  const auto queue_capacity = row.execution == execution_kind::task_graph_async
+  const auto queue_capacity = is_async(row.execution)
                                   ? opts.async_queue_capacity == 0
                                         ? row.rounds_per_shot
                                         : opts.async_queue_capacity
                                   : 0;
   const double round_interval_us =
       static_cast<double>(opts.round_interval.count()) / 1e3;
-  const bool asynchronous = row.execution == execution_kind::task_graph_async;
+  const bool asynchronous = is_async(row.execution);
   std::cout << "csv," << mode << "," << execution_name(row.execution) << ","
             << round_interval_us << "," << queue_capacity << ","
             << (asynchronous ? opts.dedicate_async_coordinator ? "dedicated"
@@ -1871,8 +2045,19 @@ int main(int argc, char **argv) {
             << (opts.source == cudaq::qec::decoder_model_source::dem_chunks
                     ? "chunks"
                     : "matrices")
-            << "\n"
-            << "instances: ";
+            << "\n";
+  if (std::any_of(opts.executions.begin(), opts.executions.end(),
+                  is_windowed)) {
+    const auto rounds_or_d = [](std::size_t value, const char *fallback) {
+      return value != 0 ? std::to_string(value) : std::string(fallback);
+    };
+    std::cout << "parallel window: commit="
+              << rounds_or_d(opts.commit_rounds, "d")
+              << "  buffer=" << rounds_or_d(opts.buffer_rounds, "d")
+              << "  gap=" << rounds_or_d(opts.gap_rounds, "3d")
+              << "  max_in_flight=" << opts.max_in_flight << " (async)\n";
+  }
+  std::cout << "instances: ";
   for (std::size_t i = 0; i < opts.instances_list.size(); ++i)
     std::cout << (i ? ", " : "") << opts.instances_list[i];
   std::cout << "  pinning="
@@ -1967,6 +2152,17 @@ int main(int argc, char **argv) {
           pad_rounds(matrices, data, dr);
           add_chunks(matrices, dr);
         }
+        // A model the chunker cannot split, such as a shot too short to
+        // repeat a round, skips this point's windowed rows only.
+        std::string window_error;
+        if (std::any_of(opts.executions.begin(), opts.executions.end(),
+                        is_windowed)) {
+          try {
+            add_window_chunks(matrices, data, distance, rounds);
+          } catch (const std::exception &e) {
+            window_error = e.what();
+          }
+        }
         const auto &round_widths = data.round_widths;
         const std::vector<int32_t> param_dr =
             matrices.chunks ? std::vector<int32_t>{} : dr;
@@ -1975,14 +2171,25 @@ int main(int argc, char **argv) {
           const auto &name = opts.decoders[static_cast<std::size_t>(id)];
           try {
             for (const auto execution : opts.executions) {
+              if (is_windowed(execution) && !window_error.empty()) {
+                std::cerr << "error: " << execution_name(execution)
+                          << " skipped (d=" << distance << " r=" << rounds
+                          << "): " << window_error << "\n";
+                continue;
+              }
               // Instance count innermost: consecutive rows then form the
               // scaling curve for one execution at one configuration.
               for (const std::size_t instances : opts.instances_list) {
                 // Rebuilt per row because a machine-sized thread request
                 // resolves against this row's instance count.
+                // A window's decoder sees only its window's rounds, so the
+                // shot's detector rounds do not describe its model.
                 const cudaqx::heterogeneous_map dec_params =
                     build_decoder_params(
-                        name, param_dr, block_leaf, opts.extra_params,
+                        name,
+                        is_windowed(execution) ? std::vector<int32_t>{}
+                                               : param_dr,
+                        block_leaf, opts.extra_params,
                         auto_thread_share(opts, instances, execution));
                 sweep_point point;
                 point.decoder_id = id;

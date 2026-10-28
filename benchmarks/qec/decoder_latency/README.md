@@ -13,7 +13,8 @@ The benchmark supports two execution modes:
   correction readout.
 
 Each mode can run a decoder directly, through a synchronous one-node task
-graph, or through an async-streaming task graph.
+graph, through an async-streaming task graph, or through a `parallel_window`
+graph, synchronous or async, that decodes the shot in overlapping windows.
 
 Task-graph benchmark rows use the graph's `streaming` node kind, which
 forwards each chunk to the inner decoder's native streaming API. This keeps
@@ -90,8 +91,8 @@ The sweep is the Cartesian product of:
 - `--rounds N[,N,...]` (default: the distance)
 - `--noise P` or `--noises P[,P,...]` (default: 0.001)
 - `--decoder_instances N[,N,...]` (default: 1)
-- `--executions E[,E,...]` (`decoder`, `task-graph`, or `task-graph-async`;
-  default: `decoder`)
+- `--executions E[,E,...]` (`decoder`, `task-graph`, `task-graph-async`,
+  `parallel-window`, or `parallel-window-async`; default: `decoder`)
 
 Option names accept either hyphens or underscores.
 
@@ -121,6 +122,30 @@ readout contributes a detector round.
 timed shots **per decoder instance** (default: 500). Increasing the instance
 count therefore increases the total samples and work; it does not divide a
 fixed shot pool.
+
+## Parallel-window rows
+
+`parallel-window` and `parallel-window-async` decode each shot through one `parallel_window` node, with the named decoder in every window. The node's model is the circuit's DEM split into one chunk per measurement round by the realtime app examples' chunker (`libs/qec/unittests/realtime/app_examples/utils/dem_chunks_from_rounds.h`), which carries each round's measurement-to-detector rows. It merges the columns Stim's decomposition splits, and finds the repeating bulk round, so the shot needs enough rounds for its middle round to repeat: Stim's first two rounds and its last two differ from the bulk, so `--rounds 5` or more. A shorter point skips its windowed rows with an error and runs the rest.
+
+The window layout defaults to the app examples': each window commits `d` rounds with `d` buffer rounds on each side, and the first-layer windows are `3d` rounds apart. Override it with:
+
+- `--commit_rounds N` (default: the distance)
+- `--buffer_rounds N` (default: the distance)
+- `--gap_rounds N` (default: three times the distance)
+- `--max_in_flight N`: copies of each window layer that may decode at once (default 4). A synchronous row decodes one window at a time whatever its value.
+
+For example, to compare windowed decoding with monolithic pymatching on long shots:
+
+```bash
+./benchmarks/qec/decoder_latency/benchmark-qec-decoder \
+  --decoders pymatching \
+  --executions task-graph-async,parallel-window-async \
+  --distances 5,11 --rounds 1000 \
+  --mode stream --round_interval_us 1 \
+  --shots 1000 --csv
+```
+
+A window decodes to error mechanisms, so pymatching in a window needs a merge strategy for parallel edges; windowed rows default it to `smallest_weight`, as the app examples do, unless `--param merge_strategy=...` is given. A window's decoder is built from that window's model alone. It is given no `detector_round`, and `--source chunks` is refused for windowed rows, since they always build from their own chunks. As with the other graph rows, `--output errors` is refused. The logical error rate should stay close to the monolithic row's at the same point; windows that commit too few rounds or buffer too few lose accuracy at their seams.
 
 ## Decoder options
 
@@ -232,6 +257,8 @@ that bookkeeping and decoding with real round arrival; compare the executions
 at the intended `--round_interval_us`. The async queue must be large enough to
 absorb temporary producer/coordinator skew, or queue-full waits dominate the
 result.
+
+By default a paced tail starts when the producer reaches FINAL. An execution that decodes inside its enqueue calls, such as a synchronous graph or a direct decoder, can fall behind its pacing, so it reaches FINAL late and its tail leaves that lateness out. `--tail_from_schedule` starts the tail when FINAL was due instead, which compares synchronous and asynchronous executions fairly: the FINAL-enqueue component then includes how late the producer was. It has no effect without `--round_interval_us`.
 
 The `rounds/s` value uses a separate wall-clock interval around each
 instance's complete timed shot loop. It includes pacing, decoder reset, and
