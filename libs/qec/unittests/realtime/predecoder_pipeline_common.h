@@ -47,7 +47,7 @@ namespace rt_pipeline = cudaq::qec::realtime::experimental;
 
 #ifndef CUDAQ_REALTIME_CPU_RELAX
 #if defined(__x86_64__)
-#include <immintrin.h>
+#include <xmmintrin.h> // _mm_pause()
 #define CUDAQ_REALTIME_CPU_RELAX() _mm_pause()
 #elif defined(__aarch64__)
 #define CUDAQ_REALTIME_CPU_RELAX() __asm__ volatile("yield" ::: "memory")
