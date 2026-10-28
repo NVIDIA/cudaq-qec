@@ -102,13 +102,14 @@ bool ingest_node::flush() {
   return true;
 }
 
-// The logical value is never followed by another publication.
+// The logical value is never followed by another publication. The last
+// publication stays current, since a graph that reads outputs in place reads
+// them after this returns false; enqueue() and flush() clear it.
 bool ingest_node::publish_next() {
   if (!logical_current_ && current_ != none && current_ + 1 < filled_) {
     ++current_;
     return true;
   }
-  clear_publications();
   return false;
 }
 

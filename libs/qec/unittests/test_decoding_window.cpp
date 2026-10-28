@@ -5108,7 +5108,19 @@ TEST(IngestNode, DeclaresItsPorts) {
   EXPECT_TRUE(reading.supports_raw_streaming_input(0));
   EXPECT_EQ(reading.streaming(),
             static_cast<streaming_task_graph_node *>(&reading));
+  EXPECT_FALSE(reading.supports_fire_pool());
   EXPECT_EQ(reading.raw_chunk_limit(), core.record_limit());
+  EXPECT_EQ(reading.num_msyn_per_decode(), core.record_limit());
+  // A round is the repeating round's 4 measurements, not a period of the
+  // widest (the 5-measurement readout) that bounds a record.
+  EXPECT_EQ(reading.num_msyn_per_round(), 4u);
+  EXPECT_EQ(core.round_width(), 4u);
+  // Its schedule is a record's period of rounds, whatever their widths, and
+  // it commits nothing itself.
+  const auto period = static_cast<std::uint32_t>(layers.a.period);
+  const auto schedule = reading.streaming_schedule();
+  ASSERT_TRUE(schedule.has_value());
+  EXPECT_TRUE(*schedule == (window_spec{period, period, 0, 0}));
   EXPECT_EQ(reading.num_observables(), 1u);
   EXPECT_EQ(not_reading.num_observables(), 0u);
   expect_throw<std::logic_error>(
@@ -5169,6 +5181,50 @@ TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore) {
   EXPECT_FALSE(node.publish_next());
   EXPECT_FALSE(node.flush());
 } // end - TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore)
+
+// A graph that reads outputs in place reads them after publish_next() says
+// nothing more waits, so the last publication stays current until the node
+// takes more: the FINAL record's last window, then the logical value.
+TEST(IngestNode, KeepsTheLastPublicationCurrent) {
+  const auto layers = layered(3, 3, 9);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  std::mt19937 rng(41);
+  const shot s(spec, 40, rng);
+  ingest_node node(context, named_windows({layers.a, layers.b}), true);
+  const auto limit = *node.raw_chunk_limit();
+  const auto total = s.measurements.size();
+  const auto final_start = (total - 1) / limit * limit;
+  const std::size_t window_ports = 2;
+  const std::size_t logical_port = 2;
+  // The last publication's value and index on each window port.
+  std::vector<const edge_value *> last(window_ports, nullptr);
+  std::vector<std::optional<std::int64_t>> last_index(window_ports);
+  for (std::size_t at = 0; at < final_start; at += limit)
+    for (bool more =
+             node.enqueue(s.measurements.data() + at, limit, round_type::BULK);
+         more; more = node.publish_next())
+      ;
+  for (bool more = node.enqueue(s.measurements.data() + final_start,
+                                total - final_start, round_type::FINAL);
+       more; more = node.publish_next())
+    for (std::size_t l = 0; l < window_ports; ++l) {
+      last[l] = node.streaming_output(l);
+      last_index[l] = node.published_index(l);
+    }
+  ASSERT_TRUE(last[0] || last[1]) << "the last publication has no window";
+  for (std::size_t l = 0; l < window_ports; ++l) {
+    EXPECT_EQ(node.streaming_output(l), last[l]) << "port " << l;
+    EXPECT_EQ(node.published_index(l), last_index[l]) << "port " << l;
+  }
+
+  ASSERT_TRUE(node.flush());
+  EXPECT_FALSE(node.publish_next());
+  EXPECT_NE(node.streaming_output(logical_port), nullptr);
+  EXPECT_TRUE(node.streaming_coverage().has_value());
+  for (std::size_t l = 0; l < window_ports; ++l)
+    EXPECT_EQ(node.streaming_output(l), nullptr) << "port " << l;
+} // end - TEST(IngestNode, KeepsTheLastPublicationCurrent)
 
 // After a first shot, an ingest node streams a second of the same length in
 // the same records, publications and logical value included, without
@@ -5611,6 +5667,7 @@ TEST(DecodeWindowNode, DeclaresItsPorts) {
   EXPECT_TRUE(b.exact_interval_coverage());
   EXPECT_EQ(b.num_observables(), 1u);
   EXPECT_EQ(b.streaming(), static_cast<streaming_task_graph_node *>(&b));
+  EXPECT_EQ(b.indexed_join(), static_cast<indexed_join_node *>(&b));
   EXPECT_EQ(b.streaming_output(0), nullptr);
   EXPECT_FALSE(b.published_index(0).has_value());
   expect_throw<std::logic_error>(

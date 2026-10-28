@@ -43,7 +43,8 @@ public:
               const std::vector<experimental::ingest_window> &windows,
               bool read_logical);
 
-  /// Make the next waiting publication current; false when none waits.
+  /// Make the next waiting publication current; false when none waits,
+  /// leaving the last one current until enqueue() or flush().
   bool publish_next() override;
   /// The current publication's index on a window port; none on `logical`,
   /// whose value covers the whole shot, and none while the logical value
@@ -59,6 +60,9 @@ public:
   bool accepts_input_type(std::size_t slot,
                           edge_value_type type) const override;
   streaming_task_graph_node *streaming() override { return this; }
+  /// A shot's partial rounds and publications carry across deliveries, so
+  /// copies would split one stream.
+  bool supports_fire_pool() const override { return false; }
 
   /// Take one chunk of a record; true when it readied a publication, which
   /// is then current.
@@ -81,6 +85,17 @@ public:
   void reset_streaming_state() override;
   std::size_t num_msyn_per_decode() const override {
     return core_.record_limit();
+  }
+  /// A typical round's measurements, not the record limit's period of them.
+  std::size_t num_msyn_per_round() const override {
+    return core_.round_width();
+  }
+  /// A record's period of rounds, committing nothing: the base derives it
+  /// by dividing the record limit by a round, which rounds of unequal width
+  /// need not divide.
+  std::optional<window_spec> streaming_schedule() const override {
+    const auto period = static_cast<std::uint32_t>(core_.period());
+    return window_spec{period, period, 0, 0};
   }
   /// The readout's observables with read_logical; none otherwise.
   std::size_t num_observables() const override { return corrections_.size(); }

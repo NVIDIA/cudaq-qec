@@ -14071,7 +14071,8 @@ TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
         lower({{"measurements", "output", "P", "input"}}, std::nullopt, params);
       },
       "from_topology: parallel_window 'P' has no dem_chunks template");
-  // What the layers cannot use: a Stim DEM, a built decoder, flat matrices.
+  // What the layers cannot use: a Stim DEM, a built decoder, flat matrices,
+  // windows of its own.
   const auto unusable =
       [&](const std::function<void(task_graph_node_config &)> &edit,
           const std::string &text) {
@@ -14099,6 +14100,8 @@ TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
       },
       "takes no built decoder");
   unusable([](auto &cfg) { cfg.d_sparse = {{0}}; }, "takes no flat matrices");
+  unusable([](auto &cfg) { cfg.windows = {{"A", {}, ""}}; },
+           "takes no windows: its layers are A and B");
   // corrected_logical, the default, reads the template's readout map.
   expect_lowering_error(
       [&] {
@@ -14290,6 +14293,26 @@ TEST(WindowKinds, BuildingAWindowedGraphStopsAtTheExecutor) {
       },
       "no_such_decoder");
 } // end - TEST(WindowKinds, BuildingAWindowedGraphStopsAtTheExecutor)
+
+// An ingest node keeps a shot's partial rounds and publications across
+// deliveries, so copies of it would split one stream: max_in_flight on it is
+// rejected, while the pattern's layers may still set it.
+TEST(WindowKinds, BuildingRejectsAnIngestFirePool) {
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"output", std::string("corrections")}};
+  lowered_pattern p(arbitrary_memory_spec(5), params);
+  ASSERT_EQ(p.nodes[0].kind, "ingest");
+  p.nodes[0].max_in_flight = 2;
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(
+            std::move(p.nodes), std::move(p.edges), {.async_streaming = true});
+      },
+      "from_topology: node 'P.ingest' of kind 'ingest' keeps state across "
+      "deliveries and cannot run as a fire pool");
+}
 
 // The pattern is registered as one, with its windows, and has no factory.
 TEST(ParallelWindowLowering, IsARegisteredPatternWithWindows) {

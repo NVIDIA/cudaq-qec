@@ -228,6 +228,10 @@ void lower_parallel_window(task_graph_node_config cfg,
   if (!cfg.d_sparse.empty() || !cfg.o_sparse.empty() || !cfg.h_sparse.empty())
     throw std::invalid_argument(what + " takes no flat matrices; its "
                                        "dem_chunks template gives its windows");
+  // Its parameters give its layers' windows; any set here would be dropped.
+  if (!cfg.windows.empty())
+    throw std::invalid_argument(what + " takes no windows: its layers are A "
+                                       "and B, from its parameters");
   const experiment_template context(*cfg.dem);
   const auto [request_a, request_b] =
       parallel_window_requests(cfg.node_params, context);

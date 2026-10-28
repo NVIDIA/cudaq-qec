@@ -28,7 +28,8 @@ namespace cudaq::qec {
 /// at once, each with its own core and decoders. Not thread-safe: one
 /// thread at a time calls every member.
 class decode_window_node final : public task_graph_node,
-                                 public streaming_task_graph_node {
+                                 public streaming_task_graph_node,
+                                 public indexed_join_node {
 public:
   /// @param store The store holding every variant of @p request.
   /// @param context The experiment template.
@@ -46,7 +47,7 @@ public:
                      std::size_t num_receives, verify_residual_mode verify);
 
   /// Whether an instance exists only with input @p slot: its window.
-  bool requires_input(std::size_t slot) const { return slot == 0; }
+  bool requires_input(std::size_t slot) const override { return slot == 0; }
   /// Fire instance @p k: its window on inputs[0] and each receive's send,
   /// or null. Publishes its frame update, commit zone and sends.
   /// @throws std::invalid_argument if there are not one input per port,
@@ -54,7 +55,8 @@ public:
   /// window's index less the offset of this shot's earlier fires, or as
   /// decode_window_core::fire() does, as do its other exceptions. A fire
   /// that throws publishes nothing.
-  bool fire(std::int64_t k, const std::vector<const edge_value *> &inputs);
+  bool fire(std::int64_t k,
+            const std::vector<const edge_value *> &inputs) override;
   /// The index of the instance last fired, on every port, while its
   /// publication stands: the frame update and each send are instance k's.
   std::optional<std::int64_t> published_index(std::size_t slot) const override;
@@ -71,6 +73,7 @@ public:
   bool accepts_input_type(std::size_t slot,
                           edge_value_type type) const override;
   streaming_task_graph_node *streaming() override { return this; }
+  indexed_join_node *indexed_join() override { return this; }
 
   /// @throws std::logic_error: the node takes windows, not raw
   /// measurements.

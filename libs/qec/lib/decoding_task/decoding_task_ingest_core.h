@@ -148,6 +148,13 @@ public:
   /// The most measurements one record may hold: a period of the widest
   /// rounds.
   std::size_t record_limit() const { return record_limit_; }
+  /// The measurements in a typical round: the repeating round's, or, for a
+  /// template that does not repeat, the widest round's.
+  std::size_t round_width() const {
+    return bulk_width_ != 0 ? bulk_width_ : max_width_;
+  }
+  /// The layers' shared period, in rounds: the most one record holds.
+  std::int64_t period() const { return period_; }
   /// The rounds the ring holds, fixed at construction.
   std::size_t ring_rounds() const { return ring_mask_ + 1; }
   /// The first index any layer has a window at, fixed by the layout.
