@@ -110,6 +110,95 @@ rep3_inputs make_rep3_inputs() {
           dem_close_all(chunks, seam_name::next_round, seam_name::prev_round)};
 }
 
+// One detector record and fault per phase, with unused trailing measurements.
+// The declared record widths, not D's largest referenced column, set the
+// layout.
+static dem_chunks_spec phase_width_spec(std::array<uint64_t, 4> widths) {
+  dem_chunks_spec spec;
+  spec.seam = {seam_name::next_round, seam_name::prev_round};
+  for (std::size_t i = 0; i < widths.size(); ++i) {
+    phase_spec_entry phase;
+    phase.id = phase_id::from_name("width-" + std::to_string(i));
+    phase.spec.num_faults = 1;
+    phase.spec.H_sparse = {0, -1};
+    phase.spec.O_sparse = {0, -1};
+    phase.spec.D_sparse = {static_cast<int64_t>(i == 0 ? 0 : widths[i - 1]),
+                           -1};
+    phase.spec.num_measurements = widths[i];
+    phase.spec.error_rates = {0.01};
+    if (!spec.phases.empty())
+      spec.connections.push_back({spec.phases.back().id, phase.id});
+    spec.phases.push_back(std::move(phase));
+  }
+  return spec;
+}
+
+TEST(DecodingTaskGraph, UnequalPhaseWidthsCannotSlideEvenWhenTotalDivides) {
+  auto spec = phase_width_spec({1, 3, 3, 5});
+  spec.measurements_per_round = 3;
+  task_graph_node_config node;
+  node.id = "unequal";
+  node.kind = "sliding_window";
+  node.dem = spec;
+  node.decoder_type = "single_error_lut";
+  node.node_params = {{"window_size", std::size_t{4}},
+                      {"step_size", std::size_t{1}}};
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(std::move(node));
+  try {
+    (void)decoding_task_graph::from_topology(std::move(nodes));
+    FAIL() << "unequal record widths must not become equal by averaging";
+  } catch (const std::invalid_argument &error) {
+    EXPECT_NE(std::string(error.what()).find("different widths cannot slide"),
+              std::string::npos)
+        << error.what();
+  }
+}
+
+TEST(DecodingTaskGraph, UnequalPhaseWidthsRequireATypicalWidth) {
+  EXPECT_THROW(decoding_task_graph::from_spec(phase_width_spec({1, 3, 3, 5}),
+                                              "single_error_lut"),
+               std::invalid_argument);
+}
+
+TEST(DecodingTaskGraph, PhaseWidthsPreserveWholeShotMeasurementMapping) {
+  for (const bool equal : {false, true}) {
+    auto spec = phase_width_spec(equal ? std::array<uint64_t, 4>{3, 3, 3, 3}
+                                       : std::array<uint64_t, 4>{1, 3, 3, 5});
+    if (!equal)
+      spec.measurements_per_round = 3;
+    auto graph = decoding_task_graph::from_spec(spec, "pymatching");
+    EXPECT_EQ(graph->get_num_msyn_per_decode(), 12u);
+    EXPECT_EQ(graph->get_num_msyn_per_round(), 3u);
+    const auto d = dem_chunks_to_d_sparse(spec);
+    const auto dense = dem_close_all(dem_chunks_from_spec(spec),
+                                     spec.seam.from_seam, spec.seam.to_seam);
+    const auto columns = sparse_binary_matrix(dense.detector_error_matrix)
+                             .to_csc()
+                             .to_nested_csc();
+    // Feed each actual single-fault syndrome through the raw measurement map.
+    // All four faults flip the logical bit; an isolated detector need not.
+    for (const auto &column : columns) {
+      measurement_results shot{std::vector<uint8_t>(12, 0)};
+      for (const auto detector : column) {
+        ASSERT_EQ(d[detector].size(), 1u);
+        shot.bits[d[detector].front()] = 1;
+      }
+      EXPECT_EQ(graph->run(shot).bits, (std::vector<uint8_t>{1}));
+    }
+    std::size_t offset = 0;
+    for (const auto id : spec.phase_sequence()) {
+      const auto width = spec.measurements_of(spec.get_phase(id));
+      if (width > 1) {
+        measurement_results shot{std::vector<uint8_t>(12, 0)};
+        shot.bits[offset + width - 1] = 1;
+        EXPECT_EQ(graph->run(shot).bits, (std::vector<uint8_t>{0}));
+      }
+      offset += width;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // apply_d_sparse
 // ---------------------------------------------------------------------------
@@ -3810,6 +3899,7 @@ struct probe_params_record {
   bool had_O = false;
   bool had_error_rate_vec = false;
   decoder_output_request output{decode_result_type::errors};
+  std::optional<decoder_init> inputs;
 };
 static std::vector<probe_params_record> probe_records;
 
@@ -3819,8 +3909,8 @@ public:
                        const cudaqx::heterogeneous_map &params)
       : decoder(inputs, output) {
     (void)params;
-    probe_records.push_back(
-        {inputs.has_observable_model(), !inputs.error_rates().empty(), output});
+    probe_records.push_back({inputs.has_observable_model(),
+                             !inputs.error_rates().empty(), output, inputs});
   }
   decoder_result decode(const std::vector<float_t> &) override {
     decoder_result r;
@@ -3840,6 +3930,56 @@ public:
       })
 };
 CUDAQ_EXT_PT_REGISTER_TYPE(params_probe_decoder)
+
+TEST(DecodingTaskGraph,
+     ClosedChunkPreparationPreservesSparseModelAndOutputPolicy) {
+  const auto spec = rep5_spec(7);
+  const auto chunks = dem_chunks_from_spec(spec);
+  const auto dense =
+      dem_close_all(chunks, spec.seam.from_seam, spec.seam.to_seam);
+  const auto expected_h = sparse_binary_matrix(dense.detector_error_matrix)
+                              .canonicalize()
+                              .to_nested_csc();
+  const auto expected_o = sparse_binary_matrix(dense.observables_flips_matrix)
+                              .to_csr()
+                              .to_nested_csr();
+  for (const auto kind : {"single_window", "sliding_window"}) {
+    probe_records.clear();
+    task_graph_node_config node;
+    node.id = "closed";
+    node.kind = kind;
+    node.dem = spec;
+    node.decoder_type = "params_probe_decoder";
+    if (std::string(kind) == "sliding_window")
+      node.node_params = {{"window_size", std::size_t{7}},
+                          {"step_size", std::size_t{5}},
+                          {"start_guard", std::size_t{1}},
+                          {"end_guard", std::size_t{1}}};
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(node));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes));
+    ASSERT_EQ(probe_records.size(), 1u);
+    const auto &inputs = *probe_records.front().inputs;
+    ASSERT_TRUE(inputs.has_matrices());
+    ASSERT_TRUE(inputs.has_dem_chunks());
+    auto expected_spec = spec;
+    if (std::string(kind) == "sliding_window")
+      for (auto &phase : expected_spec.phases)
+        phase.spec.O_sparse.clear();
+    EXPECT_EQ(inputs.dem_chunks(), expected_spec);
+    EXPECT_EQ(inputs.detector_error_matrix().to_nested_csc(), expected_h);
+    EXPECT_EQ(inputs.error_rates(), dense.error_rates);
+    ASSERT_NE(inputs.measurement_to_detectors(), nullptr);
+    EXPECT_EQ(inputs.measurement_to_detectors()->to_nested_csr(),
+              dem_chunks_to_d_sparse(spec));
+    if (std::string(kind) == "single_window") {
+      ASSERT_TRUE(inputs.has_observable_model());
+      EXPECT_EQ(inputs.observable_flips_matrix().to_nested_csr(), expected_o);
+    } else {
+      EXPECT_FALSE(inputs.has_observable_model());
+    }
+  }
+}
 
 // Refuse a flattened model so a native-source handoff regression fails at
 // construction, even when both representations give identical finite results.
@@ -6595,6 +6735,89 @@ TEST(ArbitraryLengthMemory, PyMatchingEveryFaultAndByteFragmentMatchesOracle) {
         graph->clear_corrections();
       }
     }
+}
+
+TEST(ArbitraryLengthMemory, PreparedWindowModelsMatchDenseBoundaryOracles) {
+  // The configured window plus every eager regular/terminal/short model.
+  // Keep the physical layouts explicit rather than inspecting private state.
+  struct shape {
+    std::size_t rounds;
+    bool initial, terminal;
+  };
+  constexpr std::array<shape, 9> prepared_shapes{{{7, true, false},
+                                                  {7, true, true},
+                                                  {7, false, true},
+                                                  {7, false, false},
+                                                  {7, false, true},
+                                                  {3, true, true},
+                                                  {4, true, true},
+                                                  {5, true, true},
+                                                  {6, true, true}}};
+  for (const bool explicit_d : {false, true}) {
+    auto spec = arbitrary_memory_spec(7, explicit_d);
+    for (auto &phase : spec.phases) {
+      const auto rate = phase.id == phase_name::dem_init    ? 0.01
+                        : phase.id == phase_name::dem_final ? 0.13
+                                                            : 0.07;
+      phase.spec.error_rates.assign(phase.spec.num_faults, rate);
+    }
+    task_graph_node_config node;
+    node.id = "prepared";
+    node.kind = "sliding_window";
+    node.dem = spec;
+    node.decoder_type = "params_probe_decoder";
+    node.node_params = {{"window_size", std::size_t{7}},
+                        {"step_size", std::size_t{5}},
+                        {"start_guard", std::size_t{1}},
+                        {"end_guard", std::size_t{1}},
+                        {"arbitrary_length", true}};
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(node));
+    probe_records.clear();
+    auto graph = decoding_task_graph::from_topology(std::move(nodes));
+    ASSERT_EQ(probe_records.size(), prepared_shapes.size() + 1);
+    for (std::size_t i = 0; i < prepared_shapes.size(); ++i) {
+      SCOPED_TRACE(::testing::Message()
+                   << "explicit D=" << explicit_d << " model=" << i);
+      const auto layout = prepared_shapes[i];
+      const auto &inputs = *probe_records[i + 1].inputs;
+      ASSERT_TRUE(inputs.has_matrices());
+      EXPECT_FALSE(inputs.has_observable_model());
+      EXPECT_EQ(probe_records[i + 1].output.primary,
+                decode_result_type::errors);
+      std::vector<extended_dem> chunks;
+      for (std::size_t r = 0; r < layout.rounds; ++r) {
+        const auto phase = layout.terminal && r + 1 == layout.rounds
+                               ? phase_name::dem_final
+                           : layout.initial && r == 0 ? phase_name::dem_init
+                                                      : phase_name::dem_bulk;
+        chunks.push_back(dem_chunk_from_spec(
+            spec.get_phase(phase), {spec.seam.to_seam, spec.seam.from_seam}));
+      }
+      const auto dense =
+          dem_close_all(chunks, spec.seam.from_seam, spec.seam.to_seam);
+      EXPECT_EQ(inputs.detector_error_matrix().to_nested_csc(),
+                sparse_binary_matrix(dense.detector_error_matrix)
+                    .canonicalize()
+                    .to_nested_csc());
+      EXPECT_EQ(inputs.error_rates(), dense.error_rates);
+      const auto context = layout.initial ? 0u : 4u;
+      std::vector<std::vector<uint32_t>> expected_d;
+      for (std::size_t r = 0; r < layout.rounds; ++r)
+        for (uint32_t bit = 0; bit < 4; ++bit) {
+          const auto current = static_cast<uint32_t>(context + 4 * r + bit);
+          std::vector<uint32_t> row;
+          if (r != 0 || !layout.initial)
+            row.push_back(current - 4);
+          row.push_back(current);
+          expected_d.push_back(std::move(row));
+        }
+      ASSERT_NE(inputs.measurement_to_detectors(), nullptr);
+      EXPECT_EQ(inputs.measurement_to_detectors()->num_cols(),
+                context + 4 * layout.rounds);
+      EXPECT_EQ(inputs.measurement_to_detectors()->to_nested_csr(), expected_d);
+    }
+  }
 }
 
 TEST(ArbitraryLengthMemory, DistinctTerminalPhasesMatchClosedOracle) {

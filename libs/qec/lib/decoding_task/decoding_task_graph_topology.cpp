@@ -108,10 +108,10 @@ node_build_context prepare_node(task_graph_node_config &cfg,
 
   sparse_binary_matrix d_mat, o_mat;
   std::vector<std::size_t> flat_frames;
-  // The closed DEM is kept rather than a prebuilt decoder handle so its model
-  // data can be placed into one immutable decoder_init after the node's
-  // independent input and output policies have both been resolved.
+  // Keep chunk closure sparse. The dense DEM is only used by the separate
+  // raw-text path; constructing it for chunks scales as detectors x faults.
   std::shared_ptr<const detector_error_model> closed_dem;
+  std::optional<decoder_init> closed_model;
   std::optional<dem_chunks_spec> prepared_chunks;
   if (cfg.dem.has_value()) {
     // window_size sizes the DEM as well as the buffer: it is the round count
@@ -123,9 +123,7 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     else if (!working.num_rounds.has_value() && working.has_repeating_phase())
       working.num_rounds = working.minimum_rounds();
 
-    std::vector<extended_dem> chunks;
-    if (!native_streaming_chunks)
-      chunks = dem_chunks_from_spec(working);
+    const auto sequence = working.phase_sequence();
     if (kind.name == "sliding_window" &&
         cfg.node_params.get<bool>("arbitrary_length", false) &&
         cfg.stim_dem.empty() && !cfg.decoder_instance) {
@@ -133,14 +131,20 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       ctx.decoder_type = cfg.decoder_type;
       ctx.decoder_params = cfg.params;
     }
-    const auto rounds = native_streaming_chunks
-                            ? working.phase_sequence().size()
-                            : chunks.size();
+    const auto rounds = sequence.size();
+    if (rounds == 0)
+      throw std::invalid_argument(where + ": DEM has no rounds");
     if (rounds > std::numeric_limits<uint32_t>::max())
       throw std::invalid_argument(where + ": too many DEM rounds");
     ctx.dem_rounds = static_cast<uint32_t>(rounds);
-    if (!native_streaming_chunks)
-      ctx.fault_offsets = dem_chunks_to_fault_offsets(chunks);
+    if (!native_streaming_chunks) {
+      // Offsets need only phase metadata, not another expanded fault model.
+      ctx.fault_offsets.reserve(rounds + 1);
+      ctx.fault_offsets.push_back(0);
+      for (const auto id : sequence)
+        ctx.fault_offsets.push_back(ctx.fault_offsets.back() +
+                                    working.get_phase(id).num_faults);
+    }
     // The spec form honors per-phase measurement maps; the chunk list alone
     // can only say the memory convention.
     const auto d_rows = dem_chunks_to_d_sparse(working);
@@ -178,14 +182,32 @@ node_build_context prepare_node(task_graph_node_config &cfg,
           });
       o_mat = make_csr(rows, "O");
     } else {
-      o_mat = make_csr(dem_chunks_to_o_sparse(chunks), "O");
-      closed_dem = std::make_shared<const detector_error_model>(
-          dem_close_all(chunks, working.seam.from_seam, working.seam.to_seam));
+      closed_model.emplace(
+          decoder_init::from_dem_chunks_closed(working, d_mat));
+      o_mat = closed_model->has_observable_model()
+                  ? closed_model->observable_flips_matrix()
+                  : sparse_binary_matrix::from_nested_csr(
+                        0, closed_model->num_error_mechanisms(), {});
+      ctx.h = std::make_shared<const sparse_binary_matrix>(
+          closed_model->detector_error_matrix().to_csr());
     }
     // Rounds may differ in width (a first round with one stabilizer type's
     // detectors, a data readout last). Then there is no equal split, and spr
     // is the typical round's, with the whole stream's width kept alongside.
-    if (d_mat.num_cols() % ctx.dem_rounds == 0) {
+    bool equal_widths = true;
+    if (working.has_D_sparse()) {
+      const auto width =
+          working.measurements_of(working.get_phase(sequence.front()));
+      equal_widths =
+          std::all_of(sequence.begin(), sequence.end(), [&](auto id) {
+            return working.measurements_of(working.get_phase(id)) == width;
+          });
+      if (equal_widths && (d_mat.num_cols() % ctx.dem_rounds != 0 ||
+                           d_mat.num_cols() / ctx.dem_rounds != width))
+        throw std::invalid_argument(where +
+                                    ": D width disagrees with phase widths");
+    }
+    if (equal_widths && d_mat.num_cols() % ctx.dem_rounds == 0) {
       ctx.spr = static_cast<uint32_t>(d_mat.num_cols()) / ctx.dem_rounds;
     } else {
       if (!working.measurements_per_round)
@@ -258,7 +280,7 @@ node_build_context prepare_node(task_graph_node_config &cfg,
         sparse_binary_matrix(closed_dem->detector_error_matrix,
                              sparse_binary_matrix_layout::csr)
             .canonicalize());
-  else if (!native_streaming_chunks && !cfg.h_sparse.empty())
+  else if (!closed_model && !native_streaming_chunks && !cfg.h_sparse.empty())
     ctx.h = std::make_shared<const sparse_binary_matrix>(
         make_csr(cfg.h_sparse, "H"));
   if (ctx.h && ctx.h->num_rows() != ctx.d->num_rows())
@@ -315,7 +337,7 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     if (cfg.decoder_type.empty())
       throw std::invalid_argument(where + " of kind '" + kind.name +
                                   "' needs an inner decoder name");
-    if (!closed_dem && !native_streaming_chunks)
+    if (!closed_dem && !closed_model && !native_streaming_chunks)
       throw std::invalid_argument(
           where +
           " has flat matrices, which cannot build a decoder (H and the error "
@@ -337,6 +359,9 @@ node_build_context prepare_node(task_graph_node_config &cfg,
         return decoder_takes_observables ? std::move(native)
                                          : native.without_observables();
       }
+      if (closed_model)
+        return decoder_takes_observables ? std::move(*closed_model)
+                                         : closed_model->without_observables();
       return decoder_takes_observables
                  ? decoder_init(*closed_dem, *ctx.d)
                  : decoder_init(*ctx.h, std::nullopt, closed_dem->error_rates,
