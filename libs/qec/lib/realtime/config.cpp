@@ -623,16 +623,15 @@ struct config_parse_context {
   const std::vector<data_artifact_t> *artifacts = nullptr;
 };
 
-/// The entry named @p name in a list sorted by name, or nullptr. Names are
-/// looked up only while a configuration is parsed.
+/// The entry named @p name, or nullptr. A list built in code need not be
+/// sorted, as a parsed one is, so the search is linear; names are looked up
+/// only while a configuration is parsed, written or resolved.
 const data_artifact_t *named_artifact(const std::vector<data_artifact_t> &list,
                                       const std::string &name) {
   const auto it =
-      std::lower_bound(list.begin(), list.end(), name,
-                       [](const data_artifact_t &e, const std::string &n) {
-                         return e.name < n;
-                       });
-  return it != list.end() && it->name == name ? &*it : nullptr;
+      std::find_if(list.begin(), list.end(),
+                   [&](const data_artifact_t &e) { return e.name == name; });
+  return it != list.end() ? &*it : nullptr;
 }
 
 /// The entry a reference may be written back as: the document being written
@@ -663,21 +662,20 @@ std::vector<std::string> artifact_kinds(const data_artifact_t &entry) {
   return kinds;
 }
 
-/// The entry @p name names, which must hold one of @p kinds; @p what names
-/// them, and @p where the reference, in messages.
-const data_artifact_t &find_artifact(llvm::yaml::IO &io,
-                                     const std::string &name,
-                                     const std::vector<std::string> &kinds,
-                                     const std::string &what,
-                                     const std::string &where) {
-  const auto *context =
-      static_cast<const config_parse_context *>(io.getContext());
+/// The entry of @p artifacts that @p name names, which must
+/// hold one of @p kinds; @p what names them, and @p where the reference, in
+/// messages. Without @p artifacts, the reference was parsed outside a
+/// document that could hold the entry.
+const data_artifact_t &
+find_artifact(const std::vector<data_artifact_t> *artifacts,
+              const std::string &name, const std::vector<std::string> &kinds,
+              const std::string &what, const std::string &where) {
   const auto prefix = where + " names data_artifacts entry '" + name + "'";
-  if (!context || !context->artifacts)
+  if (!artifacts)
     throw std::runtime_error(
         prefix + ", but it was parsed outside a "
                  "multi_decoder_config, which holds data_artifacts");
-  const auto *entry = named_artifact(*context->artifacts, name);
+  const auto *entry = named_artifact(*artifacts, name);
   if (!entry)
     throw std::runtime_error(prefix + ", which does not exist");
   const auto held = artifact_kinds(*entry);
@@ -689,13 +687,72 @@ const data_artifact_t &find_artifact(llvm::yaml::IO &io,
   return *entry;
 }
 
-/// Checks each entry on its own and against the others: exactly one kind;
-/// edem_path reserved; sha256 only on a file, as 64 hex digits; a window's
-/// request valid and its context a dem_chunks entry; a template valid.
-void validate_data_artifacts(const std::vector<data_artifact_t> &list) {
+/// As above, in the data_artifacts of the document being parsed.
+const data_artifact_t &find_artifact(llvm::yaml::IO &io,
+                                     const std::string &name,
+                                     const std::vector<std::string> &kinds,
+                                     const std::string &what,
+                                     const std::string &where) {
+  const auto *context =
+      static_cast<const config_parse_context *>(io.getContext());
+  return find_artifact(context ? context->artifacts : nullptr, name, kinds,
+                       what, where);
+}
+
+/// Resolves a stim_dem that names an entry of @p artifacts: any value with
+/// none of name_breaks, which Stim model text always holds. The name is kept in
+/// @p artifact, and @p text or @p path becomes a copy of the entry's text or
+/// path.
+void resolve_named_stim_dem(const std::vector<data_artifact_t> *artifacts,
+                            std::string &text, std::string &path,
+                            std::string &artifact, const std::string &where) {
+  if (text.empty() ||
+      text.find_first_of(cudaq::qec::decoding::config::name_breaks) !=
+          std::string::npos)
+    return;
+  artifact = std::move(text);
+  text.clear();
+  const auto &entry =
+      find_artifact(artifacts, artifact, {"stim_dem", "stim_dem_path"},
+                    "Stim DEM", where + " stim_dem");
+  if (!entry.stim_dem_path.empty() && !path.empty())
+    throw cudaq::qec::decoding::config::both_stim_forms(where);
+  text = entry.stim_dem;
+  if (!entry.stim_dem_path.empty())
+    path = entry.stim_dem_path;
+}
+
+} // namespace
+
+// The list a configuration built in code holds, which is never parsed.
+void cudaq::qec::decoding::config::resolve_stim_dem(
+    const std::vector<data_artifact> &artifacts, std::string &text,
+    std::string &path, std::string &artifact, const std::string &where) {
+  resolve_named_stim_dem(&artifacts, text, path, artifact, where);
+}
+
+// Checks each entry on its own and against the others: a name with none of
+// name_breaks, held once; exactly one kind; edem_path reserved; sha256 only
+// on a file, as 64 hex digits; a window's request valid and its context a
+// dem_chunks entry; a template valid. Sorted by name, a repeated name is
+// held by neighbours.
+void cudaq::qec::decoding::config::validate_data_artifacts(
+    const std::vector<data_artifact_t> &list) {
+  for (std::size_t i = 1; i < list.size(); ++i)
+    if (list[i].name == list[i - 1].name)
+      throw std::runtime_error("data_artifacts has two entries named '" +
+                               list[i].name + "'");
   for (const auto &entry : list) {
     const auto where = "data_artifacts entry '" + entry.name + "'";
     const auto kinds = artifact_kinds(entry);
+    // A stim_dem with any of name_breaks is model text, so a name that holds
+    // one could never be named.
+    if (entry.name.empty() ||
+        entry.name.find_first_of(name_breaks) != std::string::npos)
+      throw std::runtime_error(where +
+                               " needs a name without spaces, tabs or line "
+                               "breaks, since a stim_dem with them is model "
+                               "text, not a name");
     if (kinds.empty())
       throw std::runtime_error(where +
                                " has no kind: give one of dem_chunks, "
@@ -750,7 +807,6 @@ void validate_data_artifacts(const std::vector<data_artifact_t> &list) {
   } // end - for(entry)
 } // end - validate_data_artifacts()
 
-} // namespace
 LLVM_YAML_IS_SEQUENCE_VECTOR(
     cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec)
 LLVM_YAML_IS_SEQUENCE_VECTOR(
@@ -1387,23 +1443,13 @@ static void map_dem_chunks(IO &io,
 
 using cudaq::qec::decoding::config::both_stim_forms;
 
-/// Resolves a stim_dem that names a data_artifacts entry: any value with no
-/// whitespace, which Stim model text always has. The name is kept in @p
-/// artifact, and @p text or
-/// @p path becomes a copy of the entry's text or path.
+/// Resolves a stim_dem that names an entry of the document being parsed.
 static void resolve_stim_dem(IO &io, std::string &text, std::string &path,
                              std::string &artifact, const std::string &where) {
-  if (text.empty() || text.find_first_of(" \t\r\n") != std::string::npos)
-    return;
-  artifact = std::move(text);
-  text.clear();
-  const auto &entry = find_artifact(io, artifact, {"stim_dem", "stim_dem_path"},
-                                    "Stim DEM", where + " stim_dem");
-  if (!entry.stim_dem_path.empty() && !path.empty())
-    throw both_stim_forms(where);
-  text = entry.stim_dem;
-  if (!entry.stim_dem_path.empty())
-    path = entry.stim_dem_path;
+  const auto *context =
+      static_cast<const config_parse_context *>(io.getContext());
+  resolve_named_stim_dem(context ? context->artifacts : nullptr, text, path,
+                         artifact, where);
 }
 
 /// Writes a model that names an entry as the name while its copy still
@@ -2338,7 +2384,8 @@ struct MappingTraits<cudaq::qec::decoding::config::multi_decoder_config> {
         context->artifacts = &config.data_artifacts;
     } else {
       io.mapOptional("data_artifacts", artifacts);
-      validate_data_artifacts(config.data_artifacts);
+      cudaq::qec::decoding::config::validate_data_artifacts(
+          config.data_artifacts);
       if (auto *context = static_cast<config_parse_context *>(io.getContext()))
         context->artifacts = &config.data_artifacts;
     }
@@ -2778,14 +2825,26 @@ llvm::json::Object task_graph_json_schema() {
           {"not", llvm::json::Object{{"required", llvm::json::Array{key}}}}});
     const auto *spec = cudaq::qec::find_task_graph_node_kind(kind);
     llvm::json::Array spellings{kind};
-    if (spec)
+    // The kind's own bounds, which its parameter validation checks.
+    llvm::json::Object bounds;
+    if (spec) {
       for (const auto &alias : spec->aliases)
         spellings.push_back(alias);
+      for (const auto &[key, least] : spec->parameter_minimums)
+        bounds[key] = llvm::json::Object{{"minimum", least}};
+      for (const auto &[key, most] : spec->parameter_maximums) {
+        if (!bounds.getObject(key))
+          bounds[key] = llvm::json::Object{};
+        (*bounds.getObject(key))["maximum"] = most;
+      }
+    }
     llvm::json::Object then_clause;
     if (!required.empty())
       then_clause["required"] = std::move(required);
     if (!forbidden.empty())
       then_clause["allOf"] = std::move(forbidden);
+    if (!bounds.empty())
+      then_clause["properties"] = std::move(bounds);
     if (then_clause.empty())
       continue;
     per_kind.push_back(llvm::json::Object{
@@ -3074,7 +3133,8 @@ std::string decoder_config_json_schema() {
       {"syndrome_size",
        llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
       {"stim_dem_path", llvm::json::Object{{"type", "string"}}},
-      // Model text, or, with no whitespace, a data_artifacts entry's name.
+      // Model text, or, with no spaces, tabs or line breaks, a
+      // data_artifacts entry's name.
       {"stim_dem", llvm::json::Object{{"type", "string"}}},
       {"H_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"O_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
@@ -3343,6 +3403,10 @@ std::string decoder_config_json_schema() {
            {"data_artifacts",
             llvm::json::Object{
                 {"type", "object"},
+                // A name holds none of name_breaks, as the parser checks;
+                // \\S would refuse Unicode whitespace the parser accepts.
+                {"propertyNames",
+                 llvm::json::Object{{"pattern", "^[^ \\t\\r\\n]+$"}}},
                 {"additionalProperties",
                  llvm::json::Object{{"$ref", "#/$defs/data_artifact"}}}}},
            {"decoders",

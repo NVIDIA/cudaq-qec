@@ -168,7 +168,7 @@ jobs:
           # Install the correct torch first.
           cuda_no_dot=$(echo ${{ matrix.cuda_version }} | sed 's/\.//')
           pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}
-          pip install numpy pytest onnxscript cuquantum-cu${{ steps.config.outputs.cuda_major }} quimb opt_einsum nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
+          pip install numpy pytest pyyaml jsonschema onnxscript cuquantum-cu${{ steps.config.outputs.cuda_major }} quimb opt_einsum nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
           # The following tests are needed for docs/sphinx/examples/qec/python/tensor_network_decoder.py.
           if [ "$(uname -m)" == "x86_64" ]; then
               # Stim is not currently available on manylinux ARM wheels, so only
@@ -389,7 +389,7 @@ jobs:
         run: |
           cuda_no_dot=$(echo ${{ matrix.cuda_version }} | sed 's/\.//')
           pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}
-          pip install numpy pytest cuquantum-cu${{ steps.config.outputs.cuda_major }} quimb opt_einsum nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0" "custabilizer-cu${{ steps.config.outputs.cuda_major }}>=0.3.0"
+          pip install numpy pytest pyyaml jsonschema cuquantum-cu${{ steps.config.outputs.cuda_major }} quimb opt_einsum nvidia-cublas "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0" "custabilizer-cu${{ steps.config.outputs.cuda_major }}>=0.3.0"
 
       - name: Run GPU C++ tests
         run: |

@@ -38,6 +38,47 @@ def test_decoder_initialization_with_fortran_order():
     assert list(r_f.result) == list(r_c.result)
 
 
+def test_decode_accepts_ndarray_syndromes():
+    """decode / decode_batch take NumPy arrays directly (any numeric or bool
+    dtype, any layout) and hand the decoder the same values as the list
+    forms; soft float syndromes are preserved exactly. An echo decoder makes
+    the values the decoder received observable."""
+
+    @qec.decoder("echo_syndrome_byod")
+    class EchoDecoder:
+
+        def __init__(self, H, **kwargs):
+            qec.Decoder.__init__(self, H)
+
+        def decode(self, syndrome):
+            res = qec.DecoderResult()
+            res.converged = True
+            res.result = list(syndrome)
+            return res
+
+    decoder = qec.get_decoder("echo_syndrome_byod", H)
+    rows = [create_test_syndrome(), create_test_syndrome()]
+    ref = decoder.decode_batch(rows)
+    soft = np.array(rows)
+    np.testing.assert_array_equal(ref.result, soft)
+    for arr in (soft, np.asfortranarray(soft), np.vstack([soft, soft])[::2]):
+        got = decoder.decode_batch(arr)
+        np.testing.assert_array_equal(got.result, soft)
+        np.testing.assert_array_equal(got.converged, ref.converged)
+    np.testing.assert_array_equal(decoder.decode(soft[1]).result, soft[1])
+    hard = (soft > 0.5).astype(np.uint8)
+    for arr in (hard, hard.astype(bool), hard.astype(np.int64),
+                hard.astype(np.float32), hard.tolist()):
+        np.testing.assert_array_equal(decoder.decode_batch(arr).result, hard)
+    np.testing.assert_array_equal(decoder.decode(hard[0]).result, hard[0])
+    np.testing.assert_array_equal(
+        decoder.decode(hard[0].tolist()).result, hard[0])
+    with pytest.raises(TypeError):
+        decoder.decode_batch(soft.astype(np.complex128))
+    with pytest.raises(TypeError):
+        decoder.decode_batch(np.zeros((2, 3, 10)))
+
+
 def test_decoder_api():
     # Test decode_batch
     decoder = qec.get_decoder('example_byod', H)

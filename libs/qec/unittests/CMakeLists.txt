@@ -107,6 +107,22 @@ target_link_libraries(test_thread_pool PRIVATE GTest::gtest_main
 add_dependencies(CUDAQXQECUnitTests test_thread_pool)
 gtest_discover_tests(test_thread_pool)
 
+add_executable(test_hsb_playback_loop utils/test_hsb_playback_loop.cpp)
+target_link_libraries(test_hsb_playback_loop PRIVATE GTest::gtest_main)
+add_dependencies(CUDAQXQECUnitTests test_hsb_playback_loop)
+gtest_discover_tests(test_hsb_playback_loop)
+
+if(UNIX)
+  find_package(Python COMPONENTS Interpreter QUIET)
+  find_program(HSB_PLAYBACK_BASH_EXECUTABLE bash)
+  if(Python_Interpreter_FOUND AND HSB_PLAYBACK_BASH_EXECUTABLE)
+    add_test(NAME hsb_playback_loop_harness
+      COMMAND ${Python_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/utils/test_hsb_playback_loop.py)
+    set_tests_properties(hsb_playback_loop_harness PROPERTIES TIMEOUT 30)
+  endif()
+endif()
+
 add_executable(test_extended_dem test_extended_dem.cpp)
 target_link_libraries(test_extended_dem PRIVATE GTest::gtest_main
                                         cudaq-qec-decoders)

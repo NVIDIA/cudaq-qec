@@ -30,13 +30,6 @@ void check_choice(const cudaqx::heterogeneous_map &p, const std::string &key,
                              " or " + second + "; got '" + value + "'");
 }
 
-/// Throws std::runtime_error if uint64 parameter @p key is set to 0.
-void check_positive(const cudaqx::heterogeneous_map &p,
-                    const std::string &key) {
-  if (p.contains(key) && p.get<std::size_t>(key) == 0)
-    throw std::runtime_error("parallel_window: " + key + " must be at least 1");
-}
-
 /// A's commit and buffer zones are required; B's gap defaults to
 /// commit_rounds + 2 buffer_rounds. The rest pass through to the layers.
 decoding::config::decoder_schema parallel_window_params() {
@@ -52,9 +45,6 @@ decoding::config::decoder_schema parallel_window_params() {
   schema.params.push_back({"conflicting_parallel", param_kind::string});
   schema.params.push_back({"verify_residual", param_kind::string});
   schema.validate = [](const cudaqx::heterogeneous_map &p) {
-    check_positive(p, "commit_rounds");
-    check_positive(p, "buffer_rounds");
-    check_positive(p, "gap_rounds");
     check_choice(p, "output", "corrected_logical", "corrections");
     check_choice(p, "input_boundary", "columns", "truncate");
     check_choice(p, "conflicting_parallel", "reject", "most_likely");
@@ -80,6 +70,8 @@ const bool registered = [] {
   spec.name = "parallel_window";
   spec.requires_decoder = true;
   spec.requires_dem = true;
+  spec.parameter_minimums = {
+      {"commit_rounds", 1}, {"buffer_rounds", 1}, {"gap_rounds", 1}};
   register_node_kind(
       std::move(spec), parallel_window_params(),
       [](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {

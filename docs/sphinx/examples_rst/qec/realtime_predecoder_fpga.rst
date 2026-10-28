@@ -268,6 +268,40 @@ After the initial network setup, subsequent runs are faster:
      --data-dir /path/to/syndrome_data
 
 
+Bounded decoding-server regression (software emulator)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The decoding-server regression harness can replay one BRAM-sized dataset for
+longer endurance checks without loading more distinct samples. Use the
+counter-capable software HSB emulator from the repository's ``.cudaq_version``
+and an already configured RoCE loopback connection. The server, emulator,
+syndrome player and surface-code data generator must already be built.
+
+.. code-block:: bash
+
+   ./libs/qec/unittests/utils/hsb_fpga_decoding_server_test.sh \
+     --emulate --decoder pymatching \
+     --cudaqx-dir /path/to/cudaq-qec \
+     --cuda-quantum-dir /path/to/cuda-quantum \
+     --hsb-dir /path/to/holoscan-sensor-bridge \
+     --loop-seconds 30 --min-decodes 1000
+
+The harness first verifies the corrections from one finite ILA capture, then
+replays that same load for the requested duration. Acceptance requires at
+least the requested number of completed measurements, matching sent/received
+frame counts, and no transport or RPC-status failures. The initial verification
+pass is excluded from the loop's completed-measurement count. Repeated
+playback tests endurance, not accuracy on additional independent samples;
+it also does not increase the maximum size of a single BRAM load.
+
+``--loop-seconds`` and ``--min-decodes`` are emulator-only harness options;
+they are rejected for real-FPGA mode before any network setup. The player's
+``--loop`` option additionally allows manual continuous playback until Ctrl+C.
+On hardware, only the finite preflight is correction-verified: emulator-only
+cumulative counters must not be assumed to exist in the FPGA bitstream.
+Without loop options, the existing single-pass playback path is unchanged.
+
+
 FPGA End-to-End Test
 --------------------
 

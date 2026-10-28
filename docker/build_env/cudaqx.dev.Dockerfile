@@ -14,7 +14,7 @@ LABEL org.opencontainers.image.title="cudaqx-dev"
 LABEL org.opencontainers.image.url="https://github.com/NVIDIA/cudaqx"
 
 # Work around nvidia-container-toolkit 1.17.1 rejecting its own IMEX default
-ENV NVIDIA_IMEX_CHANNELS=0
+ENV NVIDIA_IMEX_CHANNELS=""
 
 RUN apt-get update && CUDA_DASH=$(echo $cuda_version | tr '.' '-') \
   && apt-get install -y jq cuda-nvtx-${CUDA_DASH} \

@@ -190,7 +190,7 @@ void check_pymatching_window(const decoding_window &window,
     check(detectors);
   };
   const cudaqx::heterogeneous_map parameters{{"merge_strategy", policy}};
-  const auto forms = kernel_forms(window);
+  const auto &forms = window.model;
   ASSERT_GE(forms.priors.size(), forms.h.num_cols());
   const std::vector<double> priors(forms.priors.begin(),
                                    forms.priors.begin() + forms.h.num_cols());

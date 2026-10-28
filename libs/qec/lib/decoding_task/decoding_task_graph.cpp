@@ -56,17 +56,22 @@ apply_o_sparse(const error_pattern &e,
   return result;
 }
 
+// The one place the XOR rule lives: sizes must match, converged is ANDed.
+void xor_logical_into(logical_outcome &acc, const logical_outcome &other) {
+  if (acc.bits.size() != other.bits.size())
+    throw std::invalid_argument("xor_logical: size mismatch (" +
+                                std::to_string(acc.bits.size()) + " vs " +
+                                std::to_string(other.bits.size()) + ")");
+  acc.converged = acc.converged && other.converged;
+  for (std::size_t i = 0; i < acc.bits.size(); ++i)
+    acc.bits[i] ^= other.bits[i];
+}
+
+// A copy of `a` folded with `b`: one allocation, for the result.
 logical_outcome xor_logical(const logical_outcome &a,
                             const logical_outcome &b) {
-  if (a.bits.size() != b.bits.size())
-    throw std::invalid_argument("xor_logical: size mismatch (" +
-                                std::to_string(a.bits.size()) + " vs " +
-                                std::to_string(b.bits.size()) + ")");
-  logical_outcome result;
-  result.converged = a.converged && b.converged;
-  result.bits.resize(a.bits.size());
-  for (std::size_t i = 0; i < result.bits.size(); ++i)
-    result.bits[i] = a.bits[i] ^ b.bits[i];
+  logical_outcome result = a;
+  xor_logical_into(result, b);
   return result;
 }
 
