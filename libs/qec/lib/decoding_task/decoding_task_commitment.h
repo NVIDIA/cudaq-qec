@@ -19,11 +19,14 @@
 #include "cudaq/qec/decoding_task_graph_config.h"
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace cudaq::qec {
+
+class data_artifact_store;
 
 /// The windows one decode_window node decodes: the request of the ingest
 /// window port that feeds it.
@@ -90,11 +93,15 @@ std::size_t commitment_probe_rounds(const experiment_template &context,
 /// the row, and that every detectable fault is committed exactly once
 /// (F1-F4); that sends match receives, none twice; and that no commit
 /// column has an ambiguous parallel column.
+/// @param store Where the layers' windows are built and read, once each, so
+/// the graph's nodes read the very windows checked; null to build them for
+/// the check alone. @p context must be the store's own template.
 /// @throws std::invalid_argument naming the check, and the row, column,
 /// window or edge that fails it.
 void validate_commitment(std::shared_ptr<const experiment_template> context,
                          const std::vector<window_layer> &layers,
-                         const std::vector<task_graph_edge> &edges);
+                         const std::vector<task_graph_edge> &edges,
+                         data_artifact_store *store = nullptr);
 
 /// Check a topology's windowed decoding before any node is built, and do
 /// nothing for a topology with no ingest or decode_window node. Every ingest
@@ -107,9 +114,15 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
 /// shots: no send joins their windows, and ones with different templates
 /// reach no common node. Each ingest node's layers and sends then pass
 /// validate_commitment().
+/// Each ingest node's template is registered in @p store, and its layers'
+/// windows are built there as validate_commitment() checks them.
+/// @return Each ingest node's layers, by node id: the decode_window nodes
+/// reading it, in id order. Empty for a topology with neither kind.
 /// @throws std::invalid_argument naming the node or edge, or as
 /// experiment_template and validate_commitment() do.
-void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
-                              const std::vector<task_graph_edge> &edges);
+std::map<std::string, std::vector<window_layer>>
+validate_window_topology(const std::vector<task_graph_node_config> &nodes,
+                         const std::vector<task_graph_edge> &edges,
+                         data_artifact_store &store);
 
 } // namespace cudaq::qec

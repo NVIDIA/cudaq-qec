@@ -257,40 +257,36 @@ void data_artifact_store::add_stim_dem(std::string_view text,
 }
 
 // Builds each variant key on the store's template, at the first shot length
-// and instance that has it; variant_probe_rounds() bounds the lengths that
-// hold every key. A hash hit whose request or key differs means the window
-// bytes missed a field, as for templates. A window holding the readout round
-// gets m2o when the template has a readout map: the key fixes where a window
-// ends, so every instance of a variant agrees.
+// and instance that has it, as variant_instances() lists them. A hash hit whose
+// request or key differs means the window bytes missed a field, as for
+// templates. A window holding the readout round gets m2o when the template has
+// a readout map: the key fixes where a window ends, so every instance of a
+// variant agrees.
 void data_artifact_store::add_windows(
     const std::shared_ptr<const experiment_template> &context,
     const window_request &request) {
   const auto hash = template_hash(context->spec(), "add_windows");
   const auto &t = templates_.at(hash).handle;
   const bool readout_map = !t->readout().empty();
-  for (auto R = t->min_rounds(); R < variant_probe_rounds(*t, request); ++R) {
-    const auto instances = window_instances(request, R);
-    for (auto k = instances.begin; k < instances.end; ++k) {
-      const auto key = window_variant(*t, request, k, R);
-      const auto bytes = window_bytes(hash, request, key);
-      auto window_hash = sha256_hex(bytes);
-      if (const auto hit = windows_.find(window_hash); hit != windows_.end()) {
-        if (hit->second.request != request || hit->second.key != key)
-          throw std::logic_error("data_artifact_store: two window variants "
-                                 "share sha256 " +
-                                 window_hash + " but differ");
-        continue;
-      }
-      const bool with_m2o =
-          readout_map && place_window(t, request, k, R).rounds.end ==
-                             static_cast<std::int64_t>(R);
-      auto handle = std::make_shared<const decoding_window>(
-          window_from_dem_chunks(t, request, k, R, with_m2o));
-      records_.push_back({"window", bytes.size(), window_hash});
-      windows_.emplace(std::move(window_hash),
-                       window_entry{request, key, std::move(handle)});
+  for (const auto &[key, k, R] : variant_instances(*t, request)) {
+    const auto bytes = window_bytes(hash, request, key);
+    auto window_hash = sha256_hex(bytes);
+    if (const auto hit = windows_.find(window_hash); hit != windows_.end()) {
+      if (hit->second.request != request || hit->second.key != key)
+        throw std::logic_error("data_artifact_store: two window variants "
+                               "share sha256 " +
+                               window_hash + " but differ");
+      continue;
     }
-  } // end - for(R)
+    const bool with_m2o =
+        readout_map && place_window(t, request, k, R).rounds.end ==
+                           static_cast<std::int64_t>(R);
+    auto handle = std::make_shared<const decoding_window>(
+        window_from_dem_chunks(t, request, k, R, with_m2o));
+    records_.push_back({"window", bytes.size(), window_hash});
+    windows_.emplace(std::move(window_hash),
+                     window_entry{request, key, std::move(handle)});
+  } // end - for(key)
 } // end - data_artifact_store::add_windows()
 
 std::shared_ptr<const experiment_template>
@@ -310,6 +306,17 @@ data_artifact_store::find_window(const experiment_template &context,
     throw std::logic_error("data_artifact_store: the window variant was not "
                            "built at configuration time");
   return it->second.handle;
+}
+
+// Each key variant_instances() lists, looked up as find_window() does.
+std::vector<std::pair<variant_key, std::shared_ptr<const decoding_window>>>
+data_artifact_store::find_windows(const experiment_template &context,
+                                  const window_request &request) const {
+  std::vector<std::pair<variant_key, std::shared_ptr<const decoding_window>>>
+      out;
+  for (const auto &v : variant_instances(context, request))
+    out.emplace_back(v.key, find_window(context, request, v.key));
+  return out;
 }
 
 // By content, as add_template() keys it, so an equal template built

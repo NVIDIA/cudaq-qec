@@ -4,9 +4,14 @@
  */
 
 #include "task_graph_test_fixtures.h"
+#include "../lib/decoding_task/decoding_task_data_artifacts.h"
+#include "../lib/decoding_task/decoding_task_decode_window_node.h"
 #include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_graph_utils.h"
+#include "../lib/decoding_task/decoding_task_ingest_node.h"
 #include "../lib/decoding_task/decoding_task_memory_window_node.h"
+#include "../lib/decoding_task/decoding_task_node_kind_registry.h"
+#include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "../lib/decoding_task/decoding_task_predecoder_node.h"
 #include "../lib/decoding_task/decoding_task_window_node.h"
 #include "../lib/realtime/decode_target.h"
@@ -13866,5 +13871,577 @@ TEST(DecodingTaskGraph, StagedOutputRejectsMixedContributors) {
       std::string::npos)
       << graph->streaming_incompatibility_reason();
 }
+
+// ---------------------------------------------------------------------------
+// parallel_window pattern lowering
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Pattern node P over @p spec with @p params, fed by measurements and read
+// at the output, lowered.
+struct lowered_pattern {
+  std::vector<task_graph_node_config> nodes;
+  std::vector<task_graph_edge> edges{{"measurements", "output", "P", "input"},
+                                     {"P", "output", "output", "input"}};
+
+  lowered_pattern(const dem_chunks_spec &spec, cudaqx::heterogeneous_map params,
+                  std::size_t max_in_flight = 1) {
+    task_graph_node_config cfg;
+    cfg.id = "P";
+    cfg.kind = "parallel_window";
+    cfg.dem = spec;
+    cfg.decoder_type = "single_error_lut";
+    cfg.params.insert("lut_size", std::size_t{7});
+    cfg.node_params = std::move(params);
+    cfg.max_in_flight = max_in_flight;
+    lower_parallel_window(std::move(cfg), nodes, edges);
+  }
+};
+
+// Expect check() to throw an exception mentioning text.
+template <typename Check>
+void expect_lowering_error(Check &&check, const std::string &text) {
+  try {
+    check();
+    ADD_FAILURE() << "expected: " << text;
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+} // namespace
+
+// The pattern lowers into the hand-written parallel-window graph: P.ingest
+// with layers A and B reading the logical value, P.A and P.B with the
+// pattern's inner decoder and layer parameters, and P.sum over both layers
+// and the logical, with the edges between them and the outer edges moved
+// onto P.ingest and P.sum.
+TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
+  auto spec = arbitrary_memory_spec(5, true);
+  spec.phases.back().spec.m2o_sparse = {0, -1};
+  auto layers = layered(3, 3, 9);
+  layers.a.input.prior = 0.04;
+  const lowered_pattern p(spec,
+                          {{"commit_rounds", std::size_t{3}},
+                           {"buffer_rounds", std::size_t{3}},
+                           {"gap_rounds", std::size_t{9}},
+                           {"boundary_prior", 0.04},
+                           {"verify_residual", std::string("report")}},
+                          /*max_in_flight=*/4);
+  ASSERT_EQ(p.nodes.size(), 4u);
+  const auto &ingest = p.nodes[0];
+  EXPECT_EQ(ingest.id, "P.ingest");
+  EXPECT_EQ(ingest.kind, "ingest");
+  EXPECT_EQ(ingest.dem, spec);
+  EXPECT_EQ(ingest.windows, (std::vector<experimental::ingest_window>{
+                                {"A", layers.a, ""}, {"B", layers.b, ""}}));
+  EXPECT_TRUE(ingest.node_params.get<bool>("read_logical"));
+  for (std::size_t i : {1, 2}) {
+    const auto &layer = p.nodes[i];
+    EXPECT_EQ(layer.id, i == 1 ? "P.A" : "P.B");
+    EXPECT_EQ(layer.kind, "decode_window");
+    EXPECT_FALSE(layer.dem.has_value());
+    EXPECT_EQ(layer.decoder_type, "single_error_lut");
+    EXPECT_EQ(layer.params.get<std::size_t>("lut_size"), 7u);
+    EXPECT_EQ(layer.max_in_flight, 4u);
+    EXPECT_EQ(layer.node_params.get<std::string>("verify_residual"), "report");
+    EXPECT_EQ(layer.node_params.contains("num_receives"), i == 2);
+  }
+  EXPECT_EQ(p.nodes[2].node_params.get<std::size_t>("num_receives"), 2u);
+  // Only the layers fire as pools; ingest and the sum keep one copy.
+  EXPECT_EQ(p.nodes[0].max_in_flight, 1u);
+  EXPECT_EQ(p.nodes[3].max_in_flight, 1u);
+  EXPECT_EQ(p.nodes[3].id, "P.sum");
+  EXPECT_EQ(p.nodes[3].kind, "xor");
+  EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 3u);
+  EXPECT_EQ(p.edges, (std::vector<task_graph_edge>{
+                         {"measurements", "output", "P.ingest", "input"},
+                         {"P.sum", "output", "output", "input"},
+                         {"P.ingest", "A", "P.A", "input"},
+                         {"P.ingest", "B", "P.B", "input"},
+                         {"P.A", "forward", "P.B", "receive_0", -1},
+                         {"P.A", "backward", "P.B", "receive_1"},
+                         {"P.A", "output", "P.sum", "in_0"},
+                         {"P.B", "output", "P.sum", "in_1"},
+                         {"P.ingest", "logical", "P.sum", "in_2"}}));
+} // end - TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph)
+
+// With output: corrections the ingest reads no logical value and P.sum takes
+// the two layers alone; gap_rounds defaults to commit_rounds + 2 buffer
+// rounds, and the column options and a truncated input reach the layers.
+TEST(ParallelWindowLowering, PassesTheOptionsOn) {
+  const lowered_pattern p(
+      arbitrary_memory_spec(5),
+      {{"commit_rounds", std::size_t{2}},
+       {"buffer_rounds", std::size_t{1}},
+       {"output", std::string("corrections")},
+       {"input_boundary", std::string("truncate")},
+       {"merge_identical", true},
+       {"conflicting_parallel", std::string("most_likely")}});
+  auto layers = layered(2, 1, 4);
+  layers.a.input = {experimental::port_disposition::open, std::nullopt,
+                    experimental::input_boundary::truncate};
+  for (auto *request : {&layers.a, &layers.b})
+    request->columns = {true, experimental::parallel_resolution::most_likely};
+  ASSERT_EQ(p.nodes.size(), 4u);
+  EXPECT_EQ(p.nodes[0].windows, (std::vector<experimental::ingest_window>{
+                                    {"A", layers.a, ""}, {"B", layers.b, ""}}));
+  EXPECT_FALSE(p.nodes[0].node_params.contains("read_logical"));
+  EXPECT_EQ(p.nodes[1].max_in_flight, 1u);
+  EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 2u);
+  EXPECT_EQ(std::count_if(p.edges.begin(), p.edges.end(),
+                          [](const task_graph_edge &e) {
+                            return e.from_output == "logical";
+                          }),
+            0);
+} // end - TEST(ParallelWindowLowering, PassesTheOptionsOn)
+
+// Without boundary_prior, A's open input takes, over the detectors faults
+// cross into, the largest chance that an odd number of them fire: one
+// crossing fault's prior, or two combined as merged columns are, whatever
+// the priors of faults that do not cross; with no such fault, the pattern
+// asks for one.
+TEST(ParallelWindowLowering, DefaultsTheBoundaryPrior) {
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}}};
+  auto crossing = next_only_spec();
+  for (auto &phase : crossing.phases)
+    phase.spec.error_rates = {0.3, 0.3, 0.3, 0.3, 0.05};
+  const auto requests =
+      parallel_window_requests(params, experiment_template(crossing));
+  EXPECT_EQ(requests.first.input.prior, std::optional<double>{0.05});
+  auto two = crossing;
+  for (auto &phase : two.phases) {
+    phase.spec.num_faults = 6;
+    phase.spec.error_rates = {0.3, 0.3, 0.3, 0.3, 0.05, 0.1};
+    phase.spec.seam_specs[1].spec.H_sparse = {4, 5, -1, -1, -1, -1};
+  }
+  const auto combined =
+      parallel_window_requests(params, experiment_template(two));
+  ASSERT_TRUE(combined.first.input.prior.has_value());
+  EXPECT_NEAR(*combined.first.input.prior, 0.05 + 0.1 - 2 * 0.05 * 0.1, 1e-12);
+  expect_lowering_error(
+      [&] {
+        parallel_window_requests(params,
+                                 experiment_template(single_round_spec()));
+      },
+      "parallel_window: no fault crosses into the next round with a prior "
+      "strictly between 0 and 1");
+} // end - TEST(ParallelWindowLowering, DefaultsTheBoundaryPrior)
+
+// The pattern is wired measurements -> P -> output: one edge into its
+// input, and none into or out of another port. It needs a template and its
+// required parameters.
+TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}}};
+  const auto lower = [&](std::vector<task_graph_edge> edges,
+                         std::optional<dem_chunks_spec> dem,
+                         cudaqx::heterogeneous_map with) {
+    task_graph_node_config cfg;
+    std::vector<task_graph_node_config> nodes;
+    cfg.id = "P";
+    cfg.kind = "parallel_window";
+    cfg.dem = std::move(dem);
+    cfg.node_params = std::move(with);
+    lower_parallel_window(std::move(cfg), nodes, edges);
+  };
+  const auto spec = arbitrary_memory_spec(5);
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"},
+               {"measurements", "output", "P", "input"}},
+              spec, params);
+      },
+      "from_topology: parallel_window 'P' needs exactly one edge into "
+      "'input'");
+  expect_lowering_error(
+      [&] { lower({{"measurements", "output", "P", "side"}}, spec, params); },
+      "from_topology: parallel_window 'P' has no input 'side'");
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"},
+               {"P", "logical", "output", "input"}},
+              spec, params);
+      },
+      "from_topology: parallel_window 'P' has no output 'logical'");
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"}}, std::nullopt, params);
+      },
+      "from_topology: parallel_window 'P' has no dem_chunks template");
+  // What the layers cannot use: a Stim DEM, a built decoder, flat matrices,
+  // windows of its own.
+  const auto unusable =
+      [&](const std::function<void(task_graph_node_config &)> &edit,
+          const std::string &text) {
+        task_graph_node_config cfg;
+        std::vector<task_graph_node_config> nodes;
+        std::vector<task_graph_edge> edges{
+            {"measurements", "output", "P", "input"}};
+        cfg.id = "P";
+        cfg.kind = "parallel_window";
+        cfg.dem = spec;
+        cfg.node_params = params;
+        edit(cfg);
+        expect_lowering_error(
+            [&] { lower_parallel_window(std::move(cfg), nodes, edges); },
+            "from_topology: parallel_window 'P' " + text);
+      };
+  unusable([](auto &cfg) { cfg.stim_dem = "error(0.1) D0"; },
+           "takes no stim_dem: each layer builds its decoders from its "
+           "windows");
+  unusable(
+      [](auto &cfg) {
+        cfg.decoder_instance = get_decoder(
+            "single_error_lut",
+            decoder_init(sparse_binary_matrix::from_nested_csr(1, 1, {{0}})));
+      },
+      "takes no built decoder");
+  unusable([](auto &cfg) { cfg.d_sparse = {{0}}; }, "takes no flat matrices");
+  unusable([](auto &cfg) { cfg.windows = {{"A", {}, ""}}; },
+           "takes no windows: its layers are A and B");
+  // corrected_logical, the default, reads the template's readout map.
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"}}, spec,
+              {{"commit_rounds", std::size_t{2}},
+               {"buffer_rounds", std::size_t{1}},
+               {"output", std::string("corrected_logical")}});
+      },
+      "from_topology: parallel_window 'P' has output: corrected_logical, "
+      "which reads the logical value through the last phase's m2o_sparse, "
+      "and its template has none");
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"}}, spec,
+              {{"buffer_rounds", std::size_t{1}}});
+      },
+      "commit_rounds");
+} // end - TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern)
+
+// A pattern inside an ensemble is rejected before anything is built: its
+// ingest would be fed by the ensemble's fan-out, not by measurements alone.
+TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble) {
+  task_graph_ensemble_spec spec;
+  task_graph_ensemble_spec::member member;
+  task_graph_node_config pattern;
+  task_graph_node_config ensemble;
+  std::vector<task_graph_node_config> nodes;
+  pattern.id = "pw";
+  pattern.kind = "parallel_window";
+  pattern.dem = arbitrary_memory_spec(5);
+  pattern.decoder_type = "single_error_lut";
+  pattern.node_params = {{"commit_rounds", std::size_t{2}},
+                         {"buffer_rounds", std::size_t{1}}};
+  member.nodes.push_back(std::move(pattern));
+  member.edges = {{"input", "output", "pw", "input"},
+                  {"pw", "output", "output", "input"}};
+  spec.members.push_back(std::move(member));
+  spec.join_strategy = "first";
+  ensemble.id = "E";
+  ensemble.ensemble = std::move(spec);
+  nodes.push_back(std::move(ensemble));
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(
+            std::move(nodes), {{"measurements", "output", "E", "input"},
+                               {"E", "output", "output", "input"}});
+      },
+      "from_topology: ensemble 'E' member 0 has parallel_window 'pw', which "
+      "expands only as a node of the graph");
+} // end - TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble)
+
+// A pattern or an ensemble may not take a synthetic endpoint's id, though
+// lowering gives its nodes other ids.
+TEST(ParallelWindowLowering, RejectsAReservedId) {
+  for (const std::string id : {"measurements", "dets", "output"}) {
+    SCOPED_TRACE(id);
+    task_graph_node_config pattern;
+    std::vector<task_graph_node_config> nodes;
+    pattern.id = id;
+    pattern.kind = "parallel_window";
+    pattern.dem = arbitrary_memory_spec(5);
+    pattern.decoder_type = "single_error_lut";
+    pattern.node_params = {{"commit_rounds", std::size_t{2}},
+                           {"buffer_rounds", std::size_t{1}},
+                           {"output", std::string("corrections")}};
+    nodes.push_back(std::move(pattern));
+    expect_lowering_error(
+        [&] {
+          decoding_task_graph::from_topology(
+              std::move(nodes), {{"measurements", "output", id, "input"},
+                                 {id, "output", "output", "input"}});
+        },
+        "from_topology: node id '" + id +
+            "' is reserved for a synthetic endpoint");
+  } // end - for(id)
+} // end - TEST(ParallelWindowLowering, RejectsAReservedId)
+
+// ---------------------------------------------------------------------------
+// Building the windowed kinds
+// ---------------------------------------------------------------------------
+
+// The ingest and decode_window kinds build their nodes from what a windowed
+// topology resolves: an ingest node from its template and layers, a
+// decode_window node from the store's windows, the template and the layer
+// request of the ingest port it reads, with its receives, inner decoder
+// and verify_residual. Without them neither builds.
+TEST(WindowKinds, BuildTheirNodesFromTheContext) {
+  const auto layers = layered(2, 1, 3);
+  auto spec = arbitrary_memory_spec(5, true);
+  spec.phases.back().spec.m2o_sparse = {0, -1};
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  const cudaqx::heterogeneous_map ingest_params{{"read_logical", true}};
+  const cudaqx::heterogeneous_map unchecked{};
+  const cudaqx::heterogeneous_map failing{
+      {"verify_residual", std::string("fail")}};
+  const cudaqx::heterogeneous_map receiving{{"num_receives", std::size_t{2}}};
+  std::mt19937 rng(53);
+  std::vector<std::uint8_t> m(context->measurement_offset(30, 30));
+  std::optional<edge_value> window;
+  for (auto &x : m)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  store.add_windows(context, layers.a);
+  store.add_windows(context, layers.b);
+  // The context a windowed topology gives node id: its template, with
+  // @p layer for a decode_window node.
+  const auto context_of = [&](const std::string &id,
+                              const cudaqx::heterogeneous_map &params,
+                              std::optional<window_request> layer) {
+    node_build_context ctx;
+    ctx.id = id;
+    ctx.node_params = &params;
+    ctx.store = &store;
+    ctx.context = context;
+    ctx.layer = std::move(layer);
+    ctx.decoder_type = "single_error_lut";
+    return ctx;
+  };
+  const auto build = [&](const std::string &kind, node_build_context &ctx) {
+    return (*find_node_factory(kind))(ctx);
+  };
+
+  auto ingest_ctx = context_of("ingest", ingest_params, std::nullopt);
+  ingest_ctx.windows = {{"A", layers.a, ""}, {"B", layers.b, ""}};
+  auto ingest = build("ingest", ingest_ctx);
+  auto *in = dynamic_cast<ingest_node *>(ingest.get());
+  ASSERT_NE(in, nullptr);
+  EXPECT_EQ(in->outputs(), (std::vector<std::string>{"A", "B", "logical"}));
+  // A's first window, copied while its publication stands.
+  for (std::size_t at = 0; !window; at += *in->raw_chunk_limit()) {
+    ASSERT_LT(at + *in->raw_chunk_limit(), m.size());
+    for (bool more = in->enqueue(m.data() + at, *in->raw_chunk_limit(),
+                                 round_type::BULK);
+         more; more = in->publish_next())
+      if (!window)
+        window = *in->streaming_output(0);
+  }
+
+  auto a_ctx = context_of("A", unchecked, layers.a);
+  auto checked_ctx = context_of("A", failing, layers.a);
+  auto b_ctx = context_of("B", receiving, layers.b);
+  auto a = build("decode_window", a_ctx);
+  auto checked = build("decode_window", checked_ctx);
+  auto b = build("decode_window", b_ctx);
+  auto *a_node = dynamic_cast<decode_window_node *>(a.get());
+  auto *checked_node = dynamic_cast<decode_window_node *>(checked.get());
+  ASSERT_NE(a_node, nullptr);
+  ASSERT_NE(checked_node, nullptr);
+  EXPECT_EQ(b->inputs(),
+            (std::vector<std::string>{"input", "receive_0", "receive_1"}));
+  // A random window is beyond a single-error table: unchecked, it fires;
+  // with verify_residual fail, its solution is rejected.
+  EXPECT_TRUE(a_node->fire(0, {&*window}));
+  EXPECT_THROW(checked_node->fire(0, {&*window}), std::runtime_error);
+
+  node_build_context bare;
+  bare.id = "lonely";
+  bare.node_params = &unchecked;
+  expect_lowering_error([&] { build("ingest", bare); },
+                        "task graph node 'lonely': an ingest node is built "
+                        "only within a windowed topology");
+  expect_lowering_error([&] { build("decode_window", bare); },
+                        "task graph node 'lonely': a decode_window node is "
+                        "built only within a windowed topology");
+} // end - TEST(WindowKinds, BuildTheirNodesFromTheContext)
+
+// from_topology builds a windowed graph's nodes from what it resolves, so a
+// builder's own error is reported as itself, and only then rejects the
+// graph: its nodes join their inputs by index, which this executor does not.
+TEST(WindowKinds, BuildingAWindowedGraphStopsAtTheExecutor) {
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"output", std::string("corrections")}};
+  lowered_pattern p(arbitrary_memory_spec(5), params);
+  lowered_pattern unknown(arbitrary_memory_spec(5), params);
+  unknown.nodes[2].decoder_type = "no_such_decoder";
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(std::move(p.nodes),
+                                           std::move(p.edges));
+      },
+      "from_topology: a windowed graph needs an executor that joins inputs "
+      "by index, which is not available yet");
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(std::move(unknown.nodes),
+                                           std::move(unknown.edges));
+      },
+      "no_such_decoder");
+} // end - TEST(WindowKinds, BuildingAWindowedGraphStopsAtTheExecutor)
+
+// An ingest node keeps a shot's partial rounds and publications across
+// deliveries, so copies of it would split one stream: max_in_flight on it is
+// rejected, while the pattern's layers may still set it.
+TEST(WindowKinds, BuildingRejectsAnIngestFirePool) {
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"output", std::string("corrections")}};
+  lowered_pattern p(arbitrary_memory_spec(5), params);
+  ASSERT_EQ(p.nodes[0].kind, "ingest");
+  p.nodes[0].max_in_flight = 2;
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(
+            std::move(p.nodes), std::move(p.edges), {.async_streaming = true});
+      },
+      "from_topology: node 'P.ingest' of kind 'ingest' keeps state across "
+      "deliveries and cannot run as a fire pool");
+}
+
+// The pattern is registered as one, with its windows, and has no factory.
+TEST(ParallelWindowLowering, IsARegisteredPatternWithWindows) {
+  const auto *pattern = find_node_pattern("parallel_window");
+  ASSERT_NE(pattern, nullptr);
+  EXPECT_TRUE(pattern->lower);
+  EXPECT_TRUE(pattern->windows);
+  EXPECT_EQ(find_node_factory("parallel_window"), nullptr);
+  EXPECT_EQ(find_node_pattern("xor"), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Pattern kinds
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Ids the relay pattern below was lowered for, in order.
+std::vector<std::string> &relay_lowered_ids() {
+  static std::vector<std::string> ids;
+  return ids;
+}
+
+// A pattern kind for the tests below: node R lowers into one streaming node
+// R.inner over the five-round repetition code, which takes R's edges.
+const bool relay_pattern_registered = [] {
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  spec.name = "test_only_relay";
+  spec.requires_decoder = false;
+  spec.requires_dem = false;
+  pattern.lower = [](task_graph_node_config cfg,
+                     std::vector<task_graph_node_config> &out,
+                     std::vector<task_graph_edge> &edges) {
+    const std::string inner = cfg.id + ".inner";
+    relay_lowered_ids().push_back(cfg.id);
+    for (auto &e : edges) {
+      if (e.to_node == cfg.id)
+        e.to_node = inner;
+      if (e.from_node == cfg.id)
+        e.from_node = inner;
+    }
+    out.push_back(rep5_streaming_node(inner));
+  };
+  register_pattern_kind(std::move(spec), {}, std::move(pattern));
+  return true;
+}();
+
+} // namespace
+
+// A pattern kind is lowered by the hook it registered before any node is
+// checked or built, so it needs no factory, and the node it lowers into
+// takes its edges.
+TEST(PatternKind, IsLoweredByItsHookBeforeTheBuild) {
+  std::vector<task_graph_node_config> nodes;
+  task_graph_node_config relay;
+  ASSERT_TRUE(relay_pattern_registered);
+  EXPECT_NE(find_node_pattern("test_only_relay"), nullptr);
+  EXPECT_EQ(find_node_factory("test_only_relay"), nullptr);
+  relay.id = "R";
+  relay.kind = "test_only_relay";
+  nodes.push_back(std::move(relay));
+  relay_lowered_ids().clear();
+  const auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"measurements", "output", "R", "input"},
+                         {"R", "output", "output", "L"}});
+  EXPECT_EQ(relay_lowered_ids(), std::vector<std::string>{"R"});
+  EXPECT_EQ(graph->output_names(), std::vector<std::string>{"L"});
+}
+
+// Any pattern kind inside an ensemble member is rejected, naming its kind,
+// before its hook runs.
+TEST(PatternKind, IsRejectedInsideAnEnsemble) {
+  task_graph_ensemble_spec spec;
+  task_graph_ensemble_spec::member member;
+  task_graph_node_config relay;
+  task_graph_node_config ensemble;
+  std::vector<task_graph_node_config> nodes;
+  ASSERT_TRUE(relay_pattern_registered);
+  relay.id = "r";
+  relay.kind = "test_only_relay";
+  member.nodes.push_back(std::move(relay));
+  member.edges = {{"input", "output", "r", "input"},
+                  {"r", "output", "output", "input"}};
+  spec.members.push_back(std::move(member));
+  spec.join_strategy = "first";
+  ensemble.id = "E";
+  ensemble.ensemble = std::move(spec);
+  nodes.push_back(std::move(ensemble));
+  relay_lowered_ids().clear();
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(
+            std::move(nodes), {{"measurements", "output", "E", "input"},
+                               {"E", "output", "output", "input"}});
+      },
+      "from_topology: ensemble 'E' member 0 has test_only_relay 'r', which "
+      "expands only as a node of the graph");
+  EXPECT_TRUE(relay_lowered_ids().empty());
+} // end - TEST(PatternKind, IsRejectedInsideAnEnsemble)
+
+// A kind either is a pattern or has a factory: registering one form replaces
+// the other, and unregistering removes both. A pattern needs a lowering.
+TEST(PatternKind, RegistrationReplacesTheOtherForm) {
+  const std::string name = "test_only_pattern_or_factory";
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  const node_factory factory =
+      [](node_build_context &) -> std::unique_ptr<task_graph_node> {
+    return nullptr;
+  };
+  spec.name = name;
+  EXPECT_THROW(register_pattern_kind(spec, {}, pattern), std::invalid_argument);
+  pattern.lower = [](task_graph_node_config,
+                     std::vector<task_graph_node_config> &,
+                     std::vector<task_graph_edge> &) {};
+
+  register_pattern_kind(spec, {}, pattern);
+  EXPECT_NE(find_node_pattern(name), nullptr);
+  EXPECT_EQ(find_node_factory(name), nullptr);
+  register_node_kind(spec, {}, factory);
+  EXPECT_EQ(find_node_pattern(name), nullptr);
+  EXPECT_NE(find_node_factory(name), nullptr);
+  register_pattern_kind(spec, {}, pattern);
+  EXPECT_NE(find_node_pattern(name), nullptr);
+  EXPECT_EQ(find_node_factory(name), nullptr);
+  unregister_task_graph_node_kind(name);
+  EXPECT_EQ(find_node_pattern(name), nullptr);
+  EXPECT_EQ(find_task_graph_node_kind(name), nullptr);
+} // end - TEST(PatternKind, RegistrationReplacesTheOtherForm)
 
 } // namespace cudaq::qec

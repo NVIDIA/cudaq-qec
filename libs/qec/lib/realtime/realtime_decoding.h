@@ -75,13 +75,15 @@ struct stim_dem_read {
 using pinned_stim_dems = std::map<std::string, stim_dem_read>;
 
 /// Fill a data artifact store from a configuration: every template a window
-/// entry or an ingest layer is built on, named or inline, and no other, since
-/// experiment_template rejects some models a plain decoder's dem_chunks
-/// accepts; every Stim DEM entry, with a file-backed one read and checked
-/// against its pinned sha256; and every window variant a window entry or an
-/// ingest layer needs. A node's layers are built on the template its DEM is
-/// built from: its own dem_chunks, else its decoder's unless the decoder has
-/// flat matrices, which then outrank it, as when expand_dem_chunks() has run.
+/// entry, an ingest layer or a parallel_window pattern is built on, named or
+/// inline, and no other, since experiment_template rejects some models a
+/// plain decoder's dem_chunks accepts; every Stim DEM entry, with a
+/// file-backed one read and checked against its pinned sha256; and every
+/// window variant a window entry, an ingest layer or a pattern needs, the
+/// pattern's layers as its windows <id>.A and <id>.B. A node's layers are
+/// built on the template its DEM is built from: its own dem_chunks, else its
+/// decoder's unless the decoder has flat matrices, which then outrank it, as
+/// when expand_dem_chunks() has run.
 /// A layer builds its own request; while that equals the window entry it
 /// names, as parsing leaves it, the entry must be on the node's template.
 /// Callers include decoding_task_data_artifacts.h to use the store.
@@ -91,7 +93,8 @@ using pinned_stim_dems = std::map<std::string, stim_dem_read>;
 /// @throws std::runtime_error naming the entry, or the decoder and node, if a
 /// file cannot be read or does not match its sha256, an inline Stim DEM is
 /// pinned, a window entry's context or a layer's entry is not of the right
-/// kind or template, a node with layers has no template, or a template or
+/// kind or template, a node with layers or a pattern has no template, a
+/// pattern's parameters are invalid, or a template or
 /// window cannot be built.
 /// @throws std::logic_error naming the same, if the store finds its own
 /// entries inconsistent, which no configuration causes.

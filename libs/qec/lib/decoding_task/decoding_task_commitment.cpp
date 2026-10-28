@@ -14,6 +14,7 @@
 // path.
 
 #include "decoding_task_commitment.h"
+#include "decoding_task_data_artifacts.h"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -411,16 +412,22 @@ void check_imports(const window_schedule &s) {
   }
 }
 
-// Builds window s's variant and rejects its first commit column with a
-// conflicting parallel column, naming both by round.
+// Rejects window s's first commit column with a conflicting parallel
+// column, naming both by round. The window is @p built, s's variant built
+// elsewhere, or one built here. A variant's windows are one problem up to a
+// shift of rounds, so columns are named in s's rounds either way.
 void check_parallel_columns(std::shared_ptr<const experiment_template> context,
                             const window_request &request,
-                            const scheduled_window &s, std::size_t num_rounds) {
+                            const scheduled_window &s, std::size_t num_rounds,
+                            const decoding_window *built) {
   const auto &t = *context;
-  const auto w = window_from_dem_chunks(context, request, s.k, num_rounds);
+  std::optional<decoding_window> own;
+  if (!built)
+    own = window_from_dem_chunks(context, request, s.k, num_rounds);
+  const auto &w = built ? *built : *own;
   const auto column = [&](std::size_t c) {
-    auto r = w.rounds.begin;
-    const auto first = t.column_offset(w.rounds.begin, num_rounds);
+    auto r = s.rounds.begin;
+    const auto first = t.column_offset(s.rounds.begin, num_rounds);
     if (c >= w.num_fault_columns)
       return "column " + std::to_string(c);
     while (t.column_offset(r + 1, num_rounds) - first <=
@@ -547,7 +554,8 @@ std::size_t commitment_probe_rounds(const experiment_template &context,
 // the rows; parallel columns last, once per layer variant.
 void validate_commitment(std::shared_ptr<const experiment_template> context,
                          const std::vector<window_layer> &layers,
-                         const std::vector<task_graph_edge> &edges) {
+                         const std::vector<task_graph_edge> &edges,
+                         data_artifact_store *store) {
   std::vector<window_schedule> schedules;
   std::map<const extended_dem *, chunk_touch> touches;
   std::set<std::pair<std::string, variant_key>> variants;
@@ -569,11 +577,20 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
                touch_rounds(*context, schedule.num_rounds, touches));
     check_imports(schedule);
   }
+  // The windows are built only once the schedules pass, so a delivery or
+  // commit mistake is reported before any is built.
+  if (store)
+    for (const auto &layer : layers)
+      store->add_windows(context, layer.request);
   for (const auto &schedule : schedules)
     for (const auto &w : schedule.windows)
-      if (variants.insert({w.node, w.variant}).second)
-        check_parallel_columns(context, *requests.at(w.node), w,
-                               schedule.num_rounds);
+      if (variants.insert({w.node, w.variant}).second) {
+        const auto &request = *requests.at(w.node);
+        check_parallel_columns(
+            context, request, w, schedule.num_rounds,
+            store ? store->find_window(*context, request, w.variant).get()
+                  : nullptr);
+      }
 } // end - validate_commitment()
 
 namespace {
@@ -671,8 +688,10 @@ std::vector<std::string> same_index_cycle(
 
 // Shape first, so a mistake is named for what it is rather than as the
 // commitment failure it causes; then validate_commitment() per ingest node.
-void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
-                              const std::vector<task_graph_edge> &edges) {
+std::map<std::string, std::vector<window_layer>>
+validate_window_topology(const std::vector<task_graph_node_config> &nodes,
+                         const std::vector<task_graph_edge> &edges,
+                         data_artifact_store &store) {
   std::map<std::string, const task_graph_node_config *> ingests;
   std::map<std::string, const task_graph_node_config *> windows;
   std::map<std::string, std::shared_ptr<const experiment_template>> templates;
@@ -687,7 +706,7 @@ void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
       windows[n.id] = &n;
   }
   if (ingests.empty() && windows.empty())
-    return;
+    return layers;
 
   for (const auto &[id, n] : ingests) {
     std::size_t fed = 0;
@@ -705,7 +724,7 @@ void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
                       "' must be fed by measurements alone");
     if (!n->dem)
       reject_topology("ingest node '" + id + "' has no dem_chunks template");
-    templates[id] = std::make_shared<const experiment_template>(*n->dem);
+    templates[id] = store.add_template(*n->dem);
     if (n->node_params.contains("read_logical") &&
         n->node_params.get<bool>("read_logical") &&
         templates[id]->readout().empty())
@@ -800,7 +819,8 @@ void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
     layers[fed.first].push_back(
         {id, fed.second, *layer_request(*ingests.at(fed.first), fed.second)});
   for (const auto &[id, ingest_layers] : layers)
-    validate_commitment(templates.at(id), ingest_layers, sends[id]);
+    validate_commitment(templates.at(id), ingest_layers, sends[id], &store);
+  return layers;
 } // end - validate_window_topology()
 
 } // namespace cudaq::qec

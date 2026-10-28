@@ -20,16 +20,31 @@
 // received and decoded serially, decode as it does, and the logical error
 // rate tracks monolithic matching; receiving a send, a window with nothing
 // to decode, the decoder a window takes, and a decode step that allocates
-// nothing per shot; and the data artifact store: sha256, canonical
-// content, shared entries, templates as content, and lookups that never
-// build.
+// nothing per shot; the ingest core: shots streamed in records cut at
+// random, whose every window view is checked against the detectors the
+// closed model's D forms from the whole shot, with the raw logical value,
+// FINAL and record errors, a ring of fixed size that keeps what views out
+// need, and records that allocate nothing; the decode_window core and the
+// serial pipeline: ingest and the cores, run on raw measurements with
+// windows from the store, decode as the reference does, bit for bit,
+// fires allocate nothing beyond their decoder, a missing residual leaves
+// the imports zero, and what is not a core's window is rejected; and the
+// data artifact store:
+// sha256, canonical content, shared entries, templates as content, and
+// lookups that never build.
 
+#include "allocation_counter.h"
 #include "parallel_window_reference.h"
 #include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_commitment.h"
 #include "../lib/decoding_task/decoding_task_data_artifacts.h"
+#include "../lib/decoding_task/decoding_task_decode_window_core.h"
+#include "../lib/decoding_task/decoding_task_decode_window_node.h"
 #include "../lib/decoding_task/decoding_task_decoding_window.h"
+#include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
+#include "../lib/decoding_task/decoding_task_ingest_core.h"
+#include "../lib/decoding_task/decoding_task_ingest_node.h"
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/dem_construction_code.h"
@@ -37,19 +52,24 @@
 #include "cudaq/qec/pcm_utils.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
 #include <memory>
-#include <new>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -57,63 +77,6 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <unistd.h>
-#endif
-
-// Whether a sanitizer runs this build. Its allocator replaces operator new,
-// aborts on a refused allocation instead of returning null, and reserves
-// address space of its own.
-#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
-#define WINDOW_TESTS_SANITIZED 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
-#define WINDOW_TESTS_SANITIZED 1
-#endif
-#endif
-#ifndef WINDOW_TESTS_SANITIZED
-#define WINDOW_TESTS_SANITIZED 0
-#endif
-
-#if !WINDOW_TESTS_SANITIZED
-namespace {
-// This thread's allocations while counting_allocations is set, so a test can
-// check that a per-shot call allocates nothing.
-thread_local bool counting_allocations = false;
-thread_local std::size_t allocations_counted = 0;
-} // namespace
-
-// The global allocation functions, plain and aligned, counting; operator
-// new[] and the nothrow forms call these.
-void *operator new(std::size_t size) {
-  void *p = std::malloc(size == 0 ? 1 : size);
-  if (counting_allocations)
-    ++allocations_counted;
-  if (!p)
-    throw std::bad_alloc();
-  return p;
-}
-
-// aligned_alloc takes a size that is a whole number of alignments.
-void *operator new(std::size_t size, std::align_val_t align) {
-  const auto alignment = static_cast<std::size_t>(align);
-  const auto rounded =
-      (std::max(size, std::size_t{1}) + alignment - 1) / alignment * alignment;
-  void *p = std::aligned_alloc(alignment, rounded);
-  if (counting_allocations)
-    ++allocations_counted;
-  if (!p)
-    throw std::bad_alloc();
-  return p;
-}
-
-void operator delete(void *p) noexcept { std::free(p); }
-
-void operator delete(void *p, std::size_t) noexcept { std::free(p); }
-
-void operator delete(void *p, std::align_val_t) noexcept { std::free(p); }
-
-void operator delete(void *p, std::size_t, std::align_val_t) noexcept {
-  std::free(p);
-}
 #endif
 
 namespace cudaq::qec {
@@ -1562,7 +1525,7 @@ TEST(WindowModel, HoldsTheKernelForms) {
 
 // A capped address space proves nothing under a sanitizer, whose allocator
 // aborts on a refused allocation and reserves address space of its own.
-constexpr bool sanitized = WINDOW_TESTS_SANITIZED;
+constexpr bool sanitized = QEC_TEST_SANITIZED;
 
 // A repetition-code memory over n bits: n - 1 detectors a round.
 dem_chunks_spec repetition_memory_spec(std::size_t n) {
@@ -1646,11 +1609,33 @@ window_graph with_most_likely(window_graph g) {
   return g;
 }
 
-// Calls validate_commitment() on a fresh template of spec.
+// Calls validate_commitment() on a fresh template of spec twice: building
+// the windows for the check alone, and into a store, as a graph's build
+// does. Both must agree, rejecting with the same message or not at all, and
+// a store that passes holds every layer's windows. Rethrows the rejection.
 void validate(const dem_chunks_spec &spec, const window_graph &g) {
-  validate_commitment(std::make_shared<const experiment_template>(spec),
-                      g.layers, g.edges);
-}
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  std::string alone;
+  std::string stored;
+  try {
+    validate_commitment(std::make_shared<const experiment_template>(spec),
+                        g.layers, g.edges);
+  } catch (const std::invalid_argument &e) {
+    alone = e.what();
+  }
+  try {
+    validate_commitment(context, g.layers, g.edges, &store);
+  } catch (const std::invalid_argument &e) {
+    stored = e.what();
+  }
+  EXPECT_EQ(stored, alone);
+  if (!alone.empty())
+    throw std::invalid_argument(alone);
+  for (const auto &layer : g.layers)
+    EXPECT_NO_THROW(store.find_windows(*context, layer.request))
+        << layer.node << "'s windows are not in the store";
+} // end - validate()
 
 // ---------------------------------------------------------------------------
 // Schedule
@@ -2576,10 +2561,11 @@ void expect_decodes_match(const parallel_window_reference &reference,
     const auto &mine = got[i].solution;
     const auto &theirs = want.windows[i];
     std::vector<std::size_t> committed;
+    SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
+    ASSERT_EQ(mine.outputs.committed.size(), w.model.o.num_cols());
     for (std::size_t c = 0; c < rw.num_faults; ++c)
       if (mine.outputs.committed[c])
         committed.push_back(rw.columns[c]);
-    SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
     ASSERT_EQ(got[i].detectors, theirs.detectors);
     ASSERT_EQ(std::vector<std::uint8_t>(mine.estimate.begin(),
                                         mine.estimate.begin() +
@@ -2784,7 +2770,6 @@ TEST(DecodingWindow, AWorkspaceServesOnlyItsOwnWindow) {
                "commit_window: the workspace is not sized for window 1");
 }
 
-#if !WINDOW_TESTS_SANITIZED
 // Decodes with @p inner, counting what each of its decode() calls
 // allocates, so a test can tell its caller's allocations from the decoder's
 // own in the same call.
@@ -2795,9 +2780,9 @@ public:
       : decoder(decoder_init(window.model.h)), inner_(std::move(inner)) {}
 
   decoder_result decode(const std::vector<float_t> &syndrome) override {
-    const auto before = allocations_counted;
-    auto result = inner_->decode(syndrome);
-    last_decode_allocations_ = allocations_counted - before;
+    decoder_result result;
+    last_decode_allocations_ =
+        allocation_counter::during([&] { result = inner_->decode(syndrome); });
     return result;
   }
 
@@ -2809,7 +2794,15 @@ private:
   std::unique_ptr<decoder> inner_;
   std::size_t last_decode_allocations_ = 0;
 };
-#endif
+
+// A count that ends in an exception stops counting, so the test's own
+// allocations after it are not counted.
+TEST(AllocationCounter, AThrowingRunStopsCounting) {
+  EXPECT_THROW(allocation_counter::during(
+                   [] { throw std::runtime_error("from the run"); }),
+               std::runtime_error);
+  EXPECT_FALSE(allocation_counter::counting);
+}
 
 // On a workspace sized beforehand, receiving a send, solving a window
 // without a decoder and committing allocate nothing, and solving with a
@@ -2817,9 +2810,9 @@ private:
 // The results match a fresh workspace's, so nothing is left over from the
 // last shot.
 TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot) {
-#if WINDOW_TESTS_SANITIZED
-  GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator new";
-#else
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
   const auto tmpl =
       std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
   const auto layers = layered(2, 2, 3);
@@ -2834,11 +2827,7 @@ TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot) {
   auto a_ws = make_window_workspace(a);
   auto b_ws = make_window_workspace(next_b);
   const auto allocations = [](const auto &run) {
-    allocations_counted = 0;
-    counting_allocations = true;
-    run();
-    counting_allocations = false;
-    return allocations_counted;
+    return allocation_counter::during(run);
   };
   // The detectors fault column c of A flips.
   const auto fault = [&](std::size_t c) {
@@ -2887,8 +2876,1767 @@ TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot) {
   EXPECT_EQ(a_ws.solution.outputs.committed[a.commit_columns.begin], 0);
   expect_fresh(a, &dec, a_detectors, a_ws);
   expect_fresh(next_b, nullptr, b_detectors, b_ws);
-#endif
 } // end - TEST(DecodingWindow, TheDecodeStepAllocatesNothingPerShot)
+
+// ---------------------------------------------------------------------------
+// Ingest core
+// ---------------------------------------------------------------------------
+
+// multi_terminal_memory_spec with three suffix phases, the first of which
+// forms its detectors from its own measurements alone, unlike bulk, so a
+// suffix round taken for bulk would form other detectors.
+dem_chunks_spec distinct_suffix_spec() {
+  auto spec = multi_terminal_memory_spec(5, 3);
+  for (auto &phase : spec.phases)
+    if (phase.id == phase_id::from_name("terminal0"))
+      phase.spec.D_sparse = {4, -1, 5, -1, 6, -1, 7, -1};
+  return spec;
+}
+
+// Expect check() to throw E mentioning text.
+template <typename E, typename Check>
+void expect_throw(Check &&check, const std::string &text) {
+  try {
+    check();
+    ADD_FAILURE() << "expected: " << text;
+  } catch (const E &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+// A shot of R rounds on spec: random measurements, and the detectors the
+// closed model's D forms from them, independently of ingest.
+struct shot {
+  std::shared_ptr<const experiment_template> context;
+  std::size_t R = 0;
+  std::vector<std::uint8_t> measurements;
+  std::vector<std::uint8_t> detectors;
+
+  shot(const dem_chunks_spec &spec, std::size_t rounds, std::mt19937 &rng)
+      : context(std::make_shared<const experiment_template>(spec)), R(rounds) {
+    auto expanded = spec;
+    expanded.num_rounds = R;
+    const auto d = dem_chunks_to_d_sparse(expanded);
+    measurements.resize(context->measurement_offset(R, R));
+    for (auto &m : measurements)
+      m = static_cast<std::uint8_t>(rng() & 1);
+    detectors.assign(d.size(), 0);
+    for (std::size_t r = 0; r < d.size(); ++r)
+      for (const auto c : d[r])
+        detectors[r] ^= measurements.at(c);
+  }
+
+  // Round r's detectors.
+  std::vector<std::uint8_t> round(std::int64_t r) const {
+    const auto i = static_cast<std::size_t>(r);
+    return {detectors.begin() + context->row_offset(i, R),
+            detectors.begin() + context->row_offset(i + 1, R)};
+  }
+
+  // The readout round's measurements through the last phase's m2o_sparse.
+  std::vector<std::uint8_t> logical() const {
+    std::vector<std::uint8_t> out;
+    std::uint8_t value = 0;
+    const auto base = context->measurement_offset(R - 1, R);
+    for (const auto i : context->readout()) {
+      if (i == -1) {
+        out.push_back(value);
+        value = 0;
+      } else {
+        value ^= measurements.at(base + static_cast<std::size_t>(i));
+      }
+    }
+    return out;
+  }
+};
+
+// Ingest's layers for requests, each with a pool of three views.
+std::vector<ingest_layer> layers_of(const std::vector<window_request> &reqs) {
+  std::vector<ingest_layer> out;
+  for (const auto &request : reqs)
+    out.push_back({request, 3});
+  return out;
+}
+
+// The view is the shot's window k of its layer, rows and variant alike.
+void expect_view(const ingest_core &core, const shot &s,
+                 const std::vector<window_request> &requests,
+                 const window_view &view) {
+  const auto &request = requests.at(view.layer);
+  const auto placed = place_window(s.context, request, view.k, s.R);
+  SCOPED_TRACE("layer " + std::to_string(view.layer) + ", window " +
+               std::to_string(view.k));
+  EXPECT_EQ(view.rounds, placed.rounds);
+  EXPECT_EQ(
+      view.first_row,
+      s.context->row_offset(static_cast<std::size_t>(view.rounds.begin), s.R));
+  EXPECT_EQ(view.source, &core);
+  EXPECT_TRUE(view.variant == window_variant(*s.context, request, view.k, s.R));
+  for (auto r = view.rounds.begin; r < view.rounds.end; ++r) {
+    const auto got = core.detectors(r);
+    EXPECT_EQ(std::vector<std::uint8_t>(got.begin(), got.end()), s.round(r))
+        << "round " << r;
+  }
+}
+
+// Streams shot s into core in records cut at random, no longer than its
+// limit, ending with a FINAL record that starts anywhere within a record's
+// length of the shot's end: before the readout round, inside it, or at its
+// end, when the FINAL record is empty. Every publication is checked against the
+// shot, its views held for a while, checked again and released. @p before_final
+// counts the indices published before the FINAL record.
+void expect_streams(ingest_core &core, const shot &s,
+                    const std::vector<window_request> &requests,
+                    std::mt19937 &rng, std::size_t &before_final) {
+  const auto total = s.measurements.size();
+  const auto limit = core.record_limit();
+  const auto final_start = std::uniform_int_distribution<std::size_t>(
+      total > limit ? total - limit : 0, total)(rng);
+  std::deque<const window_view *> held;
+  std::set<std::pair<std::size_t, std::int64_t>> published;
+  std::int64_t last_k = std::numeric_limits<std::int64_t>::min();
+  bool final_taken = false;
+  before_final = 0;
+  // Publications ready so far, checked, with views held up to two indices.
+  const auto drain = [&] {
+    while (const auto *p = core.poll()) {
+      EXPECT_GT(p->k, last_k);
+      last_k = p->k;
+      before_final += final_taken ? 0 : 1;
+      for (std::size_t l = 0; l < p->views.size(); ++l) {
+        const auto instances = window_instances(requests[l], s.R);
+        EXPECT_EQ(p->views[l] != nullptr,
+                  p->k >= instances.begin && p->k < instances.end)
+            << "layer " << l << ", window " << p->k;
+        if (!p->views[l])
+          continue;
+        expect_view(core, s, requests, *p->views[l]);
+        EXPECT_TRUE(published.insert({l, p->k}).second);
+        held.push_back(p->views[l]);
+      }
+      while (held.size() > 2 * requests.size()) {
+        expect_view(core, s, requests, *held.front());
+        core.release(*held.front());
+        held.pop_front();
+      }
+    } // end - while(p)
+  };
+  // Feeds one record, releasing every held view if the ring defers it.
+  const auto feed = [&](std::size_t begin, std::size_t end, bool final) {
+    auto status =
+        core.enqueue(s.measurements.data() + begin, end - begin, final);
+    if (status == ingest_status::deferred) {
+      for (const auto *view : held)
+        core.release(*view);
+      held.clear();
+      drain();
+      status = core.enqueue(s.measurements.data() + begin, end - begin, final);
+    }
+    ASSERT_EQ(status, ingest_status::accepted);
+  };
+  for (std::size_t at = 0; at < final_start;) {
+    const auto len = std::uniform_int_distribution<std::size_t>(
+        1, std::min(limit, final_start - at))(rng);
+    ASSERT_NO_FATAL_FAILURE(feed(at, at + len, false));
+    at += len;
+    drain();
+  }
+  final_taken = true;
+  ASSERT_NO_FATAL_FAILURE(feed(final_start, total, true));
+  drain();
+  for (const auto *view : held)
+    core.release(*view);
+  held.clear();
+  EXPECT_TRUE(core.done());
+  EXPECT_EQ(core.shot_rounds(), s.R);
+  for (std::size_t l = 0; l < requests.size(); ++l) {
+    const auto instances = window_instances(requests[l], s.R);
+    for (auto k = instances.begin; k < instances.end; ++k)
+      EXPECT_TRUE(published.count({l, k}))
+          << "layer " << l << ", window " << k << " was never published";
+  }
+} // end - expect_streams()
+
+// arbitrary_memory_spec with explicit D, whose rounds are 100 measurements
+// wide but whose readout round is one: a record's rounds are bounded by the
+// rounds it can complete before FINAL, not by the narrow readout round.
+dem_chunks_spec one_measurement_readout_spec() {
+  auto spec = arbitrary_memory_spec(5, true);
+  for (auto &phase : spec.phases) {
+    auto &p = phase.spec;
+    if (phase.id == phase_name::dem_init) {
+      p.num_measurements = 100;
+      p.D_sparse = {0, -1, 1, -1, 2, -1, 3, -1};
+    } else if (phase.id == phase_name::dem_bulk) {
+      p.num_measurements = 100;
+      p.D_sparse = {0, 100, -1, 1, 101, -1, 2, 102, -1, 3, 103, -1};
+    } else {
+      p.num_measurements = 1;
+      p.D_sparse = {0, 100, -1, 1, -1, 2, -1, 3, -1};
+    }
+  }
+  return spec;
+}
+
+// Every layout the streaming tests run: the parallel-window layers at two
+// sizes, and a sequential sliding window.
+std::vector<std::vector<window_request>> ingest_layouts() {
+  const auto large = layered(3, 3, 9);
+  const auto small = layered(2, 2, 3);
+  return {{large.a, large.b}, {small.a, small.b}, {sliding(2, 5)}};
+}
+
+// Every view of every window, in shots of every length up to 40 and back
+// down, cut into records at random, holds the rows the whole shot's D forms,
+// on specs with D_sparse and without, with one suffix phase or three, one of
+// them unlike bulk, with no prefix or suffix at all, with a first round
+// narrower than the rest, and with a wider readout round or narrower ones,
+// one as narrow as a single measurement beside rounds of a hundred. Windows
+// are handed over before FINAL once complete, and the raw logical value is
+// the readout round's through m2o.
+TEST(IngestCore, StreamsShotsCutAnywhere) {
+  std::mt19937 rng(7);
+  for (const auto &spec :
+       {arbitrary_memory_spec(5, true), rep5_spec(),
+        multi_terminal_memory_spec(5, 3), distinct_suffix_spec(),
+        wide_readout_spec(), narrow_readout_spec(),
+        one_measurement_readout_spec(), repeating_only_spec(),
+        widening_spec(true)}) {
+    const auto context = std::make_shared<const experiment_template>(spec);
+    std::vector<std::size_t> lengths;
+    // Rising then falling, so a shot follows both a shorter and a longer one.
+    for (auto R = context->min_rounds(); R <= 40; ++R)
+      lengths.push_back(R);
+    for (auto R = std::size_t{40}; R >= context->min_rounds(); --R)
+      lengths.push_back(R);
+    for (const auto &requests : ingest_layouts()) {
+      ingest_core core(context, layers_of(requests),
+                       !context->readout().empty());
+      for (const auto R : lengths) {
+        SCOPED_TRACE("R=" + std::to_string(R) + ", " +
+                     std::to_string(requests.size()) + " layers");
+        const shot s(spec, R, rng);
+        std::size_t early = 0;
+        expect_streams(core, s, requests, rng, early);
+        if (HasFatalFailure())
+          return;
+        if (R >= 30)
+          EXPECT_GT(early, 0u) << "nothing was handed over before FINAL";
+        EXPECT_EQ(core.logical(), s.logical());
+        core.reset();
+      } // end - for(R)
+    } // end - for(requests)
+  } // end - for(spec)
+} // end - TEST(IngestCore, StreamsShotsCutAnywhere)
+
+// arbitrary_memory_spec with explicit D as a chain that does not repeat:
+// init, bulk and final, so its shots have exactly three rounds.
+dem_chunks_spec fixed_length_spec() {
+  auto spec = arbitrary_memory_spec(3, true);
+  spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_final}};
+  return spec;
+}
+
+// A template that does not repeat has one shot length: its shots stream as
+// any other's, and a record that runs past its last round is rejected,
+// FINAL or not, however much it holds.
+TEST(IngestCore, StreamsAShotOfFixedLength) {
+  const auto spec = fixed_length_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  const auto layers = layered(3, 3, 9);
+  const std::vector<window_request> requests{layers.a, layers.b};
+  const std::vector<std::uint8_t> record(48, 0);
+  std::mt19937 rng(17);
+  ASSERT_FALSE(context->repeats());
+  ASSERT_EQ(context->min_rounds(), 3u);
+  for (const auto &layout : ingest_layouts()) {
+    ingest_core core(context, layers_of(layout), false);
+    for (int i = 0; i < 5; ++i) {
+      const shot s(spec, 3, rng);
+      std::size_t early = 0;
+      ASSERT_NO_FATAL_FAILURE(expect_streams(core, s, layout, rng, early));
+      core.reset();
+    }
+  }
+  ingest_core core(context, layers_of(requests), false);
+  for (const auto len : {4u * 4u, 4u * 4u + 1u, 4u * 6u + 3u}) {
+    core.reset();
+    expect_throw<std::invalid_argument>(
+        [&] { core.enqueue(record.data(), len, true); },
+        "ingest: the FINAL record runs past the shot's last round, 3 rounds "
+        "long");
+  }
+  core.reset();
+  expect_throw<std::invalid_argument>(
+      [&] { core.enqueue(record.data(), 4u * 3u + 1u, false); },
+      "ingest: a record runs past the shot's last round, 3 rounds long");
+  // The rejected record left no round formed.
+  EXPECT_EQ(core.poll(), nullptr);
+  expect_throw<std::out_of_range>([&] { core.detectors(0); },
+                                  "ingest: round 0's detectors are not in "
+                                  "the ring");
+} // end - TEST(IngestCore, StreamsAShotOfFixedLength)
+
+// The readout round may arrive before FINAL, in part or whole: a record
+// longer than the rounds before it, then a FINAL record with the rest, or
+// nothing at all. Its measurements are never taken for a bulk round, so the
+// shot's views and logical value are as they would be had FINAL carried it.
+TEST(IngestCore, TakesAReadoutRoundThatArrivesBeforeFinal) {
+  const auto layers = layered(3, 3, 9);
+  const std::vector<window_request> requests{layers.a, layers.b};
+  std::mt19937 rng(23);
+  // Streams s in records of the given lengths, the last of them FINAL, and
+  // checks every view and the logical value.
+  const auto streams = [&](const shot &s, std::vector<std::size_t> lengths) {
+    ingest_core core(s.context, layers_of(requests),
+                     !s.context->readout().empty());
+    std::size_t at = 0;
+    std::size_t views = 0;
+    for (std::size_t i = 0; i < lengths.size(); ++i) {
+      ASSERT_EQ(core.enqueue(s.measurements.data() + at, lengths[i],
+                             i + 1 == lengths.size()),
+                ingest_status::accepted);
+      at += lengths[i];
+      while (const auto *p = core.poll())
+        for (const auto *view : p->views)
+          if (view) {
+            expect_view(core, s, requests, *view);
+            core.release(*view);
+            ++views;
+          }
+    }
+    ASSERT_EQ(at, s.measurements.size());
+    EXPECT_TRUE(core.done());
+    EXPECT_GT(views, 0u);
+    EXPECT_EQ(core.logical(), s.logical());
+  };
+  // 14 rounds of 4 measurements, then a readout round of 5.
+  const shot wide(wide_readout_spec(), 15, rng);
+  ASSERT_EQ(wide.measurements.size(), 61u);
+  ASSERT_NO_FATAL_FAILURE(streams(wide, {60, 1}));
+  ASSERT_NO_FATAL_FAILURE(streams(wide, {48, 13, 0}));
+  // A readout round as wide as bulk, whole before an empty FINAL.
+  const shot even(arbitrary_memory_spec(5, true), 15, rng);
+  ASSERT_NO_FATAL_FAILURE(streams(even, {48, 12, 0}));
+} // end - TEST(IngestCore, TakesAReadoutRoundThatArrivesBeforeFinal)
+
+// A record no longer than the limit is always taken once nothing is held:
+// rounds a record can complete before FINAL are bounded by the rounds cut
+// before it, which a one-measurement readout round does not narrow.
+TEST(IngestCore, TakesAnyLegalRecordWhenNothingIsHeld) {
+  const auto context = std::make_shared<const experiment_template>(
+      one_measurement_readout_spec());
+  const std::vector<std::uint8_t> record(400, 0);
+  ingest_core core(context, layers_of({sliding(2, 5)}), false);
+  ASSERT_EQ(core.record_limit(), 200u);
+  EXPECT_EQ(core.enqueue(record.data(), 99, false), ingest_status::accepted);
+  EXPECT_EQ(core.enqueue(record.data(), 200, false), ingest_status::accepted);
+}
+
+// A record longer than one period of rounds is rejected, and the core takes
+// no more input until it is reset.
+TEST(IngestCore, RejectsARecordLongerThanAPeriod) {
+  const auto spec = arbitrary_memory_spec(5, true);
+  const auto context = std::make_shared<const experiment_template>(spec);
+  const auto layers = layered(3, 3, 9);
+  ingest_core core(context, layers_of({layers.a, layers.b}), false);
+  const std::vector<std::uint8_t> record(core.record_limit() + 1, 0);
+  EXPECT_EQ(core.record_limit(), 12u * 4u);
+  expect_throw<std::invalid_argument>(
+      [&] { core.enqueue(record.data(), record.size(), false); },
+      "ingest: a record of 49 measurements is longer than one period of "
+      "rounds, 48");
+  expect_throw<std::logic_error>([&] { core.enqueue(record.data(), 4, false); },
+                                 "ingest: reset() is needed after a failure");
+  core.reset();
+  EXPECT_EQ(core.enqueue(record.data(), 4, false), ingest_status::accepted);
+} // end - TEST(IngestCore, RejectsARecordLongerThanAPeriod)
+
+// A FINAL record must end a shot the template admits: its readout round is
+// whole, the rounds before it are whole, and the shot is long enough. Input
+// after FINAL waits for reset().
+TEST(IngestCore, RejectsAFinalRecordThatEndsNoShot) {
+  const auto spec = arbitrary_memory_spec(5, true);
+  const auto context = std::make_shared<const experiment_template>(spec);
+  const auto layers = layered(3, 3, 9);
+  const std::vector<std::uint8_t> record(48, 0);
+  ingest_core core(context, layers_of({layers.a, layers.b}), false);
+  const auto rejects = [&](std::size_t before, std::size_t final_len,
+                           const std::string &text) {
+    core.reset();
+    ASSERT_EQ(core.enqueue(record.data(), before, false),
+              ingest_status::accepted);
+    expect_throw<std::invalid_argument>(
+        [&] { core.enqueue(record.data(), final_len, true); }, text);
+  };
+  rejects(0, 3,
+          "ingest: the shot holds 3 measurements, fewer than its readout "
+          "round's 4");
+  rejects(0, 10,
+          "ingest: the FINAL record ends mid-round: round 1 has 2 of its 4 "
+          "measurements before the readout round");
+  rejects(1, 9,
+          "ingest: the FINAL record ends mid-round: round 1 has 2 of its 4 "
+          "measurements before the readout round");
+  rejects(0, 4,
+          "ingest: the FINAL record ends the shot at 1 round, but the "
+          "template's shots have at least " +
+              std::to_string(context->min_rounds()));
+  // A failed core hands nothing over, though windows were complete.
+  core.reset();
+  ASSERT_EQ(core.enqueue(record.data(), 48, false), ingest_status::accepted);
+  expect_throw<std::invalid_argument>(
+      [&] { core.enqueue(record.data(), 10, true); },
+      "ingest: the FINAL record ends mid-round");
+  EXPECT_EQ(core.poll(), nullptr);
+  core.reset();
+  ASSERT_EQ(core.enqueue(record.data(), 2, false), ingest_status::accepted);
+  ASSERT_EQ(core.enqueue(record.data(), 34, true), ingest_status::accepted);
+  EXPECT_EQ(core.shot_rounds(), 9u);
+  expect_throw<std::logic_error>(
+      [&] { core.enqueue(record.data(), 4, false); },
+      "ingest: input after FINAL; reset() starts the next shot");
+} // end - TEST(IngestCore, RejectsAFinalRecordThatEndsNoShot)
+
+// The ring is sized at construction and never grows: while views are out,
+// it keeps their rounds intact and defers what it has no room for, and a
+// full pool holds back the next index. Releasing them lets the shot go on.
+TEST(IngestCore, HoldsEveryRoundAViewNeeds) {
+  const auto spec = arbitrary_memory_spec(5, true);
+  const auto layers = layered(3, 3, 9);
+  const std::vector<window_request> requests{layers.a, layers.b};
+  std::mt19937 rng(11);
+  const shot s(spec, 200, rng);
+  ingest_core core(s.context, layers_of(requests), false);
+  const auto ring = core.ring_rounds();
+  const auto period = 12u * 4u;
+  std::vector<const window_view *> out;
+  std::size_t at = 0;
+  // Records of one period until the ring defers one.
+  for (;;) {
+    ASSERT_LT(at + period, s.measurements.size());
+    if (core.enqueue(s.measurements.data() + at, period, false) ==
+        ingest_status::deferred)
+      break;
+    at += period;
+    while (const auto *p = core.poll())
+      for (const auto *view : p->views)
+        if (view)
+          out.push_back(view);
+  }
+  EXPECT_EQ(core.ring_rounds(), ring);
+  // A's pool of three is out, with B's views of the same indices: B has no
+  // window 0.
+  EXPECT_EQ(out.size(), 3u + 2u);
+  EXPECT_EQ(core.poll(), nullptr);
+  for (const auto *view : out)
+    expect_view(core, s, requests, *view);
+  for (const auto *view : out)
+    core.release(*view);
+  expect_throw<std::logic_error>([&] { core.release(*out.front()); },
+                                 "ingest: release of a view that is not out");
+  // Released, the rest of the shot streams through.
+  out.clear();
+  for (;;) {
+    const auto len = std::min<std::size_t>(period, s.measurements.size() - at);
+    const bool final = at + len == s.measurements.size();
+    ASSERT_EQ(core.enqueue(s.measurements.data() + at, len, final),
+              ingest_status::accepted);
+    at += len;
+    while (const auto *p = core.poll())
+      for (const auto *view : p->views)
+        if (view) {
+          expect_view(core, s, requests, *view);
+          core.release(*view);
+        }
+    if (final)
+      break;
+  }
+  EXPECT_TRUE(core.done());
+  EXPECT_EQ(core.ring_rounds(), ring);
+  expect_throw<std::out_of_range>([&] { core.detectors(0); },
+                                  "ingest: round 0's detectors are not in "
+                                  "the ring");
+} // end - TEST(IngestCore, HoldsEveryRoundAViewNeeds)
+
+// A view's rows are read through the view, round by round, as detectors()
+// reads them; a round outside the view is not read through it, even while
+// the ring holds it.
+TEST(IngestCore, AViewReadsOnlyItsRounds) {
+  const auto layers = layered(3, 3, 9);
+  std::mt19937 rng(5);
+  const shot s(arbitrary_memory_spec(5, true), 40, rng);
+  ingest_core core(s.context, layers_of({layers.a, layers.b}), false);
+  const ingest_publication *p = nullptr;
+  const window_view *view = nullptr;
+  for (std::size_t at = 0; !p; at += 48) {
+    ASSERT_LE(at + 48, s.measurements.size());
+    ASSERT_EQ(core.enqueue(s.measurements.data() + at, 48, false),
+              ingest_status::accepted);
+    p = core.poll();
+  }
+  view = p->views[0];
+  ASSERT_NE(view, nullptr);
+  for (auto r = view->rounds.begin; r < view->rounds.end; ++r) {
+    const auto through_view = core.view_detectors(*view, r);
+    const auto direct = core.detectors(r);
+    EXPECT_EQ(through_view.data(), direct.data());
+    EXPECT_EQ(through_view.size(), direct.size());
+  }
+  ASSERT_NO_THROW(core.detectors(view->rounds.end));
+  expect_throw<std::out_of_range>(
+      [&] { core.view_detectors(*view, view->rounds.end); },
+      "ingest: window " + std::to_string(view->k) +
+          "'s view does not hold round " + std::to_string(view->rounds.end) +
+          " in the ring");
+} // end - TEST(IngestCore, AViewReadsOnlyItsRounds)
+
+// A view out holds its shot: reset() waits for it, and the core reads the
+// logical value only from a last phase with m2o_sparse.
+TEST(IngestCore, ChecksResetAndReadout) {
+  const auto layers = layered(3, 3, 9);
+  const std::vector<window_request> requests{layers.a, layers.b};
+  std::mt19937 rng(3);
+  const shot s(arbitrary_memory_spec(5, true), 40, rng);
+  ingest_core core(s.context, layers_of(requests), false);
+  const ingest_publication *p = nullptr;
+  for (std::size_t at = 0; !p; at += 48) {
+    ASSERT_LE(at + 48, s.measurements.size());
+    ASSERT_EQ(core.enqueue(s.measurements.data() + at, 48, false),
+              ingest_status::accepted);
+    p = core.poll();
+  }
+  expect_throw<std::logic_error>([&] { core.reset(); },
+                                 "ingest: reset() with views out");
+  EXPECT_TRUE(core.logical().empty());
+  auto no_readout = arbitrary_memory_spec(5, true);
+  no_readout.phases.back().spec.m2o_sparse.clear();
+  expect_throw<std::invalid_argument>(
+      [&] {
+        ingest_core(std::make_shared<const experiment_template>(no_readout),
+                    layers_of(requests), true);
+      },
+      "ingest: read_logical needs the last phase's m2o_sparse");
+  expect_throw<std::invalid_argument>(
+      [&] {
+        ingest_core(s.context, layers_of({layers.a, sliding(2, 5)}), false);
+      },
+      "ingest: the layers' periods differ: 12 and 2");
+} // end - TEST(IngestCore, ChecksResetAndReadout)
+
+// Records, polls and releases allocate nothing once the core is built, with
+// three suffix phases held back, and reading the logical value.
+TEST(IngestCore, AllocatesNothingPerRecord) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  const auto layers = layered(3, 3, 9);
+  const std::vector<window_request> requests{layers.a, layers.b};
+  std::mt19937 rng(5);
+  for (const auto &spec : {distinct_suffix_spec(), wide_readout_spec()}) {
+    const shot s(spec, 120, rng);
+    ingest_core core(s.context, layers_of(requests),
+                     !s.context->readout().empty());
+    std::size_t allocations = 0;
+    for (std::size_t at = 0; at < s.measurements.size();) {
+      const auto len = std::min<std::size_t>(17, s.measurements.size() - at);
+      const bool final = at + len == s.measurements.size();
+      auto status = ingest_status::deferred;
+      allocations += allocation_counter::during([&] {
+        status = core.enqueue(s.measurements.data() + at, len, final);
+        while (const auto *p = core.poll())
+          for (const auto *view : p->views)
+            if (view)
+              core.release(*view);
+      });
+      ASSERT_EQ(status, ingest_status::accepted);
+      at += len;
+    }
+    EXPECT_TRUE(core.done());
+    EXPECT_EQ(core.logical(), s.logical());
+    EXPECT_EQ(allocations, 0u);
+  } // end - for(spec)
+} // end - TEST(IngestCore, AllocatesNothingPerRecord)
+
+// ---------------------------------------------------------------------------
+// Decode window core and the serial pipeline
+// ---------------------------------------------------------------------------
+
+// Measurements whose detectors are @p detectors where a round's detector j
+// is its measurement j, XOR the round before's, as in the memory specs:
+// each round's measurement j is detector j XOR the round before's
+// measurement j, and measurements past a round's detectors are 0.
+std::vector<std::uint8_t>
+memory_measurements(const experiment_template &t, std::size_t R,
+                    const std::vector<std::uint8_t> &detectors) {
+  std::vector<std::uint8_t> m(t.measurement_offset(R, R), 0);
+  for (std::size_t r = 0; r < R; ++r) {
+    const auto row = t.row_offset(r, R);
+    const auto at = t.measurement_offset(r, R);
+    const auto before = r == 0 ? 0 : t.measurement_offset(r - 1, R);
+    for (std::size_t j = 0; j < t.row_offset(r + 1, R) - row; ++j)
+      m[at + j] = detectors[row + j] ^ (r == 0 ? 0 : m[before + j]);
+  }
+  return m;
+} // end - memory_measurements()
+
+// The readout round's measurements through the last phase's m2o_sparse.
+std::vector<std::uint8_t> raw_logical(const experiment_template &t,
+                                      std::size_t R,
+                                      const std::vector<std::uint8_t> &m) {
+  std::vector<std::uint8_t> out;
+  std::uint8_t value = 0;
+  for (const auto i : t.readout()) {
+    if (i == -1) {
+      out.push_back(value);
+      value = 0;
+    } else {
+      value ^= m.at(t.measurement_offset(R - 1, R) + i);
+    }
+  }
+  return out;
+} // end - raw_logical()
+
+// single_error_lut, counting what each decode() allocates into
+// decode_allocations, so a test can tell a fire's own allocations from its
+// decoder's.
+class allocation_counting_lut final : public decoder {
+public:
+  static inline std::size_t decode_allocations = 0;
+
+  allocation_counting_lut(decoder_init inputs, decoder_output_request output,
+                          const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(get_decoder("single_error_lut", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    decoder_result result;
+    decode_allocations +=
+        allocation_counter::during([&] { result = inner_->decode(syndrome); });
+    return result;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      allocation_counting_lut,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<allocation_counting_lut>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(allocation_counting_lut)
+
+// The window @p view holds, copied from its ring as an ingest node hands it
+// over.
+window_rows rows_of(const window_view &view) {
+  window_rows rows;
+  view.source->copy_window(view, rows);
+  return rows;
+}
+
+// A windowed graph run without the executor, for shots of any length, with
+// its windows from a data artifact store: ingest takes a shot's
+// measurements in records of one period, and each index it hands over
+// fires its layers in g's order, each receiving the sends of the producer
+// instances its edges name. A window's rows are copied as its view is
+// released, as an ingest node hands them over. Every window's detectors and
+// solution are kept.
+//
+// With in_flight set, as the executor's fire pools will: each window fires
+// on its own thread once its producers have finished and its slot is free,
+// with no barrier between layers or indices, while this thread hands ingest
+// records and collects finished fires. A slot is free
+// once every fire that may receive from its last window has finished, so up
+// to in_flight indices are in flight at once.
+class core_pipeline {
+public:
+  core_pipeline(const dem_chunks_spec &spec, const window_graph &g,
+                const std::string &decoder_name,
+                const cudaqx::heterogeneous_map &params = {},
+                std::size_t in_flight = 0)
+      : graph_(g), context_(store_.add_template(spec)), in_flight_(in_flight) {
+    std::vector<ingest_layer> layers;
+    for (const auto &e : g.edges)
+      lead_ = std::max(lead_, -e.index_offset);
+    // Serially, a producer's window is still held when its consumers fire.
+    // Pipelined, a slot's last window stays leased to fires up to lead_
+    // indices later.
+    const std::size_t views = in_flight ? in_flight + 1 : 2;
+    const std::size_t slots =
+        in_flight ? in_flight + static_cast<std::size_t>(lead_) : 4;
+    for (const auto &layer : g.layers) {
+      store_.add_windows(context_, layer.request);
+      layers.push_back({layer.request, views});
+      cores_.push_back(std::make_unique<decode_window_core>(
+          store_, context_, layer.request, decoder_name, params, slots));
+    }
+    ingest_ = std::make_unique<ingest_core>(context_, std::move(layers),
+                                            !context_->readout().empty());
+  } // end - core_pipeline()
+
+  // Decodes one shot of measurements.
+  void run(const std::vector<std::uint8_t> &measurements) {
+    ingest_->reset();
+    for (auto &core : cores_)
+      core->reset();
+    decodes_.clear();
+    commits_.clear();
+    published_.clear();
+    finished_.clear();
+    measurements_ = &measurements;
+    at_ = 0;
+    if (in_flight_) {
+      ASSERT_NO_FATAL_FAILURE(run_pipelined());
+      return;
+    }
+    while (at_ < measurements.size()) {
+      ASSERT_TRUE(feed());
+      while (const auto *p = ingest_->poll())
+        fire_index(*p);
+    }
+    ASSERT_TRUE(ingest_->done());
+  } // end - run()
+
+  const std::shared_ptr<const experiment_template> &context() const {
+    return context_;
+  }
+  const ingest_core &ingest() const { return *ingest_; }
+  const decode_window_core &core(std::size_t l) const { return *cores_[l]; }
+  // Every window's decode, by node and instance.
+  const std::map<std::pair<std::string, std::int64_t>, production_decode> &
+  decodes() const {
+    return decodes_;
+  }
+  // Every window's commit zone, by node and instance.
+  const std::map<std::pair<std::string, std::int64_t>, round_range> &
+  commits() const {
+    return commits_;
+  }
+  // What the fires themselves allocated, the decoder's included; serial
+  // runs only.
+  std::size_t fire_allocations() const { return fire_allocations_; }
+  // Records ingest took while fires ran.
+  std::size_t fed_while_firing() const { return fed_while_firing_; }
+  // Fires begun while a fire of another layer ran.
+  std::size_t fired_beside_other_layers() const {
+    return fired_beside_other_layers_;
+  }
+
+private:
+  // A layer and an index: one window instance.
+  using instance = std::pair<std::size_t, std::int64_t>;
+
+  // A published window waiting for its producers and its slot.
+  struct waiting_fire {
+    std::size_t l = 0;
+    std::int64_t k = 0;
+    window_rows window; ///< Copied as ingest released its view
+  };
+
+  // What a fire's thread hands back: its record, or why it failed.
+  struct finished_fire {
+    instance at;
+    const window_fire *fire = nullptr;
+    std::string error;
+  };
+
+  // Hands ingest the shot's next record, if one is left; false when the
+  // ring has no room for it yet.
+  bool feed() {
+    const auto len =
+        std::min(ingest_->record_limit(), measurements_->size() - at_);
+    const bool final = at_ + len == measurements_->size();
+    if (at_ == measurements_->size() ||
+        ingest_->enqueue(measurements_->data() + at_, len, final) !=
+            ingest_status::accepted)
+      return false;
+    at_ += len;
+    return true;
+  }
+
+  // Fires each layer's window of the index, in g's order, from its rows,
+  // copied as the view is released.
+  void fire_index(const ingest_publication &p) {
+    for (std::size_t l = 0; l < graph_.layers.size(); ++l) {
+      const auto *view = p.views[l];
+      const auto receives = receives_of(l, p.k);
+      const window_fire *f = nullptr;
+      if (!view)
+        continue;
+      ingest_->copy_window(*view, rows_);
+      ingest_->release(*view);
+      fire_allocations_ += allocation_counter::during(
+          [&] { f = &cores_[l]->fire(slot_of(l, p.k), rows_, receives); });
+      keep(l, *f);
+    } // end - for(l)
+  } // end - fire_index()
+
+  // Feeds ingest, queues what it publishes, starts every queued fire that
+  // may start and collects those that have finished, until the shot's last
+  // window has finished. Waits only while fires run.
+  void run_pipelined() {
+    std::deque<waiting_fire> waiting;
+    while (!ingest_->done() || !waiting.empty() || !running_.empty()) {
+      bool moved = false;
+      if (feed()) {
+        moved = true;
+        if (!running_.empty())
+          ++fed_while_firing_;
+      }
+      while (const auto *p = ingest_->poll()) {
+        for (std::size_t l = 0; l < graph_.layers.size(); ++l)
+          if (p->views[l]) {
+            published_.insert({l, p->k});
+            waiting.push_back({l, p->k, rows_of(*p->views[l])});
+            ingest_->release(*p->views[l]);
+          }
+        moved = true;
+      }
+      for (auto it = waiting.begin(); it != waiting.end();) {
+        if (!may_start(*it, waiting)) {
+          ++it;
+          continue;
+        }
+        start(*it);
+        it = waiting.erase(it);
+        moved = true;
+      }
+      moved = collect() || moved;
+      if (!moved && running_.empty()) {
+        ADD_FAILURE() << "the pipeline stalled with " << waiting.size()
+                      << " windows waiting";
+        return;
+      }
+      if (!moved)
+        std::this_thread::yield();
+    } // end - while(windows)
+  } // end - run_pipelined()
+
+  // Whether w's producers have finished and its slot is free: every fire
+  // that may receive from the slot's last window, at an index up to lead_
+  // past it, has finished. Fires are published in index order, so those
+  // still to finish are the waiting and running ones.
+  bool may_start(const waiting_fire &w,
+                 const std::deque<waiting_fire> &waiting) const {
+    const auto slots = static_cast<std::int64_t>(cores_[w.l]->num_slots());
+    const auto lease_end = w.k - slots + lead_;
+    for (const auto &other : waiting)
+      if (other.k <= lease_end)
+        return false;
+    for (const auto &[at, fire] : running_)
+      if (at.second <= lease_end)
+        return false;
+    for (const auto &e : graph_.edges) {
+      const instance producer{layer_of(e.from_node), w.k + e.index_offset};
+      if (e.to_node == graph_.layers[w.l].node && published_.count(producer) &&
+          !finished_.count(producer))
+        return false;
+    }
+    return true;
+  }
+
+  // Starts w on its own thread, with its receives found here.
+  void start(const waiting_fire &w) {
+    auto receives = receives_of(w.l, w.k);
+    const auto slot = slot_of(w.l, w.k);
+    for (const auto &[at, fire] : running_)
+      if (at.first != w.l) {
+        ++fired_beside_other_layers_;
+        break;
+      }
+    running_[{w.l, w.k}] =
+        std::thread([this, w, slot, receives = std::move(receives)] {
+          finished_fire f{{w.l, w.k}, nullptr, ""};
+          try {
+            f.fire = &cores_[w.l]->fire(slot, w.window, receives);
+          } catch (const std::exception &e) {
+            f.error = e.what();
+          }
+          const std::lock_guard<std::mutex> lock(finished_mutex_);
+          finished_queue_.push_back(std::move(f));
+        });
+  }
+
+  // Joins the fires that have finished and keeps their records. Returns
+  // whether any had.
+  bool collect() {
+    std::vector<finished_fire> done;
+    {
+      const std::lock_guard<std::mutex> lock(finished_mutex_);
+      done.swap(finished_queue_);
+    }
+    for (auto &f : done) {
+      running_.at(f.at).join();
+      EXPECT_EQ(f.error, "")
+          << graph_.layers[f.at.first].node << "[" << f.at.second << "]";
+      if (f.fire)
+        keep(f.at.first, *f.fire);
+      running_.erase(f.at);
+      finished_.insert(f.at);
+    }
+    return !done.empty();
+  }
+
+  // What layer l's window k receives: the sends of the producer instances
+  // its edges name, held in the slots they fired into, or null for none. A
+  // producer's slot is not firing: a later window takes it only once the
+  // fires that receive from this one have finished.
+  std::vector<const window_send_value *> receives_of(std::size_t l,
+                                                     std::int64_t k) const {
+    std::vector<const window_send_value *> receives;
+    for (const auto &e : graph_.edges) {
+      if (e.to_node != graph_.layers[l].node)
+        continue;
+      const auto port = std::stoul(e.to_input.substr(8)); // "receive_k"
+      const auto p = layer_of(e.from_node);
+      const auto &f = cores_[p]->held(slot_of(p, k + e.index_offset));
+      receives.resize(std::max(receives.size(), port + 1), nullptr);
+      receives[port] = f.fired && f.k == k + e.index_offset
+                           ? &f.sends[cores_[p]->send_index(e.from_output)]
+                           : nullptr;
+    }
+    return receives;
+  }
+
+  // The slot layer l fires window k into: consecutive indices take
+  // different slots.
+  std::size_t slot_of(std::size_t l, std::int64_t k) const {
+    const auto slots = static_cast<std::int64_t>(cores_[l]->num_slots());
+    return static_cast<std::size_t>((k % slots + slots) % slots);
+  }
+
+  // Keeps layer l's fire f.
+  void keep(std::size_t l, const window_fire &f) {
+    decodes_[{graph_.layers[l].node, f.k}] = {
+        {f.detectors.begin(), f.detectors.end()}, *f.solution};
+    commits_[{graph_.layers[l].node, f.k}] = f.commit;
+  }
+
+  // The layer of node id.
+  std::size_t layer_of(const std::string &id) const {
+    for (std::size_t l = 0; l < graph_.layers.size(); ++l)
+      if (graph_.layers[l].node == id)
+        return l;
+    throw std::logic_error("no layer " + id);
+  }
+
+  window_graph graph_;
+  data_artifact_store store_;
+  std::shared_ptr<const experiment_template> context_;
+  std::size_t in_flight_ = 0; ///< Indices in flight; 0 for one at a time
+  std::int64_t lead_ = 0;     ///< The most indices a receive reaches back
+  std::unique_ptr<ingest_core> ingest_;
+  std::vector<std::unique_ptr<decode_window_core>> cores_;
+  const std::vector<std::uint8_t> *measurements_ = nullptr;
+  window_rows rows_;   ///< A serial fire's window, reused
+  std::size_t at_ = 0; ///< The shot's measurements handed to ingest
+  // Pipelined: the shot's published and finished windows, the running
+  // fires, and those finished but not yet collected.
+  std::set<instance> published_;
+  std::set<instance> finished_;
+  std::map<instance, std::thread> running_;
+  std::mutex finished_mutex_;
+  std::vector<finished_fire> finished_queue_;
+  std::map<std::pair<std::string, std::int64_t>, production_decode> decodes_;
+  std::map<std::pair<std::string, std::int64_t>, round_range> commits_;
+  std::size_t fire_allocations_ = 0;
+  std::size_t fed_while_firing_ = 0;
+  std::size_t fired_beside_other_layers_ = 0;
+};
+
+// The pipeline, run on the measurements behind @p detectors, decodes as the
+// reference does, window by window and bit for bit, over the same commit
+// zones, and the frames it folds are the reference's.
+void expect_pipeline_matches(core_pipeline &pipeline,
+                             parallel_window_reference &reference,
+                             const production_windows &production,
+                             const std::vector<std::uint8_t> &detectors,
+                             std::size_t R) {
+  const auto want = reference.decode(detectors);
+  std::vector<production_decode> got;
+  std::vector<std::uint8_t> frame(want.frame.size(), 0);
+  ASSERT_NO_FATAL_FAILURE(
+      pipeline.run(memory_measurements(*pipeline.context(), R, detectors)));
+  ASSERT_EQ(pipeline.decodes().size(), reference.windows().size());
+  for (const auto &rw : reference.windows()) {
+    got.push_back(pipeline.decodes().at({rw.node, rw.k}));
+    EXPECT_EQ(pipeline.commits().at({rw.node, rw.k}), rw.commit)
+        << rw.node << "[" << rw.k << "]";
+  }
+  ASSERT_NO_FATAL_FAILURE(
+      expect_decodes_match(reference, production, got, want));
+  for (const auto &d : got)
+    for (std::size_t j = 0; j < frame.size(); ++j)
+      frame[j] ^= d.solution.outputs.frame[j];
+  EXPECT_EQ(frame, want.frame);
+} // end - expect_pipeline_matches()
+
+// @p requests with every anchor @p by rounds later, so other windows
+// straddle round 0.
+layered_requests shifted(layered_requests requests, std::int64_t by) {
+  requests.a.offset += by;
+  requests.b.offset += by;
+  return requests;
+}
+
+// Ingest and the decode_window cores, run serially on raw measurements with
+// windows from the store, decode every single fault as the reference does,
+// window by window, for every layout and shot length up to 24, and with
+// the default layout a round earlier, whose first A window's commit zone
+// starts before the shot. One pipeline serves every length.
+TEST(DecodeWindowCore, PipelineDecodesSingleFaultsAsTheReference) {
+  auto layouts = swept_layouts();
+  layouts.push_back(parallel_graph(shifted(layered(2, 1, 3), -1)));
+  for (const auto &spec :
+       {arbitrary_memory_spec(5), multi_terminal_memory_spec(5, 3)}) {
+    for (const auto &g : layouts) {
+      core_pipeline pipeline(spec, g, "single_error_lut");
+      for (auto R = pipeline.context()->min_rounds(); R <= 24; ++R) {
+        parallel_window_reference reference(spec, g, R, "single_error_lut");
+        const production_windows production(
+            pipeline.context(), g, R, reference.order(), "single_error_lut");
+        const auto &s = reference.model();
+        SCOPED_TRACE("R=" + std::to_string(R));
+        for (std::size_t c = 0; c < s.h.size(); ++c)
+          ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
+              pipeline, reference, production, detectors_of(s, c), R))
+              << "column " << c;
+      } // end - for(R)
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(DecodeWindowCore, PipelineDecodesSingleFaultsAsTheReference)
+
+// One pipeline decodes shots of any length in any order: a shorter shot
+// after a longer one finds no fire of the longer one's windows.
+TEST(DecodeWindowCore, PipelineServesShotsOfAnyLengthInAnyOrder) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  core_pipeline pipeline(spec, g, "single_error_lut");
+  for (const std::size_t R : {24u, 9u, 17u, 9u, 6u}) {
+    SCOPED_TRACE("R=" + std::to_string(R));
+    parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const production_windows production(pipeline.context(), g, R,
+                                        reference.order(), "single_error_lut");
+    const auto &s = reference.model();
+    for (std::size_t c = 0; c < s.h.size(); c += 3)
+      ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
+          pipeline, reference, production, detectors_of(s, c), R))
+          << "column " << c;
+  }
+}
+
+// The same on sampled shots with PyMatching, where windows commit several
+// faults and send what they leave; the raw logical value is the readout
+// round's through m2o.
+TEST(DecodeWindowCore, PipelineDecodesSampledShotsAsTheReference) {
+  constexpr std::size_t R = 20;      // two periods of each layout
+  constexpr std::size_t shots = 500; // a hundred or so with several faults
+  for (const auto &spec : {arbitrary_memory_spec(5), wide_readout_spec()}) {
+    for (const auto &g : {parallel_graph(layered(3, 3, 9)),
+                          parallel_graph(with_truncate(layered(3, 3, 9)))}) {
+      core_pipeline pipeline(spec, g, "pymatching", matching);
+      parallel_window_reference reference(spec, g, R, "pymatching", matching);
+      const production_windows production(
+          pipeline.context(), g, R, reference.order(), "pymatching", matching);
+      const auto &s = reference.model();
+      const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+          s.dem.detector_error_matrix, shots, s.dem.error_rates, 23);
+      for (std::size_t i = 0; i < shots; ++i) {
+        const auto syndrome = row_of(detectors, i);
+        ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
+            pipeline, reference, production, syndrome, R))
+            << "shot " << i;
+        EXPECT_EQ(
+            pipeline.ingest().logical(),
+            raw_logical(*pipeline.context(), R,
+                        memory_measurements(*pipeline.context(), R, syndrome)));
+      }
+    } // end - for(g)
+  } // end - for(spec)
+} // end - TEST(DecodeWindowCore, PipelineDecodesSampledShotsAsTheReference)
+
+// A fire allocates nothing beyond what its decoder's decode() does, over a
+// long shot with every kind of variant.
+TEST(DecodeWindowCore, FiresAllocateNothingBeyondTheDecoder) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(3, 3, 9));
+  constexpr std::size_t R = 60; // five periods: prefix, bulk and terminal
+  core_pipeline pipeline(spec, g, "allocation_counting_lut");
+  const parallel_window_reference reference(spec, g, R, "single_error_lut");
+  allocation_counting_lut::decode_allocations = 0;
+  ASSERT_NO_FATAL_FAILURE(pipeline.run(memory_measurements(
+      *pipeline.context(), R, detectors_of(reference.model(), 37))));
+  EXPECT_GT(allocation_counting_lut::decode_allocations, 0u);
+  EXPECT_EQ(pipeline.fire_allocations(),
+            allocation_counting_lut::decode_allocations);
+} // end - TEST(DecodeWindowCore, FiresAllocateNothingBeyondTheDecoder)
+
+// A window imports rows only when the instance that values them exists, so
+// one fired without its residual is rejected, and its slot keeps the fire
+// it held, imports and all.
+TEST(DecodeWindowCore, AMissingResidualIsRejected) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  std::mt19937 rng(13);
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 2);
+  decode_window_core b(store, context, g.layers[1].request, "single_error_lut",
+                       {}, 2);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 4}, {g.layers[1].request, 4}}, false);
+  std::vector<std::uint8_t> m(context->measurement_offset(R, R));
+  for (auto &x : m)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  const ingest_publication *p = nullptr;
+  for (std::size_t at = 0; !p || !p->views[1]; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while ((p = ingest.poll()) && !p->views[1])
+      ;
+  }
+  const auto &fired = a.fire(0, rows_of(*p->views[0]), {});
+  const auto &residual = fired.sends[a.send_index("backward")];
+  const window_send_value *with[] = {nullptr, &residual};
+  const window_send_value *without[] = {nullptr, nullptr};
+  const auto imported = [&](const window_fire &f) {
+    return std::vector<std::uint8_t>(
+        f.detectors.end() - static_cast<std::ptrdiff_t>(residual.values.size()),
+        f.detectors.end());
+  };
+  ASSERT_NE(std::count(residual.values.begin(), residual.values.end(), 1), 0);
+  EXPECT_EQ(imported(b.fire(0, rows_of(*p->views[1]), with)),
+            std::vector<std::uint8_t>(residual.values.begin(),
+                                      residual.values.end()));
+  expect_error([&] { b.fire(0, rows_of(*p->views[1]), without); },
+               "decode_window: window " + std::to_string(p->k) + " imports " +
+                   std::to_string(residual.values.size()) +
+                   " rows, but no residual reaches its imported row 0");
+  ASSERT_TRUE(b.held(0).fired);
+  EXPECT_EQ(b.held(0).k, p->k);
+  EXPECT_EQ(imported(b.held(0)),
+            std::vector<std::uint8_t>(residual.values.begin(),
+                                      residual.values.end()));
+} // end - TEST(DecodeWindowCore, AMissingResidualIsRejected)
+
+// single_error_lut whose decode() throws while fail_next is set, so a test
+// can fail a fire after it has started rewriting its slot.
+class failing_lut final : public decoder {
+public:
+  static inline bool fail_next = false;
+
+  failing_lut(decoder_init inputs, decoder_output_request output,
+              const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(get_decoder("single_error_lut", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    if (fail_next)
+      throw std::runtime_error("failing_lut: decode failed");
+    return inner_->decode(syndrome);
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      failing_lut,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<failing_lut>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(failing_lut)
+
+// A fire whose decoder fails has already begun rewriting its slot, so it
+// leaves the slot empty: neither the window it held nor the one that failed
+// is found there. It frees its variant's decoder, so a prefix window whose
+// decode failed may fire again.
+TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  store.add_windows(context, g.layers[0].request);
+  decode_window_core a(store, context, g.layers[0].request, "failing_lut", {},
+                       1);
+  ingest_core ingest(context, {{g.layers[0].request, 4}}, false);
+  const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
+  std::vector<const window_view *> views;
+  for (std::size_t at = 0; views.size() < 2; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll())
+      views.push_back(p->views[0]);
+  }
+  failing_lut::fail_next = false;
+  a.fire(0, rows_of(*views[0]), {});
+  ASSERT_TRUE(a.held(0).fired);
+  ASSERT_EQ(a.held(0).k, views[0]->k);
+  failing_lut::fail_next = true;
+  EXPECT_THROW(a.fire(0, rows_of(*views[0]), {}), std::runtime_error);
+  failing_lut::fail_next = false;
+  EXPECT_FALSE(a.held(0).fired);
+  // The failed fire freed its variant's one decoder.
+  ASSERT_FALSE(views[0]->variant.bulk());
+  EXPECT_EQ(a.fire(0, rows_of(*views[0]), {}).k, views[0]->k);
+  failing_lut::fail_next = true;
+  EXPECT_THROW(a.fire(0, rows_of(*views[1]), {}), std::runtime_error);
+  failing_lut::fail_next = false;
+  EXPECT_FALSE(a.held(0).fired);
+  expect_error([&] { a.held(1); },
+               "decode_window: slot 1 does not exist; there are 1");
+} // end - TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty)
+
+// A decoder that finds no fault, whatever the detectors, and says it
+// converged unless told otherwise: its estimate satisfies only a window
+// whose detectors are all zero.
+class blind_decoder final : public decoder {
+public:
+  static inline bool converges = true;
+
+  blind_decoder(decoder_init inputs, decoder_output_request output)
+      : decoder(inputs, output) {}
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    decoder_result result;
+    result.converged = converges;
+    result.result.assign(get_block_size(), 0.0);
+    return result;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      blind_decoder,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &) {
+        return std::make_unique<blind_decoder>(
+            std::move(inputs), output.value_or(decoder_output_request{
+                                   decode_result_type::errors}));
+      })
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(blind_decoder)
+
+// verify_residual. With fail, a fire whose solution leaves a detector
+// unexplained throws, naming the window and the first row where H e
+// differs from d, and leaves its slot empty, as a failed decode does. With
+// report, the fire's record says the window was checked and the solution
+// does not hold; with none, that it was not checked. A solution that holds
+// passes all three.
+TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto request = parallel_graph(layered(2, 1, 3)).layers[0].request;
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  std::mt19937 rng(41);
+  std::vector<std::uint8_t> noisy(context->measurement_offset(R, R));
+  const std::vector<std::uint8_t> quiet(noisy.size(), 0);
+  std::size_t own = 0;
+  store.add_windows(context, request);
+  decode_window_core none(store, context, request, "blind_decoder", {}, 1);
+  decode_window_core report(store, context, request, "blind_decoder", {}, 1,
+                            verify_residual_mode::report);
+  decode_window_core fail(store, context, request, "blind_decoder", {}, 1,
+                          verify_residual_mode::fail);
+  ingest_core noisy_ingest(context, {{request, 1}}, false);
+  ingest_core quiet_ingest(context, {{request, 1}}, false);
+  // The first window ingest hands over from a shot of measurements m.
+  const auto first_view = [](ingest_core &ingest,
+                             const std::vector<std::uint8_t> &m) {
+    const ingest_publication *p = nullptr;
+    for (std::size_t at = 0; !p && at + ingest.record_limit() <= m.size();
+         at += ingest.record_limit()) {
+      ingest.enqueue(m.data() + at, ingest.record_limit(), false);
+      p = ingest.poll();
+    }
+    return p ? p->views[0] : nullptr;
+  };
+  for (auto &x : noisy)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  const auto *noisy_view = first_view(noisy_ingest, noisy);
+  const auto *quiet_view = first_view(quiet_ingest, quiet);
+  ASSERT_NE(noisy_view, nullptr);
+  ASSERT_NE(quiet_view, nullptr);
+  for (auto r = noisy_view->rounds.begin; r < noisy_view->rounds.end; ++r)
+    own += noisy_ingest.view_detectors(*noisy_view, r).size();
+
+  const auto &reported = report.fire(0, rows_of(*noisy_view), {});
+  EXPECT_TRUE(reported.checked);
+  EXPECT_FALSE(reported.solution->satisfied);
+  const auto missed = static_cast<std::size_t>(
+      std::find(reported.detectors.begin(), reported.detectors.end(), 1) -
+      reported.detectors.begin());
+  ASSERT_LT(missed, own);
+  EXPECT_FALSE(none.fire(0, rows_of(*noisy_view), {}).checked);
+  expect_throw<std::runtime_error>(
+      [&] { fail.fire(0, rows_of(*noisy_view), {}); },
+      "decode_window: window " + std::to_string(noisy_view->k) +
+          "'s solution does not satisfy its detectors (verify_residual: "
+          "fail): H e first differs from d at its row " +
+          std::to_string(missed) + ", shot row " +
+          std::to_string(noisy_view->first_row + missed));
+  EXPECT_FALSE(fail.held(0).fired);
+
+  for (auto *core : {&none, &report, &fail}) {
+    const auto &f = core->fire(0, rows_of(*quiet_view), {});
+    EXPECT_TRUE(f.solution->satisfied);
+    EXPECT_EQ(f.checked, core != &none);
+  }
+} // end - TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported)
+
+// With verify_residual fail, a row H e misses among a window's imported
+// rows is named as one: B's own rows are quiet, and a forged residual of
+// ones sets its imported rows.
+TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "blind_decoder", {},
+                       1);
+  decode_window_core b(store, context, g.layers[1].request, "blind_decoder", {},
+                       1, verify_residual_mode::fail);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 4}, {g.layers[1].request, 4}}, false);
+  const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
+  const ingest_publication *p = nullptr;
+  for (std::size_t at = 0; !p || !p->views[1]; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while ((p = ingest.poll()) && !p->views[1])
+      ;
+  }
+  const auto &residual =
+      a.fire(0, rows_of(*p->views[0]), {}).sends[a.send_index("backward")];
+  const std::vector<std::uint8_t> ones(residual.values.size(), 1);
+  const window_send_value forged{ones, residual.send, residual.first_row};
+  const window_send_value *receives[] = {nullptr, &forged};
+  ASSERT_FALSE(ones.empty());
+  expect_throw<std::runtime_error>(
+      [&] { b.fire(0, rows_of(*p->views[1]), receives); },
+      "decode_window: window " + std::to_string(p->k) +
+          "'s solution does not satisfy its detectors (verify_residual: "
+          "fail): H e first differs from d at its imported row 0");
+  EXPECT_FALSE(b.held(0).fired);
+} // end - TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow)
+
+// A node's verify_residual is read as its mode, none when unset; any other
+// spelling is rejected, naming the kind.
+TEST(DecodeWindowCore, VerifyResidualIsReadFromItsParameter) {
+  const auto mode_of = [](const std::string &value) {
+    return verify_residual_of({{"verify_residual", value}}, "decode_window");
+  };
+  EXPECT_EQ(verify_residual_of({}, "decode_window"),
+            verify_residual_mode::none);
+  EXPECT_EQ(mode_of("none"), verify_residual_mode::none);
+  EXPECT_EQ(mode_of("fail"), verify_residual_mode::fail);
+  EXPECT_EQ(mode_of("report"), verify_residual_mode::report);
+  expect_throw<std::runtime_error>(
+      [&] { mode_of("true"); },
+      "decode_window: verify_residual must be none, fail or report; got "
+      "'true'");
+} // end - TEST(DecodeWindowCore, VerifyResidualIsReadFromItsParameter)
+
+// single_error_lut that notes a decode() begun while its decoder is still
+// decoding, and holds each decode a while, so that fires begun together
+// overlap.
+class overlap_probe_lut final : public decoder {
+public:
+  static inline std::atomic<std::size_t> shared = 0; ///< Decodes that overlap
+  static inline std::atomic<std::size_t> running = 0;
+  static inline std::atomic<bool> overlapped = false; ///< Any two at once
+
+  overlap_probe_lut(decoder_init inputs, decoder_output_request output,
+                    const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(get_decoder("single_error_lut", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    // Long enough for the other fires of a batch to begin.
+    constexpr auto hold = std::chrono::milliseconds(2);
+    decoder_result result;
+    if (busy_.exchange(true))
+      ++shared;
+    if (++running > 1)
+      overlapped = true;
+    std::this_thread::sleep_for(hold);
+    result = inner_->decode(syndrome);
+    --running;
+    busy_ = false;
+    return result;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      overlap_probe_lut,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<overlap_probe_lut>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+  std::atomic<bool> busy_ = false;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(overlap_probe_lut)
+
+// Fires into different slots run at once, as a pipelined executor runs
+// them: each window on its own thread once its producers have finished,
+// with no barrier between layers, while ingest takes records and finished
+// fires are collected on another. No two fires share a decoder, and every
+// window decodes as the reference does, on the parallel layout and on a
+// sliding one whose windows receive from their own layer.
+TEST(DecodeWindowCore, FiresRunAtOnceWhileIngestTakesRecords) {
+  constexpr std::size_t R = 30;        // ten periods: prefix, bulk, terminal
+  constexpr std::size_t in_flight = 4; // indices at once, as max_in_flight
+  const auto spec = arbitrary_memory_spec(5);
+  overlap_probe_lut::shared = 0;
+  overlap_probe_lut::overlapped = false;
+  for (const auto &g :
+       {parallel_graph(layered(2, 1, 3)), sliding_graph(2, 5)}) {
+    SCOPED_TRACE(g.layers[0].node);
+    core_pipeline pipeline(spec, g, "overlap_probe_lut", {}, in_flight);
+    parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const production_windows production(pipeline.context(), g, R,
+                                        reference.order(), "single_error_lut");
+    const auto &s = reference.model();
+    for (std::size_t c = 0; c < s.h.size(); c += 7)
+      ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
+          pipeline, reference, production, detectors_of(s, c), R))
+          << "column " << c;
+    EXPECT_GT(pipeline.fed_while_firing(), 0u)
+        << "ingest took no record while fires ran";
+    if (g.layers.size() > 1)
+      EXPECT_GT(pipeline.fired_beside_other_layers(), 0u)
+          << "no layer's fire began while another layer's ran";
+  } // end - for(g)
+  EXPECT_EQ(overlap_probe_lut::shared, 0u) << "fires shared a decoder";
+  EXPECT_TRUE(overlap_probe_lut::overlapped) << "no fires ran at once";
+} // end - TEST(DecodeWindowCore, FiresRunAtOnceWhileIngestTakesRecords)
+
+// single_error_lut whose decode() counts itself in, then waits until the
+// test opens the gate, so a test can fire again while a fire is decoding.
+class gated_lut final : public decoder {
+public:
+  static inline std::atomic<std::size_t> entered = 0;
+  static inline std::atomic<bool> open = true;
+
+  gated_lut(decoder_init inputs, decoder_output_request output,
+            const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(get_decoder("single_error_lut", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    ++entered;
+    while (!open)
+      std::this_thread::yield();
+    return inner_->decode(syndrome);
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      gated_lut,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<gated_lut>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(gated_lut)
+
+// A prefix or terminal variant has one decoder, so a window fired into a
+// second slot while its first fire decodes is rejected, and that slot keeps
+// what it held; the first fire completes. A bulk window may fire into two
+// slots at once, each with its own decoder.
+TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  store.add_windows(context, g.layers[0].request);
+  decode_window_core a(store, context, g.layers[0].request, "gated_lut", {}, 2);
+  ingest_core ingest(context, {{g.layers[0].request, 8}}, false);
+  const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
+  const window_view *edge = nullptr; // a prefix or terminal window
+  const window_view *bulk = nullptr;
+  std::string errors[2];
+  std::atomic<std::size_t> finished = 0;
+  // Fires view's window into slot s on its own thread, keeping what it
+  // throws.
+  const auto fire_on_thread = [&](std::size_t s, const window_view &view) {
+    return std::thread([&, s, window = rows_of(view)] {
+      try {
+        a.fire(s, window, {});
+      } catch (const std::exception &e) {
+        errors[s] = e.what();
+      }
+      ++finished;
+    });
+  };
+  for (std::size_t at = 0; !edge || !bulk; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll()) {
+      if (!p->views[0])
+        continue;
+      if (p->views[0]->variant.bulk() && !bulk)
+        bulk = p->views[0];
+      if (!p->views[0]->variant.bulk() && !edge)
+        edge = p->views[0];
+    }
+  } // end - for(at)
+
+  // Slot 1 holds a bulk window, which a rejected fire leaves there.
+  gated_lut::open = true;
+  ASSERT_EQ(a.fire(1, rows_of(*bulk), {}).k, bulk->k);
+  // The second fire is rejected before it reaches the decoder, or, were it
+  // not, waits there beside the first until the gate opens.
+  gated_lut::open = false;
+  gated_lut::entered = 0;
+  auto first = fire_on_thread(0, *edge);
+  while (gated_lut::entered < 1)
+    std::this_thread::yield();
+  auto second = fire_on_thread(1, *edge);
+  while (finished < 1 && gated_lut::entered < 2)
+    std::this_thread::yield();
+  gated_lut::open = true;
+  first.join();
+  second.join();
+  EXPECT_EQ(errors[0], "");
+  EXPECT_NE(errors[1].find("decode_window: window " + std::to_string(edge->k) +
+                           "'s variant is decoding in another slot; a window "
+                           "fires into one slot at a time"),
+            std::string::npos)
+      << errors[1];
+  EXPECT_TRUE(a.held(0).fired);
+  EXPECT_EQ(a.held(0).k, edge->k);
+  EXPECT_TRUE(a.held(1).fired);
+  EXPECT_EQ(a.held(1).k, bulk->k);
+  // Once the first fire is done, the window may fire again.
+  EXPECT_EQ(a.fire(1, rows_of(*edge), {}).k, edge->k);
+
+  // Both fires of a bulk window reach their decoders at once.
+  gated_lut::open = false;
+  gated_lut::entered = 0;
+  finished = 0;
+  errors[0].clear();
+  errors[1].clear();
+  first = fire_on_thread(0, *bulk);
+  second = fire_on_thread(1, *bulk);
+  while (finished < 1 && gated_lut::entered < 2)
+    std::this_thread::yield();
+  EXPECT_EQ(gated_lut::entered, 2u);
+  gated_lut::open = true;
+  first.join();
+  second.join();
+  EXPECT_EQ(errors[0], "");
+  EXPECT_EQ(errors[1], "");
+} // end - TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime)
+
+// A rejected fire changes nothing: its slot still holds the window it last
+// fired, rows and solution alike, whether a received send is misdirected,
+// the window spans more rounds than its own, or it holds fewer rows than
+// its variant.
+TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 40;
+  std::mt19937 rng(19);
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 2);
+  decode_window_core b(store, context, g.layers[1].request, "single_error_lut",
+                       {}, 2);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 8}, {g.layers[1].request, 8}}, false);
+  std::vector<std::uint8_t> m(context->measurement_offset(R, R));
+  std::vector<const window_view *> a_views;
+  std::vector<const window_view *> b_views;
+  for (auto &x : m)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  for (std::size_t at = 0; b_views.size() < 2; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll()) {
+      if (p->views[0])
+        a_views.push_back(p->views[0]);
+      if (p->views[1])
+        b_views.push_back(p->views[1]);
+    }
+  }
+  const auto k = b_views[0]->k;
+  const auto &before =
+      a.fire(0, rows_of(*a_views[static_cast<std::size_t>(k - 1)]), {});
+  const auto &at_k =
+      a.fire(1, rows_of(*a_views[static_cast<std::size_t>(k)]), {});
+  const window_send_value *receives[] = {&before.sends[a.send_index("forward")],
+                                         &at_k.sends[a.send_index("backward")]};
+  const window_send_value *misdirected[] = {
+      nullptr, &at_k.sends[a.send_index("backward")]};
+  const auto &fired = b.fire(0, rows_of(*b_views[0]), receives);
+  const std::vector<std::uint8_t> detectors(fired.detectors.begin(),
+                                            fired.detectors.end());
+  const auto estimate = fired.solution->estimate;
+  auto longer = rows_of(*b_views[1]);
+  auto shorter = rows_of(*b_views[1]);
+  longer.rounds.end += 1000;
+  shorter.detectors.pop_back();
+  expect_error([&] { b.fire(0, rows_of(*b_views[1]), misdirected); },
+               "send 'backward' reaches shot row");
+  expect_error([&] { b.fire(0, longer, {}); }, "decode_window: window " +
+                                                   std::to_string(k + 1) +
+                                                   " spans rounds");
+  expect_error(
+      [&] { b.fire(0, shorter, {}); },
+      "decode_window: window " + std::to_string(k + 1) + " holds " +
+          std::to_string(shorter.detectors.size()) + " rows, not the " +
+          std::to_string(shorter.detectors.size() + 1) + " of its variant");
+  const auto &kept = b.held(0);
+  ASSERT_TRUE(kept.fired);
+  EXPECT_EQ(kept.k, k);
+  EXPECT_EQ(
+      std::vector<std::uint8_t>(kept.detectors.begin(), kept.detectors.end()),
+      detectors);
+  EXPECT_EQ(kept.solution->estimate, estimate);
+} // end - TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas)
+
+// A view of another layer's window is rejected even when its variant key
+// and its rows match this layer's: with the default sizes, B's windows are
+// as long as A's, and both layers' bulk keys are empty.
+TEST(DecodeWindowCore, RejectsAnotherLayersViewOfTheSameSize) {
+  const auto g = parallel_graph(layered(3, 3, 9));
+  constexpr std::size_t R = 60;
+  data_artifact_store store;
+  const auto context = store.add_template(arbitrary_memory_spec(5));
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 2);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 8}, {g.layers[1].request, 8}}, false);
+  const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
+  const window_view *b_view = nullptr;
+  for (std::size_t at = 0; !b_view || b_view->variant.position;
+       at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll())
+      if (p->views[1])
+        b_view = p->views[1];
+  }
+  ASSERT_EQ(b_view->rounds.end - b_view->rounds.begin, 9);
+  expect_error([&] { a.fire(0, rows_of(*b_view), {}); },
+               "decode_window: window " + std::to_string(b_view->k) +
+                   " spans rounds");
+}
+
+// A fire takes only its own layer's windows, whose index and first row
+// agree with their key and rounds, into existing slots, and a send only
+// onto the rows its mode reaches in the receiving window.
+TEST(DecodeWindowCore, RejectsWhatIsNotItsWindow) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 30;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_core a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 2);
+  decode_window_core b(store, context, g.layers[1].request, "single_error_lut",
+                       {}, 2);
+  ingest_core ingest(
+      context, {{g.layers[0].request, 4}, {g.layers[1].request, 4}}, false);
+  const auto m = memory_measurements(
+      *context, R, std::vector<std::uint8_t>(context->row_offset(R, R), 0));
+  std::vector<const window_view *> a_views;
+  std::vector<const window_view *> b_views;
+  // Records until A has three views out and B two, held.
+  for (std::size_t at = 0; a_views.size() < 3 || b_views.size() < 2;
+       at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ASSERT_EQ(ingest.enqueue(m.data() + at, ingest.record_limit(), false),
+              ingest_status::accepted);
+    while (const auto *p = ingest.poll()) {
+      if (p->views[0])
+        a_views.push_back(p->views[0]);
+      if (p->views[1])
+        b_views.push_back(p->views[1]);
+    }
+  }
+  auto unknown = rows_of(*a_views[0]);
+  unknown.variant.position = 1000;
+  expect_error([&] { a.fire(2, rows_of(*a_views[0]), {}); },
+               "decode_window: slot 2 does not exist; there are 2");
+  expect_error([&] { a.fire(0, unknown, {}); },
+               "decode_window: window 0's variant is none of this layer's");
+  // A window's index and first row agree with its key and rounds.
+  auto renumbered = rows_of(*a_views[0]);
+  auto misplaced = rows_of(*a_views[1]);
+  ASSERT_EQ(renumbered.variant.position, std::optional<std::int64_t>(0));
+  renumbered.k = 1;
+  misplaced.first_row += 1;
+  expect_error([&] { a.fire(0, renumbered, {}); },
+               "decode_window: window 1 carries window 0's variant");
+  expect_error([&] { a.fire(0, misplaced, {}); },
+               "decode_window: window 1's first row is " +
+                   std::to_string(misplaced.first_row) + ", not " +
+                   std::to_string(misplaced.first_row - 1));
+  expect_error([&] { a.fire(0, rows_of(*b_views.back()), {}); },
+               "decode_window: window " + std::to_string(b_views.back()->k) +
+                   " spans rounds");
+  // A[k].backward is B[k]'s imports, before B[k + 1]'s rows.
+  ASSERT_EQ(b_views[1]->k, b_views[0]->k + 1);
+  const auto &fired =
+      a.fire(0, rows_of(*a_views[static_cast<std::size_t>(b_views[0]->k)]), {});
+  const window_send_value *misdirected[] = {
+      nullptr, &fired.sends[a.send_index("backward")]};
+  expect_error([&] { b.fire(0, rows_of(*b_views[1]), misdirected); },
+               "send 'backward' reaches shot row");
+  expect_error([&] { a.send_index("sideways"); },
+               "decode_window: the layer has no send 'sideways'");
+} // end - TEST(DecodeWindowCore, RejectsWhatIsNotItsWindow)
 
 // ---------------------------------------------------------------------------
 // Data artifact store
@@ -3133,4 +4881,948 @@ TEST(DataArtifactStore, WindowsHoldingTheReadoutCarryM2o) {
 } // end - TEST(DataArtifactStore, WindowsHoldingTheReadoutCarryM2o)
 
 } // namespace
+
+// The windowed graph's payloads are edge-value types registered by name, so
+// their ports wire together, and an edge value refilled with a window or a
+// send no larger than the one it holds allocates nothing, as an executor's
+// join refills its copies.
+TEST(WindowPayloads, AreEdgeValuesRefilledInPlace) {
+  window_rows rows;
+  const window_send send{"forward", send_mode::delta, {}, {0, 1, 2}};
+  const std::vector<std::uint8_t> values{1, 0, 1};
+  window_send_payload payload;
+  EXPECT_EQ(edge_value_type("window_rows"), edge_value_type::of<window_rows>());
+  EXPECT_EQ(edge_value_type("window_send"),
+            edge_value_type::of<window_send_payload>());
+
+  copy_send({values, &send, 7}, payload);
+  EXPECT_EQ(payload.values, values);
+  EXPECT_EQ(payload.send, &send);
+  EXPECT_EQ(payload.first_row, 7u);
+  const auto received = receive_of(payload);
+  EXPECT_EQ(received.values.data(), payload.values.data());
+  EXPECT_EQ(received.values.size(), values.size());
+  EXPECT_EQ(received.send, &send);
+  EXPECT_EQ(received.first_row, 7u);
+
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  rows.k = 3;
+  rows.detectors.assign(64, 1);
+  edge_value held_rows(rows);
+  edge_value held_send(payload);
+  rows.k = 4;
+  rows.detectors.assign(40, 0);
+  payload.values.assign(2, 1);
+  const edge_value next_rows(rows);
+  const edge_value next_send(payload);
+  EXPECT_EQ(allocation_counter::during([&] {
+              held_rows = next_rows;
+              held_send = next_send;
+              copy_send(receive_of(next_send.get<window_send_payload>()),
+                        held_send.get<window_send_payload>());
+            }),
+            0u);
+  EXPECT_EQ(held_rows.get<window_rows>().k, 4);
+  EXPECT_EQ(held_rows.get<window_rows>().detectors, rows.detectors);
+  EXPECT_EQ(held_send.get<window_send_payload>().values, payload.values);
+} // end - TEST(WindowPayloads, AreEdgeValuesRefilledInPlace)
+
+// ---------------------------------------------------------------------------
+// The ingest node
+// ---------------------------------------------------------------------------
+
+// One publication of an ingest node, as a test keeps it.
+struct node_publication {
+  std::optional<std::int64_t> index;
+  std::vector<std::optional<window_rows>> windows; ///< One per layer
+  std::optional<std::vector<std::uint8_t>> logical;
+  std::optional<streaming_task_graph_node::committed_coverage> coverage;
+};
+
+// The publication @p node holds, copied.
+node_publication current_publication(const ingest_node &node,
+                                     std::size_t layers) {
+  node_publication out;
+  out.index = node.published_index(0);
+  // Every window port carries the publication's index; the logical value,
+  // folded over the whole shot, carries none.
+  for (std::size_t l = 0; l < layers; ++l)
+    EXPECT_EQ(node.published_index(l), out.index);
+  EXPECT_FALSE(node.published_index(layers).has_value());
+  for (std::size_t l = 0; l < layers; ++l) {
+    const auto *value = node.streaming_output(l);
+    out.windows.push_back(value ? std::optional{value->get<window_rows>()}
+                                : std::nullopt);
+  }
+  if (const auto *value = node.streaming_output(layers))
+    out.logical = value->get<logical_outcome>().bits;
+  out.coverage = node.streaming_coverage();
+  return out;
+}
+
+// Streams shot s into @p node in records cut at random, no longer than its
+// chunk limit, the last of them FINAL, then flushes it, handing over and
+// keeping every publication.
+std::vector<node_publication> stream_into(ingest_node &node, const shot &s,
+                                          std::size_t layers,
+                                          std::mt19937 &rng) {
+  std::vector<node_publication> out;
+  const auto limit = *node.raw_chunk_limit();
+  const auto keep = [&](bool published) {
+    for (bool more = published; more; more = node.publish_next())
+      out.push_back(current_publication(node, layers));
+  };
+  for (std::size_t at = 0; at < s.measurements.size();) {
+    const auto len =
+        std::min(std::uniform_int_distribution<std::size_t>(1, limit)(rng),
+                 s.measurements.size() - at);
+    const auto type = at + len == s.measurements.size() ? round_type::FINAL
+                                                        : round_type::BULK;
+    keep(node.enqueue(s.measurements.data() + at, len, type));
+    at += len;
+  }
+  keep(node.flush());
+  return out;
+} // end - stream_into()
+
+// The windows a node built over @p requests publishes, its layers named
+// L0, L1, ...
+std::vector<experimental::ingest_window>
+named_windows(const std::vector<window_request> &requests) {
+  std::vector<experimental::ingest_window> windows;
+  for (std::size_t l = 0; l < requests.size(); ++l)
+    windows.push_back({"L" + std::to_string(l), requests[l], ""});
+  return windows;
+}
+
+// @p rows is shot s's window k of @p request: its rounds, first row, variant
+// and rows.
+void expect_window_rows(const shot &s, const window_request &request,
+                        std::int64_t k, const window_rows &rows) {
+  const auto placed = place_window(s.context, request, k, s.R);
+  std::vector<std::uint8_t> want;
+  SCOPED_TRACE("window " + std::to_string(k));
+  for (auto r = placed.rounds.begin; r < placed.rounds.end; ++r) {
+    const auto round = s.round(r);
+    want.insert(want.end(), round.begin(), round.end());
+  }
+  EXPECT_EQ(rows.k, k);
+  EXPECT_EQ(rows.rounds, placed.rounds);
+  EXPECT_EQ(rows.first_row,
+            s.context->row_offset(static_cast<std::size_t>(placed.rounds.begin),
+                                  s.R));
+  EXPECT_TRUE(rows.variant == window_variant(*s.context, request, k, s.R));
+  EXPECT_EQ(rows.detectors, want);
+}
+
+// An ingest node publishes each index's windows, numbered from 0, the first
+// index any layer has: every window the shot holds, once, in index order,
+// with the shot's rows, and none it does not. A record may ready several
+// indices, at FINAL all that remain, and each is handed over in turn. With
+// read_logical, flush() then publishes the readout round's logical value,
+// alone, over the whole shot, and only once. One node serves shots of any
+// length in any order.
+TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
+  std::mt19937 rng(29);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  auto layouts = ingest_layouts();
+  // Anchors a period later, so the first window is k = -1 and the node's
+  // numbering is its own.
+  const auto later = shifted(layered(2, 1, 3), layered(2, 1, 3).a.period);
+  layouts.push_back({later.a, later.b});
+  ASSERT_NE(std::min(window_instances(later.a, 30).begin,
+                     window_instances(later.b, 30).begin),
+            0);
+  for (const auto &requests : layouts) {
+    ingest_node node(context, named_windows(requests), true);
+    for (const auto R :
+         {context->min_rounds(), std::size_t{30}, std::size_t{13},
+          std::size_t{22}, context->min_rounds() + 1}) {
+      SCOPED_TRACE("R=" + std::to_string(R) + ", " +
+                   std::to_string(requests.size()) + " layers");
+      const shot s(spec, R, rng);
+      auto first = std::numeric_limits<std::int64_t>::max();
+      auto end = std::numeric_limits<std::int64_t>::min();
+      for (const auto &request : requests) {
+        first = std::min(first, window_instances(request, R).begin);
+        end = std::max(end, window_instances(request, R).end);
+      }
+      const auto got = stream_into(node, s, requests.size(), rng);
+      ASSERT_EQ(got.size(), static_cast<std::size_t>(end - first) + 1);
+      for (std::size_t i = 0; i + 1 < got.size(); ++i) {
+        const auto k = first + static_cast<std::int64_t>(i);
+        ASSERT_EQ(got[i].index, std::optional<std::int64_t>(i));
+        EXPECT_FALSE(got[i].logical.has_value());
+        EXPECT_FALSE(got[i].coverage.has_value());
+        for (std::size_t l = 0; l < requests.size(); ++l) {
+          const auto instances = window_instances(requests[l], R);
+          ASSERT_EQ(got[i].windows[l].has_value(),
+                    k >= instances.begin && k < instances.end)
+              << "layer " << l << ", window " << k;
+          if (got[i].windows[l])
+            expect_window_rows(s, requests[l], k, *got[i].windows[l]);
+        }
+      } // end - for(i)
+      EXPECT_FALSE(got.back().index.has_value());
+      EXPECT_EQ(got.back().logical, s.logical());
+      ASSERT_TRUE(got.back().coverage.has_value());
+      EXPECT_EQ(got.back().coverage->begin_round, 0u);
+      EXPECT_EQ(got.back().coverage->end_round,
+                streaming_task_graph_node::whole_shot);
+      EXPECT_EQ(std::vector<std::uint8_t>(node.corrections(),
+                                          node.corrections() +
+                                              node.num_observables()),
+                s.logical());
+      EXPECT_FALSE(node.flush());
+      // Clearing a flushed shot's corrections starts the next shot.
+      node.clear_corrections();
+    } // end - for(R)
+  } // end - for(requests)
+} // end - TEST(IngestNode, PublishesEachIndexsWindowsFromZero)
+
+// An ingest node takes raw measurements on `input`, in chunks no longer
+// than a period of its widest rounds, and offers one port of windows per
+// layer, then, with read_logical, `logical`, of the readout's observables.
+// It streams only.
+TEST(IngestNode, DeclaresItsPorts) {
+  const auto layers = layered(3, 3, 9);
+  const auto context =
+      std::make_shared<const experiment_template>(wide_readout_spec());
+  const std::vector<experimental::ingest_window> windows{{"A", layers.a, ""},
+                                                         {"B", layers.b, ""}};
+  ingest_node reading(context, windows, true);
+  ingest_node not_reading(context, windows, false);
+  const ingest_core core(context, layers_of({layers.a, layers.b}), false);
+  std::vector<edge_value> outputs;
+  EXPECT_EQ(reading.inputs(), std::vector<std::string>{"input"});
+  EXPECT_EQ(reading.outputs(), (std::vector<std::string>{"A", "B", "logical"}));
+  EXPECT_EQ(not_reading.outputs(), (std::vector<std::string>{"A", "B"}));
+  EXPECT_TRUE(reading.output_type(1) == edge_value_type::of<window_rows>());
+  EXPECT_TRUE(reading.output_type(2) == logical_outcome_type);
+  EXPECT_FALSE(not_reading.output_type(2).has_value());
+  EXPECT_TRUE(reading.accepts_input_type(0, measurement_results_type));
+  EXPECT_FALSE(reading.accepts_input_type(0, detection_events_type));
+  EXPECT_TRUE(reading.supports_raw_streaming_input(0));
+  EXPECT_EQ(reading.streaming(),
+            static_cast<streaming_task_graph_node *>(&reading));
+  EXPECT_FALSE(reading.supports_fire_pool());
+  EXPECT_EQ(reading.raw_chunk_limit(), core.record_limit());
+  EXPECT_EQ(reading.num_msyn_per_decode(), core.record_limit());
+  // A round is the repeating round's 4 measurements, not a period of the
+  // widest (the 5-measurement readout) that bounds a record.
+  EXPECT_EQ(reading.num_msyn_per_round(), 4u);
+  EXPECT_EQ(core.round_width(), 4u);
+  // Its schedule is a record's period of rounds, whatever their widths, and
+  // it commits nothing itself.
+  const auto period = static_cast<std::uint32_t>(layers.a.period);
+  const auto schedule = reading.streaming_schedule();
+  ASSERT_TRUE(schedule.has_value());
+  EXPECT_TRUE(*schedule == (window_spec{period, period, 0, 0}));
+  EXPECT_EQ(reading.num_observables(), 1u);
+  EXPECT_EQ(not_reading.num_observables(), 0u);
+  expect_throw<std::logic_error>(
+      [&] { reading.execute_indexed({}, outputs); },
+      "ingest: the node streams; it has no one-shot path");
+} // end - TEST(IngestNode, DeclaresItsPorts)
+
+// Every publication is handed over before the node takes more: enqueue()
+// or flush() while some still wait is rejected, naming how many. flush()
+// publishes nothing before FINAL, and the logical value only once.
+TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore) {
+  const auto layers = layered(3, 3, 9);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  std::mt19937 rng(31);
+  const shot s(spec, 40, rng);
+  ingest_node node(context, named_windows({layers.a, layers.b}), true);
+  const auto limit = *node.raw_chunk_limit();
+  const auto total = s.measurements.size();
+  // The FINAL record: the shot's last limit measurements or fewer.
+  const auto final_start = (total - 1) / limit * limit;
+  std::size_t waiting = 0;
+  for (std::size_t at = 0; at < final_start; at += limit)
+    for (bool more =
+             node.enqueue(s.measurements.data() + at, limit, round_type::BULK);
+         more; more = node.publish_next())
+      ;
+  // Mid-shot, clearing the corrections keeps the shot.
+  node.clear_corrections();
+  EXPECT_FALSE(node.flush());
+  ASSERT_TRUE(node.enqueue(s.measurements.data() + final_start,
+                           total - final_start, round_type::FINAL));
+  while (node.publish_next())
+    ++waiting;
+  ASSERT_GE(waiting, 1u) << "FINAL readied one index only";
+
+  // Again, holding the FINAL record's publications back.
+  node.reset_streaming_state();
+  for (std::size_t at = 0; at < final_start; at += limit)
+    for (bool more =
+             node.enqueue(s.measurements.data() + at, limit, round_type::BULK);
+         more; more = node.publish_next())
+      ;
+  ASSERT_TRUE(node.enqueue(s.measurements.data() + final_start,
+                           total - final_start, round_type::FINAL));
+  expect_throw<std::logic_error>(
+      [&] { node.flush(); },
+      "ingest: flush() while " + std::to_string(waiting) +
+          " publications wait to be handed over; publish_next() hands each "
+          "over");
+  expect_throw<std::logic_error>(
+      [&] { node.enqueue(nullptr, 0, round_type::BULK); },
+      "ingest: enqueue() while " + std::to_string(waiting) +
+          " publications wait to be handed over");
+  while (node.publish_next())
+    ;
+  EXPECT_TRUE(node.flush());
+  EXPECT_FALSE(node.publish_next());
+  EXPECT_FALSE(node.flush());
+} // end - TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore)
+
+// A graph that reads outputs in place reads them after publish_next() says
+// nothing more waits, so the last publication stays current until the node
+// takes more: the FINAL record's last window, then the logical value.
+TEST(IngestNode, KeepsTheLastPublicationCurrent) {
+  const auto layers = layered(3, 3, 9);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  std::mt19937 rng(41);
+  const shot s(spec, 40, rng);
+  ingest_node node(context, named_windows({layers.a, layers.b}), true);
+  const auto limit = *node.raw_chunk_limit();
+  const auto total = s.measurements.size();
+  const auto final_start = (total - 1) / limit * limit;
+  const std::size_t window_ports = 2;
+  const std::size_t logical_port = 2;
+  // The last publication's value and index on each window port.
+  std::vector<const edge_value *> last(window_ports, nullptr);
+  std::vector<std::optional<std::int64_t>> last_index(window_ports);
+  for (std::size_t at = 0; at < final_start; at += limit)
+    for (bool more =
+             node.enqueue(s.measurements.data() + at, limit, round_type::BULK);
+         more; more = node.publish_next())
+      ;
+  for (bool more = node.enqueue(s.measurements.data() + final_start,
+                                total - final_start, round_type::FINAL);
+       more; more = node.publish_next())
+    for (std::size_t l = 0; l < window_ports; ++l) {
+      last[l] = node.streaming_output(l);
+      last_index[l] = node.published_index(l);
+    }
+  ASSERT_TRUE(last[0] || last[1]) << "the last publication has no window";
+  for (std::size_t l = 0; l < window_ports; ++l) {
+    EXPECT_EQ(node.streaming_output(l), last[l]) << "port " << l;
+    EXPECT_EQ(node.published_index(l), last_index[l]) << "port " << l;
+  }
+
+  ASSERT_TRUE(node.flush());
+  EXPECT_FALSE(node.publish_next());
+  EXPECT_NE(node.streaming_output(logical_port), nullptr);
+  EXPECT_TRUE(node.streaming_coverage().has_value());
+  for (std::size_t l = 0; l < window_ports; ++l)
+    EXPECT_EQ(node.streaming_output(l), nullptr) << "port " << l;
+} // end - TEST(IngestNode, KeepsTheLastPublicationCurrent)
+
+// After a first shot, an ingest node streams a second of the same length in
+// the same records, publications and logical value included, without
+// allocating: windows are copied into buffers kept from the first.
+TEST(IngestNode, StreamsAShotWithoutAllocating) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  const auto layers = layered(3, 3, 9);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  std::mt19937 rng(37);
+  const shot s(spec, 60, rng);
+  ingest_node node(context, named_windows({layers.a, layers.b}), true);
+  const auto limit = *node.raw_chunk_limit();
+  std::size_t allocations = 0;
+  std::size_t published = 0;
+  // Streams the shot, counting the node's own allocations.
+  const auto stream = [&] {
+    allocations = 0;
+    published = 0;
+    for (std::size_t at = 0; at < s.measurements.size(); at += limit) {
+      const auto len = std::min(limit, s.measurements.size() - at);
+      const auto type = at + len == s.measurements.size() ? round_type::FINAL
+                                                          : round_type::BULK;
+      bool more = false;
+      allocations += allocation_counter::during([&] {
+        for (more = node.enqueue(s.measurements.data() + at, len, type); more;
+             more = node.publish_next())
+          published += node.streaming_output(0) != nullptr;
+      });
+    }
+    allocations += allocation_counter::during([&] { node.flush(); });
+    node.reset_streaming_state();
+  };
+  stream();
+  stream();
+  EXPECT_GT(published, 0u);
+  EXPECT_EQ(allocations, 0u);
+} // end - TEST(IngestNode, StreamsAShotWithoutAllocating)
+
+// ---------------------------------------------------------------------------
+// The decode_window node
+// ---------------------------------------------------------------------------
+
+// What a decode_window node published for one window.
+struct window_publication {
+  std::vector<std::uint8_t> frame;
+  bool converged = false;
+  streaming_task_graph_node::committed_coverage commit{};
+  std::vector<std::vector<std::uint8_t>> sends; ///< One per send port
+};
+
+// A windowed graph run on the ingest and decode_window nodes, as an
+// executor that joins by index runs it, one fire at a time: each index
+// ingest hands over fires its layers in g's order, and each receive is a
+// copy of the producer's send, kept as a join keeps it. What every window
+// published is kept, by node and window, with the logical value.
+class node_pipeline {
+public:
+  node_pipeline(const dem_chunks_spec &spec, const window_graph &g,
+                const std::string &decoder_name,
+                const cudaqx::heterogeneous_map &params = {})
+      : graph_(g), context_(store_.add_template(spec)) {
+    std::vector<experimental::ingest_window> windows;
+    for (const auto &layer : g.layers) {
+      store_.add_windows(context_, layer.request);
+      windows.push_back({layer.node, layer.request, ""});
+    }
+    ingest_ = std::make_unique<ingest_node>(context_, windows,
+                                            !context_->readout().empty());
+    for (const auto &layer : g.layers) {
+      std::size_t receives = 0;
+      for (const auto &e : g.edges)
+        receives += e.to_node == layer.node;
+      nodes_.push_back(std::make_unique<decode_window_node>(
+          store_, context_, layer.request, decoder_name, params, receives,
+          verify_residual_mode::none));
+    }
+  } // end - node_pipeline()
+
+  // Decodes one shot of measurements, in records of @p record
+  // measurements, or of the ingest node's limit for 0, the last FINAL.
+  void run(const std::vector<std::uint8_t> &measurements,
+           std::size_t record = 0) {
+    start();
+    feed(measurements, record, measurements.size());
+    for (bool more = ingest_->flush(); more; more = ingest_->publish_next())
+      logical_ =
+          ingest_->streaming_output(nodes_.size())->get<logical_outcome>().bits;
+  }
+
+  // Feeds a shot's first @p records records, none FINAL, and stops there,
+  // as a shot cut off mid-way.
+  void run_part(const std::vector<std::uint8_t> &measurements,
+                std::size_t records) {
+    const auto limit = *ingest_->raw_chunk_limit();
+    start();
+    feed(measurements, 0, std::min(records * limit, measurements.size() - 1));
+  }
+
+  const std::shared_ptr<const experiment_template> &context() const {
+    return context_;
+  }
+  // What every window published, by node and window.
+  const std::map<std::pair<std::string, std::int64_t>, window_publication> &
+  published() const {
+    return published_;
+  }
+  const std::vector<std::uint8_t> &logical() const { return logical_; }
+  ingest_node &ingest() { return *ingest_; }
+  // What the last shot's fires allocated, the decoders' included.
+  std::size_t fire_allocations() const { return fire_allocations_; }
+
+private:
+  // A new shot: every node reset, and nothing kept from the last.
+  void start() {
+    ingest_->reset_streaming_state();
+    for (auto &node : nodes_)
+      node->reset_streaming_state();
+    published_.clear();
+    held_.clear();
+    logical_.clear();
+    folded_.assign(nodes_.size(), {});
+    fire_allocations_ = 0;
+  }
+
+  // Feeds measurements [0, end) in records of @p record measurements, or of
+  // the ingest node's limit for 0; a record ending the shot is FINAL.
+  void feed(const std::vector<std::uint8_t> &measurements, std::size_t record,
+            std::size_t end) {
+    const auto size = record ? record : *ingest_->raw_chunk_limit();
+    ASSERT_LE(size, *ingest_->raw_chunk_limit());
+    for (std::size_t at = 0; at < end; at += size) {
+      const auto len = std::min(size, end - at);
+      const auto type = at + len == measurements.size() ? round_type::FINAL
+                                                        : round_type::BULK;
+      for (bool more = ingest_->enqueue(measurements.data() + at, len, type);
+           more; more = ingest_->publish_next())
+        fire_index();
+    }
+  } // end - feed()
+
+  // Fires each layer's window of the current index, in g's order.
+  void fire_index() {
+    const auto i = *ingest_->published_index(0);
+    for (std::size_t l = 0; l < nodes_.size(); ++l) {
+      const auto *window = ingest_->streaming_output(l);
+      std::vector<const edge_value *> inputs(nodes_[l]->inputs().size(),
+                                             nullptr);
+      if (!window)
+        continue;
+      inputs[0] = window;
+      for (const auto &e : graph_.edges) {
+        if (e.to_node != graph_.layers[l].node)
+          continue;
+        const auto port = std::stoul(e.to_input.substr(8)); // "receive_k"
+        const auto it = held_.find(
+            {layer_of(e.from_node), i + e.index_offset, e.from_output});
+        inputs[1 + port] = it == held_.end() ? nullptr : &it->second;
+      }
+      bool fired = false;
+      fire_allocations_ += allocation_counter::during(
+          [&] { fired = nodes_[l]->fire(i, inputs); });
+      ASSERT_TRUE(fired);
+      keep(l, i, window->get<window_rows>().k);
+    } // end - for(l)
+  } // end - fire_index()
+
+  // Keeps what layer l's node published for its window k, at index i, and
+  // copies its sends as a join would.
+  void keep(std::size_t l, std::int64_t i, std::int64_t k) {
+    const auto &node = *nodes_[l];
+    const auto ports = node.outputs();
+    auto &p = published_[{graph_.layers[l].node, k}];
+    const auto &frame = node.streaming_output(0)->get<logical_outcome>();
+    auto &folded = folded_[l];
+    for (std::size_t s = 0; s < ports.size(); ++s)
+      EXPECT_EQ(node.published_index(s), std::optional<std::int64_t>(i));
+    folded.resize(frame.bits.size(), 0);
+    for (std::size_t j = 0; j < folded.size(); ++j)
+      folded[j] ^= frame.bits[j];
+    EXPECT_EQ(
+        std::vector<std::uint8_t>(node.corrections(),
+                                  node.corrections() + node.num_observables()),
+        folded)
+        << "the node's corrections fold its fires";
+    p.frame = frame.bits;
+    p.converged = frame.converged;
+    p.commit = *node.streaming_coverage();
+    for (std::size_t s = 1; s < ports.size(); ++s) {
+      const auto &send = *node.streaming_output(s);
+      p.sends.push_back(send.get<window_send_payload>().values);
+      held_[{l, i, ports[s]}] = send;
+    }
+  } // end - keep()
+
+  // The layer of node id.
+  std::size_t layer_of(const std::string &id) const {
+    for (std::size_t l = 0; l < graph_.layers.size(); ++l)
+      if (graph_.layers[l].node == id)
+        return l;
+    throw std::logic_error("no layer " + id);
+  }
+
+  window_graph graph_;
+  data_artifact_store store_;
+  std::shared_ptr<const experiment_template> context_;
+  std::unique_ptr<ingest_node> ingest_;
+  std::vector<std::unique_ptr<decode_window_node>> nodes_;
+  std::map<std::pair<std::string, std::int64_t>, window_publication> published_;
+  // Each send, by producer layer, index and port, as a join holds it.
+  std::map<std::tuple<std::size_t, std::int64_t, std::string>, edge_value>
+      held_;
+  std::vector<std::uint8_t> logical_;
+  // Each layer's frame updates this shot, XORed together.
+  std::vector<std::vector<std::uint8_t>> folded_;
+  std::size_t fire_allocations_ = 0;
+};
+
+// The shot behind @p detectors, streamed in records of @p record
+// measurements (the ingest node's limit for 0), publishes the reference's
+// windows: each one's frame update, convergence, commit interval and sends,
+// with frames that XOR to the reference's frame. With a readout map, the
+// logical value is the readout round's through m2o, computed apart.
+void expect_nodes_match(node_pipeline &pipeline,
+                        parallel_window_reference &reference,
+                        const std::vector<std::uint8_t> &detectors,
+                        std::size_t R, std::size_t record = 0) {
+  const auto want = reference.decode(detectors);
+  const auto measurements =
+      memory_measurements(*pipeline.context(), R, detectors);
+  std::vector<std::uint8_t> frame(want.frame.size(), 0);
+  ASSERT_NO_FATAL_FAILURE(pipeline.run(measurements, record));
+  if (pipeline.context()->readout().empty())
+    EXPECT_TRUE(pipeline.logical().empty());
+  else
+    EXPECT_EQ(pipeline.logical(),
+              raw_logical(*pipeline.context(), R, measurements));
+  ASSERT_EQ(pipeline.published().size(), reference.windows().size());
+  for (std::size_t i = 0; i < reference.windows().size(); ++i) {
+    const auto &rw = reference.windows()[i];
+    const auto &got = pipeline.published().at({rw.node, rw.k});
+    SCOPED_TRACE(rw.node + "[" + std::to_string(rw.k) + "]");
+    EXPECT_EQ(got.frame, want.windows[i].frame);
+    EXPECT_EQ(got.converged, want.windows[i].converged);
+    EXPECT_EQ(got.commit.begin_round,
+              static_cast<std::uint64_t>(rw.commit.begin));
+    EXPECT_EQ(got.commit.end_round, static_cast<std::uint64_t>(rw.commit.end));
+    EXPECT_EQ(got.sends, want.windows[i].sends);
+    for (std::size_t j = 0; j < frame.size(); ++j)
+      frame[j] ^= got.frame[j];
+  } // end - for(i)
+  EXPECT_EQ(frame, want.frame);
+} // end - expect_nodes_match()
+
+// The ingest and decode_window nodes, joined by index as an executor joins
+// them, decode single faults as the reference does, window by window, at
+// every shot length up to 60, so every remainder of the period and every
+// terminal clip: on parallel layouts and a sliding one, with a wider
+// readout round and with three suffix phases. Sampled shots with PyMatching
+// decode alike.
+TEST(DecodeWindowNode, DecodesEveryWindowAsTheReference) {
+  for (const auto &spec :
+       {wide_readout_spec(), multi_terminal_memory_spec(5, 3)}) {
+    for (const auto &g :
+         {parallel_graph(layered(2, 1, 3)), parallel_graph(layered(3, 2, 2)),
+          sliding_graph(2, 5)}) {
+      node_pipeline pipeline(spec, g, "single_error_lut");
+      for (auto R = pipeline.context()->min_rounds(); R <= 60; ++R) {
+        SCOPED_TRACE("R=" + std::to_string(R));
+        parallel_window_reference reference(spec, g, R, "single_error_lut");
+        const auto &s = reference.model();
+        for (std::size_t c = R % 7; c < s.h.size(); c += 7)
+          ASSERT_NO_FATAL_FAILURE(
+              expect_nodes_match(pipeline, reference, detectors_of(s, c), R))
+              << "column " << c;
+      }
+    } // end - for(g)
+  } // end - for(spec)
+  const auto spec = wide_readout_spec();
+  const auto g = parallel_graph(layered(3, 3, 9));
+  constexpr std::size_t R = 20;
+  node_pipeline pipeline(spec, g, "pymatching", matching);
+  parallel_window_reference reference(spec, g, R, "pymatching", matching);
+  const auto &s = reference.model();
+  const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+      s.dem.detector_error_matrix, 20, s.dem.error_rates, 41);
+  for (std::size_t i = 0; i < 20; ++i)
+    ASSERT_NO_FATAL_FAILURE(
+        expect_nodes_match(pipeline, reference, row_of(detectors, i), R))
+        << "shot " << i;
+} // end - TEST(DecodeWindowNode, DecodesEveryWindowAsTheReference)
+
+// However a shot's records are cut, it decodes as the reference does:
+// single measurements, half rounds, whole rounds, several rounds, records
+// that end mid-round, or a period of the widest rounds, the last of them
+// holding the wider readout round with whatever precedes it.
+TEST(DecodeWindowNode, DecodesAlikeHoweverRecordsAreCut) {
+  const auto spec = wide_readout_spec(); // 4 measurements a round, 5 last
+  const auto g = parallel_graph(layered(3, 3, 9));
+  constexpr std::size_t R = 26;
+  node_pipeline pipeline(spec, g, "pymatching", matching);
+  parallel_window_reference reference(spec, g, R, "pymatching", matching);
+  const auto &s = reference.model();
+  const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+      s.dem.detector_error_matrix, 5, s.dem.error_rates, 43);
+  const auto limit = *pipeline.ingest().raw_chunk_limit();
+  for (const std::size_t record :
+       {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{9},
+        std::size_t{12}, limit}) {
+    SCOPED_TRACE("records of " + std::to_string(record));
+    for (std::size_t i = 0; i < 5; ++i)
+      ASSERT_NO_FATAL_FAILURE(expect_nodes_match(
+          pipeline, reference, row_of(detectors, i), R, record))
+          << "shot " << i;
+  }
+} // end - TEST(DecodeWindowNode, DecodesAlikeHoweverRecordsAreCut)
+
+// A shot cut off mid-way leaves nothing behind once the next starts, a
+// longer shot's part before a shorter shot or a shorter one's before a
+// longer. Input after FINAL is rejected until the next shot starts.
+TEST(DecodeWindowNode, AShotCutOffLeavesNothingBehind) {
+  const auto spec = wide_readout_spec();
+  const auto g = parallel_graph(layered(2, 1, 3));
+  node_pipeline pipeline(spec, g, "single_error_lut");
+  const auto &context = *pipeline.context();
+  std::mt19937 rng(59);
+  for (const auto [cut, R] : {std::pair<std::size_t, std::size_t>{40, 18},
+                              std::pair<std::size_t, std::size_t>{12, 30}}) {
+    SCOPED_TRACE("R=" + std::to_string(R) +
+                 " after part of R=" + std::to_string(cut));
+    std::vector<std::uint8_t> other(context.measurement_offset(cut, cut));
+    parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const auto &s = reference.model();
+    for (auto &x : other)
+      x = static_cast<std::uint8_t>(rng() & 1);
+    for (std::size_t c = 0; c < s.h.size(); c += 11) {
+      ASSERT_NO_FATAL_FAILURE(pipeline.run_part(other, 3));
+      ASSERT_NO_FATAL_FAILURE(
+          expect_nodes_match(pipeline, reference, detectors_of(s, c), R))
+          << "column " << c;
+    }
+  } // end - for(cut)
+  expect_throw<std::logic_error>(
+      [&] { pipeline.ingest().enqueue(nullptr, 0, round_type::BULK); },
+      "ingest: input after FINAL; reset() starts the next shot");
+} // end - TEST(DecodeWindowNode, AShotCutOffLeavesNothingBehind)
+
+// Window k of @p request in an R-round shot whose detection events are
+// @p detectors, made by hand as ingest would hand it over.
+window_rows
+window_from_shot(const std::shared_ptr<const experiment_template> &context,
+                 const window_request &request, std::int64_t k, std::size_t R,
+                 const std::vector<std::uint8_t> &detectors) {
+  const auto placed = place_window(context, request, k, R);
+  const auto end =
+      context->row_offset(static_cast<std::size_t>(placed.rounds.end), R);
+  window_rows rows;
+  rows.k = k;
+  rows.rounds = placed.rounds;
+  rows.variant = window_variant(*context, request, k, R);
+  rows.first_row =
+      context->row_offset(static_cast<std::size_t>(placed.rounds.begin), R);
+  rows.detectors.assign(detectors.begin() +
+                            static_cast<std::ptrdiff_t>(rows.first_row),
+                        detectors.begin() + static_cast<std::ptrdiff_t>(end));
+  return rows;
+}
+
+// A decode_window node depends only on its inputs: windows made by hand
+// from the shot's detection events, with no ingest, decode as the
+// reference's do.
+TEST(DecodeWindowNode, TakesWindowsFromAnyProducer) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 18;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  store.add_windows(context, g.layers[0].request);
+  decode_window_node a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 0, verify_residual_mode::none);
+  parallel_window_reference reference(spec, g, R, "single_error_lut");
+  const auto &s = reference.model();
+  for (std::size_t c = 0; c < s.h.size(); c += 3) {
+    const auto detectors = detectors_of(s, c);
+    const auto want = reference.decode(detectors);
+    SCOPED_TRACE("column " + std::to_string(c));
+    for (std::size_t i = 0; i < reference.windows().size(); ++i) {
+      const auto &rw = reference.windows()[i];
+      if (rw.node != "A")
+        continue;
+      const edge_value input(
+          window_from_shot(context, g.layers[0].request, rw.k, R, detectors));
+      ASSERT_TRUE(a.fire(rw.k, {&input}));
+      EXPECT_EQ(a.streaming_output(0)->get<logical_outcome>().bits,
+                want.windows[i].frame);
+      EXPECT_EQ(a.streaming_output(1)->get<window_send_payload>().values,
+                want.windows[i].sends[0]);
+    } // end - for(i)
+  } // end - for(c)
+} // end - TEST(DecodeWindowNode, TakesWindowsFromAnyProducer)
+
+// A decode_window node takes a window on `input` and a send on each
+// `receive_<i>`, of which only the window is required, and offers its
+// frame update on `output` and each send of its layer on a port named by
+// the send: A sends forward and backward to B. It joins by index and
+// streams only.
+TEST(DecodeWindowNode, DeclaresItsPorts) {
+  const auto g = parallel_graph(layered(2, 1, 3));
+  data_artifact_store store;
+  const auto context = store.add_template(arbitrary_memory_spec(5));
+  std::vector<edge_value> outputs;
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  decode_window_node a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 0, verify_residual_mode::none);
+  decode_window_node b(store, context, g.layers[1].request, "single_error_lut",
+                       {}, 2, verify_residual_mode::none);
+  EXPECT_EQ(a.inputs(), std::vector<std::string>{"input"});
+  EXPECT_EQ(a.outputs(),
+            (std::vector<std::string>{"output", "forward", "backward"}));
+  EXPECT_EQ(b.inputs(),
+            (std::vector<std::string>{"input", "receive_0", "receive_1"}));
+  EXPECT_EQ(b.outputs(), std::vector<std::string>{"output"});
+  EXPECT_TRUE(a.output_type(0) == logical_outcome_type);
+  EXPECT_TRUE(a.output_type(2) == edge_value_type::of<window_send_payload>());
+  EXPECT_FALSE(a.output_type(3).has_value());
+  EXPECT_FALSE(b.output_type(1).has_value());
+  EXPECT_TRUE(b.accepts_input_type(0, edge_value_type::of<window_rows>()));
+  EXPECT_TRUE(
+      b.accepts_input_type(2, edge_value_type::of<window_send_payload>()));
+  EXPECT_FALSE(b.accepts_input_type(0, measurement_results_type));
+  EXPECT_FALSE(
+      b.accepts_input_type(3, edge_value_type::of<window_send_payload>()));
+  EXPECT_TRUE(b.requires_input(0));
+  EXPECT_FALSE(b.requires_input(1));
+  EXPECT_TRUE(b.supports_streaming_input(2));
+  EXPECT_FALSE(b.supports_streaming_input(3));
+  EXPECT_TRUE(b.exact_interval_coverage());
+  EXPECT_EQ(b.num_observables(), 1u);
+  EXPECT_EQ(b.streaming(), static_cast<streaming_task_graph_node *>(&b));
+  EXPECT_EQ(b.indexed_join(), static_cast<indexed_join_node *>(&b));
+  EXPECT_EQ(b.streaming_output(0), nullptr);
+  EXPECT_FALSE(b.published_index(0).has_value());
+  expect_throw<std::logic_error>(
+      [&] { b.execute_indexed({}, outputs); },
+      "decode_window: the node joins its inputs by index; it has no one-shot "
+      "path");
+  expect_throw<std::logic_error>(
+      [&] { b.enqueue(nullptr, 0, round_type::BULK); },
+      "decode_window: the node takes windows, not raw measurements");
+} // end - TEST(DecodeWindowNode, DeclaresItsPorts)
+
+// A fire is given one input per port, a window on `input`, and on each
+// receive a send or nothing; anything else is rejected, and so is a
+// solution the node's verify_residual fails. A rejected fire publishes
+// nothing, taking down the publication of the fire before it.
+TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
+  const auto g = parallel_graph(layered(2, 1, 3));
+  data_artifact_store store;
+  const auto context = store.add_template(arbitrary_memory_spec(5));
+  std::mt19937 rng(43);
+  std::vector<std::uint8_t> m(context->measurement_offset(30, 30));
+  for (auto &x : m)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  store.add_windows(context, g.layers[0].request);
+  store.add_windows(context, g.layers[1].request);
+  decode_window_node a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 0, verify_residual_mode::none);
+  decode_window_node b(store, context, g.layers[1].request, "single_error_lut",
+                       {}, 2, verify_residual_mode::none);
+  decode_window_node blind(store, context, g.layers[0].request, "blind_decoder",
+                           {}, 0, verify_residual_mode::fail);
+  ingest_core ingest(context, {{g.layers[0].request, 1}}, false);
+  const ingest_publication *p = nullptr;
+  for (std::size_t at = 0; !p; at += ingest.record_limit()) {
+    ASSERT_LT(at + ingest.record_limit(), m.size());
+    ingest.enqueue(m.data() + at, ingest.record_limit(), false);
+    p = ingest.poll();
+  }
+  const edge_value window(rows_of(*p->views[0]));
+  const edge_value wrong(logical_outcome{{1}, true});
+  auto quiet_rows = rows_of(*p->views[0]);
+  std::fill(quiet_rows.detectors.begin(), quiet_rows.detectors.end(), 0);
+  const edge_value quiet(quiet_rows);
+  // Each rejected fire takes down the publication of the one before.
+  const auto rejects = [&](const std::vector<const edge_value *> &inputs,
+                           const std::string &text) {
+    ASSERT_TRUE(a.fire(0, {&window}));
+    expect_error([&] { a.fire(1, inputs); }, text);
+    EXPECT_EQ(a.streaming_output(0), nullptr);
+    EXPECT_FALSE(a.streaming_coverage().has_value());
+    EXPECT_FALSE(a.published_index(0).has_value());
+  };
+  rejects({&window, &window},
+          "decode_window: instance 1 has 2 inputs, not the node's 1");
+  rejects({nullptr}, "decode_window: instance 1 has no window on its input");
+  rejects({&wrong},
+          "decode_window: instance 1's input 'input' holds no window_rows");
+  expect_error([&] { b.fire(0, {&window, nullptr, &wrong}); },
+               "decode_window: instance 0's input 'receive_1' holds no "
+               "window_send");
+  rejects({&window}, "decode_window: instance 1 carries window " +
+                         std::to_string(window.get<window_rows>().k) +
+                         ", but this shot's instances are " +
+                         std::to_string(window.get<window_rows>().k) +
+                         " below their windows");
+  ASSERT_TRUE(blind.fire(0, {&quiet}));
+  EXPECT_THROW(blind.fire(0, {&window}), std::runtime_error);
+  EXPECT_EQ(blind.streaming_output(0), nullptr);
+} // end - TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance)
+
+// A fire's publication stands until the next fire or a reset: its frame
+// update, with its decoder's convergence, and its commit zone. Clearing the
+// corrections zeroes the node's delta, not what it published.
+TEST(DecodeWindowNode, PublishesUntilTheNextFireOrReset) {
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(2, 1, 3));
+  constexpr std::size_t R = 18;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  parallel_window_reference reference(spec, g, R, "single_error_lut");
+  std::optional<edge_value> window;
+  std::vector<std::uint8_t> frame;
+  store.add_windows(context, g.layers[0].request);
+  decode_window_node a(store, context, g.layers[0].request, "single_error_lut",
+                       {}, 0, verify_residual_mode::none);
+  decode_window_node doubtful(store, context, g.layers[0].request,
+                              "blind_decoder", {}, 0,
+                              verify_residual_mode::none);
+  // An A window that commits a single fault flipping the observable.
+  for (std::size_t c = 0; !window && c < reference.model().h.size(); ++c) {
+    const auto detectors = detectors_of(reference.model(), c);
+    const auto want = reference.decode(detectors);
+    for (std::size_t i = 0; !window && i < want.windows.size(); ++i)
+      if (reference.windows()[i].node == "A" &&
+          std::count(want.windows[i].frame.begin(), want.windows[i].frame.end(),
+                     1) != 0) {
+        window = window_from_shot(context, g.layers[0].request,
+                                  reference.windows()[i].k, R, detectors);
+        frame = want.windows[i].frame;
+      }
+  } // end - for(c)
+  ASSERT_TRUE(window.has_value());
+  ASSERT_TRUE(a.fire(7, {&*window}));
+  EXPECT_EQ(a.streaming_output(0)->get<logical_outcome>().bits, frame);
+  EXPECT_EQ(a.published_index(0), std::optional<std::int64_t>(7));
+  EXPECT_TRUE(a.streaming_coverage().has_value());
+  EXPECT_EQ(std::vector<std::uint8_t>(a.corrections(),
+                                      a.corrections() + a.num_observables()),
+            frame);
+  // Corrections fold every fire: the same frame twice cancels.
+  ASSERT_TRUE(a.fire(7, {&*window}));
+  EXPECT_EQ(
+      std::count(a.corrections(), a.corrections() + a.num_observables(), 1), 0);
+  EXPECT_EQ(a.streaming_output(0)->get<logical_outcome>().bits, frame);
+  ASSERT_TRUE(a.fire(7, {&*window}));
+  a.clear_corrections();
+  EXPECT_EQ(
+      std::count(a.corrections(), a.corrections() + a.num_observables(), 1), 0);
+  EXPECT_EQ(a.streaming_output(0)->get<logical_outcome>().bits, frame);
+  a.reset_streaming_state();
+  EXPECT_EQ(a.streaming_output(0), nullptr);
+  EXPECT_FALSE(a.streaming_coverage().has_value());
+  EXPECT_FALSE(a.published_index(0).has_value());
+
+  blind_decoder::converges = false;
+  ASSERT_TRUE(doubtful.fire(0, {&*window}));
+  blind_decoder::converges = true;
+  EXPECT_FALSE(doubtful.streaming_output(0)->get<logical_outcome>().converged);
+  ASSERT_TRUE(doubtful.fire(0, {&*window}));
+  EXPECT_TRUE(doubtful.streaming_output(0)->get<logical_outcome>().converged);
+} // end - TEST(DecodeWindowNode, PublishesUntilTheNextFireOrReset)
+
+// A fire allocates nothing beyond what its decoder's decode() does, from
+// the first: its send buffers are reserved for their largest variant. Two
+// shots, over every kind of variant.
+TEST(DecodeWindowNode, FiresAllocateNothingBeyondTheDecoder) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  const auto spec = arbitrary_memory_spec(5);
+  const auto g = parallel_graph(layered(3, 3, 9));
+  constexpr std::size_t R = 60;
+  node_pipeline pipeline(spec, g, "allocation_counting_lut");
+  const parallel_window_reference reference(spec, g, R, "single_error_lut");
+  const auto m = memory_measurements(*pipeline.context(), R,
+                                     detectors_of(reference.model(), 37));
+  for (int shot = 0; shot < 2; ++shot) {
+    SCOPED_TRACE(shot == 0 ? "first shot" : "second shot");
+    allocation_counting_lut::decode_allocations = 0;
+    ASSERT_NO_FATAL_FAILURE(pipeline.run(m));
+    EXPECT_EQ(pipeline.published().size(), reference.windows().size());
+    EXPECT_GT(allocation_counting_lut::decode_allocations, 0u);
+    EXPECT_EQ(pipeline.fire_allocations(),
+              allocation_counting_lut::decode_allocations);
+  }
+} // end - TEST(DecodeWindowNode, FiresAllocateNothingBeyondTheDecoder)
+
 } // namespace cudaq::qec

@@ -16,6 +16,7 @@
 
 #include "decoding_task_decoding_window.h"
 #include "cudaq/qec/decoder_init.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -178,23 +179,6 @@ void check_request(const window_request &request) {
   }
   check_sends(request, window);
 } // end - check_request()
-
-// The rounds a window's model reads, relative to its anchor: from the round
-// before its first (v_in, and a truncated input's crossing faults) to the
-// end of the chunks it stitches. Past that it reads only whether the end
-// round exists, which decides the last chunk's outgoing seam and the output
-// port.
-round_range model_reach(const experiment_template &t,
-                        const window_request &request) {
-  const auto zones = sorted_zones(request);
-  const auto m = static_cast<std::int64_t>(t.max_span());
-  const auto end = zones.back().end;
-  auto imports_end = end;
-  if (request.output.disposition == port_disposition::closed)
-    imports_end =
-        request.output.imports ? request.output.imports->end : end + m;
-  return {zones.front().begin - 1, std::max(end + m, imports_end)};
-}
 
 // The first k whose model reads no prefix round.
 std::int64_t first_bulk_index(const experiment_template &t,
@@ -559,6 +543,33 @@ void experimental::check_window_request(const window_request &request) {
   check_request(request);
 }
 
+// Zones are disjoint, so the least first round and the greatest end bound
+// them without sorting.
+round_range zone_span(const window_request &request) {
+  round_range span = *request.commit;
+  for (const auto &buffer : request.buffers) {
+    span.begin = std::min(span.begin, buffer.begin);
+    span.end = std::max(span.end, buffer.end);
+  }
+  return span;
+}
+
+// The rounds a window's model reads, relative to its anchor: from the round
+// before its first (v_in, and a truncated input's crossing faults) to the
+// end of the chunks it stitches. Past that it reads only whether the end
+// round exists, which decides the last chunk's outgoing seam and the output
+// port.
+round_range model_reach(const experiment_template &t,
+                        const window_request &request) {
+  const auto span = zone_span(request);
+  const auto m = static_cast<std::int64_t>(t.max_span());
+  auto imports_end = span.end;
+  if (request.output.disposition == port_disposition::closed)
+    imports_end =
+        request.output.imports ? request.output.imports->end : span.end + m;
+  return {span.begin - 1, std::max(span.end + m, imports_end)};
+}
+
 // The first k whose clipped commit zone ends after round 0, to the first
 // whose commit zone starts at or past R.
 index_range window_instances(const window_request &request,
@@ -855,6 +866,25 @@ std::size_t variant_probe_rounds(const experiment_template &context,
   return std::max<std::size_t>(
       context.min_rounds(),
       static_cast<std::size_t>(std::max<std::int64_t>(end, 0)));
+}
+
+// Keys in the order they first appear, shot length by shot length; a layer
+// has few, so a linear search finds a repeat.
+std::vector<variant_instance>
+variant_instances(const experiment_template &context,
+                  const window_request &request) {
+  std::vector<variant_instance> out;
+  for (auto R = context.min_rounds();
+       R < variant_probe_rounds(context, request); ++R) {
+    const auto instances = window_instances(request, R);
+    for (auto k = instances.begin; k < instances.end; ++k) {
+      const auto key = window_variant(context, request, k, R);
+      if (std::none_of(out.begin(), out.end(),
+                       [&](const variant_instance &v) { return v.key == key; }))
+        out.push_back({key, k, R});
+    }
+  }
+  return out;
 }
 
 // Compares in a fixed order, so the first mismatch named is deterministic:
@@ -1191,5 +1221,8 @@ void solve_window(const decoding_window &window, decoder *dec,
     out.satisfied = out.satisfied && ws.explained[r] == (detectors[r] & 1);
   commit_window(window, detectors, ws);
 } // end - solve_window()
+
+// Ingest's windows travel on edges by value.
+CUDAQ_REGISTER_EDGE_VALUE_TYPE(window_rows, "window_rows")
 
 } // namespace cudaq::qec
