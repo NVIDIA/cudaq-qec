@@ -569,11 +569,10 @@ struct realtime_pipeline::Impl {
       const uint64_t bit = 1ULL << w;
       if (external_ring_)
         slot_request[cursor] = rid;
-      // Store the tag before taking the worker: a worker that observes its
-      // idle bit clear then reads the tag of this assignment and nothing else.
+      // Store the tag now; the worker is taken (idle bit cleared) only after
+      // the launch is enqueued and the RX flag is cleared, see below.
       __atomic_store_n(&inflight_slot_tags[w], static_cast<int>(cursor),
                        __ATOMIC_RELEASE);
-      idle_mask.fetch_and(~bit, cuda::std::memory_order_acq_rel);
 
       uint8_t *slot_dev = rb.rx_data + (slot_host - rb.rx_data_host);
       uint8_t *tx_host = tx_slot_host(static_cast<int>(cursor));
@@ -589,14 +588,16 @@ struct realtime_pipeline::Impl {
 
       live_dispatched.fetch_add(1, cuda::std::memory_order_relaxed);
 
-      // Release the RX slot once the launch work is enqueued, and before any
-      // response for it is published from this thread, so a follow-up
+      // Release the RX slot once the launch work is enqueued, and only then
+      // take the worker: nothing can complete this slot (and let the
+      // producer refill it) before its rx_flag is cleared, so a follow-up
       // request in the same slot never loses its rx_flag to this clear. On
       // an external ring the transport may refill the page as soon as the
       // flag reads 0, while a pre-launch H2D copy may still be queued on
       // the stream; a pre_launch_fn that copies asynchronously carries that
       // exposure.
       __atomic_store_n(&rb.rx_flags_host[cursor], 0, __ATOMIC_RELEASE);
+      idle_mask.fetch_and(~bit, cuda::std::memory_order_acq_rel);
 
       if (err != cudaSuccess) {
         // Launch failed: nothing runs on the stream for this request. Frame
@@ -727,7 +728,7 @@ struct realtime_pipeline::Impl {
 
       bool found_any = false;
       for (uint32_t s = 0; s < ns; ++s) {
-        if (!slot_occupied[s])
+        if (!__atomic_load_n(&slot_occupied[s], __ATOMIC_ACQUIRE))
           continue;
 
         // A non-zero tx_flag is the TX slot address published for the
@@ -740,11 +741,11 @@ struct realtime_pipeline::Impl {
         NVTX_PUSH("ConsumerComplete");
         report_completion(static_cast<int>(s));
 
-        // ARM memory ordering: clear occupancy BEFORE clearing the TX flag,
-        // with a fence between.
-        slot_occupied[s] = 0;
-        __sync_synchronize();
+        // Clear the TX flag before freeing the slot: once slot_occupied
+        // reads 0 the injector may refill the slot and a worker may publish
+        // the next response, which a late clear would wipe.
         cudaq_host_ringbuffer_clear_slot(&active_rb_, s);
+        __atomic_store_n(&slot_occupied[s], 0, __ATOMIC_RELEASE);
         found_any = true;
         NVTX_POP();
       }
@@ -889,7 +890,7 @@ bool ring_buffer_injector::try_submit(uint32_t function_id, const void *payload,
                                       uint64_t request_id) {
   uint32_t cur = state_->next_slot.load(std::memory_order_relaxed);
   uint32_t slot = cur % static_cast<uint32_t>(state_->num_slots);
-  if ((*state_->slot_occupied)[slot])
+  if (__atomic_load_n(&(*state_->slot_occupied)[slot], __ATOMIC_ACQUIRE))
     return false;
 
   if (!state_->next_slot.compare_exchange_weak(

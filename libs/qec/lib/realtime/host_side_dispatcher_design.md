@@ -149,8 +149,7 @@ void realtime_pipeline::Impl::dispatcher_loop() {
         int w = acquire_worker(fid);
         if (w < 0) { CUDAQ_REALTIME_CPU_RELAX(); continue; }   // backpressure: stay on this slot
         if (external_ring_) slot_request[cursor] = rid;        // internal ring: the injector recorded the id (Section 9, step 3)
-        atomic_store(&inflight_slot_tags[w], cursor, release); // tag first ...
-        idle_mask.fetch_and(~(1ULL << w), acq_rel);            // ... then take the worker
+        atomic_store(&inflight_slot_tags[w], cursor, release); // tag now; the worker is taken below
 
         // Device view of the RX slot, host view of the TX slot
         void    *slot_dev = rb.rx_data + (slot_host - rb.rx_data_host);
@@ -162,11 +161,13 @@ void realtime_pipeline::Impl::dispatcher_loop() {
         if (err == cudaSuccess && wr.post_launch_fn) wr.post_launch_fn(wr.post_launch_data, slot_dev, wr.stream);
         live_dispatched.fetch_add(1, relaxed);                   // launch attempts; drops are not counted
 
-        // Consume the RX slot before publishing anything for it from this thread, so a
+        // Consume the RX slot, and only then take the worker: nothing can complete this
+        // slot (and let the producer refill it) before its rx_flag is cleared, so a
         // follow-up request in the same slot never loses its rx_flag to this clear. On an
         // external ring the transport may refill the page while the pre-launch H2D copy
         // is still queued on the stream.
         atomic_store(&rb.rx_flags_host[cursor], 0, release);
+        idle_mask.fetch_and(~(1ULL << w), acq_rel);
 
         if (err != cudaSuccess) {
             (void)cudaGetLastError();
@@ -322,7 +323,7 @@ The consumer thread harvests completions **out-of-order** by scanning all active
 while (!consumer_stop) {
     bool found_any = false;
     for (uint32_t s = 0; s < NUM_SLOTS; ++s) {
-        if (!slot_occupied[s]) continue;
+        if (!atomic_load(&slot_occupied[s], acquire)) continue;
 
         if (ring->poll_tx(s) == CUDAQ_TX_READY) {   // any non-zero tx_flags value
             int err = slot_cuda_error[s];           // set by the dispatcher on a failed launch
@@ -330,9 +331,8 @@ while (!consumer_stop) {
             slot_cuda_error[s] = 0;
             total_completed++;
 
-            slot_occupied[s] = 0;      // Reset occupancy FIRST
-            __sync_synchronize();       // ARM memory fence
-            ring->clear_slot(s);        // Then clear tx_flags (rx_flags was cleared by the dispatcher)
+            ring->clear_slot(s);                        // clear tx_flags FIRST (rx_flags was cleared by the dispatcher)
+            atomic_store(&slot_occupied[s], 0, release); // then free the slot: the producer may refill it at once
             found_any = true;
         }
     }
@@ -342,14 +342,14 @@ while (!consumer_stop) {
 
 The consumer uses `slot_occupied[]` (set by the producer, cleared by the consumer) to know which slots are active, and `poll_tx()`, which reports `READY` for any non-zero `tx_flags` value, to find published responses. An occupied slot with `tx_flags == 0` is in flight.
 
-### 7.2 Consumer-Producer Race Fix
+### 7.2 Slot Recycling Order
 
-On ARM's weakly ordered memory model, the consumer must reset `slot_occupied[s] = 0` **before** clearing the ring buffer flags (via `clear_slot`), with a `__sync_synchronize()` fence between them. Without this ordering:
-1. Consumer clears flags (slot appears free to producer)
-2. Producer writes new `slot_occupied[s] = 1` 
-3. Consumer's delayed `slot_occupied[s] = 0` clobbers the producer's write
+The producer keys backpressure off `slot_occupied[]`, so the consumer must clear `tx_flags` (via `clear_slot`) **before** it stores `slot_occupied[s] = 0` (release; the injector loads it with acquire). With the opposite order:
+1. Consumer stores `slot_occupied[s] = 0` and is preempted before `clear_slot`
+2. Producer refills slot `s`, the dispatcher launches it, a worker publishes the new response into `tx_flags[s]`
+3. Consumer's delayed `clear_slot` wipes that publication
 
-This race caused exactly one request to get "stuck" indefinitely, eventually stalling the entire pipeline through backpressure.
+The dispatcher has the matching rule on its side: it clears `rx_flags[s]` before `idle_mask.fetch_and` hands the worker over, so the slot cannot be completed and refilled while its `rx_flag` clear is still pending. Either violation leaves exactly one request stuck forever and eventually stalls the pipeline through backpressure.
 
 ### 7.3 Publishing and External Rings
 
@@ -415,11 +415,11 @@ The `pipeline_stage_config` allows configuring `num_workers`, `num_slots` (used 
 6. **Host Dispatcher** checks the RPC magic and copies `function_id`, `request_id` and `ptp_timestamp` out of the header.
 7. **Host Dispatcher** scans `idle_mask`, finds `worker_id = 2` free with a matching `function_id`.
 8. **Host Dispatcher** saves `inflight_slot_tags[2] = slot`.
-9. **Host Dispatcher** marks bit 2 busy in `idle_mask`.
+9. **Host Dispatcher** derives the pointers for the launch (bit 2 of `idle_mask` is taken in step 13, after the `rx_flags` clear).
 10. **Host Dispatcher** translates `host_ptr` to the slot device pointer `dev_ptr` and derives the TX slot host pointer (`tx_data_host + slot * tx_stride`).
 11. **Host Dispatcher** calls `pre_launch_fn`: writes `h_ring_ptrs[0] = dev_ptr`, derives host pointer via offset arithmetic, issues `cudaMemcpyAsync(d_trt_input, host_ptr + 24, input_size, H2D, stream[2])`.
 12. **Host Dispatcher** calls `cudaGraphLaunch(..., stream[2])`.
-13. **Host Dispatcher** clears `rx_flags[slot] = 0` and advances to the next slot. Nothing is written to `tx_flags`; the slot is in flight in pipeline-private state (`slot_occupied[slot]`, `inflight_slot_tags[2]`). The producer does not check `tx_flags`; backpressure is via `slot_occupied[]`.
+13. **Host Dispatcher** clears `rx_flags[slot] = 0`, then marks bit 2 busy in `idle_mask` (handing the request to worker 2) and advances to the next slot. Nothing is written to `tx_flags`; the slot is in flight in pipeline-private state (`slot_occupied[slot]`, `inflight_slot_tags[2]`). The producer does not check `tx_flags`; backpressure is via `slot_occupied[]`.
 14. **GPU DMA engine** copies input payload from ring buffer to TRT input buffer.
 15. **GPU** executes TRT inference (or passthrough copy in SKIP_TRT mode).
 16. **GPU DMA engine** copies TRT output to host-mapped `h_predecoder_outputs_`.
@@ -437,7 +437,7 @@ The `pipeline_stage_config` allows configuring `num_workers`, `num_slots` (used 
 28. **PyMatching Worker** calls `pipeline.complete_deferred(slot)` → `tx_flags[slot].store(tx_slot_addr, release)`.
 29. **Consumer** scans all slots where `slot_occupied[s]` is set, calls `poll_tx(s)`, which reports `READY` for any non-zero `tx_flags` value.
 30. **Consumer** calls `completion_handler(request_id, slot, success = slot_cuda_error[slot] == 0, cuda_error)`.
-31. **Consumer** sets `slot_occupied[slot] = 0`, `__sync_synchronize()`, then calls `clear_slot(slot)` (clears `tx_flags` only; `rx_flags` was cleared in step 13). Producer may now reuse slot.
+31. **Consumer** calls `clear_slot(slot)` (clears `tx_flags` only; `rx_flags` was cleared in step 13), then stores `slot_occupied[slot] = 0` (release). Producer may now reuse slot.
 
 ---
 
@@ -576,7 +576,7 @@ The implementation in `realtime_pipeline.cu` keeps the following invariants; cha
 - **Tag ownership**: `inflight_slot_tags[w]` is written by the dispatcher (release) before it clears bit `w`, and the worker thread reads it (acquire) only after observing its bit clear, so the tag is the one for the current assignment and stays stable until that thread sets the bit again. Only the dispatcher clears `idle_mask` bits; in CPU-stage mode only worker thread `w` sets bit `w` (a failed launch is handed to it through `worker_launch_failed[w]`), and in GPU-only mode the host callback sets the bit last, after publishing. The tag for a worker therefore cannot change while that worker's flow is active.
 - **Ready-flag claiming**: The CPU poller claims each completion exactly once with `compare_exchange_strong(1, 2)` on the ready flag, relaxed on failure; the worker clears the flag (store 0) in `release_job`.
 - **Backpressure model**: The producer (`ring_buffer_injector`) checks `slot_occupied[slot]`, never `tx_flags`, mirroring the hsb model where `ring_flag`/`rx_flags` is the sole sender-receiver backpressure mechanism. `slot_request[slot]` and `slot_occupied[slot]` are written before the slot is signalled. Between dispatch and publication `tx_flags` stays 0; the slot is tracked in flight by pipeline-private state, and the consumer treats any non-zero `tx_flags` as a published response.
-- **Consumer memory ordering**: The consumer sets `slot_occupied[s] = 0` BEFORE calling `cudaq_host_ringbuffer_clear_slot`, with a `__sync_synchronize()` fence between them, to prevent the producer-consumer race on ARM. `clear_slot` clears `tx_flags` only; `rx_flags` is cleared by the dispatcher when it takes the request.
+- **Slot recycling order**: The consumer calls `cudaq_host_ringbuffer_clear_slot` (`tx_flags` only) BEFORE it stores `slot_occupied[s] = 0` (release), and the dispatcher clears `rx_flags[s]` BEFORE it takes the worker (Section 7.2). Both orders keep a refilled slot from losing its flag to a late clear.
 - **Published value**: `tx_flags[slot]` is either 0 or the host address of the TX slot that holds the `RPCResponse`; no other value is ever stored. On an external ring the pipeline never polls or clears `tx_flags` (the transport's TX kernel does) and reports completion at publish time on the publishing thread.
 - **Launch errors**: A failed `cudaGraphLaunch` produces an `RPCResponse` with the `cudaError_t` in `status` in the TX slot, a completion with `success = false` and `cuda_error`, and a worker that is reusable afterwards. Errors never hang the pipeline.
 - **In-place aliasing**: On the internal ring the TX slot is the RX slot. Every response writer (dispatcher failure path, CPU stages, PyMatching threads) reads the request fields it needs before writing the response.

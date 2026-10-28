@@ -168,7 +168,6 @@ sequenceDiagram
     Disp->>Disp: check magic, copy function_id / request_id / ptp from RPCHeader
     Disp->>Disp: idle_mask.load acquire, find worker W via ffsll
     Disp->>Disp: inflight_slot_tags W = S, release
-    Disp->>Disp: idle_mask.fetch_and ~1 shl W, acq_rel, mark W busy
     Disp->>Disp: slot_dev = rx_data + offset, tx_host = tx_data_host + S * tx_stride
 
     opt pre_launch_fn configured
@@ -178,6 +177,7 @@ sequenceDiagram
     Disp->>GPU: cudaGraphLaunch graph_exec W, stream W
     Disp->>Disp: mark slot S in-flight (pipeline-private), tx_flags untouched
     Disp->>RB: rx_flags S .store 0, release, free rx slot
+    Disp->>Disp: idle_mask.fetch_and ~1 shl W, acq_rel, mark W busy (after the rx clear)
     Note over Disp: Producer uses slot_occupied[] for backpressure,<br>not tx_flags
 
     Note over Prod,App: === PHASE 3: GPU Inference ===
@@ -212,9 +212,8 @@ sequenceDiagram
     Cons->>RB: poll_tx S: tx_flags S .load acquire, any non-zero = READY
     Cons->>App: completion_handler request_id, slot, success = slot_cuda_error S == 0
     Cons->>Cons: total_completed.fetch_add 1, relaxed
-    Cons->>Cons: slot_occupied S = 0
-    Cons->>Cons: __sync_synchronize
     Cons->>RB: clear_slot S: tx_flags = 0
+    Cons->>Cons: slot_occupied S = 0, release
     Note over Prod: Slot S now available for next submission
     Note over PMW,App: External ring: no Consumer thread. publish() calls<br>completion_handler on the publishing thread and the<br>transport's TX kernel consumes and clears tx_flags
 ```
@@ -291,10 +290,10 @@ stateDiagram-v2
         Result available for consumer
     end note
 
-    TX_READY --> FREE : Consumer reads result, sets slot_occupied=0, calls clear_slot (tx_flags = 0)
+    TX_READY --> FREE : Consumer reads result, calls clear_slot (tx_flags = 0), sets slot_occupied=0
 
     DISPATCHED --> LAUNCH_ERROR : cudaGraphLaunch failed → RPCResponse with error status in TX slot, slot_cuda_error set, tx_flags = TX slot addr
-    LAUNCH_ERROR --> FREE : Consumer reports completion with cuda_error, sets slot_occupied=0, calls clear_slot
+    LAUNCH_ERROR --> FREE : Consumer reports completion with cuda_error, calls clear_slot, sets slot_occupied=0
 ```
 
 **`tx_flags` value encoding:**
@@ -404,10 +403,15 @@ memory model. Key ordering guarantees:
    `complete_deferred()` pairs with `tx_flags[S].load(acquire)` in `poll_tx_flag()`.
    Consumer sees the full RPC response before the ready flag.
 
-5. **Consumer → Producer (slot recycling):** `slot_occupied[S] = 0` followed
-   by `__sync_synchronize()` (full barrier) before `clear_slot()` ensures the
-   producer cannot see a free slot while the consumer is still accessing
-   slot metadata.
+5. **Consumer → Producer (slot recycling):** `clear_slot()` (tx_flags = 0)
+   comes first, then `slot_occupied[S]` is stored 0 with release; the
+   producer's acquire load of `slot_occupied` pairs with it. The order matters:
+   once the producer sees a free slot it may refill it and a worker may publish
+   the next response, which a late `clear_slot()` would wipe.
+
+6. **Dispatcher → Worker (handoff):** the dispatcher clears `rx_flags[S]`
+   before `idle_mask.fetch_and` takes the worker, so the slot cannot be
+   completed and refilled while its old `rx_flag` clear is still pending.
 
 ```mermaid
 flowchart LR
@@ -417,14 +421,11 @@ flowchart LR
         E["ready_flags store(1)<br>(release, system scope)"] -->|"paired with"| F["ready_flags CAS<br>(acquire)"]
         G["idle_mask fetch_or<br>(release)"] -->|"paired with"| H["idle_mask load<br>(acquire)"]
         M["inflight_slot_tags store<br>(release, dispatcher)"] -->|"paired with"| N["inflight_slot_tags load<br>(acquire, worker)"]
+        K["slot_occupied store(0)<br>(release, consumer)"] -->|"paired with"| L["slot_occupied load<br>(acquire, injector)"]
     end
 
     subgraph "Mutex-Based Ordering"
         I["py_match_queue::push()<br>mutex lock/unlock"] -->|"happens-before"| J["py_match_queue::pop()<br>mutex lock/unlock"]
-    end
-
-    subgraph "Full Barriers"
-        K["__sync_synchronize()<br>between slot_occupied=0<br>and clear_slot()"]
     end
 ```
 
