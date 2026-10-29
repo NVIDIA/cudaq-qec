@@ -30,7 +30,6 @@
 //     (--save_syndrome).
 
 #include "cudaq.h"
-#include "utils/dem_chunks_from_rounds.h"
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
@@ -42,15 +41,14 @@
 #include "cudaq/qec/realtime/decoding.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include <algorithm>
-#include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <mutex>
 #include <numeric>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
-#include <tuple>
 
 #ifdef QEC_APP_CQR
 // cqr build variant: this same application compiled with -frealtime-lowering
@@ -648,12 +646,15 @@ bool setup_decoders(const cudaq::qec::code &code,
   const std::size_t num_boundary_syndromes =
       is_z_prep ? num_z_stabilizers : num_x_stabilizers;
   std::optional<cudaq::qec::dem_chunks_spec> chunks;
-  if (opts.dem_chunks)
-    chunks = dem_chunks_from_rounds(
-        cudaq::qec::pcm_to_sparse_vec(inputs.dem.detector_error_matrix),
-        cudaq::qec::pcm_to_sparse_vec(inputs.dem.observables_flips_matrix),
-        inputs.dem.error_rates, cudaq::qec::d_sparse(inputs.m2d),
-        opts.num_rounds, num_syndromes_per_round, code.get_num_data_qubits());
+  if (opts.dem_chunks) {
+    chunks = cudaq::qec::memory_dem_chunks_from_decoder_inputs(
+        inputs, opts.num_rounds, num_syndromes_per_round,
+        code.get_num_data_qubits());
+    const auto repeating = chunks->repeating_rounds();
+    std::cout << "DEM chunks: " << repeating.prefix << " prefix, "
+              << repeating.length << " bulk, " << repeating.suffix
+              << " suffix rounds\n";
+  }
   auto cfg = build_multi_decoder_config(inputs, num_syndromes_per_round,
                                         num_boundary_syndromes, chunks, opts);
 
