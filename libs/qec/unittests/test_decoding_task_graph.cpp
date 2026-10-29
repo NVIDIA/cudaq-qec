@@ -12930,7 +12930,9 @@ TEST(DecodingTaskGraph, ConcurrentRecordsPipelineUpstreamNodes) {
 // Rounds queued while the graph is behind are admitted together: with B
 // stalled, a burst of tagged rounds waits in the queue, and the coordinator
 // takes several as one record, which W, metering 64 rounds, receives in one
-// call. Every round still arrives, in order, and every operation counts.
+// call. Every round still arrives, in order. W publishes once per record it
+// receives, so a batch advances the result once and counts as one completed
+// operation, the public counter's batched rule.
 TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
   if (std::thread::hardware_concurrency() < 3)
     GTEST_SKIP() << "pipelining needs at least three CPU threads";
@@ -12968,6 +12970,7 @@ TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
       widest = std::max(widest, lengths[k]);
     }
     EXPECT_EQ(received, rounds);
+    EXPECT_EQ(result.completed_operations, lengths.size() - lengths_before);
   }
   EXPECT_GE(widest, 2u) << "no shot admitted queued rounds together";
 } // end - TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether)

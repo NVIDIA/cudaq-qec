@@ -1080,11 +1080,12 @@ struct decoding_task_graph::impl::record_scheduler {
     const auto si = flush.node;
     if (!indexed(si) || self_fed[si] || flush.offset == flush_resolved)
       return flush_ready_locked(self, si);
+    // Each context's live events must be only its fires, and in `self`
+    // the flush asking; compared, not subtracted, so no count can wrap.
     for (const auto *c : active) {
-      auto live = c->node_live[si] - c->node_fires_live[si];
-      if (c == &self)
-        --live; // the flush event asking
-      if (live != 0)
+      const std::uint32_t allowed =
+          c->node_fires_live[si] + (c == &self ? 1u : 0u);
+      if (c->node_live[si] != allowed)
         return false;
     }
     return true;
@@ -2472,16 +2473,22 @@ void decoding_task_graph::impl::dispatch_async_session() {
       }
       if (!S.admitting.empty()) {
         auto lock = S.lock_runtime();
-        for (auto *c : S.admitting) {
+        std::size_t activated = 0;
+        for (; activated < S.admitting.size(); ++activated) {
+          auto &c = *S.admitting[activated];
           try {
-            S.push_raw_roots_locked(*c);
+            S.push_raw_roots_locked(c);
           } catch (...) {
             admit_error = std::current_exception();
             break;
           }
-          S.activate_locked(*c, /*gated=*/true);
+          S.activate_locked(c, /*gated=*/true);
           progressed = true;
         }
+        // Hand back the contexts a failure left unactivated, rather than
+        // leave them to the failed session's discard_all().
+        for (std::size_t r = activated; r < S.admitting.size(); ++r)
+          S.release_locked(*S.admitting[r]);
         S.notify_workers();
         lock.unlock();
       }

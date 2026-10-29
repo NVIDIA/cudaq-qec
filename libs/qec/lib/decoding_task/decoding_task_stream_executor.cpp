@@ -667,10 +667,15 @@ void decoding_task_graph::impl::finish_async_streaming() {
         break;
       CUDAQ_REALTIME_CPU_RELAX();
     }
-    while (waiting())
-      wait_for_completion_change(
-          state.completed, state.completion_waiters,
-          state.completed.load(std::memory_order_acquire));
+    // Park on the value just checked: reading it again could see the
+    // result arrive and then wait for a change that never comes.
+    for (auto completed = state.completed.load(std::memory_order_acquire);
+         completed < state.finish_target &&
+         !state.failed.load(std::memory_order_acquire) &&
+         !state.cancel_requested.load(std::memory_order_acquire);
+         completed = state.completed.load(std::memory_order_acquire))
+      wait_for_completion_change(state.completed, state.completion_waiters,
+                                 completed);
     // A session that ended without its result releases the graph before
     // the caller learns why.
     if (state.completed.load(std::memory_order_acquire) < state.finish_target ||
