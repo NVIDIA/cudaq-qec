@@ -30,6 +30,7 @@
 //     (--save_syndrome).
 
 #include "cudaq.h"
+#include "utils/dem_chunks_from_rounds.h"
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
@@ -169,6 +170,9 @@ struct run_options {
   bool save_dem = false;
   bool load_dem = false;
   bool dem_chunks = false; // describe the DEM one round at a time
+  // Decode with the parallel_window pattern over the chunks: implies
+  // --dem_chunks and --task_graph.
+  bool parallel_window = false;
   std::string dem_filename;
   bool save_syndrome = false;
   bool load_syndrome = false;
@@ -183,6 +187,10 @@ struct experiment {
   std::size_t num_data = 0, num_ancx = 0, num_ancz = 0;
   std::size_t num_rounds = 0, num_logical = 0, num_obs = 0;
   std::vector<std::size_t> x_vec, z_vec, obs_flat;
+  // The syndrome_mapping row the data readout names: a `final` row ends a
+  // windowed graph's shot. 0 sends it untagged, as the other decoders take
+  // it.
+  std::uint64_t final_mapping_id = 0;
 };
 
 // --save_syndrome capture state. The library callback is a bare
@@ -304,225 +312,6 @@ decoder_args(const std::string &type, [[maybe_unused]] int distance,
   return args;
 }
 
-// Split the characterized model into one DEM chunk per measurement round, so a
-// single config serves any number of rounds. Round r's chunk holds the
-// detectors whose latest measurement lies in round r, and the faults whose
-// first detector lies there; a fault must reach no further than the next
-// round's detectors, and a detector no further back than the previous round's
-// measurements. The rounds equal to the middle one are the repeating bulk.
-static cudaq::qec::dem_chunks_spec
-build_dem_chunks(const cudaq::qec::decoder_inputs &inputs,
-                 std::size_t num_rounds, std::size_t num_syndromes_per_round,
-                 std::size_t num_data) {
-  using namespace cudaq::qec;
-  const auto rows_of = [](const std::vector<std::int64_t> &flat) {
-    std::vector<std::vector<std::int64_t>> rows(1);
-    for (const auto value : flat)
-      if (value < 0)
-        rows.emplace_back();
-      else
-        rows.back().push_back(value);
-    rows.pop_back();
-    return rows;
-  };
-  const std::size_t S = num_syndromes_per_round, R = num_rounds + 1;
-  const auto count = [&](std::size_t r) {
-    return r < num_rounds ? S : num_data;
-  };
-  const auto round_of = [&](std::int64_t m) {
-    return std::min(static_cast<std::size_t>(m) / S, num_rounds);
-  };
-
-  // Detector rounds, local indices, and D rows in round-local measurements:
-  // the previous round's first, then the detector's own round's.
-  const auto d_rows = rows_of(d_sparse(inputs.m2d));
-  std::vector<std::size_t> det_round(d_rows.size()), local(d_rows.size());
-  std::vector<std::size_t> width(R + 1, 0);
-  std::vector<std::vector<std::int64_t>> d_local(R);
-  for (std::size_t k = 0; k < d_rows.size(); ++k) {
-    if (d_rows[k].empty())
-      throw std::runtime_error("--dem_chunks: detector " + std::to_string(k) +
-                               " reads no measurement");
-    std::size_t r = 0;
-    for (const auto m : d_rows[k])
-      r = std::max(r, round_of(m));
-    det_round[k] = r;
-    local[k] = width[r]++;
-    for (const auto m : d_rows[k]) {
-      const std::size_t at = round_of(m);
-      const auto offset = static_cast<std::int64_t>(at * S);
-      if (at + 1 == r)
-        d_local[r].push_back(m - offset);
-      else if (at == r)
-        d_local[r].push_back(
-            m - offset + static_cast<std::int64_t>(r > 0 ? count(r - 1) : 0));
-      else
-        throw std::runtime_error("--dem_chunks: detector " + std::to_string(k) +
-                                 " reads a measurement more than one round "
-                                 "before its last");
-    }
-    d_local[r].push_back(-1);
-  }
-
-  // Round-major numbering makes a column's lowest detector index its earliest
-  // round, and makes the closed chunks renumber detectors as this DEM does.
-  if (!std::is_sorted(det_round.begin(), det_round.end()))
-    throw std::runtime_error(
-        "--dem_chunks needs detectors numbered round by round");
-
-  struct fault {
-    double p = 0.0;
-    std::vector<std::int64_t> rows, next_rows;
-    std::uint64_t obs = 0;
-    auto key() const { return std::tie(rows, next_rows, obs); }
-  };
-  const auto &dem = inputs.dem;
-  const std::size_t num_columns = dem.num_error_mechanisms();
-  std::vector<std::vector<std::size_t>> columns(num_columns);
-  const auto h_rows = rows_of(pcm_to_sparse_vec(dem.detector_error_matrix));
-  for (std::size_t det = 0; det < h_rows.size(); ++det)
-    for (const auto col : h_rows[det])
-      columns[col].push_back(det);
-  std::vector<std::uint64_t> column_obs(num_columns, 0);
-  const auto o_rows = rows_of(pcm_to_sparse_vec(dem.observables_flips_matrix));
-  if (o_rows.size() > 64)
-    throw std::runtime_error("--dem_chunks supports at most 64 observables");
-  for (std::size_t o = 0; o < o_rows.size(); ++o)
-    for (const auto col : o_rows[o])
-      column_obs[col] |= std::uint64_t{1} << o;
-
-  std::vector<std::vector<fault>> rounds(R);
-  for (std::size_t col = 0; col < num_columns; ++col) {
-    if (columns[col].empty())
-      throw std::runtime_error("--dem_chunks needs every column to flip a "
-                               "detector");
-    const std::size_t r = det_round[columns[col].front()];
-    fault f;
-    f.p = dem.error_rates[col];
-    f.obs = column_obs[col];
-    for (const auto det : columns[col]) {
-      const std::size_t at = det_round[det];
-      // Both directions: an earlier round would land on the outgoing seam,
-      // which is the wrong boundary rather than a wider one.
-      if (at != r && at != r + 1)
-        throw std::runtime_error("--dem_chunks needs every column within two "
-                                 "consecutive rounds");
-      (at == r ? f.rows : f.next_rows)
-          .push_back(static_cast<std::int64_t>(local[det]));
-    }
-    rounds[r].push_back(std::move(f));
-  }
-  for (std::size_t r = 0; r < R; ++r) {
-    auto &faults = rounds[r];
-    std::sort(faults.begin(), faults.end(),
-              [](const fault &a, const fault &b) { return a.key() < b.key(); });
-    std::vector<fault> merged;
-    for (auto &f : faults) {
-      if (!merged.empty() && merged.back().key() == f.key()) {
-        double &p = merged.back().p;
-        p = p * (1 - f.p) + f.p * (1 - p);
-      } else {
-        merged.push_back(std::move(f));
-      }
-    }
-    // Every fault here starts in round r, so ordering the round's columns as
-    // pcm_is_sorted() would, with the next round's rows one block later,
-    // leaves the closed model sorted, as sliding_window requires.
-    const auto block = static_cast<std::uint32_t>(
-        std::max<std::size_t>({width[r], width[r + 1], 1}));
-    std::vector<std::vector<std::uint32_t>> local_rows;
-    for (const auto &f : merged) {
-      auto &rows = local_rows.emplace_back(f.rows.begin(), f.rows.end());
-      for (const auto row : f.next_rows)
-        rows.push_back(block + static_cast<std::uint32_t>(row));
-    }
-    faults.clear();
-    for (const auto i : get_sorted_pcm_column_indices(local_rows, block))
-      faults.push_back(std::move(merged[i]));
-  }
-
-  const auto same = [&](std::size_t a, std::size_t b) {
-    if (width[a] != width[b] || width[a + 1] != width[b + 1] ||
-        count(a) != count(b) || (a > 0) != (b > 0) ||
-        (a > 0 && count(a - 1) != count(b - 1)) || d_local[a] != d_local[b] ||
-        rounds[a].size() != rounds[b].size())
-      return false;
-    for (std::size_t i = 0; i < rounds[a].size(); ++i) {
-      const fault &x = rounds[a][i], &y = rounds[b][i];
-      if (x.key() != y.key() || std::abs(x.p - y.p) > 1e-9 * std::max(x.p, y.p))
-        return false;
-    }
-    return true;
-  };
-  const std::size_t middle = R / 2;
-  std::size_t bulk_first = middle, bulk_last = middle;
-  while (bulk_first > 0 && same(bulk_first - 1, middle))
-    --bulk_first;
-  while (bulk_last + 1 < R && same(bulk_last + 1, middle))
-    ++bulk_last;
-  if (bulk_last == bulk_first)
-    throw std::runtime_error("--dem_chunks found no repeating round in " +
-                             std::to_string(num_rounds) +
-                             " rounds; raise --num_rounds");
-
-  const auto chunk_of = [&](std::size_t r) {
-    const auto &faults = rounds[r];
-    const auto seam_rows = [&](std::size_t rows, bool next) {
-      std::vector<std::vector<std::int64_t>> by_row(rows);
-      for (std::size_t i = 0; i < faults.size(); ++i)
-        for (const auto row : next ? faults[i].next_rows : faults[i].rows)
-          by_row[row].push_back(static_cast<std::int64_t>(i));
-      std::vector<std::int64_t> sparse;
-      for (const auto &row : by_row) {
-        sparse.insert(sparse.end(), row.begin(), row.end());
-        sparse.push_back(-1);
-      }
-      return sparse;
-    };
-    dem_chunk_spec spec;
-    spec.num_faults = faults.size();
-    for (const auto &f : faults)
-      spec.error_rates.push_back(f.p);
-    spec.seam_specs.push_back(
-        {seam_name::prev_round, {seam_rows(width[r], false), {}}});
-    if (r + 1 < R)
-      spec.seam_specs.push_back(
-          {seam_name::next_round, {seam_rows(width[r + 1], true), {}}});
-    for (std::size_t o = 0; o < o_rows.size(); ++o) {
-      for (std::size_t i = 0; i < faults.size(); ++i)
-        if (faults[i].obs >> o & 1)
-          spec.O_sparse.push_back(static_cast<std::int64_t>(i));
-      spec.O_sparse.push_back(-1);
-    }
-    spec.D_sparse = d_local[r];
-    if (count(r) != S)
-      spec.num_measurements = count(r);
-    return spec;
-  };
-
-  dem_chunks_spec spec;
-  spec.seam = {seam_name::next_round, seam_name::prev_round};
-  spec.num_rounds = R;
-  spec.measurements_per_round = S;
-  std::vector<phase_id> chain;
-  const auto add_phase = [&](const std::string &name, std::size_t r) {
-    const phase_id id = phase_id::from_name(name);
-    spec.phases.push_back({id, chunk_of(r)});
-    chain.push_back(id);
-  };
-  for (std::size_t r = 0; r < bulk_first; ++r)
-    add_phase("before" + std::to_string(r), r);
-  add_phase("bulk", middle);
-  for (std::size_t r = bulk_last + 1; r < R; ++r)
-    add_phase("after" + std::to_string(r - bulk_last - 1), r);
-  for (std::size_t i = 0; i + 1 < chain.size(); ++i)
-    spec.connections.push_back({chain[i], chain[i + 1]});
-  spec.connections.push_back({chain[bulk_first], chain[bulk_first]});
-  printf("DEM chunks: %zu rounds before the repeating round, %zu after\n",
-         bulk_first, R - 1 - bulk_last);
-  return spec;
-}
-
 // Build one decoder config per logical qubit from the decoder_inputs produced
 // by `decoder_context_from_memory_circuit(...).full_component()`. All decoders
 // share the same DEM (`H_sparse`), observables (`O_sparse`) and
@@ -555,7 +344,27 @@ build_multi_decoder_config(
       dc.error_rate_vec = dem.error_rates;
     }
 
-    if (opts.decoder_type == "sliding_window") {
+    if (opts.parallel_window) {
+      // One parallel_window node over the chunks: windows of d committed
+      // rounds with d buffer rounds, decoding in the gaps of 3d between them.
+      using node_spec = config::decoder_config::task_graph_spec::node_spec;
+      auto &graph = dc.task_graph.emplace();
+      node_spec pw;
+      pw.id = "pw";
+      pw.type = "parallel_window";
+      pw.inner_type = opts.decoder_type;
+      pw.decoder_custom_args =
+          decoder_args(opts.decoder_type, opts.distance, opts.decoder_params);
+      pw.node_params = cudaqx::heterogeneous_map{
+          {"commit_rounds", static_cast<std::size_t>(opts.distance)},
+          {"buffer_rounds", static_cast<std::size_t>(opts.distance)},
+          {"gap_rounds", static_cast<std::size_t>(3 * opts.distance)},
+          {"output", std::string("corrections")}};
+      graph.nodes.push_back(std::move(pw));
+      graph.edges = {{"measurements", "output", "pw", "input"},
+                     {"pw", "output", "output", "input"}};
+      graph.options.async_streaming = opts.async_streaming;
+    } else if (opts.decoder_type == "sliding_window") {
       dc.type = "sliding_window";
       cudaqx::heterogeneous_map sw_args;
       sw_args.insert("window_size", opts.sw_window_size);
@@ -588,6 +397,9 @@ build_multi_decoder_config(
 
     multi_config.decoders.push_back(dc);
   }
+  // A windowed graph completes a shot only at its FINAL round.
+  if (opts.parallel_window)
+    multi_config.syndrome_mapping.push_back({1, "final"});
   return multi_config;
 }
 
@@ -602,7 +414,8 @@ __qpu__ std::vector<cudaq::measure_result> memory_circuit(
     const cudaq::qec::code::stabilizer_round &stab_round,
     const cudaq::qec::code::one_qubit_encoding &state_prep,
     std::size_t num_rounds, const std::vector<std::size_t> &x_stabilizers,
-    const std::vector<std::size_t> &z_stabilizers, std::int64_t decoder_id) {
+    const std::vector<std::size_t> &z_stabilizers, std::int64_t decoder_id,
+    std::uint64_t final_mapping_id) {
   patch logical(data, xstab_anc, zstab_anc);
   state_prep(logical);
 
@@ -616,9 +429,13 @@ __qpu__ std::vector<cudaq::measure_result> memory_circuit(
     cudaq::qec::decoding::enqueue_syndromes(decoder_id, s);
   }
 
-  // Final data readout
+  // Final data readout, through the row that ends the shot, if any.
   auto data_meas = mz(data);
-  cudaq::qec::decoding::enqueue_syndromes(decoder_id, data_meas);
+  if (final_mapping_id == 0)
+    cudaq::qec::decoding::enqueue_syndromes(decoder_id, data_meas);
+  else
+    cudaq::qec::decoding::enqueue_syndromes_mapped(
+        decoder_id, data_meas, num_rounds, final_mapping_id);
   return data_meas;
 }
 
@@ -637,7 +454,8 @@ __qpu__ std::int64_t demo_circuit_qpu(
     const std::vector<std::size_t> &x_stabilizers,
     const std::vector<std::size_t> &z_stabilizers,
     const std::vector<std::size_t> &obs_matrix_flat,
-    std::size_t num_observables, const std::vector<std::int64_t> &decoder_ids) {
+    std::size_t num_observables, const std::vector<std::int64_t> &decoder_ids,
+    std::uint64_t final_mapping_id) {
   cudaq::qvector data(num_logical * num_data),
       xstab_anc(num_logical * num_ancx), zstab_anc(num_logical * num_ancz);
 
@@ -649,11 +467,12 @@ __qpu__ std::int64_t demo_circuit_qpu(
   for (std::size_t i = 0; i < num_logical; i++) {
     // Stream this logical's rounds + data readout to its decoder, keeping the
     // single data measurement it returns.
-    auto data_meas = memory_circuit(
-        data.slice(i * num_data, num_data),
-        xstab_anc.slice(i * num_ancx, num_ancx),
-        zstab_anc.slice(i * num_ancz, num_ancz), stab_round, state_prep,
-        num_rounds, x_stabilizers, z_stabilizers, decoder_ids[i]);
+    auto data_meas =
+        memory_circuit(data.slice(i * num_data, num_data),
+                       xstab_anc.slice(i * num_ancx, num_ancx),
+                       zstab_anc.slice(i * num_ancz, num_ancz), stab_round,
+                       state_prep, num_rounds, x_stabilizers, z_stabilizers,
+                       decoder_ids[i], final_mapping_id);
 
     // Raw logical observable (row 0 of the observable matrix) from that
     // readout.
@@ -720,8 +539,15 @@ experiment make_experiment(const cudaq::qec::code &code,
 //   (default)         : characterize and configure the decoders in-process.
 bool setup_decoders(const cudaq::qec::code &code,
                     cudaq::qec::operation state_prep, const run_options &opts,
-                    cudaq::noise_model &noise) {
+                    cudaq::noise_model &noise, experiment &exp) {
   namespace config = cudaq::qec::decoding::config;
+  // The configuration's first final row, which ends each shot, or 0.
+  const auto final_row_of = [](const config::multi_decoder_config &cfg) {
+    for (const auto &row : cfg.syndrome_mapping)
+      if (row.type == "final")
+        return row.id;
+    return std::uint64_t{0};
+  };
 
   if (opts.load_dem) {
     std::ifstream config_file(opts.dem_filename);
@@ -792,6 +618,7 @@ bool setup_decoders(const cudaq::qec::code &code,
     }
 
     config::configure_decoders(cfg);
+    exp.final_mapping_id = final_row_of(cfg);
     printf("Loaded decoder config from %s (%zu decoders)\n",
            opts.dem_filename.c_str(), cfg.decoders.size());
     return true;
@@ -822,8 +649,11 @@ bool setup_decoders(const cudaq::qec::code &code,
       is_z_prep ? num_z_stabilizers : num_x_stabilizers;
   std::optional<cudaq::qec::dem_chunks_spec> chunks;
   if (opts.dem_chunks)
-    chunks = build_dem_chunks(inputs, opts.num_rounds, num_syndromes_per_round,
-                              code.get_num_data_qubits());
+    chunks = dem_chunks_from_rounds(
+        cudaq::qec::pcm_to_sparse_vec(inputs.dem.detector_error_matrix),
+        cudaq::qec::pcm_to_sparse_vec(inputs.dem.observables_flips_matrix),
+        inputs.dem.error_rates, cudaq::qec::d_sparse(inputs.m2d),
+        opts.num_rounds, num_syndromes_per_round, code.get_num_data_qubits());
   auto cfg = build_multi_decoder_config(inputs, num_syndromes_per_round,
                                         num_boundary_syndromes, chunks, opts);
 
@@ -836,6 +666,7 @@ bool setup_decoders(const cudaq::qec::code &code,
   }
 
   config::configure_decoders(cfg);
+  exp.final_mapping_id = final_row_of(cfg);
   return true;
 }
 
@@ -1021,12 +852,12 @@ run_shots(std::size_t num_shots, cudaq::noise_model &noise,
                           stab_round, prep, exp.num_data, exp.num_ancx,
                           exp.num_ancz, exp.num_rounds, exp.num_logical,
                           exp.x_vec, exp.z_vec, exp.obs_flat, exp.num_obs,
-                          decoder_ids)
+                          decoder_ids, exp.final_mapping_id)
              : cudaq::run(num_shots, noise, cudaq::qec::qpu::demo_circuit_qpu,
                           stab_round, prep, exp.num_data, exp.num_ancx,
                           exp.num_ancz, exp.num_rounds, exp.num_logical,
                           exp.x_vec, exp.z_vec, exp.obs_flat, exp.num_obs,
-                          decoder_ids);
+                          decoder_ids, exp.final_mapping_id);
 }
 
 // Decode the per-shot results and print the logical error rate.
@@ -1089,10 +920,10 @@ void demo_circuit_host(const cudaq::qec::code &code, const run_options &opts) {
                               cudaq::qec::two_qubit_depolarization(opts.p_cnot),
                               /*num_controls=*/1);
 
-  const experiment exp = make_experiment(code, state_prep, opts);
+  experiment exp = make_experiment(code, state_prep, opts);
 
   // Configure the decoders. --save_dem stops here (config written, no shots).
-  if (!setup_decoders(code, state_prep, opts, noise))
+  if (!setup_decoders(code, state_prep, opts, noise, exp))
     return;
 
   // One decoder id per logical qubit, matching config ids 0..num_logical-1.
@@ -1153,6 +984,13 @@ void show_help() {
          "decodes the --num_rounds given here.\n");
   printf("  --dem_chunks        Describe the DEM as one chunk per round with a "
          "repeating bulk, so one config serves any --num_rounds.\n");
+  printf("  --parallel_window   Decode with the parallel_window pattern over "
+         "the chunks,\n"
+         "      --decoder_type inside each window, ending each shot through a "
+         "final\n"
+         "      syndrome_mapping row. Implies --dem_chunks and --task_graph; "
+         "replaying\n"
+         "      --load_syndrome cannot end a shot, so it is not supported.\n");
   printf("  --save_syndrome <string> Save syndrome data to a file for later "
          "replay.\n");
   printf("  --load_syndrome <string> Load and replay syndrome data from a "
@@ -1222,6 +1060,10 @@ int main(int argc, char **argv) {
         i++;
       } else if (arg == "--dem_chunks") {
         opts.dem_chunks = true;
+      } else if (arg == "--parallel_window") {
+        opts.parallel_window = true;
+        opts.dem_chunks = true;
+        opts.task_graph = true;
       } else if (arg == "--save_syndrome") {
         opts.save_syndrome = true;
         opts.syndrome_filename = val(i);
@@ -1299,6 +1141,11 @@ int main(int argc, char **argv) {
   if (opts.task_graph && !is_leaf_decoder(opts.decoder_type)) {
     printf("Error: --task_graph requires --decoder_type 'multi_error_lut', "
            "'nv-qldpc-decoder', or 'pymatching'\n");
+    return 1;
+  }
+  if (opts.parallel_window && opts.load_syndrome) {
+    printf("Error: --load_syndrome replays rounds untagged, so it cannot end "
+           "a --parallel_window shot\n");
     return 1;
   }
   if (opts.async_streaming && !opts.task_graph) {

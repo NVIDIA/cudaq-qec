@@ -3146,7 +3146,7 @@ std::string decoder_config_json_schema() {
   // per fault) are not expressible here, so a document that passes this schema
   // may still be rejected when parsed.
   llvm::json::Object dem_chunk_properties{
-      {"num_faults", llvm::json::Object{{"type", "integer"}, {"minimum", 1}}},
+      {"num_faults", llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
       {"H_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"seam_specs",
        llvm::json::Object{{"type", "array"},

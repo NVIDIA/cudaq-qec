@@ -10,10 +10,12 @@
 
 #include "decoding_task_commitment.h"
 #include "decoding_task_data_artifacts.h"
+#include "decoding_task_decode_window_node.h"
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
 #include "measurement_frame_lengths.h"
+#include "sparse_dem_from_chunks.h"
 #include "cudaq/qec/cancellation.h"
 #include "cudaq/qec/candidate_sink.h"
 #include "cudaq/qec/decoder_config_schema.h"
@@ -26,6 +28,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 
 namespace cudaq::qec {
@@ -69,14 +72,15 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       kind.inner_decoder_output(cfg.node_params);
   const bool decoder_takes_observables =
       kind.inner_decoder_takes_observables(cfg.node_params);
-  // Native observable streaming needs D and the observable shape, not a
-  // closed H/rates model. Other kinds still need their finite window's H.
-  const bool native_streaming_chunks =
-      kind.name == "streaming" && decoder_takes_observables &&
+  const bool native_chunks =
       cfg.dem.has_value() && !cfg.decoder_instance && cfg.stim_dem.empty() &&
       !cfg.decoder_type.empty() &&
       !decoder_needs_model_matrices(cfg.decoder_type,
                                     decoder_model_source::dem_chunks);
+  // Native observable streaming needs only D and the observable projection.
+  // Other kinds keep the graph's H/O, but need no closed decoder model/priors.
+  const bool native_streaming_chunks =
+      native_chunks && kind.name == "streaming" && decoder_takes_observables;
   ctx.id = cfg.id;
   ctx.node_params = &cfg.node_params;
 
@@ -108,10 +112,10 @@ node_build_context prepare_node(task_graph_node_config &cfg,
 
   sparse_binary_matrix d_mat, o_mat;
   std::vector<std::size_t> flat_frames;
-  // The closed DEM is kept rather than a prebuilt decoder handle so its model
-  // data can be placed into one immutable decoder_init after the node's
-  // independent input and output policies have both been resolved.
+  // Keep chunk closure sparse. The dense DEM is only used by the separate
+  // raw-text path; constructing it for chunks scales as detectors x faults.
   std::shared_ptr<const detector_error_model> closed_dem;
+  std::optional<decoder_init> closed_model;
   std::optional<dem_chunks_spec> prepared_chunks;
   if (cfg.dem.has_value()) {
     // window_size sizes the DEM as well as the buffer: it is the round count
@@ -123,9 +127,7 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     else if (!working.num_rounds.has_value() && working.has_repeating_phase())
       working.num_rounds = working.minimum_rounds();
 
-    std::vector<extended_dem> chunks;
-    if (!native_streaming_chunks)
-      chunks = dem_chunks_from_spec(working);
+    const auto sequence = working.phase_sequence();
     if (kind.name == "sliding_window" &&
         cfg.node_params.get<bool>("arbitrary_length", false) &&
         cfg.stim_dem.empty() && !cfg.decoder_instance) {
@@ -133,14 +135,20 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       ctx.decoder_type = cfg.decoder_type;
       ctx.decoder_params = cfg.params;
     }
-    const auto rounds = native_streaming_chunks
-                            ? working.phase_sequence().size()
-                            : chunks.size();
+    const auto rounds = sequence.size();
+    if (rounds == 0)
+      throw std::invalid_argument(where + ": DEM has no rounds");
     if (rounds > std::numeric_limits<uint32_t>::max())
       throw std::invalid_argument(where + ": too many DEM rounds");
     ctx.dem_rounds = static_cast<uint32_t>(rounds);
-    if (!native_streaming_chunks)
-      ctx.fault_offsets = dem_chunks_to_fault_offsets(chunks);
+    if (!native_streaming_chunks) {
+      // Offsets need only phase metadata, not another expanded fault model.
+      ctx.fault_offsets.reserve(rounds + 1);
+      ctx.fault_offsets.push_back(0);
+      for (const auto id : sequence)
+        ctx.fault_offsets.push_back(ctx.fault_offsets.back() +
+                                    working.get_phase(id).num_faults);
+    }
     // The spec form honors per-phase measurement maps; the chunk list alone
     // can only say the memory convention.
     const auto d_rows = dem_chunks_to_d_sparse(working);
@@ -177,15 +185,50 @@ node_build_context prepare_node(task_graph_node_config &cfg,
             rows[observable].push_back(static_cast<uint32_t>(column));
           });
       o_mat = make_csr(rows, "O");
+    } else if (native_chunks) {
+      const auto chunks = dem_chunks_from_spec(working);
+      auto projection = details::sparse_dem_from_chunks(
+          chunks, working.seam.from_seam, working.seam.to_seam,
+          /*with_priors=*/false);
+      o_mat = sparse_binary_matrix::from_nested_csr(
+                  static_cast<sparse_binary_matrix::index_type>(
+                      projection.observable_rows.size()),
+                  projection.detector_error_matrix.num_cols(),
+                  projection.observable_rows)
+                  .canonicalize();
+      ctx.h = std::make_shared<const sparse_binary_matrix>(
+          projection.detector_error_matrix.to_csr());
     } else {
-      o_mat = make_csr(dem_chunks_to_o_sparse(chunks), "O");
-      closed_dem = std::make_shared<const detector_error_model>(
-          dem_close_all(chunks, working.seam.from_seam, working.seam.to_seam));
+      closed_model.emplace(
+          decoder_init::from_dem_chunks_closed(working, d_mat));
+      o_mat = closed_model->has_observable_model()
+                  ? closed_model->observable_flips_matrix()
+                  : sparse_binary_matrix::from_nested_csr(
+                        0, closed_model->num_error_mechanisms(), {});
+      ctx.h = std::make_shared<const sparse_binary_matrix>(
+          closed_model->detector_error_matrix().to_csr());
     }
     // Rounds may differ in width (a first round with one stabilizer type's
     // detectors, a data readout last). Then there is no equal split, and spr
     // is the typical round's, with the whole stream's width kept alongside.
-    if (d_mat.num_cols() % ctx.dem_rounds == 0) {
+    // Only phases that supply D_sparse declare their own widths. Without those
+    // rows a round measures one bit per detector, the memory convention of
+    // dem_chunks_to_d_sparse(), which the seam checks already keep consistent;
+    // num_measurements and measurements_per_round then take no part in it.
+    bool equal_widths = true;
+    if (working.has_D_sparse()) {
+      const auto width =
+          working.measurements_of(working.get_phase(sequence.front()));
+      equal_widths =
+          std::all_of(sequence.begin(), sequence.end(), [&](auto id) {
+            return working.measurements_of(working.get_phase(id)) == width;
+          });
+      if (equal_widths && (d_mat.num_cols() % ctx.dem_rounds != 0 ||
+                           d_mat.num_cols() / ctx.dem_rounds != width))
+        throw std::invalid_argument(where +
+                                    ": D width disagrees with phase widths");
+    }
+    if (equal_widths && d_mat.num_cols() % ctx.dem_rounds == 0) {
       ctx.spr = static_cast<uint32_t>(d_mat.num_cols()) / ctx.dem_rounds;
     } else {
       if (!working.measurements_per_round)
@@ -258,7 +301,7 @@ node_build_context prepare_node(task_graph_node_config &cfg,
         sparse_binary_matrix(closed_dem->detector_error_matrix,
                              sparse_binary_matrix_layout::csr)
             .canonicalize());
-  else if (!native_streaming_chunks && !cfg.h_sparse.empty())
+  else if (!ctx.h && !native_streaming_chunks && !cfg.h_sparse.empty())
     ctx.h = std::make_shared<const sparse_binary_matrix>(
         make_csr(cfg.h_sparse, "H"));
   if (ctx.h && ctx.h->num_rows() != ctx.d->num_rows())
@@ -315,7 +358,7 @@ node_build_context prepare_node(task_graph_node_config &cfg,
     if (cfg.decoder_type.empty())
       throw std::invalid_argument(where + " of kind '" + kind.name +
                                   "' needs an inner decoder name");
-    if (!closed_dem && !native_streaming_chunks)
+    if (!closed_dem && !closed_model && !native_chunks)
       throw std::invalid_argument(
           where +
           " has flat matrices, which cannot build a decoder (H and the error "
@@ -329,14 +372,15 @@ node_build_context prepare_node(task_graph_node_config &cfg,
       // Native consumers need the authoritative recipe to preserve streaming
       // phase/FINAL semantics, not just its finite-window equivalent matrices.
       // Match the standalone decoder configuration's model-source policy.
-      if (prepared_chunks &&
-          !decoder_needs_model_matrices(cfg.decoder_type,
-                                        decoder_model_source::dem_chunks)) {
+      if (native_chunks) {
         auto native =
             decoder_init::from_dem_chunks(std::move(*prepared_chunks), *ctx.d);
         return decoder_takes_observables ? std::move(native)
                                          : native.without_observables();
       }
+      if (closed_model)
+        return decoder_takes_observables ? std::move(*closed_model)
+                                         : closed_model->without_observables();
       return decoder_takes_observables
                  ? decoder_init(*closed_dem, *ctx.d)
                  : decoder_init(*ctx.h, std::nullopt, closed_dem->error_rates,
@@ -664,6 +708,8 @@ struct graph_windows {
   std::map<std::string, std::shared_ptr<const experiment_template>> templates;
   /// By decode_window node: the ingest node it reads, and its layer.
   std::map<std::string, std::pair<std::string, window_request>> layers;
+  /// By decode_window node: its receives' guarantees, by receive index.
+  std::map<std::string, std::vector<std::optional<std::int64_t>>> guarantees;
 };
 
 // Record in @p windows which template and layer each node reads, from
@@ -672,6 +718,7 @@ struct graph_windows {
 // layers' windows into the store.
 void record_graph_windows(
     const std::vector<task_graph_node_config> &nodes,
+    const std::vector<task_graph_edge> &edges,
     const std::map<std::string, std::vector<window_layer>> &layers,
     graph_windows &windows) {
   for (const auto &cfg : nodes) {
@@ -679,10 +726,35 @@ void record_graph_windows(
     if (kind && kind->name == "ingest")
       windows.templates[cfg.id] = windows.store.add_template(*cfg.dem);
   }
-  for (const auto &[ingest, ingest_layers] : layers)
-    for (const auto &layer : ingest_layers)
+  for (const auto &[ingest, ingest_layers] : layers) {
+    // Ingest numbers its publications from its layers' first window.
+    auto base = std::numeric_limits<std::int64_t>::max();
+    const auto layer_of = [&](const std::string &node) {
+      const auto it = std::find_if(
+          ingest_layers.begin(), ingest_layers.end(),
+          [&](const window_layer &layer) { return layer.node == node; });
+      return it == ingest_layers.end() ? nullptr : &*it;
+    };
+    for (const auto &layer : ingest_layers) {
       windows.layers[layer.node] = {ingest, layer.request};
-}
+      base = std::min(base, window_instances(layer.request, 0).begin);
+    }
+    // A send between two of its layers, into receive_i; validation has
+    // checked the receive names.
+    for (const auto &e : edges) {
+      const auto *to = layer_of(e.to_node);
+      const auto *from = layer_of(e.from_node);
+      if (!to || !from || e.to_input.rfind("receive_", 0) != 0)
+        continue;
+      const auto receive = std::stoul(e.to_input.substr(8));
+      auto &guarantees = windows.guarantees[e.to_node];
+      if (guarantees.size() <= receive)
+        guarantees.resize(receive + 1);
+      guarantees[receive] = first_guaranteed_receive(to->request, from->request,
+                                                     e.index_offset, base);
+    }
+  } // end - for(ingest)
+} // end - record_graph_windows()
 
 // Give a windowed node what its builder reads: an ingest node its template
 // and layers, a decode_window node the store, its ingest node's template,
@@ -699,6 +771,9 @@ void attach_windows(const task_graph_node_config &cfg,
     ctx.store = &windows.store;
     ctx.context = windows.templates.at(l->second.first);
     ctx.layer = l->second.second;
+    if (const auto g = windows.guarantees.find(cfg.id);
+        g != windows.guarantees.end())
+      ctx.guaranteed_receives = g->second;
     ctx.decoder_type = cfg.decoder_type;
     ctx.decoder_params = cfg.params;
   }
@@ -770,6 +845,76 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
       new decoding_task_graph(std::move(i)));
 }
 
+// Each ingest node's windows are scheduled apart. A node's copies share one
+// core: the bulk variant has a decoder per copy, and every prefix or
+// terminal variant one, which a single window of the shot uses; copies are
+// built only for an asynchronous graph. Validation built every variant into
+// the store, which hashes each.
+window_schedule describe_schedule(std::vector<task_graph_node_config> nodes,
+                                  std::vector<task_graph_edge> edges,
+                                  const task_graph_options &options,
+                                  std::size_t num_rounds) {
+  auto kind_lock = lock_node_kind_registry();
+  data_artifact_store store;
+  window_schedule out;
+  out.num_rounds = num_rounds;
+  lower_patterns(nodes, edges);
+  // The layout reads parameters with their defaults filled, as built.
+  for (auto &cfg : nodes)
+    if (const auto *kind = find_task_graph_node_kind(cfg.kind))
+      if (const auto *schema = decoding::config::find_decoder_schema(
+              task_graph_node_schema_name(kind->name)))
+        decoding::config::materialize_default_args(*schema, cfg.node_params);
+  for (const auto &[ingest, layers] :
+       validate_window_topology(nodes, edges, store)) {
+    const auto is_layer = [&](const std::string &node) {
+      return std::any_of(
+          layers.begin(), layers.end(),
+          [&](const window_layer &layer) { return layer.node == node; });
+    };
+    const auto ingest_cfg =
+        std::find_if(nodes.begin(), nodes.end(),
+                     [&](const auto &cfg) { return cfg.id == ingest; });
+    std::vector<task_graph_edge> sends;
+    for (const auto &e : edges)
+      if (is_layer(e.from_node) && is_layer(e.to_node))
+        sends.push_back(e);
+    const auto context = store.add_template(*ingest_cfg->dem);
+    const auto layer_of = [&](const std::string &node) -> const auto & {
+      return std::find_if(
+                 layers.begin(), layers.end(),
+                 [&](const window_layer &layer) { return layer.node == node; })
+          ->request;
+    };
+    auto schedule = schedule_windows(context, layers, sends, num_rounds);
+    out.templates[ingest] = store.template_sha256(*context);
+    for (auto &window : schedule.windows) {
+      const auto node =
+          std::find_if(nodes.begin(), nodes.end(),
+                       [&](const auto &cfg) { return cfg.id == window.node; });
+      const bool counted = std::any_of(out.decoders.begin(), out.decoders.end(),
+                                       [&](const variant_decoders &d) {
+                                         return d.node == window.node &&
+                                                d.variant == window.variant;
+                                       });
+      if (!counted)
+        out.decoders.push_back(
+            {window.node, window.variant,
+             options.async_streaming && window.variant.bulk()
+                 ? node->max_in_flight
+                 : std::size_t{1},
+             store.window_sha256(*context, layer_of(window.node),
+                                 window.variant)});
+      out.windows.push_back(std::move(window));
+    }
+  } // end - for(ingest, layers)
+  std::sort(out.decoders.begin(), out.decoders.end(),
+            [](const auto &a, const auto &b) {
+              return std::tie(a.node, a.variant) < std::tie(b.node, b.variant);
+            });
+  return out;
+} // end - describe_schedule()
+
 std::unique_ptr<decoding_task_graph>
 decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
                                    std::vector<task_graph_edge> edges,
@@ -832,15 +977,21 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
   } // end - for(cfg)
   graph_windows windows;
   if (!infer_edges)
-    record_graph_windows(
-        nodes, validate_window_topology(nodes, edges, windows.store), windows);
+    record_graph_windows(nodes, edges,
+                         validate_window_topology(nodes, edges, windows.store),
+                         windows);
 
   auto i = std::make_unique<impl>();
   for (auto &cfg : nodes) {
     const auto *kind = find_task_graph_node_kind(cfg.kind);
     const auto *factory = find_node_factory(cfg.kind);
     auto ctx = prepare_node(cfg, *kind);
+    // Copies are built only for an asynchronous graph; what they share, the
+    // first fills.
+    std::shared_ptr<void> shared;
     attach_windows(cfg, windows, ctx);
+    ctx.copies = options.async_streaming ? cfg.max_in_flight : 1;
+    ctx.shared = &shared;
     // The first node carrying a DEM owns the graph's D; a single-node graph
     // also exposes its O.  o_matrix() is not meaningful once outcomes are
     // combined, so a multi-node graph leaves it unset, as combine() does.
@@ -868,20 +1019,16 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
       auto replica_ctx = prepare_node(cfg, *kind);
       // Each copy decodes the same windows, so it reads the same store.
       attach_windows(cfg, windows, replica_ctx);
+      replica_ctx.copy = r;
+      replica_ctx.copies = ctx.copies;
+      replica_ctx.shared = &shared;
       replicas.push_back((*factory)(replica_ctx));
     }
+    i->one_shot_streams = i->one_shot_streams || !node->has_one_shot_path();
     i->node_ids.push_back(cfg.id);
     i->nodes.push_back(std::move(node));
     i->node_replicas.push_back(std::move(replicas));
   }
-  // The windowed kinds join their inputs by index, which this executor does
-  // not do yet. Their nodes are built first, so a builder's own error is
-  // reported as itself.
-  if (!windows.templates.empty())
-    throw std::invalid_argument(
-        "from_topology: a windowed graph needs an executor that joins inputs "
-        "by index, which is not available yet");
-
   wire_patterns(patterns, i->node_ids, i->nodes, edges);
 
   if (infer_edges) {

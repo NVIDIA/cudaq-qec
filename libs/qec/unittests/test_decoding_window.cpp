@@ -45,19 +45,25 @@
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
 #include "../lib/decoding_task/decoding_task_ingest_core.h"
 #include "../lib/decoding_task/decoding_task_ingest_node.h"
+#include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "cudaq/qec/code.h"
+#include "cudaq/qec/decoding_task_graph.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/dem_construction_code.h"
 #include "cudaq/qec/dem_sampling.h"
+#include "cudaq/qec/logger.h"
 #include "cudaq/qec/pcm_utils.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
@@ -1434,7 +1440,8 @@ TEST(WindowVariants, CountMatchesTheLayout) {
   }
 }
 
-// Windows with equal keys are the same problem up to a shift of rounds.
+// Windows with equal keys are the same problem up to a shift of rounds. A
+// key from bounds found once is the key window_variant() finds.
 TEST(WindowVariants, EqualKeysBuildTheSameWindow) {
   for (const auto &spec : {rep5_spec(), arbitrary_memory_spec(5, true),
                            multi_terminal_memory_spec(5, 3),
@@ -1442,12 +1449,15 @@ TEST(WindowVariants, EqualKeysBuildTheSameWindow) {
     const auto tmpl = std::make_shared<const experiment_template>(spec);
     for (const auto &request : sweep_requests()) {
       std::map<variant_key, decoding_window> first;
+      const auto bounds = variant_bounds_of(*tmpl, request);
       const auto end = variant_probe_rounds(*tmpl, request) + 2 * 12;
       for (auto R = tmpl->min_rounds(); R < end; ++R) {
         const auto instances = window_instances(request, R);
         for (auto k = instances.begin; k < instances.end; ++k) {
           const auto key = window_variant(*tmpl, request, k, R);
           auto w = window_from_dem_chunks(tmpl, request, k, R);
+          EXPECT_TRUE(window_variant(bounds, request, k, R) == key)
+              << "R=" << R << " k=" << k;
           const auto [it, inserted] = first.emplace(key, w);
           if (!inserted)
             EXPECT_NO_THROW(check_same_window_up_to_shift(it->second, w))
@@ -2131,13 +2141,17 @@ using pw_reference::observables_of;
 using pw_reference::parallel_window_reference;
 using pw_reference::syndrome_of;
 
-// Phenomenological memory over the distance-d surface code's Z checks.
-dem_chunks_spec surface_memory_spec(std::size_t distance, double p) {
+// Phenomenological memory over the distance-d surface code's Z checks, or
+// its X checks with @p x_checks.
+dem_chunks_spec surface_memory_spec(std::size_t distance, double p,
+                                    bool x_checks = false) {
   cudaqx::heterogeneous_map options;
   options.insert("distance", distance);
   const auto matrices =
       css_matrices_from_code(*code::get("surface_code", options));
-  return phenomenological_memory_spec(matrices.hz, matrices.lz, p, p);
+  return x_checks
+             ? phenomenological_memory_spec(matrices.hx, matrices.lx, p, p)
+             : phenomenological_memory_spec(matrices.hz, matrices.lz, p, p);
 }
 
 // Detection events of one fault column.
@@ -3503,7 +3517,8 @@ std::vector<std::uint8_t> raw_logical(const experiment_template &t,
 // decoder's.
 class allocation_counting_lut final : public decoder {
 public:
-  static inline std::size_t decode_allocations = 0;
+  /// Atomic: copies of a node decode on several threads.
+  static inline std::atomic<std::size_t> decode_allocations = 0;
 
   allocation_counting_lut(decoder_init inputs, decoder_output_request output,
                           const cudaqx::heterogeneous_map &params)
@@ -4139,7 +4154,7 @@ public:
 CUDAQ_EXT_PT_REGISTER_TYPE(blind_decoder)
 
 // verify_residual. With fail, a fire whose solution leaves a detector
-// unexplained throws, naming the window and the first row where H e
+// unexplained records why, naming the window and the first row where H e
 // differs from d, and leaves its slot empty, as a failed decode does. With
 // report, the fire's record says the window was checked and the solution
 // does not hold; with none, that it was not checked. A solution that holds
@@ -4190,19 +4205,21 @@ TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported) {
       reported.detectors.begin());
   ASSERT_LT(missed, own);
   EXPECT_FALSE(none.fire(0, rows_of(*noisy_view), {}).checked);
-  expect_throw<std::runtime_error>(
-      [&] { fail.fire(0, rows_of(*noisy_view), {}); },
-      "decode_window: window " + std::to_string(noisy_view->k) +
-          "'s solution does not satisfy its detectors (verify_residual: "
-          "fail): H e first differs from d at its row " +
-          std::to_string(missed) + ", shot row " +
-          std::to_string(noisy_view->first_row + missed));
+  EXPECT_EQ(fail.fire(0, rows_of(*noisy_view), {}).failure,
+            "decode_window: window " + std::to_string(noisy_view->k) +
+                "'s solution does not satisfy its detectors "
+                "(verify_residual: fail): H e first differs from d at its "
+                "row " +
+                std::to_string(missed) + ", shot row " +
+                std::to_string(noisy_view->first_row + missed));
   EXPECT_FALSE(fail.held(0).fired);
+  EXPECT_TRUE(report.held(0).failure.empty());
 
   for (auto *core : {&none, &report, &fail}) {
     const auto &f = core->fire(0, rows_of(*quiet_view), {});
     EXPECT_TRUE(f.solution->satisfied);
     EXPECT_EQ(f.checked, core != &none);
+    EXPECT_TRUE(f.failure.empty());
   }
 } // end - TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported)
 
@@ -4238,11 +4255,11 @@ TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow) {
   const window_send_value forged{ones, residual.send, residual.first_row};
   const window_send_value *receives[] = {nullptr, &forged};
   ASSERT_FALSE(ones.empty());
-  expect_throw<std::runtime_error>(
-      [&] { b.fire(0, rows_of(*p->views[1]), receives); },
-      "decode_window: window " + std::to_string(p->k) +
-          "'s solution does not satisfy its detectors (verify_residual: "
-          "fail): H e first differs from d at its imported row 0");
+  EXPECT_EQ(b.fire(0, rows_of(*p->views[1]), receives).failure,
+            "decode_window: window " + std::to_string(p->k) +
+                "'s solution does not satisfy its detectors "
+                "(verify_residual: fail): H e first differs from d at its "
+                "imported row 0");
   EXPECT_FALSE(b.held(0).fired);
 } // end - TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow)
 
@@ -4380,8 +4397,9 @@ CUDAQ_EXT_PT_REGISTER_TYPE(gated_lut)
 
 // A prefix or terminal variant has one decoder, so a window fired into a
 // second slot while its first fire decodes is rejected, and that slot keeps
-// what it held; the first fire completes. A bulk window may fire into two
-// slots at once, each with its own decoder.
+// what it held; the first fire completes. Its results lie in the variant's
+// one workspace, so they hold until the variant fires again, in any slot.
+// A bulk window may fire into two slots at once, each with its own decoder.
 TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
   const auto spec = arbitrary_memory_spec(5);
   const auto g = parallel_graph(layered(2, 1, 3));
@@ -4448,8 +4466,13 @@ TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
   EXPECT_EQ(a.held(0).k, edge->k);
   EXPECT_TRUE(a.held(1).fired);
   EXPECT_EQ(a.held(1).k, bulk->k);
-  // Once the first fire is done, the window may fire again.
+  // Once the first fire is done, the window may fire again, and the first
+  // fire's results no longer hold.
+  EXPECT_TRUE(a.holds(a.held(0)));
+  EXPECT_TRUE(a.holds(a.held(1)));
   EXPECT_EQ(a.fire(1, rows_of(*edge), {}).k, edge->k);
+  EXPECT_FALSE(a.holds(a.held(0)));
+  EXPECT_TRUE(a.holds(a.held(1)));
 
   // Both fires of a bulk window reach their decoders at once.
   gated_lut::open = false;
@@ -4788,6 +4811,8 @@ TEST(DataArtifactStore, StimDemsAreKeyedByTheirText) {
 // Every variant of a request is built once, at the first shot length that
 // has it, and equal requests from other nodes reuse it. Lookups never build:
 // a variant, request or template the store did not build is a logic error.
+// A lookup by the template's sha256 finds what a lookup by the template
+// does.
 TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
   data_artifact_store store;
   data_artifact_store other;
@@ -4795,6 +4820,7 @@ TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
   const auto request = layered(2, 2, 3).a;
   std::set<variant_key> keys;
   store.add_windows(tmpl, request);
+  const auto digest = store.template_sha256(*tmpl);
   const auto added = store.records().size();
   store.add_windows(tmpl, window_request(request));
   EXPECT_EQ(store.records().size(), added);
@@ -4807,6 +4833,7 @@ TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
       keys.insert(key);
       ASSERT_NE(w, nullptr);
       EXPECT_EQ(store.find_window(*tmpl, request, key), w);
+      EXPECT_EQ(store.find_window(digest, request, key), w);
       EXPECT_NO_THROW(check_same_window_up_to_shift(
           *w, window_from_dem_chunks(tmpl, request, k, R)));
     }
@@ -4819,6 +4846,9 @@ TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild) {
       "was not built at configuration time");
   expect_logic_error(
       [&] { store.find_window(*tmpl, request, variant_key{999, 999}); },
+      "was not built at configuration time");
+  expect_logic_error(
+      [&] { store.find_window(std::string(64, '0'), request, *keys.begin()); },
       "was not built at configuration time");
 } // end - TEST(DataArtifactStore, VariantsBuildOnceAndLookupsNeverBuild)
 
@@ -5024,6 +5054,44 @@ void expect_window_rows(const shot &s, const window_request &request,
 // read_logical, flush() then publishes the readout round's logical value,
 // alone, over the whole shot, and only once. One node serves shots of any
 // length in any order.
+// No delivery readies more publications than the node declares, which
+// sizes its consumers' join tables: whole records of every length, the
+// FINAL one readying all that remain, and the logical value's flush.
+TEST(IngestNode, ReadiesNoMoreThanItDeclaresPerDelivery) {
+  std::mt19937 rng(31);
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  std::size_t most = 0; // the most one delivery readied
+  for (const auto &requests : ingest_layouts()) {
+    ingest_node node(context, named_windows(requests), true);
+    const auto declared = node.max_publications_per_delivery();
+    const auto limit = *node.raw_chunk_limit();
+    for (auto R = context->min_rounds(); R <= 40; ++R) {
+      SCOPED_TRACE("R=" + std::to_string(R));
+      const shot s(spec, R, rng);
+      const auto &m = s.measurements;
+      node.reset_streaming_state();
+      for (std::size_t at = 0; at < m.size(); at += limit) {
+        const auto len = std::min(limit, m.size() - at);
+        std::size_t readied = 0;
+        for (bool more = node.enqueue(m.data() + at, len,
+                                      at + len == m.size() ? round_type::FINAL
+                                                           : round_type::BULK);
+             more; more = node.publish_next())
+          ++readied;
+        EXPECT_LE(readied, declared) << "record at " << at;
+        most = std::max(most, readied);
+      }
+      std::size_t flushed = 0;
+      for (bool more = node.flush(); more; more = node.publish_next())
+        ++flushed;
+      EXPECT_LE(flushed, declared);
+    }
+  }
+  // A FINAL record readies several windows, so the bound is not one.
+  EXPECT_GT(most, 1u);
+}
+
 TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
   std::mt19937 rng(29);
   const auto spec = wide_readout_spec();
@@ -5226,9 +5294,9 @@ TEST(IngestNode, KeepsTheLastPublicationCurrent) {
     EXPECT_EQ(node.streaming_output(l), nullptr) << "port " << l;
 } // end - TEST(IngestNode, KeepsTheLastPublicationCurrent)
 
-// After a first shot, an ingest node streams a second of the same length in
-// the same records, publications and logical value included, without
-// allocating: windows are copied into buffers kept from the first.
+// From its first shot, an ingest node streams a shot, publications and
+// logical value included, FINAL's burst of windows too, without
+// allocating: windows are copied into buffers sized at construction.
 TEST(IngestNode, StreamsAShotWithoutAllocating) {
   if (QEC_TEST_SANITIZED)
     GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
@@ -5261,9 +5329,10 @@ TEST(IngestNode, StreamsAShotWithoutAllocating) {
     node.reset_streaming_state();
   };
   stream();
-  stream();
   EXPECT_GT(published, 0u);
-  EXPECT_EQ(allocations, 0u);
+  EXPECT_EQ(allocations, 0u) << "the first shot allocated";
+  stream();
+  EXPECT_EQ(allocations, 0u) << "the second shot allocated";
 } // end - TEST(IngestNode, StreamsAShotWithoutAllocating)
 
 // ---------------------------------------------------------------------------
@@ -5633,6 +5702,50 @@ TEST(DecodeWindowNode, TakesWindowsFromAnyProducer) {
 // frame update on `output` and each send of its layer on a port named by
 // the send: A sends forward and backward to B. It joins by index and
 // streams only.
+// A receive from an earlier instance is guaranteed from the first index at
+// which its producer exists: in every shot in which the consumer instance
+// exists, so does the producer instance, on parallel layouts, shifted ones
+// and a sliding window, at every shot length up to 60, and only the first
+// instance goes unguaranteed. A residual, at offset 0, and a producer whose
+// commit zone starts after the consumer's, are never guaranteed.
+TEST(DecodeWindowNode, GuaranteesReceivesFromEarlierInstances) {
+  struct receive {
+    window_request consumer;
+    window_request producer;
+  };
+  std::vector<receive> deltas;
+  for (const auto &r :
+       {layered(2, 1, 3), layered(3, 2, 2), shifted(layered(2, 1, 3), -1),
+        shifted(layered(2, 1, 3), 4)})
+    deltas.push_back({r.b, r.a});
+  deltas.push_back({sliding(2, 5), sliding(2, 5)});
+  for (const auto &[consumer, producer] : deltas) {
+    const auto base = std::min(window_instances(consumer, 0).begin,
+                               window_instances(producer, 0).begin);
+    const auto first = first_guaranteed_receive(consumer, producer, -1, base);
+    ASSERT_TRUE(first.has_value());
+    for (std::size_t R = 1; R <= 60; ++R) {
+      const auto c = window_instances(consumer, R);
+      const auto p = window_instances(producer, R);
+      std::size_t unguaranteed = 0; // consumer instances before first
+      for (auto kc = c.begin; kc < c.end; ++kc) {
+        if (kc - base < *first) {
+          ++unguaranteed;
+          continue;
+        }
+        EXPECT_TRUE(kc - 1 >= p.begin && kc - 1 < p.end)
+            << "R=" << R << ", instance " << kc - base;
+      }
+      EXPECT_LE(unguaranteed, 1u) << "R=" << R;
+    }
+  } // end - for(consumer, producer)
+  const auto pw = layered(2, 1, 3);
+  auto later = sliding(2, 5);
+  later.offset += 4;
+  EXPECT_FALSE(first_guaranteed_receive(pw.b, pw.a, 0, 0));
+  EXPECT_FALSE(first_guaranteed_receive(sliding(2, 5), later, -1, 0));
+} // end - TEST(DecodeWindowNode, GuaranteesReceivesFromEarlierInstances)
+
 TEST(DecodeWindowNode, DeclaresItsPorts) {
   const auto g = parallel_graph(layered(2, 1, 3));
   data_artifact_store store;
@@ -5680,8 +5793,8 @@ TEST(DecodeWindowNode, DeclaresItsPorts) {
 } // end - TEST(DecodeWindowNode, DeclaresItsPorts)
 
 // A fire is given one input per port, a window on `input`, and on each
-// receive a send or nothing; anything else is rejected, and so is a
-// solution the node's verify_residual fails. A rejected fire publishes
+// receive a send or nothing; anything else is rejected. A solution the
+// node's verify_residual fails is reported, not thrown. Either publishes
 // nothing, taking down the publication of the fire before it.
 TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
   const auto g = parallel_graph(layered(2, 1, 3));
@@ -5734,8 +5847,15 @@ TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
                          std::to_string(window.get<window_rows>().k) +
                          " below their windows");
   ASSERT_TRUE(blind.fire(0, {&quiet}));
-  EXPECT_THROW(blind.fire(0, {&window}), std::runtime_error);
+  EXPECT_EQ(blind.fire_failure(), nullptr);
+  EXPECT_FALSE(blind.fire(0, {&window}));
+  ASSERT_NE(blind.fire_failure(), nullptr);
+  EXPECT_NE(blind.fire_failure()->find("does not satisfy its detectors"),
+            std::string::npos);
   EXPECT_EQ(blind.streaming_output(0), nullptr);
+  EXPECT_FALSE(blind.published_index(0).has_value());
+  ASSERT_TRUE(blind.fire(0, {&quiet}));
+  EXPECT_EQ(blind.fire_failure(), nullptr);
 } // end - TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance)
 
 // A fire's publication stands until the next fire or a reset: its frame
@@ -5824,5 +5944,1520 @@ TEST(DecodeWindowNode, FiresAllocateNothingBeyondTheDecoder) {
               allocation_counting_lut::decode_allocations);
   }
 } // end - TEST(DecodeWindowNode, FiresAllocateNothingBeyondTheDecoder)
+
+// Stores share what they build: a second store of the same template and
+// request holds the first one's template and window variants, the same
+// objects, while either lives, and records them as its own. A different
+// template shares nothing. Once every store and holder lets go they are
+// freed: sharing keeps nothing alive.
+TEST(DataArtifactStore, StoresShareWhatTheyBuild) {
+  auto spec = wide_readout_spec();
+  auto other = spec;
+  const auto request = layered(2, 1, 3).a;
+  std::weak_ptr<const experiment_template> kept_template;
+  std::weak_ptr<const decoding_window> kept_window;
+  other.phases.at(0).spec.error_rates.at(0) *= 2;
+  {
+    data_artifact_store first;
+    data_artifact_store second;
+    data_artifact_store third;
+    const auto a = first.add_template(spec);
+    first.add_windows(a, request);
+    const auto b = second.add_template(spec);
+    second.add_windows(b, request);
+    const auto c = third.add_template(other);
+    EXPECT_EQ(a, b);
+    EXPECT_NE(a, c);
+    for (const auto &[key, window] : first.find_windows(*a, request))
+      EXPECT_EQ(window, second.find_window(*b, request, key));
+    EXPECT_EQ(second.records(), first.records());
+    kept_template = a;
+    kept_window = first.find_windows(*a, request).front().second;
+  }
+  EXPECT_TRUE(kept_template.expired());
+  EXPECT_TRUE(kept_window.expired());
+}
+
+// Stores built at once on two threads end up sharing one template and one
+// of each window variant: whichever registers first is kept.
+TEST(DataArtifactStore, StoresBuiltAtOnceShareWhatTheyBuild) {
+  const auto spec = wide_readout_spec();
+  const auto request = layered(3, 2, 2).b;
+  std::array<data_artifact_store, 2> stores;
+  std::array<std::shared_ptr<const experiment_template>, 2> templates;
+  std::vector<std::thread> threads;
+  for (std::size_t i = 0; i < stores.size(); ++i)
+    threads.emplace_back([&, i] {
+      templates[i] = stores[i].add_template(spec);
+      stores[i].add_windows(templates[i], request);
+    });
+  for (auto &thread : threads)
+    thread.join();
+  EXPECT_EQ(templates[0], templates[1]);
+  for (const auto &[key, window] :
+       stores[0].find_windows(*templates[0], request))
+    EXPECT_EQ(window, stores[1].find_window(*templates[1], request, key));
+}
+
+// ---------------------------------------------------------------------------
+// Windowed graphs on the executor
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A parallel_window pattern node P over @p spec with @p params, fed by
+// measurements and read at the output, as from_topology takes it.
+task_graph_node_config
+pattern_node(const dem_chunks_spec &spec,
+             const cudaqx::heterogeneous_map &params,
+             std::size_t max_in_flight = 1,
+             const std::string &decoder = "single_error_lut") {
+  task_graph_node_config cfg;
+  cfg.id = "P";
+  cfg.kind = "parallel_window";
+  cfg.dem = spec;
+  cfg.decoder_type = decoder;
+  cfg.node_params = params;
+  cfg.max_in_flight = max_in_flight;
+  return cfg;
+}
+
+// The edges into and out of pattern P.
+std::vector<task_graph_edge> pattern_edges() {
+  return {{"measurements", "output", "P", "input"},
+          {"P", "output", "output", "input"}};
+}
+
+// The layers pattern_node() lowers into, as the reference's graph.
+window_graph lowered_graph(const dem_chunks_spec &spec,
+                           const cudaqx::heterogeneous_map &params) {
+  std::vector<task_graph_node_config> nodes;
+  auto edges = pattern_edges();
+  lower_parallel_window(pattern_node(spec, params), nodes, edges);
+  return parallel_graph(
+      {nodes.at(0).windows.at(0).request, nodes.at(0).windows.at(1).request});
+}
+
+// Streams @p measurements into @p graph as one shot, in records of
+// @p record measurements, the last FINAL, and returns its corrections.
+std::vector<std::uint8_t>
+stream_shot(decoding_task_graph &graph,
+            const std::vector<std::uint8_t> &measurements, std::size_t record) {
+  graph.reset_decoder();
+  for (std::size_t at = 0; at < measurements.size(); at += record) {
+    const auto len = std::min(record, measurements.size() - at);
+    graph.enqueue_syndrome(measurements.data() + at, len,
+                           at + len == measurements.size() ? round_type::FINAL
+                                                           : round_type::BULK);
+  }
+  const auto *corrections = graph.get_obs_corrections();
+  return {corrections, corrections + graph.get_num_observables()};
+}
+
+// The graph @p graph, of layout @p g over wide_readout_spec(), streams
+// single faults in records of @p record measurements (the graph's round
+// for 0) as the reference decodes them, at every shot length up to 60:
+// with @p corrected false its corrections are the reference's frame, and
+// with it true that frame applied to the raw logical value.
+void expect_graph_streams(decoding_task_graph &graph, const window_graph &g,
+                          bool corrected, std::size_t record) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  std::size_t flipped = 0; // shots whose expected value is not zero
+  ASSERT_TRUE(graph.supports_streaming())
+      << graph.streaming_incompatibility_reason();
+  if (record == 0)
+    record = graph.get_num_msyn_per_round();
+  for (auto R = tmpl.min_rounds(); R <= 60; ++R) {
+    SCOPED_TRACE("R=" + std::to_string(R));
+    parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const auto &s = reference.model();
+    for (std::size_t c = R % 7; c < s.h.size(); c += 7) {
+      const auto detectors = detectors_of(s, c);
+      const auto measurements = memory_measurements(tmpl, R, detectors);
+      auto want = reference.decode(detectors).frame;
+      if (corrected) {
+        const auto logical = raw_logical(tmpl, R, measurements);
+        for (std::size_t j = 0; j < want.size(); ++j)
+          want[j] ^= logical.at(j);
+      }
+      flipped += std::count(want.begin(), want.end(), 1) != 0;
+      EXPECT_EQ(stream_shot(graph, measurements, record), want)
+          << "column " << c;
+    }
+  } // end - for(R)
+  // A graph that published nothing would match only zero values.
+  EXPECT_GT(flipped, 0u);
+} // end - expect_graph_streams()
+
+// The pattern over wide_readout_spec() with @p output, built with
+// @p options and @p max_in_flight copies of each layer, streams as the
+// reference decodes, in records of @p record measurements.
+void expect_pattern_streams(const std::string &output,
+                            const task_graph_options &options,
+                            std::size_t max_in_flight, std::size_t record) {
+  const auto spec = wide_readout_spec();
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}},
+                                         {"output", output}};
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, params, max_in_flight));
+  auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                  pattern_edges(), options);
+  expect_graph_streams(*graph, lowered_graph(spec, params),
+                       output == "corrected_logical", record);
+}
+
+// A sliding window W over wide_readout_spec(), written by hand: ingest's
+// one layer feeds W, and W[k-1]'s forward delta W[k]'s receive_0. Built
+// with @p options and @p max_in_flight copies of W, it streams as the
+// reference decodes, in records of @p record measurements.
+void expect_sliding_streams(const task_graph_options &options,
+                            std::size_t max_in_flight, std::size_t record) {
+  const auto g = sliding_graph(2, 5);
+  std::vector<task_graph_node_config> nodes(2);
+  nodes[0].id = "ingest";
+  nodes[0].kind = "ingest";
+  nodes[0].dem = wide_readout_spec();
+  nodes[0].windows = {{"W", g.layers.at(0).request, ""}};
+  nodes[1].id = "W";
+  nodes[1].kind = "decode_window";
+  nodes[1].decoder_type = "single_error_lut";
+  nodes[1].node_params.insert("num_receives", std::size_t{1});
+  nodes[1].max_in_flight = max_in_flight;
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "ingest", "input"},
+       {"ingest", "W", "W", "input"},
+       {"W", "forward", "W", "receive_0", -1},
+       {"W", "output", "output", "input"}},
+      options);
+  expect_graph_streams(*graph, g, false, record);
+}
+
+} // namespace
+
+// The pattern, lowered and built by from_topology, streams through the
+// executor as the reference decodes: synchronously, asynchronously, and
+// asynchronously with four copies of each layer decoding at once, in
+// records of a round or of 5 measurements, cut anywhere.
+TEST(WindowedGraph, StreamsThePatternAsTheReference) {
+  task_graph_options async;
+  async.async_streaming = true;
+  for (const std::string output : {"corrections", "corrected_logical"})
+    for (const std::size_t record : {std::size_t{0}, std::size_t{5}}) {
+      SCOPED_TRACE("output: " + output + ", record " + std::to_string(record));
+      EXPECT_NO_THROW(expect_pattern_streams(output, {}, 1, record));
+      EXPECT_NO_THROW(expect_pattern_streams(output, async, 1, record));
+      EXPECT_NO_THROW(expect_pattern_streams(output, async, 4, record));
+    }
+} // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
+
+// A record can contain many interleaved A/B commits. Retiring every A delta
+// before the B deltas must not make the bounded output stager grow with it.
+TEST(WindowedGraph, LargeRecordsRetireInterleavedLayersInRoundOrder) {
+  constexpr std::size_t rounds = 1001;
+  auto spec = wide_readout_spec();
+  spec.num_rounds = rounds;
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{4}},
+      {"buffer_rounds", std::size_t{2}},
+      {"output", std::string{"corrections"}}};
+  parallel_window_reference reference(spec, lowered_graph(spec, params), rounds,
+                                      "single_error_lut");
+  std::vector<std::uint8_t> detectors(reference.model().row.back(), 0);
+  // Nonzero corrections from separated A-prefix, B-bulk and A-terminal cores.
+  for (const auto round : {0u, 41u, 997u}) {
+    const auto flipped = detectors_of(reference.model(), rep5_checks * round);
+    for (std::size_t i = 0; i < detectors.size(); ++i)
+      detectors[i] ^= flipped[i];
+  }
+  const auto measurements = memory_measurements(tmpl, rounds, detectors);
+  const auto expected = reference.decode(detectors).frame;
+  ASSERT_EQ(expected, std::vector<std::uint8_t>{1});
+  const auto readout = tmpl.measurement_offset(rounds - 1, rounds);
+  for (const bool open : {false, true})
+    for (const bool asynchronous : {false, true})
+      for (const std::size_t copies : {1u, 4u})
+        for (const std::string output : {"corrections", "corrected_logical"}) {
+          if (!asynchronous && copies != 1)
+            continue;
+          SCOPED_TRACE(::testing::Message()
+                       << "open=" << open << " async=" << asynchronous
+                       << " copies=" << copies << " output=" << output);
+          auto configured = spec;
+          if (open)
+            configured.num_rounds.reset();
+          auto node = pattern_node(configured, params, copies);
+          node.node_params.insert("output", output);
+          std::vector<task_graph_node_config> nodes;
+          nodes.push_back(std::move(node));
+          auto edges = pattern_edges();
+          edges.push_back({"P", "output", "output", "copy"});
+          task_graph_options options;
+          options.async_streaming = asynchronous;
+          options.async_num_workers = 2 * copies;
+          options.async_queue_capacity = 2;
+          auto graph = decoding_task_graph::from_topology(
+              std::move(nodes), std::move(edges), options);
+          auto want = expected;
+          if (output == "corrected_logical") {
+            const auto logical = raw_logical(tmpl, rounds, measurements);
+            for (std::size_t i = 0; i < want.size(); ++i)
+              want[i] ^= logical[i];
+          }
+          // Reuse the same deployment and record contexts across packet sizes
+          // and epochs; the large record contains 1,000 regular rounds.
+          for (const std::size_t packet_rounds : {7u, 1000u, 7u, 1000u}) {
+            SCOPED_TRACE(packet_rounds);
+            graph->reset_decoder();
+            const auto packet = packet_rounds * rep5_checks;
+            for (std::size_t at = 0; at < readout; at += packet)
+              graph->enqueue_syndrome(measurements.data() + at,
+                                      std::min(packet, readout - at),
+                                      round_type::BULK);
+            graph->enqueue_syndrome(measurements.data() + readout,
+                                    measurements.size() - readout,
+                                    round_type::FINAL);
+            const auto result = graph->streaming_result();
+            ASSERT_EQ(result.status, task_graph_streaming_status::complete)
+                << result.error;
+            ASSERT_EQ(result.outputs.size(), 2);
+            EXPECT_EQ(result.values,
+                      (std::vector<std::uint8_t>{want[0], want[0]}));
+            for (const auto &sink : result.outputs) {
+              EXPECT_EQ(sink.coverage_begin_round, 0);
+              EXPECT_EQ(sink.coverage_end_round, rounds);
+            }
+          }
+        }
+}
+
+// describe_schedule() of the pattern's topology lists exactly the
+// reference's windows at every shot length up to 30: each instance's node,
+// k, rounds, zones, ports and dependencies. Each node builds a decoder per
+// copy for the bulk variant, one copy synchronously and four with
+// max_in_flight 4 asynchronously, and one for each prefix or terminal
+// variant, which its copies share. Each variant's and the template's sha256
+// is the one a store built from the same template and requests records, and
+// distinct variants have distinct hashes. A topology without windows lists
+// none.
+TEST(WindowedGraph, DescribesItsSchedule) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  const auto g = lowered_graph(spec, params);
+  data_artifact_store store; // the same template and requests, held apart
+  const auto context = store.add_template(spec);
+  task_graph_options async;
+  const auto recorded = [&](const std::string &kind,
+                            const std::string &sha256) {
+    return std::any_of(store.records().begin(), store.records().end(),
+                       [&](const data_artifact_record &r) {
+                         return r.kind == kind && r.sha256 == sha256;
+                       });
+  };
+  for (const auto &layer : g.layers)
+    store.add_windows(context, layer.request);
+  async.async_streaming = true;
+  for (const auto &[options, copies] :
+       {std::pair{task_graph_options{}, std::size_t{1}},
+        std::pair{async, std::size_t{4}}}) {
+    SCOPED_TRACE(std::to_string(copies) + " copies");
+    for (auto R = tmpl.min_rounds(); R <= 30; ++R) {
+      SCOPED_TRACE("R=" + std::to_string(R));
+      const parallel_window_reference reference(spec, g, R, "single_error_lut");
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pattern_node(spec, params, copies));
+      const auto schedule =
+          describe_schedule(std::move(nodes), pattern_edges(), options, R);
+      std::set<std::pair<std::string, variant_key>> variants;
+      EXPECT_EQ(schedule.num_rounds, R);
+      ASSERT_EQ(schedule.windows.size(), reference.windows().size());
+      for (const auto &rw : reference.windows()) {
+        const auto w =
+            std::find_if(schedule.windows.begin(), schedule.windows.end(),
+                         [&](const scheduled_window &s) {
+                           return s.node == "P." + rw.node && s.k == rw.k;
+                         });
+        ASSERT_NE(w, schedule.windows.end()) << rw.node << "[" << rw.k << "]";
+        EXPECT_EQ(w->rounds, rw.rounds);
+        EXPECT_EQ(w->commit, rw.commit);
+        EXPECT_EQ(w->buffers, rw.buffers);
+        EXPECT_EQ(w->input.exists, rw.input_exists);
+        EXPECT_EQ(w->output.exists, rw.output_exists);
+        ASSERT_EQ(w->inputs.size(), rw.inputs.size());
+        for (std::size_t i = 0; i < rw.inputs.size(); ++i) {
+          EXPECT_EQ(w->inputs[i].from_node, "P." + rw.inputs[i].from_node);
+          EXPECT_EQ(w->inputs[i].k, rw.inputs[i].k);
+          EXPECT_EQ(w->inputs[i].to_input, rw.inputs[i].to_input);
+          EXPECT_EQ(w->inputs[i].exists, rw.inputs[i].exists);
+        }
+        variants.insert({w->node, w->variant});
+      }
+      ASSERT_EQ(schedule.decoders.size(), variants.size());
+      std::set<std::string> hashes;
+      for (const auto &d : schedule.decoders) {
+        const auto &layer = d.node == "P.A" ? g.layers[0] : g.layers[1];
+        EXPECT_TRUE(variants.count({d.node, d.variant})) << d.node;
+        EXPECT_EQ(d.decoders, d.variant.bulk() ? copies : 1u) << d.node;
+        EXPECT_EQ(d.sha256,
+                  store.window_sha256(*context, layer.request, d.variant));
+        EXPECT_TRUE(recorded("window", d.sha256)) << d.node;
+        hashes.insert(d.sha256);
+      }
+      EXPECT_EQ(hashes.size(), schedule.decoders.size());
+      ASSERT_EQ(schedule.templates.size(), 1u);
+      EXPECT_EQ(schedule.templates.at("P.ingest"),
+                store.template_sha256(*context));
+      EXPECT_TRUE(recorded("dem_chunks", schedule.templates.at("P.ingest")));
+    } // end - for(R)
+  } // end - for(options, copies)
+  std::vector<task_graph_node_config> plain(2);
+  plain[0].id = "A";
+  plain[0].kind = "xor";
+  plain[1].id = "B";
+  plain[1].kind = "xor";
+  EXPECT_TRUE(describe_schedule(std::move(plain),
+                                {{"measurements", "output", "A", "a"},
+                                 {"measurements", "output", "A", "b"},
+                                 {"A", "output", "B", "a"},
+                                 {"A", "output", "B", "b"},
+                                 {"B", "output", "output", "input"}},
+                                {}, 10)
+                  .windows.empty());
+} // end - TEST(WindowedGraph, DescribesItsSchedule)
+
+// A shot's closure says whether every window's solution was checked and
+// held: not_checked without verify_residual; closed with report when every
+// solution satisfies its window, as a lookup table's single faults do; and
+// open when one does not, as a blind decoder's on a shot with flips, which
+// still completes. Graph and output agree.
+TEST(WindowedGraph, ReportsTheShotsClosure) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  const auto closure_of = [&](const std::string &verify,
+                              const std::string &decoder,
+                              const std::vector<std::uint8_t> &detectors) {
+    cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                     {"buffer_rounds", std::size_t{1}},
+                                     {"gap_rounds", std::size_t{3}},
+                                     {"output", std::string("corrections")}};
+    if (!verify.empty())
+      params.insert("verify_residual", verify);
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pattern_node(spec, params, 1, decoder));
+    auto graph =
+        decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+    stream_shot(*graph, memory_measurements(tmpl, R, detectors),
+                graph->get_num_msyn_per_round());
+    const auto &result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.outputs.at(0).closure, result.closure);
+    return result.closure;
+  };
+  const parallel_window_reference reference(
+      spec,
+      lowered_graph(spec, {{"commit_rounds", std::size_t{2}},
+                           {"buffer_rounds", std::size_t{1}},
+                           {"gap_rounds", std::size_t{3}}}),
+      R, "single_error_lut");
+  const auto flips = detectors_of(reference.model(), 3);
+  ASSERT_GT(std::count(flips.begin(), flips.end(), 1), 0);
+  EXPECT_EQ(closure_of("", "single_error_lut", flips),
+            task_graph_closure::not_checked);
+  EXPECT_EQ(closure_of("none", "single_error_lut", flips),
+            task_graph_closure::not_checked);
+  EXPECT_EQ(closure_of("report", "single_error_lut", flips),
+            task_graph_closure::closed);
+  EXPECT_EQ(closure_of("report", "blind_decoder", flips),
+            task_graph_closure::open);
+  // A shot read and consumed hands the next one a closure of its own: a
+  // blind decoder's quiet shot after an open one is closed.
+  cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                   {"buffer_rounds", std::size_t{1}},
+                                   {"gap_rounds", std::size_t{3}},
+                                   {"output", std::string("corrections")},
+                                   {"verify_residual", std::string("report")}};
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, params, 1, "blind_decoder"));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  const auto record = graph->get_num_msyn_per_round();
+  const std::vector<std::uint8_t> quiet(flips.size(), 0);
+  for (const auto &[detectors, want] :
+       {std::pair{flips, task_graph_closure::open},
+        std::pair{quiet, task_graph_closure::closed}}) {
+    const auto m = memory_measurements(tmpl, R, detectors);
+    for (std::size_t at = 0; at < m.size(); at += record) {
+      const auto len = std::min(record, m.size() - at);
+      graph->enqueue_syndrome(m.data() + at, len,
+                              at + len == m.size() ? round_type::FINAL
+                                                   : round_type::BULK);
+    }
+    EXPECT_EQ(graph->streaming_result().closure, want);
+    graph->clear_corrections();
+  }
+} // end - TEST(WindowedGraph, ReportsTheShotsClosure)
+
+// The one-shot paths run a windowed graph's shot through its stream: run,
+// run_all, run_batch and run_async give the reference's frame for single
+// faults at every shot length up to 24, synchronously and asynchronously
+// with four copies, report that every window converged, and leave the
+// graph reset for the next call or stream.
+TEST(WindowedGraph, RunsOneShotsThroughItsStream) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  const auto g = lowered_graph(spec, params);
+  task_graph_options async;
+  async.async_streaming = true;
+  for (const auto &[options, copies] :
+       {std::pair{task_graph_options{}, std::size_t{1}},
+        std::pair{async, std::size_t{4}}}) {
+    SCOPED_TRACE(std::to_string(copies) + " copies");
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pattern_node(spec, params, copies));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    for (auto R = tmpl.min_rounds(); R <= 24; ++R) {
+      SCOPED_TRACE("R=" + std::to_string(R));
+      parallel_window_reference reference(spec, g, R, "single_error_lut");
+      const auto &s = reference.model();
+      std::vector<measurement_results> shots;
+      std::vector<std::vector<std::uint8_t>> wants;
+      for (std::size_t c = R % 7; c < s.h.size(); c += 7) {
+        const auto detectors = detectors_of(s, c);
+        const measurement_results m{memory_measurements(tmpl, R, detectors)};
+        const auto want = reference.decode(detectors).frame;
+        const auto run = graph->run(m);
+        EXPECT_EQ(run.bits, want) << "column " << c;
+        EXPECT_TRUE(run.converged);
+        EXPECT_EQ(graph->run_all(m).at(0).bits, want) << "column " << c;
+        EXPECT_EQ(graph->run_async(m).get().bits, want) << "column " << c;
+        shots.push_back(m);
+        wants.push_back(want);
+      }
+      const auto batch = graph->run_batch(shots);
+      ASSERT_EQ(batch.size(), wants.size());
+      for (std::size_t i = 0; i < batch.size(); ++i)
+        EXPECT_EQ(batch[i].bits, wants[i]) << "shot " << i;
+      EXPECT_EQ(graph->streaming_result().generation, 0u);
+    } // end - for(R)
+  } // end - for(options, copies)
+} // end - TEST(WindowedGraph, RunsOneShotsThroughItsStream)
+
+// A one-shot call refuses while a streaming shot is open, or while a
+// completed shot is unread, rather than discard it, and runs once the
+// shot is consumed or the graph reset. converged is false when a window's
+// decoder did not converge.
+TEST(WindowedGraph, OneShotsWaitForAnOpenShot) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, params, 1, "blind_decoder"));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  const std::vector<std::uint8_t> quiet(tmpl.measurement_offset(R, R), 0);
+  const measurement_results m{quiet};
+  const auto refuses = [&] {
+    try {
+      graph->run(m);
+      ADD_FAILURE() << "a one-shot call discarded an open shot";
+    } catch (const std::logic_error &e) {
+      EXPECT_NE(std::string(e.what()).find("shot in progress"),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  graph->enqueue_syndrome(quiet.data(), 1, round_type::BULK);
+  refuses();
+  graph->reset_decoder();
+  EXPECT_TRUE(graph->run(m).converged);
+  stream_shot(*graph, quiet, graph->get_num_msyn_per_round());
+  refuses(); // complete, but not read and consumed
+  graph->clear_corrections();
+  blind_decoder::converges = false;
+  EXPECT_FALSE(graph->run(m).converged);
+  blind_decoder::converges = true;
+} // end - TEST(WindowedGraph, OneShotsWaitForAnOpenShot)
+
+// A decoder that counts its constructions and finds no fault.
+class counted_decoder final : public decoder {
+public:
+  static inline std::atomic<std::size_t> built{0};
+
+  counted_decoder(decoder_init inputs, decoder_output_request output)
+      : decoder(inputs, output) {
+    ++built;
+  }
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    decoder_result result;
+    result.converged = true;
+    result.result.assign(get_block_size(), 0.0);
+    return result;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      counted_decoder,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &) {
+        return std::make_unique<counted_decoder>(
+            std::move(inputs), output.value_or(decoder_output_request{
+                                   decode_result_type::errors}));
+      })
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(counted_decoder)
+
+// A node's copies share one core, with a slot per copy: each layer builds a
+// bulk decoder per copy and one decoder for each prefix and terminal
+// variant, not every variant's decoders per copy.
+TEST(WindowedGraph, CopiesShareTheirPrefixAndTerminalDecoders) {
+  const auto spec = wide_readout_spec();
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  const auto g = lowered_graph(spec, params);
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  task_graph_options async;
+  async.async_streaming = true;
+  for (const std::size_t copies : {1, 4}) {
+    SCOPED_TRACE(std::to_string(copies) + " copies");
+    std::vector<task_graph_node_config> nodes;
+    std::size_t want = 0; // bulk per copy, each other variant once
+    for (const auto &layer : g.layers) {
+      store.add_windows(context, layer.request);
+      for (const auto &[key, window] :
+           store.find_windows(*context, layer.request))
+        want += key.bulk() ? copies : 1;
+    }
+    nodes.push_back(pattern_node(spec, params, copies, "counted_decoder"));
+    counted_decoder::built = 0;
+    const auto graph = decoding_task_graph::from_topology(
+        std::move(nodes), pattern_edges(), async);
+    EXPECT_EQ(counted_decoder::built.load(), want);
+  }
+}
+
+// Join tables are preallocated for the most a record can publish: the
+// pattern streamed in whole-round records, each readying several windows,
+// with four copies of each layer, never grows one.
+TEST(WindowedGraph, JoinTablesHoldWhatARecordPublishes) {
+  namespace logging = cudaq::qec::detail;
+  std::mutex mutex;
+  std::vector<std::string> warnings;
+  logging::forwarder_config config;
+  task_graph_options async;
+  config.callback = [&](logging::forwarded_log_record &&record) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (record.level == logging::log_level::warn)
+      warnings.push_back(record.message);
+  };
+  async.async_streaming = true;
+  logging::set_forwarder(std::move(config));
+  EXPECT_NO_THROW(expect_pattern_streams("corrections", async, 4, 0));
+  logging::flush_logs();
+  logging::clear_forwarder();
+  for (const auto &warning : warnings)
+    EXPECT_EQ(warning.find("join table"), std::string::npos) << warning;
+}
+
+// A sliding window, whose sends feed its own next instance, streams as the
+// reference decodes in the same ways: a window waits for its predecessor's
+// delta however many copies could fire.
+TEST(WindowedGraph, StreamsASlidingWindowAsTheReference) {
+  task_graph_options async;
+  async.async_streaming = true;
+  for (const std::size_t record : {std::size_t{0}, std::size_t{5}}) {
+    SCOPED_TRACE("record " + std::to_string(record));
+    EXPECT_NO_THROW(expect_sliding_streams({}, 1, record));
+    EXPECT_NO_THROW(expect_sliding_streams(async, 1, record));
+    EXPECT_NO_THROW(expect_sliding_streams(async, 4, record));
+  }
+} // end - TEST(WindowedGraph, StreamsASlidingWindowAsTheReference)
+
+// ---------------------------------------------------------------------------
+// Windowed graphs under concurrency, load and failure
+// ---------------------------------------------------------------------------
+
+// single_error_lut whose decode() sleeps a random time up to max_delay_us,
+// notes the most decodes running at once for each window size (a layer's
+// bulk windows share one), counts decodes during which a test's record
+// count advanced, and throws while fail is set, so tests can reorder,
+// overlap and fail fires. While held, a decode that has started waits at a
+// gate until released, so a test can know decodes are in flight rather than
+// hope to catch one.
+class jitter_lut final : public decoder {
+public:
+  static inline std::atomic<int> max_delay_us = 0;
+  static inline std::atomic<bool> fail = false;
+  static inline std::atomic<std::size_t> running = 0; ///< Decodes now
+  static inline std::atomic<std::size_t> records = 0; ///< A test's count
+  /// Decodes during which records advanced.
+  static inline std::atomic<std::size_t> spanned_records = 0;
+
+  jitter_lut(decoder_init inputs, decoder_output_request output,
+             const cudaqx::heterogeneous_map &params)
+      : decoder(inputs, output),
+        inner_(get_decoder("single_error_lut", inputs, output, params)) {}
+
+  decoder_result decode(const std::vector<float_t> &syndrome) override {
+    thread_local std::mt19937 rng(
+        std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    const auto size = syndrome.size();
+    const std::size_t before = records;
+    if (fail)
+      throw std::runtime_error("jitter_lut: decode failed");
+    ++running;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto now = ++at_once_[size];
+      peak_[size] = std::max(peak_[size], now);
+    }
+    {
+      std::unique_lock<std::mutex> lock(gate_mutex_);
+      gate_.wait(lock, [] { return !held_; });
+    }
+    if (const int most = max_delay_us; most > 0)
+      std::this_thread::sleep_for(
+          std::chrono::microseconds(rng() % static_cast<unsigned>(most)));
+    auto result = inner_->decode(syndrome);
+    spanned_records += records > before;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      --at_once_[size];
+    }
+    --running;
+    return result;
+  }
+
+  /// The most decodes of one window size that ran at once.
+  static std::size_t peak_of_one_size() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::size_t most = 0;
+    for (const auto &[size, peak] : peak_)
+      most = std::max(most, peak);
+    return most;
+  }
+  /// Decodes that start from now on wait at the gate.
+  static void hold() {
+    std::lock_guard<std::mutex> lock(gate_mutex_);
+    held_ = true;
+  }
+  /// Let every waiting and later decode through.
+  static void release() {
+    {
+      std::lock_guard<std::mutex> lock(gate_mutex_);
+      held_ = false;
+    }
+    gate_.notify_all();
+  }
+  /// Release the gate from another thread once @p ready() holds, or after
+  /// ten seconds, so a test blocked joining held decodes still ends.
+  template <typename Ready>
+  static std::thread release_when(Ready ready) {
+    return std::thread([ready] {
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (!ready() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      release();
+    });
+  }
+  static void reset() {
+    release();
+    std::lock_guard<std::mutex> lock(mutex_);
+    at_once_.clear();
+    peak_.clear();
+    max_delay_us = 0;
+    fail = false;
+    records = 0;
+    spanned_records = 0;
+  }
+
+  CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+      jitter_lut,
+      static std::unique_ptr<decoder> create(
+          decoder_init inputs, std::optional<decoder_output_request> output,
+          const cudaqx::heterogeneous_map &params) {
+        return std::make_unique<jitter_lut>(
+            std::move(inputs),
+            output.value_or(decoder_output_request{decode_result_type::errors}),
+            params);
+      })
+
+private:
+  std::unique_ptr<decoder> inner_;
+  static inline std::mutex mutex_;
+  static inline std::map<std::size_t, std::size_t> at_once_;
+  static inline std::map<std::size_t, std::size_t> peak_;
+  static inline std::mutex gate_mutex_;
+  static inline std::condition_variable gate_;
+  static inline bool held_ = false;
+};
+CUDAQ_EXT_PT_REGISTER_TYPE(jitter_lut)
+
+namespace {
+
+// The pattern's parameters for these tests: output corrections.
+cudaqx::heterogeneous_map load_params() {
+  return {{"commit_rounds", std::size_t{2}},
+          {"buffer_rounds", std::size_t{1}},
+          {"gap_rounds", std::size_t{3}},
+          {"output", std::string("corrections")}};
+}
+
+// The pattern over wide_readout_spec() with @p copies of each layer, an
+// asynchronous graph with @p workers pool threads (automatic for 0).
+std::unique_ptr<decoding_task_graph> load_graph(std::size_t copies,
+                                                const std::string &decoder,
+                                                std::size_t workers = 0) {
+  task_graph_options options;
+  std::vector<task_graph_node_config> nodes;
+  options.async_streaming = true;
+  if (workers)
+    options.async_num_workers = workers;
+  nodes.push_back(
+      pattern_node(wide_readout_spec(), load_params(), copies, decoder));
+  return decoding_task_graph::from_topology(std::move(nodes), pattern_edges(),
+                                            options);
+}
+
+} // namespace
+
+// Sampled shots of many faults at long lengths stream asynchronously, with
+// four copies of each layer, as the reference decodes them.
+TEST(WindowedGraph, StreamsSampledShotsAtLongLengths) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  const auto g = lowered_graph(spec, load_params());
+  auto graph = load_graph(4, "single_error_lut");
+  for (const std::size_t R : {37, 100, 257}) {
+    SCOPED_TRACE("R=" + std::to_string(R));
+    parallel_window_reference reference(spec, g, R, "single_error_lut");
+    const auto &s = reference.model();
+    const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+        s.dem.detector_error_matrix, 100, s.dem.error_rates, 43 + R);
+    for (std::size_t i = 0; i < 100; ++i) {
+      const auto shot = row_of(detectors, i);
+      EXPECT_EQ(stream_shot(*graph, memory_measurements(tmpl, R, shot),
+                            graph->get_num_msyn_per_round()),
+                reference.decode(shot).frame)
+          << "shot " << i;
+    }
+  }
+}
+
+// Decodes overlap ingestion and each other: records are taken while windows
+// decode, and two copies of one layer decode at once; the shot still
+// decodes as the reference does. Decodes are held at the gate until two of
+// one layer are in flight, so the overlap is certain, not a scheduling
+// accident.
+TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 5);
+  const auto m = memory_measurements(tmpl, R, shot);
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 3000;
+  jitter_lut::hold();
+  auto releaser = jitter_lut::release_when(
+      [] { return jitter_lut::peak_of_one_size() > 1; });
+  auto graph = load_graph(4, "jitter_lut", 8);
+  // Records of a period of rounds: held decodes keep their records in
+  // flight, and the queue holds few.
+  const auto record = graph->get_num_msyn_per_decode();
+  graph->reset_decoder();
+  for (std::size_t at = 0; at < m.size(); at += record) {
+    const auto len = std::min(record, m.size() - at);
+    const bool last = at + len == m.size();
+    graph->enqueue_syndrome(m.data() + at, len,
+                            last ? round_type::FINAL : round_type::BULK);
+    ++jitter_lut::records;
+    // Records arrive at a pace, as rounds do, not all at once.
+    std::this_thread::sleep_for(std::chrono::microseconds(500));
+  }
+  const auto &result = graph->streaming_result();
+  releaser.join();
+  EXPECT_EQ(
+      std::vector<std::uint8_t>(result.values.begin(), result.values.end()),
+      reference.decode(shot).frame);
+  EXPECT_GT(jitter_lut::spanned_records, 0u)
+      << "no record was taken while a window decoded";
+  EXPECT_GT(jitter_lut::peak_of_one_size(), 1u)
+      << "no two windows of one layer decoded at once";
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther)
+
+// Read mid-shot, with decodes finishing in random order, the output's
+// coverage is [0, frontier) and never shrinks, and its value is exactly the
+// reference windows committed below the frontier, folded.
+TEST(WindowedGraph, MidShotReadsMatchTheirCoverage) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto &s = reference.model();
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 500;
+  auto graph = load_graph(4, "jitter_lut");
+  const auto record = graph->get_num_msyn_per_round();
+  for (std::size_t c = 0; c < s.h.size(); c += 9) {
+    SCOPED_TRACE("column " + std::to_string(c));
+    const auto shot = detectors_of(s, c);
+    const auto want = reference.decode(shot);
+    const auto m = memory_measurements(tmpl, R, shot);
+    std::uint64_t frontier = 0;
+    graph->reset_decoder();
+    for (std::size_t at = 0; at < m.size(); at += record) {
+      const auto len = std::min(record, m.size() - at);
+      graph->enqueue_syndrome(m.data() + at, len,
+                              at + len == m.size() ? round_type::FINAL
+                                                   : round_type::BULK);
+      const auto &result = graph->streaming_result();
+      const auto &output = result.outputs.at(0);
+      std::vector<std::uint8_t> folded(want.frame.size(), 0);
+      EXPECT_EQ(output.coverage_begin_round, 0u);
+      EXPECT_GE(output.coverage_end_round, frontier) << "the frontier shrank";
+      frontier = output.coverage_end_round;
+      for (std::size_t i = 0; i < reference.windows().size(); ++i)
+        if (static_cast<std::uint64_t>(reference.windows()[i].commit.end) <=
+            frontier)
+          for (std::size_t j = 0; j < folded.size(); ++j)
+            folded[j] ^= want.windows[i].frame[j];
+      EXPECT_EQ(
+          std::vector<std::uint8_t>(result.values.begin(), result.values.end()),
+          folded)
+          << "at frontier " << frontier;
+    } // end - for(at)
+    EXPECT_EQ(frontier, R);
+  } // end - for(c)
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, MidShotReadsMatchTheirCoverage)
+
+// Reset and destruction join decodes in flight, and a graph reset with
+// decodes in flight decodes its next shot as the reference does.
+TEST(WindowedGraph, ResetAndDestructionJoinDecodesInFlight) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 4);
+  const auto m = memory_measurements(tmpl, R, shot);
+  // Feeds the shot's first half, none of it FINAL, with decodes held at the
+  // gate, and waits until one is in flight there.
+  const auto feed_half = [&](decoding_task_graph &graph) {
+    // Records of a period of rounds, as held decodes keep theirs in flight.
+    const auto record = graph.get_num_msyn_per_decode();
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    graph.reset_decoder();
+    jitter_lut::hold();
+    for (std::size_t at = 0; at + record < m.size() / 2; at += record)
+      graph.enqueue_syndrome(m.data() + at, record, round_type::BULK);
+    while (jitter_lut::running == 0 &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    EXPECT_GT(jitter_lut::running, 0u) << "no window was decoding";
+  };
+  // Releases the gate a little later, once the caller is likely joining.
+  const auto release_soon = [] {
+    return jitter_lut::release_when([start = std::chrono::steady_clock::now()] {
+      return std::chrono::steady_clock::now() - start >
+             std::chrono::milliseconds(20);
+    });
+  };
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 2000;
+  {
+    auto graph = load_graph(4, "jitter_lut", 8);
+    feed_half(*graph);
+    auto releaser = release_soon();
+    graph.reset(); // destroyed with decodes in flight
+    releaser.join();
+  }
+  auto graph = load_graph(4, "jitter_lut", 8);
+  feed_half(*graph);
+  auto releaser = release_soon();
+  graph->reset_decoder();
+  releaser.join();
+  EXPECT_EQ(jitter_lut::running, 0u) << "a reset left decodes running";
+  EXPECT_EQ(stream_shot(*graph, m, graph->get_num_msyn_per_round()),
+            reference.decode(shot).frame);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, ResetAndDestructionJoinDecodesInFlight)
+
+// A decode that fails on a pool thread surfaces on a later call, as an
+// error naming it, and reset_decoder() recovers the graph.
+TEST(WindowedGraph, AFailedDecodeSurfacesAndAResetRecovers) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 2);
+  const auto m = memory_measurements(tmpl, R, shot);
+  jitter_lut::reset();
+  auto graph = load_graph(4, "jitter_lut");
+  jitter_lut::fail = true;
+  try {
+    stream_shot(*graph, m, graph->get_num_msyn_per_round());
+    graph->streaming_result();
+    ADD_FAILURE() << "a failed decode went unreported";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find("jitter_lut: decode failed"),
+              std::string::npos)
+        << e.what();
+  }
+  jitter_lut::fail = false;
+  graph->reset_decoder();
+  EXPECT_EQ(stream_shot(*graph, m, graph->get_num_msyn_per_round()),
+            reference.decode(shot).frame);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, AFailedDecodeSurfacesAndAResetRecovers)
+
+// One one-shot call runs on a graph at a time: while one decodes, another
+// is refused as concurrent, rather than its rounds mixed into the first's
+// stream; once the first returns, the next runs.
+TEST(WindowedGraph, OneShotCallsRunOneAtATime) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 2);
+  const measurement_results m{memory_measurements(tmpl, R, shot)};
+  const auto want = reference.decode(shot).frame;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  jitter_lut::reset();
+  jitter_lut::hold();
+  auto graph = load_graph(1, "jitter_lut", 2);
+  auto first = graph->run_async(m);
+  while (jitter_lut::running == 0 &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_GT(jitter_lut::running, 0u) << "the first call was not decoding";
+  try {
+    graph->run(m);
+    ADD_FAILURE() << "a concurrent one-shot call ran";
+  } catch (const std::logic_error &e) {
+    EXPECT_NE(std::string(e.what()).find("another one-shot call is running"),
+              std::string::npos)
+        << e.what();
+  }
+  jitter_lut::release();
+  EXPECT_EQ(first.get().bits, want);
+  EXPECT_EQ(graph->run(m).bits, want);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, OneShotCallsRunOneAtATime)
+
+// A one-shot call that fails mid-shot leaves the graph ready for the next:
+// a blind decoder under verify_residual fail rejects a shot with flips, and
+// a quiet shot then runs.
+TEST(WindowedGraph, AFailedOneShotLeavesTheGraphReady) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  auto params = load_params();
+  std::vector<task_graph_node_config> nodes;
+  params.insert("verify_residual", std::string("fail"));
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto flips = detectors_of(reference.model(), 3);
+  const std::vector<std::uint8_t> quiet(flips.size(), 0);
+  nodes.push_back(pattern_node(spec, params, 1, "blind_decoder"));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  EXPECT_THROW(
+      graph->run(measurement_results{memory_measurements(tmpl, R, flips)}),
+      std::runtime_error);
+  const auto ran =
+      graph->run(measurement_results{memory_measurements(tmpl, R, quiet)});
+  EXPECT_EQ(ran.bits,
+            std::vector<std::uint8_t>(graph->get_num_observables(), 0));
+} // end - TEST(WindowedGraph, AFailedOneShotLeavesTheGraphReady)
+
+// A one-shot call with no measurements has no FINAL round to end its shot,
+// so it is refused rather than read before the shot completes; the graph
+// then runs a shot as before.
+TEST(WindowedGraph, OneShotsRefuseAnEmptyShot) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, load_params(), 1, "single_error_lut"));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  expect_error([&] { graph->run(measurement_results{}); },
+               "decoding_task_graph::run: a one-shot call needs the shot's "
+               "measurements");
+  const std::vector<std::uint8_t> quiet(tmpl.measurement_offset(R, R), 0);
+  EXPECT_EQ(graph->run(measurement_results{quiet}).bits,
+            std::vector<std::uint8_t>(graph->get_num_observables(), 0));
+} // end - TEST(WindowedGraph, OneShotsRefuseAnEmptyShot)
+
+// An enqueue that is rejected opens no shot, and one whose shot fails
+// leaves nothing to keep, so neither makes one-shot calls refuse: a null
+// record on an asynchronous graph, and a failing decode on a synchronous one.
+TEST(WindowedGraph, RejectedOrFailedEnqueuesLeaveOneShotsReady) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 2);
+  const auto measurements = memory_measurements(tmpl, R, shot);
+  const measurement_results m{measurements};
+  const auto want = reference.decode(shot).frame;
+  jitter_lut::reset();
+  auto asynchronous = load_graph(1, "jitter_lut");
+  EXPECT_THROW(asynchronous->enqueue_syndrome(nullptr, 3, round_type::BULK),
+               std::invalid_argument);
+  EXPECT_EQ(asynchronous->run(m).bits, want);
+
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, load_params(), 1, "jitter_lut"));
+  auto synchronous =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  jitter_lut::fail = true;
+  EXPECT_ANY_THROW(stream_shot(*synchronous, measurements,
+                               synchronous->get_num_msyn_per_round()));
+  jitter_lut::fail = false;
+  EXPECT_EQ(synchronous->run(m).bits, want);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, RejectedOrFailedEnqueuesLeaveOneShotsReady)
+
+// A reset_decoder() overlapping a one-shot call cancels the call's shot, and
+// the call reports that rather than returning the cleared result as its
+// decode: the first window's decode is held at the gate while another thread
+// resets the graph. The graph then runs the shot as the reference does.
+TEST(WindowedGraph, AnOverlappingResetFailsTheOneShotCall) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  // A reset shot reads zero, so take the first fault whose shot decodes to
+  // something else.
+  std::vector<std::uint8_t> shot;
+  std::vector<std::uint8_t> want;
+  for (std::size_t c = 0; c < reference.model().h.size(); ++c) {
+    shot = detectors_of(reference.model(), c);
+    want = reference.decode(shot).frame;
+    if (want != std::vector<std::uint8_t>(want.size(), 0))
+      break;
+  }
+  ASSERT_NE(want, std::vector<std::uint8_t>(want.size(), 0));
+  const measurement_results m{memory_measurements(tmpl, R, shot)};
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  jitter_lut::reset();
+  jitter_lut::hold();
+  // A queue that holds the whole shot, so the call submits its FINAL round
+  // and waits there, on the held decode, for the shot to complete.
+  task_graph_options options;
+  options.async_streaming = true;
+  options.async_num_workers = 2;
+  options.async_queue_capacity = 256;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, load_params(), 1, "jitter_lut"));
+  auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                  pattern_edges(), options);
+  auto call = graph->run_async(m);
+  while (jitter_lut::running == 0 &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_GT(jitter_lut::running, 0u) << "the call was not decoding";
+  // The reset joins the held decode, so the gate opens from another thread.
+  auto releaser =
+      jitter_lut::release_when([start = std::chrono::steady_clock::now()] {
+        return std::chrono::steady_clock::now() - start >
+               std::chrono::milliseconds(20);
+      });
+  // The reset cancels the call's stream even when its guard then finds the
+  // call resetting too and refuses it; either way the call's shot is gone.
+  try {
+    graph->reset_decoder();
+  } catch (const std::logic_error &) {
+  }
+  releaser.join();
+  try {
+    (void)call.get();
+    ADD_FAILURE() << "the call returned a decode of a shot another call reset";
+  } catch (const std::logic_error &e) {
+    EXPECT_NE(
+        std::string(e.what()).find("another call reset or cleared the graph"),
+        std::string::npos)
+        << e.what();
+  }
+  EXPECT_EQ(graph->run(m).bits, want);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, AnOverlappingResetFailsTheOneShotCall)
+
+// A solution verify_residual fail rejects is raised outside the fire, as a
+// failed decode is: synchronously and asynchronously, a blind decoder's
+// shot with flips fails the graph, naming the window and its row, and
+// reset_decoder() recovers it for a quiet shot.
+TEST(WindowedGraph, ARejectedSolutionFailsTheGraph) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 20;
+  const parallel_window_reference reference(
+      spec, lowered_graph(spec, load_params()), R, "single_error_lut");
+  const auto flips = detectors_of(reference.model(), 3);
+  const std::vector<std::uint8_t> quiet(flips.size(), 0);
+  auto params = load_params();
+  params.insert("verify_residual", std::string("fail"));
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    task_graph_options options;
+    std::vector<task_graph_node_config> nodes;
+    options.async_streaming = async;
+    nodes.push_back(pattern_node(spec, params, 2, "blind_decoder"));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    const auto record = graph->get_num_msyn_per_round();
+    try {
+      stream_shot(*graph, memory_measurements(tmpl, R, flips), record);
+      graph->streaming_result();
+      ADD_FAILURE() << "a rejected solution went unreported";
+    } catch (const std::runtime_error &e) {
+      const std::string what = e.what();
+      EXPECT_NE(what.find("'s solution does not satisfy its detectors "
+                          "(verify_residual: fail): H e first differs from "
+                          "d at its "),
+                std::string::npos)
+          << what;
+    }
+    graph->reset_decoder();
+    EXPECT_EQ(stream_shot(*graph, memory_measurements(tmpl, R, quiet), record),
+              std::vector<std::uint8_t>(graph->get_num_observables(), 0));
+  } // end - for(async)
+} // end - TEST(WindowedGraph, ARejectedSolutionFailsTheGraph)
+
+// Concurrency is invisible to the result: with decodes finishing in random
+// order, every number of copies and pool threads decodes single faults as
+// the reference does.
+TEST(WindowedGraph, ConcurrencyIsInvisibleToTheResult) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  const auto g = lowered_graph(spec, load_params());
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 200;
+  for (const std::size_t copies : {1, 2, 4, 8})
+    for (const std::size_t workers : {1, 2, 4, 8}) {
+      SCOPED_TRACE(std::to_string(copies) + " copies, " +
+                   std::to_string(workers) + " workers");
+      auto graph = load_graph(copies, "jitter_lut", workers);
+      for (const std::size_t R : {tmpl.min_rounds(), std::size_t{20}}) {
+        parallel_window_reference reference(spec, g, R, "single_error_lut");
+        const auto &s = reference.model();
+        for (std::size_t c = R % 5; c < s.h.size(); c += 11) {
+          const auto shot = detectors_of(s, c);
+          EXPECT_EQ(stream_shot(*graph, memory_measurements(tmpl, R, shot),
+                                graph->get_num_msyn_per_round()),
+                    reference.decode(shot).frame)
+              << "R=" << R << ", column " << c;
+        }
+      }
+    } // end - for(workers)
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, ConcurrencyIsInvisibleToTheResult)
+
+// With one copy of each layer and slow decoders, a window waiting on
+// another's sends never stops the rest: every window completes within a
+// watchdog's time, and the shot decodes as the reference does.
+TEST(WindowedGraph, OneCopyPerLayerNeverDeadlocks) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 60;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 6);
+  const auto m = memory_measurements(tmpl, R, shot);
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 1000;
+  auto graph = load_graph(1, "jitter_lut", 2);
+  auto run = std::async(std::launch::async, [&] {
+    return stream_shot(*graph, m, graph->get_num_msyn_per_round());
+  });
+  ASSERT_EQ(run.wait_for(std::chrono::seconds(60)), std::future_status::ready)
+      << "the shot did not complete";
+  EXPECT_EQ(run.get(), reference.decode(shot).frame);
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, OneCopyPerLayerNeverDeadlocks)
+
+// Once warmed up, a windowed graph streams a shot allocating nothing on any
+// thread beyond what its decoders' decode() calls do: deliveries reuse their
+// wires' buffers, and staged publications and the output stager reuse
+// theirs. Each buffer grows once it first holds the largest window it will,
+// and buffers circulate between wires and join entries, so warm-up spreads
+// over a few shots. A synchronous graph is deterministic: after its first
+// few shots, every shot allocates only the decoders'. In an asynchronous
+// one, which record context and join entry a window lands in depends on
+// timing; it warms up for good, so over later shots some allocate only the
+// decoders' and all together allocate less than the first one did.
+TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 5);
+  const auto want = reference.decode(shot).frame;
+  const auto m = memory_measurements(tmpl, R, shot);
+  task_graph_options async;
+  async.async_streaming = true;
+  for (const auto &[options, copies] :
+       {std::pair{task_graph_options{}, std::size_t{1}},
+        std::pair{async, std::size_t{4}}}) {
+    SCOPED_TRACE(std::to_string(copies) + " copies");
+    std::vector<task_graph_node_config> nodes;
+    std::vector<std::size_t> extra; // beyond the decoders, by shot
+    nodes.push_back(
+        pattern_node(spec, load_params(), copies, "allocation_counting_lut"));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    const auto record = graph->get_num_msyn_per_round();
+    const auto stream = [&] {
+      for (std::size_t at = 0; at < m.size(); at += record) {
+        const auto len = std::min(record, m.size() - at);
+        graph->enqueue_syndrome(m.data() + at, len,
+                                at + len == m.size() ? round_type::FINAL
+                                                     : round_type::BULK);
+      }
+      graph->streaming_result();
+    };
+    for (int run = 0; run < (options.async_streaming ? 30 : 8); ++run) {
+      graph->reset_decoder();
+      allocation_counting_lut::decode_allocations = 0;
+      const auto all = allocation_counter::on_every_thread_during(stream);
+      ASSERT_EQ(graph->streaming_result().values, want);
+      ASSERT_GE(all, allocation_counting_lut::decode_allocations.load());
+      extra.push_back(all - allocation_counting_lut::decode_allocations);
+    }
+    if (!options.async_streaming) {
+      for (std::size_t run = 4; run < extra.size(); ++run)
+        EXPECT_EQ(extra[run], 0u)
+            << "shot " << run << " allocated beyond its decoders";
+      continue;
+    }
+    const auto later =
+        std::vector<std::size_t>(extra.begin() + 10, extra.end());
+    EXPECT_NE(std::count(later.begin(), later.end(), 0u), 0)
+        << "no later shot allocated only the decoders'";
+    EXPECT_LT(std::accumulate(later.begin(), later.end(), std::size_t{0}),
+              extra.front())
+        << "the graph kept allocating shot after shot";
+  } // end - for(options, copies)
+} // end - TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders)
+
+// A phase may have no faults: its round's detectors are never flipped, as a
+// circuit's prep round's may not be. A template whose first round has none
+// validates, and the pattern over it, synchronously and asynchronously,
+// decodes every single fault at every shot length up to 30 as the reference
+// does.
+TEST(WindowedGraph, AZeroFaultPhaseStreams) {
+  auto spec = wide_readout_spec();
+  auto &init = phase_of(spec, phase_name::dem_init);
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  init.num_faults = 0;
+  init.error_rates.clear();
+  init.H_sparse = {-1, -1, -1, -1}; // its four detectors
+  init.O_sparse = {-1};
+  ASSERT_NO_THROW(spec.validate());
+  const experiment_template tmpl(spec);
+  const auto g = lowered_graph(spec, params);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    task_graph_options options;
+    std::vector<task_graph_node_config> nodes;
+    options.async_streaming = async;
+    nodes.push_back(pattern_node(spec, params, async ? 4 : 1));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    const auto record = graph->get_num_msyn_per_round();
+    for (auto R = tmpl.min_rounds(); R <= 30; ++R) {
+      parallel_window_reference reference(spec, g, R, "single_error_lut");
+      const auto &s = reference.model();
+      for (std::size_t c = 0; c < s.h.size(); ++c) {
+        const auto detectors = detectors_of(s, c);
+        EXPECT_EQ(stream_shot(*graph, memory_measurements(tmpl, R, detectors),
+                              record),
+                  reference.decode(detectors).frame)
+            << "R=" << R << ", column " << c;
+      }
+    }
+  } // end - for(async)
+} // end - TEST(WindowedGraph, AZeroFaultPhaseStreams)
+
+// ---------------------------------------------------------------------------
+// Accuracy on the surface code
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The pattern's layout for distance @p d: commit and buffer zones of d
+// rounds, and a gap of 3d, as TracksMonolithicMatching lays windows out.
+cudaqx::heterogeneous_map surface_params(std::size_t d) {
+  return {{"commit_rounds", d},
+          {"buffer_rounds", d},
+          {"gap_rounds", 3 * d},
+          {"output", std::string("corrections")}};
+}
+
+// The pattern over @p spec decoding with pymatching, with @p copies of each
+// layer, asynchronous when @p async.
+std::unique_ptr<decoding_task_graph>
+surface_graph(const dem_chunks_spec &spec,
+              const cudaqx::heterogeneous_map &params, std::size_t copies,
+              bool async) {
+  task_graph_options options;
+  std::vector<task_graph_node_config> nodes;
+  options.async_streaming = async;
+  nodes.push_back(pattern_node(spec, params, copies, "pymatching"));
+  nodes.back().params = matching;
+  return decoding_task_graph::from_topology(std::move(nodes), pattern_edges(),
+                                            options);
+}
+
+// Observables monolithic matching over the whole shot @p s predicts.
+std::vector<std::uint8_t>
+monolithic_observables(decoder &monolithic, const pw_reference::shot &s,
+                       const std::vector<std::uint8_t> &syndrome) {
+  const auto out =
+      monolithic.decode(std::vector<float_t>(syndrome.begin(), syndrome.end()));
+  std::vector<std::uint8_t> matched(out.result.size());
+  for (std::size_t j = 0; j < matched.size(); ++j)
+    matched[j] = convert_soft_to_hard(out.result[j]);
+  return observables_of(s, matched);
+}
+
+} // namespace
+
+// The parallel_window pattern, streamed asynchronously with four copies of
+// each layer, decodes sampled surface-code memory as accurately as matching
+// over the whole shot: for the Z and the X checks at d = 3 and 5, its
+// logical error rate is within 0.03 of matching's over 5000 sampled shots,
+// and both are right on the empty shot and on every single fault, which
+// sampling at these sizes seldom reaches. The rates are near 0.10 at d = 3
+// and 0.05 at d = 5, and on this sample differ by at most 2 shots.
+TEST(WindowedGraph, SurfaceCodeTracksMonolithicMatching) {
+  constexpr std::size_t shots = 5000; // the plan's sample size
+  constexpr double tolerance = 0.03;  // the plan's logical error rate band
+  constexpr double p = 0.01;          // well below threshold
+  for (const std::size_t d : {3, 5})
+    for (const bool x_checks : {false, true}) {
+      SCOPED_TRACE("d=" + std::to_string(d) + (x_checks ? ", X" : ", Z"));
+      const auto spec = surface_memory_spec(d, p, x_checks);
+      const auto params = surface_params(d);
+      const experiment_template tmpl(spec);
+      const std::size_t R = 8 * d + 1; // two periods of the layout
+      parallel_window_reference reference(spec, lowered_graph(spec, params), R,
+                                          "pymatching", matching);
+      const auto &s = reference.model();
+      const auto monolithic = make_decoder(s.h, s.row.back(), s.dem.error_rates,
+                                           "pymatching", matching);
+      auto graph = surface_graph(spec, params, 4, true);
+      const auto record = graph->get_num_msyn_per_round();
+      const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+          s.dem.detector_error_matrix, shots, s.dem.error_rates, 29 + d);
+      std::size_t windowed_wrong = 0;
+      std::size_t monolithic_wrong = 0;
+      const auto windowed_of = [&](const std::vector<std::uint8_t> &syndrome) {
+        return stream_shot(*graph, memory_measurements(tmpl, R, syndrome),
+                           record);
+      };
+      for (std::size_t c = 0; c <= s.h.size(); ++c) {
+        std::vector<std::uint8_t> fault(s.h.size(), 0);
+        if (c < s.h.size())
+          fault[c] = 1; // the last pass is the empty shot
+        const auto syndrome = syndrome_of(s, fault);
+        const auto truth = observables_of(s, fault);
+        ASSERT_EQ(windowed_of(syndrome), truth) << "column " << c;
+        ASSERT_EQ(monolithic_observables(*monolithic, s, syndrome), truth)
+            << "column " << c;
+      }
+      for (std::size_t i = 0; i < shots; ++i) {
+        const auto syndrome = row_of(detectors, i);
+        const auto truth = observables_of(s, row_of(errors, i));
+        windowed_wrong += windowed_of(syndrome) != truth;
+        monolithic_wrong +=
+            monolithic_observables(*monolithic, s, syndrome) != truth;
+      }
+      const auto rate = [&](std::size_t wrong) {
+        return static_cast<double>(wrong) / static_cast<double>(shots);
+      };
+      EXPECT_NEAR(rate(windowed_wrong), rate(monolithic_wrong), tolerance)
+          << "windowed " << windowed_wrong << ", monolithic "
+          << monolithic_wrong << " of " << shots;
+      EXPECT_GT(monolithic_wrong, 0u) << "no logical error to compare";
+    } // end - for(x_checks)
+} // end - TEST(WindowedGraph, SurfaceCodeTracksMonolithicMatching)
+
+// The pattern's paths agree on sampled surface-code shots: synchronous and
+// asynchronous streaming, and the one-shot run, give the same frame.
+TEST(WindowedGraph, SurfaceCodePathsAgree) {
+  constexpr std::size_t shots = 200;
+  constexpr std::size_t d = 3;
+  constexpr double p = 0.02; // enough faults that frames vary
+  const auto spec = surface_memory_spec(d, p);
+  const auto params = surface_params(d);
+  const experiment_template tmpl(spec);
+  const std::size_t R = 8 * d + 1;
+  parallel_window_reference reference(spec, lowered_graph(spec, params), R,
+                                      "pymatching", matching);
+  const auto &s = reference.model();
+  auto sync = surface_graph(spec, params, 1, false);
+  auto async = surface_graph(spec, params, 4, true);
+  auto one_shot = surface_graph(spec, params, 1, false);
+  const auto record = sync->get_num_msyn_per_round();
+  const auto [detectors, errors] = dem_sampler::cpu::sample_dem(
+      s.dem.detector_error_matrix, shots, s.dem.error_rates, 31);
+  std::size_t ones = 0;
+  for (std::size_t i = 0; i < shots; ++i) {
+    const auto m = memory_measurements(tmpl, R, row_of(detectors, i));
+    const auto want = stream_shot(*sync, m, record);
+    EXPECT_EQ(stream_shot(*async, m, record), want) << "shot " << i;
+    EXPECT_EQ(one_shot->run(measurement_results{m}).bits, want) << "shot " << i;
+    ones += std::count(want.begin(), want.end(), 1);
+  }
+  EXPECT_GT(ones, 0u) << "every frame was 0";
+} // end - TEST(WindowedGraph, SurfaceCodePathsAgree)
 
 } // namespace cudaq::qec

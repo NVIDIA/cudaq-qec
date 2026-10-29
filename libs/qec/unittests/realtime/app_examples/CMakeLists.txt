@@ -129,6 +129,44 @@ set_tests_properties(
   PROPERTIES ENVIRONMENT
     "EXTRA_CLI_ARGS=--task_graph --async_streaming")
 
+# The same stream decoded by the parallel_window pattern over the DEM's
+# per-round chunks, pymatching in each window, each shot ended through a
+# final syndrome_mapping row; asynchronously, synchronously, and at d = 5. A
+# --load_syndrome replay sends every round untagged and so cannot end a
+# windowed shot: the script skips it.
+foreach(_sc1_pw IN ITEMS "3;12;60;30;async;pymatching"
+                          "3;12;60;30;sync;pymatching"
+                          "5;20;40;40;async;pymatching"
+                          "3;12;60;30;async;multi_error_lut")
+  list(GET _sc1_pw 0 _d)
+  list(GET _sc1_pw 1 _rounds)
+  list(GET _sc1_pw 2 _non_zero)
+  list(GET _sc1_pw 3 _corrections)
+  list(GET _sc1_pw 4 _mode)
+  list(GET _sc1_pw 5 _decoder)
+  set(_name app_examples.surface_code-1-local-test-distance-${_d}-parallel-window-${_mode})
+  if(NOT _decoder STREQUAL "pymatching")
+    string(APPEND _name "-${_decoder}")
+  endif()
+  set(_args "--parallel_window")
+  if(_mode STREQUAL "async")
+    string(APPEND _args " --async_streaming")
+  endif()
+  add_test(
+    NAME ${_name}
+    COMMAND
+      bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
+        ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
+        ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-local
+        ${_d} ${_non_zero} ${_corrections} NULL ${_rounds}
+        ${CMAKE_BINARY_DIR}/lib
+        ${_decoder}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+  set_tests_properties(${_name}
+    PROPERTIES ENVIRONMENT "EXTRA_CLI_ARGS=${_args};SKIP_SYNDROME_REPLAY=1")
+endforeach()
+
 # This must be disabled for now because the multi_error_lut decoder is not
 # powerful enough to pass this test. The nv-qldpc-decoder can pass this test,
 # but that is not available on the GitHub repo.
@@ -351,6 +389,23 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
 
+  # A parallel_window graph over the wire: the data readout's final row
+  # crosses it, ending each shot in the in-process server's session.
+  add_test(
+    NAME app_examples.surface_code-1-cqr-test-distance-3-parallel-window
+    COMMAND
+      ${CMAKE_COMMAND} -E env ${_surface_code_1_cqr_env}
+        "EXTRA_CLI_ARGS=--parallel_window --async_streaming"
+        SKIP_SYNDROME_REPLAY=1
+      bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.sh"
+        ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
+        ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
+        3 60 30 NULL 12
+        ${CMAKE_BINARY_DIR}/lib
+        pymatching
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+
   # Two-process: same application as the udp client, with the standard
   # decoding server (decoding_server, from tools/decoding-server) in a
   # separate process serving the decoders configured from the app's own
@@ -409,6 +464,22 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
           3 60 30
           $<TARGET_FILE:decoding_server>
           12
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+
+    # A parallel_window graph served by the standalone decoding server from
+    # the app's saved YAML, its final row ending each shot.
+    add_test(
+      NAME app_examples.surface_code-1-cqr-two-process-test-distance-3-parallel-window
+      COMMAND
+        ${CMAKE_COMMAND} -E env
+          "EXTRA_CLI_ARGS=--parallel_window --async_streaming"
+        bash "${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-cqr-two-process-test.sh"
+          ${CMAKE_CURRENT_BINARY_DIR}/surface_code-1-cqr
+          3 60 30
+          $<TARGET_FILE:decoding_server>
+          12
+          pymatching
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
   endif()
@@ -952,6 +1023,18 @@ add_surface_code_4_yaml_decoder_cases(pymatching pymatching)
 add_surface_code_4_yaml_decoder_cases(pymatching-task-graph pymatching
   --task_graph)
 
+# The same decoder in each window of a parallel_window node over the model's
+# per-round chunks, each shot ended through a final syndrome_mapping row.
+# Windows need rounds to tile, so these run more than distance rounds, kept
+# short enough at d = 3 for the residual ceiling, which is calibrated at the
+# rate of a few rounds.
+add_surface_code_4_yaml_test(pymatching-parallel-window-d3 3 6 pymatching 200
+  --task_graph --parallel_window)
+add_surface_code_4_yaml_test(pymatching-parallel-window-async-d3 3 6
+  pymatching 200 --task_graph --parallel_window --async_streaming)
+add_surface_code_4_yaml_test(pymatching-parallel-window-async-d5 5 20
+  pymatching 200 --task_graph --parallel_window --async_streaming)
+
 # Both PyMatching nodes decode the same d3 surface-code volume in parallel. The
 # right node has a zero observable projection, so xor preserves the left node's
 # correction and the ordinary residual logical-error ceiling remains meaningful.
@@ -981,6 +1064,11 @@ endif()
 if(_SC4_HAVE_NV_QLDPC)
   add_surface_code_4_yaml_decoder_cases(nv-qldpc-task-graph nv-qldpc-decoder
     --task_graph --use-relay-bp)
+  # Relay-BP in each window of a parallel_window node; BP-family entries need
+  # 1000 shots to sit clearly below the residual ceiling.
+  add_surface_code_4_yaml_test(nv-qldpc-parallel-window-async-d3 3 6
+    nv-qldpc-decoder 1000 --task_graph --parallel_window --async_streaming
+    --use-relay-bp)
 endif()
 
 # Relaxed round rule (T=6 not a multiple of d=5) and multi-logical patches, each
@@ -1012,6 +1100,12 @@ if(TARGET surface_code-4-yaml-cqr)
   set_property(TEST app_examples.surface_code-4-yaml-cqr-three-way-overlap
     APPEND PROPERTY ENVIRONMENT
       "QEC_CONCURRENCY_TEST_DECODERS=3;REQUIRE_DECODER_CONCURRENCY=3;EXPECTED_BARRIER_COMPLETIONS=2;EXPECTED_DECODER_CORRECTIONS=0,2,0;EXPECTED_SERVER_DECODER_CONSTRUCTIONS=3;CHECK_MISSING_SERVER_PORT=1;SKIP_LOGICAL_ERROR_CEILING=1")
+
+  # Three parallel_window graphs served by the external decoding server, each
+  # patch's final row crossing the wire to end its shot.
+  add_surface_code_4_yaml_external_test(parallel-window-async 3 6
+    "pymatching,pymatching,pymatching" 200 --task_graph --parallel_window
+    --async_streaming)
 
   add_surface_code_4_yaml_external_test(three-way-overlap-task-graph 3 3
     "concurrency_test_decoder,concurrency_test_decoder,concurrency_test_decoder"

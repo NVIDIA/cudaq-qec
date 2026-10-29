@@ -287,7 +287,8 @@ void lower_parallel_window(task_graph_node_config cfg,
   b_cfg.node_params.insert("num_receives", std::size_t{2});
   sum_cfg.id = sum;
   sum_cfg.kind = "xor";
-  sum_cfg.node_params.insert("num_inputs", std::size_t{corrected ? 3 : 2});
+  sum_cfg.node_params.insert("num_inputs",
+                             static_cast<std::size_t>(corrected ? 3 : 2));
   out.push_back(std::move(ingest_cfg));
   out.push_back(std::move(a_cfg));
   out.push_back(std::move(b_cfg));
