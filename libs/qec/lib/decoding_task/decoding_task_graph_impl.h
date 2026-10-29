@@ -25,6 +25,22 @@
 
 namespace cudaq::qec {
 
+/// Combine closures: not_checked outranks open, which outranks closed, so a
+/// shot is closed only when every window was checked and held. None, for
+/// a node that decodes no window, changes nothing.
+inline std::optional<task_graph_closure>
+combine_closure(std::optional<task_graph_closure> a,
+                std::optional<task_graph_closure> b) {
+  const auto rank = [](task_graph_closure c) {
+    return c == task_graph_closure::closed ? 0
+           : c == task_graph_closure::open ? 1
+                                           : 2;
+  };
+  if (!a || !b)
+    return a ? a : b;
+  return rank(*a) >= rank(*b) ? a : b;
+}
+
 struct decoding_task_graph::impl {
   impl();
 
@@ -124,9 +140,16 @@ struct decoding_task_graph::impl {
   // branches without imposing a barrier on independent branches.
   std::vector<std::vector<std::size_t>> streaming_dependents;
   std::vector<std::vector<std::size_t>> streaming_producers;
+  // By streaming node: the other nodes that reach it through a loop-carried
+  // wire, which the dependency graph above leaves out.
+  std::vector<std::vector<std::size_t>> streaming_loop_producers;
   std::vector<int32_t> streaming_predecessor_counts;
   std::vector<std::vector<uint8_t>> streaming_reachability;
-  std::vector<std::vector<uint8_t>> streaming_overlap;
+  /// How two streaming nodes' branches meet: not at all; only at
+  /// rendezvous descendants, which take inputs in any order; or at one that
+  /// needs ordered delivery.
+  enum class streaming_overlap_kind : uint8_t { disjoint, rendezvous, ordered };
+  std::vector<std::vector<streaming_overlap_kind>> streaming_overlap;
   std::size_t streaming_parallel_width = 1;
 
   // Sizes cached by compile_wires() so the accessors do not have to nominate a
@@ -146,7 +169,9 @@ struct decoding_task_graph::impl {
 
   // A staged output folds exact commit intervals in round order: a delta
   // waits in `pending` until the frontier reaches its first round. The
-  // contributors' deltas never go through latest_node_corrections.
+  // contributors' deltas never go through latest_node_corrections. Its
+  // intervals are preallocated, and `pending` and `spare` index them, so
+  // staging allocates nothing.
   struct output_stager {
     struct interval {
       std::uint64_t begin = 0;
@@ -159,8 +184,15 @@ struct decoding_task_graph::impl {
     std::vector<uint8_t> bits;  ///< the frame at the frontier
     std::vector<uint8_t> whole; ///< whole-shot deltas held until FINAL
     bool has_whole = false;
-    std::vector<interval> pending; ///< sorted by begin round
-    std::size_t capacity = 0;      ///< fixed at build; overflow is a bug
+    std::vector<interval> intervals;  ///< capacity of them, bits sized
+    std::vector<std::size_t> pending; ///< waiting, sorted by begin round
+    std::vector<std::size_t> spare;   ///< free intervals
+    std::size_t capacity = 0;         ///< fixed at build; overflow is a bug
+    /// Return every waiting interval to the spares.
+    void clear_pending() {
+      spare.insert(spare.end(), pending.begin(), pending.end());
+      pending.clear();
+    }
   };
   std::vector<output_stager> output_stagers;
   std::vector<uint8_t> streaming_node_staged; // by streaming node
@@ -181,6 +213,27 @@ struct decoding_task_graph::impl {
   std::vector<std::vector<uint8_t>> latest_node_corrections;
   std::vector<std::optional<streaming_task_graph_node::committed_coverage>>
       latest_node_coverage;
+  // Each node's publications' closures this shot, combined; none before its
+  // first window, or for a node that decodes none.
+  std::vector<std::optional<task_graph_closure>> latest_node_closure;
+  // Each node's publications this shot: whether every one's decoder
+  // converged; none before its first window.
+  std::vector<std::optional<bool>> latest_node_converged;
+  // A node has no one-shot path, so one-shot calls run through the stream.
+  bool one_shot_streams = false;
+  // A record was accepted since the last reset, or since a completed shot
+  // was consumed, and its shot has not failed: one-shot calls through the
+  // stream would discard it. Atomic, as an overlapping enqueue sets it
+  // before it is rejected, and an asynchronous failure clears it.
+  std::atomic<bool> shot_open{false};
+  // A one-shot call through the stream is running: held for the whole call,
+  // as each step it takes guards only itself.
+  std::atomic<bool> one_shot_running{false};
+  // reset_decoder() and clear_corrections() calls, each of which ends a
+  // shot: a one-shot call compares it to tell another call's from its own.
+  std::atomic<std::uint64_t> shot_resets{0};
+  /// Whether every window reaching output @p k converged this shot.
+  bool output_converged(std::size_t k) const;
   // Progress captured when the record being retired began.
   std::uint64_t retiring_generation = 0;
   std::uint64_t retiring_revision = 0;
@@ -278,6 +331,9 @@ struct decoding_task_graph::impl {
   void consume_streaming_result();
   void reset_streaming_progress();
   void fail_streaming_progress(const std::string &message);
+  /// Zero every value the result is composed from and its coverage, and mark
+  /// it pending, so nothing of the previous shot stays readable.
+  void hide_streaming_result();
   void compose_streaming_values() const;
   void clear_latest_node_corrections();
 
@@ -302,6 +358,10 @@ struct decoding_task_graph::impl {
   /// Process one streaming record and update public result progress.
   bool process_streaming_record(const uint8_t *syndrome, std::size_t len,
                                 std::optional<round_type> type);
+  /// Either public enqueue_syndrome(): opens the shot, unless the record is
+  /// rejected, and runs it synchronously or asynchronously.
+  bool enqueue_record(const uint8_t *syndrome, std::size_t len,
+                      std::optional<round_type> type, int cuda_device_id);
   /// Flush an asynchronously finished stream and update public result progress.
   bool finish_streaming_record();
 

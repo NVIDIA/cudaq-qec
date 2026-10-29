@@ -3,12 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Test plugin that registers a task-graph node kind with unload cleanup.
+// Test plugin that registers a task-graph node kind, and a pattern kind that
+// lowers into it, each with unload cleanup.
 
 #include "decoding_task/decoding_task_node_kind_registry.h"
 
 #include <atomic>
 #include <memory>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -98,7 +100,45 @@ node_kind_registration register_dlclose_test_node() {
       });
 }
 
+/// @brief Register a pattern that lowers node P into one test node P.inner,
+/// which takes P's edges, and return its unload cleanup token. Both hooks
+/// live in this plugin; the windows hook declares no layers.
+/// @return Registration token held until the plugin is unloaded.
+node_kind_registration register_dlclose_test_pattern() {
+  task_graph_node_kind_spec spec;
+  decoding::config::decoder_schema schema;
+  node_pattern pattern;
+  spec.name = "node_kind_dlclose_pattern";
+  spec.requires_decoder = false;
+  spec.requires_dem = false;
+  schema.validate = [](const cudaqx::heterogeneous_map &) {};
+  pattern.lower = [](task_graph_node_config cfg,
+                     std::vector<task_graph_node_config> &out,
+                     std::vector<task_graph_edge> &edges) {
+    task_graph_node_config inner;
+    inner.id = cfg.id + ".inner";
+    inner.kind = "node_kind_dlclose_plugin";
+    for (auto &e : edges) {
+      if (e.to_node == cfg.id)
+        e.to_node = inner.id;
+      if (e.from_node == cfg.id)
+        e.from_node = inner.id;
+    }
+    out.push_back(std::move(inner));
+  };
+  pattern.windows = [](const cudaqx::heterogeneous_map &,
+                       const experiment_template &) {
+    return node_pattern::window_layers{};
+  };
+  return register_scoped_pattern_kind(std::move(spec), std::move(schema),
+                                      std::move(pattern));
+}
+
 const node_kind_registration registration = register_dlclose_test_node();
+// Constructed after the node kind it lowers into, so it is unregistered
+// first.
+const node_kind_registration pattern_registration =
+    register_dlclose_test_pattern();
 
 } // namespace
 

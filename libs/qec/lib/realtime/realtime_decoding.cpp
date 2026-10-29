@@ -8,6 +8,7 @@
 #include "stim_dem_forms.h"
 #include "../decoding_task/decoding_task_data_artifacts.h"
 #include "../decoding_task/decoding_task_graph_utils.h"
+#include "../decoding_task/decoding_task_node_kind_registry.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -17,14 +18,10 @@
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fmt/core.h>
-#include <fstream>
-#include <iterator>
 #include <limits>
-#include <map>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -91,75 +88,6 @@ static std::vector<uint8_t> pack_syndrome_bits(const uint8_t *syndromes,
 }
 
 namespace cudaq::qec::decoding::host {
-
-/// Read a Stim DEM file into the text a decoder is built from. `where` names
-/// the key being resolved, since both the entry-level `stim_dem_path` and a
-/// node's come through here and a bare path is not enough to place the error.
-static std::string read_stim_dem_file(const std::filesystem::path &path,
-                                      std::string_view where) {
-  // A directory opens as a stream and fails only when read, past the check
-  // below.
-  std::error_code ec;
-  if (!std::filesystem::is_regular_file(path, ec))
-    throw std::runtime_error(
-        fmt::format("{} is not a readable file: {}", where, path.string()));
-  // Binary, so the bytes read are the file's: a pinned sha256 hashes them.
-  std::ifstream file(path, std::ios::binary);
-  if (!file)
-    throw std::runtime_error(
-        fmt::format("{} could not be opened: {}", where, path.string()));
-  try {
-    return std::string((std::istreambuf_iterator<char>(file)),
-                       std::istreambuf_iterator<char>());
-  } catch (const std::exception &error) {
-    throw std::runtime_error(fmt::format("{} could not be read: {} ({})", where,
-                                         path.string(), error.what()));
-  }
-}
-
-/// Read the DEM a decoder entry names.
-std::string read_stim_dem(const std::filesystem::path &dem_path) {
-  return read_stim_dem_file(dem_path, "stim_dem_path");
-}
-
-/// A pin as sha256_hex() writes a hash: lowercase.
-static std::string lowercase_pin(std::string pin) {
-  std::transform(pin.begin(), pin.end(), pin.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
-  return pin;
-}
-
-/// Read a data_artifacts entry's Stim DEM, hashing it once: its inline text,
-/// or its file, resolved against `base_dir` as a decoder's is and checked
-/// against the entry's pin. A pin needs a file, as parsing requires; a
-/// configuration built in code skips the parser. Other kinds of entry give
-/// no text and no hash.
-static stim_dem_read
-read_stim_dem_entry(const config::data_artifact &entry,
-                    const std::filesystem::path &base_dir) {
-  const auto where = "data_artifacts." + entry.name;
-  const auto pinned = lowercase_pin(entry.sha256);
-  std::filesystem::path path(entry.stim_dem_path);
-  stim_dem_read read;
-  if (entry.stim_dem_path.empty() && !entry.sha256.empty())
-    throw std::runtime_error(where + ": sha256 pins a file, so it needs a "
-                                     "file-backed entry such as stim_dem_path");
-  if (entry.stim_dem_path.empty()) {
-    read.text = entry.stim_dem;
-    if (!read.text.empty())
-      read.sha256 = cudaq::qec::sha256_hex(read.text);
-    return read;
-  }
-  if (path.is_relative())
-    path = std::filesystem::absolute(base_dir / path).lexically_normal();
-  read.text = read_stim_dem_file(path, where);
-  read.sha256 = cudaq::qec::sha256_hex(read.text);
-  if (!pinned.empty() && pinned != read.sha256)
-    throw std::runtime_error(where + ": " + entry.stim_dem_path +
-                             " has sha256 " + read.sha256 +
-                             ", but the entry pins " + entry.sha256);
-  return read;
-} // end - read_stim_dem_entry()
 
 cudaqx::heterogeneous_map prepare_decoder_params(
     const cudaq::qec::decoding::config::decoder_config &decoder_config) {
@@ -628,8 +556,15 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
     // Stim DEM text stands in for this node's H when the decoder's model needs
     // annotations the matrices cannot carry, so it is from_topology() that
     // builds the decoder either way -- the flat form's usual shortcut of
-    // pre-building one from the entry-level H would ignore the text.
-    if (node.dem.has_value() || !ns.stim_dem.empty() ||
+    // pre-building one from the entry-level H would ignore the text. A kind
+    // that reads no DEM builds its decoders from what it receives, a window
+    // model per window, so it too takes only the decoder's name and
+    // parameters: a decoder built here from the whole shot would go unused,
+    // and a failure building it would hide the graph's own errors. A
+    // pattern kind is lowered before the build, possibly into several nodes,
+    // which one built decoder could not serve, so it too takes the name.
+    if (!kind->requires_dem || cudaq::qec::find_node_pattern(kind->name) ||
+        node.dem.has_value() || !ns.stim_dem.empty() ||
         !ns.stim_dem_path.empty()) {
       node.decoder_type = decoder_type;
       // Both spellings reach the builder as text, so from_topology() and
@@ -798,93 +733,6 @@ build_task_graph(const cudaq::qec::decoding::config::decoder_config &cfg,
                                                         tg.edges, tg.options);
 }
 
-namespace {
-
-// Calls visit on every node of a node list, const or not, including those
-// inside ensemble members.
-template <typename Nodes, typename Visit>
-void for_each_node(Nodes &nodes, Visit &&visit) {
-  for (auto &node : nodes) {
-    visit(node);
-    if (node.ensemble)
-      for (auto &member : node.ensemble->members)
-        for_each_node(member.nodes, visit);
-  }
-}
-
-} // namespace
-
-namespace {
-
-// What read_pinned_stim_dems() read for pinned entry @p entry. The read is
-// the entry's only while its hash is the entry's current pin: by name alone,
-// a map read for another configuration would pass bytes this pin does not
-// name, and a missing read would leave the file unchecked.
-const stim_dem_read &pinned_read(const pinned_stim_dems &pinned,
-                                 const config::data_artifact &entry) {
-  const auto where = "data_artifacts." + entry.name;
-  const auto it = pinned.find(entry.name);
-  if (it == pinned.end())
-    throw std::logic_error(where + " is pinned, but its text was not read "
-                                   "with read_pinned_stim_dems()");
-  if (it->second.sha256 != lowercase_pin(entry.sha256))
-    throw std::logic_error(where + " pins sha256 " + entry.sha256 +
-                           ", but its text was read against " +
-                           it->second.sha256 +
-                           "; read the pins of this configuration");
-  return it->second;
-}
-
-} // namespace
-
-pinned_stim_dems
-read_pinned_stim_dems(const config::multi_decoder_config &config,
-                      const std::filesystem::path &base_dir) {
-  pinned_stim_dems pinned;
-  for (const auto &entry : config.data_artifacts)
-    if (!entry.sha256.empty())
-      pinned[entry.name] = read_stim_dem_entry(entry, base_dir);
-  return pinned;
-}
-
-config::multi_decoder_config
-with_pinned_stim_dems(const config::multi_decoder_config &config,
-                      const std::filesystem::path &base_dir) {
-  return with_pinned_stim_dems(config, read_pinned_stim_dems(config, base_dir));
-}
-
-// Pinned entries are looked up before any copy changes, so a failure leaves
-// the caller's configuration untouched. A copy names an entry only while its
-// path is still the entry's: one edited after parsing is read as it stands.
-config::multi_decoder_config
-with_pinned_stim_dems(const config::multi_decoder_config &config,
-                      const pinned_stim_dems &pinned) {
-  auto out = config;
-  // Each pinned entry's path and checked text, by name.
-  std::map<std::string, std::pair<std::string, std::string>> by_name;
-  const auto use_text = [&](std::string &text, std::string &path,
-                            const std::string &artifact) {
-    const auto it = by_name.find(artifact);
-    if (it == by_name.end() || !text.empty() || path != it->second.first)
-      return;
-    text = it->second.second;
-    path.clear();
-  };
-  for (const auto &entry : config.data_artifacts)
-    if (!entry.sha256.empty())
-      by_name[entry.name] = {entry.stim_dem_path,
-                             pinned_read(pinned, entry).text};
-  for (auto &decoder : out.decoders) {
-    use_text(decoder.stim_dem, decoder.stim_dem_path,
-             decoder.stim_dem_artifact);
-    if (decoder.task_graph)
-      for_each_node(decoder.task_graph->nodes, [&](auto &node) {
-        use_text(node.stim_dem, node.stim_dem_path, node.stim_dem_artifact);
-      });
-  }
-  return out;
-} // end - with_pinned_stim_dems()
-
 int configure_decoders(
     cudaq::qec::decoding::config::multi_decoder_config &config,
     const std::filesystem::path &base_dir) {
@@ -942,26 +790,10 @@ int configure_decoders(
 
   std::vector<std::optional<cudaq::qec::decoder_init>> resolved(
       config.decoders.size());
-  // The absolute form of each model path, applied to the caller's
-  // configuration only once the whole configuration has been applied. Rewriting
-  // as we go would leave a caller's config partly rewritten when a later entry
-  // fails to resolve, so a retry against a different base directory would
-  // silently keep the first one.
-  std::vector<std::string> absolute_model_paths(config.decoders.size());
-  for (std::size_t i = 0; i < config.decoders.size(); ++i) {
-    const auto &decoder_config = config.decoders[i];
-    if (!decoder_config.task_graph.has_value())
+  for (std::size_t i = 0; i < config.decoders.size(); ++i)
+    if (!config.decoders[i].task_graph.has_value())
       resolved[i].emplace(
           resolve_decoder_init(pinned.decoders[i], absolute_base));
-    if (!decoder_config.stim_dem_path.empty()) {
-      std::filesystem::path model(decoder_config.stim_dem_path);
-      absolute_model_paths[i] =
-          model.is_relative() ? std::filesystem::absolute(absolute_base / model)
-                                    .lexically_normal()
-                                    .string()
-                              : model.lexically_normal().string();
-    }
-  }
   // Construction allocates, so replacements are built in place rather than
   // alongside the old set: a constructor failure can still leave the decoder
   // set empty. Overlapping both sets would double peak decoder memory, which
@@ -991,6 +823,7 @@ int configure_decoders(
     return 4;
   }
   warn_async_graph_contention(decoder_configs);
+  warn_windowed_serving(config);
 
   // Seeded with the pass-through BULK row: a document declaring only a `final`
   // row must keep the id every producer sends.
@@ -1005,12 +838,25 @@ int configure_decoders(
       g_syndrome_mapping.emplace_back(row.id, shape);
   }
 
-  // The configuration is now in effect. Make its model paths absolute so the
-  // copy that gets cached, published and re-read by the session registry
-  // resolves without knowing the base directory used here.
-  for (std::size_t i = 0; i < config.decoders.size(); ++i)
-    if (!absolute_model_paths[i].empty())
-      config.decoders[i].stim_dem_path = absolute_model_paths[i];
+  // The configuration is now in effect, so the caller's copy is rewritten
+  // only now: rewriting as we go would leave it partly rewritten when a later
+  // entry fails, and a retry against a different base directory would
+  // silently keep the first one. Names are resolved as parsing resolves
+  // them, so a configuration built in code is written back by name. Model
+  // paths become absolute so the copy that gets cached, published and re-read
+  // by the session registry resolves without knowing the base directory used
+  // here.
+  resolve_stim_dem_names(config);
+  for (auto &decoder_config : config.decoders)
+    if (!decoder_config.stim_dem_path.empty()) {
+      std::filesystem::path model(decoder_config.stim_dem_path);
+      decoder_config.stim_dem_path =
+          (model.is_relative()
+               ? std::filesystem::absolute(absolute_base / model)
+               : model)
+              .lexically_normal()
+              .string();
+    }
 
   // Entries' model paths obey the same rule, which keeps a decoder or node
   // that names one equal to its copy, so the name is still written back.
@@ -1174,9 +1020,17 @@ namespace {
 
 using node_spec = config::decoder_config::task_graph_spec::node_spec;
 
+// Whether @p node's kind is a pattern whose hook declares windows, which are
+// built on the node's template as a layered node's are.
+bool declares_windows(const node_spec &node) {
+  const auto kind_lock = cudaq::qec::lock_node_kind_registry();
+  const auto *pattern = cudaq::qec::find_node_pattern(node.resolved_kind());
+  return pattern && pattern->windows;
+}
+
 // Runs step, giving an error the place it came from. A construction error
 // becomes a configuration error; the store's own logic errors keep their
-// kind.
+// kind, as configuration errors do.
 template <typename Step>
 void at(const std::string &where, Step &&step) {
   try {
@@ -1185,10 +1039,42 @@ void at(const std::string &where, Step &&step) {
     throw std::runtime_error(where + ": " + e.what());
   } catch (const std::logic_error &e) {
     throw std::logic_error(where + ": " + e.what());
+  } catch (const std::runtime_error &e) {
+    throw std::runtime_error(where + ": " + e.what());
   }
 }
 
 } // namespace
+
+// Windowed decoders are found from their nodes' kinds, as built.
+void warn_windowed_serving(
+    const cudaq::qec::decoding::config::multi_decoder_config &config) {
+  const bool final_row = std::any_of(
+      config.syndrome_mapping.begin(), config.syndrome_mapping.end(),
+      [](const auto &row) { return row.type == "final"; });
+  for (const auto &cfg : config.decoders) {
+    if (!cfg.task_graph ||
+        std::none_of(cfg.task_graph->nodes.begin(), cfg.task_graph->nodes.end(),
+                     [](const node_spec &node) {
+                       return node.resolved_kind() == "decode_window" ||
+                              declares_windows(node);
+                     }))
+      continue;
+    if (!cfg.task_graph->options.async_streaming)
+      CUDA_QEC_WARN("decoder {} runs a windowed task graph synchronously, so "
+                    "its window decodes do not overlap later rounds; set "
+                    "async_streaming",
+                    cfg.id);
+    if (!final_row)
+      CUDA_QEC_WARN("decoder {} runs a windowed task graph, but "
+                    "syndrome_mapping has no final row to end its shots",
+                    cfg.id);
+    if (cfg.dispatch == config::DecoderDispatch::device_graph)
+      CUDA_QEC_WARN("decoder {} runs a windowed task graph, which is served "
+                    "with dispatch: host only",
+                    cfg.id);
+  } // end - for(cfg)
+} // end - warn_windowed_serving()
 
 cudaq::qec::data_artifact_store
 fill_data_artifact_store(const config::multi_decoder_config &config,
@@ -1197,9 +1083,9 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
                                   read_pinned_stim_dems(config, base_dir));
 }
 
-// Templates first, so window entries and ingest layers find their context;
-// then Stim DEMs, a pinned one from its checked read; then every window
-// variant. Only the templates windows are built on are added:
+// Templates first, so window entries, ingest layers and patterns find their
+// context; then Stim DEMs, a pinned one from its checked read; then every
+// window variant. Only the templates windows are built on are added:
 // experiment_template is stricter than a plain decoder's dem_chunks, so
 // building every template would reject models that decoders without windows
 // accept.
@@ -1228,15 +1114,15 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
       at(entry_name(*context),
          [&] { store.add_template(*context->dem_chunks); });
   }
-  // The template a node with layers runs on, its own or its decoder's; one
-  // with layers but no template is rejected with the layers below.
+  // The template a node with layers, or a pattern, runs on, its own or its
+  // decoder's; one with neither is rejected with the layers below.
   for (const auto &decoder : config.decoders) {
     if (!decoder.task_graph)
       continue;
     for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
       const auto *spec = node_template(decoder, node);
       const bool own = node.dem_chunks && spec == &*node.dem_chunks;
-      if (node.windows.empty() || !spec)
+      if ((node.windows.empty() && !declares_windows(node)) || !spec)
         return;
       at(own ? decoder_name(decoder) + ", node '" + node.id + "'"
              : decoder_name(decoder),
@@ -1287,15 +1173,45 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
       // so name why it does not apply.
       const bool expanded = node.D_sparse.empty() && decoder.dem_chunks &&
                             !decoder.H_sparse.empty();
-      if (node.windows.empty())
-        return;
-      if (!spec)
-        throw std::runtime_error(
+      const auto no_template = [&] {
+        return std::runtime_error(
             where + " has windows but no dem_chunks template" +
             (expanded ? ": its decoder's dem_chunks is expanded into "
                         "H_sparse, and a node beside flat matrices runs on "
                         "them; give the node dem_chunks of its own"
                       : ""));
+      };
+      cudaq::qec::node_pattern::window_layers generated;
+      std::shared_ptr<const cudaq::qec::experiment_template> tmpl;
+      bool declared = false;
+      // A pattern's layers are its windows <id>.<layer>. The registry lock
+      // keeps its hook registered while the hook runs, and only then: the
+      // requests it returns are plain data, and building their windows,
+      // the costly part, needs no lock.
+      {
+        const auto kind_lock = cudaq::qec::lock_node_kind_registry();
+        const auto *pattern =
+            cudaq::qec::find_node_pattern(node.resolved_kind());
+        declared = pattern && pattern->windows;
+        if (declared) {
+          if (!spec)
+            throw no_template();
+          tmpl = store.find_template(*spec);
+          at(where, [&] {
+            generated = pattern->windows(node.node_params.map(), *tmpl);
+          });
+        }
+      }
+      if (declared) {
+        for (const auto &[layer, request] : generated)
+          at(where + ", window '" + node.id + "." + layer + "'",
+             [&] { store.add_windows(tmpl, request); });
+        return;
+      }
+      if (node.windows.empty())
+        return;
+      if (!spec)
+        throw no_template();
       for (const auto &layer : node.windows) {
         const auto layer_where = where + ", layer '" + layer.layer + "'";
         const auto tmpl = store.find_template(*spec);
