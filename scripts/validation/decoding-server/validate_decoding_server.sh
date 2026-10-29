@@ -23,12 +23,16 @@
 #   5. 200 paced shots through pymatching
 #   6. chromobius plugin fed by a Stim DEM
 #   7. malformed config exits non-zero with a diagnostic
-#   8. hsb_fpga_syndrome_playback --help                                (GPU)
-#   9. trt_decoder builds an engine from the repo's test ONNX model     (GPU)
+#   8. (GPU) hsb_fpga_syndrome_playback --help
+#   9. (GPU) trt_decoder builds an engine from the repo's test ONNX model
 #  10. nvq++ compiles and runs a CUDA-Q program and a QEC program
 #  11. the shipped examples build with the shipped build.sh
 #  12. the realtime example tests from libs/qec/unittests/realtime/app_examples
 #      run against those binaries, with decoding_server as the external server
+#  13. (GPU) the shipped realtime_decoding_demo builds with the shipped CMake
+#      toolchain and its software-only path (qpu-kernel source over UDP) passes
+#      with pymatching, multi_error_lut, and nv-qldpc-decoder (skipped when the
+#      image has no nv-qldpc plugin)
 #
 # The ONNX model, chromobius DEM and example test scripts come from this
 # checkout and are mounted read-only into the container.
@@ -359,6 +363,45 @@ run_example_test "surface_code-5 per-decoder rings" \
     'bash $T/surface_code-5-per-decoder-rings-test.sh $B/surface_code-5-per-decoder-rings'
 run_example_test "surface_code-6 mapped enqueue, in-process" \
     'bash $T/surface_code-6-mapped-enqueue-test.sh $B/surface_code-6-mapped-enqueue NULL /nonexistent'
+
+# The demo is the documented user-facing example (docs: examples_rst/qec/
+# realtime_decoding_demo). It resolves the deliverables from the image's
+# CUDAQX_INSTALL_DIR / CUDA_QUANTUM_PATH / CUDAQ_REALTIME_DIR, so no prefix
+# flags are passed: this checks the documented in-container invocation.
+in_container "13. realtime_decoding_demo build" '
+    cd ~/examples/realtime_decoding_demo
+    rm -rf /root/validate-demo-build
+    cmake -G Ninja -S . -B /root/validate-demo-build > /root/validate-demo-build.log 2>&1 \
+        && cmake --build /root/validate-demo-build >> /root/validate-demo-build.log 2>&1 \
+        || { tail -30 /root/validate-demo-build.log; exit 1; }
+    ls -1 /root/validate-demo-build/surface_code_realtime_decoding /root/validate-demo-build/surface_code_realtime_decoding-cqr
+'
+
+# run_realtime_decoding.sh checks residual logical errors and server dispatch
+# counts itself; its exit code is the verdict. Exit 77 means the decoder is
+# not available in this image (the nv-qldpc plugin is supplied only to CI
+# builds via the artifacts context), which is a skip, not a failure.
+run_demo() { # <label> <decoder args...>
+    local label=$1; shift
+    in_container "13. realtime_decoding_demo: $label" "
+        cd ~/examples/realtime_decoding_demo
+        log=/root/validate-demo-$1.log
+        ./run_realtime_decoding.sh --source qpu-kernel --example-build-dir /root/validate-demo-build --decoder $* > \$log 2>&1
+        rc=\$?
+        if [[ \$rc -eq 77 ]]; then echo 'SKIPPED: decoder not available in this image'; grep -m2 ERROR \$log; exit 0; fi
+        [[ \$rc -ne 0 ]] && tail -30 \$log
+        grep -E 'residual logical errors|server evidence|REALTIME DECODING' \$log
+        exit \$rc
+    "
+}
+run_demo "qpu-kernel/udp, pymatching" pymatching
+run_demo "qpu-kernel/udp, multi_error_lut" multi_error_lut
+if [[ $SKIP_GPU -eq 0 ]]; then
+    run_demo "qpu-kernel/udp, nv-qldpc-decoder (GPU)" nv-qldpc-decoder --gpu 0
+else
+    echo
+    echo "Skipping GPU check 13 nv-qldpc-decoder (--skip-gpu)"
+fi
 
 echo
 if [[ $num_failures -eq 0 ]]; then

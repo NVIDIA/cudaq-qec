@@ -4,8 +4,9 @@
 # Release image for the CUDA-Q QEC decoding server. The "toolchain" and
 # "builder" stages are discarded; the "runtime" stage ships the server,
 # its runtime dependencies, and what a user needs to build and run CUDA-Q
-# programs against it (nvq++ and headers), with worked examples under
-# /root/examples. It carries no toolchain for rebuilding the server itself.
+# programs against it (nvq++, headers, cmake, nvcc and g++), with worked
+# examples under /root/examples. It carries no toolchain for rebuilding the
+# server itself.
 #
 # CUDA-Q itself is not built here: /opt/nvidia/cudaq comes from the
 # official CUDA-Q container (cudaq_image). Two things are compiled:
@@ -200,6 +201,14 @@ ARG CUDA_VERSION
 #   - NVRTC (hololink_core JIT)
 #   - libgomp (OpenMP, linked by decoding_server and libcudaq-qec)
 #   - binutils + libc/libstdc++ dev files, so nvq++ can link user programs
+#   - cmake, ninja, g++ and nvcc (+ cudart dev files), so CMake projects
+#     that enable the CUDA language, such as the realtime_decoding_demo
+#     example, build against the installed SDK. Nothing here rebuilds
+#     the server.
+#   - iproute2, sudo, ethtool and the Mellanox ibdev2netdev/mlnx_qos
+#     tools, which the realtime_decoding_demo's --setup-network uses to
+#     configure a passed-through ConnectX port for the cpu_roce and FPGA
+#     paths
 #   - libpython3.12 and libevent: nvq++ links CUDA-Q's pyscf and MPI comm
 #     plugins into every program, which need these (and the OpenMPI
 #     libraries copied below) to load
@@ -233,6 +242,9 @@ RUN --mount=type=bind,from=toolchain,source=/opt/cudaq-src/realtime/scripts/deps
         libnl-3-200 libnl-route-3-200 \
         libgomp1 \
         binutils libc6-dev libstdc++-13-dev \
+        cmake ninja-build g++ \
+        cuda-nvcc-${CUDA_VER_DASH} cuda-cudart-dev-${CUDA_VER_DASH} \
+        iproute2 sudo ethtool mlnx-ofed-kernel-utils \
         libpython3.12t64 libevent-core-2.1-7t64 libevent-pthreads-2.1-7t64; \
     if [ "$TARGETARCH" != "arm64" ] || [ "$CUDA_MAJOR" != "12" ]; then \
         apt-cache search tensorrt \
@@ -316,6 +328,11 @@ COPY --from=builder /workspaces/cudaq-qec/docker/release/decoding-server-example
                     /workspaces/cudaq-qec/docker/release/decoding-server-examples/build.sh \
                     /workspaces/cudaq-qec/libs/qec/unittests/realtime/app_examples/surface_code-*.cpp \
                     /root/examples/
+# The realtime decoding demo (docs: examples_rst/qec/realtime_decoding_demo):
+# a CMake project that drives the installed decoding_server from a lowered
+# kernel over UDP or RoCE, or from the FPGA playback tool.
+COPY --from=builder /workspaces/cudaq-qec/docs/sphinx/examples/qec/realtime_decoding_demo \
+                    /root/examples/realtime_decoding_demo/
 
 WORKDIR /root
 ENTRYPOINT ["bash", "-l"]

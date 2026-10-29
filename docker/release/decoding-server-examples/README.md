@@ -10,12 +10,15 @@ starting point.
 | Path | Contents |
 | --- | --- |
 | `~/examples/` | Six surface-code memory experiments with realtime decoding, plus `build.sh` |
+| `~/examples/realtime_decoding_demo/` | The realtime decoding demo: a CMake project with `run_realtime_decoding.sh`, which drives `decoding_server` over UDP, RoCE, or from the FPGA playback tool |
 | `/opt/nvidia/cudaq-qec/bin` | `decoding_server`, `playback-emulator`, `hsb_fpga_syndrome_playback`, example server configs |
 
 `nvq++`, the CUDA-Q and QEC headers, and all libraries are on the default
 search paths. A program is compiled with `nvq++ --target stim`, linking the QEC
 libraries it needs, and runs without further setup. `build.sh` shows the exact
-flags.
+flags. `cmake`, `ninja`, `g++` and `nvcc` are also installed for CMake projects
+that build against the installed SDK; `realtime_decoding_demo/CMakeLists.txt`
+is the worked example of that.
 
 ## Build
 
