@@ -12662,6 +12662,8 @@ public:
   bool enqueue(const uint8_t *syndrome, std::size_t len, round_type) override {
     const auto record = records_++;
     probe_->log(id_, record);
+    if (mode_ == "wide")
+      probe_->log(id_ + ".len", len); // how many rounds this record held
     probe_->maybe_block(id_, record);
     value_out_.get<logical_outcome>().bits[0] =
         syndrome && len ? syndrome[0] : uint8_t{0};
@@ -12703,6 +12705,8 @@ public:
   }
   const uint8_t *corrections() const override { return &correction_; }
   void clear_corrections() override { correction_ = 0; }
+  // Whether the node takes raw measurements: `source`, or `wide`.
+  bool raw() const { return mode_ == "source" || mode_ == "wide"; }
   void reset_streaming_state() override {
     probe_->resetting();
     if (probe_->reset_fails(id_))
@@ -12713,24 +12717,26 @@ public:
     records_ = 0;
     skipped_ = 0;
   }
-  std::size_t num_msyn_per_decode() const override {
-    return mode_ == "source" ? 1 : 0;
-  }
+  std::size_t num_msyn_per_decode() const override { return raw() ? 1 : 0; }
   std::size_t num_msyn_per_round() const override { return 1; }
   std::size_t num_observables() const override { return 1; }
+  // `wide` takes up to 64 rounds a record, so rounds admitted together
+  // reach it as one.
   std::optional<std::size_t> raw_chunk_limit() const override {
+    if (mode_ == "wide")
+      return 64;
     return mode_ == "source" ? std::optional<std::size_t>{1} : std::nullopt;
   }
   bool supports_raw_streaming_input(std::size_t slot) const override {
-    return mode_ == "source" && slot == 0;
+    return raw() && slot == 0;
   }
   bool supports_streaming_input(std::size_t slot) const override {
-    return mode_ != "source" && slot < (joins() ? 2u : 1u);
+    return !raw() && slot < (joins() ? 2u : 1u);
   }
   std::optional<window_spec> derive_streaming_schedule(
       std::size_t output_slot,
       const std::vector<input_schedule> &inputs) const override {
-    if (mode_ == "source")
+    if (raw())
       return streaming_task_graph_node::derive_streaming_schedule(output_slot,
                                                                   inputs);
     if (output_slot != 0 || inputs.empty())
@@ -12747,7 +12753,7 @@ public:
   }
   bool accepts_input_type(std::size_t slot,
                           edge_value_type type) const override {
-    if (mode_ == "source")
+    if (raw())
       return slot == 0 && type == edge_value_type("measurement_results");
     return supports_streaming_input(slot) &&
            type == edge_value_type("logical_outcome");
@@ -12757,7 +12763,7 @@ public:
   }
   void execute_indexed(const std::vector<edge_value> &inputs,
                        std::vector<edge_value> &outputs) const override {
-    outputs[0] = mode_ == "source" ? value_out_ : inputs[0];
+    outputs[0] = raw() ? value_out_ : inputs[0];
   }
   std::vector<std::string> inputs() const override {
     return joins() ? std::vector<std::string>{"a", "b"}
@@ -12920,6 +12926,51 @@ TEST(DecodingTaskGraph, ConcurrentRecordsPipelineUpstreamNodes) {
   // Every record flips D's bit, so five records leave it set.
   EXPECT_EQ(result.values[0], 1u);
 }
+
+// Rounds queued while the graph is behind are admitted together: with B
+// stalled, a burst of tagged rounds waits in the queue, and the coordinator
+// takes several as one record, which W, metering 64 rounds, receives in one
+// call. Every round still arrives, in order, and every operation counts.
+TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
+  if (std::thread::hardware_concurrency() < 3)
+    GTEST_SKIP() << "pipelining needs at least three CPU threads";
+  ASSERT_TRUE(pipeline_probe_registered);
+  constexpr std::size_t rounds = 40;
+  std::size_t widest = 0;
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  active_pipeline_probe = probe;
+  nodes.push_back(pipeline_node("W", "wide"));
+  nodes.push_back(pipeline_node("B", "pass"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "W", "input"},
+       {"W", "output", "B", "input"},
+       {"B", "output", "output", "input"}},
+      {.async_streaming = true, .async_queue_capacity = 64});
+  for (int shot = 0; shot < 5 && widest < 2; ++shot) {
+    SCOPED_TRACE("shot " + std::to_string(shot));
+    const auto records = pipeline_records(rounds);
+    const auto lengths_before = probe->records("W.len").size();
+    std::size_t received = 0;
+    graph->reset_decoder();
+    probe->block_on("B", 0); // B numbers each shot's records from 0
+    for (std::size_t i = 0; i + 1 < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+    ASSERT_TRUE(probe->wait_until_blocking());
+    probe->release();
+    EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+    const auto result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    const auto lengths = probe->records("W.len");
+    for (std::size_t k = lengths_before; k < lengths.size(); ++k) {
+      received += lengths[k];
+      widest = std::max(widest, lengths[k]);
+    }
+    EXPECT_EQ(received, rounds);
+  }
+  EXPECT_GE(widest, 2u) << "no shot admitted queued rounds together";
+} // end - TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether)
 
 TEST(DecodingTaskGraph, DispatcherParksWhileRecordsAreBlocked) {
   if (std::thread::hardware_concurrency() < 3)

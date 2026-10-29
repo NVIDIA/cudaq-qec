@@ -18,6 +18,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <mutex>
@@ -35,6 +36,12 @@ constexpr std::int64_t no_index = std::numeric_limits<std::int64_t>::min();
 // microseconds, far less than a park and wake. Spin that long first while a
 // session has records in flight; idle sessions park at once.
 constexpr std::size_t kHandoffSpinPauseIters = 4096;
+
+// The most queued rounds the async coordinator admits as one record. A
+// parallel window's first layer fires every 3d rounds by default, 33 at
+// d = 11; 32 keeps a batch within about one such period, bounding the work
+// one record holds and its buffer.
+constexpr std::size_t async_max_coalesced_records = 32;
 
 // An indexed node's flush event, in graph_event::offset, once it has resolved
 // its instances and waits only to end the node's shot. Flush events carry no
@@ -158,7 +165,9 @@ struct decoding_task_graph::impl::record_context {
   bool in_use = false;
   uint64_t sequence = 0;
   phase kind = phase::idle;
-  // Record payload.
+  // Record payload: a queue slot's, or, for rounds admitted together, this
+  // buffer's, sized when the async queue is prepared.
+  std::vector<uint8_t> batch;
   const uint8_t *syndrome = nullptr;
   std::size_t len = 0;
   std::optional<round_type> type;
@@ -166,6 +175,8 @@ struct decoding_task_graph::impl::record_context {
   // Asynchronous record bookkeeping: which public operation this context
   // belongs to and whether retiring it completes that operation.
   uint64_t ring_sequence = 0;
+  // Public operations this record holds: queued rounds admitted together.
+  std::size_t operations = 1;
   bool closes_record = false;
   bool finish_flush = false;
 };
@@ -404,6 +415,7 @@ struct decoding_task_graph::impl::record_scheduler {
     c.type.reset();
     c.measurement = nullptr;
     c.ring_sequence = 0;
+    c.operations = 1;
     c.closes_record = false;
     c.finish_flush = false;
   }
@@ -2084,6 +2096,22 @@ void decoding_task_graph::impl::prepare_event_runtime(std::size_t context_count,
       std::max<std::size_t>(64, 16 * (nodes.size() + streaming_wire_count + 1));
   scheduler =
       std::make_unique<record_scheduler>(*this, context_count, event_capacity);
+  // Queued rounds may be admitted together when the one raw-input node
+  // meters its own chunks; their records then need room for a batch.
+  auto &state = async_streaming;
+  std::size_t raw_inputs = 0;
+  state.coalesce = dispatcher_thread;
+  for (std::size_t si = 0; si < streaming_nodes.size(); ++si)
+    if (streaming_node_has_raw_input[si]) {
+      ++raw_inputs;
+      if (!streaming_nodes[si].capability->raw_chunk_limit())
+        state.coalesce = false;
+    }
+  state.coalesce = state.coalesce && raw_inputs == 1;
+  if (state.coalesce && !state.slots.empty())
+    for (auto &c : scheduler->contexts)
+      c.batch.resize(async_max_coalesced_records *
+                     state.slots.front().syndrome.size());
 }
 
 // Keep both the persistent event workers and asynchronous coordinator inside
@@ -2294,8 +2322,13 @@ void decoding_task_graph::impl::retire_record_context(record_context &c) {
     publish_async_stream_snapshot();
     return;
   }
+  // Rounds admitted together count once for each time they advanced the
+  // result, up to how many there are: exact unless one of them advanced it
+  // twice while another did not.
   if (result.operation_completed)
-    ++result.completed_operations;
+    result.completed_operations += std::max<std::uint64_t>(
+        1, std::min<std::uint64_t>(c.operations,
+                                   result.generation - retiring_generation));
   // Most public operations only fill a window and leave every observable and
   // status unchanged. Avoid serializing with readers and copying an identical
   // snapshot for those no-op operations. FINAL still publishes its terminal
@@ -2382,18 +2415,46 @@ void decoding_task_graph::impl::dispatch_async_session() {
     if (admitted < state.submitted.load(std::memory_order_acquire)) {
       std::exception_ptr admit_error;
       auto lock = S.lock_runtime();
-      while (admitted < state.submitted.load(std::memory_order_acquire)) {
+      const auto submitted = state.submitted.load(std::memory_order_acquire);
+      while (admitted < submitted) {
         auto *c = S.try_acquire_locked();
         if (!c)
           break;
         auto &slot = state.slots[admitted % state.capacity];
+        // BULK rounds queued behind this one join its record. FINAL stays a
+        // record of its own: its flush counts the shot's last operation.
+        std::size_t take = 1;
+        std::size_t bytes = slot.len;
+        if (state.coalesce && slot.type == round_type::BULK)
+          while (take < async_max_coalesced_records &&
+                 admitted + take < submitted) {
+            const auto &next = state.slots[(admitted + take) % state.capacity];
+            if (next.type != round_type::BULK ||
+                bytes + next.len > c->batch.size())
+              break;
+            bytes += next.len;
+            ++take;
+          }
+        const auto &last = state.slots[(admitted + take - 1) % state.capacity];
         c->kind = record_context::phase::enqueue;
         c->syndrome = slot.syndrome.data();
         c->len = slot.len;
-        c->type = slot.type;
-        c->ring_sequence = admitted;
-        c->closes_record = slot.type != round_type::FINAL;
-        if (slot.type == round_type::FINAL)
+        if (take > 1) {
+          std::size_t at = 0;
+          for (std::size_t r = 0; r < take; ++r) {
+            const auto &queued = state.slots[(admitted + r) % state.capacity];
+            std::memcpy(c->batch.data() + at, queued.syndrome.data(),
+                        queued.len);
+            at += queued.len;
+          }
+          c->syndrome = c->batch.data();
+          c->len = bytes;
+        }
+        c->type = last.type;
+        c->operations = take;
+        c->ring_sequence = admitted + take - 1;
+        c->closes_record = last.type != round_type::FINAL;
+        if (last.type == round_type::FINAL)
           final_pending = true;
         try {
           S.push_raw_roots_locked(*c);
@@ -2402,7 +2463,7 @@ void decoding_task_graph::impl::dispatch_async_session() {
           break;
         }
         S.activate_locked(*c, /*gated=*/true);
-        ++admitted;
+        admitted += take;
         progressed = true;
       }
       S.notify_workers();

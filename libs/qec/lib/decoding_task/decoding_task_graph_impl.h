@@ -274,6 +274,11 @@ struct decoding_task_graph::impl {
     std::atomic<std::uint32_t> completion_waiters{0};
     std::atomic<bool> coordinator_waiting{false};
     uint64_t finish_target = 0;
+    /// Whether the coordinator may admit several queued rounds as one
+    /// record: the graph's one raw-input node meters its own chunks, so a
+    /// record may be cut, or joined, anywhere. With two, records also order
+    /// their deliveries to where those nodes meet.
+    bool coalesce = false;
     int cuda_device_id = -1;
     bool needs_reset = false;
     mutable std::mutex snapshot_mutex;
