@@ -150,7 +150,7 @@ struct options {
   bool run_stream = true;
   std::vector<execution_kind> executions = {execution_kind::decoder};
   // Zero selects one complete shot's detector-round count per sweep point.
-  std::size_t async_queue_capacity = 256;
+  std::size_t async_queue_capacity = 32;
   bool dedicate_async_coordinator = false;
   std::size_t async_spin_pause_iters = 0;
   // parallel_window layout. 0 = unset: d committed and d buffer rounds per
@@ -229,7 +229,7 @@ void print_usage(const char *argv0) {
          "decoder)\n"
       << "  --async_queue_capacity N   rounds an async graph's producer may "
          "queue ahead\n"
-      << "                             (default: 256; 0 reserves one shot)\n"
+      << "                             (default: 32; 0 reserves one shot)\n"
       << "  --dedicate_async_coordinator\n"
       << "                             reserve the last CPU in each pinned "
          "instance block\n"

@@ -276,9 +276,11 @@ a chunk as several, so that no record holds more than a chunk's windows.
 
 In an asynchronous graph, records overlap: a later record runs ahead on nodes
 that have finished the earlier ones, up to 16 records at once.
-``async_queue_capacity`` (default 256) bounds how many public enqueues may be
+``async_queue_capacity`` (default 32) bounds how many public enqueues may be
 queued or running, which is how far a producer may run ahead before an
-enqueue waits.
+enqueue waits. A graph that falls behind returns FINAL's result only after
+draining what is queued, so a deeper queue raises throughput when behind at
+the cost of that tail.
 
 Decoder-server YAML exposes the same policy as ``task_graph.async_streaming``,
 with optional ``async_queue_capacity``, ``async_coordinator_cpu``,

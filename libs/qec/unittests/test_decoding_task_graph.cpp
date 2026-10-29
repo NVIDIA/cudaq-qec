@@ -12975,14 +12975,16 @@ TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
   EXPECT_GE(widest, 2u) << "no shot admitted queued rounds together";
 } // end - TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether)
 
-// By default a producer may run a few hundred rounds ahead of a stalled
-// graph without waiting: the queue holds rounds, not record contexts, which
-// stay few. Released, the graph takes every round, in order.
-TEST(DecodingTaskGraph, ProducerRunsFarAheadByDefault) {
+// By default a producer may run 32 rounds ahead of a stalled graph, more
+// than its 16 record contexts, without waiting, and then waits: the queue
+// holds rounds, not contexts, and bounds how far behind a FINAL can be.
+// Released, the graph takes every round, in order.
+TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue) {
   if (std::thread::hardware_concurrency() < 3)
     GTEST_SKIP() << "pipelining needs at least three CPU threads";
   ASSERT_TRUE(pipeline_probe_registered);
-  constexpr std::size_t rounds = 200;
+  constexpr std::size_t ahead = 32; // the default async_queue_capacity
+  constexpr std::size_t rounds = ahead + 2;
   const auto records = pipeline_records(rounds);
   std::size_t received = 0;
   auto probe = std::make_shared<pipeline_probe>();
@@ -12990,6 +12992,7 @@ TEST(DecodingTaskGraph, ProducerRunsFarAheadByDefault) {
   task_graph_options options;
   active_pipeline_probe = probe;
   options.async_streaming = true;
+  ASSERT_EQ(options.async_queue_capacity, ahead);
   nodes.push_back(pipeline_node("W", "wide"));
   nodes.push_back(pipeline_node("B", "pass"));
   auto graph = decoding_task_graph::from_topology(
@@ -13000,22 +13003,29 @@ TEST(DecodingTaskGraph, ProducerRunsFarAheadByDefault) {
       options);
   probe->block_on("B", 0);
   auto producer = std::async(std::launch::async, [&] {
-    for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    for (std::size_t i = 0; i < ahead; ++i)
       graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
   });
   const bool ran_ahead =
       producer.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  auto beyond = std::async(std::launch::async, [&] {
+    graph->enqueue_syndrome(&records[ahead], 1, round_type::BULK);
+  });
+  const bool waited = beyond.wait_for(std::chrono::milliseconds(200)) ==
+                      std::future_status::timeout;
   probe->release();
   producer.get();
+  beyond.get();
   EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
   EXPECT_EQ(graph->streaming_result().status,
             task_graph_streaming_status::complete);
   for (const auto len : probe->records("W.len"))
     received += len;
 
-  EXPECT_TRUE(ran_ahead) << "the producer waited on the stalled graph";
+  EXPECT_TRUE(ran_ahead) << "the producer waited before filling the queue";
+  EXPECT_TRUE(waited) << "the producer ran past a full queue";
   EXPECT_EQ(received, rounds);
-}
+} // end - TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue)
 
 TEST(DecodingTaskGraph, DispatcherParksWhileRecordsAreBlocked) {
   if (std::thread::hardware_concurrency() < 3)

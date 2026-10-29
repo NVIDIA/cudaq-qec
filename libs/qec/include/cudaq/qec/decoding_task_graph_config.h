@@ -44,10 +44,11 @@ struct task_graph_options {
   bool async_streaming = false;
   /// Maximum public enqueue operations queued or executing: how far the
   /// producer may run ahead of the graph. Must be nonzero when asynchronous.
-  /// A windowed graph admits queued rounds together, so a deep queue lets it
-  /// catch up in batches. 256 is a quarter of a millisecond of 1 us rounds
-  /// enqueued one at a time; each slot holds one enqueue.
-  std::size_t async_queue_capacity = 256;
+  /// A windowed graph admits queued rounds together, so a deeper queue lets
+  /// it catch up in larger batches, but a graph that falls behind returns
+  /// FINAL's result only after draining it. 32 keeps that backlog to tens of
+  /// microseconds while still batching; each slot holds one enqueue.
+  std::size_t async_queue_capacity = 32;
   /// CPU reserved for the asynchronous coordinator, or -1 to inherit the
   /// constructing thread's affinity. This pins only the coordinator; decoder
   /// pool workers retain their separately configured affinity.
