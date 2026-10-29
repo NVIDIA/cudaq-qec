@@ -82,15 +82,19 @@ struct decoder_config {
   ///   - Chunk form: dem_chunks (which carries phases, connections, seam, and
   ///     num_rounds internally). The flat fields are derived by expanding the
   ///     phases, and must be omitted.
-  ///   - DEM form: stim_dem_path, the Stim model text itself. The decoder
-  ///     derives its dimensions, observable mapping and error rates from it.
-  ///     H_sparse, O_sparse and error_rate_vec must be omitted; D_sparse is
-  ///     still required, while block_size and syndrome_size are optional
-  ///     checked assertions.
+  ///   - DEM form: stim_dem or stim_dem_path, the Stim model text itself,
+  ///     inline or by file. The decoder derives its dimensions, observable
+  ///     mapping and error rates from it. H_sparse, O_sparse and
+  ///     error_rate_vec must be omitted; D_sparse is still required, while
+  ///     block_size and syndrome_size are optional checked assertions.
   ///
   /// Throughout a configuration, a `*_path` key names a file and a key without
   /// the suffix carries its contents inline: `stim_dem_path` is read from disk,
-  /// while a node's `stim_dem` is the model text itself.
+  /// while `stim_dem` is the model text itself. A `stim_dem` with no spaces,
+  /// tabs or line breaks instead names a data_artifacts Stim DEM entry: any
+  /// such value is taken as a name, which is safe because Stim model text
+  /// always contains them. Parsing resolves the name; a configuration built in
+  /// code is resolved where its models are built.
   ///
   /// Chunk form stays authoritative: decoder construction hands the chunks to
   /// the decoder, alone for one that declared it reads chunks natively
@@ -105,6 +109,11 @@ struct decoder_config {
   /// resolved against the configuration file's directory, or the process
   /// working directory for a programmatic or raw-string configuration.
   std::string stim_dem_path;
+  /// The same model's text inline; at most one of the two is set.
+  std::string stim_dem;
+  /// The data_artifacts entry `stim_dem` names, if it names one; stim_dem or
+  /// stim_dem_path is then a copy of that entry's text or path.
+  std::string stim_dem_artifact;
   std::vector<std::int64_t> H_sparse;
   std::vector<std::int64_t> O_sparse;
   /// Maps raw measurements to detectors. Orthogonal to the model source and
@@ -206,6 +215,9 @@ struct decoder_config {
       /// spellings; setting both on one node is an error rather than a
       /// precedence.
       std::string stim_dem_path;
+      /// The data_artifacts entry `stim_dem` names, if it names one; one of
+      /// the two fields above is then a copy of that entry's text or path.
+      std::string stim_dem_artifact;
       /// Copies of the node that may fire at once in asynchronous
       /// streaming; see `task_graph_node_config::max_in_flight`.
       std::uint64_t max_in_flight = 1;
@@ -407,6 +419,8 @@ struct syndrome_mapping_config {
 /// named wherever a block is expected. Exactly one kind is set: dem_chunks,
 /// stim_dem, stim_dem_path, window (with its context) or edem_path.
 struct data_artifact {
+  /// Unique, and without spaces, tabs or line breaks, so a `stim_dem` naming
+  /// it is told apart from model text.
   std::string name;
   /// An experiment template.
   std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;

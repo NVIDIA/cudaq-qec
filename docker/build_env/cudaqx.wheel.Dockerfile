@@ -23,7 +23,7 @@ RUN mkdir /cudaq-wheels
 COPY cudaq-wheels/ /cudaq-wheels/
 
 # Work around nvidia-container-toolkit 1.17.1 rejecting its own IMEX default
-ENV NVIDIA_IMEX_CHANNELS=0
+ENV NVIDIA_IMEX_CHANNELS=""
 
 RUN mkdir -p /workspaces/cudaqx/cudaq && cd /workspaces/cudaqx/cudaq \
   && git init \

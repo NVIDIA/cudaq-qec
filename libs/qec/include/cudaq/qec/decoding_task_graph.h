@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -66,7 +67,9 @@ struct task_graph_node_kind_spec {
   /// (an `inner:` block or a plugin-valued `type`). An `xor` node does not.
   bool requires_decoder = true;
   /// Whether the kind needs a DEM (`dem_chunks` or flat matrices) to build its
-  /// D and O matrices.
+  /// D and O matrices. A kind that wraps a decoder but reads no DEM builds
+  /// its decoders itself, from what it receives, so configuration gives it
+  /// the decoder's name and parameters rather than a built decoder.
   bool requires_dem = true;
   /// Optional policy describing the inner decoder's outputs. When absent, the
   /// output preserves the original observable-model policy: a decoder given O
@@ -89,6 +92,13 @@ struct task_graph_node_kind_spec {
   /// Whether the kind reads window requests from a `windows` map, one output
   /// port per layer. Every other kind rejects `windows`.
   bool takes_windows = false;
+  /// Least values of the kind's uint64 parameters, by key. Registration adds
+  /// the check to the kind's parameter validation, and the JSON schema
+  /// publishes each one in the kind's clause, so the two agree.
+  std::map<std::string, std::uint64_t> parameter_minimums;
+  /// Greatest values of the kind's uint64 parameters, by key, checked and
+  /// published as the minimums are.
+  std::map<std::string, std::uint64_t> parameter_maximums;
   /// Optional policy deciding whether the inner decoder needs the DEM's
   /// observable model. An absent policy means yes. When the policy returns
   /// false, the topology withholds O and leaves projection to the node.
