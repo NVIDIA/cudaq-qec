@@ -1497,6 +1497,19 @@ def test_parallel_window_pattern_and_pool_options_parse():
     assert options.async_num_workers == 3
 
 
+def test_parallel_window_pattern_round_trips_through_yaml():
+    mdc = qec.multi_decoder_config.from_yaml_str(_PATTERN_YAML)
+    emitted = mdc.to_yaml_str()
+    again = qec.multi_decoder_config.from_yaml_str(emitted)
+    assert again == mdc
+    node = again.decoders[0].task_graph.nodes[0]
+    assert node.type == "parallel_window"
+    assert node.node_params["commit_rounds"] == 3
+    assert node.node_params["gap_rounds"] == 9
+    assert node.node_params["output"] == "corrected_logical"
+    assert node.max_in_flight == 4
+
+
 def test_parallel_window_pattern_validates_against_the_schema():
     jsonschema = pytest.importorskip("jsonschema")
     yaml = pytest.importorskip("yaml")

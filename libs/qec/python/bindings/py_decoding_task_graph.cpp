@@ -72,6 +72,11 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .value("COMPLETE", task_graph_streaming_status::complete)
       .value("FAILED", task_graph_streaming_status::failed);
 
+  nb::enum_<task_graph_closure>(mod, "TaskGraphClosure")
+      .value("NOT_CHECKED", task_graph_closure::not_checked)
+      .value("CLOSED", task_graph_closure::closed)
+      .value("OPEN", task_graph_closure::open);
+
   nb::class_<task_graph_output_progress>(mod, "TaskGraphOutputProgress")
       .def_ro("name", &task_graph_output_progress::name)
       .def_ro("value_offset", &task_graph_output_progress::value_offset)
@@ -81,7 +86,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
               &task_graph_output_progress::coverage_begin_round)
       .def_ro("coverage_end_round",
               &task_graph_output_progress::coverage_end_round)
-      .def_ro("status", &task_graph_output_progress::status);
+      .def_ro("status", &task_graph_output_progress::status)
+      .def_ro("closure", &task_graph_output_progress::closure);
 
   nb::class_<task_graph_streaming_result>(mod, "TaskGraphStreamingResult")
       .def_ro("shot_epoch", &task_graph_streaming_result::shot_epoch)
@@ -94,7 +100,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
               &task_graph_streaming_result::operation_completed)
       .def_ro("error", &task_graph_streaming_result::error)
       .def_ro("outputs", &task_graph_streaming_result::outputs)
-      .def_ro("values", &task_graph_streaming_result::values);
+      .def_ro("values", &task_graph_streaming_result::values)
+      .def_ro("closure", &task_graph_streaming_result::closure);
 
   // -------------------------------------------------------------------------
   // Primitive task functions

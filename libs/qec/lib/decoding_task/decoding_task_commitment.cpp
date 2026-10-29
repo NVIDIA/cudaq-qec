@@ -560,6 +560,7 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
   std::map<const extended_dem *, chunk_touch> touches;
   std::set<std::pair<std::string, variant_key>> variants;
   std::map<std::string, const window_request *> requests;
+  std::string digest; // the template's sha256 in the store, hashed once
   if (!context)
     reject("no template");
   for (const auto &layer : layers)
@@ -579,16 +580,18 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
   }
   // The windows are built only once the schedules pass, so a delivery or
   // commit mistake is reported before any is built.
-  if (store)
+  if (store) {
     for (const auto &layer : layers)
       store->add_windows(context, layer.request);
+    digest = store->template_sha256(*context);
+  }
   for (const auto &schedule : schedules)
     for (const auto &w : schedule.windows)
       if (variants.insert({w.node, w.variant}).second) {
         const auto &request = *requests.at(w.node);
         check_parallel_columns(
             context, request, w, schedule.num_rounds,
-            store ? store->find_window(*context, request, w.variant).get()
+            store ? store->find_window(digest, request, w.variant).get()
                   : nullptr);
       }
 } // end - validate_commitment()

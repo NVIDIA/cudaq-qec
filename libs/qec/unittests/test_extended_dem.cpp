@@ -2034,8 +2034,11 @@ TEST(DemChunkSpec, NumFaultsMustFitUint32) {
   EXPECT_THROW(spec.validate("test"), std::invalid_argument);
 }
 
-TEST(DemChunkSpec, ZeroFaultsThrows) {
+// A chunk may have no faults, but not priors for faults it does not have.
+TEST(DemChunkSpec, ZeroFaultsValidateWithoutPriors) {
   dem_chunk_spec spec;
+  EXPECT_NO_THROW(spec.validate("chunk"));
+  spec.error_rates = {0.01};
   EXPECT_THROW(spec.validate("chunk"), std::invalid_argument);
 }
 
@@ -2522,6 +2525,22 @@ TEST(DemChunkSpec, PerSeamOSparseThrows) {
   e.spec.O_sparse = {0, -1}; // non-empty: should throw
   spec.seam_specs.push_back(e);
   EXPECT_THROW(dem_chunk_from_spec(spec, {}, "test"), std::invalid_argument);
+}
+
+// A chunk without faults validates and keeps its seams' rows: its
+// detectors exist, and nothing ever flips them.
+TEST(DemChunkSpec, AChunkWithoutFaultsKeepsItsRows) {
+  dem_chunk_spec spec;
+  spec.H_sparse = {-1, -1, -1};
+  spec.O_sparse = {-1};
+  ASSERT_NO_THROW(spec.validate("test"));
+  const auto chunk = dem_chunk_from_spec(
+      spec, {seam_name::prev_round, seam_name::next_round}, "test");
+  EXPECT_EQ(chunk.H.num_rows(), 6u);
+  EXPECT_EQ(chunk.H.num_cols(), 0u);
+  EXPECT_EQ(chunk.get_seam(seam_name::prev_round).num_rows(), 3u);
+  EXPECT_EQ(chunk.get_seam(seam_name::next_round).num_rows(), 3u);
+  EXPECT_EQ(chunk.num_faults(), 0u);
 }
 
 // Issue 3: zero-rate DEM must have correct tensor shape, not [0 × 0].

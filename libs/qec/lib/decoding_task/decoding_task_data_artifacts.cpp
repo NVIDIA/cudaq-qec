@@ -5,8 +5,9 @@
 
 // The data artifact store: SHA-256 (FIPS 180-4), the canonical bytes that
 // identify a template, a window request and a window variant, and the store
-// that keys its entries by them. Runs at configuration time and may
-// allocate; nothing here is on the hot path.
+// that keys its entries by them. Stores share what they build, by content,
+// through a process-wide registry of weak handles. Runs at configuration
+// time and may allocate; nothing here is on the hot path.
 
 #include "decoding_task_data_artifacts.h"
 #include <algorithm>
@@ -14,6 +15,9 @@
 #include <bit>
 #include <cstdint>
 #include <cstdio>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -119,6 +123,104 @@ std::string window_bytes(const std::string &template_sha256,
   put(out, "terminal", optional_of(key.terminal, index));
   return out;
 }
+
+// What every store has built that something still holds, by sha256, so
+// stores of equal content share one template or window variant rather than
+// each build its own. Handles are weak: an entry is freed with its last
+// holder. Building runs outside the lock, so two stores may build the same
+// entry at once; the first registered is kept, as within a store.
+struct shared_artifacts {
+  struct template_entry {
+    dem_chunks_spec spec;
+    std::weak_ptr<const experiment_template> handle;
+  };
+  struct window_entry {
+    window_request request;
+    variant_key key;
+    std::weak_ptr<const decoding_window> handle;
+  };
+  std::mutex mutex;
+  std::map<std::string, template_entry> templates;
+  std::map<std::string, window_entry> windows;
+};
+
+shared_artifacts &shared() {
+  static shared_artifacts artifacts;
+  return artifacts;
+}
+
+// Drops the entries no store or node holds any more.
+template <typename Map>
+void sweep(Map &entries) {
+  std::erase_if(
+      entries, [](const auto &entry) { return entry.second.handle.expired(); });
+}
+
+// The live template with @p spec's content, built with @p build if none is.
+// A hash hit whose content differs means canonical_bytes() missed a field.
+template <typename Build>
+std::shared_ptr<const experiment_template>
+shared_template(const std::string &hash, const dem_chunks_spec &spec,
+                Build &&build) {
+  auto &artifacts = shared();
+  std::shared_ptr<const experiment_template> built;
+  const auto live = [&]() -> std::shared_ptr<const experiment_template> {
+    const auto it = artifacts.templates.find(hash);
+    if (it == artifacts.templates.end())
+      return nullptr;
+    auto handle = it->second.handle.lock();
+    if (handle && it->second.spec != spec)
+      throw std::logic_error("data_artifact_store: two templates share "
+                             "sha256 " +
+                             hash + " but differ");
+    return handle;
+  };
+  {
+    std::lock_guard<std::mutex> lock(artifacts.mutex);
+    if (auto handle = live())
+      return handle;
+  }
+  built = build();
+  std::lock_guard<std::mutex> lock(artifacts.mutex);
+  if (auto handle = live())
+    return handle;
+  sweep(artifacts.templates);
+  artifacts.templates[hash] = {spec, built};
+  return built;
+} // end - shared_template()
+
+// The live window variant @p key of @p request with @p hash, built with
+// @p build if none is, as shared_template() does.
+template <typename Build>
+std::shared_ptr<const decoding_window>
+shared_window(const std::string &hash, const window_request &request,
+              const variant_key &key, Build &&build) {
+  auto &artifacts = shared();
+  std::shared_ptr<const decoding_window> built;
+  const auto live = [&]() -> std::shared_ptr<const decoding_window> {
+    const auto it = artifacts.windows.find(hash);
+    if (it == artifacts.windows.end())
+      return nullptr;
+    auto handle = it->second.handle.lock();
+    if (handle && (it->second.request != request || it->second.key != key))
+      throw std::logic_error("data_artifact_store: two window variants "
+                             "share sha256 " +
+                             hash + " but differ");
+    return handle;
+  };
+  {
+    std::lock_guard<std::mutex> lock(artifacts.mutex);
+    if (auto handle = live())
+      return handle;
+  }
+  built = build();
+  std::lock_guard<std::mutex> lock(artifacts.mutex);
+  if (auto handle = live())
+    return handle;
+  sweep(artifacts.windows);
+  artifacts.windows[hash] = {request, key, built};
+  return built;
+} // end - shared_window()
 
 } // namespace
 
@@ -239,7 +341,9 @@ data_artifact_store::add_template(const dem_chunks_spec &spec) {
           " but differ");
     return it->second.handle;
   }
-  auto handle = std::make_shared<const experiment_template>(spec);
+  auto handle = shared_template(hash, spec, [&] {
+    return std::make_shared<const experiment_template>(spec);
+  });
   records_.push_back({"dem_chunks", bytes.size(), hash});
   templates_.emplace(std::move(hash), template_entry{spec, handle});
   return handle;
@@ -281,8 +385,10 @@ void data_artifact_store::add_windows(
     const bool with_m2o =
         readout_map && place_window(t, request, k, R).rounds.end ==
                            static_cast<std::int64_t>(R);
-    auto handle = std::make_shared<const decoding_window>(
-        window_from_dem_chunks(t, request, k, R, with_m2o));
+    auto handle = shared_window(window_hash, request, key, [&] {
+      return std::make_shared<const decoding_window>(
+          window_from_dem_chunks(t, request, k, R, with_m2o));
+    });
     records_.push_back({"window", bytes.size(), window_hash});
     windows_.emplace(std::move(window_hash),
                      window_entry{request, key, std::move(handle)});
@@ -299,23 +405,54 @@ std::shared_ptr<const decoding_window>
 data_artifact_store::find_window(const experiment_template &context,
                                  const window_request &request,
                                  const variant_key &key) const {
-  const auto hash = template_hash(context.spec(), "find_window");
-  const auto it = windows_.find(sha256_hex(window_bytes(hash, request, key)));
+  return find_window(template_sha256(context), request, key);
+}
+
+// The template already hashed, by template_sha256().
+std::shared_ptr<const decoding_window>
+data_artifact_store::find_window(const std::string &template_digest,
+                                 const window_request &request,
+                                 const variant_key &key) const {
+  return windows_.at(window_hash(template_digest, request, key)).handle;
+}
+
+std::string
+data_artifact_store::template_sha256(const experiment_template &context) const {
+  return template_hash(context.spec(), "template_sha256");
+}
+
+// Hashes the template, then looks up as window_hash() does.
+std::string
+data_artifact_store::window_sha256(const experiment_template &context,
+                                   const window_request &request,
+                                   const variant_key &key) const {
+  return window_hash(template_hash(context.spec(), "window_sha256"), request,
+                     key);
+}
+
+// Keyed as add_windows() keys it; a hit must hold this request and key.
+std::string data_artifact_store::window_hash(const std::string &template_digest,
+                                             const window_request &request,
+                                             const variant_key &key) const {
+  auto hash = sha256_hex(window_bytes(template_digest, request, key));
+  const auto it = windows_.find(hash);
   if (it == windows_.end() || it->second.request != request ||
       it->second.key != key)
     throw std::logic_error("data_artifact_store: the window variant was not "
                            "built at configuration time");
-  return it->second.handle;
+  return hash;
 }
 
-// Each key variant_instances() lists, looked up as find_window() does.
+// Each key variant_instances() lists, looked up as find_window() does, on a
+// template hashed once.
 std::vector<std::pair<variant_key, std::shared_ptr<const decoding_window>>>
 data_artifact_store::find_windows(const experiment_template &context,
                                   const window_request &request) const {
   std::vector<std::pair<variant_key, std::shared_ptr<const decoding_window>>>
       out;
+  const auto hash = template_sha256(context);
   for (const auto &v : variant_instances(context, request))
-    out.emplace_back(v.key, find_window(context, request, v.key));
+    out.emplace_back(v.key, find_window(hash, request, v.key));
   return out;
 }
 
