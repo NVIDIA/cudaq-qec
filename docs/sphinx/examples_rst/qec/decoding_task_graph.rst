@@ -269,8 +269,10 @@ the session. A FINAL enqueue waits for all accepted input and the final flush.
 before consuming the result. Each public enqueue remains one queue record, so
 inner streaming decoders observe the same call boundaries as synchronous
 graphs, with one exception: a graph whose one raw-input node meters its own
-chunks, such as a windowed graph, admits BULK rounds that have queued up
-behind it together, so that a graph that falls behind catches up in batches.
+chunks, such as a windowed graph, works in records of about one chunk. It
+admits BULK rounds that have queued up behind it together, so that a graph
+that falls behind catches up in batches, and runs a tagged record longer than
+a chunk as several, so that no record holds more than a chunk's windows.
 
 In an asynchronous graph, records overlap: a later record runs ahead on nodes
 that have finished the earlier ones, up to 16 records at once.

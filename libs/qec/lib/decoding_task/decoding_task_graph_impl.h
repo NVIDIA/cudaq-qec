@@ -97,6 +97,11 @@ struct decoding_task_graph::impl {
   std::vector<std::int32_t> pool_worker_cpus;
   std::unique_ptr<detail::thread_pool> parallel_pool;
 
+  // Most bytes per record context: one chunk of the graph's single raw-input
+  // node, when it meters its own. Longer tagged records run as several;
+  // async graphs join queued rounds up to it. Zero: records taken as given.
+  std::size_t record_bytes = 0;
+
   // Preallocated record contexts and the scheduler that runs them. Their
   // complete definitions stay in the executor translation unit.
   struct record_context;
@@ -348,6 +353,9 @@ struct decoding_task_graph::impl {
   bool enqueue_sweep(const uint8_t *syndrome, std::size_t len,
                      std::optional<round_type> type, int cuda_device_id);
   bool flush_sweep(int cuda_device_id);
+  /// One record through one context; enqueue_sweep() cuts long ones.
+  bool sweep_record(const uint8_t *syndrome, std::size_t len,
+                    std::optional<round_type> type, int cuda_device_id);
   /// Allocate the worker pool and record contexts after graph compilation.
   void prepare_event_runtime(std::size_t context_count, bool dispatcher_thread);
   /// Drop every record, join entry and replica lease, as a new shot needs.

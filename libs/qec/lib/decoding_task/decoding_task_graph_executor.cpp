@@ -37,12 +37,12 @@ constexpr std::int64_t no_index = std::numeric_limits<std::int64_t>::min();
 // session has records in flight; idle sessions park at once.
 constexpr std::size_t kHandoffSpinPauseIters = 4096;
 
-// The most bytes of queued rounds the async coordinator admits as one
-// record, past the raw-input node's own chunk. A windowed graph's ingest
-// takes one first-layer period, 3d rounds of about d^2 measurements: 8 KB at
-// d = 11, 126 KB at d = 35. 128 KB covers that while bounding what a node
-// metering huge chunks would have each context hold.
-constexpr std::size_t async_max_batch_bytes = std::size_t{128} << 10;
+// The most bytes of rounds a record context takes, past the raw-input node's
+// own chunk. A windowed graph's ingest takes one first-layer period, 3d
+// rounds of about d^2 measurements: 8 KB at d = 11, 126 KB at d = 35. 128 KB
+// covers that while bounding what a node metering huge chunks would have
+// each context hold.
+constexpr std::size_t max_record_bytes = std::size_t{128} << 10;
 
 // An indexed node's flush event, in graph_event::offset, once it has resolved
 // its instances and waits only to end the node's shot. Flush events carry no
@@ -178,6 +178,9 @@ struct decoding_task_graph::impl::record_context {
   uint64_t ring_sequence = 0;
   // Public operations this record holds: queued rounds admitted together.
   std::size_t operations = 1;
+  // Whether this record starts its public operation, which a record cut into
+  // several does only in its first.
+  bool opens_record = true;
   bool closes_record = false;
   bool finish_flush = false;
 };
@@ -423,6 +426,7 @@ struct decoding_task_graph::impl::record_scheduler {
     c.measurement = nullptr;
     c.ring_sequence = 0;
     c.operations = 1;
+    c.opens_record = true;
     c.closes_record = false;
     c.finish_flush = false;
   }
@@ -2103,27 +2107,29 @@ void decoding_task_graph::impl::prepare_event_runtime(std::size_t context_count,
       std::max<std::size_t>(64, 16 * (nodes.size() + streaming_wire_count + 1));
   scheduler =
       std::make_unique<record_scheduler>(*this, context_count, event_capacity);
-  // Queued rounds may be admitted together when the one raw-input node
-  // meters its own chunks; their records then need room for a batch. A batch
-  // fits one of the node's chunks, so it is one delivery, as the join tables
-  // sized per record assume.
+  // When the one raw-input node meters its own chunks, a record may be cut
+  // or joined anywhere, so records hold one chunk: a longer one is cut, and
+  // queued rounds are joined, which their records need room for. A record of
+  // one chunk is one delivery, as the join tables sized per record assume.
   auto &state = async_streaming;
   std::size_t raw_inputs = 0;
   std::size_t chunk = 0;
-  state.coalesce = dispatcher_thread;
+  bool metered = true;
   for (std::size_t si = 0; si < streaming_nodes.size(); ++si)
     if (streaming_node_has_raw_input[si]) {
       const auto limit = streaming_nodes[si].capability->raw_chunk_limit();
       ++raw_inputs;
       if (!limit)
-        state.coalesce = false;
+        metered = false;
       else
         chunk = *limit;
     }
-  state.coalesce = state.coalesce && raw_inputs == 1;
+  record_bytes =
+      raw_inputs == 1 && metered ? std::min(chunk, max_record_bytes) : 0;
+  state.coalesce = dispatcher_thread && record_bytes != 0;
   if (state.coalesce)
     for (auto &c : scheduler->contexts)
-      c.batch.resize(std::min(chunk, async_max_batch_bytes));
+      c.batch.resize(record_bytes);
 }
 
 // Keep both the persistent event workers and asynchronous coordinator inside
@@ -2221,6 +2227,27 @@ bool decoding_task_graph::impl::enqueue_sweep(const uint8_t *syndrome,
                                               std::optional<round_type> type,
                                               int cuda_device_id) {
   require_streaming_support("enqueue_syndrome");
+  // A tagged record longer than record_bytes runs as several, each retired
+  // before the next, so none holds more than a chunk's windows. The pieces
+  // before the last are BULK; the last keeps the record's type.
+  if (record_bytes != 0 && type && len > record_bytes) {
+    bool fired = false;
+    for (std::size_t at = 0; at < len; at += record_bytes) {
+      const auto piece = std::min(record_bytes, len - at);
+      const auto piece_type = at + piece == len ? type : round_type::BULK;
+      fired = sweep_record(syndrome + at, piece, piece_type, cuda_device_id) ||
+              fired;
+    }
+    return fired;
+  }
+  return sweep_record(syndrome, len, type, cuda_device_id);
+}
+
+// Run one record through a context of its own and fold it in.
+bool decoding_task_graph::impl::sweep_record(const uint8_t *syndrome,
+                                             std::size_t len,
+                                             std::optional<round_type> type,
+                                             int cuda_device_id) {
   auto &c = scheduler->acquire();
   c.kind = record_context::phase::enqueue;
   c.syndrome = syndrome;
@@ -2310,7 +2337,8 @@ void decoding_task_graph::impl::retire_record_context(record_context &c) {
   auto &state = async_streaming;
   auto &result = streaming_result_state;
   const bool begins_operation =
-      c.kind == record_context::phase::enqueue || c.finish_flush;
+      (c.kind == record_context::phase::enqueue && c.opens_record) ||
+      c.finish_flush;
   if (begins_operation) {
     result.operation_completed = false;
     retiring_generation = result.generation;
@@ -2372,6 +2400,9 @@ void decoding_task_graph::impl::dispatch_async_session() {
   uint64_t observed_epoch = state.wake_epoch.load(std::memory_order_acquire);
   bool flush_admitted = false;
   bool final_pending = false;
+  // How much of the record at `admitted` is admitted already, when it is
+  // being admitted in pieces.
+  std::size_t cut_at = 0;
   std::exception_ptr failure;
 
   const auto fail_session = [&](std::exception_ptr error) {
@@ -2434,6 +2465,27 @@ void decoding_task_graph::impl::dispatch_async_session() {
         if (!c)
           break;
         auto &slot = state.slots[admitted % state.capacity];
+        // A tagged record longer than record_bytes is admitted as several,
+        // into the slot's own buffer: each but the last BULK, the first
+        // opening its operation and the last closing it.
+        if (record_bytes != 0 && slot.type &&
+            (cut_at != 0 || slot.len > record_bytes)) {
+          const auto piece = std::min(record_bytes, slot.len - cut_at);
+          const bool last = cut_at + piece == slot.len;
+          c->kind = record_context::phase::enqueue;
+          c->syndrome = slot.syndrome.data() + cut_at;
+          c->len = piece;
+          c->type = last ? slot.type : round_type::BULK;
+          c->opens_record = cut_at == 0;
+          c->ring_sequence = admitted;
+          c->closes_record = last && slot.type != round_type::FINAL;
+          if (last && slot.type == round_type::FINAL)
+            final_pending = true;
+          S.admitting.push_back(c);
+          cut_at = last ? 0 : cut_at + piece;
+          admitted += last ? 1 : 0;
+          continue;
+        }
         // BULK rounds queued behind this one join its record. FINAL stays a
         // record of its own: its flush counts the shot's last operation.
         std::size_t take = 1;
