@@ -4,9 +4,11 @@
 # HSB FPGA syndrome-playback tool
 # ==============================================================================
 # Gated by CUDAQX_QEC_ENABLE_HSB_TOOLS.  Builds hsb_fpga_syndrome_playback,
-# which requires a holoscan-sensor-bridge build (hololink_core).  The
-# remaining discovery below (gpu_roce_transceiver, DOCA, cuda-quantum
-# realtime) is optional; nothing in this directory fails without it.
+# which requires a holoscan-sensor-bridge build (hololink_core) and the
+# cuda-quantum realtime headers (CUDAQ_REALTIME_ROOT or a CUDA-Q install
+# with realtime; the playback tool includes dispatch_kernel_launch.h).  The
+# gpu_roce_transceiver, DOCA and holoscan discovery below is not used by that
+# target and only warns when missing.
 # These are NOT CI tests -- they need FPGA hardware or an FPGA emulator.
 
 if (NOT HOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR)
