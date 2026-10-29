@@ -15,6 +15,7 @@
 // decode() does.
 
 #include "decoding_task_decoding_window.h"
+#include "sparse_dem_from_chunks.h"
 #include "cudaq/qec/decoder_init.h"
 #include "cudaq/qec/decoding_task_graph.h"
 #include <algorithm>
@@ -274,8 +275,9 @@ struct chain_columns {
 chain_columns close_columns(const std::vector<extended_dem> &chunks,
                             seam_id from_seam, seam_id to_seam) {
   chain_columns out;
-  const auto h = dem_chunks_to_pcm(chunks, from_seam, to_seam);
-  const auto o = dem_chunks_to_o_sparse(chunks);
+  auto closed = details::sparse_dem_from_chunks(chunks, from_seam, to_seam);
+  const auto &h = closed.detector_error_matrix;
+  const auto &o = closed.observable_rows;
   out.num_rows = h.num_rows();
   out.num_observables = o.size();
   out.rows = h.to_nested_csc();
@@ -284,9 +286,7 @@ chain_columns close_columns(const std::vector<extended_dem> &chunks,
     for (const auto c : o[i])
       out.observables[c].push_back(
           static_cast<sparse_binary_matrix::index_type>(i));
-  for (const auto &chunk : chunks)
-    out.priors.insert(out.priors.end(), chunk.error_rates.begin(),
-                      chunk.error_rates.end());
+  out.priors = std::move(closed.error_rates);
   return out;
 } // end - close_columns()
 
