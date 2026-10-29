@@ -227,10 +227,10 @@ struct decoder_config {
       std::string partition_label;
       std::vector<column_range> partition_columns;
 
-      /// An ensemble pattern written in place of a node: member subgraphs
-      /// raced against each other, one answer kept (the YAML spelling of
-      /// `cudaq::qec::task_graph_ensemble_spec`). `type` stays empty and the
-      /// node fields above are ignored; the entry is lowered by the builder.
+      /// The members and join of a node of type `ensemble`, written as its
+      /// own keys: member subgraphs raced against each other, one answer kept
+      /// (the YAML spelling of `cudaq::qec::task_graph_ensemble_spec`). The
+      /// node fields above are ignored; the builder lowers the node.
       struct ensemble_spec {
         struct member {
           std::vector<node_spec> nodes;

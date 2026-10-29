@@ -566,23 +566,23 @@ Ensembles
 +++++++++
 
 An ensemble races several member subgraphs and keeps one answer. It is written
-as a pattern in place of a node, with the members as node lists of their own:
+as a node of type ``ensemble``, with the members as node lists of their own:
 
 .. code-block:: yaml
 
    nodes:
      - id: ens
-       ensemble:
-         join_strategy: deadline
-         join_params: {deadline_us: 200, soft_stop_before_us: 50}
-         members:
-           - nodes: [{id: a, type: single_window, inner: {type: pymatching}}]
-             edges: [{from: input, to: a}, {from: a, to: output}]
-           - nodes:
-               - {id: b, type: single_window, inner: {type: nv-qldpc-decoder}}
-             edges:
-               - {from: input, to: b}
-               - {from: b, to: output}
+       type: ensemble
+       join_strategy: deadline
+       join_params: {deadline_us: 200, soft_stop_before_us: 50}
+       members:
+         - nodes: [{id: a, type: single_window, inner: {type: pymatching}}]
+           edges: [{from: input, to: a}, {from: a, to: output}]
+         - nodes:
+             - {id: b, type: single_window, inner: {type: nv-qldpc-decoder}}
+           edges:
+             - {from: input, to: b}
+             - {from: b, to: output}
    edges:
      - {from: measurements, to: ens}
      - {from: ens, to: output}

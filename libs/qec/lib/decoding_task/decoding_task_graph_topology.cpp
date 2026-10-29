@@ -29,6 +29,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_set>
+#include <utility>
 
 namespace cudaq::qec {
 
@@ -384,11 +385,11 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
   ensemble_wiring wiring;
   const std::string id = wiring.id = cfg.id;
   const std::string what = "from_topology: ensemble '" + id + "'";
-  auto spec = std::move(*cfg.ensemble);
   if (id.empty())
     throw std::invalid_argument("from_topology: every node needs an id");
-  if (spec.members.empty())
+  if (!cfg.ensemble || cfg.ensemble->members.empty())
     throw std::invalid_argument(what + " has no members");
+  auto spec = std::move(*cfg.ensemble);
   if (spec.join_strategy.empty())
     throw std::invalid_argument(what + " names no join_strategy");
   const std::string fan = wiring.fan = id + ".fanout",
@@ -430,11 +431,9 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
     if (m.nodes.empty())
       throw std::invalid_argument(member + " has no nodes");
     for (auto &n : m.nodes) {
-      if (n.ensemble)
-        throw std::invalid_argument(member + " nests an ensemble, which is "
-                                             "not supported yet");
-      // Member nodes are not lowered, and parallel_window's ingest must be
-      // fed by measurements alone, never by a fan-out.
+      // Member nodes are not lowered: an ensemble does not nest yet, and
+      // parallel_window's ingest must be fed by measurements alone, never by
+      // a fan-out.
       if (find_node_pattern(n.kind))
         throw std::invalid_argument(
             member + " has " + find_task_graph_node_kind(n.kind)->name + " '" +
@@ -495,20 +494,45 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
   return wiring;
 }
 
-/// Rewrite every pattern entry of `nodes`, an ensemble or a node of a
-/// pattern kind, into plain nodes, in place, so the result is in topological
-/// order whenever the input was. Only ensembles need wiring once built. The
-/// caller holds the registry lock, which keeps each lowering registered
-/// while it runs.
+/// The wirings of the ensembles lowered so far, which lower_patterns() takes
+/// once every pattern is lowered. Its callers hold the registry lock, which
+/// serializes the lowerings.
+std::vector<ensemble_wiring> &pending_ensemble_wirings() {
+  static std::vector<ensemble_wiring> pending;
+  return pending;
+}
+
+// Its members and join live in the config's `ensemble` field rather than
+// its parameters, so the kind registers none.
+const bool ensemble_registered = [] {
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  spec.name = "ensemble";
+  spec.requires_decoder = spec.requires_dem = false;
+  pattern.lower = [](task_graph_node_config cfg,
+                     std::vector<task_graph_node_config> &out,
+                     std::vector<task_graph_edge> &edges) {
+    pending_ensemble_wirings().push_back(
+        lower_ensemble(std::move(cfg), out, edges));
+  };
+  register_pattern_kind(std::move(spec), {}, std::move(pattern));
+  return true;
+}();
+
+/// Rewrite every node of a pattern kind in `nodes` into plain nodes, in
+/// place, so the result is in topological order whenever the input was. Only
+/// ensembles need wiring once built. The caller holds the registry lock,
+/// which keeps each lowering registered while it runs.
 std::vector<ensemble_wiring>
 lower_patterns(std::vector<task_graph_node_config> &nodes,
                std::vector<task_graph_edge> &edges) {
-  std::vector<ensemble_wiring> wirings;
+  auto &wirings = pending_ensemble_wirings();
   std::vector<task_graph_node_config> lowered;
+  wirings.clear();
   if (std::none_of(nodes.begin(), nodes.end(), [](const auto &cfg) {
-        return cfg.ensemble.has_value() || find_node_pattern(cfg.kind);
+        return find_node_pattern(cfg.kind) != nullptr;
       }))
-    return wirings;
+    return {};
   // A lone pattern gets the single-node wiring before it stops being one
   // node.
   if (nodes.size() == 1 && edges.empty())
@@ -516,23 +540,20 @@ lower_patterns(std::vector<task_graph_node_config> &nodes,
              {nodes[0].id, "output", "output", "input"}};
   lowered.reserve(nodes.size());
   for (auto &cfg : nodes) {
-    const node_pattern *pattern =
-        cfg.ensemble ? nullptr : find_node_pattern(cfg.kind);
+    const node_pattern *pattern = find_node_pattern(cfg.kind);
     // A pattern's nodes take its id as their prefix, so a reserved one is
     // named before lowering hides it.
-    if ((cfg.ensemble || pattern) &&
+    if (pattern &&
         (cfg.id == "measurements" || cfg.id == "dets" || cfg.id == "output"))
       throw std::invalid_argument("from_topology: node id '" + cfg.id +
                                   "' is reserved for a synthetic endpoint");
-    if (cfg.ensemble)
-      wirings.push_back(lower_ensemble(std::move(cfg), lowered, edges));
-    else if (pattern)
+    if (pattern)
       pattern->lower(std::move(cfg), lowered, edges);
     else
       lowered.push_back(std::move(cfg));
   } // end - for(cfg)
   nodes = std::move(lowered);
-  return wirings;
+  return std::exchange(wirings, {});
 } // end - lower_patterns()
 
 /// The static width of a node's `logical_outcome` output, when it has one.

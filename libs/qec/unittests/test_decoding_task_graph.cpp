@@ -2859,7 +2859,7 @@ TEST(DecodingTaskGraph, JsonSchemaDescribesTaskGraphAndItsKinds) {
   // test file is exported too.
   EXPECT_NE(schema.find("\"start_guard\""), std::string::npos);
   EXPECT_NE(schema.find("\"unused_knob\""), std::string::npos);
-  // A node entry may be an ensemble pattern instead of a typed node.
+  // An ensemble node's keys, with each strategy's parameters.
   EXPECT_NE(schema.find("\"ensemble\""), std::string::npos);
   EXPECT_NE(schema.find("\"join_strategy\""), std::string::npos);
   // Members hold nodes of the node schema itself; each strategy's parameters
@@ -2889,25 +2889,25 @@ TEST(DecodingTaskGraph, EnsembleYamlParsesRoundTripsAndLowers) {
   namespace cfg = cudaq::qec::decoding::config;
   auto multi_config = cfg::multi_decoder_config::from_yaml_str(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: deadline
-            join_params: {deadline_us: 200000, soft_stop_before_us: 100000}
-            members:
-              - nodes:
-                  - {id: a, type: single_window, inner: {type: single_error_lut}}
-                edges: [{from: input, to: a}, {from: a, to: output}]
-              - nodes:
-                  - {id: b, type: single_window, inner: {type: single_error_lut}}
-                  - {id: x, type: xor}
-                edges:
-                  - {from: input, to: b}
-                  - {from: b, to: x.a}
-                  - {from: b, to: x.b}
-                  - {from: x, to: output}
+          type: ensemble
+          join_strategy: deadline
+          join_params: {deadline_us: 200000, soft_stop_before_us: 100000}
+          members:
+            - nodes:
+                - {id: a, type: single_window, inner: {type: single_error_lut}}
+              edges: [{from: input, to: a}, {from: a, to: output}]
+            - nodes:
+                - {id: b, type: single_window, inner: {type: single_error_lut}}
+                - {id: x, type: xor}
+              edges:
+                - {from: input, to: b}
+                - {from: b, to: x.a}
+                - {from: b, to: x.b}
+                - {from: x, to: output}
 )"));
   const auto &node = multi_config.decoders.at(0).task_graph->nodes.at(0);
   ASSERT_TRUE(node.ensemble.has_value());
-  EXPECT_TRUE(node.type.empty());
+  EXPECT_EQ(node.type, "ensemble");
   EXPECT_EQ(node.ensemble->members.size(), 2u);
   EXPECT_EQ(node.ensemble->join_strategy, "deadline");
   EXPECT_EQ(node.ensemble->join_params.map().get<std::size_t>("deadline_us"),
@@ -2947,16 +2947,16 @@ decoders:
           residual_from: parity_check
           inner: {type: single_error_lut}
         - id: ens
-          ensemble:
-            join_strategy: deadline
-            join_params: {deadline_us: 500000}
-            members:
-              - nodes:
-                  - {id: a, type: single_window, window_size: 5, push_candidates: true, cancellable: true, inner: {type: single_error_lut}}
-                edges: [{from: input, to: a}]
-              - nodes:
-                  - {id: b, type: single_window, window_size: 5, inner: {type: multi_error_lut, lut_error_depth: 2}}
-                edges: [{from: input, to: b}, {from: b, to: output}]
+          type: ensemble
+          join_strategy: deadline
+          join_params: {deadline_us: 500000}
+          members:
+            - nodes:
+                - {id: a, type: single_window, window_size: 5, push_candidates: true, cancellable: true, inner: {type: single_error_lut}}
+              edges: [{from: input, to: a}]
+            - nodes:
+                - {id: b, type: single_window, window_size: 5, inner: {type: multi_error_lut, lut_error_depth: 2}}
+              edges: [{from: input, to: b}, {from: b, to: output}]
         - id: combine
           type: xor
       edges:
@@ -2984,11 +2984,11 @@ decoders:
   // the server, which only streams, rejects the graph.
   auto raw = cfg::multi_decoder_config::from_yaml_str(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: first
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          type: ensemble
+          join_strategy: first
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+              edges: [{from: input, to: a}, {from: a, to: output}]
 )"));
   EXPECT_NE(cfg::configure_decoders(raw), 0);
   cfg::finalize_decoders();
@@ -3009,7 +3009,7 @@ TEST(DecodingTaskGraph, EnsembleYamlRejectsLoweredKindsAndBadPatterns) {
   rejects(ensemble_yaml(R"(
         - {id: fan, type: ensemble_fanout}
 )"),
-          "write an 'ensemble' entry instead");
+          "write an 'ensemble' node instead");
   // Nor is a selection strategy a decoder type.
   rejects(ensemble_yaml(R"(
         - {id: w, type: single_window, inner: {type: deadline, deadline_us: 5}}
@@ -3017,39 +3017,39 @@ TEST(DecodingTaskGraph, EnsembleYamlRejectsLoweredKindsAndBadPatterns) {
           "no parameter schema is registered");
   rejects(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: best
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          type: ensemble
+          join_strategy: best
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+              edges: [{from: input, to: a}, {from: a, to: output}]
 )"),
           "not a registered selection strategy");
+  // The ensemble's keys belong to its type alone.
   rejects(ensemble_yaml(R"(
         - id: ens
           type: xor
-          ensemble:
-            join_strategy: first
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          join_strategy: first
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+              edges: [{from: input, to: a}, {from: a, to: output}]
 )"),
-          "takes no type");
+          "Unknown key");
   rejects(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: deadline
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          type: ensemble
+          join_strategy: deadline
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+              edges: [{from: input, to: a}, {from: a, to: output}]
 )"),
           "deadline_us");
   // Member wiring is the builder's to check.
   auto unwired = cfg::multi_decoder_config::from_yaml_str(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: first
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+          type: ensemble
+          join_strategy: first
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
 )"));
   try {
     cudaq::qec::decoding::host::build_task_graph(unwired.decoders.at(0));
@@ -14621,6 +14621,7 @@ TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble) {
   spec.members.push_back(std::move(member));
   spec.join_strategy = "first";
   ensemble.id = "E";
+  ensemble.kind = "ensemble";
   ensemble.ensemble = std::move(spec);
   nodes.push_back(std::move(ensemble));
   expect_lowering_error(
@@ -14878,6 +14879,7 @@ TEST(PatternKind, IsRejectedInsideAnEnsemble) {
   spec.members.push_back(std::move(member));
   spec.join_strategy = "first";
   ensemble.id = "E";
+  ensemble.kind = "ensemble";
   ensemble.ensemble = std::move(spec);
   nodes.push_back(std::move(ensemble));
   relay_lowered_ids().clear();

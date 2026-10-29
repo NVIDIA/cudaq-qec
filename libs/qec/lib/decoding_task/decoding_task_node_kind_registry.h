@@ -93,8 +93,7 @@ using node_factory =
 
 /// How a pattern kind expands. A node of a pattern kind is never built:
 /// from_topology() rewrites it into plain nodes and edges before any node is
-/// checked, as it does an ensemble entry, so the expanded graph is validated
-/// as a hand-written one is.
+/// checked, so the expanded graph is validated as a hand-written one is.
 struct node_pattern {
   using lowering = std::function<void(task_graph_node_config cfg,
                                       std::vector<task_graph_node_config> &out,

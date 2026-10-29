@@ -1059,6 +1059,7 @@ def test_task_graph_ensemble_roundtrips_through_yaml():
     ens.members = [member]
     node = qec.task_graph_node()
     node.id = "ens"
+    node.type = "ensemble"
     node.ensemble = ens
 
     graph = qec.task_graph_spec()
@@ -1074,7 +1075,7 @@ def test_task_graph_ensemble_roundtrips_through_yaml():
 
     parsed = qec.decoder_config.from_yaml_str(dc.to_yaml_str())
     node2 = parsed.task_graph.nodes[0]
-    assert node2.type == ""
+    assert node2.type == "ensemble"
     assert node2.ensemble is not None
     assert node2.ensemble.join_strategy == "deadline"
     assert node2.ensemble.join_params["deadline_us"] == 200
