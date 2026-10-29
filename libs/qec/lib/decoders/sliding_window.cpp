@@ -269,6 +269,9 @@ sliding_window::decode_batch(const std::vector<std::vector<float_t>> &syndromes,
     return std::vector<decoder_result>{};
   }
   if (syndromes[0].size() == this->syndrome_size) {
+    // The per-layer copy below reads every row up to syndrome_size.
+    for (const auto &s : syndromes)
+      check_syndrome_size(s.size());
     CUDA_QEC_DBG("Decoding whole block");
     // Decode the whole thing, feeding one detector layer at a time.
     std::optional<std::vector<decoder_result>> results;
@@ -301,9 +304,9 @@ sliding_window::decode_batch(const std::vector<std::vector<float_t>> &syndromes,
     // call. Multi-round chunks are rejected.
     if (r.size() != expected)
       throw std::invalid_argument(fmt::format(
-          "sliding_window: round {} has width {} but expected {} for this "
-          "round in the boundary layout",
-          rounds_since_last_reset, r.size(), expected));
+          "sliding_window: syndrome has length {}; every row in a call must "
+          "be either the full syndrome ({}) or the width of round {} ({})",
+          r.size(), this->syndrome_size, rounds_since_last_reset, expected));
 
   // Maybe FIXME:
   // Copies this layer into the rolling buffer. Revisit with a pooled buffer if

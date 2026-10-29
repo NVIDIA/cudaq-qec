@@ -36,8 +36,8 @@ find_package(CUDAToolkit REQUIRED)
 # ==============================================================================
 add_compile_options(-Wno-attributes) 
 
-add_executable(test_decoders test_decoders.cpp decoders/sample_decoder.cpp
-  decoders/cancellation_probe_decoder.cpp)
+add_executable(test_decoders test_decoders.cpp test_decoder_syndrome_size.cpp
+  decoders/sample_decoder.cpp decoders/cancellation_probe_decoder.cpp)
 target_include_directories(test_decoders PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
 target_link_libraries(test_decoders PRIVATE GTest::gtest_main cudaq-qec-decoders libstim CUDA::cudart)
 add_dependencies(CUDAQXQECUnitTests test_decoders)

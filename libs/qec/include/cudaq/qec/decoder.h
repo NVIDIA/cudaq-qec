@@ -15,6 +15,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -274,6 +275,9 @@ public:
   /// contract. The `result` field contains the primary output, and requested
   /// auxiliary outputs are stored in `opt_results`. A decoder that cannot
   /// satisfy the contract rejects construction.
+  /// @throws std::invalid_argument if the decoder does not accept a syndrome of
+  /// this length. Implementations must check the length before indexing the
+  /// syndrome; `check_syndrome_size()` does this for the common case.
   virtual decoder_result decode(const std::vector<float_t> &syndrome) = 0;
 
   /// @brief Decode a single syndrome
@@ -535,6 +539,20 @@ protected:
   void project_errors_to_observables(const float_t *errors,
                                      float_t *observables,
                                      std::size_t observables_size) const;
+
+  /// @brief Reject a syndrome whose length is not `syndrome_size`.
+  ///
+  /// Inline and non-virtual so that plugins built against older headers keep
+  /// the same layout, vtable and imported symbols.
+  /// @param size The length of the syndrome passed to decode.
+  /// @throws std::invalid_argument if @p size differs from `syndrome_size`.
+  void check_syndrome_size(std::size_t size) const {
+    if (size != syndrome_size)
+      throw std::invalid_argument(
+          "Syndrome has length " + std::to_string(size) +
+          " but this decoder expects " + std::to_string(syndrome_size) +
+          " (the number of detectors)");
+  }
 
   /// @brief Declare that this decoder consumes its realtime input as a stream
   /// of detector layers rather than one full syndrome per decode.
