@@ -108,9 +108,8 @@ partial output file, which must be removed before retrying.
 
 .. important::
 
-   Use decoder plugins built against the same QEC decoder interface as the
-   server. Official release archives omit both the standalone server and
-   generator; use the decoding-server image for this workflow.
+   Official release archives omit both the standalone server and generator;
+   use the decoding-server image for this workflow.
 
 See Also
 ^^^^^^^^

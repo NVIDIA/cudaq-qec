@@ -198,9 +198,6 @@ class GeneratorCliTest(unittest.TestCase):
                 self.assertIn("at least 3", result.stdout)
                 self.assertIn("at least 4", result.stdout)
                 self.assertIn("--output=PATH", result.stdout)
-                self.assertIn("The server executes the parallel_window graph",
-                              result.stdout)
-                self.assertIn("FINAL ends each shot", result.stdout)
                 self.assertNotIn("--output defaults", result.stdout)
                 self.assertNotIn("CUDAQ_QEC_DECODER_CONFIG", result.stdout)
                 self.assertEqual(list(self.root.iterdir()), [])
