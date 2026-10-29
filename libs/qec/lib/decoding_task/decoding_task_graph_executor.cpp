@@ -126,6 +126,8 @@ struct decoding_task_graph::impl::record_context {
   // buffers for the record's next publications.
   std::vector<std::vector<staged_delta>> staged;
   std::vector<std::size_t> staged_count;
+  // Retirement heap: at most one entry per node, reserved at construction.
+  std::vector<std::size_t> staged_nodes;
   // Replica of each pooled node leased to this record, or no_event.
   std::vector<std::size_t> pool_replica;
   std::vector<std::uint32_t> node_published;
@@ -301,6 +303,7 @@ struct decoding_task_graph::impl::record_scheduler {
       c.node_delta.assign(M, 0);
       c.staged.assign(M, {});
       c.staged_count.assign(M, 0);
+      c.staged_nodes.reserve(M);
       c.pool_replica.assign(M, no_event);
       c.node_published.assign(M, 0);
       c.node_closure.assign(M, std::nullopt);
@@ -1955,13 +1958,43 @@ int decoding_task_graph::impl::resolve_cuda_device_id() const {
 // Fold one retired record's captured node state into the graph-level view the
 // progress model reads. Generations advance here, in record order.
 void decoding_task_graph::impl::apply_record_context(record_context &c) {
+  // One record can finish arbitrarily many interleaved layer instances.
+  // Folding by node would fill the bounded stager with A intervals before
+  // its B intervals close the gaps. Sort each capture in reverse round order,
+  // then merge the nodes' tails, reusing their buffers and a node-sized heap.
+  auto &pending = c.staged_nodes;
+  pending.clear();
+  for (std::size_t si = 0; si < c.staged_count.size(); ++si) {
+    const auto count = c.staged_count[si];
+    if (count == 0)
+      continue;
+    auto &deltas = c.staged[si];
+    std::sort(deltas.begin(), deltas.begin() + count,
+              [](const auto &left, const auto &right) {
+                return left.coverage.begin_round > right.coverage.begin_round;
+              });
+    pending.push_back(si);
+  }
+  const auto later = [&](std::size_t left, std::size_t right) {
+    return c.staged[left][c.staged_count[left] - 1].coverage.begin_round >
+           c.staged[right][c.staged_count[right] - 1].coverage.begin_round;
+  };
+  std::make_heap(pending.begin(), pending.end(), later);
+  while (!pending.empty()) {
+    std::pop_heap(pending.begin(), pending.end(), later);
+    const auto si = pending.back();
+    const auto &delta = c.staged[si][--c.staged_count[si]];
+    for (const auto k : streaming_node_outputs[si])
+      stage_delta(k, delta.coverage, delta.bits);
+    if (c.staged_count[si] != 0)
+      std::push_heap(pending.begin(), pending.end(), later);
+    else
+      pending.pop_back();
+  }
   for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
-    if (si < streaming_node_staged.size() && streaming_node_staged[si]) {
-      for (std::size_t d = 0; d < c.staged_count[si]; ++d)
-        for (const auto k : streaming_node_outputs[si])
-          stage_delta(k, c.staged[si][d].coverage, c.staged[si][d].bits);
-      c.staged_count[si] = 0;
-    } else if (c.node_snapshotted[si]) {
+    const bool staged =
+        si < streaming_node_staged.size() && streaming_node_staged[si];
+    if (!staged && c.node_snapshotted[si]) {
       auto &latest = latest_node_corrections[si];
       const auto &captured = c.node_corrections[si];
       if (c.node_delta[si]) {
