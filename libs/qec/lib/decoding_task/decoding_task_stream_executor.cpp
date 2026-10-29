@@ -28,10 +28,9 @@ namespace {
 
 constexpr int kAsyncFinishSpinPauseIters = 4096;
 
-// How long FINAL's caller spins for its result before parking. The windows
-// left to decode after FINAL take a few hundred microseconds at d = 11, and
-// a park and wake would add tens more; 2 ms covers that chain while bounding
-// the CPU a caller burns when a decode runs long.
+// How long FINAL's caller spins for its result before parking: the decodes
+// left after FINAL take a few hundred microseconds at d = 11 and a wake adds
+// tens more, while 2 ms bounds the CPU a long decode makes it burn.
 constexpr std::chrono::microseconds async_final_spin_budget{2000};
 
 // Release the single-producer publication guard and wake a lifecycle operation
@@ -642,23 +641,20 @@ void decoding_task_graph::impl::finish_async_streaming() {
     state.finish_requested.store(true, std::memory_order_release);
     g.wake_async_stream();
   }
-  // The result is published when the flush's record completes; the session
-  // then ends and releases the graph without changing it, so a caller need
-  // not wait for that unless the session failed. settle_async_streaming()
-  // makes the next call wait instead.
+  // Return once the result is published; the session ends without changing
+  // it, and settle_async_streaming() makes the next call wait for that. A
+  // failed or cancelled session is waited out here.
   if (state.active.load(std::memory_order_acquire)) {
-    // Waiting ends with the result, or with a failure or cancel, which ends
-    // the session without one. Both mark every submitted record completed,
-    // which wakes the parked wait below; checking for them keeps the caller
-    // from then waiting on for a result that will not come.
+    // Wait for the result, a failure or a cancel. The latter two mark every
+    // record completed, waking a parked wait.
     const auto waiting = [&state] {
       return state.completed.load(std::memory_order_acquire) <
                  state.finish_target &&
              !state.failed.load(std::memory_order_acquire) &&
              !state.cancel_requested.load(std::memory_order_acquire);
     };
-    // Spin for the result first: the caller wants it now, and parking would
-    // add a wake to the shot's tail. Check the clock every few pauses only.
+    // Spin first, since a park adds a wake to the tail; check the clock only
+    // every few pauses.
     const auto spin_deadline =
         std::chrono::steady_clock::now() + async_final_spin_budget;
     for (int spin = 0; waiting(); ++spin) {
@@ -667,8 +663,8 @@ void decoding_task_graph::impl::finish_async_streaming() {
         break;
       CUDAQ_REALTIME_CPU_RELAX();
     }
-    // Park on the value just checked: reading it again could see the
-    // result arrive and then wait for a change that never comes.
+    // Park on the value just checked: a fresh read could see the result
+    // arrive, then wait for a change that never comes.
     for (auto completed = state.completed.load(std::memory_order_acquire);
          completed < state.finish_target &&
          !state.failed.load(std::memory_order_acquire) &&
@@ -676,8 +672,7 @@ void decoding_task_graph::impl::finish_async_streaming() {
          completed = state.completed.load(std::memory_order_acquire))
       wait_for_completion_change(state.completed, state.completion_waiters,
                                  completed);
-    // A session that ended without its result releases the graph before
-    // the caller learns why.
+    // Without the result, wait for the session to release the graph.
     if (state.completed.load(std::memory_order_acquire) < state.finish_target ||
         state.failed.load(std::memory_order_acquire))
       wait_until_inactive(state.active);
@@ -685,8 +680,8 @@ void decoding_task_graph::impl::finish_async_streaming() {
   g.rethrow_async_stream_error();
 }
 
-// A finished session has published its result but may still be ending:
-// its coordinator returns from the pool phase and then releases the graph.
+// A finished session has published its result but may still be releasing
+// the graph.
 void decoding_task_graph::impl::settle_async_streaming() {
   auto &state = async_streaming;
   if (state.enabled && state.active.load(std::memory_order_acquire) &&

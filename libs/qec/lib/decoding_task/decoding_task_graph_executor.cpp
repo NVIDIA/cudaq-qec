@@ -37,11 +37,9 @@ constexpr std::int64_t no_index = std::numeric_limits<std::int64_t>::min();
 // session has records in flight; idle sessions park at once.
 constexpr std::size_t kHandoffSpinPauseIters = 4096;
 
-// The most bytes of rounds a record context takes, past the raw-input node's
-// own chunk. A windowed graph's ingest takes one first-layer period, 3d
-// rounds of about d^2 measurements: 8 KB at d = 11, 126 KB at d = 35. 128 KB
-// covers that while bounding what a node metering huge chunks would have
-// each context hold.
+// Cap on record_bytes. A windowed graph's ingest chunk is one first-layer
+// period, 3d rounds of about d^2 measurements: 8 KB at d = 11, 126 KB at
+// d = 35. 128 KB covers that and bounds each context's batch buffer.
 constexpr std::size_t max_record_bytes = std::size_t{128} << 10;
 
 // An indexed node's flush event, in graph_event::offset, once it has resolved
@@ -166,8 +164,8 @@ struct decoding_task_graph::impl::record_context {
   bool in_use = false;
   uint64_t sequence = 0;
   phase kind = phase::idle;
-  // Record payload: a queue slot's, or, for rounds admitted together, this
-  // buffer's, sized when the async queue is prepared.
+  // Record payload: all or part of a queue slot's, or this buffer's, which
+  // holds rounds admitted together.
   std::vector<uint8_t> batch;
   const uint8_t *syndrome = nullptr;
   std::size_t len = 0;
@@ -178,8 +176,8 @@ struct decoding_task_graph::impl::record_context {
   uint64_t ring_sequence = 0;
   // Public operations this record holds: queued rounds admitted together.
   std::size_t operations = 1;
-  // Whether this record starts its public operation, which a record cut into
-  // several does only in its first.
+  // Whether this record starts its public operation: only the first of a
+  // record cut into several does.
   bool opens_record = true;
   bool closes_record = false;
   bool finish_flush = false;
@@ -533,7 +531,7 @@ struct decoding_task_graph::impl::record_scheduler {
     notify_workers();
   }
 
-  // activate() for a caller holding the lock, which wakes the workers.
+  // activate() under the caller's lock; the caller wakes the workers.
   void activate_locked(context &c, bool gated) {
     c.gated = gated;
     if (gated) {
@@ -1074,18 +1072,17 @@ struct decoding_task_graph::impl::record_scheduler {
     return false;
   }
 
-  // Whether an indexed node's flush may resolve its instances: no delivery to
-  // it is queued or running. Without a loop-carried edge into the node, its
-  // own fires deliver nothing to it, so those may still run; with one, this
-  // is flush_ready_locked(), as for a pooled node. The second pass, which
-  // ends the node's shot, waits for that too.
+  // Whether an indexed node's flush may resolve its instances: no delivery
+  // to it is in flight. Its own fires may still run unless a loop-carried
+  // edge feeds it back; then, and for the flush's second pass, this is
+  // flush_ready_locked().
   bool flush_may_start_locked(const context &self,
                               const graph_event &flush) const {
     const auto si = flush.node;
     if (!indexed(si) || self_fed[si] || flush.offset == flush_resolved)
       return flush_ready_locked(self, si);
-    // Each context's live events must be only its fires, and in `self`
-    // the flush asking; compared, not subtracted, so no count can wrap.
+    // Live events may be only fires, plus the asking flush in `self`;
+    // compared, not subtracted, so no count can wrap.
     for (const auto *c : active) {
       const std::uint32_t allowed =
           c->node_fires_live[si] + (c == &self ? 1u : 0u);
@@ -1150,9 +1147,8 @@ struct decoding_task_graph::impl::record_scheduler {
           entry.state[i] == join_entry::present ? &entry.inputs[i] : nullptr;
     auto *capability = node.replicas[replica];
     capability->clear_corrections(); // its corrections become this delta
-    // The entry is freed once, under a lock the worker takes anyway: by
-    // finish_locked() when this returns, or by fail() when anything here
-    // throws, the fire or its publication.
+    // The entry is freed once: by finish_locked() when this returns, or by
+    // fail() if the fire or its publication throws.
     const bool fired = node.indexed[replica]->fire(event.index, inputs);
     // A failure the node reported takes the path of a thrown one.
     if (const auto *failure = capability->fire_failure())
@@ -1425,8 +1421,7 @@ struct decoding_task_graph::impl::record_scheduler {
 
   // ----- Dispatcher support ------------------------------------------------
 
-  // Fires a pool of @p executing workers may run at once; with one worker,
-  // that worker.
+  // Fires @p executing workers may run at once: all but one, at least one.
   static std::size_t fire_cap_for(std::size_t executing) {
     return executing > 1 ? executing - 1 : 1;
   }
@@ -1438,9 +1433,8 @@ struct decoding_task_graph::impl::record_scheduler {
     return lock;
   }
 
-  // The async coordinator is the only thread that admits, activates and
-  // releases contexts, so it reads `active` and each context's `in_use`
-  // without the runtime lock; workers only read them, under it.
+  // Only the async coordinator admits, activates and releases contexts, so it
+  // reads `active` and `in_use` without the lock; workers read them under it.
 
   // How many of the oldest active contexts have finished executing, in order.
   // Coordinator only.
@@ -1811,9 +1805,8 @@ private:
       owner.wake_async_stream();
   }
 
-  // Finish event @p id, which ran to completion, freeing an indexed fire's
-  // join entry. Its worker calls this under the lock it takes to select its
-  // next event.
+  // Finish event @p id, which ran to completion, freeing a fire's join
+  // entry. Called under the lock its worker takes to select the next event.
   void finish_locked(context &c, std::size_t id) {
     if (id < c.slots.size() && c.slots[id].running &&
         c.slots[id].event.kind == graph_event_kind::streaming_indexed_fire) {
@@ -1981,10 +1974,9 @@ public:
     std::vector<uint8_t> state;
   };
   std::vector<std::deque<join_entry>> joins;
-  // By streaming node: the table indices of its used entries, in no order,
-  // so a flush resolves the shot's instances without scanning the whole
-  // preallocation; and scratch the flush sorts them in. Both are reserved
-  // with the table.
+  // By streaming node: its used entries' table indices, unordered, so a
+  // flush need not scan the whole table; and the flush's scratch to sort
+  // them in. Both are reserved with the table.
   std::vector<std::vector<std::size_t>> join_live;
   std::vector<std::vector<std::size_t>> join_scan;
   // By streaming node: whether a loop-carried edge feeds it, so its own
@@ -2054,9 +2046,8 @@ public:
   }
   // Per-replica scratch for the input pointers handed to fire().
   std::vector<std::vector<std::vector<const edge_value *>>> fire_inputs;
-  // Per streaming node and copy: the join entry the copy's running fire
-  // reads, found when the fire is claimed. A deque keeps its entries in
-  // place as it grows, so the fire reads it without the lock.
+  // Per streaming node and copy: the join entry its running fire reads, found
+  // at claim. A growing deque keeps entries in place, so no lock is needed.
   std::vector<std::vector<join_entry *>> fire_entries;
   // Whether publication copies outputs into the record (several contexts,
   // or a fire pool).
@@ -2069,8 +2060,7 @@ public:
   alignas(64) std::atomic<uint64_t> ready_generation{0};
   alignas(64) std::size_t running = 0;
   // Indexed fires running, and the most that may: one fewer than the
-  // workers executing events, so ingestion, deliveries and flushes always
-  // have one and are not queued behind decodes.
+  // executing workers, so other events never queue behind decodes.
   std::size_t running_fires = 0;
   std::size_t fire_cap = 1;
   uint64_t next_record = 0;
@@ -2107,10 +2097,8 @@ void decoding_task_graph::impl::prepare_event_runtime(std::size_t context_count,
       std::max<std::size_t>(64, 16 * (nodes.size() + streaming_wire_count + 1));
   scheduler =
       std::make_unique<record_scheduler>(*this, context_count, event_capacity);
-  // When the one raw-input node meters its own chunks, a record may be cut
-  // or joined anywhere, so records hold one chunk: a longer one is cut, and
-  // queued rounds are joined, which their records need room for. A record of
-  // one chunk is one delivery, as the join tables sized per record assume.
+  // Records hold one chunk of a single metering raw-input node (see
+  // record_bytes): one delivery, as the per-record join tables assume.
   auto &state = async_streaming;
   std::size_t raw_inputs = 0;
   std::size_t chunk = 0;
@@ -2228,8 +2216,7 @@ bool decoding_task_graph::impl::enqueue_sweep(const uint8_t *syndrome,
                                               int cuda_device_id) {
   require_streaming_support("enqueue_syndrome");
   // A tagged record longer than record_bytes runs as several, each retired
-  // before the next, so none holds more than a chunk's windows. The pieces
-  // before the last are BULK; the last keeps the record's type.
+  // before the next: BULK, then the record's own type for the last.
   if (record_bytes != 0 && type && len > record_bytes) {
     bool fired = false;
     for (std::size_t at = 0; at < len; at += record_bytes) {
@@ -2362,9 +2349,8 @@ void decoding_task_graph::impl::retire_record_context(record_context &c) {
     publish_async_stream_snapshot();
     return;
   }
-  // Rounds admitted together count once for each time they advanced the
-  // result, up to how many there are: exact unless one of them advanced it
-  // twice while another did not.
+  // Rounds admitted together count once per time they advanced the result,
+  // up to how many there are.
   if (result.operation_completed)
     result.completed_operations += std::max<std::uint64_t>(
         1, std::min<std::uint64_t>(c.operations,
@@ -2400,8 +2386,7 @@ void decoding_task_graph::impl::dispatch_async_session() {
   uint64_t observed_epoch = state.wake_epoch.load(std::memory_order_acquire);
   bool flush_admitted = false;
   bool final_pending = false;
-  // How much of the record at `admitted` is admitted already, when it is
-  // being admitted in pieces.
+  // Bytes of the record at `admitted` already admitted, while it is cut.
   std::size_t cut_at = 0;
   std::exception_ptr failure;
 
@@ -2453,9 +2438,8 @@ void decoding_task_graph::impl::dispatch_async_session() {
     if (failure)
       continue;
 
-    // Admit every published record a context is free for: fill the contexts
-    // without the lock, copying any batch, then activate them under one lock
-    // and wake the workers once.
+    // Admit what free contexts allow: fill them without the lock, then
+    // activate them under one lock and wake the workers once.
     if (admitted < state.submitted.load(std::memory_order_acquire)) {
       std::exception_ptr admit_error;
       const auto submitted = state.submitted.load(std::memory_order_acquire);
@@ -2465,9 +2449,9 @@ void decoding_task_graph::impl::dispatch_async_session() {
         if (!c)
           break;
         auto &slot = state.slots[admitted % state.capacity];
-        // A tagged record longer than record_bytes is admitted as several,
-        // into the slot's own buffer: each but the last BULK, the first
-        // opening its operation and the last closing it.
+        // A tagged record longer than record_bytes is admitted as several
+        // pieces of its slot: BULK but the last, the first opening its
+        // operation and the last closing it.
         if (record_bytes != 0 && slot.type &&
             (cut_at != 0 || slot.len > record_bytes)) {
           const auto piece = std::min(record_bytes, slot.len - cut_at);
@@ -2537,8 +2521,7 @@ void decoding_task_graph::impl::dispatch_async_session() {
           S.activate_locked(c, /*gated=*/true);
           progressed = true;
         }
-        // Hand back the contexts a failure left unactivated, rather than
-        // leave them to the failed session's discard_all().
+        // Release any contexts a failure left unactivated.
         for (std::size_t r = activated; r < S.admitting.size(); ++r)
           S.release_locked(*S.admitting[r]);
         S.notify_workers();

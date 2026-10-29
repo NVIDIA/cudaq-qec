@@ -279,10 +279,7 @@ struct decoding_task_graph::impl {
     std::atomic<std::uint32_t> completion_waiters{0};
     std::atomic<bool> coordinator_waiting{false};
     uint64_t finish_target = 0;
-    /// Whether the coordinator may admit several queued rounds as one
-    /// record: the graph's one raw-input node meters its own chunks, so a
-    /// record may be cut, or joined, anywhere. With two, records also order
-    /// their deliveries to where those nodes meet.
+    /// Admit queued rounds together: record_bytes is nonzero.
     bool coalesce = false;
     int cuda_device_id = -1;
     bool needs_reset = false;
@@ -442,12 +439,11 @@ struct decoding_task_graph::impl {
   void synchronize_async_streaming();
   /// Drain accepted input without flushing, then release graph exclusivity.
   void drain_async_streaming();
-  /// Drain accepted input and flush once. Returns once the result is
-  /// published; a failed session also waits for graph exclusivity to be
-  /// released, and rethrows.
+  /// Drain accepted input and flush once; return when the result is
+  /// published. A failed or cancelled session first releases the graph,
+  /// and a failure rethrows.
   void finish_async_streaming();
-  /// Wait out a finished session's teardown, which runs after its result is
-  /// published, so the next call finds the graph released. No-op otherwise.
+  /// Wait for a finished session to release the graph.
   void settle_async_streaming();
   /// Discard queued input and release graph exclusivity for reset.
   void cancel_async_streaming();
