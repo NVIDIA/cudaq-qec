@@ -100,20 +100,17 @@ share the graph's N workers.
 The generator is a standalone tool and requires ``--output=PATH``. It has no
 default filename or implicit output location. Generation never overwrites an
 existing file or symlink. Wait for successful completion,
-then pass the file explicitly to ``decoding_server --config=PATH`` when the
-runtime is available. Exit status is zero for successful generation or help
+then pass the file explicitly to ``decoding_server --config=PATH``. The server
+executes the ``parallel_window`` graph and closes each shot through the emitted
+``final`` mapping. Exit status is zero for successful generation or help
 and one for an error. A forced termination may leave a
 partial output file, which must be removed before retrying.
 
 .. important::
 
-   The target server must support executable parallel-window graphs.
-   A server without that support reports
-   ``the 'parallel_window' pattern is not available yet`` and exits with status
-   one. Use an image containing executable parallel-window support. Official
-   release archives currently omit both the standalone server and generator;
-   use the decoding-server image instead. Parsing the YAML does not establish
-   end-to-end decoding or performance.
+   Use decoder plugins built against the same QEC decoder interface as the
+   server. Official release archives omit both the standalone server and
+   generator; use the decoding-server image for this workflow.
 
 See Also
 ^^^^^^^^

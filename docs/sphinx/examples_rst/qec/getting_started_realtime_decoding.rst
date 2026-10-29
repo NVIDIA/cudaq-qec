@@ -91,10 +91,11 @@ The configuration is then saved to a YAML file for reuse. The YAML format is hum
 For finite Surface Code memory experiments, the standalone
 ``memory-experiment-generator`` can generate this YAML directly. The required
 ``--output=PATH`` selects its destination; there is no default filename. It
-never replaces an existing configuration. When the generated
-pattern's runtime is available, pass the completed file to
-``decoding_server --config=PATH`` explicitly. The generator does not change
-server configuration discovery or in-process configuration APIs.
+never replaces an existing configuration. Pass the completed file to
+``decoding_server --config=PATH`` explicitly; the server executes the generated
+``parallel_window`` graph and closes shots through its ``final`` mapping. The
+generator does not change server configuration discovery or in-process
+configuration APIs.
 
 .. note::
 
