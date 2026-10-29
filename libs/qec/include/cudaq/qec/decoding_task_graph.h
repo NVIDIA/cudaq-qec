@@ -176,9 +176,9 @@ task_graph_node_params_schema(const std::string &type) {
 
 struct task_graph_node_config;
 
-/// An ensemble pattern: member subgraphs run concurrently, one answer
-/// kept. The members and join of a node of kind `ensemble`
-/// (`task_graph_node_config::ensemble`), which from_topology() lowers into an
+/// The members and join of a node of kind `ensemble`
+/// (`task_graph_node_config::ensemble`): member subgraphs run concurrently and
+/// one answer is kept. from_topology() lowers the node into an
 /// `ensemble_fanout`, `ensemble_join`, and the members. Every member node input
 /// that accepts a `%candidate_sink` is wired to the ensemble's candidate sink
 /// and every one that accepts a `cancellation_token` to its cancellation token.

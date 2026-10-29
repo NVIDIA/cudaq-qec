@@ -488,7 +488,7 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
   cudaq::qec::task_graph_node_config node;
   node.id = ns.id;
   node.kind = ns.resolved_kind();
-  if (node.kind == "ensemble") {
+  if (ns.ensemble.has_value()) {
     // A pattern: translate its member nodes (each with the usual DEM fallback
     // and decoder handling) and hand the pattern itself to the builder, which
     // lowers it. The pattern node carries no DEM or decoder of its own.

@@ -1083,6 +1083,26 @@ def test_task_graph_ensemble_roundtrips_through_yaml():
     assert node2.ensemble.members[0].edges[1].to_node == "output"
     assert parsed.task_graph == dc.task_graph
 
+    # The schema polices the ensemble keys as the parser does: an ensemble
+    # node takes no other node key, and no other node takes its keys.
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    document = yaml.safe_load(qec_yaml_for(dc))
+    validator.validate(document)
+    with_inner = yaml.safe_load(qec_yaml_for(dc))
+    with_inner["decoders"][0]["task_graph"]["nodes"][0]["inner"] = {
+        "type": "pymatching"
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(with_inner)
+    on_xor = yaml.safe_load(qec_yaml_for(dc))
+    on_xor["decoders"][0]["task_graph"]["nodes"][0]["type"] = "xor"
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(on_xor)
+
 
 def test_task_graph_edges_carry_ports():
     # The configuration holds the same edge type from_topology() takes, so ports

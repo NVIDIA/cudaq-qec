@@ -314,7 +314,7 @@ static bool is_ensemble_node(const task_graph_node_spec &node) {
 /// Whether a node needs no entry-level DEM: its kind takes none, it carries
 /// its own, or every member node does.
 static bool task_graph_node_describes_itself(const task_graph_node_spec &node) {
-  if (is_ensemble_node(node)) {
+  if (node.ensemble.has_value()) {
     for (const auto &member : node.ensemble->members)
       for (const auto &member_node : member.nodes)
         if (!task_graph_node_describes_itself(member_node))
@@ -431,8 +431,7 @@ static void validate_task_graph(const decoder_config &config) {
                                "only an ingest node takes windows");
     if (is_ensemble_node(node))
       validate_ensemble_node(node, node_context(node.id), typed);
-    else
-      typed.emplace_back(&node, node_context(node.id));
+    typed.emplace_back(&node, node_context(node.id));
   }
   for (const auto &[typed_node, where] : typed) {
     const auto &node = *typed_node;
@@ -2593,8 +2592,20 @@ decoder_params_json_schema(const decoder_schema &schema,
 /// The `ensemble` kind's keys, added to `node_properties`: members of nodes
 /// (the node schema itself) and edges, a registered join_strategy and, per
 /// strategy, its join_params. Returns the clause requiring them of an
-/// ensemble node.
+/// ensemble node, forbidding it every other node key, and forbidding them of
+/// every other node, as the parser does.
 llvm::json::Object ensemble_json_schema(llvm::json::Object &node_properties) {
+  const auto forbid = [](std::vector<std::string> keys) {
+    llvm::json::Array out;
+    for (const auto &key : keys)
+      out.push_back(llvm::json::Object{
+          {"not", llvm::json::Object{{"required", llvm::json::Array{key}}}}});
+    return out;
+  };
+  std::vector<std::string> node_only;
+  for (const auto &[key, value] : node_properties)
+    if (key != "id" && key != "type" && key != "max_in_flight")
+      node_only.push_back(key.str());
   llvm::json::Array names, per_strategy;
   for (const auto &name : cudaq::qec::registered_selection_strategies()) {
     names.push_back(name);
@@ -2648,10 +2659,12 @@ llvm::json::Object ensemble_json_schema(llvm::json::Object &node_properties) {
   node_properties["join_strategy"] =
       llvm::json::Object{{"type", "string"}, {"enum", std::move(names)}};
   node_properties["join_params"] = llvm::json::Object{{"type", "object"}};
+  llvm::json::Array constraints = forbid(std::move(node_only));
+  for (auto &clause : per_strategy)
+    constraints.push_back(std::move(clause));
   llvm::json::Object ensemble{
-      {"required", llvm::json::Array{"members", "join_strategy"}}};
-  if (!per_strategy.empty())
-    ensemble["allOf"] = std::move(per_strategy);
+      {"required", llvm::json::Array{"members", "join_strategy"}},
+      {"allOf", std::move(constraints)}};
   return llvm::json::Object{
       {"if",
        llvm::json::Object{
@@ -2659,7 +2672,9 @@ llvm::json::Object ensemble_json_schema(llvm::json::Object &node_properties) {
             llvm::json::Object{
                 {"type", llvm::json::Object{{"const", "ensemble"}}}}},
            {"required", llvm::json::Array{"type"}}}},
-      {"then", std::move(ensemble)}};
+      {"then", std::move(ensemble)},
+      {"else", llvm::json::Object{{"allOf", forbid({"members", "join_strategy",
+                                                    "join_params"})}}}};
 }
 
 llvm::json::Object task_graph_json_schema() {
