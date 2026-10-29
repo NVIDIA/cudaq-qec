@@ -337,7 +337,7 @@ COPY --from=builder /workspaces/cudaq-qec/docs/sphinx/examples/qec/realtime_deco
 # Third-party notices for components this image adds beyond CUDA-Q and
 # CUDA-Q QEC. Apt packages are attributed in the CUDA-Q package sources image, 
 # as for the CUDA-Q and CUDA-QEC containers.
-COPY docker/release/decoding-server-notices/NOTICE_CONTAINER /opt/nvidia/cudaq-qec/NOTICE_CONTAINER
+COPY docker/release/decoding-server-notices/NOTICE /opt/nvidia/cudaq-qec/NOTICE_CONTAINER
 
 WORKDIR /root
 ENTRYPOINT ["bash", "-l"]

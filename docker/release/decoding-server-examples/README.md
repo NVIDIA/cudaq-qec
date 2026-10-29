@@ -138,3 +138,28 @@ and others) live in `libcudaq-qec-decoders.so`. Plugin decoders are loaded from
 `/opt/nvidia/cudaq-qec/lib/decoder-plugins`; this image ships `pymatching`,
 `chromobius`, `trt_decoder` and a small `example` plugin. The `nv-qldpc-decoder`
 GPU plugin is present when the image was built with the proprietary artifacts.
+
+## Notice and disclaimer
+
+NOTICE AND DISCLAIMER: This software automatically retrieves, accesses or
+interacts with external materials. Those retrieved materials are not
+distributed with this software and are governed solely by separate terms,
+conditions and licenses. You are solely responsible for finding, reviewing and
+complying with all applicable terms, conditions, and licenses, and for
+verifying the security, integrity and suitability of any retrieved materials
+for your specific use case. This software is provided "AS IS", without warranty
+of any kind. The author makes no representations or warranties regarding any
+retrieved materials, and assumes no liability for any losses, damages,
+liabilities or legal consequences from your use or inability to use this
+software or any retrieved materials. Use this software and the retrieved
+materials at your own risk.
+
+The script `realtime_decoding_demo/prepare_ising_artifacts.py` retrieves, when
+run, the following NVIDIA materials:
+
+- the Ising-Decoding repository, <https://github.com/NVIDIA/Ising-Decoding>
+- the `nvidia/Ising-Decoder-SurfaceCode-1-Fast` model weights,
+  <https://huggingface.co/nvidia/Ising-Decoder-SurfaceCode-1-Fast>, under the
+  NVIDIA Open Model License
+
+Nothing else in this container retrieves external materials.
