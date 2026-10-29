@@ -82,6 +82,7 @@ ingest_core::ingest_core(std::shared_ptr<const experiment_template> context,
       reject("layer " + std::to_string(l) + "'s view pool is empty");
     first_k_.push_back(window_instances(request, 0).begin);
     spans_.push_back(zone_span(request));
+    bounds_.push_back(variant_bounds_of(*context_, request));
     lowest = std::min(lowest, request.offset + spans_.back().begin);
     highest = std::max(highest, request.offset + model_reach(t, request).end);
     max_views = std::max(max_views, layers_[l].max_views);
@@ -490,7 +491,7 @@ bool ingest_core::window_complete(std::size_t l, std::int64_t k,
   const auto &request = layers_[l].request;
   if (shot_rounds_)
     return true;
-  return !window_variant(*context_, request, k, least).terminal &&
+  return !window_variant(bounds_[l], request, k, least).terminal &&
          request.offset + k * period_ + spans_[l].end <=
              static_cast<std::int64_t>(formed_);
 }
@@ -534,9 +535,8 @@ const ingest_publication *ingest_core::poll() {
       auto &view = pools_[l][s];
       out_[l][s] = true;
       view.k = k;
-      view.rounds = {std::max<std::int64_t>(0, anchor + spans_[l].begin),
-                     std::min(end, anchor + spans_[l].end)};
-      view.variant = window_variant(*context_, request, k, least);
+      view.rounds = clip_rounds(spans_[l], anchor, end);
+      view.variant = window_variant(bounds_[l], request, k, least);
       view.first_row =
           ring_first_row_[static_cast<std::size_t>(view.rounds.begin) &
                           ring_mask_];

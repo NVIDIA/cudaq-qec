@@ -5,6 +5,7 @@
 #include "decoding_task_memory_window_node.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
+#include "sparse_dem_from_chunks.h"
 #include "cudaq/qec/logger.h"
 #include <algorithm>
 #include <limits>
@@ -199,8 +200,10 @@ memory_window_node::compile_model(std::size_t start_phase, bool terminal,
   // Use the sparse closure primitives behind from_dem_chunks_closed(). These
   // are physical window slices with an extra preceding measurement context,
   // not an expansion of the original whole-shot recipe.
-  m.h = dem_chunks_to_pcm(chunks, spec_->seam.from_seam, spec_->seam.to_seam);
-  const auto observable_rows = dem_chunks_to_o_sparse(chunks);
+  auto closed = details::sparse_dem_from_chunks(chunks, spec_->seam.from_seam,
+                                                spec_->seam.to_seam);
+  m.h = std::move(closed.detector_error_matrix);
+  const auto &observable_rows = closed.observable_rows;
   m.o =
       sparse_binary_matrix::from_nested_csr(
           static_cast<sparse_binary_matrix::index_type>(observable_rows.size()),
@@ -210,14 +213,9 @@ memory_window_node::compile_model(std::size_t start_phase, bool terminal,
     throw std::invalid_argument(
         "memory window: model and measurement/output layouts disagree");
   m.fault_offsets = dem_chunks_to_fault_offsets(chunks);
-  std::vector<double> error_rates;
-  error_rates.reserve(m.h.num_cols());
-  for (const auto &chunk : chunks)
-    error_rates.insert(error_rates.end(), chunk.error_rates.begin(),
-                       chunk.error_rates.end());
   m.dec = get_decoder(
       ctx.decoder_type,
-      decoder_init(m.h, std::nullopt, std::move(error_rates), m.d),
+      decoder_init(m.h, std::nullopt, std::move(closed.error_rates), m.d),
       decoder_output_request{decode_result_type::errors}, ctx.decoder_params);
   if (m.dec->get_result_type() == decode_result_type::observables ||
       m.dec->get_syndrome_size() != m.h.num_rows() ||

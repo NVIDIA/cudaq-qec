@@ -62,7 +62,10 @@ inline window_send_value receive_of(const window_send_payload &payload) {
   return {payload.values, payload.send, payload.first_row};
 }
 
-/// One fire's results, held in its slot until the slot fires again.
+/// One fire's results, held in its slot until the slot fires again. A
+/// prefix or terminal variant's detectors, solution and sends lie in its
+/// one set of buffers, so they hold until that variant fires again, in
+/// any slot.
 struct window_fire {
   std::int64_t k = 0;
   bool fired = false;   ///< False until the slot first fires
@@ -73,18 +76,26 @@ struct window_fire {
   /// The estimate, convergence, whether H e = d, and the outputs.
   const window_solution *solution = nullptr;
   std::vector<window_send_value> sends; ///< One per send of the request
+  /// Empty unless verify_residual fail rejected the solution: then why,
+  /// naming the window and the first row where H e differs from d.
+  std::string failure;
+  std::size_t variant = 0; ///< The variant's index in the core
+  /// A prefix or terminal variant's fire count at this fire: its results
+  /// hold while the count stays.
+  std::uint64_t ticket = 0;
 };
 
 /// Fires one layer's windows. Fires into different slots may run at once,
-/// each on its own thread: each slot has its own buffers and bulk decoder,
+/// each on its own thread: each slot has its own bulk decoder and buffers,
 /// and a prefix or terminal variant, which only one window of a shot uses,
-/// has a single decoder, so a window fires into one slot at a time: a fire
-/// of a prefix or terminal variant while another decodes is rejected. While
-/// a slot fires, held() may read other slots, but nothing may read or fire
-/// that slot, and reset() may not run. A fire's sends are leased to the
+/// has a single decoder and buffers, so it fires into one slot at a time: a
+/// fire of a prefix or terminal variant while another decodes is rejected.
+/// While a slot fires, held() may read other slots, but nothing may read or
+/// fire that slot, and reset() may not run. A fire's sends are leased to the
 /// fires that receive them: its slot must not fire again until they have
 /// finished. The caller chooses the slots, so it knows which holds which
-/// window, and orders all of this, as the executor's queues will.
+/// window, and orders all of this. The copies of a decode_window_node, which
+/// the executor runs for concurrency, share one core, a slot each.
 class decode_window_core {
 public:
   /// @param store The store holding every variant of @p request on
@@ -112,8 +123,9 @@ public:
   /// delta to the window's own rows and a residual to its imported ones,
   /// then decode and commit. The window and every received row are checked
   /// first, so a rejected fire leaves the slot holding what it held; a decoder
-  /// that fails, or a solution that verify_residual fail rejects, leaves it
-  /// empty. Allocates nothing beyond what the decoder's decode() does, except
+  /// that fails leaves it empty. A solution that verify_residual fail rejects
+  /// leaves it empty too, without a throw: the fire record's failure says
+  /// why. Allocates nothing beyond what the decoder's decode() does, except
   /// for the message of a solution it rejects.
   /// @param receives One per receive port: the producer instance's send, or
   /// null when that instance does not exist.
@@ -122,18 +134,27 @@ public:
   /// variant's rows, a received send reaches a row the window does not take
   /// in its mode, or an imported row receives no residual;
   /// std::logic_error if the window's variant is a prefix or terminal one
-  /// that another slot is decoding; std::runtime_error if verify_residual
-  /// is fail and the solution does not satisfy the window's detectors.
+  /// that another slot is decoding.
   const window_fire &fire(std::size_t slot, const window_rows &window,
                           std::span<const window_send_value *const> receives);
 
   /// Start a new shot: no slot holds a fire, so held() shows none of an
   /// earlier shot's windows.
   void reset();
+  /// Start a new shot in @p slot alone, which may run while other slots
+  /// fire.
+  /// @throws std::invalid_argument if the slot does not exist.
+  void reset(std::size_t slot);
+  /// The layer's request.
+  const window_request &request() const { return request_; }
   /// The fire @p slot holds, unfired when it holds none. Reads only that
   /// slot, so it may run while other slots fire.
   /// @throws std::invalid_argument if the slot does not exist.
   const window_fire &held(std::size_t slot) const;
+  /// Whether @p fire's detectors, solution and sends still hold: always for
+  /// the bulk, and for a prefix or terminal variant until it fires again,
+  /// in any slot. Reads no slot.
+  bool holds(const window_fire &fire) const;
   /// The index of send @p id among the request's sends.
   /// @throws std::invalid_argument if the request has no such send.
   std::size_t send_index(const std::string &id) const;
@@ -145,12 +166,15 @@ public:
   std::size_t max_send_rows(std::size_t s) const;
 
 private:
-  /// One variant's model and its decoders: one per slot for the bulk, else
-  /// one.
+  /// One variant's model, and its decoders with a workspace and detector
+  /// buffer each: one per slot for the bulk, else one, as a prefix or
+  /// terminal variant fires in one slot at a time.
   struct variant {
     variant_key key;
     std::shared_ptr<const decoding_window> window;
     std::vector<std::unique_ptr<decoder>> decoders;
+    std::vector<window_workspace> workspaces;
+    std::vector<std::vector<std::uint8_t>> detectors;
   };
 
   /// Throws std::invalid_argument for @p what.
@@ -165,16 +189,24 @@ private:
   verify_residual_mode verify_ = verify_residual_mode::none;
   round_range span_; ///< The rounds a window spans, from its anchor
   std::vector<variant> variants_;
-  // Per slot, a workspace and a detector buffer for every variant.
-  std::vector<std::vector<window_workspace>> workspaces_;
-  std::vector<std::vector<std::vector<std::uint8_t>>> detectors_;
-  std::vector<window_fire> fires_;
+  /// One slot's fire, on cache lines of its own: copies fire into
+  /// neighbouring slots at once.
+  struct alignas(64) slot_fire {
+    window_fire fire;
+  };
+  std::vector<slot_fire> fires_;
   /// Per slot, which imported rows a fire's residuals reach, checked before
   /// it writes.
   std::vector<std::vector<std::uint8_t>> covered_;
   /// Per variant, whether a fire holds its one decoder; set only for prefix
   /// and terminal variants.
-  std::unique_ptr<std::atomic<bool>[]> decoding_;
+  /// A claim flag on a cache line of its own, as copies claim variants at
+  /// once.
+  struct alignas(64) claim_flag {
+    std::atomic<bool> decoding{false};
+    std::atomic<std::uint64_t> fires{0}; ///< Claims taken
+  };
+  std::unique_ptr<claim_flag[]> decoding_;
 };
 
 } // namespace cudaq::qec

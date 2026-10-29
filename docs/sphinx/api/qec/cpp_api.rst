@@ -295,6 +295,8 @@ Graph
 
 .. doxygenenum:: cudaq::qec::task_graph_streaming_status
 
+.. doxygenenum:: cudaq::qec::task_graph_closure
+
 .. doxygenstruct:: cudaq::qec::task_graph_output_progress
     :members:
 
