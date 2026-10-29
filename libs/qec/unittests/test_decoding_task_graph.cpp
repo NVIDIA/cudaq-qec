@@ -14823,9 +14823,9 @@ const bool relay_pattern_registered = [] {
   spec.name = "test_only_relay";
   spec.requires_decoder = false;
   spec.requires_dem = false;
-  pattern.lower = [](task_graph_node_config cfg,
-                     std::vector<task_graph_node_config> &out,
-                     std::vector<task_graph_edge> &edges) {
+  pattern.lower =
+      [](task_graph_node_config cfg, std::vector<task_graph_node_config> &out,
+         std::vector<task_graph_edge> &edges) -> node_pattern::wiring {
     const std::string inner = cfg.id + ".inner";
     relay_lowered_ids().push_back(cfg.id);
     for (auto &e : edges) {
@@ -14835,6 +14835,7 @@ const bool relay_pattern_registered = [] {
         e.from_node = inner;
     }
     out.push_back(rep5_streaming_node(inner));
+    return {};
   };
   register_pattern_kind(std::move(spec), {}, std::move(pattern));
   return true;
@@ -14906,9 +14907,9 @@ TEST(PatternKind, RegistrationReplacesTheOtherForm) {
   };
   spec.name = name;
   EXPECT_THROW(register_pattern_kind(spec, {}, pattern), std::invalid_argument);
-  pattern.lower = [](task_graph_node_config,
-                     std::vector<task_graph_node_config> &,
-                     std::vector<task_graph_edge> &) {};
+  pattern.lower =
+      [](task_graph_node_config, std::vector<task_graph_node_config> &,
+         std::vector<task_graph_edge> &) -> node_pattern::wiring { return {}; };
 
   register_pattern_kind(spec, {}, pattern);
   EXPECT_NE(find_node_pattern(name), nullptr);

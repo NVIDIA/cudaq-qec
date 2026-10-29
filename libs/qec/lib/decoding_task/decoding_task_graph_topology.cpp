@@ -494,45 +494,20 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
   return wiring;
 }
 
-/// The wirings of the ensembles lowered so far, which lower_patterns() takes
-/// once every pattern is lowered. Its callers hold the registry lock, which
-/// serializes the lowerings.
-std::vector<ensemble_wiring> &pending_ensemble_wirings() {
-  static std::vector<ensemble_wiring> pending;
-  return pending;
-}
-
-// Its members and join live in the config's `ensemble` field rather than
-// its parameters, so the kind registers none.
-const bool ensemble_registered = [] {
-  task_graph_node_kind_spec spec;
-  node_pattern pattern;
-  spec.name = "ensemble";
-  spec.requires_decoder = spec.requires_dem = false;
-  pattern.lower = [](task_graph_node_config cfg,
-                     std::vector<task_graph_node_config> &out,
-                     std::vector<task_graph_edge> &edges) {
-    pending_ensemble_wirings().push_back(
-        lower_ensemble(std::move(cfg), out, edges));
-  };
-  register_pattern_kind(std::move(spec), {}, std::move(pattern));
-  return true;
-}();
-
 /// Rewrite every node of a pattern kind in `nodes` into plain nodes, in
-/// place, so the result is in topological order whenever the input was. Only
-/// ensembles need wiring once built. The caller holds the registry lock,
-/// which keeps each lowering registered while it runs.
-std::vector<ensemble_wiring>
+/// place, so the result is in topological order whenever the input was.
+/// Returns the wiring each pattern asks for once its nodes are built. The
+/// caller holds the registry lock, which keeps each lowering registered
+/// while it runs.
+std::vector<node_pattern::wiring>
 lower_patterns(std::vector<task_graph_node_config> &nodes,
                std::vector<task_graph_edge> &edges) {
-  auto &wirings = pending_ensemble_wirings();
+  std::vector<node_pattern::wiring> wirings;
   std::vector<task_graph_node_config> lowered;
-  wirings.clear();
   if (std::none_of(nodes.begin(), nodes.end(), [](const auto &cfg) {
         return find_node_pattern(cfg.kind) != nullptr;
       }))
-    return {};
+    return wirings;
   // A lone pattern gets the single-node wiring before it stops being one
   // node.
   if (nodes.size() == 1 && edges.empty())
@@ -547,13 +522,13 @@ lower_patterns(std::vector<task_graph_node_config> &nodes,
         (cfg.id == "measurements" || cfg.id == "dets" || cfg.id == "output"))
       throw std::invalid_argument("from_topology: node id '" + cfg.id +
                                   "' is reserved for a synthetic endpoint");
-    if (pattern)
-      pattern->lower(std::move(cfg), lowered, edges);
-    else
+    if (!pattern)
       lowered.push_back(std::move(cfg));
+    else if (auto wire = pattern->lower(std::move(cfg), lowered, edges))
+      wirings.push_back(std::move(wire));
   } // end - for(cfg)
   nodes = std::move(lowered);
-  return std::exchange(wirings, {});
+  return wirings;
 } // end - lower_patterns()
 
 /// The static width of a node's `logical_outcome` output, when it has one.
@@ -676,6 +651,27 @@ void wire_patterns(const std::vector<ensemble_wiring> &wirings,
   }
   edges.insert(edges.begin(), handles.begin(), handles.end());
 }
+
+// Its members and join live in the config's `ensemble` field rather than
+// its parameters, so the kind registers none.
+const bool ensemble_registered = [] {
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  spec.name = "ensemble";
+  spec.requires_decoder = spec.requires_dem = false;
+  pattern.lower = [](task_graph_node_config cfg,
+                     std::vector<task_graph_node_config> &out,
+                     std::vector<task_graph_edge> &edges) {
+    return [w = lower_ensemble(std::move(cfg), out, edges)](
+               const std::vector<std::string> &ids,
+               std::vector<std::unique_ptr<task_graph_node>> &built,
+               std::vector<task_graph_edge> &edges) {
+      wire_patterns({w}, ids, built, edges);
+    };
+  };
+  register_pattern_kind(std::move(spec), {}, std::move(pattern));
+  return true;
+}();
 
 /// The windows a windowed topology's nodes read: one template per ingest
 /// node and every variant of every layer, built once for the graph as
@@ -1008,7 +1004,8 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     i->nodes.push_back(std::move(node));
     i->node_replicas.push_back(std::move(replicas));
   }
-  wire_patterns(patterns, i->node_ids, i->nodes, edges);
+  for (const auto &wire : patterns)
+    wire(i->node_ids, i->nodes, edges);
 
   if (infer_edges) {
     const auto outs = i->nodes[0]->outputs();

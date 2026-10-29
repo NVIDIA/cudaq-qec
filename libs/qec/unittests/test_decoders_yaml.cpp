@@ -4564,7 +4564,8 @@ TEST(PatternKind, FillsTheStoreWithTheWindowsItsHookDeclares) {
   params.params.push_back({"rounds", cfg::param_kind::uint64});
   pattern.lower = [](cudaq::qec::task_graph_node_config,
                      std::vector<cudaq::qec::task_graph_node_config> &,
-                     std::vector<cudaq::qec::task_graph_edge> &) {};
+                     std::vector<cudaq::qec::task_graph_edge> &)
+      -> cudaq::qec::node_pattern::wiring { return {}; };
   pattern.windows = [&](const cudaqx::heterogeneous_map &node_params,
                         const cudaq::qec::experiment_template &) {
     seen_rounds = node_params.get<std::size_t>("rounds");
