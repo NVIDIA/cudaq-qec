@@ -6154,16 +6154,18 @@ TEST(WindowedGraph, StreamsThePatternAsTheReference) {
     }
 } // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
 
-// A record can contain many interleaved A/B commits. Retiring every A delta
-// before the B deltas must not make the bounded output stager grow with it.
-TEST(WindowedGraph, LargeRecordsRetireInterleavedLayersInRoundOrder) {
+// Records of 1000 rounds, each completing many interleaved A and B windows,
+// stream as the reference decodes them with layout @p commit and @p buffer:
+// synchronous or asynchronous, with a fixed or an open shot length.
+static void expect_large_records_stream(std::size_t commit,
+                                        std::size_t buffer) {
   constexpr std::size_t rounds = 1001;
   auto spec = wide_readout_spec();
   spec.num_rounds = rounds;
   const experiment_template tmpl(spec);
   const cudaqx::heterogeneous_map params{
-      {"commit_rounds", std::size_t{4}},
-      {"buffer_rounds", std::size_t{2}},
+      {"commit_rounds", commit},
+      {"buffer_rounds", buffer},
       {"output", std::string{"corrections"}}};
   parallel_window_reference reference(spec, lowered_graph(spec, params), rounds,
                                       "single_error_lut");
@@ -6233,6 +6235,20 @@ TEST(WindowedGraph, LargeRecordsRetireInterleavedLayersInRoundOrder) {
             }
           }
         }
+} // end - expect_large_records_stream()
+
+// A record can contain many interleaved A/B commits. Retiring every A delta
+// before the B deltas must not make the bounded output stager grow with it.
+TEST(WindowedGraph, LargeRecordsRetireInterleavedLayersInRoundOrder) {
+  expect_large_records_stream(4, 2);
+}
+
+// The executor takes a long record in records of one ingest chunk, a period
+// of rounds of the widest round, the readout's 5 measurements. With commit 3
+// and buffer 1 a chunk is 25 bytes, which cuts 4-measurement rounds, as a
+// node metering its own chunks accepts.
+TEST(WindowedGraph, LargeRecordsCutMidRoundStream) {
+  expect_large_records_stream(3, 1);
 }
 
 // describe_schedule() of the pattern's topology lists exactly the

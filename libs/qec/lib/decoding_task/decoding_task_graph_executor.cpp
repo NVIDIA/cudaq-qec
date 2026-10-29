@@ -2216,7 +2216,9 @@ bool decoding_task_graph::impl::enqueue_sweep(const uint8_t *syndrome,
                                               int cuda_device_id) {
   require_streaming_support("enqueue_syndrome");
   // A tagged record longer than record_bytes runs as several, each retired
-  // before the next: BULK, then the record's own type for the last.
+  // before the next: BULK, then the record's own type for the last. Cuts
+  // may fall mid-round: a node that meters its own chunks takes a record
+  // cut anywhere (raw_chunk_limit()).
   if (record_bytes != 0 && type && len > record_bytes) {
     bool fired = false;
     for (std::size_t at = 0; at < len; at += record_bytes) {
@@ -2451,7 +2453,8 @@ void decoding_task_graph::impl::dispatch_async_session() {
         auto &slot = state.slots[admitted % state.capacity];
         // A tagged record longer than record_bytes is admitted as several
         // pieces of its slot: BULK but the last, the first opening its
-        // operation and the last closing it.
+        // operation and the last closing it. Cuts may fall mid-round, as
+        // in enqueue_sweep().
         if (record_bytes != 0 && slot.type &&
             (cut_at != 0 || slot.len > record_bytes)) {
           const auto piece = std::min(record_bytes, slot.len - cut_at);
