@@ -215,6 +215,7 @@ struct decoding_task_graph::impl::record_scheduler {
         fire_entries(owner.streaming_nodes.size()),
         has_waiting_workers(owner.parallel_pool->num_threads() > 1) {
     const auto N = owner.nodes.size();
+    admitting.reserve(context_count);
     const auto M = owner.streaming_nodes.size();
     // Join leads, in topological order: how far past the newest published
     // index an indexed node can fire (f) or have an entry created (e). And
@@ -356,6 +357,11 @@ struct decoding_task_graph::impl::record_scheduler {
       }
     return nullptr;
   }
+
+  // A free context for the async coordinator to fill before activating it.
+  // The coordinator alone acquires, activates and releases contexts, and
+  // workers look only at active ones, so filling it needs no lock.
+  context *try_acquire_for_admission() { return try_acquire_locked(); }
 
   context &acquire() {
     auto lock = lock_runtime();
@@ -982,8 +988,10 @@ struct decoding_task_graph::impl::record_scheduler {
   }
 
   // Free a join entry of node si, swapping the last used entry into its
-  // place in join_live.
+  // place in join_live. Freeing a free one does nothing.
   void release_join_locked(std::size_t si, join_entry &entry) {
+    if (!entry.used)
+      return;
     auto &live = join_live[si];
     const auto moved = live.back();
     live[entry.live_at] = moved;
@@ -1137,24 +1145,13 @@ struct decoding_task_graph::impl::record_scheduler {
           entry.state[i] == join_entry::present ? &entry.inputs[i] : nullptr;
     auto *capability = node.replicas[replica];
     capability->clear_corrections(); // its corrections become this delta
-    bool fired = false;
-    try {
-      fired = node.indexed[replica]->fire(event.index, inputs);
-    } catch (...) {
-      // The entry is freed however the fire ends.
-      auto lock = lock_runtime();
-      release_join_locked(si, entry);
-      throw;
-    }
-    // A failure the node reported takes the path of a thrown one. Otherwise
-    // the entry is freed when the fire finishes, under that lock.
-    if (const auto *failure = capability->fire_failure()) {
-      {
-        auto lock = lock_runtime();
-        release_join_locked(si, entry);
-      }
+    // The entry is freed once, under a lock the worker takes anyway: by
+    // finish_locked() when this returns, or by fail() when anything here
+    // throws, the fire or its publication.
+    const bool fired = node.indexed[replica]->fire(event.index, inputs);
+    // A failure the node reported takes the path of a thrown one.
+    if (const auto *failure = capability->fire_failure())
       throw std::runtime_error(*failure);
-    }
     if (fired)
       (void)publish_all(c, id, event.root, si, capability, event.index);
     else
@@ -1939,8 +1936,13 @@ private:
       error = std::move(failure);
     stop = true;
     if (c && id < c->slots.size() && c->slots[id].running) {
-      c->slots[id].running = false;
-      unclaim_locked(*c, c->slots[id]);
+      auto &failed = c->slots[id];
+      // A fire's entry, which finish_locked() would have freed.
+      if (failed.event.kind == graph_event_kind::streaming_indexed_fire)
+        release_join_locked(failed.event.node,
+                            *fire_entries[failed.event.node][failed.pool_slot]);
+      failed.running = false;
+      unclaim_locked(*c, failed);
     }
     if (running != 0)
       --running;
@@ -1952,6 +1954,9 @@ private:
 public:
   impl &owner;
   std::vector<context> contexts;
+  // Contexts the coordinator has filled and is about to activate together;
+  // reserved for all of them.
+  std::vector<context *> admitting;
   std::vector<context *> active;   // oldest record first
   std::vector<uint8_t> node_busy;  // by topology node
   std::vector<uint64_t> node_turn; // by streaming node: record it serves next
@@ -2416,14 +2421,15 @@ void decoding_task_graph::impl::dispatch_async_session() {
     if (failure)
       continue;
 
-    // Admit every published record a context is free for, under one lock,
+    // Admit every published record a context is free for: fill the contexts
+    // without the lock, copying any batch, then activate them under one lock
     // and wake the workers once.
     if (admitted < state.submitted.load(std::memory_order_acquire)) {
       std::exception_ptr admit_error;
-      auto lock = S.lock_runtime();
       const auto submitted = state.submitted.load(std::memory_order_acquire);
+      S.admitting.clear();
       while (admitted < submitted) {
-        auto *c = S.try_acquire_locked();
+        auto *c = S.try_acquire_for_admission();
         if (!c)
           break;
         auto &slot = state.slots[admitted % state.capacity];
@@ -2461,18 +2467,24 @@ void decoding_task_graph::impl::dispatch_async_session() {
         c->closes_record = last.type != round_type::FINAL;
         if (last.type == round_type::FINAL)
           final_pending = true;
-        try {
-          S.push_raw_roots_locked(*c);
-        } catch (...) {
-          admit_error = std::current_exception();
-          break;
-        }
-        S.activate_locked(*c, /*gated=*/true);
+        S.admitting.push_back(c);
         admitted += take;
-        progressed = true;
       }
-      S.notify_workers();
-      lock.unlock();
+      if (!S.admitting.empty()) {
+        auto lock = S.lock_runtime();
+        for (auto *c : S.admitting) {
+          try {
+            S.push_raw_roots_locked(*c);
+          } catch (...) {
+            admit_error = std::current_exception();
+            break;
+          }
+          S.activate_locked(*c, /*gated=*/true);
+          progressed = true;
+        }
+        S.notify_workers();
+        lock.unlock();
+      }
       if (admit_error)
         fail_session(admit_error);
     }

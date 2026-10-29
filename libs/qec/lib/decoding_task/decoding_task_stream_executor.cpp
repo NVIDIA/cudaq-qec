@@ -647,24 +647,34 @@ void decoding_task_graph::impl::finish_async_streaming() {
   // not wait for that unless the session failed. settle_async_streaming()
   // makes the next call wait instead.
   if (state.active.load(std::memory_order_acquire)) {
+    // Waiting ends with the result, or with a failure or cancel, which ends
+    // the session without one. Both mark every submitted record completed,
+    // which wakes the parked wait below; checking for them keeps the caller
+    // from then waiting on for a result that will not come.
+    const auto waiting = [&state] {
+      return state.completed.load(std::memory_order_acquire) <
+                 state.finish_target &&
+             !state.failed.load(std::memory_order_acquire) &&
+             !state.cancel_requested.load(std::memory_order_acquire);
+    };
     // Spin for the result first: the caller wants it now, and parking would
     // add a wake to the shot's tail. Check the clock every few pauses only.
     const auto spin_deadline =
         std::chrono::steady_clock::now() + async_final_spin_budget;
-    for (int spin = 0;
-         state.completed.load(std::memory_order_acquire) < state.finish_target;
-         ++spin) {
+    for (int spin = 0; waiting(); ++spin) {
       if ((spin & 255) == 0 &&
           std::chrono::steady_clock::now() >= spin_deadline)
         break;
       CUDAQ_REALTIME_CPU_RELAX();
     }
-    for (auto completed = state.completed.load(std::memory_order_acquire);
-         completed < state.finish_target;
-         completed = state.completed.load(std::memory_order_acquire))
-      wait_for_completion_change(state.completed, state.completion_waiters,
-                                 completed);
-    if (state.failed.load(std::memory_order_acquire))
+    while (waiting())
+      wait_for_completion_change(
+          state.completed, state.completion_waiters,
+          state.completed.load(std::memory_order_acquire));
+    // A session that ended without its result releases the graph before
+    // the caller learns why.
+    if (state.completed.load(std::memory_order_acquire) < state.finish_target ||
+        state.failed.load(std::memory_order_acquire))
       wait_until_inactive(state.active);
   }
   g.rethrow_async_stream_error();
