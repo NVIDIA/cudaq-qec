@@ -445,6 +445,9 @@ void bindDecodingConfig(nb::module_ &mod) {
           "The node kind's own parameters (window_size, step_size, guards, "
           "...), converted through the schema the kind registered; set "
           "`type` first.")
+      .def_rw("max_in_flight", &task_graph_spec::node_spec::max_in_flight,
+              "Copies of the node that may fire at once in asynchronous "
+              "streaming.")
       .def_rw("dem_chunks", &task_graph_spec::node_spec::dem_chunks,
               "DEM for this node alone; falls back to the entry-level DEM.")
       .def_rw("dem_chunks_artifact",

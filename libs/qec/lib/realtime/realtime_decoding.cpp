@@ -8,6 +8,7 @@
 #include "stim_dem_forms.h"
 #include "../decoding_task/decoding_task_data_artifacts.h"
 #include "../decoding_task/decoding_task_graph_utils.h"
+#include "../decoding_task/decoding_task_node_kind_registry.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -559,8 +560,11 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
     // that reads no DEM builds its decoders from what it receives, a window
     // model per window, so it too takes only the decoder's name and
     // parameters: a decoder built here from the whole shot would go unused,
-    // and a failure building it would hide the graph's own errors.
-    if (!kind->requires_dem || node.dem.has_value() || !ns.stim_dem.empty() ||
+    // and a failure building it would hide the graph's own errors. A
+    // pattern kind is lowered before the build, possibly into several nodes,
+    // which one built decoder could not serve, so it too takes the name.
+    if (!kind->requires_dem || cudaq::qec::find_node_pattern(kind->name) ||
+        node.dem.has_value() || !ns.stim_dem.empty() ||
         !ns.stim_dem_path.empty()) {
       node.decoder_type = decoder_type;
       // Both spellings reach the builder as text, so from_topology() and
@@ -819,6 +823,7 @@ int configure_decoders(
     return 4;
   }
   warn_async_graph_contention(decoder_configs);
+  warn_windowed_serving(config);
 
   // Seeded with the pass-through BULK row: a document declaring only a `final`
   // row must keep the id every producer sends.
@@ -1015,9 +1020,17 @@ namespace {
 
 using node_spec = config::decoder_config::task_graph_spec::node_spec;
 
+// Whether @p node's kind is a pattern whose hook declares windows, which are
+// built on the node's template as a layered node's are.
+bool declares_windows(const node_spec &node) {
+  const auto kind_lock = cudaq::qec::lock_node_kind_registry();
+  const auto *pattern = cudaq::qec::find_node_pattern(node.resolved_kind());
+  return pattern && pattern->windows;
+}
+
 // Runs step, giving an error the place it came from. A construction error
 // becomes a configuration error; the store's own logic errors keep their
-// kind.
+// kind, as configuration errors do.
 template <typename Step>
 void at(const std::string &where, Step &&step) {
   try {
@@ -1026,10 +1039,42 @@ void at(const std::string &where, Step &&step) {
     throw std::runtime_error(where + ": " + e.what());
   } catch (const std::logic_error &e) {
     throw std::logic_error(where + ": " + e.what());
+  } catch (const std::runtime_error &e) {
+    throw std::runtime_error(where + ": " + e.what());
   }
 }
 
 } // namespace
+
+// Windowed decoders are found from their nodes' kinds, as built.
+void warn_windowed_serving(
+    const cudaq::qec::decoding::config::multi_decoder_config &config) {
+  const bool final_row = std::any_of(
+      config.syndrome_mapping.begin(), config.syndrome_mapping.end(),
+      [](const auto &row) { return row.type == "final"; });
+  for (const auto &cfg : config.decoders) {
+    if (!cfg.task_graph ||
+        std::none_of(cfg.task_graph->nodes.begin(), cfg.task_graph->nodes.end(),
+                     [](const node_spec &node) {
+                       return node.resolved_kind() == "decode_window" ||
+                              declares_windows(node);
+                     }))
+      continue;
+    if (!cfg.task_graph->options.async_streaming)
+      CUDA_QEC_WARN("decoder {} runs a windowed task graph synchronously, so "
+                    "its window decodes do not overlap later rounds; set "
+                    "async_streaming",
+                    cfg.id);
+    if (!final_row)
+      CUDA_QEC_WARN("decoder {} runs a windowed task graph, but "
+                    "syndrome_mapping has no final row to end its shots",
+                    cfg.id);
+    if (cfg.dispatch == config::DecoderDispatch::device_graph)
+      CUDA_QEC_WARN("decoder {} runs a windowed task graph, which is served "
+                    "with dispatch: host only",
+                    cfg.id);
+  } // end - for(cfg)
+} // end - warn_windowed_serving()
 
 cudaq::qec::data_artifact_store
 fill_data_artifact_store(const config::multi_decoder_config &config,
@@ -1038,9 +1083,9 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
                                   read_pinned_stim_dems(config, base_dir));
 }
 
-// Templates first, so window entries and ingest layers find their context;
-// then Stim DEMs, a pinned one from its checked read; then every window
-// variant. Only the templates windows are built on are added:
+// Templates first, so window entries, ingest layers and patterns find their
+// context; then Stim DEMs, a pinned one from its checked read; then every
+// window variant. Only the templates windows are built on are added:
 // experiment_template is stricter than a plain decoder's dem_chunks, so
 // building every template would reject models that decoders without windows
 // accept.
@@ -1069,15 +1114,15 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
       at(entry_name(*context),
          [&] { store.add_template(*context->dem_chunks); });
   }
-  // The template a node with layers runs on, its own or its decoder's; one
-  // with layers but no template is rejected with the layers below.
+  // The template a node with layers, or a pattern, runs on, its own or its
+  // decoder's; one with neither is rejected with the layers below.
   for (const auto &decoder : config.decoders) {
     if (!decoder.task_graph)
       continue;
     for_each_node(decoder.task_graph->nodes, [&](const node_spec &node) {
       const auto *spec = node_template(decoder, node);
       const bool own = node.dem_chunks && spec == &*node.dem_chunks;
-      if (node.windows.empty() || !spec)
+      if ((node.windows.empty() && !declares_windows(node)) || !spec)
         return;
       at(own ? decoder_name(decoder) + ", node '" + node.id + "'"
              : decoder_name(decoder),
@@ -1128,15 +1173,45 @@ fill_data_artifact_store(const config::multi_decoder_config &config,
       // so name why it does not apply.
       const bool expanded = node.D_sparse.empty() && decoder.dem_chunks &&
                             !decoder.H_sparse.empty();
-      if (node.windows.empty())
-        return;
-      if (!spec)
-        throw std::runtime_error(
+      const auto no_template = [&] {
+        return std::runtime_error(
             where + " has windows but no dem_chunks template" +
             (expanded ? ": its decoder's dem_chunks is expanded into "
                         "H_sparse, and a node beside flat matrices runs on "
                         "them; give the node dem_chunks of its own"
                       : ""));
+      };
+      cudaq::qec::node_pattern::window_layers generated;
+      std::shared_ptr<const cudaq::qec::experiment_template> tmpl;
+      bool declared = false;
+      // A pattern's layers are its windows <id>.<layer>. The registry lock
+      // keeps its hook registered while the hook runs, and only then: the
+      // requests it returns are plain data, and building their windows,
+      // the costly part, needs no lock.
+      {
+        const auto kind_lock = cudaq::qec::lock_node_kind_registry();
+        const auto *pattern =
+            cudaq::qec::find_node_pattern(node.resolved_kind());
+        declared = pattern && pattern->windows;
+        if (declared) {
+          if (!spec)
+            throw no_template();
+          tmpl = store.find_template(*spec);
+          at(where, [&] {
+            generated = pattern->windows(node.node_params.map(), *tmpl);
+          });
+        }
+      }
+      if (declared) {
+        for (const auto &[layer, request] : generated)
+          at(where + ", window '" + node.id + "." + layer + "'",
+             [&] { store.add_windows(tmpl, request); });
+        return;
+      }
+      if (node.windows.empty())
+        return;
+      if (!spec)
+        throw no_template();
       for (const auto &layer : node.windows) {
         const auto layer_where = where + ", layer '" + layer.layer + "'";
         const auto tmpl = store.find_template(*spec);

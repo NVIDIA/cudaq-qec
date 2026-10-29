@@ -4,9 +4,14 @@
  */
 
 #include "task_graph_test_fixtures.h"
+#include "../lib/decoding_task/decoding_task_data_artifacts.h"
+#include "../lib/decoding_task/decoding_task_decode_window_node.h"
 #include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_graph_utils.h"
+#include "../lib/decoding_task/decoding_task_ingest_node.h"
 #include "../lib/decoding_task/decoding_task_memory_window_node.h"
+#include "../lib/decoding_task/decoding_task_node_kind_registry.h"
+#include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "../lib/decoding_task/decoding_task_predecoder_node.h"
 #include "../lib/decoding_task/decoding_task_window_node.h"
 #include "../lib/realtime/decode_target.h"
@@ -19,6 +24,7 @@
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/dem_sampling.h"
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/logger.h"
 #include "cudaq/qec/plugin_loader.h"
 #include "cudaq/qec/realtime/decoding_config.h"
 #include <algorithm>
@@ -31,6 +37,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <mutex>
@@ -12289,6 +12296,30 @@ public:
     return out;
   }
 
+  /// Make @p node's reset throw, or none's for an empty name.
+  void fail_reset(std::string node) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    failing_reset_ = std::move(node);
+  }
+  bool reset_fails(const std::string &node) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return node == failing_reset_;
+  }
+  /// Run @p hook as each node resets, or nothing for an empty one.
+  void during_reset(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    reset_hook_ = std::move(hook);
+  }
+  void resetting() {
+    std::function<void()> hook;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      hook = reset_hook_;
+    }
+    if (hook)
+      hook();
+  }
+
   void record_pair(uint8_t a, uint8_t b) {
     std::lock_guard<std::mutex> lock(mutex_);
     pairs_.emplace_back(a, b);
@@ -12323,6 +12354,8 @@ private:
   std::atomic<std::size_t> pool_in_flight_{0};
   std::atomic<std::size_t> pool_high_water_{0};
   std::string blocked_node_;
+  std::string failing_reset_;
+  std::function<void()> reset_hook_;
   std::size_t blocked_record_ = std::numeric_limits<std::size_t>::max();
   bool blocking_ = false;
   bool released_ = false;
@@ -12362,7 +12395,9 @@ public:
     const uint8_t bit = value.get<logical_outcome>().bits[0];
     if (mode_ == "skip" && (skipped_++ % 2) == 0)
       return false; // publishes on every other record only
-    if (mode_ == "join") {
+    if (joins()) {
+      // Each input's arrival, logged apart from the node's fires.
+      probe_->log(id_ + "." + inputs()[slot], records_);
       pending_[slot] = bit;
       if (++received_ < 2)
         return false;
@@ -12392,6 +12427,9 @@ public:
   const uint8_t *corrections() const override { return &correction_; }
   void clear_corrections() override { correction_ = 0; }
   void reset_streaming_state() override {
+    probe_->resetting();
+    if (probe_->reset_fails(id_))
+      throw std::runtime_error("probe node " + id_ + " failed to reset");
     correction_ = 0;
     valid_ = false;
     received_ = 0;
@@ -12410,7 +12448,7 @@ public:
     return mode_ == "source" && slot == 0;
   }
   bool supports_streaming_input(std::size_t slot) const override {
-    return mode_ != "source" && slot < (mode_ == "join" ? 2u : 1u);
+    return mode_ != "source" && slot < (joins() ? 2u : 1u);
   }
   std::optional<window_spec> derive_streaming_schedule(
       std::size_t output_slot,
@@ -12445,10 +12483,15 @@ public:
     outputs[0] = mode_ == "source" ? value_out_ : inputs[0];
   }
   std::vector<std::string> inputs() const override {
-    return mode_ == "join" ? std::vector<std::string>{"a", "b"}
-                           : std::vector<std::string>{"input"};
+    return joins() ? std::vector<std::string>{"a", "b"}
+                   : std::vector<std::string>{"input"};
   }
   std::vector<std::string> outputs() const override { return {"output"}; }
+  bool supports_streaming_rendezvous() const override {
+    return mode_ == "rendezvous";
+  }
+  // `rendezvous` joins as `join` does, opting in to any arrival order.
+  bool joins() const { return mode_ == "join" || mode_ == "rendezvous"; }
 
 private:
   std::string id_;
@@ -12912,7 +12955,10 @@ static std::vector<index_fire> index_fires;
 /// records every fire. `logical` folds every input bit and publishes the
 /// parity once, at flush, over the whole shot. With `staged`, `join`
 /// commits instance k over round [k, k + 1) and `logical` reports whole-shot
-/// coverage, so an output they feed is staged.
+/// coverage, so an output they feed is staged. A `join` with `guaranteed`
+/// at or above 0 declares its `b` guaranteed from that instance on.
+/// `join_send` is a `join` that also publishes its value on `send`, typed as
+/// measurements rather than corrections, so it may feed a loop-carried edge.
 class index_probe_node : public task_graph_node,
                          public streaming_task_graph_node,
                          public indexed_join_node {
@@ -12920,10 +12966,10 @@ public:
   index_probe_node(std::string id, std::string mode, std::int64_t limit,
                    std::size_t hold_ms, int hold_bit, bool staged,
                    std::shared_ptr<pipeline_probe> probe,
-                   std::int64_t first = 0)
+                   std::int64_t first = 0, std::int64_t guaranteed = -1)
       : id_(std::move(id)), mode_(std::move(mode)), limit_(limit),
-        first_(first), hold_(hold_ms), hold_bit_(hold_bit), staged_(staged),
-        probe_(std::move(probe)) {
+        first_(first), guaranteed_(guaranteed), hold_(hold_ms),
+        hold_bit_(hold_bit), staged_(staged), probe_(std::move(probe)) {
     logical_outcome output;
     output.bits = {0};
     output.converged = true;
@@ -12933,11 +12979,15 @@ public:
 
   streaming_task_graph_node *streaming() override { return this; }
   indexed_join_node *indexed_join() override {
-    return mode_ == "join" ? this : nullptr;
+    return joins() ? this : nullptr;
   }
+  bool joins() const { return mode_ == "join" || mode_ == "join_send"; }
 
   // indexed_join_node
   bool requires_input(std::size_t slot) const override { return slot == 0; }
+  bool input_guaranteed(std::size_t slot, std::int64_t k) const override {
+    return slot == 1 && guaranteed_ >= 0 && k >= guaranteed_;
+  }
   bool fire(std::int64_t k,
             const std::vector<const edge_value *> &inputs) override {
     const int a = inputs[0]->get<logical_outcome>().bits[0];
@@ -13009,6 +13059,9 @@ public:
       published_ *= 2;
       second_ready_ = true;
     }
+    // `even` publishes record r as index 2r alone, so odd indices never come.
+    if (mode_ == "even")
+      published_ *= 2;
     valid_ = true;
     return true;
   }
@@ -13035,7 +13088,7 @@ public:
     return true;
   }
   std::optional<std::int64_t> published_index(std::size_t slot) const override {
-    if (slot == 1)
+    if (slot == 1 && mode_ != "join_send")
       return odd_valid_ ? std::optional{published_ + 1} : std::nullopt;
     return published_;
   }
@@ -13058,13 +13111,14 @@ public:
   std::size_t num_msyn_per_decode() const override { return 0; }
   std::size_t num_msyn_per_round() const override { return 1; }
   std::size_t num_observables() const override {
-    return mode_ == "join" || mode_ == "logical" || mode_ == "running" ? 1 : 0;
+    return joins() || mode_ == "logical" || mode_ == "running" ? 1 : 0;
   }
   bool supports_streaming_input(std::size_t slot) const override {
-    return slot < (mode_ == "join" ? 2u : 1u);
+    return slot < (joins() ? 2u : 1u);
   }
   bool has_output(std::size_t slot) const {
-    return slot == 0 || (mode_ == "split" && slot == 1);
+    return slot == 0 ||
+           ((mode_ == "split" || mode_ == "join_send") && slot == 1);
   }
   std::optional<window_spec> derive_streaming_schedule(
       std::size_t output_slot,
@@ -13074,8 +13128,11 @@ public:
     return inputs[0].schedule;
   }
   std::optional<edge_value_type> output_type(std::size_t slot) const override {
-    return has_output(slot) ? std::optional{edge_value_type("logical_outcome")}
-                            : std::nullopt;
+    if (!has_output(slot))
+      return std::nullopt;
+    return slot == 1 && mode_ == "join_send"
+               ? edge_value_type("measurement_results")
+               : edge_value_type("logical_outcome");
   }
   std::optional<std::size_t>
   output_value_size(std::size_t slot) const override {
@@ -13088,6 +13145,8 @@ public:
             type == edge_value_type("measurement_results"));
   }
   const edge_value *streaming_output(std::size_t slot) const override {
+    if (slot == 1 && mode_ == "join_send")
+      return valid_ ? &value_out_ : nullptr;
     if (slot == 1)
       return odd_valid_ ? &value_odd_ : nullptr;
     return slot == 0 && valid_ ? &value_out_ : nullptr;
@@ -13097,10 +13156,12 @@ public:
     outputs[0] = inputs[0];
   }
   std::vector<std::string> inputs() const override {
-    return mode_ == "join" ? std::vector<std::string>{"a", "b"}
-                           : std::vector<std::string>{"input"};
+    return joins() ? std::vector<std::string>{"a", "b"}
+                   : std::vector<std::string>{"input"};
   }
   std::vector<std::string> outputs() const override {
+    if (mode_ == "join_send")
+      return {"output", "send"};
     return mode_ == "split" ? std::vector<std::string>{"output", "odd"}
                             : std::vector<std::string>{"output"};
   }
@@ -13110,6 +13171,7 @@ private:
   std::string mode_;
   std::int64_t limit_;
   std::int64_t first_;
+  std::int64_t guaranteed_;
   std::size_t hold_;
   int hold_bit_;
   bool staged_;
@@ -13139,6 +13201,8 @@ static const bool index_probe_registered = [] {
   schema.params.push_back({"hold_bit", param_kind::int32, /*required=*/false});
   schema.params.push_back({"staged", param_kind::int32, /*required=*/false});
   schema.params.push_back({"first", param_kind::int32, /*required=*/false});
+  schema.params.push_back(
+      {"guaranteed", param_kind::int32, /*required=*/false});
   register_node_kind(
       std::move(spec), std::move(schema), [](node_build_context &ctx) {
         return std::make_unique<index_probe_node>(
@@ -13147,7 +13211,8 @@ static const bool index_probe_registered = [] {
             ctx.node_params->get<std::size_t>("hold_ms", 0),
             ctx.node_params->get<int>("hold_bit", -1),
             ctx.node_params->get<int>("staged", 0) != 0, active_pipeline_probe,
-            ctx.node_params->get<int>("first", 0));
+            ctx.node_params->get<int>("first", 0),
+            ctx.node_params->get<int>("guaranteed", -1));
       });
   return true;
 }();
@@ -13386,6 +13451,182 @@ TEST(DecodingTaskGraph, FirePoolRejectsStatefulKindsAndBuiltDecoders) {
 }
 
 // ---------------------------------------------------------------------------
+// Reset failure
+// ---------------------------------------------------------------------------
+
+// A reset that throws part-way leaves the result failed, its values zero,
+// and the graph refusing input, until a later reset succeeds: no stale value
+// is readable, synchronously or asynchronously.
+TEST(DecodingTaskGraph, FailedResetHidesTheResultUntilAResetSucceeds) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(pipeline_node("P", "pass"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "P", "input"},
+         {"P", "output", "output", "input"}},
+        {.async_streaming = async});
+    const uint8_t one = 1;
+    graph->enqueue_syndrome(&one, 1, round_type::FINAL);
+    ASSERT_EQ(graph->streaming_result().values.at(0), 1);
+    probe->fail_reset("P");
+    EXPECT_THROW(graph->reset_decoder(), std::runtime_error);
+    const auto failed = graph->streaming_result();
+    EXPECT_EQ(failed.status, task_graph_streaming_status::failed);
+    EXPECT_EQ(failed.values.at(0), 0) << "a stale value is readable";
+    EXPECT_NE(failed.error.find("probe node P failed to reset"),
+              std::string::npos)
+        << failed.error;
+    EXPECT_ANY_THROW(graph->enqueue_syndrome(&one, 1, round_type::FINAL));
+    probe->fail_reset("");
+    graph->reset_decoder();
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::pending);
+    graph->enqueue_syndrome(&one, 1, round_type::FINAL);
+    EXPECT_EQ(graph->streaming_result().values.at(0), 1);
+  }
+} // end - TEST(DecodingTaskGraph, FailedResetHidesTheResultUntilAResetSucceeds)
+
+// While a reset that succeeds runs, an asynchronous graph's readers see the
+// result zeroed and pending, not failed: a reader polling during an ordinary
+// reset must not latch an error.
+TEST(DecodingTaskGraph, AResetThatSucceedsNeverReadsAsFailed) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  std::vector<task_graph_streaming_result> seen;
+  const uint8_t one = 1;
+  active_pipeline_probe = probe;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(pipeline_node("P", "pass"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "P", "input"},
+       {"P", "output", "output", "input"}},
+      {.async_streaming = true});
+  graph->enqueue_syndrome(&one, 1, round_type::FINAL);
+  ASSERT_EQ(graph->streaming_result().values.at(0), 1);
+  probe->during_reset([&] { seen.push_back(graph->streaming_result()); });
+  graph->reset_decoder();
+  probe->during_reset({});
+  ASSERT_FALSE(seen.empty());
+  for (const auto &result : seen) {
+    EXPECT_EQ(result.status, task_graph_streaming_status::pending)
+        << result.error;
+    EXPECT_TRUE(result.error.empty()) << result.error;
+    EXPECT_EQ(result.values.at(0), 0) << "a stale value is readable";
+    EXPECT_EQ(result.outputs.at(0).coverage_end_round, 0u);
+  }
+} // end - TEST(DecodingTaskGraph, AResetThatSucceedsNeverReadsAsFailed)
+
+// ---------------------------------------------------------------------------
+// Rendezvous joins
+// ---------------------------------------------------------------------------
+
+// measurements -> A -> P -> J.a and A -> J.b, where J joins in @p mode and
+// P relays in @p p_mode, holding records carrying `hold_bit` for `hold_ms`.
+// With @p other, a second joiner R in that mode reads P and A the same way
+// and feeds its own output.
+static std::unique_ptr<decoding_task_graph>
+make_rendezvous_graph(const std::shared_ptr<pipeline_probe> &probe,
+                      const std::string &mode, const std::string &p_mode,
+                      const std::string &other = {}, std::size_t hold_ms = 0,
+                      int hold_bit = -1) {
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(pipeline_node("P", p_mode, hold_ms, hold_bit));
+  nodes.push_back(pipeline_node("J", mode));
+  std::vector<task_graph_edge> edges{{"measurements", "output", "A", "input"},
+                                     {"A", "output", "P", "input"},
+                                     {"P", "output", "J", "a"},
+                                     {"A", "output", "J", "b"},
+                                     {"J", "output", "output", "joined"}};
+  if (!other.empty()) {
+    nodes.push_back(pipeline_node("R", other));
+    edges.push_back({"P", "output", "R", "a"});
+    edges.push_back({"A", "output", "R", "b"});
+    edges.push_back({"R", "output", "output", "other"});
+  }
+  // The graph is one chain, so it would get one worker; a second lets a
+  // delivery run while P blocks.
+  return decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
+                                            {.async_streaming = true,
+                                             .async_queue_capacity = 8,
+                                             .async_num_workers = 2});
+}
+
+// A rendezvous consumer takes its direct input while its other input's
+// producer is still running: A's delivery to J.b does not wait behind its
+// delivery to P.
+TEST(DecodingTaskGraph, RendezvousTakesADirectInputBesideItsAncestor) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_rendezvous_graph(probe, "rendezvous", "pass");
+  const uint8_t one = 1, zero = 0;
+  probe->block_on("P", 0);
+  // A BULK record returns once queued; a FINAL one waits for the shot.
+  graph->enqueue_syndrome(&one, 1, round_type::BULK);
+  ASSERT_TRUE(probe->wait_until_blocking());
+  EXPECT_TRUE(probe->wait_for_count("J.b", 1))
+      << "J.b waited for P, an ancestor of its other input";
+  EXPECT_EQ(probe->count("J.a"), 0u);
+  probe->release();
+  graph->enqueue_syndrome(&zero, 1, round_type::FINAL);
+  EXPECT_EQ(graph->streaming_result().values.at(0), 0); // 1 ^ 1, then 0 ^ 0
+  EXPECT_EQ(probe->count("J"), 2u);
+}
+
+// A shared descendant that has not opted in stays ordered, even beside one
+// that has: J.b waits for P while R.b does not.
+TEST(DecodingTaskGraph, RendezvousLeavesOtherDescendantsOrdered) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_rendezvous_graph(probe, "join", "pass", "rendezvous");
+  const uint8_t one = 1, zero = 0;
+  probe->block_on("P", 0);
+  graph->enqueue_syndrome(&one, 1, round_type::BULK);
+  ASSERT_TRUE(probe->wait_until_blocking());
+  EXPECT_TRUE(probe->wait_for_count("R.b", 1));
+  EXPECT_EQ(probe->count("J.b"), 0u) << "J.b ran before P, which J needs";
+  probe->release();
+  graph->enqueue_syndrome(&zero, 1, round_type::FINAL);
+  EXPECT_EQ(probe->count("J.b"), 2u);
+  EXPECT_EQ(probe->count("R.b"), 2u);
+}
+
+// A rendezvous consumer keeps each publication's values together across many
+// records, with a relay slowed on some of them, and across a reset: every
+// pair J sees is (v ^ 1, v) for one record's v.
+TEST(DecodingTaskGraph, RendezvousKeepsEachRecordsInputsTogether) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph =
+      make_rendezvous_graph(probe, "rendezvous", "invert", {}, 2, /*bit=*/1);
+  const auto records = pipeline_records(24);
+  for (int shot = 0; shot < 2; ++shot) {
+    SCOPED_TRACE("shot " + std::to_string(shot));
+    graph->reset_decoder();
+    for (std::size_t i = 0; i < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1,
+                              i + 1 == records.size() ? round_type::FINAL
+                                                      : round_type::BULK);
+    graph->streaming_result();
+    const auto pairs = probe->pairs();
+    ASSERT_EQ(pairs.size(), records.size() * (shot + 1));
+    for (std::size_t i = records.size() * shot; i < pairs.size(); ++i)
+      EXPECT_EQ(pairs[i].first, pairs[i].second ^ 1) << "pair " << i;
+  }
+} // end - TEST(DecodingTaskGraph, RendezvousKeepsEachRecordsInputsTogether)
+
+// ---------------------------------------------------------------------------
 // Indexed joins
 // ---------------------------------------------------------------------------
 
@@ -13408,6 +13649,35 @@ TEST(DecodingTaskGraph, IndexedJoinPairsInstancesAcrossRecords) {
     EXPECT_EQ(result.values[0], expected_join_parity(records, records.size()))
         << "copies=" << copies;
   }
+}
+
+// An edge back to its own node, or to an earlier one, is loop-carried: it
+// needs a negative index_offset, and may carry only a value its consumer
+// joins, not corrections, which fold in node order.
+TEST(DecodingTaskGraph, IndexedJoinChecksLoopCarriedEdges) {
+  ASSERT_TRUE(index_probe_registered);
+  const auto refused = [](std::int64_t offset, const std::string &text) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag", 1 << 30));
+    nodes.push_back(index_node("J", "join", 1 << 30));
+    try {
+      decoding_task_graph::from_topology(
+          std::move(nodes), {{"measurements", "output", "A", "input"},
+                             {"A", "output", "T", "input"},
+                             {"T", "output", "J", "a"},
+                             {"J", "output", "J", "b", offset},
+                             {"J", "output", "output", "input"}});
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  refused(0, "edge from node 2 ('J') to node 2 ('J') violates topological "
+             "order");
+  refused(-1, "loop-carried edge J.output -> J.b carries corrections or a "
+              "completion");
 }
 
 TEST(DecodingTaskGraph, IndexedJoinDiscardsInstancesMissingRequiredInput) {
@@ -13724,11 +13994,187 @@ TEST(DecodingTaskGraph, IndexOffsetIsValidatedAtBuild) {
   EXPECT_FALSE(graph->supports_streaming());
 }
 
+// Instances dropped all through a long shot stay dropped: T publishes only
+// even indices, so every odd J, whose a never comes, is dropped as T's next
+// publication passes it. Over thousands of records, with J's copies firing
+// out of order, every even J pairs its own a with R's b and no odd one
+// fires. (The executor keeps only recent drops; one it forgets leaves a
+// stray entry that FINAL discards, so this checks the joins, not the
+// ring's size.)
+TEST(DecodingTaskGraph, IndexedJoinDropsInstancesAllThroughAShot) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "even"));
+  nodes.push_back(index_node("R", "tag"));
+  nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, /*copies=*/2));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "T", "input"},
+       {"A", "output", "R", "input"},
+       {"T", "output", "J", "a"},
+       {"R", "output", "J", "b", /*index_offset=*/-1},
+       {"J", "output", "output", "input"}},
+      {.async_streaming = true, .async_queue_capacity = 8});
+  const auto records = pipeline_records(4000);
+  for (std::size_t i = 0; i < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1,
+                            i + 1 == records.size() ? round_type::FINAL
+                                                    : round_type::BULK);
+  std::lock_guard<std::mutex> lock(index_fires_mutex);
+  ASSERT_EQ(index_fires.size(), records.size());
+  for (const auto &fire : index_fires) {
+    ASSERT_EQ(fire.k % 2, 0) << "J[" << fire.k << "] has no a, yet fired";
+    const auto r = static_cast<std::size_t>(fire.k / 2);
+    EXPECT_EQ(fire.a, records[r]) << "J[" << fire.k << "]";
+    // R numbers every record, so J[k] reads R's record k - 1.
+    if (fire.k > 0 && static_cast<std::size_t>(fire.k - 1) < records.size())
+      EXPECT_EQ(fire.b, records[fire.k - 1]) << "J[" << fire.k << "]";
+  }
+} // end - TEST(DecodingTaskGraph, IndexedJoinDropsInstancesAllThroughAShot)
+
+// An input the consumer guarantees, still missing when the shot ends, was
+// lost: R stops publishing at 3, so J[4] and J[5] never get their b. With b
+// guaranteed the shot fails, naming the input; without, they fire absent.
+TEST(DecodingTaskGraph, IndexedJoinFailsOnALostGuaranteedInput) {
+  ASSERT_TRUE(index_probe_registered);
+  for (const bool guaranteed : {false, true}) {
+    SCOPED_TRACE(guaranteed ? "guaranteed" : "not guaranteed");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("R", "tag", /*limit=*/3));
+    nodes.push_back(index_node("J", "join"));
+    nodes.back().node_params.insert("guaranteed", guaranteed ? 1 : -1);
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes), {{"measurements", "output", "A", "input"},
+                           {"A", "output", "T", "input"},
+                           {"A", "output", "R", "input"},
+                           {"T", "output", "J", "a"},
+                           {"R", "output", "J", "b", /*index_offset=*/-1},
+                           {"J", "output", "output", "input"}});
+    const auto records = pipeline_records(6);
+    try {
+      for (std::size_t i = 0; i < records.size(); ++i)
+        graph->enqueue_syndrome(&records[i], 1,
+                                i + 1 == records.size() ? round_type::FINAL
+                                                        : round_type::BULK);
+      EXPECT_FALSE(guaranteed) << "a lost input went unnoticed";
+      EXPECT_EQ(probe->records("J"),
+                (std::vector<std::size_t>{0, 1, 2, 3, 4, 5}));
+    } catch (const std::exception &e) {
+      EXPECT_TRUE(guaranteed) << e.what();
+      EXPECT_NE(std::string(e.what()).find("input 1 of instance 4"),
+                std::string::npos)
+          << e.what();
+    }
+  }
+} // end - TEST(DecodingTaskGraph, IndexedJoinFailsOnALostGuaranteedInput)
+
+// A node's flush waits for a producer that reaches it through a
+// loop-carried edge: J1[k] joins T[k] with J2[k - 1], its b guaranteed from
+// instance 1, and J2[k] joins J1[k], so each slow J2 fire feeds J1's next
+// instance, and J2 flushes after J1. When the shot ends J1 is quiet while
+// J2 still fires into it; resolving J1 then would lose that b. Every
+// instance of both fires, synchronously and asynchronously, the latter with
+// workers to spare so the FINAL record's flush runs beside its fires.
+TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer) {
+  ASSERT_TRUE(index_probe_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "asynchronous" : "synchronous");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    task_graph_options options;
+    options.async_streaming = async;
+    if (async)
+      options.async_num_workers = 4;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("J1", "join"));
+    nodes.back().node_params.insert("guaranteed", 1);
+    nodes.push_back(index_node("J2", "join_send", 1 << 30, /*hold_ms=*/20));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J1", "a"},
+         {"J2", "send", "J1", "b", /*index_offset=*/-1},
+         {"J1", "output", "J2", "a"},
+         {"T", "output", "J2", "b", /*index_offset=*/-1},
+         {"J2", "output", "output", "input"}},
+        options);
+    const auto records = pipeline_records(6);
+    for (std::size_t i = 0; i < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1,
+                              i + 1 == records.size() ? round_type::FINAL
+                                                      : round_type::BULK);
+    const auto &result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+        << result.error;
+    const std::vector<std::size_t> all{0, 1, 2, 3, 4, 5};
+    for (const auto *node : {"J1", "J2"}) {
+      auto fired = probe->records(node);
+      std::sort(fired.begin(), fired.end());
+      EXPECT_EQ(fired, all) << node;
+    }
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer)
+
+// An instance fires once, however its inputs are told absent: J[k] joins
+// T[k] with T[k - 1], so J[0]'s b is absent by its offset. T's first
+// publication carries T[0] for J[0]'s a and, on the other wire, the news
+// that its index -1 never comes, for J[0]'s b. Delivered after a, that news
+// must not fire J[0] again. Every instance fires exactly once,
+// synchronously and asynchronously.
+TEST(DecodingTaskGraph, IndexedJoinFiresEachInstanceOnce) {
+  ASSERT_TRUE(index_probe_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "asynchronous" : "synchronous");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    task_graph_options options;
+    options.async_streaming = async;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("J", "join"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"T", "output", "J", "b", /*index_offset=*/-1},
+         {"J", "output", "output", "input"}},
+        options);
+    const auto records = pipeline_records(4);
+    for (std::size_t i = 0; i < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1,
+                              i + 1 == records.size() ? round_type::FINAL
+                                                      : round_type::BULK);
+    const auto &result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+        << result.error;
+    auto fired = probe->records("J");
+    std::sort(fired.begin(), fired.end());
+    EXPECT_EQ(fired, (std::vector<std::size_t>{0, 1, 2, 3}));
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, IndexedJoinFiresEachInstanceOnce)
+
 TEST(DecodingTaskGraph, IndexedJoinHandlesManyInstancesPerRecord) {
   ASSERT_TRUE(index_probe_registered);
   auto probe = std::make_shared<pipeline_probe>();
-  // Records of four rounds publish four instances each from T and R, more
-  // than the join table's per-record preallocation; it grows as needed.
+  // Records of four rounds publish four instances each from T and R, which
+  // the join table's preallocation covers.
   auto graph = make_indexed_join_graph(
       probe, {.async_streaming = true, .async_queue_capacity = 2},
       /*limit=*/1 << 30, /*join_copies=*/2);
@@ -13741,6 +14187,45 @@ TEST(DecodingTaskGraph, IndexedJoinHandlesManyInstancesPerRecord) {
   expect_indexed_pairs(rounds, rounds.size());
   EXPECT_EQ(graph->streaming_result().values[0],
             expected_join_parity(rounds, rounds.size()));
+}
+
+// With T stopped after 3 instances, J's later instances wait on their
+// required input until FINAL resolves them, more than the join table's
+// preallocation: it grows rather than fail, and its FINAL flush says so,
+// outside the lock. The grown table serves the next shot, which says
+// nothing.
+TEST(DecodingTaskGraph, IndexedJoinGrowsAndSaysSoOnce) {
+  namespace logging = cudaq::qec::detail;
+  ASSERT_TRUE(index_probe_registered);
+  std::mutex mutex;
+  std::vector<std::string> warnings;
+  logging::forwarder_config config;
+  const std::vector<uint8_t> rounds(40, 0);
+  auto probe = std::make_shared<pipeline_probe>();
+  auto graph = make_indexed_join_graph(
+      probe, {.async_streaming = true, .async_queue_capacity = 2},
+      /*limit=*/3);
+  config.callback = [&](logging::forwarded_log_record &&record) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (record.level == logging::log_level::warn &&
+        record.message.find("join table") != std::string::npos)
+      warnings.push_back(record.message);
+  };
+  logging::set_forwarder(std::move(config));
+  for (int shot = 0; shot < 2; ++shot) {
+    graph->reset_decoder();
+    for (std::size_t r = 0; r < rounds.size(); ++r)
+      graph->enqueue_syndrome(&rounds[r], 1,
+                              r + 1 == rounds.size() ? round_type::FINAL
+                                                     : round_type::BULK);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete);
+  }
+  logging::flush_logs();
+  logging::clear_forwarder();
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("grew past its"), std::string::npos)
+      << warnings[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -13866,5 +14351,575 @@ TEST(DecodingTaskGraph, StagedOutputRejectsMixedContributors) {
       std::string::npos)
       << graph->streaming_incompatibility_reason();
 }
+
+// ---------------------------------------------------------------------------
+// parallel_window pattern lowering
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Pattern node P over @p spec with @p params, fed by measurements and read
+// at the output, lowered.
+struct lowered_pattern {
+  std::vector<task_graph_node_config> nodes;
+  std::vector<task_graph_edge> edges{{"measurements", "output", "P", "input"},
+                                     {"P", "output", "output", "input"}};
+
+  lowered_pattern(const dem_chunks_spec &spec, cudaqx::heterogeneous_map params,
+                  std::size_t max_in_flight = 1) {
+    task_graph_node_config cfg;
+    cfg.id = "P";
+    cfg.kind = "parallel_window";
+    cfg.dem = spec;
+    cfg.decoder_type = "single_error_lut";
+    cfg.params.insert("lut_size", std::size_t{7});
+    cfg.node_params = std::move(params);
+    cfg.max_in_flight = max_in_flight;
+    lower_parallel_window(std::move(cfg), nodes, edges);
+  }
+};
+
+// Expect check() to throw an exception mentioning text.
+template <typename Check>
+void expect_lowering_error(Check &&check, const std::string &text) {
+  try {
+    check();
+    ADD_FAILURE() << "expected: " << text;
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+} // namespace
+
+// The pattern lowers into the hand-written parallel-window graph: P.ingest
+// with layers A and B reading the logical value, P.A and P.B with the
+// pattern's inner decoder and layer parameters, and P.sum over both layers
+// and the logical, with the edges between them and the outer edges moved
+// onto P.ingest and P.sum.
+TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
+  auto spec = arbitrary_memory_spec(5, true);
+  spec.phases.back().spec.m2o_sparse = {0, -1};
+  auto layers = layered(3, 3, 9);
+  layers.a.input.prior = 0.04;
+  const lowered_pattern p(spec,
+                          {{"commit_rounds", std::size_t{3}},
+                           {"buffer_rounds", std::size_t{3}},
+                           {"gap_rounds", std::size_t{9}},
+                           {"boundary_prior", 0.04},
+                           {"verify_residual", std::string("report")}},
+                          /*max_in_flight=*/4);
+  ASSERT_EQ(p.nodes.size(), 4u);
+  const auto &ingest = p.nodes[0];
+  EXPECT_EQ(ingest.id, "P.ingest");
+  EXPECT_EQ(ingest.kind, "ingest");
+  EXPECT_EQ(ingest.dem, spec);
+  EXPECT_EQ(ingest.windows, (std::vector<experimental::ingest_window>{
+                                {"A", layers.a, ""}, {"B", layers.b, ""}}));
+  EXPECT_TRUE(ingest.node_params.get<bool>("read_logical"));
+  for (std::size_t i : {1, 2}) {
+    const auto &layer = p.nodes[i];
+    EXPECT_EQ(layer.id, i == 1 ? "P.A" : "P.B");
+    EXPECT_EQ(layer.kind, "decode_window");
+    EXPECT_FALSE(layer.dem.has_value());
+    EXPECT_EQ(layer.decoder_type, "single_error_lut");
+    EXPECT_EQ(layer.params.get<std::size_t>("lut_size"), 7u);
+    EXPECT_EQ(layer.max_in_flight, 4u);
+    EXPECT_EQ(layer.node_params.get<std::string>("verify_residual"), "report");
+    EXPECT_EQ(layer.node_params.contains("num_receives"), i == 2);
+  }
+  EXPECT_EQ(p.nodes[2].node_params.get<std::size_t>("num_receives"), 2u);
+  // Only the layers fire as pools; ingest and the sum keep one copy.
+  EXPECT_EQ(p.nodes[0].max_in_flight, 1u);
+  EXPECT_EQ(p.nodes[3].max_in_flight, 1u);
+  EXPECT_EQ(p.nodes[3].id, "P.sum");
+  EXPECT_EQ(p.nodes[3].kind, "xor");
+  EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 3u);
+  EXPECT_EQ(p.edges, (std::vector<task_graph_edge>{
+                         {"measurements", "output", "P.ingest", "input"},
+                         {"P.sum", "output", "output", "input"},
+                         {"P.ingest", "A", "P.A", "input"},
+                         {"P.ingest", "B", "P.B", "input"},
+                         {"P.A", "forward", "P.B", "receive_0", -1},
+                         {"P.A", "backward", "P.B", "receive_1"},
+                         {"P.A", "output", "P.sum", "in_0"},
+                         {"P.B", "output", "P.sum", "in_1"},
+                         {"P.ingest", "logical", "P.sum", "in_2"}}));
+} // end - TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph)
+
+// With output: corrections the ingest reads no logical value and P.sum takes
+// the two layers alone; gap_rounds defaults to commit_rounds + 2 buffer
+// rounds, and the column options and a truncated input reach the layers.
+TEST(ParallelWindowLowering, PassesTheOptionsOn) {
+  const lowered_pattern p(
+      arbitrary_memory_spec(5),
+      {{"commit_rounds", std::size_t{2}},
+       {"buffer_rounds", std::size_t{1}},
+       {"output", std::string("corrections")},
+       {"input_boundary", std::string("truncate")},
+       {"merge_identical", true},
+       {"conflicting_parallel", std::string("most_likely")}});
+  auto layers = layered(2, 1, 4);
+  layers.a.input = {experimental::port_disposition::open, std::nullopt,
+                    experimental::input_boundary::truncate};
+  for (auto *request : {&layers.a, &layers.b})
+    request->columns = {true, experimental::parallel_resolution::most_likely};
+  ASSERT_EQ(p.nodes.size(), 4u);
+  EXPECT_EQ(p.nodes[0].windows, (std::vector<experimental::ingest_window>{
+                                    {"A", layers.a, ""}, {"B", layers.b, ""}}));
+  EXPECT_FALSE(p.nodes[0].node_params.contains("read_logical"));
+  EXPECT_EQ(p.nodes[1].max_in_flight, 1u);
+  EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 2u);
+  EXPECT_EQ(std::count_if(p.edges.begin(), p.edges.end(),
+                          [](const task_graph_edge &e) {
+                            return e.from_output == "logical";
+                          }),
+            0);
+} // end - TEST(ParallelWindowLowering, PassesTheOptionsOn)
+
+// Without boundary_prior, A's open input takes, over the detectors faults
+// cross into, the largest chance that an odd number of them fire: one
+// crossing fault's prior, or two combined as merged columns are, whatever
+// the priors of faults that do not cross; with no such fault, the pattern
+// asks for one.
+TEST(ParallelWindowLowering, DefaultsTheBoundaryPrior) {
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}}};
+  auto crossing = next_only_spec();
+  for (auto &phase : crossing.phases)
+    phase.spec.error_rates = {0.3, 0.3, 0.3, 0.3, 0.05};
+  const auto requests =
+      parallel_window_requests(params, experiment_template(crossing));
+  EXPECT_EQ(requests.first.input.prior, std::optional<double>{0.05});
+  auto two = crossing;
+  for (auto &phase : two.phases) {
+    phase.spec.num_faults = 6;
+    phase.spec.error_rates = {0.3, 0.3, 0.3, 0.3, 0.05, 0.1};
+    phase.spec.seam_specs[1].spec.H_sparse = {4, 5, -1, -1, -1, -1};
+  }
+  const auto combined =
+      parallel_window_requests(params, experiment_template(two));
+  ASSERT_TRUE(combined.first.input.prior.has_value());
+  EXPECT_NEAR(*combined.first.input.prior, 0.05 + 0.1 - 2 * 0.05 * 0.1, 1e-12);
+  expect_lowering_error(
+      [&] {
+        parallel_window_requests(params,
+                                 experiment_template(single_round_spec()));
+      },
+      "parallel_window: no fault crosses into the next round with a prior "
+      "strictly between 0 and 1");
+} // end - TEST(ParallelWindowLowering, DefaultsTheBoundaryPrior)
+
+// The pattern is wired measurements -> P -> output: one edge into its
+// input, and none into or out of another port. It needs a template and its
+// required parameters.
+TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}}};
+  const auto lower = [&](std::vector<task_graph_edge> edges,
+                         std::optional<dem_chunks_spec> dem,
+                         cudaqx::heterogeneous_map with) {
+    task_graph_node_config cfg;
+    std::vector<task_graph_node_config> nodes;
+    cfg.id = "P";
+    cfg.kind = "parallel_window";
+    cfg.dem = std::move(dem);
+    cfg.node_params = std::move(with);
+    lower_parallel_window(std::move(cfg), nodes, edges);
+  };
+  const auto spec = arbitrary_memory_spec(5);
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"},
+               {"measurements", "output", "P", "input"}},
+              spec, params);
+      },
+      "from_topology: parallel_window 'P' needs exactly one edge into "
+      "'input'");
+  expect_lowering_error(
+      [&] { lower({{"measurements", "output", "P", "side"}}, spec, params); },
+      "from_topology: parallel_window 'P' has no input 'side'");
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"},
+               {"P", "logical", "output", "input"}},
+              spec, params);
+      },
+      "from_topology: parallel_window 'P' has no output 'logical'");
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"}}, std::nullopt, params);
+      },
+      "from_topology: parallel_window 'P' has no dem_chunks template");
+  // What the layers cannot use: a Stim DEM, a built decoder, flat matrices,
+  // windows of its own.
+  const auto unusable =
+      [&](const std::function<void(task_graph_node_config &)> &edit,
+          const std::string &text) {
+        task_graph_node_config cfg;
+        std::vector<task_graph_node_config> nodes;
+        std::vector<task_graph_edge> edges{
+            {"measurements", "output", "P", "input"}};
+        cfg.id = "P";
+        cfg.kind = "parallel_window";
+        cfg.dem = spec;
+        cfg.node_params = params;
+        edit(cfg);
+        expect_lowering_error(
+            [&] { lower_parallel_window(std::move(cfg), nodes, edges); },
+            "from_topology: parallel_window 'P' " + text);
+      };
+  unusable([](auto &cfg) { cfg.stim_dem = "error(0.1) D0"; },
+           "takes no stim_dem: each layer builds its decoders from its "
+           "windows");
+  unusable(
+      [](auto &cfg) {
+        cfg.decoder_instance = get_decoder(
+            "single_error_lut",
+            decoder_init(sparse_binary_matrix::from_nested_csr(1, 1, {{0}})));
+      },
+      "takes no built decoder");
+  unusable([](auto &cfg) { cfg.d_sparse = {{0}}; }, "takes no flat matrices");
+  unusable([](auto &cfg) { cfg.windows = {{"A", {}, ""}}; },
+           "takes no windows: its layers are A and B");
+  // corrected_logical, the default, reads the template's readout map.
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"}}, spec,
+              {{"commit_rounds", std::size_t{2}},
+               {"buffer_rounds", std::size_t{1}},
+               {"output", std::string("corrected_logical")}});
+      },
+      "from_topology: parallel_window 'P' has output: corrected_logical, "
+      "which reads the logical value through the last phase's m2o_sparse, "
+      "and its template has none");
+  expect_lowering_error(
+      [&] {
+        lower({{"measurements", "output", "P", "input"}}, spec,
+              {{"buffer_rounds", std::size_t{1}}});
+      },
+      "commit_rounds");
+} // end - TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern)
+
+// A pattern inside an ensemble is rejected before anything is built: its
+// ingest would be fed by the ensemble's fan-out, not by measurements alone.
+TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble) {
+  task_graph_ensemble_spec spec;
+  task_graph_ensemble_spec::member member;
+  task_graph_node_config pattern;
+  task_graph_node_config ensemble;
+  std::vector<task_graph_node_config> nodes;
+  pattern.id = "pw";
+  pattern.kind = "parallel_window";
+  pattern.dem = arbitrary_memory_spec(5);
+  pattern.decoder_type = "single_error_lut";
+  pattern.node_params = {{"commit_rounds", std::size_t{2}},
+                         {"buffer_rounds", std::size_t{1}}};
+  member.nodes.push_back(std::move(pattern));
+  member.edges = {{"input", "output", "pw", "input"},
+                  {"pw", "output", "output", "input"}};
+  spec.members.push_back(std::move(member));
+  spec.join_strategy = "first";
+  ensemble.id = "E";
+  ensemble.ensemble = std::move(spec);
+  nodes.push_back(std::move(ensemble));
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(
+            std::move(nodes), {{"measurements", "output", "E", "input"},
+                               {"E", "output", "output", "input"}});
+      },
+      "from_topology: ensemble 'E' member 0 has parallel_window 'pw', which "
+      "expands only as a node of the graph");
+} // end - TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble)
+
+// A pattern or an ensemble may not take a synthetic endpoint's id, though
+// lowering gives its nodes other ids.
+TEST(ParallelWindowLowering, RejectsAReservedId) {
+  for (const std::string id : {"measurements", "dets", "output"}) {
+    SCOPED_TRACE(id);
+    task_graph_node_config pattern;
+    std::vector<task_graph_node_config> nodes;
+    pattern.id = id;
+    pattern.kind = "parallel_window";
+    pattern.dem = arbitrary_memory_spec(5);
+    pattern.decoder_type = "single_error_lut";
+    pattern.node_params = {{"commit_rounds", std::size_t{2}},
+                           {"buffer_rounds", std::size_t{1}},
+                           {"output", std::string("corrections")}};
+    nodes.push_back(std::move(pattern));
+    expect_lowering_error(
+        [&] {
+          decoding_task_graph::from_topology(
+              std::move(nodes), {{"measurements", "output", id, "input"},
+                                 {id, "output", "output", "input"}});
+        },
+        "from_topology: node id '" + id +
+            "' is reserved for a synthetic endpoint");
+  } // end - for(id)
+} // end - TEST(ParallelWindowLowering, RejectsAReservedId)
+
+// ---------------------------------------------------------------------------
+// Building the windowed kinds
+// ---------------------------------------------------------------------------
+
+// The ingest and decode_window kinds build their nodes from what a windowed
+// topology resolves: an ingest node from its template and layers, a
+// decode_window node from the store's windows, the template and the layer
+// request of the ingest port it reads, with its receives, inner decoder
+// and verify_residual. Without them neither builds.
+TEST(WindowKinds, BuildTheirNodesFromTheContext) {
+  const auto layers = layered(2, 1, 3);
+  auto spec = arbitrary_memory_spec(5, true);
+  spec.phases.back().spec.m2o_sparse = {0, -1};
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+  const cudaqx::heterogeneous_map ingest_params{{"read_logical", true}};
+  const cudaqx::heterogeneous_map unchecked{};
+  const cudaqx::heterogeneous_map failing{
+      {"verify_residual", std::string("fail")}};
+  const cudaqx::heterogeneous_map receiving{{"num_receives", std::size_t{2}}};
+  std::mt19937 rng(53);
+  std::vector<std::uint8_t> m(context->measurement_offset(30, 30));
+  std::optional<edge_value> window;
+  for (auto &x : m)
+    x = static_cast<std::uint8_t>(rng() & 1);
+  store.add_windows(context, layers.a);
+  store.add_windows(context, layers.b);
+  // The context a windowed topology gives node id: its template, with
+  // @p layer for a decode_window node.
+  const auto context_of = [&](const std::string &id,
+                              const cudaqx::heterogeneous_map &params,
+                              std::optional<window_request> layer) {
+    node_build_context ctx;
+    ctx.id = id;
+    ctx.node_params = &params;
+    ctx.store = &store;
+    ctx.context = context;
+    ctx.layer = std::move(layer);
+    ctx.decoder_type = "single_error_lut";
+    return ctx;
+  };
+  const auto build = [&](const std::string &kind, node_build_context &ctx) {
+    return (*find_node_factory(kind))(ctx);
+  };
+
+  auto ingest_ctx = context_of("ingest", ingest_params, std::nullopt);
+  ingest_ctx.windows = {{"A", layers.a, ""}, {"B", layers.b, ""}};
+  auto ingest = build("ingest", ingest_ctx);
+  auto *in = dynamic_cast<ingest_node *>(ingest.get());
+  ASSERT_NE(in, nullptr);
+  EXPECT_EQ(in->outputs(), (std::vector<std::string>{"A", "B", "logical"}));
+  // A's first window, copied while its publication stands.
+  for (std::size_t at = 0; !window; at += *in->raw_chunk_limit()) {
+    ASSERT_LT(at + *in->raw_chunk_limit(), m.size());
+    for (bool more = in->enqueue(m.data() + at, *in->raw_chunk_limit(),
+                                 round_type::BULK);
+         more; more = in->publish_next())
+      if (!window)
+        window = *in->streaming_output(0);
+  }
+
+  auto a_ctx = context_of("A", unchecked, layers.a);
+  auto checked_ctx = context_of("A", failing, layers.a);
+  auto b_ctx = context_of("B", receiving, layers.b);
+  auto a = build("decode_window", a_ctx);
+  auto checked = build("decode_window", checked_ctx);
+  auto b = build("decode_window", b_ctx);
+  auto *a_node = dynamic_cast<decode_window_node *>(a.get());
+  auto *checked_node = dynamic_cast<decode_window_node *>(checked.get());
+  ASSERT_NE(a_node, nullptr);
+  ASSERT_NE(checked_node, nullptr);
+  EXPECT_EQ(b->inputs(),
+            (std::vector<std::string>{"input", "receive_0", "receive_1"}));
+  // A random window is beyond a single-error table: unchecked, it fires;
+  // with verify_residual fail, its solution is rejected.
+  EXPECT_TRUE(a_node->fire(0, {&*window}));
+  EXPECT_FALSE(checked_node->fire(0, {&*window}));
+  EXPECT_NE(checked_node->fire_failure(), nullptr);
+
+  node_build_context bare;
+  bare.id = "lonely";
+  bare.node_params = &unchecked;
+  expect_lowering_error([&] { build("ingest", bare); },
+                        "task graph node 'lonely': an ingest node is built "
+                        "only within a windowed topology");
+  expect_lowering_error([&] { build("decode_window", bare); },
+                        "task graph node 'lonely': a decode_window node is "
+                        "built only within a windowed topology");
+} // end - TEST(WindowKinds, BuildTheirNodesFromTheContext)
+
+// from_topology builds a windowed graph's nodes from what it resolves, so a
+// builder's own error is reported as itself; a graph whose nodes build
+// streams, its nodes joining their inputs by index.
+TEST(WindowKinds, BuildingAWindowedGraphStreams) {
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"output", std::string("corrections")}};
+  lowered_pattern p(arbitrary_memory_spec(5), params);
+  lowered_pattern unknown(arbitrary_memory_spec(5), params);
+  unknown.nodes[2].decoder_type = "no_such_decoder";
+  const auto graph = decoding_task_graph::from_topology(std::move(p.nodes),
+                                                        std::move(p.edges));
+  EXPECT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(std::move(unknown.nodes),
+                                           std::move(unknown.edges));
+      },
+      "no_such_decoder");
+} // end - TEST(WindowKinds, BuildingAWindowedGraphStreams)
+
+// An ingest node keeps a shot's partial rounds and publications across
+// deliveries, so copies of it would split one stream: max_in_flight on it is
+// rejected, while the pattern's layers may still set it.
+TEST(WindowKinds, BuildingRejectsAnIngestFirePool) {
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"output", std::string("corrections")}};
+  lowered_pattern p(arbitrary_memory_spec(5), params);
+  ASSERT_EQ(p.nodes[0].kind, "ingest");
+  p.nodes[0].max_in_flight = 2;
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(
+            std::move(p.nodes), std::move(p.edges), {.async_streaming = true});
+      },
+      "from_topology: node 'P.ingest' of kind 'ingest' keeps state across "
+      "deliveries and cannot run as a fire pool");
+}
+
+// The pattern is registered as one, with its windows, and has no factory.
+TEST(ParallelWindowLowering, IsARegisteredPatternWithWindows) {
+  const auto *pattern = find_node_pattern("parallel_window");
+  ASSERT_NE(pattern, nullptr);
+  EXPECT_TRUE(pattern->lower);
+  EXPECT_TRUE(pattern->windows);
+  EXPECT_EQ(find_node_factory("parallel_window"), nullptr);
+  EXPECT_EQ(find_node_pattern("xor"), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Pattern kinds
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Ids the relay pattern below was lowered for, in order.
+std::vector<std::string> &relay_lowered_ids() {
+  static std::vector<std::string> ids;
+  return ids;
+}
+
+// A pattern kind for the tests below: node R lowers into one streaming node
+// R.inner over the five-round repetition code, which takes R's edges.
+const bool relay_pattern_registered = [] {
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  spec.name = "test_only_relay";
+  spec.requires_decoder = false;
+  spec.requires_dem = false;
+  pattern.lower = [](task_graph_node_config cfg,
+                     std::vector<task_graph_node_config> &out,
+                     std::vector<task_graph_edge> &edges) {
+    const std::string inner = cfg.id + ".inner";
+    relay_lowered_ids().push_back(cfg.id);
+    for (auto &e : edges) {
+      if (e.to_node == cfg.id)
+        e.to_node = inner;
+      if (e.from_node == cfg.id)
+        e.from_node = inner;
+    }
+    out.push_back(rep5_streaming_node(inner));
+  };
+  register_pattern_kind(std::move(spec), {}, std::move(pattern));
+  return true;
+}();
+
+} // namespace
+
+// A pattern kind is lowered by the hook it registered before any node is
+// checked or built, so it needs no factory, and the node it lowers into
+// takes its edges.
+TEST(PatternKind, IsLoweredByItsHookBeforeTheBuild) {
+  std::vector<task_graph_node_config> nodes;
+  task_graph_node_config relay;
+  ASSERT_TRUE(relay_pattern_registered);
+  EXPECT_NE(find_node_pattern("test_only_relay"), nullptr);
+  EXPECT_EQ(find_node_factory("test_only_relay"), nullptr);
+  relay.id = "R";
+  relay.kind = "test_only_relay";
+  nodes.push_back(std::move(relay));
+  relay_lowered_ids().clear();
+  const auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"measurements", "output", "R", "input"},
+                         {"R", "output", "output", "L"}});
+  EXPECT_EQ(relay_lowered_ids(), std::vector<std::string>{"R"});
+  EXPECT_EQ(graph->output_names(), std::vector<std::string>{"L"});
+}
+
+// Any pattern kind inside an ensemble member is rejected, naming its kind,
+// before its hook runs.
+TEST(PatternKind, IsRejectedInsideAnEnsemble) {
+  task_graph_ensemble_spec spec;
+  task_graph_ensemble_spec::member member;
+  task_graph_node_config relay;
+  task_graph_node_config ensemble;
+  std::vector<task_graph_node_config> nodes;
+  ASSERT_TRUE(relay_pattern_registered);
+  relay.id = "r";
+  relay.kind = "test_only_relay";
+  member.nodes.push_back(std::move(relay));
+  member.edges = {{"input", "output", "r", "input"},
+                  {"r", "output", "output", "input"}};
+  spec.members.push_back(std::move(member));
+  spec.join_strategy = "first";
+  ensemble.id = "E";
+  ensemble.ensemble = std::move(spec);
+  nodes.push_back(std::move(ensemble));
+  relay_lowered_ids().clear();
+  expect_lowering_error(
+      [&] {
+        decoding_task_graph::from_topology(
+            std::move(nodes), {{"measurements", "output", "E", "input"},
+                               {"E", "output", "output", "input"}});
+      },
+      "from_topology: ensemble 'E' member 0 has test_only_relay 'r', which "
+      "expands only as a node of the graph");
+  EXPECT_TRUE(relay_lowered_ids().empty());
+} // end - TEST(PatternKind, IsRejectedInsideAnEnsemble)
+
+// A kind either is a pattern or has a factory: registering one form replaces
+// the other, and unregistering removes both. A pattern needs a lowering.
+TEST(PatternKind, RegistrationReplacesTheOtherForm) {
+  const std::string name = "test_only_pattern_or_factory";
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  const node_factory factory =
+      [](node_build_context &) -> std::unique_ptr<task_graph_node> {
+    return nullptr;
+  };
+  spec.name = name;
+  EXPECT_THROW(register_pattern_kind(spec, {}, pattern), std::invalid_argument);
+  pattern.lower = [](task_graph_node_config,
+                     std::vector<task_graph_node_config> &,
+                     std::vector<task_graph_edge> &) {};
+
+  register_pattern_kind(spec, {}, pattern);
+  EXPECT_NE(find_node_pattern(name), nullptr);
+  EXPECT_EQ(find_node_factory(name), nullptr);
+  register_node_kind(spec, {}, factory);
+  EXPECT_EQ(find_node_pattern(name), nullptr);
+  EXPECT_NE(find_node_factory(name), nullptr);
+  register_pattern_kind(spec, {}, pattern);
+  EXPECT_NE(find_node_pattern(name), nullptr);
+  EXPECT_EQ(find_node_factory(name), nullptr);
+  unregister_task_graph_node_kind(name);
+  EXPECT_EQ(find_node_pattern(name), nullptr);
+  EXPECT_EQ(find_task_graph_node_kind(name), nullptr);
+} // end - TEST(PatternKind, RegistrationReplacesTheOtherForm)
 
 } // namespace cudaq::qec

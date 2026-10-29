@@ -20,6 +20,7 @@
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/sparse_binary_matrix.h"
 #include "cudaq/qec/window_request.h"
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -155,6 +156,28 @@ struct decoding_window {
   }
 };
 
+/// The rounds @p request's windows span, relative to their anchor: from
+/// the first zone's first round to the last zone's end. Allocates nothing.
+/// @p request must have a commit zone; check_window_request() checks that.
+round_range zone_span(const window_request &request);
+
+/// The rounds of @p zone, relative to a window's anchor, for the window
+/// anchored at @p anchor, clipped to [0, @p end): the shot's rounds, or
+/// those known so far. Every place a window's rounds are found clips so.
+inline round_range clip_rounds(round_range zone, std::int64_t anchor,
+                               std::int64_t end) {
+  return {std::max<std::int64_t>(0, anchor + zone.begin),
+          std::min(end, anchor + zone.end)};
+}
+
+/// The rounds the model of a window of @p request reads, relative to its
+/// anchor: from the round before its first, whose measurements give v_in,
+/// to the end of the chunks it stitches. A window whose reach meets the
+/// shot's prefix or its end has a prefix or terminal variant. Allocates
+/// nothing.
+round_range model_reach(const experiment_template &t,
+                        const window_request &request);
+
 /// The instances k of @p request whose commit zone, clipped to the shot,
 /// is non-empty in a @p num_rounds round shot.
 /// @throws std::invalid_argument if the request has no commit zone or a
@@ -207,10 +230,59 @@ variant_key window_variant(const experiment_template &context,
                            const window_request &request, std::int64_t k,
                            std::size_t num_rounds);
 
+/// What window_variant() reads of a layer and its template, found once by
+/// variant_bounds_of() for a caller that asks per window.
+struct variant_bounds {
+  round_range reach;              ///< model_reach() of the request
+  std::int64_t prefix_rounds = 0; ///< The template's prefix rounds
+  std::int64_t end_rounds = 0;    ///< Rounds kept from the shot's end
+};
+
+/// @p request's variant bounds on @p context.
+/// @throws std::invalid_argument if the request's anchor is invalid.
+variant_bounds variant_bounds_of(const experiment_template &context,
+                                 const window_request &request);
+
+/// window_variant() from @p bounds, those of @p request. Allocates
+/// nothing and does not check the request.
+variant_key window_variant(const variant_bounds &bounds,
+                           const window_request &request, std::int64_t k,
+                           std::size_t num_rounds);
+
+/// One window of a layer, as ingest hands it over by value: which window it
+/// is, its rounds and model, where its first row lies in the shot, and its
+/// own rows' detectors. A decode_window reads nothing else of ingest. It is
+/// the edge-value type "window_rows", which an executor may copy into its
+/// joins.
+struct window_rows {
+  std::int64_t k = 0;
+  round_range rounds;        ///< The window's rounds, clipped to the shot
+  variant_key variant;       ///< Its model among the layer's variants
+  std::size_t first_row = 0; ///< Its first round's first row in the shot
+  std::vector<std::uint8_t> detectors; ///< Its own rows, round by round
+};
+
 /// A shot length past which a layer gains no variant: every key appears in
 /// some shot of [context.min_rounds(), variant_probe_rounds()).
 std::size_t variant_probe_rounds(const experiment_template &context,
                                  const window_request &request);
+
+/// Where a variant first appears: its key, and an instance and shot length
+/// that have it.
+struct variant_instance {
+  variant_key key;
+  std::int64_t k = 0;
+  std::size_t num_rounds = 0;
+};
+
+/// Every variant of @p request, each with the first shot length, from the
+/// shortest, and the first instance in it that has it, over the shots
+/// variant_probe_rounds() bounds.
+/// @throws std::invalid_argument as check_window_request() if the request
+/// is invalid.
+std::vector<variant_instance>
+variant_instances(const experiment_template &context,
+                  const window_request &request);
 
 /// Check that two windows are the same problem up to a shift of rounds.
 /// @throws std::invalid_argument naming the first field they differ in.

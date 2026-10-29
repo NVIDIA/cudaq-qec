@@ -19,11 +19,14 @@
 #include "cudaq/qec/decoding_task_graph_config.h"
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace cudaq::qec {
+
+class data_artifact_store;
 
 /// The windows one decode_window node decodes: the request of the ingest
 /// window port that feeds it.
@@ -56,12 +59,28 @@ struct scheduled_window {
   window_port output;
   std::vector<window_send> sends;
   std::vector<window_dependency> inputs;
+  bool operator==(const scheduled_window &) const = default;
 };
 
-/// Every window of a shot, by layer in the order given, then by k.
+/// The decoders a node builds for one variant of its layer, and the sha256
+/// the store records the variant under.
+struct variant_decoders {
+  std::string node;
+  variant_key variant;
+  std::size_t decoders = 0;
+  std::string sha256;
+  bool operator==(const variant_decoders &) const = default;
+};
+
+/// Every window of a shot, by layer in the order given, then by k, and, by
+/// node and variant, the decoders each node builds for the variants the
+/// shot uses. Only describe_schedule() lists the decoders.
 struct window_schedule {
   std::size_t num_rounds = 0;
   std::vector<scheduled_window> windows;
+  std::vector<variant_decoders> decoders;
+  /// By ingest node: the sha256 the store records its template under.
+  std::map<std::string, std::string> templates;
 };
 
 /// The windows of a @p num_rounds round shot and their dependencies.
@@ -90,11 +109,15 @@ std::size_t commitment_probe_rounds(const experiment_template &context,
 /// the row, and that every detectable fault is committed exactly once
 /// (F1-F4); that sends match receives, none twice; and that no commit
 /// column has an ambiguous parallel column.
+/// @param store Where the layers' windows are built and read, once each, so
+/// the graph's nodes read the very windows checked; null to build them for
+/// the check alone. @p context must be the store's own template.
 /// @throws std::invalid_argument naming the check, and the row, column,
 /// window or edge that fails it.
 void validate_commitment(std::shared_ptr<const experiment_template> context,
                          const std::vector<window_layer> &layers,
-                         const std::vector<task_graph_edge> &edges);
+                         const std::vector<task_graph_edge> &edges,
+                         data_artifact_store *store = nullptr);
 
 /// Check a topology's windowed decoding before any node is built, and do
 /// nothing for a topology with no ingest or decode_window node. Every ingest
@@ -107,9 +130,31 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
 /// shots: no send joins their windows, and ones with different templates
 /// reach no common node. Each ingest node's layers and sends then pass
 /// validate_commitment().
+/// Each ingest node's template is registered in @p store, and its layers'
+/// windows are built there as validate_commitment() checks them.
+/// @return Each ingest node's layers, by node id: the decode_window nodes
+/// reading it, in id order. Empty for a topology with neither kind.
 /// @throws std::invalid_argument naming the node or edge, or as
 /// experiment_template and validate_commitment() do.
-void validate_window_topology(const std::vector<task_graph_node_config> &nodes,
-                              const std::vector<task_graph_edge> &edges);
+std::map<std::string, std::vector<window_layer>>
+validate_window_topology(const std::vector<task_graph_node_config> &nodes,
+                         const std::vector<task_graph_edge> &edges,
+                         data_artifact_store &store);
+
+/// The windows a @p num_rounds round shot of a topology decodes, as
+/// from_topology() would build it with @p options: every ingest node's
+/// windows, scheduled apart, and the decoders each node builds per variant
+/// the shot uses: one per copy for the bulk, as an asynchronous graph runs
+/// max_in_flight copies, and one for each prefix or terminal variant, which
+/// the copies share; with the sha256 of each variant and template, as the
+/// store records them. Lowers patterns and validates the windows as
+/// from_topology() does, but builds no node. Internal until cudaq-edem fixes
+/// what a window is; empty for a topology without windows.
+/// @throws std::invalid_argument as from_topology() does for the layout, or
+/// if a template admits no shot of @p num_rounds rounds.
+window_schedule describe_schedule(std::vector<task_graph_node_config> nodes,
+                                  std::vector<task_graph_edge> edges,
+                                  const task_graph_options &options,
+                                  std::size_t num_rounds);
 
 } // namespace cudaq::qec

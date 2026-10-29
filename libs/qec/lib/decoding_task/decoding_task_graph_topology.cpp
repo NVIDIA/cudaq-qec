@@ -9,6 +9,8 @@
 // exist once.
 
 #include "decoding_task_commitment.h"
+#include "decoding_task_data_artifacts.h"
+#include "decoding_task_decode_window_node.h"
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
@@ -22,8 +24,10 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 
 namespace cudaq::qec {
@@ -93,6 +97,10 @@ node_build_context prepare_node(task_graph_node_config &cfg,
   if (kind.requires_dem && !cfg.dem.has_value() && !has_flat)
     throw std::invalid_argument(where + " of kind '" + kind.name +
                                 "' needs a DEM: set dem or d_sparse/o_sparse");
+  // A kind reading windows takes its template whole, so the shot is never
+  // expanded into matrices for it.
+  if (kind.takes_windows)
+    return ctx;
   if (!kind.requires_dem) {
     if (cfg.dem.has_value() || has_flat)
       throw std::invalid_argument(where + " of kind '" + kind.name +
@@ -425,6 +433,12 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
       if (n.ensemble)
         throw std::invalid_argument(member + " nests an ensemble, which is "
                                              "not supported yet");
+      // Member nodes are not lowered, and parallel_window's ingest must be
+      // fed by measurements alone, never by a fan-out.
+      if (find_node_pattern(n.kind))
+        throw std::invalid_argument(
+            member + " has " + find_task_graph_node_kind(n.kind)->name + " '" +
+            n.id + "', which expands only as a node of the graph");
       if (n.id.empty())
         throw std::invalid_argument(member + " has a node without an id");
       n.id = prefix + n.id;
@@ -481,31 +495,45 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
   return wiring;
 }
 
-/// Rewrite every pattern entry of `nodes` into plain nodes, in place, so the
-/// result is in topological order whenever the input was.
+/// Rewrite every pattern entry of `nodes`, an ensemble or a node of a
+/// pattern kind, into plain nodes, in place, so the result is in topological
+/// order whenever the input was. Only ensembles need wiring once built. The
+/// caller holds the registry lock, which keeps each lowering registered
+/// while it runs.
 std::vector<ensemble_wiring>
 lower_patterns(std::vector<task_graph_node_config> &nodes,
                std::vector<task_graph_edge> &edges) {
   std::vector<ensemble_wiring> wirings;
-  if (std::none_of(nodes.begin(), nodes.end(),
-                   [](const auto &cfg) { return cfg.ensemble.has_value(); }))
+  std::vector<task_graph_node_config> lowered;
+  if (std::none_of(nodes.begin(), nodes.end(), [](const auto &cfg) {
+        return cfg.ensemble.has_value() || find_node_pattern(cfg.kind);
+      }))
     return wirings;
   // A lone pattern gets the single-node wiring before it stops being one
   // node.
   if (nodes.size() == 1 && edges.empty())
     edges = {{"measurements", "output", nodes[0].id, "input"},
              {nodes[0].id, "output", "output", "input"}};
-  std::vector<task_graph_node_config> lowered;
   lowered.reserve(nodes.size());
   for (auto &cfg : nodes) {
+    const node_pattern *pattern =
+        cfg.ensemble ? nullptr : find_node_pattern(cfg.kind);
+    // A pattern's nodes take its id as their prefix, so a reserved one is
+    // named before lowering hides it.
+    if ((cfg.ensemble || pattern) &&
+        (cfg.id == "measurements" || cfg.id == "dets" || cfg.id == "output"))
+      throw std::invalid_argument("from_topology: node id '" + cfg.id +
+                                  "' is reserved for a synthetic endpoint");
     if (cfg.ensemble)
       wirings.push_back(lower_ensemble(std::move(cfg), lowered, edges));
+    else if (pattern)
+      pattern->lower(std::move(cfg), lowered, edges);
     else
       lowered.push_back(std::move(cfg));
-  }
+  } // end - for(cfg)
   nodes = std::move(lowered);
   return wirings;
-}
+} // end - lower_patterns()
 
 /// The static width of a node's `logical_outcome` output, when it has one.
 std::optional<std::size_t>
@@ -628,6 +656,87 @@ void wire_patterns(const std::vector<ensemble_wiring> &wirings,
   edges.insert(edges.begin(), handles.begin(), handles.end());
 }
 
+/// The windows a windowed topology's nodes read: one template per ingest
+/// node and every variant of every layer, built once for the graph as
+/// validation checks them. Nodes keep shared handles to what they read, so
+/// the store need not outlive the build.
+struct graph_windows {
+  data_artifact_store store;
+  /// By ingest node.
+  std::map<std::string, std::shared_ptr<const experiment_template>> templates;
+  /// By decode_window node: the ingest node it reads, and its layer.
+  std::map<std::string, std::pair<std::string, window_request>> layers;
+  /// By decode_window node: its receives' guarantees, by receive index.
+  std::map<std::string, std::vector<std::optional<std::int64_t>>> guarantees;
+};
+
+// Record in @p windows which template and layer each node reads, from
+// @p layers, each ingest node's, as validate_window_topology() resolved
+// them. It checked every ingest node has a template, and built them and the
+// layers' windows into the store.
+void record_graph_windows(
+    const std::vector<task_graph_node_config> &nodes,
+    const std::vector<task_graph_edge> &edges,
+    const std::map<std::string, std::vector<window_layer>> &layers,
+    graph_windows &windows) {
+  for (const auto &cfg : nodes) {
+    const auto *kind = find_task_graph_node_kind(cfg.kind);
+    if (kind && kind->name == "ingest")
+      windows.templates[cfg.id] = windows.store.add_template(*cfg.dem);
+  }
+  for (const auto &[ingest, ingest_layers] : layers) {
+    // Ingest numbers its publications from its layers' first window.
+    auto base = std::numeric_limits<std::int64_t>::max();
+    const auto layer_of = [&](const std::string &node) {
+      const auto it = std::find_if(
+          ingest_layers.begin(), ingest_layers.end(),
+          [&](const window_layer &layer) { return layer.node == node; });
+      return it == ingest_layers.end() ? nullptr : &*it;
+    };
+    for (const auto &layer : ingest_layers) {
+      windows.layers[layer.node] = {ingest, layer.request};
+      base = std::min(base, window_instances(layer.request, 0).begin);
+    }
+    // A send between two of its layers, into receive_i; validation has
+    // checked the receive names.
+    for (const auto &e : edges) {
+      const auto *to = layer_of(e.to_node);
+      const auto *from = layer_of(e.from_node);
+      if (!to || !from || e.to_input.rfind("receive_", 0) != 0)
+        continue;
+      const auto receive = std::stoul(e.to_input.substr(8));
+      auto &guarantees = windows.guarantees[e.to_node];
+      if (guarantees.size() <= receive)
+        guarantees.resize(receive + 1);
+      guarantees[receive] = first_guaranteed_receive(to->request, from->request,
+                                                     e.index_offset, base);
+    }
+  } // end - for(ingest)
+} // end - record_graph_windows()
+
+// Give a windowed node what its builder reads: an ingest node its template
+// and layers, a decode_window node the store, its ingest node's template,
+// its layer and its inner decoder, which it builds per window variant.
+void attach_windows(const task_graph_node_config &cfg,
+                    const graph_windows &windows, node_build_context &ctx) {
+  if (const auto t = windows.templates.find(cfg.id);
+      t != windows.templates.end()) {
+    ctx.store = &windows.store;
+    ctx.context = t->second;
+    ctx.windows = cfg.windows;
+  } else if (const auto l = windows.layers.find(cfg.id);
+             l != windows.layers.end()) {
+    ctx.store = &windows.store;
+    ctx.context = windows.templates.at(l->second.first);
+    ctx.layer = l->second.second;
+    if (const auto g = windows.guarantees.find(cfg.id);
+        g != windows.guarantees.end())
+      ctx.guaranteed_receives = g->second;
+    ctx.decoder_type = cfg.decoder_type;
+    ctx.decoder_params = cfg.params;
+  }
+}
+
 } // namespace
 
 std::unique_ptr<decoding_task_graph>
@@ -694,6 +803,76 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
       new decoding_task_graph(std::move(i)));
 }
 
+// Each ingest node's windows are scheduled apart. A node's copies share one
+// core: the bulk variant has a decoder per copy, and every prefix or
+// terminal variant one, which a single window of the shot uses; copies are
+// built only for an asynchronous graph. Validation built every variant into
+// the store, which hashes each.
+window_schedule describe_schedule(std::vector<task_graph_node_config> nodes,
+                                  std::vector<task_graph_edge> edges,
+                                  const task_graph_options &options,
+                                  std::size_t num_rounds) {
+  auto kind_lock = lock_node_kind_registry();
+  data_artifact_store store;
+  window_schedule out;
+  out.num_rounds = num_rounds;
+  lower_patterns(nodes, edges);
+  // The layout reads parameters with their defaults filled, as built.
+  for (auto &cfg : nodes)
+    if (const auto *kind = find_task_graph_node_kind(cfg.kind))
+      if (const auto *schema = decoding::config::find_decoder_schema(
+              task_graph_node_schema_name(kind->name)))
+        decoding::config::materialize_default_args(*schema, cfg.node_params);
+  for (const auto &[ingest, layers] :
+       validate_window_topology(nodes, edges, store)) {
+    const auto is_layer = [&](const std::string &node) {
+      return std::any_of(
+          layers.begin(), layers.end(),
+          [&](const window_layer &layer) { return layer.node == node; });
+    };
+    const auto ingest_cfg =
+        std::find_if(nodes.begin(), nodes.end(),
+                     [&](const auto &cfg) { return cfg.id == ingest; });
+    std::vector<task_graph_edge> sends;
+    for (const auto &e : edges)
+      if (is_layer(e.from_node) && is_layer(e.to_node))
+        sends.push_back(e);
+    const auto context = store.add_template(*ingest_cfg->dem);
+    const auto layer_of = [&](const std::string &node) -> const auto & {
+      return std::find_if(
+                 layers.begin(), layers.end(),
+                 [&](const window_layer &layer) { return layer.node == node; })
+          ->request;
+    };
+    auto schedule = schedule_windows(context, layers, sends, num_rounds);
+    out.templates[ingest] = store.template_sha256(*context);
+    for (auto &window : schedule.windows) {
+      const auto node =
+          std::find_if(nodes.begin(), nodes.end(),
+                       [&](const auto &cfg) { return cfg.id == window.node; });
+      const bool counted = std::any_of(out.decoders.begin(), out.decoders.end(),
+                                       [&](const variant_decoders &d) {
+                                         return d.node == window.node &&
+                                                d.variant == window.variant;
+                                       });
+      if (!counted)
+        out.decoders.push_back(
+            {window.node, window.variant,
+             options.async_streaming && window.variant.bulk()
+                 ? node->max_in_flight
+                 : std::size_t{1},
+             store.window_sha256(*context, layer_of(window.node),
+                                 window.variant)});
+      out.windows.push_back(std::move(window));
+    }
+  } // end - for(ingest, layers)
+  std::sort(out.decoders.begin(), out.decoders.end(),
+            [](const auto &a, const auto &b) {
+              return std::tie(a.node, a.variant) < std::tie(b.node, b.variant);
+            });
+  return out;
+} // end - describe_schedule()
+
 std::unique_ptr<decoding_task_graph>
 decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
                                    std::vector<task_graph_edge> edges,
@@ -754,14 +933,23 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
           "' runs as a fire pool, so each copy needs its own inner decoder; "
           "give decoder_type instead of a built decoder");
   } // end - for(cfg)
+  graph_windows windows;
   if (!infer_edges)
-    validate_window_topology(nodes, edges);
+    record_graph_windows(nodes, edges,
+                         validate_window_topology(nodes, edges, windows.store),
+                         windows);
 
   auto i = std::make_unique<impl>();
   for (auto &cfg : nodes) {
     const auto *kind = find_task_graph_node_kind(cfg.kind);
     const auto *factory = find_node_factory(cfg.kind);
     auto ctx = prepare_node(cfg, *kind);
+    // Copies are built only for an asynchronous graph; what they share, the
+    // first fills.
+    std::shared_ptr<void> shared;
+    attach_windows(cfg, windows, ctx);
+    ctx.copies = options.async_streaming ? cfg.max_in_flight : 1;
+    ctx.shared = &shared;
     // The first node carrying a DEM owns the graph's D; a single-node graph
     // also exposes its O.  o_matrix() is not meaningful once outcomes are
     // combined, so a multi-node graph leaves it unset, as combine() does.
@@ -787,13 +975,18 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     for (std::size_t r = 1; options.async_streaming && r < cfg.max_in_flight;
          ++r) {
       auto replica_ctx = prepare_node(cfg, *kind);
+      // Each copy decodes the same windows, so it reads the same store.
+      attach_windows(cfg, windows, replica_ctx);
+      replica_ctx.copy = r;
+      replica_ctx.copies = ctx.copies;
+      replica_ctx.shared = &shared;
       replicas.push_back((*factory)(replica_ctx));
     }
+    i->one_shot_streams = i->one_shot_streams || !node->has_one_shot_path();
     i->node_ids.push_back(cfg.id);
     i->nodes.push_back(std::move(node));
     i->node_replicas.push_back(std::move(replicas));
   }
-
   wire_patterns(patterns, i->node_ids, i->nodes, edges);
 
   if (infer_edges) {

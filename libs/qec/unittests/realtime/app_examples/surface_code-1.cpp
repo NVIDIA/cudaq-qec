@@ -168,6 +168,9 @@ struct run_options {
   bool save_dem = false;
   bool load_dem = false;
   bool dem_chunks = false; // describe the DEM one round at a time
+  // Decode with the parallel_window pattern over the chunks: implies
+  // --dem_chunks and --task_graph.
+  bool parallel_window = false;
   std::string dem_filename;
   bool save_syndrome = false;
   bool load_syndrome = false;
@@ -182,6 +185,10 @@ struct experiment {
   std::size_t num_data = 0, num_ancx = 0, num_ancz = 0;
   std::size_t num_rounds = 0, num_logical = 0, num_obs = 0;
   std::vector<std::size_t> x_vec, z_vec, obs_flat;
+  // The syndrome_mapping row the data readout names: a `final` row ends a
+  // windowed graph's shot. 0 sends it untagged, as the other decoders take
+  // it.
+  std::uint64_t final_mapping_id = 0;
 };
 
 // --save_syndrome capture state. The library callback is a bare
@@ -335,7 +342,27 @@ build_multi_decoder_config(
       dc.error_rate_vec = dem.error_rates;
     }
 
-    if (opts.decoder_type == "sliding_window") {
+    if (opts.parallel_window) {
+      // One parallel_window node over the chunks: windows of d committed
+      // rounds with d buffer rounds, decoding in the gaps of 3d between them.
+      using node_spec = config::decoder_config::task_graph_spec::node_spec;
+      auto &graph = dc.task_graph.emplace();
+      node_spec pw;
+      pw.id = "pw";
+      pw.type = "parallel_window";
+      pw.inner_type = opts.decoder_type;
+      pw.decoder_custom_args =
+          decoder_args(opts.decoder_type, opts.distance, opts.decoder_params);
+      pw.node_params = cudaqx::heterogeneous_map{
+          {"commit_rounds", static_cast<std::size_t>(opts.distance)},
+          {"buffer_rounds", static_cast<std::size_t>(opts.distance)},
+          {"gap_rounds", static_cast<std::size_t>(3 * opts.distance)},
+          {"output", std::string("corrections")}};
+      graph.nodes.push_back(std::move(pw));
+      graph.edges = {{"measurements", "output", "pw", "input"},
+                     {"pw", "output", "output", "input"}};
+      graph.options.async_streaming = opts.async_streaming;
+    } else if (opts.decoder_type == "sliding_window") {
       dc.type = "sliding_window";
       cudaqx::heterogeneous_map sw_args;
       sw_args.insert("window_size", opts.sw_window_size);
@@ -368,6 +395,9 @@ build_multi_decoder_config(
 
     multi_config.decoders.push_back(dc);
   }
+  // A windowed graph completes a shot only at its FINAL round.
+  if (opts.parallel_window)
+    multi_config.syndrome_mapping.push_back({1, "final"});
   return multi_config;
 }
 
@@ -382,7 +412,8 @@ __qpu__ std::vector<cudaq::measure_result> memory_circuit(
     const cudaq::qec::code::stabilizer_round &stab_round,
     const cudaq::qec::code::one_qubit_encoding &state_prep,
     std::size_t num_rounds, const std::vector<std::size_t> &x_stabilizers,
-    const std::vector<std::size_t> &z_stabilizers, std::int64_t decoder_id) {
+    const std::vector<std::size_t> &z_stabilizers, std::int64_t decoder_id,
+    std::uint64_t final_mapping_id) {
   patch logical(data, xstab_anc, zstab_anc);
   state_prep(logical);
 
@@ -396,9 +427,13 @@ __qpu__ std::vector<cudaq::measure_result> memory_circuit(
     cudaq::qec::decoding::enqueue_syndromes(decoder_id, s);
   }
 
-  // Final data readout
+  // Final data readout, through the row that ends the shot, if any.
   auto data_meas = mz(data);
-  cudaq::qec::decoding::enqueue_syndromes(decoder_id, data_meas);
+  if (final_mapping_id == 0)
+    cudaq::qec::decoding::enqueue_syndromes(decoder_id, data_meas);
+  else
+    cudaq::qec::decoding::enqueue_syndromes_mapped(
+        decoder_id, data_meas, num_rounds, final_mapping_id);
   return data_meas;
 }
 
@@ -417,7 +452,8 @@ __qpu__ std::int64_t demo_circuit_qpu(
     const std::vector<std::size_t> &x_stabilizers,
     const std::vector<std::size_t> &z_stabilizers,
     const std::vector<std::size_t> &obs_matrix_flat,
-    std::size_t num_observables, const std::vector<std::int64_t> &decoder_ids) {
+    std::size_t num_observables, const std::vector<std::int64_t> &decoder_ids,
+    std::uint64_t final_mapping_id) {
   cudaq::qvector data(num_logical * num_data),
       xstab_anc(num_logical * num_ancx), zstab_anc(num_logical * num_ancz);
 
@@ -429,11 +465,12 @@ __qpu__ std::int64_t demo_circuit_qpu(
   for (std::size_t i = 0; i < num_logical; i++) {
     // Stream this logical's rounds + data readout to its decoder, keeping the
     // single data measurement it returns.
-    auto data_meas = memory_circuit(
-        data.slice(i * num_data, num_data),
-        xstab_anc.slice(i * num_ancx, num_ancx),
-        zstab_anc.slice(i * num_ancz, num_ancz), stab_round, state_prep,
-        num_rounds, x_stabilizers, z_stabilizers, decoder_ids[i]);
+    auto data_meas =
+        memory_circuit(data.slice(i * num_data, num_data),
+                       xstab_anc.slice(i * num_ancx, num_ancx),
+                       zstab_anc.slice(i * num_ancz, num_ancz), stab_round,
+                       state_prep, num_rounds, x_stabilizers, z_stabilizers,
+                       decoder_ids[i], final_mapping_id);
 
     // Raw logical observable (row 0 of the observable matrix) from that
     // readout.
@@ -500,8 +537,15 @@ experiment make_experiment(const cudaq::qec::code &code,
 //   (default)         : characterize and configure the decoders in-process.
 bool setup_decoders(const cudaq::qec::code &code,
                     cudaq::qec::operation state_prep, const run_options &opts,
-                    cudaq::noise_model &noise) {
+                    cudaq::noise_model &noise, experiment &exp) {
   namespace config = cudaq::qec::decoding::config;
+  // The configuration's first final row, which ends each shot, or 0.
+  const auto final_row_of = [](const config::multi_decoder_config &cfg) {
+    for (const auto &row : cfg.syndrome_mapping)
+      if (row.type == "final")
+        return row.id;
+    return std::uint64_t{0};
+  };
 
   if (opts.load_dem) {
     std::ifstream config_file(opts.dem_filename);
@@ -572,6 +616,7 @@ bool setup_decoders(const cudaq::qec::code &code,
     }
 
     config::configure_decoders(cfg);
+    exp.final_mapping_id = final_row_of(cfg);
     printf("Loaded decoder config from %s (%zu decoders)\n",
            opts.dem_filename.c_str(), cfg.decoders.size());
     return true;
@@ -622,6 +667,7 @@ bool setup_decoders(const cudaq::qec::code &code,
   }
 
   config::configure_decoders(cfg);
+  exp.final_mapping_id = final_row_of(cfg);
   return true;
 }
 
@@ -807,12 +853,12 @@ run_shots(std::size_t num_shots, cudaq::noise_model &noise,
                           stab_round, prep, exp.num_data, exp.num_ancx,
                           exp.num_ancz, exp.num_rounds, exp.num_logical,
                           exp.x_vec, exp.z_vec, exp.obs_flat, exp.num_obs,
-                          decoder_ids)
+                          decoder_ids, exp.final_mapping_id)
              : cudaq::run(num_shots, noise, cudaq::qec::qpu::demo_circuit_qpu,
                           stab_round, prep, exp.num_data, exp.num_ancx,
                           exp.num_ancz, exp.num_rounds, exp.num_logical,
                           exp.x_vec, exp.z_vec, exp.obs_flat, exp.num_obs,
-                          decoder_ids);
+                          decoder_ids, exp.final_mapping_id);
 }
 
 // Decode the per-shot results and print the logical error rate.
@@ -875,10 +921,10 @@ void demo_circuit_host(const cudaq::qec::code &code, const run_options &opts) {
                               cudaq::qec::two_qubit_depolarization(opts.p_cnot),
                               /*num_controls=*/1);
 
-  const experiment exp = make_experiment(code, state_prep, opts);
+  experiment exp = make_experiment(code, state_prep, opts);
 
   // Configure the decoders. --save_dem stops here (config written, no shots).
-  if (!setup_decoders(code, state_prep, opts, noise))
+  if (!setup_decoders(code, state_prep, opts, noise, exp))
     return;
 
   // One decoder id per logical qubit, matching config ids 0..num_logical-1.
@@ -939,6 +985,13 @@ void show_help() {
          "decodes the --num_rounds given here.\n");
   printf("  --dem_chunks        Describe the DEM as one chunk per round with a "
          "repeating bulk, so one config serves any --num_rounds.\n");
+  printf("  --parallel_window   Decode with the parallel_window pattern over "
+         "the chunks,\n"
+         "      --decoder_type inside each window, ending each shot through a "
+         "final\n"
+         "      syndrome_mapping row. Implies --dem_chunks and --task_graph; "
+         "replaying\n"
+         "      --load_syndrome cannot end a shot, so it is not supported.\n");
   printf("  --save_syndrome <string> Save syndrome data to a file for later "
          "replay.\n");
   printf("  --load_syndrome <string> Load and replay syndrome data from a "
@@ -1008,6 +1061,10 @@ int main(int argc, char **argv) {
         i++;
       } else if (arg == "--dem_chunks") {
         opts.dem_chunks = true;
+      } else if (arg == "--parallel_window") {
+        opts.parallel_window = true;
+        opts.dem_chunks = true;
+        opts.task_graph = true;
       } else if (arg == "--save_syndrome") {
         opts.save_syndrome = true;
         opts.syndrome_filename = val(i);
@@ -1085,6 +1142,11 @@ int main(int argc, char **argv) {
   if (opts.task_graph && !is_leaf_decoder(opts.decoder_type)) {
     printf("Error: --task_graph requires --decoder_type 'multi_error_lut', "
            "'nv-qldpc-decoder', or 'pymatching'\n");
+    return 1;
+  }
+  if (opts.parallel_window && opts.load_syndrome) {
+    printf("Error: --load_syndrome replays rounds untagged, so it cannot end "
+           "a --parallel_window shot\n");
     return 1;
   }
   if (opts.async_streaming && !opts.task_graph) {

@@ -38,10 +38,13 @@ public:
   /// resolves against; the file overload above passes the config's own
   /// directory. Defaults to the working directory for a config with no
   /// originating file.
+  /// \p warn_serving logs warn_windowed_serving()'s warnings; a caller whose
+  /// config configure_decoders() already warned about passes false.
   void load_from_config(
       const cudaq::qec::decoding::config::multi_decoder_config &config,
       const std::string &source_name,
-      const std::filesystem::path &base_dir = std::filesystem::current_path());
+      const std::filesystem::path &base_dir = std::filesystem::current_path(),
+      bool warn_serving = true);
 
   DecodingSession &get(uint64_t decoder_id);
   const DecodingSession &get(uint64_t decoder_id) const;
