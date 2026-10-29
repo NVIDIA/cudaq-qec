@@ -57,10 +57,9 @@ struct node_build_context {
   /// when the flat form omitted it or native observable streaming needs no
   /// closed matrix. Kinds needing only D and O ignore it.
   std::shared_ptr<const sparse_binary_matrix> h;
-  /// The node's closed DEM when its matrices came from a `dem`; null for the
-  /// flat form or native observable streaming. Carries the error rates and
-  /// observable model beside `h`, for a kind that needs more of the DEM than
-  /// its matrices.
+  /// Dense legacy model for a raw Stim-text source; null for chunked and flat
+  /// sources. Chunked models are closed sparsely during preparation instead
+  /// of retaining a dense detectors x faults allocation here.
   std::shared_ptr<const detector_error_model> closed_dem;
   /// Rebuildable fixed-width memory recipe for arbitrary-length FINAL tails.
   std::shared_ptr<const dem_chunks_spec> memory_spec;
