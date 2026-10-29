@@ -96,11 +96,7 @@ The sweep is the Cartesian product of:
 
 Option names accept either hyphens or underscores.
 
-`--async_queue_capacity N` controls the bounded queue used by each
-`task-graph-async` instance. Its default is 8, matching
-`task_graph_options::async_queue_capacity`. Passing zero reserves one slot per
-detector round in the shot, which avoids repeated producer stalls when queue
-backpressure is not part of the workload.
+`--async_queue_capacity N` controls the bounded queue used by each async instance: how many rounds the producer may run ahead of the graph. Its default is 256, matching `task_graph_options::async_queue_capacity`. A windowed graph that falls behind admits the rounds queued behind it together, up to one first-layer period (3d rounds by default) at a time, so a deep queue lets it catch up in batches; a shallow one caps those batches. Passing zero reserves one slot per detector round in the shot.
 
 `--dedicate_async_coordinator` reserves the last CPU in each pinned instance
 block for the task graph's coordinator and removes it from the producer and

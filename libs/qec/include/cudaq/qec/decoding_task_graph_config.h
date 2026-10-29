@@ -39,11 +39,16 @@ struct task_graph_edge {
 struct task_graph_options {
   /// Process streaming records on the graph's persistent coordinator thread.
   /// Records then overlap: a later record runs ahead on nodes that finished
-  /// the earlier ones, with `async_queue_capacity` records in flight at most.
+  /// the earlier ones, up to 16 records in flight, or the queue's capacity if
+  /// smaller.
   bool async_streaming = false;
-  /// Maximum public enqueue operations queued or executing. Must be nonzero
-  /// when asynchronous.
-  std::size_t async_queue_capacity = 8;
+  /// Maximum public enqueue operations queued or executing: how far the
+  /// producer may run ahead of the graph. Must be nonzero when asynchronous.
+  /// A graph whose one raw-input node meters its own chunks, such as a
+  /// windowed graph, admits rounds that have queued up together, so a deep
+  /// queue lets it catch up in batches. 256 lets the producer run a quarter
+  /// of a millisecond ahead at 1 us rounds; each slot holds one round.
+  std::size_t async_queue_capacity = 256;
   /// CPU reserved for the asynchronous coordinator, or -1 to inherit the
   /// constructing thread's affinity. This pins only the coordinator; decoder
   /// pool workers retain their separately configured affinity.

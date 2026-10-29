@@ -174,7 +174,7 @@ shot whole_shot(dem_chunks_spec spec, std::size_t rounds) {
   s.h = sparse_binary_matrix(s.dem.detector_error_matrix).to_nested_csc();
   s.o = sparse_binary_matrix(s.dem.observables_flips_matrix).to_nested_csc();
   s.column = dem_chunks_to_fault_offsets(chunks);
-  s.row = {0};
+  s.row.assign(1, 0);
   for (const auto &chunk : chunks)
     s.row.push_back(s.row.back() +
                     (chunk.has_seam(to) ? chunk.get_seam(to).num_rows() : 0) +

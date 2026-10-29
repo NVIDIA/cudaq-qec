@@ -268,11 +268,15 @@ the session. A FINAL enqueue waits for all accepted input and the final flush.
 ``clear_corrections`` drains accepted input without flushing guarded tails
 before consuming the result. Each public enqueue remains one queue record, so
 inner streaming decoders observe the same call boundaries as synchronous
-graphs.
+graphs, with one exception: a graph whose one raw-input node meters its own
+chunks, such as a windowed graph, admits BULK rounds that have queued up
+behind it together, so that a graph that falls behind catches up in batches.
 
-In an asynchronous graph, records overlap: the coordinator admits every
-accepted record at once, up to ``async_queue_capacity``, and a later record
-runs ahead on nodes that have finished the earlier ones. 
+In an asynchronous graph, records overlap: a later record runs ahead on nodes
+that have finished the earlier ones, up to 16 records at once.
+``async_queue_capacity`` (default 256) bounds how many public enqueues may be
+queued or running, which is how far a producer may run ahead before an
+enqueue waits.
 
 Decoder-server YAML exposes the same policy as ``task_graph.async_streaming``,
 with optional ``async_queue_capacity``, ``async_coordinator_cpu``,

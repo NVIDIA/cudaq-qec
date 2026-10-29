@@ -35,6 +35,12 @@ namespace cudaq::qec {
 
 namespace {
 
+// Record contexts an asynchronous graph keeps: its records in flight at
+// once. Its pool runs fewer events than this concurrently, and a graph that
+// falls behind takes a chunk of queued rounds into each, a layer period for a
+// windowed graph, so 16 cover several hundred rounds.
+constexpr std::size_t async_record_contexts = 16;
+
 /// Every type a node's ports name must be registered: a wire into an
 /// unregistered one would fail as a bare type mismatch, and an edge_value
 /// built for it would throw on the first fire.  An input is checked by asking
@@ -835,11 +841,14 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
   }
   // Built once, after the options it depends on have been validated. The
   // parked coordinator cannot start a session before assembly returns. An
-  // asynchronous graph gets one record context per queue slot, so every
-  // accepted record is admitted at once.
+  // asynchronous graph's queue holds rounds, which are cheap; its record
+  // contexts, each with its own event store and join-table share, are
+  // fewer, and a graph that falls behind takes queued rounds into each.
   if (i->nodes.size() > 1 || !i->streaming_nodes.empty())
     i->prepare_event_runtime(
-        options.async_streaming ? options.async_queue_capacity : 1,
+        options.async_streaming
+            ? std::min(options.async_queue_capacity, async_record_contexts)
+            : 1,
         /*dispatcher_thread=*/options.async_streaming);
   return std::unique_ptr<decoding_task_graph>(
       new decoding_task_graph(std::move(i)));

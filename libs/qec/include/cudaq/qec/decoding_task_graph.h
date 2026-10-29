@@ -340,9 +340,9 @@ struct task_graph_streaming_result {
 /// serialised -- an overlapping call throws `std::logic_error`. An
 /// async-streaming graph instead has one internal coordinator that dispatches
 /// records to pool workers; its public streaming calls provide copied input
-/// and coherent snapshots. Records overlap, up to `async_queue_capacity` at
-/// once, but each node still sees them in order and every value a record
-/// moves between nodes is buffered per record.
+/// and coherent snapshots. Records overlap, a bounded number at once, but each
+/// node still sees them in order and every value a record moves between nodes
+/// is buffered per record.
 class decoding_task_graph {
 public:
   /// Construct from an already-built decoder and D/O in nested-row form.

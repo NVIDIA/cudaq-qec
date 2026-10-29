@@ -37,11 +37,12 @@ constexpr std::int64_t no_index = std::numeric_limits<std::int64_t>::min();
 // session has records in flight; idle sessions park at once.
 constexpr std::size_t kHandoffSpinPauseIters = 4096;
 
-// The most queued rounds the async coordinator admits as one record. A
-// parallel window's first layer fires every 3d rounds by default, 33 at
-// d = 11; 32 keeps a batch within about one such period, bounding the work
-// one record holds and its buffer.
-constexpr std::size_t async_max_coalesced_records = 32;
+// The most bytes of queued rounds the async coordinator admits as one
+// record, past the raw-input node's own chunk. A windowed graph's ingest
+// takes one first-layer period, 3d rounds of about d^2 measurements: 8 KB at
+// d = 11, 126 KB at d = 35. 128 KB covers that while bounding what a node
+// metering huge chunks would have each context hold.
+constexpr std::size_t async_max_batch_bytes = std::size_t{128} << 10;
 
 // An indexed node's flush event, in graph_event::offset, once it has resolved
 // its instances and waits only to end the node's shot. Flush events carry no
@@ -2097,21 +2098,26 @@ void decoding_task_graph::impl::prepare_event_runtime(std::size_t context_count,
   scheduler =
       std::make_unique<record_scheduler>(*this, context_count, event_capacity);
   // Queued rounds may be admitted together when the one raw-input node
-  // meters its own chunks; their records then need room for a batch.
+  // meters its own chunks; their records then need room for a batch. A batch
+  // fits one of the node's chunks, so it is one delivery, as the join tables
+  // sized per record assume.
   auto &state = async_streaming;
   std::size_t raw_inputs = 0;
+  std::size_t chunk = 0;
   state.coalesce = dispatcher_thread;
   for (std::size_t si = 0; si < streaming_nodes.size(); ++si)
     if (streaming_node_has_raw_input[si]) {
+      const auto limit = streaming_nodes[si].capability->raw_chunk_limit();
       ++raw_inputs;
-      if (!streaming_nodes[si].capability->raw_chunk_limit())
+      if (!limit)
         state.coalesce = false;
+      else
+        chunk = *limit;
     }
   state.coalesce = state.coalesce && raw_inputs == 1;
-  if (state.coalesce && !state.slots.empty())
+  if (state.coalesce)
     for (auto &c : scheduler->contexts)
-      c.batch.resize(async_max_coalesced_records *
-                     state.slots.front().syndrome.size());
+      c.batch.resize(std::min(chunk, async_max_batch_bytes));
 }
 
 // Keep both the persistent event workers and asynchronous coordinator inside
@@ -2426,8 +2432,7 @@ void decoding_task_graph::impl::dispatch_async_session() {
         std::size_t take = 1;
         std::size_t bytes = slot.len;
         if (state.coalesce && slot.type == round_type::BULK)
-          while (take < async_max_coalesced_records &&
-                 admitted + take < submitted) {
+          while (admitted + take < submitted) {
             const auto &next = state.slots[(admitted + take) % state.capacity];
             if (next.type != round_type::BULK ||
                 bytes + next.len > c->batch.size())
