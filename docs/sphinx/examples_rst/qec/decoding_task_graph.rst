@@ -292,10 +292,13 @@ and worker affinity masks when using this low-latency policy.
 ``async_num_workers`` sets how many pool threads run node fires in an
 asynchronous graph, not counting the coordinator. Unset, the default, picks
 the graph's parallel width, including every fire pool's copies, capped by
-hardware concurrency; the build warns when the count is below the pooled
-copies. ``async_worker_cpus`` pins those threads round-robin to the listed
-CPUs (Linux only); it is empty by default, so node work inherits the
-process's affinity. Synchronous graphs ignore both.
+hardware concurrency. An indexed node's fires leave one worker for
+ingestion and deliveries when there are several, and records pipeline, so a
+graph with one, such as a windowed graph, defaults to every pooled copy plus
+that worker. The build warns when the workers that may fire are fewer than
+the pooled copies. ``async_worker_cpus`` pins those threads round-robin to
+the listed CPUs (Linux only); it is empty by default, so node work inherits
+the process's affinity. Synchronous graphs ignore both.
 
 Pools are per graph: each decoder's asynchronous graph has its own coordinator
 and workers, so a configuration with several runs the sum of their threads.

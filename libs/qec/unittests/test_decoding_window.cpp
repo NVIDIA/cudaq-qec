@@ -6600,6 +6600,59 @@ TEST(WindowedGraph, JoinTablesHoldWhatARecordPublishes) {
     EXPECT_EQ(warning.find("join table"), std::string::npos) << warning;
 }
 
+// The pattern P with @p copies of each layer, built asynchronously with
+// @p workers, or the default pool when zero; returns the warnings about
+// copies that cannot run concurrently and the graph's thread count.
+static std::pair<std::vector<std::string>, std::size_t>
+pooled_pattern_warnings(std::size_t copies, std::size_t workers) {
+  namespace logging = cudaq::qec::detail;
+  std::mutex mutex;
+  std::vector<std::string> warnings;
+  logging::forwarder_config config;
+  task_graph_options options;
+  std::vector<task_graph_node_config> nodes;
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{4}},
+                                         {"buffer_rounds", std::size_t{2}}};
+  std::size_t threads = 0;
+  config.callback = [&](logging::forwarded_log_record &&record) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (record.level == logging::log_level::warn &&
+        record.message.find("never run concurrently") != std::string::npos)
+      warnings.push_back(record.message);
+  };
+  options.async_streaming = true;
+  if (workers != 0)
+    options.async_num_workers = workers;
+  nodes.push_back(pattern_node(wide_readout_spec(), params, copies));
+  logging::set_forwarder(std::move(config));
+  threads = decoding_task_graph::from_topology(std::move(nodes),
+                                               pattern_edges(), options)
+                ->async_thread_count();
+  logging::flush_logs();
+  logging::clear_forwarder();
+  return {warnings, threads};
+} // end - pooled_pattern_warnings()
+
+// Records pipeline, so every copy of both layers can fire at once, and an
+// indexed fire always leaves one worker for ingestion and deliveries. The
+// default pool holds both: 2 x 4 copies and that worker, then the
+// coordinator, up to the machine's threads.
+TEST(WindowedGraph, DefaultAsyncPoolRunsEveryCopyBesideIngest) {
+  const std::size_t hardware =
+      std::max(1u, std::thread::hardware_concurrency());
+  const auto [warnings, threads] = pooled_pattern_warnings(4, 0);
+  EXPECT_EQ(threads, std::min<std::size_t>(9, hardware) + 1);
+  if (hardware >= 9)
+    EXPECT_TRUE(warnings.empty()) << warnings.front();
+}
+
+// An explicit pool smaller than the copies plus the worker fires leave free
+// says that some copies can never run concurrently.
+TEST(WindowedGraph, PoolTooSmallForEveryCopyWarns) {
+  EXPECT_EQ(pooled_pattern_warnings(4, 8).first.size(), 1u);
+  EXPECT_TRUE(pooled_pattern_warnings(4, 9).first.empty());
+}
+
 // A sliding window, whose sends feed its own next instance, streams as the
 // reference decodes in the same ways: a window waits for its predecessor's
 // delta however many copies could fire.

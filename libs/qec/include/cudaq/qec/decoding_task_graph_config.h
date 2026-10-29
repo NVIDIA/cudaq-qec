@@ -57,7 +57,8 @@ struct task_graph_options {
   std::size_t async_spin_pause_iters = 0;
   /// Pool threads that run node fires in an asynchronous graph, not counting
   /// the coordinator. Unset sizes the pool from the graph: its parallel
-  /// width, including every fire pool's copies, capped by hardware
+  /// width, including every fire pool's copies, or, with an indexed node,
+  /// every copy plus the worker its fires leave free, capped by hardware
   /// concurrency. Must be at least one when set. Synchronous graphs ignore
   /// it.
   std::optional<std::size_t> async_num_workers;
