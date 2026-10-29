@@ -273,8 +273,8 @@ if [[ "$SOURCE" == "fpga" && "${BRIDGE_IP%.*}" != "${FPGA_IP%.*}" ]]; then
 fi
 
 # The example source also supports 'sliding_window', but that decoder is not
-# yet supported over the realtime decoding path to the GPU (it needs matching
-# updates to the proprietary cudevice archive), so this script does not accept
+# yet supported over the realtime decoding path to the GPU (the server-side
+# decode handlers for it do not exist yet), so this script does not accept
 # it.
 case "$DECODER" in
     pymatching|nv-qldpc-decoder|multi_error_lut|trt_decoder) ;;
@@ -999,7 +999,12 @@ start_roce_server() {
         ready="Bridge Ready"
     fi
     local spid=$!; PIDS+=("$spid"); SERVER_PID="$spid"
-    wait_for_pattern "$server_log" "$ready" 60 "$spid" >/dev/null || { cat "$server_log" >&2; return 1; }
+    wait_for_pattern "$server_log" "$ready" 60 "$spid" >/dev/null || {
+        if [[ "$DISPATCH" == "device_graph" ]] && grep -qE 'device-graph component is not linked into this binary|built without device_graph dispatch support' "$server_log"; then
+            echo "SKIP: device_graph dispatch requires a decoding_server built with the device-graph component (not part of released builds); re-run with --dispatch host to decode nv-qldpc on host dispatch over cpu_roce" >&2
+            exit 77   # standard "skip" code
+        fi
+        cat "$server_log" >&2; return 1; }
     wait_for_pattern "$server_log" "decoder 0 type: ${DECODER}" 5 "$spid" >/dev/null || {
         _err "server did not construct a '${DECODER}' session"; cat "$server_log" >&2; return 1; }
     # The RDMA handshake is published as qp=/rkey=/buffer_addr= tokens on ONE
