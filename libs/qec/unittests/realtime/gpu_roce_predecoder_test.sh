@@ -189,7 +189,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ============================================================================
-# Network Setup (reused from gpu_roce_qldpc_graph_decoder_test.sh)
+# Network Setup
 # ============================================================================
 
 detect_interfaces() {
