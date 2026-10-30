@@ -176,13 +176,14 @@ task_graph_node_params_schema(const std::string &type) {
 
 struct task_graph_node_config;
 
-/// An ensemble pattern: member subgraphs run concurrently, one answer
-/// kept. Written in place of a node (`task_graph_node_config::ensemble`) and
-/// lowered by from_topology() into an `ensemble_fanout`, `ensemble_join`,
-/// and the members. Every member node input that accepts a `%candidate_sink` is
-/// wired to the ensemble's candidate sink and every one that accepts a
-/// `cancellation_token` to its cancellation token. A member whose edges reach
-/// `output` (a `logical_outcome`) has that value pushed into the sink.
+/// The members and join of a node of kind `ensemble`
+/// (`task_graph_node_config::ensemble`): member subgraphs run concurrently and
+/// one answer is kept. from_topology() lowers the node into an
+/// `ensemble_fanout`, `ensemble_join`, and the members. Every member node input
+/// that accepts a `%candidate_sink` is wired to the ensemble's candidate sink
+/// and every one that accepts a `cancellation_token` to its cancellation token.
+/// A member whose edges reach `output` (a `logical_outcome`) has that value
+/// pushed into the sink.
 ///
 /// The pattern node has one input, `input`, and one output, `output`. Whatever
 /// feeds `input` (a shot, or a streaming producer's windows of measurements or
@@ -257,8 +258,8 @@ struct task_graph_node_config {
   /// neither of which is recoverable from D and O.
   std::unique_ptr<decoder> decoder_instance;
 
-  /// When set, this entry is an ensemble pattern rather than a node: `kind` and
-  /// the fields above are ignored, and from_topology() lowers it in place.
+  /// The members and join of a node of kind `ensemble`, which from_topology()
+  /// lowers in place; the fields above are ignored for it.
   std::optional<task_graph_ensemble_spec> ensemble;
 };
 

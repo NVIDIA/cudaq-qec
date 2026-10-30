@@ -2299,12 +2299,13 @@ TEST(DecoderYAMLTest, DescribeDecoderTypeNamesEitherTaskGraphForm) {
   decoderless.task_graph->nodes.back().type = "XOR";
   EXPECT_EQ(decoderless.describe_decoder_type(), "xor");
 
-  // An ensemble entry names its members.
+  // An ensemble node names its members.
   decoder_config raced;
   raced.task_graph.emplace();
   raced.task_graph->nodes.emplace_back();
   auto &ens = raced.task_graph->nodes.back();
   ens.id = "ens";
+  ens.type = "ensemble";
   ens.ensemble.emplace();
   ens.ensemble->members.resize(2);
   ens.ensemble->members[0].nodes = node_list;
@@ -3660,7 +3661,7 @@ TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded) {
 } // end - TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded)
 
 // Only an ingest node takes windows: a node whose type is a decoder plugin,
-// and an ensemble entry, are rejected rather than having theirs dropped.
+// and an ensemble node, are rejected rather than having theirs dropped.
 TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles) {
   namespace cfg = cudaq::qec::decoding::config;
   const auto rejects = [](const std::string &yaml, const std::string &text) {
@@ -3679,20 +3680,20 @@ TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles) {
     task_graph:
       nodes:
         - id: e
+          type: ensemble
           windows:
             A: {period: 4, zones: {commit: [0, 2]}, ports: {input: {disposition: closed}, output: {disposition: open}}}
-          ensemble:
-            join_strategy: deadline
-            join_params: {deadline_us: 200000}
-            members:
-              - nodes:
-                  - {id: a, type: single_window, inner: {type: single_error_lut}}
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          join_strategy: deadline
+          join_params: {deadline_us: 200000}
+          members:
+            - nodes:
+                - {id: a, type: single_window, inner: {type: single_error_lut}}
+              edges: [{from: input, to: a}, {from: a, to: output}]
       edges:
         - {from: measurements, to: e}
         - {from: e, to: output}
 )",
-          "is an ensemble entry, which takes no windows");
+          "is an ensemble, which takes no windows");
 } // end - TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles)
 
 // An empty value where a value of several forms belongs (dem_chunks, a
@@ -4735,7 +4736,8 @@ TEST(PatternKind, FillsTheStoreWithTheWindowsItsHookDeclares) {
   params.params.push_back({"rounds", cfg::param_kind::uint64});
   pattern.lower = [](cudaq::qec::task_graph_node_config,
                      std::vector<cudaq::qec::task_graph_node_config> &,
-                     std::vector<cudaq::qec::task_graph_edge> &) {};
+                     std::vector<cudaq::qec::task_graph_edge> &)
+      -> cudaq::qec::node_pattern::wiring { return {}; };
   pattern.windows = [&](const cudaqx::heterogeneous_map &node_params,
                         const cudaq::qec::experiment_template &) {
     seen_rounds = node_params.get<std::size_t>("rounds");
@@ -4794,14 +4796,14 @@ decoders:
         - {from: pw, to: output}
 )";
   const std::string nested = flat + R"(        - id: e
-          ensemble:
-            join_strategy: deadline
-            join_params: {deadline_us: 200000}
-            members:
-              - nodes:
-                  - )" + pattern +
+          type: ensemble
+          join_strategy: deadline
+          join_params: {deadline_us: 200000}
+          members:
+            - nodes:
+                - )" + pattern +
                              R"(
-                edges: [{from: input, to: pw}, {from: pw, to: output}]
+              edges: [{from: input, to: pw}, {from: pw, to: output}]
       edges:
         - {from: measurements, to: e}
         - {from: e, to: output}
