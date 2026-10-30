@@ -148,6 +148,7 @@ RUN CUDA_DASH=$(echo "${cuda_version}" | tr '.' '-') \
   && apt-get update && apt-get install -y --no-install-recommends \
        cuda-nvcc-${CUDA_DASH} \
        cuda-cudart-dev-${CUDA_DASH} \
+       libnvjitlink-${CUDA_DASH} \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Optional TensorRT for the cudaq-qec-trt-decoder plugin (opt-in; default off).
