@@ -46,9 +46,8 @@ predecoder on TensorRT + a PyMatching global decoder; see
 `Ising decoder (TensorRT predecoder + PyMatching)`_). Runs are seeded
 (``--seed``, default 42), so the reported counts are reproducible.
 
-For the nv-qldpc Relay BP device-graph walkthrough see
-:doc:`/examples_rst/qec/realtime_relay_bp`; for the software-only pymatching
-benchmark see :doc:`/examples_rst/qec/realtime_predecoder_pymatching`.
+For the software-only pymatching benchmark see
+:doc:`/examples_rst/qec/realtime_predecoder_pymatching`.
 
 
 Deliverables versus the example
@@ -187,12 +186,21 @@ always wins (``trt_decoder`` auto-paces the same way).
 The server has two independent knobs, both derived automatically (override
 with ``--wire`` / ``--dispatch``): the **wire** is the bridge-provider library
 that carries syndromes into the server, and the **dispatch** is the engine
-consuming each decoder's ring. ``pymatching`` and ``multi_error_lut`` ride the
-``cpu_roce`` wire on ``host`` dispatch (a server CPU thread calls the
-decoder); ``nv-qldpc-decoder --gpu 0`` defaults to the ``hololink`` wire on
-``device_graph`` dispatch (the GPU device-call scheduler fires the Relay BP
-decode graph on-device) and can be forced onto the host path with
-``--dispatch host``.
+consuming each decoder's ring. ``pymatching``, ``multi_error_lut`` and
+``trt_decoder`` ride the ``cpu_roce`` wire on ``host`` dispatch (a server CPU
+thread calls the decoder). ``nv-qldpc-decoder --gpu 0`` defaults to the
+``gpu_roce`` wire on ``device_graph`` dispatch, where a GPU device-call
+scheduler fires the Relay BP decode graph on-device. That mode needs a
+``decoding_server`` built with the device-graph component, which released
+builds do not include: against a released server the script reports the
+reason and exits ``77`` (skip). Pass ``--dispatch host`` to decode with
+nv-qldpc on host dispatch over ``cpu_roce`` instead.
+
+.. note::
+
+   ``decoding_server`` also accepts ``gpu_roce`` as a transport provider for
+   host-dispatch rings. No released decoder uses that path; this example
+   derives ``gpu_roce`` only for the device_graph mode described above.
 
 A third knob is host-only: the **loop shape**, chosen with
 ``decoding_server --host-loop=threaded|unified`` when the server is launched
@@ -310,7 +318,7 @@ Decoders
      - none
    * - ``nv-qldpc-decoder``
      - GPU (host dispatch)
-     - NIC + GPU (device_graph dispatch)
+     - NIC + GPU (device_graph dispatch; internal builds only, else ``--dispatch host``)
      - plugin + ``--gpu``
    * - ``trt_decoder``
      - GPU (host dispatch)

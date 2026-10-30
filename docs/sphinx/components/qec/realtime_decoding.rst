@@ -1,7 +1,7 @@
 Realtime Decoding
 =================
 
-This page covers how realtime decoding works, its workflow, and terminology. For runnable applications — a complete walkthrough, the AI predecoder, and Relay BP — see the :doc:`Realtime Decoding examples </examples_rst/qec/realtime_decoding>`.
+This page covers how realtime decoding works, its workflow, and terminology. For runnable applications — a complete walkthrough, the decoding server, and the AI predecoder — see the :doc:`Realtime Decoding examples </examples_rst/qec/realtime_decoding>`.
 
 CUDA-Q QEC provides realtime decoding for quantum error correction on real quantum hardware: decoders process syndromes and compute corrections within qubit coherence times, making active error correction practical for real quantum computers. The framework supports two primary deployment scenarios:
 
