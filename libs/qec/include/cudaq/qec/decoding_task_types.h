@@ -63,6 +63,12 @@ struct error_pattern {
   std::optional<cudaqx::heterogeneous_map> opt_results;
 };
 
+/// Whether a shot's window solutions were checked against their detectors
+/// and held: not_checked unless every window reaching the output checks its
+/// solution (verify_residual); else closed when every solution satisfied
+/// its window, and open when one did not.
+enum class task_graph_closure { not_checked, closed, open };
+
 /// Final observable correction. The role (L_raw, L_flip, or L_obs) is carried
 /// by the graph topology, not the type.
 struct logical_outcome {
@@ -135,6 +141,11 @@ apply_o_sparse(const error_pattern &e,
 
 /// GF(2) XOR of two logical outcomes (L_raw ⊕ L_flip → L_obs).
 logical_outcome xor_logical(const logical_outcome &a, const logical_outcome &b);
+
+/// In-place GF(2) XOR: acc.bits ^= other.bits and acc.converged &=
+/// other.converged, with no allocation. @throws std::invalid_argument if the
+/// bit counts differ (acc is then unchanged).
+void xor_logical_into(logical_outcome &acc, const logical_outcome &other);
 
 } // namespace cudaq::qec
 

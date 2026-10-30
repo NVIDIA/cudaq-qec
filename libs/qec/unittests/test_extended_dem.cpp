@@ -18,6 +18,7 @@
 //   - Per-qubit noise propagates correctly through stitch
 
 #include "task_graph_test_fixtures.h"
+#include "../lib/sparse_dem_from_chunks.h"
 #include "cudaq/qec/code_matrices.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/dem_construction.h"
@@ -2034,8 +2035,11 @@ TEST(DemChunkSpec, NumFaultsMustFitUint32) {
   EXPECT_THROW(spec.validate("test"), std::invalid_argument);
 }
 
-TEST(DemChunkSpec, ZeroFaultsThrows) {
+// A chunk may have no faults, but not priors for faults it does not have.
+TEST(DemChunkSpec, ZeroFaultsValidateWithoutPriors) {
   dem_chunk_spec spec;
+  EXPECT_NO_THROW(spec.validate("chunk"));
+  spec.error_rates = {0.01};
   EXPECT_THROW(spec.validate("chunk"), std::invalid_argument);
 }
 
@@ -2524,6 +2528,22 @@ TEST(DemChunkSpec, PerSeamOSparseThrows) {
   EXPECT_THROW(dem_chunk_from_spec(spec, {}, "test"), std::invalid_argument);
 }
 
+// A chunk without faults validates and keeps its seams' rows: its
+// detectors exist, and nothing ever flips them.
+TEST(DemChunkSpec, AChunkWithoutFaultsKeepsItsRows) {
+  dem_chunk_spec spec;
+  spec.H_sparse = {-1, -1, -1};
+  spec.O_sparse = {-1};
+  ASSERT_NO_THROW(spec.validate("test"));
+  const auto chunk = dem_chunk_from_spec(
+      spec, {seam_name::prev_round, seam_name::next_round}, "test");
+  EXPECT_EQ(chunk.H.num_rows(), 6u);
+  EXPECT_EQ(chunk.H.num_cols(), 0u);
+  EXPECT_EQ(chunk.get_seam(seam_name::prev_round).num_rows(), 3u);
+  EXPECT_EQ(chunk.get_seam(seam_name::next_round).num_rows(), 3u);
+  EXPECT_EQ(chunk.num_faults(), 0u);
+}
+
 // Issue 3: zero-rate DEM must have correct tensor shape, not [0 × 0].
 TEST(DemConstruction, ZeroRatesDemHasCorrectShape) {
   css_code_matrices code = rep3();
@@ -2671,6 +2691,51 @@ TEST(ExtendedDemValidate, MisalignedObservablesThrow) {
   dem.tags = {0, 0};
 
   EXPECT_THROW(dem.validate("misaligned O"), std::invalid_argument);
+}
+
+TEST(ExtendedDemSparseClosure, SharedPreparationMatchesDenseReference) {
+  for (const auto rounds : {3u, 4u, 7u}) {
+    for (const bool observables : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "rounds=" << rounds << " observables=" << observables);
+      auto spec = rep5_spec(rounds);
+      for (std::size_t i = 0; i < spec.phases.size(); ++i) {
+        auto &phase = spec.phases[i].spec;
+        phase.O_sparse.clear();
+        if (observables)
+          phase.O_sparse = {
+              0, -1, static_cast<std::int64_t>(phase.num_faults - 1), -1};
+        for (std::size_t j = 0; j < phase.error_rates.size(); ++j)
+          phase.error_rates[j] = 0.01 * (i + j + 1);
+      }
+      const auto chunks = dem_chunks_from_spec(spec);
+      const auto dense =
+          dem_close_all(chunks, spec.seam.from_seam, spec.seam.to_seam);
+      const auto expected_h = sparse_binary_matrix(dense.detector_error_matrix)
+                                  .canonicalize()
+                                  .to_nested_csc();
+      const auto expected_o =
+          sparse_binary_matrix(dense.observables_flips_matrix)
+              .to_csr()
+              .to_nested_csr();
+      const auto closed = details::sparse_dem_from_chunks(
+          chunks, spec.seam.from_seam, spec.seam.to_seam);
+      EXPECT_EQ(closed.detector_error_matrix.layout(),
+                sparse_binary_matrix_layout::csc);
+      EXPECT_EQ(closed.detector_error_matrix.to_nested_csc(), expected_h);
+      EXPECT_EQ(closed.observable_rows, expected_o);
+      EXPECT_EQ(closed.error_rates, dense.error_rates);
+
+      // A native decoder takes its priors from the recipe. Its graph still
+      // needs the same H/O projection, without a concatenated prior vector.
+      const auto projection = details::sparse_dem_from_chunks(
+          chunks, spec.seam.from_seam, spec.seam.to_seam,
+          /*with_priors=*/false);
+      EXPECT_EQ(projection.detector_error_matrix.to_nested_csc(), expected_h);
+      EXPECT_EQ(projection.observable_rows, expected_o);
+      EXPECT_TRUE(projection.error_rates.empty());
+    }
+  }
 }
 
 } // namespace

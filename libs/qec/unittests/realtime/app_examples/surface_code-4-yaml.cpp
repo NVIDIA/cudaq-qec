@@ -6,6 +6,7 @@
 // For full test script: surface_code-4-yaml-test.sh
 
 #include "cudaq.h"
+#include "utils/dem_chunks_from_rounds.h"
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/codes/surface_code.h"
 #include "cudaq/qec/decoder.h"
@@ -318,7 +319,9 @@ void save_dem_to_file(
     std::string dem_filename, const std::vector<std::string> &decoder_types,
     bool use_relay_bp, const std::string &onnx_path, bool use_ising,
     [[maybe_unused]] int distance, const std::string &ising_artifacts_dir,
-    bool task_graph, bool parallel_task_graph, bool async_streaming) {
+    bool task_graph, bool parallel_task_graph, bool async_streaming,
+    bool parallel_window, std::size_t num_rounds,
+    std::size_t num_syndromes_per_round, std::size_t num_data) {
   cudaq::qec::decoding::config::multi_decoder_config multi_config;
   for (uint64_t i = 0; i < decoder_types.size(); i++) {
     const std::string &decoder_type = decoder_types[i];
@@ -517,8 +520,48 @@ void save_dem_to_file(
       config.decoder_custom_args = cudaqx::heterogeneous_map{};
     }
 
+    if (parallel_window) {
+      // The model, one chunk per round, decoded by one parallel_window node:
+      // windows of d committed rounds with d buffer rounds, in gaps of 3d.
+      using node_spec = cudaq::qec::decoding::config::decoder_config::
+          task_graph_spec::node_spec;
+      auto &graph = config.task_graph.emplace();
+      node_spec pw;
+      config.dem_chunks = dem_chunks_from_rounds(
+          config.H_sparse, config.O_sparse, config.error_rate_vec,
+          config.D_sparse, num_rounds, num_syndromes_per_round, num_data);
+      config.H_sparse.clear();
+      config.O_sparse.clear();
+      config.D_sparse.clear();
+      config.error_rate_vec.clear();
+      config.block_size = 0;
+      config.syndrome_size = 0;
+      pw.id = "pw";
+      pw.type = "parallel_window";
+      pw.inner_type = decoder_type;
+      pw.decoder_custom_args = config.decoder_custom_args;
+      pw.node_params = cudaqx::heterogeneous_map{
+          {"commit_rounds", static_cast<std::size_t>(distance)},
+          {"buffer_rounds", static_cast<std::size_t>(distance)},
+          {"gap_rounds", static_cast<std::size_t>(3 * distance)},
+          {"output", std::string("corrections")},
+          // No fault of this model crosses into the next round, so there is
+          // no crossing prior; truncate, which drops only crossing faults,
+          // leaves the windows' models exact.
+          {"input_boundary", std::string("truncate")}};
+      graph.nodes.push_back(std::move(pw));
+      graph.edges = {{"measurements", "output", "pw", "input"},
+                     {"pw", "output", "output", "input"}};
+      graph.options.async_streaming = async_streaming;
+      config.decoder_custom_args = cudaqx::heterogeneous_map{};
+    }
+
     multi_config.decoders.push_back(config);
   }
+  // A windowed graph completes a shot only at its FINAL round, which the
+  // data round names through --final_mapping_id 1.
+  if (parallel_window)
+    multi_config.syndrome_mapping.push_back({1, "final"});
   std::string config_str = multi_config.to_yaml_str(200);
   std::ofstream config_file(dem_filename);
   config_file << config_str;
@@ -571,11 +614,17 @@ load_decoder_config(const std::string &dem_filename,
         m = v;
     return static_cast<uint64_t>(m + 1);
   };
-  const auto &d0 = config.decoders[0];
+  // A chunked entry is checked by its flat model, expanded at the shot
+  // length its chunks name.
+  auto flat = config.decoders;
+  for (auto &dc : flat)
+    if (dc.dem_chunks && dc.H_sparse.empty())
+      cudaq::qec::decoding::config::expand_dem_chunks(dc);
+  const auto &d0 = flat[0];
   const uint64_t span0 = span_of(d0.D_sparse);
-  decoder_types_out.assign(config.decoders.size(), std::string());
-  for (size_t k = 0; k < config.decoders.size(); ++k) {
-    const auto &dc = config.decoders[k];
+  decoder_types_out.assign(flat.size(), std::string());
+  for (size_t k = 0; k < flat.size(); ++k) {
+    const auto &dc = flat[k];
     if (dc.id < 0 || static_cast<size_t>(dc.id) >= config.decoders.size() ||
         !decoder_types_out[dc.id].empty())
       throw std::runtime_error(
@@ -954,7 +1003,7 @@ void demo_circuit_host(
     std::string onnx_path = "", bool use_ising = false,
     std::string ising_artifacts_dir = "", bool task_graph = false,
     bool parallel_task_graph = false, bool async_streaming = false,
-    std::uint64_t final_mapping_id = 0) {
+    std::uint64_t final_mapping_id = 0, bool parallel_window = false) {
   if (!code.contains_operation(statePrep))
     throw std::runtime_error(
         "sample_memory_circuit_error - requested state prep kernel not found.");
@@ -1117,7 +1166,8 @@ void demo_circuit_host(
       save_dem_to_file(matching_inputs, bp_inputs, dem_filename, decoder_types,
                        use_relay_bp, onnx_path, use_ising, distance,
                        ising_artifacts_dir, task_graph, parallel_task_graph,
-                       async_streaming);
+                       async_streaming, parallel_window, numRounds,
+                       numSyndromesPerRound, numData);
       return;
     }
   }
@@ -1538,6 +1588,10 @@ void show_help() {
          "task graph to exercise intra-graph streaming parallelism. Requires "
          "--task_graph and does not support trt_decoder. Generation phase "
          "only.\n");
+  printf("  --parallel_window   Generate each entry as one chunk per round "
+         "decoded by a parallel_window node, with a final syndrome_mapping "
+         "row (id 1) that phase 2 names with --final_mapping_id 1. Requires "
+         "--task_graph; not with trt_decoder. Generation phase only.\n");
   printf(
       "  --async_streaming   Enable asynchronous streaming on generated task "
       "graphs.\n"
@@ -1593,6 +1647,7 @@ int main(int argc, char **argv) {
   bool decoder_type_explicit = false;
   bool task_graph = false; // write the entries as task graphs, not plain types
   bool parallel_task_graph = false;
+  bool parallel_window = false; // windowed graphs over per-round chunks
   bool async_streaming = false;
   bool yaml_mode = false;
   std::string onnx_path;
@@ -1700,6 +1755,8 @@ int main(int argc, char **argv) {
     } else if (arg == "--parallel_task_graph" ||
                arg == "--parallel-task-graph") {
       parallel_task_graph = true;
+    } else if (arg == "--parallel_window" || arg == "--parallel-window") {
+      parallel_window = true;
     } else if (arg == "--async_streaming" || arg == "--async-streaming") {
       async_streaming = true;
     } else if (arg == "--onnx_path" || arg == "--onnx-path") {
@@ -1884,6 +1941,17 @@ int main(int argc, char **argv) {
     printf("Error: --parallel_task_graph requires --task_graph\n");
     return 1;
   }
+  if (yaml_mode && parallel_window) {
+    printf("Error: --parallel_window only applies to --save_dem "
+           "(generation). With --yaml the topology is read from the file; do "
+           "not pass both.\n");
+    return 1;
+  }
+  if (parallel_window && (!task_graph || parallel_task_graph)) {
+    printf("Error: --parallel_window requires --task_graph, without "
+           "--parallel_task_graph\n");
+    return 1;
+  }
   // --save_dem (generation) and --yaml (realtime) are separate phases that
   // write and read the same config file. Passing both silently drops the save,
   // so reject the combination rather than surprise the user.
@@ -1963,6 +2031,12 @@ int main(int argc, char **argv) {
     printf("Error: --parallel_task_graph does not support trt_decoder.\n");
     return 1;
   }
+  // A window's inner decoder decodes the window's own H; TensorRT is a
+  // predecoder topology, not one decoder.
+  if (parallel_window && has_type("trt_decoder")) {
+    printf("Error: --parallel_window does not support trt_decoder.\n");
+    return 1;
+  }
 
   // --use-relay-bp configures nv-qldpc-decoder entries at generation. With
   // --yaml it is accepted and ignored (the YAML is authoritative; the test
@@ -2034,12 +2108,13 @@ int main(int argc, char **argv) {
         cudaqx::heterogeneous_map{{"distance", distance},
                                   {"orientation", std::string("XV")}});
 
-    demo_circuit_host(
-        *code, distance, p_spam_per_patch, cudaq::qec::operation::prep0,
-        num_shots, num_rounds, num_logical, dem_filename, save_dem, load_dem,
-        decoder_types, save_syndrome, load_syndrome, syndrome_filename,
-        use_relay_bp, onnx_path, use_ising, ising_artifacts_dir, task_graph,
-        parallel_task_graph, async_streaming, final_mapping_id);
+    demo_circuit_host(*code, distance, p_spam_per_patch,
+                      cudaq::qec::operation::prep0, num_shots, num_rounds,
+                      num_logical, dem_filename, save_dem, load_dem,
+                      decoder_types, save_syndrome, load_syndrome,
+                      syndrome_filename, use_relay_bp, onnx_path, use_ising,
+                      ising_artifacts_dir, task_graph, parallel_task_graph,
+                      async_streaming, final_mapping_id, parallel_window);
   } catch (const std::exception &e) {
     // Configuration, channel, and geometry failures surface as a clean error
     // rather than an uncaught-exception abort.

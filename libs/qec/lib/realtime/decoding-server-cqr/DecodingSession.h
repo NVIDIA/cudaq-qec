@@ -168,6 +168,12 @@ struct DecodingSession {
   /// Core of reset_decoder.
   cudaq::qec::decoding::rpc::RpcStatus reset_core();
 
+  /// A graph session's aggregate as last captured: the snapshot a ready
+  /// get_corrections reports, with its outputs' coverage.
+  const cudaq::qec::task_graph_streaming_result &graph_result() const {
+    return graph_result_;
+  }
+
 private:
   /// Reused byte-per-bit unpack buffer: no per-call allocation once grown.
   std::vector<uint8_t> unpack_scratch_;

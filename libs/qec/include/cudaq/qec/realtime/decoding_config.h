@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace cudaq::qec::decoding::config {
@@ -90,10 +91,11 @@ struct decoder_config {
   ///
   /// Throughout a configuration, a `*_path` key names a file and a key without
   /// the suffix carries its contents inline: `stim_dem_path` is read from disk,
-  /// while `stim_dem` is the model text itself. In YAML, a `stim_dem` with no
-  /// whitespace instead names a data_artifacts Stim DEM entry: any such value
-  /// is taken as a name, which is safe because Stim model text always
-  /// contains whitespace.
+  /// while `stim_dem` is the model text itself. A `stim_dem` with no spaces,
+  /// tabs or line breaks instead names a data_artifacts Stim DEM entry: any
+  /// such value is taken as a name, which is safe because Stim model text
+  /// always contains them. Parsing resolves the name; a configuration built in
+  /// code is resolved where its models are built.
   ///
   /// Chunk form stays authoritative: decoder construction hands the chunks to
   /// the decoder, alone for one that declared it reads chunks natively
@@ -226,10 +228,10 @@ struct decoder_config {
       std::string partition_label;
       std::vector<column_range> partition_columns;
 
-      /// An ensemble pattern written in place of a node: member subgraphs
-      /// raced against each other, one answer kept (the YAML spelling of
-      /// `cudaq::qec::task_graph_ensemble_spec`). `type` stays empty and the
-      /// node fields above are ignored; the entry is lowered by the builder.
+      /// The members and join of a node of type `ensemble`, written as its
+      /// own keys: member subgraphs raced against each other, one answer kept
+      /// (the YAML spelling of `cudaq::qec::task_graph_ensemble_spec`). The
+      /// node fields above are ignored; the builder lowers the node.
       struct ensemble_spec {
         struct member {
           std::vector<node_spec> nodes;
@@ -418,6 +420,8 @@ struct syndrome_mapping_config {
 /// named wherever a block is expected. Exactly one kind is set: dem_chunks,
 /// stim_dem, stim_dem_path, window (with its context) or edem_path.
 struct data_artifact {
+  /// Unique, and without spaces, tabs or line breaks, so a `stim_dem` naming
+  /// it is told apart from model text.
   std::string name;
   /// An experiment template.
   std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;

@@ -56,17 +56,22 @@ apply_o_sparse(const error_pattern &e,
   return result;
 }
 
+// The one place the XOR rule lives: sizes must match, converged is ANDed.
+void xor_logical_into(logical_outcome &acc, const logical_outcome &other) {
+  if (acc.bits.size() != other.bits.size())
+    throw std::invalid_argument("xor_logical: size mismatch (" +
+                                std::to_string(acc.bits.size()) + " vs " +
+                                std::to_string(other.bits.size()) + ")");
+  acc.converged = acc.converged && other.converged;
+  for (std::size_t i = 0; i < acc.bits.size(); ++i)
+    acc.bits[i] ^= other.bits[i];
+}
+
+// A copy of `a` folded with `b`: one allocation, for the result.
 logical_outcome xor_logical(const logical_outcome &a,
                             const logical_outcome &b) {
-  if (a.bits.size() != b.bits.size())
-    throw std::invalid_argument("xor_logical: size mismatch (" +
-                                std::to_string(a.bits.size()) + " vs " +
-                                std::to_string(b.bits.size()) + ")");
-  logical_outcome result;
-  result.converged = a.converged && b.converged;
-  result.bits.resize(a.bits.size());
-  for (std::size_t i = 0; i < result.bits.size(); ++i)
-    result.bits[i] = a.bits[i] ^ b.bits[i];
+  logical_outcome result = a;
+  xor_logical_into(result, b);
   return result;
 }
 
@@ -270,11 +275,24 @@ void decoding_task_graph::impl::compile_wires() {
       ts = static_cast<int>(sit - ins.begin());
     }
 
-    if (fn >= 0 && tn >= 0 && fn >= tn)
+    // An edge back to its own node or an earlier one is loop-carried: with a
+    // negative index_offset each instance reads an earlier one, which the
+    // indexed-join check below requires of its consumer.
+    if (fn >= 0 && tn >= 0 && fn >= tn && e.index_offset >= 0)
       throw std::invalid_argument(
           "compile_wires: edge from node " + std::to_string(fn) + " ('" +
           node_ids[fn] + "') to node " + std::to_string(tn) + " ('" +
           node_ids[tn] + "') violates topological order");
+    // Corrections and completions are ordered and folded by node order, so
+    // a loop-carried edge carries only values its consumer joins.
+    if (fn >= 0 && tn >= 0 && fn >= tn &&
+        (is_done_slot(fn, fs) ||
+         output_type_at(fn, fs) == logical_outcome_type))
+      throw std::invalid_argument(
+          "compile_wires: loop-carried edge " + e.from_node + "." +
+          e.from_output + " -> " + e.to_node + "." + e.to_input +
+          " carries corrections or a completion; it may carry only a value "
+          "its consumer joins by index");
 
     validate_core_edge(nodes, e, fn, fs, tn, ts, output_type_at(fn, fs));
     if (e.index_offset > 0)
@@ -330,7 +348,7 @@ void decoding_task_graph::impl::compile_wires() {
     for (std::size_t node = 0; node < N; ++node) {
       parallel_node_inputs[node].resize(node_input_counts[node]);
       for (const auto &wire : wires_to[node]) {
-        if (wire.from_node < 0)
+        if (wire.from_node < 0 || wire.loop_carried())
           continue;
         ++predecessor_counts[node];
         dependents[static_cast<std::size_t>(wire.from_node)].push_back(node);
@@ -665,7 +683,10 @@ void decoding_task_graph::impl::compile_wires() {
       const int idx = entry.node_index;
       std::vector<streaming_task_graph_node::input_schedule> input_schedules;
       for (const auto &sw : wires_to[idx]) {
-        if (sw.from_node < 0 || streaming_by_node[sw.from_node] < 0)
+        // A loop-carried producer's schedule is not derived yet; its
+        // consumer's schedule follows its forward inputs.
+        if (sw.from_node < 0 || streaming_by_node[sw.from_node] < 0 ||
+            sw.loop_carried())
           continue;
         const auto &producer_schedule =
             effective_schedule[sw.from_node][sw.from_slot];
@@ -798,12 +819,24 @@ void decoding_task_graph::impl::compile_wires() {
     std::vector<std::vector<std::size_t>> value_dependents(M);
     streaming_dependents.assign(M, {});
     streaming_producers.assign(M, {});
+    streaming_loop_producers.assign(M, {});
     streaming_predecessor_counts.assign(M, 0);
     for (std::size_t si = 0; si < M; ++si) {
       const auto node_idx = streaming_nodes[si].node_index;
       for (const auto &wire : wires_to[node_idx]) {
         if (wire.from_node < 0 || streaming_by_node[wire.from_node] < 0)
           continue;
+        // A loop-carried wire orders instances, not nodes: the consumer's
+        // joins wait for it, and the dependency graph stays acyclic. Its
+        // producer is noted for the consumer's flush to wait on.
+        if (wire.loop_carried()) {
+          const auto producer_si =
+              static_cast<std::size_t>(streaming_by_node[wire.from_node]);
+          if (producer_si != si)
+            streaming_loop_producers[si].push_back(producer_si);
+          ++streaming_wire_count;
+          continue;
+        }
         const auto producer_si =
             static_cast<std::size_t>(streaming_by_node[wire.from_node]);
         streaming_dependents[producer_si].push_back(si);
@@ -822,16 +855,31 @@ void decoding_task_graph::impl::compile_wires() {
           streaming_reachability[si][descendant] |=
               streaming_reachability[dependent][descendant];
     }
-    streaming_overlap.assign(M, std::vector<uint8_t>(M, uint8_t{0}));
+    // Two branches meeting only at rendezvous descendants overlap as
+    // rendezvous; one shared descendant needing order makes them ordered. An
+    // indexed descendant does not relax order by itself: the executor orders
+    // a record-ordered sibling's deliveries against the shot's FINAL flush
+    // through it. A node always overlaps itself in order.
+    streaming_overlap.assign(M, std::vector<streaming_overlap_kind>(
+                                    M, streaming_overlap_kind::disjoint));
     for (std::size_t left = 0; left < M; ++left)
-      for (std::size_t right = left; right < M; ++right)
-        for (std::size_t descendant = 0; descendant < M; ++descendant)
-          if (streaming_reachability[left][descendant] &&
-              streaming_reachability[right][descendant]) {
-            streaming_overlap[left][right] = 1;
-            streaming_overlap[right][left] = 1;
-            break;
-          }
+      for (std::size_t right = left; right < M; ++right) {
+        auto kind = left == right ? streaming_overlap_kind::ordered
+                                  : streaming_overlap_kind::disjoint;
+        for (std::size_t descendant = 0;
+             descendant < M && kind != streaming_overlap_kind::ordered;
+             ++descendant) {
+          if (!streaming_reachability[left][descendant] ||
+              !streaming_reachability[right][descendant])
+            continue;
+          const auto &shared = streaming_nodes[descendant];
+          kind = shared.capability->supports_streaming_rendezvous()
+                     ? streaming_overlap_kind::rendezvous
+                     : streaming_overlap_kind::ordered;
+        }
+        streaming_overlap[left][right] = kind;
+        streaming_overlap[right][left] = kind;
+      } // end - for(right)
     if (M > 0)
       streaming_parallel_width = maximum_parallel_width(streaming_dependents);
     // A pooled node fires once per copy concurrently, so the pool needs that
@@ -857,6 +905,8 @@ void decoding_task_graph::impl::compile_wires() {
       latest_node_corrections[si].assign(
           streaming_nodes[si].capability->num_observables(), 0);
     latest_node_coverage.assign(M, std::nullopt);
+    latest_node_closure.assign(M, std::nullopt);
+    latest_node_converged.assign(M, std::nullopt);
     reset_streaming_progress();
   }
 
@@ -987,6 +1037,7 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
       result.outputs.empty() ? 0 : std::numeric_limits<std::uint64_t>::max();
   bool all_outputs_available = !result.outputs.empty();
   bool changed = false;
+  std::optional<task_graph_closure> graph_closure; // over every output
 
   for (std::size_t k = 0; k < result.outputs.size(); ++k) {
     auto &output = result.outputs[k];
@@ -1080,12 +1131,23 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
          output.status == task_graph_streaming_status::complete) &&
         output.generation > 0;
     graph_generation = std::min(graph_generation, output.generation);
+    // The output's closure: its windows' so far, not_checked without one.
+    const auto previous_closure = output.closure;
+    std::optional<task_graph_closure> closure;
+    for (const auto si : contributors)
+      closure = combine_closure(closure, latest_node_closure[si]);
+    output.closure = closure.value_or(task_graph_closure::not_checked);
+    graph_closure = combine_closure(graph_closure, output.closure);
     changed = changed || output.generation != previous_generation ||
               output.coverage_begin_round != previous_begin ||
               output.coverage_end_round != previous_end ||
-              output.status != previous_status;
+              output.status != previous_status ||
+              output.closure != previous_closure;
   }
 
+  changed = changed || result.closure != graph_closure.value_or(
+                                             task_graph_closure::not_checked);
+  result.closure = graph_closure.value_or(task_graph_closure::not_checked);
   result.generation = graph_generation;
   result.status = task_graph_streaming_status::pending;
   if (all_outputs_available)
@@ -1106,6 +1168,14 @@ void decoding_task_graph::impl::consume_streaming_result() {
     ++result.result_revision;
     return;
   }
+  // Consuming a complete shot starts the next one, whose closure is its own.
+  if (result.status == task_graph_streaming_status::complete) {
+    std::fill(latest_node_closure.begin(), latest_node_closure.end(),
+              std::nullopt);
+    std::fill(latest_node_converged.begin(), latest_node_converged.end(),
+              std::nullopt);
+    shot_open = false;
+  }
   result.status = task_graph_streaming_status::pending;
   for (std::size_t k = 0; k < result.outputs.size(); ++k) {
     auto &output = result.outputs[k];
@@ -1115,7 +1185,7 @@ void decoding_task_graph::impl::consume_streaming_result() {
       // Consuming a complete shot starts the next one from round 0.
       if (output.status == task_graph_streaming_status::complete) {
         stager.frontier = 0;
-        stager.pending.clear();
+        stager.clear_pending();
       }
     }
     output.status = task_graph_streaming_status::pending;
@@ -1146,17 +1216,24 @@ void decoding_task_graph::impl::reset_streaming_progress() {
   clear_latest_node_corrections();
   std::fill(latest_node_coverage.begin(), latest_node_coverage.end(),
             std::nullopt);
+  std::fill(latest_node_closure.begin(), latest_node_closure.end(),
+            std::nullopt);
+  std::fill(latest_node_converged.begin(), latest_node_converged.end(),
+            std::nullopt);
+  shot_open = false;
+  result.closure = task_graph_closure::not_checked;
   for (auto &output : result.outputs) {
     output.generation = 0;
     output.coverage_begin_round = 0;
     output.coverage_end_round = 0;
     output.status = task_graph_streaming_status::pending;
+    output.closure = task_graph_closure::not_checked;
   }
   for (auto &stager : output_stagers) {
     stager.frontier = 0;
     stager.generation = 0;
     stager.has_whole = false;
-    stager.pending.clear();
+    stager.clear_pending();
     std::fill(stager.bits.begin(), stager.bits.end(), uint8_t{0});
     std::fill(stager.whole.begin(), stager.whole.end(), uint8_t{0});
   }
@@ -1197,17 +1274,24 @@ void decoding_task_graph::impl::stage_delta(
                            "stager was sized for");
   const auto at = std::upper_bound(
       stager.pending.begin(), stager.pending.end(), coverage.begin_round,
-      [](std::uint64_t begin, const output_stager::interval &entry) {
-        return begin < entry.begin;
+      [&](std::uint64_t begin, std::size_t entry) {
+        return begin < stager.intervals[entry].begin;
       });
-  stager.pending.insert(at, {coverage.begin_round, coverage.end_round, bits});
+  const auto slot = stager.spare.back();
+  auto &interval = stager.intervals[slot];
   bool advanced = false;
+  stager.spare.pop_back();
+  interval.begin = coverage.begin_round;
+  interval.end = coverage.end_round;
+  interval.bits.assign(bits.begin(), bits.end());
+  stager.pending.insert(at, slot);
   while (!stager.pending.empty() &&
-         stager.pending.front().begin == stager.frontier) {
-    const auto &next = stager.pending.front();
-    fold(stager.bits, next.bits);
-    stager.frontier = next.end;
+         stager.intervals[stager.pending.front()].begin == stager.frontier) {
+    const auto next = stager.pending.front();
+    fold(stager.bits, stager.intervals[next].bits);
+    stager.frontier = stager.intervals[next].end;
     stager.pending.erase(stager.pending.begin());
+    stager.spare.push_back(next);
     advanced = true;
   }
   if (advanced)
@@ -1223,7 +1307,8 @@ void decoding_task_graph::impl::fold_whole_shot(output_stager &stager) {
     throw std::logic_error(
         "decoding_task_graph: a staged output still has an uncommitted "
         "interval starting at round " +
-        std::to_string(stager.pending.front().begin) + " at FINAL");
+        std::to_string(stager.intervals[stager.pending.front()].begin) +
+        " at FINAL");
   for (std::size_t i = 0; i < stager.bits.size(); ++i)
     stager.bits[i] ^= stager.whole[i];
   std::fill(stager.whole.begin(), stager.whole.end(), uint8_t{0});
@@ -1244,6 +1329,29 @@ void decoding_task_graph::impl::fail_streaming_progress(
     output.status = task_graph_streaming_status::failed;
   if (changed)
     ++result.result_revision;
+  // A failed shot holds nothing a one-shot call's reset would discard.
+  shot_open = false;
+}
+
+// The composed values read the nodes' latest corrections and the stagers'
+// frames, so both are zeroed with the values themselves.
+void decoding_task_graph::impl::hide_streaming_result() {
+  auto &result = streaming_result_state;
+  clear_latest_node_corrections();
+  for (auto &stager : output_stagers) {
+    std::fill(stager.bits.begin(), stager.bits.end(), uint8_t{0});
+    std::fill(stager.whole.begin(), stager.whole.end(), uint8_t{0});
+  }
+  std::fill(result.values.begin(), result.values.end(), uint8_t{0});
+  result.status = task_graph_streaming_status::pending;
+  result.operation_completed = false;
+  result.error.clear();
+  for (auto &output : result.outputs) {
+    output.status = task_graph_streaming_status::pending;
+    output.coverage_begin_round = 0;
+    output.coverage_end_round = 0;
+  }
+  ++result.result_revision;
 }
 
 void decoding_task_graph::impl::clear_latest_node_corrections() {
@@ -1363,19 +1471,35 @@ bool decoding_task_graph::impl::finish_streaming_record() {
   }
 }
 
+// The shot is marked open before the record runs, so a one-shot call that
+// checks meanwhile sees it; a record rejected before it opened one leaves
+// it as it was, and a shot that fails clears it (fail_streaming_progress()).
+bool decoding_task_graph::impl::enqueue_record(const uint8_t *syndrome,
+                                               std::size_t len,
+                                               std::optional<round_type> type,
+                                               int cuda_device_id) {
+  const bool was_open = shot_open.exchange(true);
+  try {
+    if (async_streaming.enabled)
+      return enqueue_syndrome_async(syndrome, len, type, cuda_device_id);
+    const in_flight_guard guard(in_flight, "enqueue_syndrome");
+    const bool fired = process_streaming_record(syndrome, len, type);
+    if (streaming_result_state.operation_completed)
+      ++streaming_result_state.completed_operations;
+    return fired;
+  } catch (...) {
+    if (!was_open)
+      shot_open = false;
+    throw;
+  }
+}
+
 // The record stays untagged down to the nodes, so a decoder that tells an
 // untagged round from BULK keeps its legacy fixed-length shot contract.
 bool decoding_task_graph::enqueue_syndrome(const uint8_t *syndrome,
                                            std::size_t len) {
-  if (impl_->async_streaming.enabled)
-    return impl_->enqueue_syndrome_async(syndrome, len, std::nullopt,
-                                         cuda_device_id().value_or(-1));
-  const in_flight_guard guard(impl_->in_flight, "enqueue_syndrome");
-  const bool fired =
-      impl_->process_streaming_record(syndrome, len, std::nullopt);
-  if (impl_->streaming_result_state.operation_completed)
-    ++impl_->streaming_result_state.completed_operations;
-  return fired;
+  return impl_->enqueue_record(syndrome, len, std::nullopt,
+                               cuda_device_id().value_or(-1));
 }
 
 bool decoding_task_graph::enqueue_syndrome(const uint8_t *syndrome,
@@ -1383,14 +1507,8 @@ bool decoding_task_graph::enqueue_syndrome(const uint8_t *syndrome,
   if (type == round_type::FINAL && len == 0)
     throw std::invalid_argument("decoding_task_graph: a FINAL round must "
                                 "carry the shot's final measurements");
-  if (impl_->async_streaming.enabled)
-    return impl_->enqueue_syndrome_async(syndrome, len, type,
-                                         cuda_device_id().value_or(-1));
-  const in_flight_guard guard(impl_->in_flight, "enqueue_syndrome");
-  const bool fired = impl_->process_streaming_record(syndrome, len, type);
-  if (impl_->streaming_result_state.operation_completed)
-    ++impl_->streaming_result_state.completed_operations;
-  return fired;
+  return impl_->enqueue_record(syndrome, len, type,
+                               cuda_device_id().value_or(-1));
 }
 
 const uint8_t *decoding_task_graph::get_obs_corrections() const {
@@ -1430,10 +1548,12 @@ decoding_task_graph::streaming_result() const {
 }
 
 void decoding_task_graph::clear_corrections() {
+  impl_->settle_async_streaming();
   if (impl_->async_streaming.enabled &&
       impl_->async_streaming.active.load(std::memory_order_acquire))
     impl_->drain_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "clear_corrections");
+  impl_->shot_resets.fetch_add(1, std::memory_order_acq_rel);
   impl_->invalidate_async_stream_snapshot();
   // This consumes the published accumulator mid-stream. Keep each node's
   // overlap buffer so the next stride still decodes the correct frame.
@@ -1450,13 +1570,16 @@ void decoding_task_graph::clear_corrections() {
 }
 
 void decoding_task_graph::reset_decoder() {
+  impl_->settle_async_streaming();
+  // Counted before the cancel, which ends a shot even if the reset is then
+  // refused as overlapping another call.
+  impl_->shot_resets.fetch_add(1, std::memory_order_acq_rel);
   if (impl_->async_streaming.enabled &&
       impl_->async_streaming.active.load(std::memory_order_acquire))
     impl_->cancel_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "reset_decoder");
   impl_->invalidate_async_stream_snapshot();
   impl_->finalized = false;
-  impl_->async_streaming.needs_reset = false;
   impl_->discard_records();
   const auto reset_node = [](task_graph_node &node) {
     if (auto *decoder_backed = node.decoder_backed())
@@ -1464,17 +1587,34 @@ void decoding_task_graph::reset_decoder() {
     else if (auto *streaming = node.streaming())
       streaming->reset_streaming_state();
   };
-  for (auto &node : impl_->nodes)
-    reset_node(*node);
-  for (auto &replicas : impl_->node_replicas)
-    for (auto &replica : replicas)
-      reset_node(*replica);
-  impl_->reset_streaming_progress();
-  if (impl_->async_streaming.enabled) {
+  const auto publish_snapshot = [&] {
+    if (!impl_->async_streaming.enabled)
+      return;
     std::lock_guard<std::mutex> lock(impl_->async_streaming.snapshot_mutex);
     impl_->async_streaming.read_snapshot = impl_->streaming_result_state;
+  };
+  // Before any node resets, the previous result is zeroed and pending, and a
+  // clean epoch opens only once every node has reset: a reset that throws
+  // part-way leaves the graph failed, with nothing stale readable, until a
+  // later one succeeds. A reader during a reset that succeeds sees no error.
+  impl_->hide_streaming_result();
+  impl_->async_streaming.needs_reset = true;
+  publish_snapshot();
+  try {
+    for (auto &node : impl_->nodes)
+      reset_node(*node);
+    for (auto &replicas : impl_->node_replicas)
+      for (auto &replica : replicas)
+        reset_node(*replica);
+  } catch (const std::exception &e) {
+    impl_->fail_streaming_progress(std::string("reset_decoder: ") + e.what());
+    publish_snapshot();
+    throw;
   }
-}
+  impl_->async_streaming.needs_reset = false;
+  impl_->reset_streaming_progress();
+  publish_snapshot();
+} // end - reset_decoder()
 
 std::size_t decoding_task_graph::get_num_msyn_per_decode() const {
   return impl_->n_msyn;
@@ -1557,7 +1697,111 @@ decoder *decoding_task_graph::inner_decoder() const {
 // One-shot and batch execution interface
 // ---------------------------------------------------------------------------
 
+// Absent windows contribute nothing, so an output no window reaches is
+// converged.
+bool decoding_task_graph::impl::output_converged(std::size_t k) const {
+  for (const auto si : output_streaming_nodes[k])
+    if (!latest_node_converged[si].value_or(true))
+      return false;
+  return true;
+}
+
+// A graph whose nodes decode only a stream runs a shot through it: from a
+// reset graph, in rounds with FINAL on the last, reading every output, and
+// leaving the graph reset. Each step is a public operation that guards
+// itself, as the asynchronous session holds the graph while it runs, so
+// this mutates the graph through its implementation alone.
+std::vector<logical_outcome>
+decoding_task_graph::run_streamed(const measurement_results &m,
+                                  const char *who) const {
+  // Releases the call's claim however it ends.
+  struct one_shot_claim {
+    std::atomic<bool> &running;
+    ~one_shot_claim() { running.store(false, std::memory_order_release); }
+  };
+  auto &self = const_cast<decoding_task_graph &>(*this);
+  std::vector<logical_outcome> outcomes;
+  const auto record = std::max<std::size_t>(get_num_msyn_per_round(), 1);
+  const auto &bits = m.bits;
+  // The shot's resets and clears once this call has reset it; any later one
+  // is another call's, which ends this call's shot.
+  std::optional<std::uint64_t> resets;
+  const auto reset_elsewhere = [&] {
+    return resets &&
+           impl_->shot_resets.load(std::memory_order_acquire) != *resets;
+  };
+  const auto ended_elsewhere = [&] {
+    return std::logic_error(
+        std::string("decoding_task_graph::") + who +
+        ": its shot did not complete: another call reset or cleared the "
+        "graph while this one-shot call ran");
+  };
+  // Without measurements no FINAL round ends the shot, so none completes.
+  if (bits.empty())
+    throw std::invalid_argument(std::string("decoding_task_graph::") + who +
+                                ": a one-shot call needs the shot's "
+                                "measurements, and got none");
+  // Each step below guards only itself, so without the claim a second call
+  // could reset or enqueue into this one's shot.
+  if (impl_->one_shot_running.exchange(true, std::memory_order_acq_rel))
+    throw std::logic_error(std::string("decoding_task_graph::") + who +
+                           ": another one-shot call is running on this graph; "
+                           "wait for it to return");
+  const one_shot_claim claim{impl_->one_shot_running};
+  if (impl_->shot_open)
+    throw std::logic_error(
+        std::string("decoding_task_graph::") + who +
+        ": the graph runs a shot through its stream, which holds a shot in "
+        "progress; finish it and clear_corrections(), or reset_decoder(), "
+        "first");
+  try {
+    self.reset_decoder();
+    resets = impl_->shot_resets.load(std::memory_order_acquire);
+    for (std::size_t at = 0; at < bits.size(); at += record) {
+      const auto len = std::min(record, bits.size() - at);
+      self.enqueue_syndrome(bits.data() + at, len,
+                            at + len == bits.size() ? round_type::FINAL
+                                                    : round_type::BULK);
+    }
+    const auto &result = self.streaming_result();
+    // A reset or clear from another call leaves a result that is pending,
+    // or that completed from a later round than the shot's first.
+    if (reset_elsewhere() ||
+        result.status != task_graph_streaming_status::complete)
+      throw ended_elsewhere();
+    for (std::size_t k = 0; k < result.outputs.size(); ++k) {
+      const auto &output = result.outputs[k];
+      auto &outcome = outcomes.emplace_back();
+      const auto first = result.values.begin() + output.value_offset;
+      outcome.bits.assign(first, first + output.value_width);
+      outcome.converged = impl_->output_converged(k);
+    }
+    // One that came while the result was read may have changed it.
+    if (reset_elsewhere())
+      throw ended_elsewhere();
+    self.reset_decoder();
+  } catch (...) {
+    // Leave the graph reset for the next call, and report why this one's
+    // shot ended: another call's reset or clear, if it had one, rather than
+    // the error that reset left this call to meet.
+    const bool ended = reset_elsewhere();
+    try {
+      self.reset_decoder();
+    } catch (...) {
+    }
+    if (ended)
+      throw ended_elsewhere();
+    throw;
+  } // end - try
+  return outcomes;
+} // end - run_streamed()
+
 logical_outcome decoding_task_graph::run(const measurement_results &m) const {
+  if (impl_->one_shot_streams) {
+    impl_->require_single_output("run");
+    return run_streamed(m, "run").at(0);
+  }
+  impl_->settle_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "run");
   return impl_->run_dag(m, "run");
 }
@@ -1611,6 +1855,9 @@ logical_outcome decoding_task_graph::impl::run_dag(const measurement_results &m,
 
 std::vector<logical_outcome>
 decoding_task_graph::run_all(const measurement_results &m) const {
+  if (impl_->one_shot_streams)
+    return run_streamed(m, "run_all");
+  impl_->settle_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "run_all");
   auto &g = *impl_;
   const auto &sink_wires = g.wires_to.back();
@@ -1634,9 +1881,15 @@ decoding_task_graph::run_async(const measurement_results &m) const {
   // The single-node fast path bypasses run_dag(), so validate before selecting
   // either path or arming the in-flight guard.
   impl_->require_single_output("run_async");
+  // Through the stream, on another thread; an asynchronous graph's session
+  // overlaps the shot's rounds.
+  if (impl_->one_shot_streams)
+    return std::async(std::launch::async,
+                      [this, m] { return run_streamed(m, "run_async").at(0); });
 
   // Held for the lifetime of the work, not of this call: the inner decode is
   // already on a worker thread by the time we return.
+  impl_->settle_async_streaming();
   auto token = std::make_shared<in_flight_guard>(impl_->in_flight, "run_async");
 
   if (impl_->nodes.size() == 1) {
@@ -1661,8 +1914,16 @@ decoding_task_graph::run_async(const measurement_results &m) const {
 
 std::vector<logical_outcome> decoding_task_graph::run_batch(
     const std::vector<measurement_results> &shots) const {
+  if (impl_->one_shot_streams) {
+    std::vector<logical_outcome> results;
+    impl_->require_single_output("run_batch");
+    for (const auto &m : shots)
+      results.push_back(run_streamed(m, "run_batch").at(0));
+    return results;
+  }
   // One token for the whole batch, over the unguarded walk: a per-shot guard
   // would leave a detection gap between shots.
+  impl_->settle_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "run_batch");
   std::vector<logical_outcome> results;
   results.reserve(shots.size());

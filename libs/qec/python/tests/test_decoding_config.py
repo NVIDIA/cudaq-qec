@@ -1059,6 +1059,7 @@ def test_task_graph_ensemble_roundtrips_through_yaml():
     ens.members = [member]
     node = qec.task_graph_node()
     node.id = "ens"
+    node.type = "ensemble"
     node.ensemble = ens
 
     graph = qec.task_graph_spec()
@@ -1074,13 +1075,33 @@ def test_task_graph_ensemble_roundtrips_through_yaml():
 
     parsed = qec.decoder_config.from_yaml_str(dc.to_yaml_str())
     node2 = parsed.task_graph.nodes[0]
-    assert node2.type == ""
+    assert node2.type == "ensemble"
     assert node2.ensemble is not None
     assert node2.ensemble.join_strategy == "deadline"
     assert node2.ensemble.join_params["deadline_us"] == 200
     assert node2.ensemble.members[0].nodes[0].id == "a"
     assert node2.ensemble.members[0].edges[1].to_node == "output"
     assert parsed.task_graph == dc.task_graph
+
+    # The schema polices the ensemble keys as the parser does: an ensemble
+    # node takes no other node key, and no other node takes its keys.
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    document = yaml.safe_load(qec_yaml_for(dc))
+    validator.validate(document)
+    with_inner = yaml.safe_load(qec_yaml_for(dc))
+    with_inner["decoders"][0]["task_graph"]["nodes"][0]["inner"] = {
+        "type": "pymatching"
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(with_inner)
+    on_xor = yaml.safe_load(qec_yaml_for(dc))
+    on_xor["decoders"][0]["task_graph"]["nodes"][0]["type"] = "xor"
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(on_xor)
 
 
 def test_task_graph_edges_carry_ports():
@@ -1235,6 +1256,48 @@ def test_verify_residual_parser_and_schema_agree():
         assert not validator.is_valid(yaml.safe_load(text))
 
 
+def test_xor_num_inputs_parser_and_schema_agree():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    text = _PW_GRAPH_YAML.replace("type: xor",
+                                  "type: xor\n          num_inputs: 3")
+    assert "num_inputs: 3" in text
+    mdc = qec.multi_decoder_config.from_yaml_str(text)
+    sum_node = [n for n in mdc.decoders[0].task_graph.nodes if n.id == "sum"][0]
+    assert sum_node.node_params["num_inputs"] == 3
+    validator.validate(yaml.safe_load(text))
+    for low in ["0", "1"]:
+        bad = text.replace("num_inputs: 3", "num_inputs: " + low)
+        with pytest.raises(RuntimeError,
+                           match="xor: num_inputs must be at least 2"):
+            qec.multi_decoder_config.from_yaml_str(bad)
+        assert not validator.is_valid(yaml.safe_load(bad))
+    wide = text.replace("num_inputs: 3", "num_inputs: 2000")
+    with pytest.raises(RuntimeError,
+                       match="xor: num_inputs must be at most 1024"):
+        qec.multi_decoder_config.from_yaml_str(wide)
+    assert not validator.is_valid(yaml.safe_load(wide))
+
+
+def test_max_in_flight_parser_and_schema_agree():
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    assert "max_in_flight: 4" in _PW_GRAPH_YAML
+    bad = _PW_GRAPH_YAML.replace("max_in_flight: 4", "max_in_flight: 0")
+    with pytest.raises(RuntimeError, match="has max_in_flight 0"):
+        qec.multi_decoder_config.from_yaml_str(bad)
+    assert not validator.is_valid(yaml.safe_load(bad))
+    validator.validate(yaml.safe_load(_PW_GRAPH_YAML))
+
+
 def test_experimental_window_request_is_writable():
     exp = qec.experimental
     request = exp.window_request()
@@ -1339,6 +1402,43 @@ decoders:
     assert decoder.stim_dem_path == ""
 
 
+def test_data_artifacts_name_stim_dems_built_in_code():
+    tiny = qec.data_artifact()
+    tiny.name = "tiny"
+    tiny.stim_dem = "error(0.1) D0 L0\nerror(0.1) D0 D1\n"
+    dec = qec.decoder_config()
+    dec.id = 0
+    dec.type = "multi_error_lut"
+    dec.D_sparse = [0, -1, 1, -1]
+    dec.stim_dem = "tiny"
+    mdc = qec.multi_decoder_config()
+    mdc.data_artifacts = [tiny]
+    mdc.decoders = [dec]
+    assert qec.configure_decoders(mdc) == 0
+    qec.finalize_decoders()
+    assert mdc.decoders[0].stim_dem_artifact == "tiny"
+    assert mdc.decoders[0].stim_dem == tiny.stim_dem
+    dec.stim_dem = "nowhere"
+    mdc.decoders = [dec]
+    with pytest.raises(RuntimeError, match="'nowhere', which does not exist"):
+        qec.configure_decoders(mdc)
+
+
+def test_data_artifacts_names_have_no_whitespace():
+    yaml = """
+data_artifacts:
+  "my dem":
+    stim_dem: "error(0.1) D0 L0\\nerror(0.1) D0 D1\\n"
+decoders:
+  - id: 0
+    type: multi_error_lut
+    stim_dem: "my dem"
+    D_sparse: [0, -1, 1, -1]
+"""
+    with pytest.raises(RuntimeError, match="needs a name without spaces"):
+        qec.multi_decoder_config.from_yaml_str(yaml)
+
+
 def test_data_artifacts_validate_against_the_schema():
     jsonschema = pytest.importorskip("jsonschema")
     yaml = pytest.importorskip("yaml")
@@ -1351,6 +1451,28 @@ def test_data_artifacts_validate_against_the_schema():
     two_kinds["data_artifacts"]["rep_memory"]["stim_dem"] = "error(0.1) D0"
     with pytest.raises(jsonschema.ValidationError):
         validator.validate(two_kinds)
+    # The schema refuses a name exactly when the parser does: only the
+    # whitespace that tells model text from a name, not Unicode's.
+    for name, refused in [("rep memory", True), ("rep\tmemory", True),
+                          ("rep\u00a0memory", False), ("rep\vmemory", False)]:
+        renamed = yaml.safe_load(_ARTIFACTS_YAML)
+        renamed["data_artifacts"][name] = renamed["data_artifacts"].pop(
+            "rep_memory")
+        assert (not validator.is_valid(renamed)) == refused, repr(name)
+        entries = {
+            "data_artifacts": {
+                name: {
+                    "stim_dem": "error(0.1) D0 L0"
+                }
+            },
+            "decoders": []
+        }
+        try:
+            qec.multi_decoder_config.from_yaml_str(json.dumps(entries))
+            parsed = True
+        except RuntimeError:
+            parsed = False
+        assert parsed != refused, repr(name)
 
 
 _PATTERN_YAML = """decoders:
@@ -1394,6 +1516,19 @@ def test_parallel_window_pattern_and_pool_options_parse():
     options.async_num_workers = 3
     options.async_worker_cpus = [1, 2]
     assert options.async_num_workers == 3
+
+
+def test_parallel_window_pattern_round_trips_through_yaml():
+    mdc = qec.multi_decoder_config.from_yaml_str(_PATTERN_YAML)
+    emitted = mdc.to_yaml_str()
+    again = qec.multi_decoder_config.from_yaml_str(emitted)
+    assert again == mdc
+    node = again.decoders[0].task_graph.nodes[0]
+    assert node.type == "parallel_window"
+    assert node.node_params["commit_rounds"] == 3
+    assert node.node_params["gap_rounds"] == 9
+    assert node.node_params["output"] == "corrected_logical"
+    assert node.max_in_flight == 4
 
 
 def test_parallel_window_pattern_validates_against_the_schema():
