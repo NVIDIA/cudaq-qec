@@ -1,0 +1,12 @@
+# Synthetic three-bit identity mapping for the package connectivity check.
+# This is not a QPU error model.
+decoders:
+  - id: 0
+    type: multi_error_lut
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0, -1, 1, -1, 2, -1]
+    O_sparse: [0, -1, 1, -1, 2, -1]
+    D_sparse: [0, -1, 1, -1, 2, -1]
+    decoder_custom_args:
+      lut_error_depth: 1

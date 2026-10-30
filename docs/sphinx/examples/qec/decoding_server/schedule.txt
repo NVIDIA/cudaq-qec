@@ -1,0 +1,5 @@
+# Acknowledge the reset before sending a single three-bit measurement group.
+0 reset session=0 signal=reset_done
+- enqueue session=0 source=0b010 after=reset_done signal=enqueued
+# Allow this CPU connectivity check time to finish decoding before reading.
++1000 get_corrections 010 session=0 after=enqueued

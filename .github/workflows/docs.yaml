@@ -120,6 +120,11 @@ jobs:
       # Build docs
       # ========================================================================
 
+      - name: Test decoding-server package example launcher
+        run: |
+          python3 -m unittest discover \
+            -s docs/sphinx/examples/qec/decoding_server -p 'test_*.py' -v
+
       - name: Install requirements
         run: |
           apt update

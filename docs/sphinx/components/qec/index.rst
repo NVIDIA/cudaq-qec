@@ -18,6 +18,9 @@ These types are meant to be extended by developers to provide new error correcti
 
 The pages below document each of these interfaces in depth — the abstraction, how to extend it, and what ships built in. For runnable, copy-pasteable programs, see the :doc:`CUDA-Q QEC examples </examples_rst/qec/examples>`.
 
+For deployment using the prebuilt Docker package, see
+:doc:`Decoding Server with Docker </examples_rst/qec/decoding_server>`.
+
 .. toctree::
    :maxdepth: 2
 
