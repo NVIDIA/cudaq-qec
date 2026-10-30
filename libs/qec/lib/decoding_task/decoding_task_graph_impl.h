@@ -186,6 +186,7 @@ struct decoding_task_graph::impl {
     };
     bool enabled = false;
     std::uint64_t frontier = 0;
+    std::uint64_t begin = 0; ///< the frontier when the frame was last consumed
     std::uint64_t generation = 0;
     std::vector<uint8_t> bits;  ///< the frame at the frontier
     std::vector<uint8_t> whole; ///< whole-shot deltas held until FINAL
