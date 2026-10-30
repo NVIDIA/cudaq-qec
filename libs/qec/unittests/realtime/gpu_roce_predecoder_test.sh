@@ -5,8 +5,8 @@
 # gpu_roce_predecoder_test.sh
 #
 # Orchestration script for the AI predecoder + PyMatching pipeline over
-# GPU RoCE RDMA.  Uses HOST_LOOP CPU-launched CUDA graph dispatch
-# with the realtime_pipeline external ring buffer path.
+# GPU RoCE RDMA.  The bridge runs the realtime_pipeline host dispatch loop
+# over an external GpuRoce ring (the transceiver's RX/TX rings).
 #
 # Modes:
 #   Default (FPGA):   bridge + playback  (requires real FPGA)
@@ -95,7 +95,7 @@ Run options:
   --gpu N                GPU device ID (default: 0)
   --timeout N            Timeout in seconds (default: 60)
   --page-size N          Ring buffer slot size (default: auto from model)
-  --num-pages N          Ring buffer slots (default: 64)
+  --num-pages N          Ring buffer slots (power of two; default: 64)
   --num-shots N          Limit number of shots (default: 1 for d13_r104)
   --spacing N            Inter-shot spacing in microseconds
   --control-port N       Emulator UDP control port (default: 8193)
@@ -111,8 +111,8 @@ Pipeline config overrides (applied after --config preset):
 
   --help, -h             Show this help
 
-BRAM constraints (RAM_DEPTH=512):
-  d7:        frame=128 B, 2 cycles/shot  -> max 256 shots
+BRAM constraints (RAM_DEPTH=512 lines of 64 B):
+  d7:        frame=360 B, 6 cycles/shot  -> max 85 shots
   d13:       frame=384 B, 6 cycles/shot  -> max 85 shots
   d13_r104:  frame=17536 B, 274 cycles/shot -> max 1 shot
 EOF
@@ -441,14 +441,15 @@ resolve_paths() {
 apply_config_defaults() {
     case "$CONFIG_NAME" in
         d7)
-            : "${PAGE_SIZE:=384}"
+            # hsb_fpga_syndrome_playback requires pages of at least 512 bytes.
+            : "${PAGE_SIZE:=512}"
             : "${NUM_SHOTS:=10}"
             if [[ -z "$DATA_DIR" ]]; then
                 DATA_DIR="${SCRIPT_DIR}/predecoder/test_data/d7_R7_Z"
             fi
             ;;
         d13)
-            : "${PAGE_SIZE:=384}"
+            : "${PAGE_SIZE:=512}"
             : "${NUM_SHOTS:=10}"
             if [[ -z "$DATA_DIR" ]]; then
                 DATA_DIR="${SCRIPT_DIR}/predecoder/test_data/d13_T13_X"
