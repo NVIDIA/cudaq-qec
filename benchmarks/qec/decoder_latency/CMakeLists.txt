@@ -9,8 +9,10 @@ find_package(Threads REQUIRED)
 add_executable(benchmark-qec-decoder EXCLUDE_FROM_ALL
     benchmark-qec-decoder.cpp
     benchmark_instance_pool.cpp)
+# The realtime app examples' per-round DEM chunker, for parallel-window rows.
 target_include_directories(benchmark-qec-decoder PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR})
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/qec/unittests/realtime/app_examples)
 target_link_libraries(benchmark-qec-decoder PRIVATE
     cudaq-qec-decoders
     libstim

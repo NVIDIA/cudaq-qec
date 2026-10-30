@@ -268,11 +268,19 @@ the session. A FINAL enqueue waits for all accepted input and the final flush.
 ``clear_corrections`` drains accepted input without flushing guarded tails
 before consuming the result. Each public enqueue remains one queue record, so
 inner streaming decoders observe the same call boundaries as synchronous
-graphs.
+graphs, with one exception: a graph whose one raw-input node meters its own
+chunks, such as a windowed graph, works in records of about one chunk. It
+admits BULK rounds that have queued up behind it together, so that a graph
+that falls behind catches up in batches, and runs a tagged record longer than
+a chunk as several, so that no record holds more than a chunk's windows.
 
-In an asynchronous graph, records overlap: the coordinator admits every
-accepted record at once, up to ``async_queue_capacity``, and a later record
-runs ahead on nodes that have finished the earlier ones. 
+In an asynchronous graph, records overlap: a later record runs ahead on nodes
+that have finished the earlier ones, up to 16 records at once.
+``async_queue_capacity`` (default 32) bounds how many public enqueues may be
+queued or running, which is how far a producer may run ahead before an
+enqueue waits. A graph that falls behind returns FINAL's result only after
+draining what is queued, so a deeper queue raises throughput when behind at
+the cost of that tail.
 
 Decoder-server YAML exposes the same policy as ``task_graph.async_streaming``,
 with optional ``async_queue_capacity``, ``async_coordinator_cpu``,
@@ -286,10 +294,14 @@ and worker affinity masks when using this low-latency policy.
 ``async_num_workers`` sets how many pool threads run node fires in an
 asynchronous graph, not counting the coordinator. Unset, the default, picks
 the graph's parallel width, including every fire pool's copies, capped by
-hardware concurrency; the build warns when the count is below the pooled
-copies. ``async_worker_cpus`` pins those threads round-robin to the listed
-CPUs (Linux only); it is empty by default, so node work inherits the
-process's affinity. Synchronous graphs ignore both.
+hardware concurrency. An indexed node's fires leave one worker for
+ingestion and deliveries when there are several, and records pipeline, so a
+graph with one, such as a windowed graph, defaults to every copy that may
+fire at once, an indexed node's single copy included, plus that worker. The
+build warns when the workers that may fire are fewer than those copies.
+``async_worker_cpus`` pins those threads round-robin to
+the listed CPUs (Linux only); it is empty by default, so node work inherits
+the process's affinity. Synchronous graphs ignore both.
 
 Pools are per graph: each decoder's asynchronous graph has its own coordinator
 and workers, so a configuration with several runs the sum of their threads.

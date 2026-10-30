@@ -297,7 +297,8 @@ struct task_graph_output_progress {
 /// update. Generation alone must therefore never be used as a readiness test.
 /// `result_revision` advances whenever any output or graph status changes.
 /// `completed_operations` counts public enqueue operations that advanced the
-/// aggregate result, even when several complete before the next read.
+/// aggregate result, even when several complete before the next read. An
+/// asynchronous graph counts them as a synchronous one would.
 /// Only reset_decoder() advances shot_epoch.
 struct task_graph_streaming_result {
   std::uint64_t shot_epoch = 0;
@@ -341,9 +342,9 @@ struct task_graph_streaming_result {
 /// serialised -- an overlapping call throws `std::logic_error`. An
 /// async-streaming graph instead has one internal coordinator that dispatches
 /// records to pool workers; its public streaming calls provide copied input
-/// and coherent snapshots. Records overlap, up to `async_queue_capacity` at
-/// once, but each node still sees them in order and every value a record
-/// moves between nodes is buffered per record.
+/// and coherent snapshots. Records overlap, a bounded number at once, but each
+/// node still sees them in order and every value a record moves between nodes
+/// is buffered per record.
 class decoding_task_graph {
 public:
   /// Construct from an already-built decoder and D/O in nested-row form.
