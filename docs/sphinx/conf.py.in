@@ -235,6 +235,8 @@ redirects = {
     "examples_rst/qec/stim_dem_decoder": "decoders.html",
     "examples_rst/qec/dem_sampling": "decoders.html",
     "examples_rst/qec/nv_qldpc_gamma_ensemble_user_guide": "../../performance/nv_qldpc_gamma_ensemble_user_guide.html",
+    # Removed page: its device-graph walkthrough relied on a non-redistributable archive.
+    "examples_rst/qec/realtime_relay_bp": "realtime_decoding_demo.html",
     # CUDA-Q Solvers was removed from this repository after the 0.6.0 release. Point the
     # previously published Solvers pages at CUDA-Q Algorithms, which supersedes
     # it, so existing links and search results do not 404.

@@ -3,11 +3,11 @@
 ## Design Specification
 
 **Component**: `cudaq-qec` Realtime Decoding Subsystem
-**Status**: Implemented
-**Supersedes**: Device-side persistent kernel dispatcher (`dispatch_kernel_with_graph`) and Statically-mapped Host Dispatcher
+**Status**: Implemented (dispatcher owned by `libcudaq-realtime-pipeline`)
+**Supersedes**: Device-side persistent kernel dispatcher (`dispatch_kernel_with_graph`), Statically-mapped Host Dispatcher, and CUDA-Q realtime's host graph-launch dispatcher (`cudaq_host_dispatcher_loop`, removed in CUDA-Q PR 5736)
 **Target Platforms**: NVIDIA Grace Hopper (GH200), Grace Blackwell (GB200)
 **Shared-Memory Model**: libcu++ `cuda::std::atomic` with `thread_scope_system`
-**Last Updated**: 2026-04-01
+**Last Updated**: 2026-10-27
 
 ---
 
@@ -23,7 +23,7 @@ The legacy architecture used a persistent GPU kernel to launch child CUDA graphs
 
 ### 1.3 The Solution
 This document defines a **Host-Side Dispatcher with a Dynamic Worker Pool**. 
-* The dispatcher runs on a dedicated CPU core.
+* The dispatcher is a thread owned by `realtime_pipeline`, running on a dedicated CPU core.
 * Predecoder streams and CPU workers act as an interchangeable pool.
 * Inflight jobs are tagged with their origin slot, allowing out-of-order execution and completion.
 * Synchronization relies exclusively on Grace Blackwell's NVLink-C2C hardware using libcu++ system-scope atomics.
@@ -36,7 +36,7 @@ This document defines a **Host-Side Dispatcher with a Dynamic Worker Pool**.
 Instead of mapping predecoder streams statically to incoming data, the host dispatcher maintains a bitmask of available workers (`idle_mask`).
 
 1. **Allocate**: When `rx_flags[slot]` indicates new data, the dispatcher finds the first available worker stream using a hardware bit-scan (`__builtin_ffsll`).
-2. **Tag**: The dispatcher records the original `slot` in a tracking array (`inflight_slot_tags[worker_id]`) so the response can be routed correctly.
+2. **Tag**: The dispatcher records the original `slot` in a tracking array (`inflight_slot_tags[worker_id]`) before it clears the worker's availability bit, so the response can be routed correctly.
 3. **Pre-launch DMA**: If a `pre_launch_fn` callback is registered on the worker, the dispatcher calls it to issue a `cudaMemcpyAsync` (DMA engine copy) of the input payload from the ring buffer to the TRT input buffer before graph launch.
 4. **Dispatch**: The dispatcher launches the CUDA graph on the assigned worker's stream and clears its availability bit.
 5. **Free**: The predecoder worker thread (not the PyMatching thread) restores the worker's availability bit in the `idle_mask` after copying inference output and enqueuing the PyMatching job. Slot completion is deferred to the PyMatching thread pool.
@@ -53,125 +53,146 @@ All shared state must use **libcu++ system-scope atomics** allocated in mapped p
 
 | Variable | Type | Memory Location | Purpose |
 | :--- | :--- | :--- | :--- |
-| `rx_flags[NUM_SLOTS]` | `atomic<uint64_t, thread_scope_system>` | Mapped Pinned | FPGA writes data ptr; CPU polls (Acquire). |
-| `tx_flags[NUM_SLOTS]` | `atomic<uint64_t, thread_scope_system>` | Mapped Pinned | Dispatcher writes IN_FLIGHT; PyMatch writes response; Consumer polls (Release/Acquire). Not used for producer backpressure. |
+| `rx_flags[NUM_SLOTS]` | `atomic<uint64_t, thread_scope_system>` | Mapped Pinned | Producer/transport writes the RX slot's host address; CPU polls (Acquire). Cleared by the dispatcher at dispatch (internal ring) or by `publish()` when the response is out (external ring, Section 7.3). |
+| `tx_flags[NUM_SLOTS]` | `atomic<uint64_t, thread_scope_system>` | Mapped Pinned | 0 = no response; non-zero = host address of the TX slot holding the response, stored (Release) by `complete_deferred`, by the worker thread on a non-deferred completion, or by the GPU-only callback. Internal ring: the consumer polls (Acquire) and clears. External ring: the transport's TX kernel consumes and clears. Not used for producer backpressure. |
+| `slot_occupied[NUM_SLOTS]`, `slot_cuda_error[NUM_SLOTS]` | `uint8_t`, `int` (plain arrays) | Host CPU Mem | Pipeline-private per-slot in-flight state. `slot_occupied` is set by the producer and cleared by the consumer (internal ring); `slot_cuda_error` carries a failed `cudaGraphLaunch` from the dispatcher to the completion callback. |
 | `ready_flags[1]` | `atomic<int, thread_scope_system>` | Mapped Pinned | GPU signals TRT done; CPU polls (Release/Acquire). Queue depth = 1. |
 | `idle_mask` | `atomic<uint64_t, thread_scope_system>` | Host CPU Mem | Bitmask of free workers. 1 = free, 0 = busy. |
-| `inflight_slot_tags[NUM_WORKERS]`| `int` (Plain array) | Host CPU Mem | Maps `worker_id` -> original FPGA `slot`. |
-| `mailbox_bank[NUM_WORKERS]` | `void*` (Plain array) | Mapped Pinned | Dispatcher writes device ptr for pre-launch callback. |
-| `h_ring_ptrs[1]` | `void*` (Mapped Pinned) | Mapped Pinned | Pre-launch callback writes slot device ptr for CPU worker readback. |
+| `inflight_slot_tags[NUM_WORKERS]`| `int` (Release store / Acquire load) | Host CPU Mem | Maps `worker_id` -> original FPGA `slot`. Written by the dispatcher before the launch, read by the worker thread. |
+| `worker_launch_failed[NUM_WORKERS]` | `uint8_t` (Release store / Acq-Rel exchange) | Host CPU Mem | Dispatcher -> worker thread: a failed `cudaGraphLaunch`; the worker thread returns its own `idle_mask` bit. |
+| `mailbox_bank[NUM_WORKERS]` | `void*` (Plain array) | Mapped Pinned | Allocated by the application for the `ai_predecoder_service` constructors; the predecoder graph does not read it (input arrives through `pre_launch_fn`). |
+| `h_ring_ptrs[1]` | `void*` (Mapped Pinned) | Mapped Pinned | Pre-launch callback records the slot device ptr (service bookkeeping; the CPU stage reads the request from the host RX slot). |
 | `h_predecoder_outputs_[1]` | `void*` (Mapped Pinned) | Mapped Pinned | GPU output copied here via DMA; CPU worker reads inference results. |
 
-**NUM_SLOTS**: 16 (ring buffer capacity).
+**NUM_SLOTS**: `pipeline_stage_config::num_slots`, used verbatim by the pipeline (16 in the PyMatching benchmark; the GpuRoce bridge passes the transceiver's page count).
 **NUM_WORKERS**: 8 (predecoder streams, each with a dedicated CPU poller thread).
 **Queue depth**: 1 per predecoder (single in-flight inference per stream).
 
 ---
 
-## 4. Host Dispatcher Thread (Producer)
+## 4. Host Dispatcher Thread (pipeline-owned)
 
-The dispatcher loop is a tight spin-polling loop running on a dedicated CPU core. It is implemented in `realtime/lib/daemon/dispatcher/host_dispatcher.cu` as `cudaq_host_dispatcher_loop()`.
+The dispatcher loop is a tight spin-polling loop running on a dedicated CPU core. It is implemented in `libs/qec/lib/realtime/realtime_pipeline.cu` as `realtime_pipeline::Impl::dispatcher_loop()` and started by `realtime_pipeline::start()`. CUDA-Q realtime contributes only the ring layout (`cudaq_ringbuffer_t`), the `cudaq_host_ringbuffer_*` slot helpers exported by `libcudaq-realtime`, the `RPCHeader` / `RPCResponse` wire structs (`dispatch_kernel_launch.h`) and `CUDAQ_REALTIME_CPU_RELAX` (`cpu_relax.h`).
 
-### 4.1 cudaq_host_dispatch_worker_t Structure
+### 4.1 Worker Resources
 
-Each worker in the pool has the following fields:
+Each worker in the pool is described by the public `gpu_worker_resources` struct (`pipeline.h`), returned by the application's `gpu_stage_factory` once per worker during `start()`:
 
 ```cpp
-typedef struct {
+struct gpu_worker_resources {
     cudaGraphExec_t graph_exec;
     cudaStream_t stream;
+    void (*pre_launch_fn)(void *user_data, void *slot_dev, cudaStream_t stream);
+    void *pre_launch_data;
+    void (*post_launch_fn)(void *user_data, void *slot_dev, cudaStream_t stream);
+    void *post_launch_data;
     uint32_t function_id;
-    void (*pre_launch_fn)(void* user_data, void* slot_dev, cudaStream_t stream);
-    void* pre_launch_data;
-    void (*post_launch_fn)(void* user_data, void* slot_dev, cudaStream_t stream);
-    void* post_launch_data;
-} cudaq_host_dispatch_worker_t;
+    void *user_context;
+};
 ```
 
-The `pre_launch_fn` callback enables the dispatcher to issue a `cudaMemcpyAsync` (using the DMA copy engine) for the input payload before each graph launch, without baking application-specific logic into the generic dispatcher. The `post_launch_fn` callback is used in GPU-only mode to enqueue a `cudaLaunchHostFunc` that signals slot completion without CPU worker threads.
+The `pre_launch_fn` callback enables the dispatcher to issue a `cudaMemcpyAsync` (using the DMA copy engine) for the input payload before each graph launch, without baking application-specific logic into the dispatcher. `post_launch_fn` is called by the dispatcher after a successful launch; in GPU-only mode the dispatcher itself then enqueues the `cudaLaunchHostFunc` completion callback (Section 8.2).
 
-### 4.2 Dispatcher Config Structure
+Per worker, the pipeline keeps private state: its bit in `idle_mask`, `inflight_slot_tags[w]` (origin slot of the request in flight), `worker_launch_failed[w]` (a failed launch to be acknowledged by the worker thread) and, in GPU-only mode, the host-callback context `{tx_flags_host, idle_mask*, worker_id, origin_slot, tx_value}`.
 
-The dispatcher loop takes a `cudaq_host_dispatch_loop_ctx_t` that composes three public API structs plus runtime state:
+### 4.2 Dispatcher State
+
+The loop runs over members of `realtime_pipeline::Impl`; nothing crosses a library boundary (abridged):
 
 ```cpp
-typedef struct {
-    cudaq_ringbuffer_t ringbuffer;         // ring buffer pointers & strides
-    cudaq_dispatcher_config_t config;      // num_slots, slot_size, dispatch_path
-    cudaq_function_table_t function_table; // entries pointer + count
-
-    cudaq_host_dispatch_worker_t *workers;
-    size_t num_workers;
-    void **h_mailbox_bank;
-    void *shutdown_flag;       // opaque cuda::std::atomic<int>*
-    uint64_t *stats_counter;
-    void *live_dispatched;     // opaque cuda::std::atomic<uint64_t>*
-    void *idle_mask;           // opaque cuda::std::atomic<uint64_t>*, 1=free 0=busy
-    int *inflight_slot_tags;   // worker_id -> origin FPGA slot
-    void *io_ctxs_host;       // NULL for legacy mode
-    void *io_ctxs_dev;        // NULL for legacy mode
-} cudaq_host_dispatch_loop_ctx_t;
+cudaq_ringbuffer_t active_rb_;      // ring views: rx_flags_host, tx_flags_host, rx_data,
+                                    // rx_data_host, tx_data_host, rx/tx_stride_sz
+bool external_ring_;                // transport-owned ring (Section 7.3)
+gpu_worker_resources worker_resources[NUM_WORKERS];
+atomic<uint64_t> idle_mask;         // 1 = free, 0 = busy; only the dispatcher clears bits
+int      inflight_slot_tags[NUM_WORKERS];   // worker_id -> origin slot (release/acquire)
+uint8_t  worker_launch_failed[NUM_WORKERS]; // dispatcher -> worker thread
+int      slot_cuda_error[NUM_SLOTS];        // dispatcher -> completion callback
+uint8_t  slot_occupied[NUM_SLOTS];          // producer -> consumer (internal ring)
+uint32_t slot_request[NUM_SLOTS];           // request_id captured per slot
+atomic<uint64_t> live_dispatched;   // launch attempts (Stats::dispatched)
+atomic<int> shutdown_flag;          // stop() -> dispatcher
+int device_id;                      // cudaGetDevice() on the thread calling start()
 ```
+
+The dispatcher thread and every worker thread call `cudaSetDevice(device_id)` first, so the factory's streams and graphs must belong to the device that is current on the thread calling `start()`.
 
 ### 4.3 Function-Aware Worker Selection
 
-When a function table is present, the dispatcher routes each request to a worker whose `function_id` matches the RPC header's `function_id`. This is correct for mixed function tables (e.g., different model types). For pools of interchangeable workers running the same model, all workers **must** share a single `function_id` to avoid head-of-line blocking — otherwise the dispatcher waits for the one specific worker that matches even when other workers are idle.
+The dispatcher routes each request to a worker whose `function_id` matches the RPC header's `function_id`; `ring_buffer_injector` refuses a `function_id` no worker serves (`std::invalid_argument`, once the pipeline is started), so on the internal ring only bad framing reaches the dispatcher's drop path; a dropped internal-ring request is reported as a completion with `success=false` and its slot is freed, while a dropped external-ring frame is left unanswered. Drops are not counted in `Stats::dispatched`. This is correct for mixed worker pools (e.g., different model types). For pools of interchangeable workers running the same model, all workers **must** share a single `function_id` to avoid head-of-line blocking — otherwise the dispatcher waits for the one specific worker that matches even when other workers are idle.
 
 ### 4.4 Dispatcher Logic (Pseudocode)
 ```cpp
-void cudaq_host_dispatcher_loop(const cudaq_host_dispatch_loop_ctx_t *ctx) {
-    size_t current_slot = 0;
+void realtime_pipeline::Impl::dispatcher_loop() {
+    cudaSetDevice(device_id);
+    const cudaq_ringbuffer_t &rb = active_rb_;
+    size_t cursor = 0;
 
-    while (ctx->shutdown_flag->load(acquire) == 0) {
-        uint64_t rx_value = ctx->ringbuffer.rx_flags_host[current_slot].load(acquire);
+    while (shutdown_flag.load(acquire) == 0) {
+        // External ring: a slot taken at dispatch is held until publish() (Section 7.3).
+        // Checked before the flag, whose stale value must not be taken for a new frame.
+        if (external_ring_ && atomic_load(&slot_occupied[cursor], acquire)) { CUDAQ_REALTIME_CPU_RELAX(); continue; }
+        uint64_t rx_value = atomic_load(&rb.rx_flags_host[cursor], acquire);
         if (rx_value == 0) { CUDAQ_REALTIME_CPU_RELAX(); continue; }
+        // External ring: the transport has not taken the previous response out of this TX slot yet
+        if (external_ring_ && atomic_load(&rb.tx_flags_host[cursor], acquire) != 0) { CUDAQ_REALTIME_CPU_RELAX(); continue; }
 
-        void* slot_host = reinterpret_cast<void*>(rx_value);
+        // Producer convention: a non-zero rx_flag is the host address of the RX slot
+        auto *slot_host = reinterpret_cast<uint8_t*>(rx_value);
+        auto *hdr = reinterpret_cast<const RPCHeader*>(slot_host);
+        if (hdr->magic != RPC_MAGIC_REQUEST) { drop(); continue; }   // see drop() below
+        // Copy the header fields before anything can overwrite the slot
+        uint32_t fid = hdr->function_id, rid = hdr->request_id;
+        uint64_t ptp = hdr->ptp_timestamp;
+        if (no worker_resources[i].function_id == fid) { drop(); continue; }
+        // drop(): internal ring, slot filled by the injector -> completion{success=false, cuda_error=0},
+        //         total_completed++, rx_flag = 0, then slot_occupied = 0 (the consumer's order);
+        //         otherwise rx_flag = 0 only. Not counted as dispatched. advance().
 
-        // Parse RPC header and lookup function table
-        if (use_function_table) {
-            ParsedSlot parsed = parse_slot_with_function_table(slot_host, ctx);
-            if (parsed.drop) { clear_and_advance(); continue; }
+        // First idle worker (ffsll over idle_mask) whose function_id matches
+        int w = acquire_worker(fid);
+        if (w < 0) { CUDAQ_REALTIME_CPU_RELAX(); continue; }   // backpressure: stay on this slot
+        slot_ptp[cursor] = ptp;                                 // stages read id/ptp from cpu_stage_context
+        if (external_ring_) {
+            slot_request[cursor] = rid;                         // internal ring: the injector recorded the id (Section 9, step 3)
+            atomic_store(&slot_occupied[cursor], 1, release);   // take the slot; publish() gives it back
         }
+        atomic_store(&inflight_slot_tags[w], cursor, release); // tag now; the worker is taken below
 
-        // Wait for an available worker with matching function_id
-        int worker_id = acquire_graph_worker(ctx, ...);
-        if (worker_id < 0) { CUDAQ_REALTIME_CPU_RELAX(); continue; }
+        // Device view of the RX slot, host view of the TX slot
+        void    *slot_dev = rb.rx_data + (slot_host - rb.rx_data_host);
+        uint8_t *tx_host  = rb.tx_data_host + cursor * rb.tx_stride_sz;  // == slot_host on the in-place internal ring
+        auto &wr = worker_resources[w];
 
-        // Mark worker busy, tag with origin slot
-        ctx->idle_mask->fetch_and(~(1ULL << worker_id), release);
-        ctx->inflight_slot_tags[worker_id] = current_slot;
+        if (wr.pre_launch_fn) wr.pre_launch_fn(wr.pre_launch_data, slot_dev, wr.stream);
+        cudaError_t err = cudaGraphLaunch(wr.graph_exec, wr.stream);
+        if (err == cudaSuccess && wr.post_launch_fn) wr.post_launch_fn(wr.post_launch_data, slot_dev, wr.stream);
+        live_dispatched.fetch_add(1, relaxed);                   // launch attempts; drops are not counted
 
-        // Translate host ptr to device ptr, write to mailbox
-        ptrdiff_t offset = (uint8_t*)slot_host - ctx->ringbuffer.rx_data_host;
-        void* data_dev = ctx->ringbuffer.rx_data + offset;
-        ctx->h_mailbox_bank[worker_id] = data_dev;
-        __sync_synchronize();
+        // Internal ring: consume the RX slot, and only then take the worker: nothing can
+        // complete this slot (and let the injector refill it) before its rx_flag is
+        // cleared, so a follow-up request in the same slot never loses its rx_flag to this
+        // clear. External ring: the flag stays set until publish() releases the slot.
+        if (!external_ring_) atomic_store(&rb.rx_flags_host[cursor], 0, release);
+        idle_mask.fetch_and(~(1ULL << w), acq_rel);
 
-        // Pre-launch callback: DMA copy input to TRT buffer
-        if (worker.pre_launch_fn)
-            worker.pre_launch_fn(worker.pre_launch_data, data_dev, worker.stream);
-
-        // Launch graph
-        cudaError_t err = cudaGraphLaunch(worker.graph_exec, worker.stream);
         if (err != cudaSuccess) {
-            tx_flags_host[current_slot].store(CUDAQ_TX_FLAG_ERROR_TAG<<48|err, release);
-            idle_mask->fetch_or(1ULL << worker_id, release);
-        } else {
-            if (worker.post_launch_fn)
-                worker.post_launch_fn(worker.post_launch_data, data_dev, worker.stream);
-            // NOTE: tx_flags IN_FLIGHT is still written by the dispatcher for the
-            // consumer's benefit (so it can distinguish in-flight from completed slots),
-            // but the producer does NOT check tx_flags for backpressure — it uses
-            // slot_occupied[] instead (hsb-compatible model).
-            tx_flags_host[current_slot].store(CUDAQ_TX_FLAG_IN_FLIGHT, release);
+            (void)cudaGetLastError();
+            write RPCResponse{RPC_MAGIC_RESPONSE, status = err, result_len = 0, rid, ptp} at tx_host;
+            slot_cuda_error[cursor] = err;
+            publish(cursor, tx_host);                            // Section 7.3: tx_flags = TX slot address
+            if (gpu_only) idle_mask.fetch_or(1ULL << w, release);             // no callback was enqueued
+            else          atomic_store(&worker_launch_failed[w], 1, release); // worker thread frees itself
+        } else if (gpu_only) {
+            gpu_only_ctxs[w].origin_slot = cursor; gpu_only_ctxs[w].tx_value = tx_host;
+            cudaLaunchHostFunc(wr.stream, gpu_only_host_callback, &gpu_only_ctxs[w]);
+            // on enqueue failure: cudaStreamSynchronize(wr.stream); gpu_only_host_callback(&gpu_only_ctxs[w]);
         }
-
-        // Consume slot and advance
-        rx_flags_host[current_slot].store(0, release);
-        current_slot = (current_slot + 1) % num_slots;
+        // Otherwise nothing is written to tx_flags: the slot is in flight in pipeline-private
+        // state (slot_occupied, inflight_slot_tags) until a response is published.
+        cursor = (cursor + 1) % num_slots;
     }
-    for (auto& w : ctx->workers) cudaStreamSynchronize(w.stream);
+    for (auto &wr : worker_resources) cudaStreamSynchronize(wr.stream);  // drains graphs and host-func callbacks
 }
 ```
 
@@ -230,8 +251,8 @@ Each predecoder has a dedicated worker thread in the `realtime_pipeline`. These 
 A separate thread pool (16 workers for d13_r104) dequeues from `PyMatchQueue` and:
 
 1. **Decode** using a per-thread PyMatching decoder instance (lock-free `thread_local` acquisition).
-2. **Write** the RPC response (`DecodeResponse`) directly into the ring buffer slot.
-3. **Signal** slot completion via `pipeline.complete_deferred(origin_slot)`, which stores the slot host address into `tx_flags[origin_slot]`.
+2. **Write** the RPC response (`RPCResponse` + `DecodeResponse`) into the TX slot handed over as `cpu_stage_context::response_buffer` (`PyMatchJob::response_buffer`; the RX slot itself on the in-place internal ring).
+3. **Signal** slot completion via `pipeline.complete_deferred(origin_slot)`, which stores the TX slot host address into `tx_flags[origin_slot]`.
 
 ### 6.3 Why Decouple?
 
@@ -256,7 +277,7 @@ Pipeline Worker Thread:         PyMatching Thread:
   return DEFERRED_COMPLETION      decode with PyMatching
   pipeline sets idle_mask ✓       write RPC response
   pipeline skips tx_flags ✗       complete_deferred(slot)
-                                   └──► tx_flags[slot].store(addr)
+                                   └──► tx_flags[slot].store(tx_slot_addr)
 ```
 
 ### 6.5 PyMatchQueue
@@ -267,7 +288,7 @@ Thread-safe MPSC queue using `std::mutex` + `std::condition_variable`:
 struct PyMatchJob {
     int origin_slot;
     uint64_t request_id;
-    void *ring_buffer_ptr;
+    void *response_buffer;   // TX slot host pointer from cpu_stage_context
 };
 
 class PyMatchQueue {
@@ -300,7 +321,7 @@ With queue depth 1, the poller must **claim** each completion exactly once.
 
 ---
 
-## 7. Out-of-Order Consumer
+## 7. Out-of-Order Consumer (internal ring)
 
 The consumer thread harvests completions **out-of-order** by scanning all active slots on every iteration, rather than waiting for a sequential `next_harvest` counter. This eliminates head-of-line blocking where a slow request in slot N would prevent harvesting faster completions in slot N+1.
 
@@ -309,19 +330,16 @@ The consumer thread harvests completions **out-of-order** by scanning all active
 while (!consumer_stop) {
     bool found_any = false;
     for (uint32_t s = 0; s < NUM_SLOTS; ++s) {
-        if (!slot_occupied[s]) continue;
+        if (!atomic_load(&slot_occupied[s], acquire)) continue;
 
-        cudaq_tx_status_t status = ring->poll_tx(s, &err);
-
-        if (status == CUDAQ_TX_READY) {
-            int rid = slot_request[s];
-            complete_ts[rid] = now();
-            completed[rid] = true;
+        if (ring->poll_tx(s) == CUDAQ_TX_READY) {   // any non-zero tx_flags value
+            int err = slot_cuda_error[s];           // set by the dispatcher on a failed launch
+            completion_handler({slot_request[s], s, err == 0, err});
+            slot_cuda_error[s] = 0;
             total_completed++;
 
-            slot_occupied[s] = 0;      // Reset occupancy FIRST
-            __sync_synchronize();       // ARM memory fence
-            ring->clear_slot(s);        // Then clear rx/tx flags
+            ring->clear_slot(s);                        // clear tx_flags FIRST (rx_flags was cleared by the dispatcher)
+            atomic_store(&slot_occupied[s], 0, release); // then free the slot: the producer may refill it at once
             found_any = true;
         }
     }
@@ -329,16 +347,24 @@ while (!consumer_stop) {
 }
 ```
 
-The consumer uses `slot_occupied[]` (set by the producer, cleared by the consumer) to know which slots are active, and `poll_tx()` to distinguish in-flight from completed results.
+The consumer uses `slot_occupied[]` (set by the producer, cleared by the consumer) to know which slots are active, and `poll_tx()`, which reports `READY` for any non-zero `tx_flags` value, to find published responses. An occupied slot with `tx_flags == 0` is in flight.
 
-### 7.2 Consumer-Producer Race Fix
+### 7.2 Slot Recycling Order
 
-On ARM's weakly ordered memory model, the consumer must reset `slot_occupied[s] = 0` **before** clearing the ring buffer flags (via `clear_slot`), with a `__sync_synchronize()` fence between them. Without this ordering:
-1. Consumer clears flags (slot appears free to producer)
-2. Producer writes new `slot_occupied[s] = 1` 
-3. Consumer's delayed `slot_occupied[s] = 0` clobbers the producer's write
+The producer keys backpressure off `slot_occupied[]`, so the consumer must clear `tx_flags` (via `clear_slot`) **before** it stores `slot_occupied[s] = 0` (release; the injector loads it with acquire). With the opposite order:
+1. Consumer stores `slot_occupied[s] = 0` and is preempted before `clear_slot`
+2. Producer refills slot `s`, the dispatcher launches it, a worker publishes the new response into `tx_flags[s]`
+3. Consumer's delayed `clear_slot` wipes that publication
 
-This race caused exactly one request to get "stuck" indefinitely, eventually stalling the entire pipeline through backpressure.
+The dispatcher has the matching rule on its side: it clears `rx_flags[s]` before `idle_mask.fetch_and` hands the worker over, so the slot cannot be completed and refilled while its `rx_flag` clear is still pending. Either violation leaves exactly one request stuck forever and eventually stalls the pipeline through backpressure.
+
+### 7.3 Publishing and External Rings
+
+Every completion path ends in the pipeline's `publish(slot, tx_host)`: a release store of the TX slot host address into `tx_flags[slot]`. The callers are the worker thread (byte count returned by the CPU stage), `complete_deferred()` (deferred completions), the GPU-only host callback and the dispatcher's launch-failure path.
+
+On the pipeline-owned **internal ring** the consumer thread above harvests the published slot. On an **external ring** (`pipeline_stage_config::external_ringbuffer`, e.g. the GpuRoce transceiver's rings) the transport owns `tx_flags`: its TX kernel treats any non-zero value as an address inside the TX ring, sends `published_addr - tx_ring_base` and zeroes the flag itself. The pipeline therefore never polls or clears `tx_flags` on an external ring and starts no consumer thread; `publish()` calls the completion handler and increments `total_completed` right after the flag store, on the publishing thread (worker thread, `complete_deferred` caller or dispatcher). The request id comes from `slot_request[slot]`, captured by the dispatcher at dispatch.
+
+**Slot ownership on an external ring.** The transport publishes a frame by storing the RX slot's host address into `rx_flags[slot]`. From the moment the dispatcher takes that request (`slot_occupied[slot] = 1`) until its response is published, the slot belongs to the pipeline: `rx_flags[slot]` keeps holding the frame, and `publish()` hands the slot back by storing 0 into it (after the completion report, and before it clears `slot_occupied`, which the dispatcher checks before the flag so a stale value is never taken for a new frame). The GpuRoce RX kernel publishes into a page only once its flag is 0, so it never presents two requests from one slot at a time; the TX slot, `slot_request` and the application's per-slot state (e.g. the bridge's deferred outputs) are therefore one request's at a time. The page *bytes* are not covered by this: the RX kernel re-arms a page's receive as soon as it publishes a frame, so they stay valid only until `num_slots` more frames have arrived. The pipeline takes what it needs at dispatch (header fields; the input through `pre_launch_fn`), stages read `cpu_stage_context::request_id` / `ptp_timestamp` instead of the RX slot, and the dispatcher does not dispatch a slot whose previous response the transport has not taken out of the TX slot yet (`tx_flags[slot] != 0`). Holding the slot makes the ring depth the in-flight window, as the injector's round robin does on the internal ring.
 
 ---
 
@@ -347,8 +373,8 @@ This race caused exactly one request to get "stuck" indefinitely, eventually sta
 The low-level dispatcher, consumer, and worker threads are wrapped by a higher-level `realtime_pipeline` class (`libs/qec/include/cudaq/qec/realtime/pipeline.h`) that hides all ring buffer management, atomics, and thread lifecycle. Application code provides three callbacks:
 
 1. **GPU stage factory** (`gpu_stage_factory`): Called once per worker during `start()`. Returns the `cudaGraphExec_t`, `cudaStream_t`, `pre_launch_fn`, `post_launch_fn`, `function_id`, and an opaque `user_context` for each worker.
-2. **CPU stage callback** (`cpu_stage_callback`): Called by each worker thread when GPU inference completes. Receives `cpu_stage_context` containing `gpu_output`, `gpu_output_size`, `response_buffer`, and the `user_context`. Returns the number of bytes written, `0` if no result ready (poll again), or `DEFERRED_COMPLETION` to release the worker without signaling slot completion.
-3. **Completion callback** (`completion_callback`): Called by the consumer thread for each completed (or errored) request with a `completion` struct.
+2. **CPU stage callback** (`cpu_stage_callback`): Called by each worker thread when GPU inference completes. Receives `cpu_stage_context` containing `gpu_output`, `gpu_output_size`, `response_buffer` (the TX slot host pointer; `max_response_size` is the TX stride), and the `user_context`. Returns the number of bytes written, `0` if no result ready (poll again), or `DEFERRED_COMPLETION` to release the worker without signaling slot completion.
+3. **Completion callback** (`completion_callback`): Called for each completed (or errored) request with a `completion` struct: by the consumer thread on the internal ring, or on the publishing thread (Section 7.3) on an external ring. `completion::success` is false and `cuda_error` holds the `cudaError_t` when `cudaGraphLaunch` failed.
 
 ```cpp
 realtime_pipeline pipeline(config);
@@ -366,13 +392,13 @@ pipeline.stop();
 
 When the CPU stage callback returns `DEFERRED_COMPLETION` (= `SIZE_MAX`), the pipeline:
 - Sets the worker's bit in `idle_mask` (worker is free for next dispatch)
-- Does NOT write to `tx_flags[origin_slot]` (slot stays IN_FLIGHT)
+- Does NOT write to `tx_flags[origin_slot]`: no response is published and the slot stays occupied in pipeline-private state
 
-The caller is responsible for eventually calling `pipeline.complete_deferred(slot)`, which stores the slot host address into `tx_flags[slot]` with release semantics, making the completion visible to the consumer.
+The caller is responsible for eventually calling `pipeline.complete_deferred(slot)`, which stores the TX slot host address (== the RX slot on the in-place internal ring) into `tx_flags[slot]` with release semantics, making the completion visible to the consumer (internal ring) or to the transport's TX kernel (external ring). `complete_deferred()` stays callable after `stop()`; ring memory is released in the destructor.
 
 ### 8.2 GPU-Only Mode
 
-If no `cpu_stage_callback` is registered, the pipeline operates in **GPU-only mode**: no CPU worker threads are spawned. Instead, the dispatcher's `post_launch_fn` enqueues a `cudaLaunchHostFunc` on each worker stream. When the GPU finishes, the CUDA runtime calls the host function, which stores into `tx_flags` and restores the `idle_mask` bit — all from the CUDA callback thread.
+If no `cpu_stage_callback` is registered, the pipeline operates in **GPU-only mode**: no CPU worker threads are spawned. After a successful launch (and the application's `post_launch_fn`, if any) the dispatcher enqueues a `cudaLaunchHostFunc` on the worker stream. When the GPU finishes, the CUDA runtime calls the host function, which publishes the TX slot address into `tx_flags` and then restores the `idle_mask` bit — all from the CUDA callback thread, with no CUDA calls inside. The pipeline writes no `RPCResponse` in this mode; the graph and `post_launch_fn` own the TX slot content, which is why GPU-only mode is rejected on an external ring (nobody frames a response for the transport).
 
 ### 8.3 ring_buffer_injector
 
@@ -384,7 +410,7 @@ The `ring_buffer_injector` class (created via `pipeline.create_injector()`) enca
 
 The injector uses a round-robin slot selection with atomic CAS for thread safety.
 
-The `pipeline_stage_config` allows configuring `num_workers`, `num_slots`, `slot_size`, and optional `core_pinning` for dispatcher, consumer, and worker threads.
+The `pipeline_stage_config` allows configuring `num_workers`, `num_slots` (used verbatim), `slot_size`, optional `core_pinning` for dispatcher, consumer, and worker threads, and `external_ringbuffer`, which hands the pipeline a transport-owned ring (Section 7.3).
 
 ---
 
@@ -392,17 +418,17 @@ The `pipeline_stage_config` allows configuring `num_workers`, `num_slots`, `slot
 
 1. **Producer** writes uint8 measurements into `payload_buf` from Stim test data.
 2. **Producer** calls `injector.submit(fid, payload, size, request_id)`.
-3. **ring_buffer_injector** writes RPC header (`RPCHeader`: magic, function_id, arg_len, request_id, ptp_timestamp = 24 bytes) + payload into `rx_data[slot]`.
+3. **ring_buffer_injector** records `slot_request[slot] = request_id`, sets `slot_occupied[slot] = 1`, then writes RPC header (`RPCHeader`: magic, function_id, arg_len, request_id, ptp_timestamp = 24 bytes) + payload into `rx_data[slot]`.
 4. **ring_buffer_injector** sets `rx_flags[slot] = host_ptr` (release).
 5. **Host Dispatcher** reads `rx_flags[slot]`, sees data.
-6. **Host Dispatcher** parses RPC header, looks up function in the function table.
-7. **Host Dispatcher** scans `idle_mask`, finds `worker_id = 2` is free.
-8. **Host Dispatcher** marks bit 2 busy in `idle_mask`.
-9. **Host Dispatcher** saves `inflight_slot_tags[2] = slot`.
-10. **Host Dispatcher** translates `host_ptr` to `dev_ptr`, writes to `mailbox_bank[2]`.
+6. **Host Dispatcher** checks the RPC magic and copies `function_id`, `request_id` and `ptp_timestamp` out of the header.
+7. **Host Dispatcher** scans `idle_mask`, finds `worker_id = 2` free with a matching `function_id`.
+8. **Host Dispatcher** saves `inflight_slot_tags[2] = slot`.
+9. **Host Dispatcher** derives the pointers for the launch (bit 2 of `idle_mask` is taken in step 13, after the `rx_flags` clear).
+10. **Host Dispatcher** translates `host_ptr` to the slot device pointer `dev_ptr` and derives the TX slot host pointer (`tx_data_host + slot * tx_stride`).
 11. **Host Dispatcher** calls `pre_launch_fn`: writes `h_ring_ptrs[0] = dev_ptr`, derives host pointer via offset arithmetic, issues `cudaMemcpyAsync(d_trt_input, host_ptr + 24, input_size, H2D, stream[2])`.
 12. **Host Dispatcher** calls `cudaGraphLaunch(..., stream[2])`.
-13. **Host Dispatcher** sets `tx_flags[slot] = IN_FLIGHT` (for consumer's benefit), then clears `rx_flags[slot] = 0` and advances to next slot. The producer does not check `tx_flags`; backpressure is via `slot_occupied[]`.
+13. **Host Dispatcher** clears `rx_flags[slot] = 0` (internal ring; on an external ring the flag is held until `publish()`, Section 7.3), then marks bit 2 busy in `idle_mask` (handing the request to worker 2) and advances to the next slot. Nothing is written to `tx_flags`; the slot is in flight in pipeline-private state (`slot_occupied[slot]`, `inflight_slot_tags[2]`). The producer does not check `tx_flags`; backpressure is via `slot_occupied[]`.
 14. **GPU DMA engine** copies input payload from ring buffer to TRT input buffer.
 15. **GPU** executes TRT inference (or passthrough copy in SKIP_TRT mode).
 16. **GPU DMA engine** copies TRT output to host-mapped `h_predecoder_outputs_`.
@@ -411,16 +437,16 @@ The `pipeline_stage_config` allows configuring `num_workers`, `num_slots`, `slot
 19. **Predecoder Worker** copies output to `deferred_outputs[origin_slot]`.
 20. **Predecoder Worker** computes syndrome density metrics.
 21. **Predecoder Worker** calls `release_job(0)` → `ready_flags[0].store(0, release)`.
-22. **Predecoder Worker** extracts `request_id` from RPC header, enqueues `PyMatchJob`.
+22. **Predecoder Worker** reads `request_id` from the RPC header in the host RX slot, enqueues `PyMatchJob` carrying `ctx.response_buffer`.
 23. **Predecoder Worker** returns `DEFERRED_COMPLETION`.
 24. **Pipeline** restores bit 2 in `idle_mask` (worker free for next dispatch). Does NOT touch `tx_flags`.
 25. **PyMatching Worker** pops `PyMatchJob` from queue, acquires per-thread decoder.
 26. **PyMatching Worker** runs PyMatching MWPM decode over full parity check matrix.
-27. **PyMatching Worker** writes `RPCResponse + DecodeResponse` into ring buffer slot.
-28. **PyMatching Worker** calls `pipeline.complete_deferred(slot)` → `tx_flags[slot].store(host_addr, release)`.
-29. **Consumer** scans all slots where `slot_occupied[s]` is set, calls `poll_tx(s)` to check if result is ready (i.e., `tx_flags[slot]` is a valid address, not IN_FLIGHT).
-30. **Consumer** calls `completion_handler(request_id, slot, success)`.
-31. **Consumer** sets `slot_occupied[slot] = 0`, `__sync_synchronize()`, then calls `clear_slot(slot)` (clears rx/tx flags). Producer may now reuse slot.
+27. **PyMatching Worker** writes `RPCResponse + DecodeResponse` into the TX slot (`PyMatchJob::response_buffer`).
+28. **PyMatching Worker** calls `pipeline.complete_deferred(slot)` → `tx_flags[slot].store(tx_slot_addr, release)`.
+29. **Consumer** scans all slots where `slot_occupied[s]` is set, calls `poll_tx(s)`, which reports `READY` for any non-zero `tx_flags` value.
+30. **Consumer** calls `completion_handler(request_id, slot, success = slot_cuda_error[slot] == 0, cuda_error)`.
+31. **Consumer** calls `clear_slot(slot)` (clears `tx_flags` only; `rx_flags` was cleared in step 13), then stores `slot_occupied[slot] = 0` (release). Producer may now reuse slot.
 
 ---
 
@@ -444,13 +470,11 @@ struct RPCHeader {
 
 The producer does **not** check `tx_flags` for backpressure. Instead, it checks a host-side `slot_occupied[]` byte vector — set to 1 by the producer on submission, cleared to 0 by the consumer after harvesting. This mirrors the hsb FPGA model where `ring_flag` (mapped to `rx_flags`) is the sole backpressure mechanism between sender and receiver.
 
-The dispatcher still writes `tx_flags[slot] = CUDAQ_TX_FLAG_IN_FLIGHT` after a successful `cudaGraphLaunch` and before clearing `rx_flags[slot]`. This is used internally by the consumer to distinguish in-flight slots from completed results, but it is **not** part of the producer's backpressure contract.
-
-1. **Dispatcher**: On successful launch, writes `tx_flags[current_slot] = IN_FLIGHT` then clears `rx_flags`. On failure, writes `CUDAQ_TX_FLAG_ERROR_TAG<<48 | err`.
+1. **Dispatcher**: After the launch, clears `rx_flags`; `tx_flags` stays 0 and the slot is tracked in flight by pipeline-private state (`slot_occupied`, `inflight_slot_tags`). On a failed `cudaGraphLaunch` it writes an `RPCResponse` with the error status into the TX slot, records the error in `slot_cuda_error[slot]` and publishes the TX slot address.
 2. **Producer**: Reuses a slot only when `slot_occupied[slot] == 0`. Does not read `tx_flags`.
-3. **Consumer**: Scans slots where `slot_occupied[s]` is set, polls `tx_flags` to distinguish IN_FLIGHT from completed, and harvests completed results.
+3. **Consumer**: Scans slots where `slot_occupied[s]` is set; any non-zero `tx_flags` is a published response, harvested with `success = (slot_cuda_error[s] == 0)`.
 
-**Slot lifecycle**: Idle (`slot_occupied=0`) → Written (`slot_occupied=1`, `rx_flags=ptr`) → Dispatched (`rx_flags=0`, GPU processing) → Completed (`tx_flags=response addr`) → Consumer harvests, `slot_occupied=0`, flags cleared → Idle.
+**Slot lifecycle**: Idle (`slot_occupied=0`) → Written (`slot_occupied=1`, `rx_flags=ptr`) → Dispatched (`rx_flags=0`, `tx_flags=0`, pipeline-tracked, GPU processing) → Completed (`tx_flags=TX slot addr`) → Consumer harvests, `slot_occupied=0`, `tx_flags` cleared → Idle. **Launch error**: Dispatched → Completed with `completion::success=false` and `cuda_error`, through the same path.
 
 ---
 
@@ -473,11 +497,15 @@ Data-integrity tests that verify known payloads survive the full CUDA graph roun
 - **Zeros, Known Pattern, Random Data, Extreme Float Values**: Single-request verification with different payload patterns (including `FLT_MAX`, `NaN`, `INFINITY`).
 - **Multiple Requests (5,000 iterations)**: Pushes 5,000 random 6.4 KB payloads through the pipeline and verifies bitwise identity on every one. Confirms no cross-contamination or data corruption over sustained use.
 
-### 12.3 Integration Tests (8 tests)
-- **Dispatcher lifecycle**: Shutdown semantics, stats counter accuracy, invalid RPC magic rejection, slot wraparound.
-- **Single Request Round-Trip**: Full dispatcher -> graph -> poll -> verify data path.
-- **Multi-Predecoder Concurrency**: 4 predecoders on 4 streams, simultaneous dispatch, per-predecoder data verification.
-- **Sustained Throughput (200 requests)**: Regression test for the 128-launch-limit fix. Proves indefinite stability of the host-side dispatcher.
+### 12.3 Integration Tests (`PipelineDispatchTest`, 11 tests)
+Driven through the public `realtime_pipeline` API with passthrough predecoders:
+- **Dispatcher lifecycle**: Shutdown semantics, stats counter accuracy, invalid RPC magic rejection (on an external ring, where the drop is observable), slot wraparound.
+- **Single Request Round-Trip**: Full dispatcher -> graph -> CPU stage -> completion data path.
+- **Multi-Predecoder Concurrency**: 4 predecoders on 4 streams with distinct function ids, simultaneous dispatch, per-predecoder data verification.
+- **Sustained Throughput (200 requests)**: 2 workers sharing one function id over 8 slots; exercises injector backpressure and proves indefinite stability of the host-side dispatcher.
+- **Deferred Completion**: `DEFERRED_COMPLETION` followed by `complete_deferred()` from the test thread.
+- **GPU-Only Round-Trip**: no CPU stage; completion comes from the host callback.
+- **Launch Failure Reports Error**: null `graph_exec` -> completion with `success=false` and the CUDA error, an `RPCResponse` with non-zero status in the TX slot, and a worker that is reusable afterwards.
 
 ### 12.4 End-to-End Benchmark (test_realtime_predecoder_w_pymatching)
 - Configurable surface code distance and round count: d7, d13, d13_r104, d21, d31.
@@ -490,10 +518,11 @@ Data-integrity tests that verify known payloads survive the full CUDA graph roun
 
 ## 13. Shutdown and Grace Period
 
-- **Grace period**: After the producer stops submitting, the pipeline waits up to 5 seconds for `total_completed >= total_submitted`.
-- **Consumer exit**: The consumer thread normally exits when `producer_stop && total_completed >= total_submitted`. To avoid hanging forever if some in-flight requests never complete, set a **consumer_stop** flag after the grace period; the consumer loop checks this and exits so `consumer.join()` returns and the process can print the final report and exit cleanly.
-- **Dispatcher shutdown**: Set `shutdown_flag = 1` after the consumer exits, then join the dispatcher thread. The dispatcher synchronizes all worker streams before returning.
-- **PyMatching thread pool**: Call `pymatch_queue.shutdown()` to unblock all waiting threads, then join all PyMatching worker threads.
+- **Grace period**: After the producer stops submitting, `stop()` waits up to 5 seconds for `total_completed >= total_submitted` (internal ring only; an external ring cannot be drained by count because the transport owns the request stream).
+- **Dispatcher shutdown**: `stop()` then sets `shutdown_flag = 1` and joins the dispatcher thread. The dispatcher synchronizes all worker streams before returning, so every graph and every GPU-only host callback has finished and published.
+- **Single use**: the stop flags are never reset, so `start()` after `stop()` throws `std::logic_error` and `ring_buffer_injector::try_submit()` returns false once `stop()` has begun; construct a new pipeline instead.
+- **Consumer and workers**: `consumer_stop` is set after the dispatcher has joined, so the consumer thread (internal ring) exits even when `total_completed < total_submitted`; the worker threads are joined last. This keeps `stop()` from hanging on requests that never complete.
+- **PyMatching thread pool**: Shut the queue down (`pymatch_queue.shutdown()` unblocks all waiting threads), then stop the pipeline and join the PyMatching worker threads. The reverse order is also safe: `complete_deferred()` stays callable after `stop()`, so a decode that finishes late still publishes into ring memory that lives until the pipeline is destroyed.
 
 ---
 
@@ -520,7 +549,7 @@ Measured on Grace Blackwell (GB200) with `predecoder_memory_d13_T104_X.onnx` (FP
 
 ### 14.2 Multi-GPU
 
-Multi-GPU dispatch is **not currently supported**. The host dispatcher thread does not call `cudaSetDevice()` before `cudaGraphLaunch()` or `cudaStreamQuery()`, causing hangs when workers span multiple devices. The `--num-gpus` flag is accepted but clamped to 1 with a warning. See Section 15 for details.
+Multi-GPU dispatch is **not currently supported**. The pipeline's dispatcher thread launches every worker's graph on one device (the device current on the thread that called `start()`), so workers cannot span multiple devices. The `--num-gpus` flag is accepted but clamped to 1 with a warning. See Section 15 for details.
 
 ### 14.3 Raw TRT Baseline (trtexec)
 
@@ -534,31 +563,36 @@ Multi-GPU dispatch is **not currently supported**. The host dispatcher thread do
 
 ## 15. Multi-GPU Support (Not Yet Implemented)
 
-Multi-GPU dispatch is **disabled** pending a fix to the host dispatcher. The `--num-gpus` flag is accepted but clamped to 1.
+Multi-GPU dispatch is **disabled** pending an extension of the pipeline's dispatcher. The `--num-gpus` flag is accepted but clamped to 1.
 
 ### 15.1 Known Issue
 
-The host dispatcher thread (`cudaq_host_dispatcher_loop`) does not call `cudaSetDevice()` before `cudaGraphLaunch()` or `cudaStreamQuery()`. CUDA streams and graphs are bound to the device on which they were created, but `cudaGraphLaunch` dispatches to the **calling thread's current device**, not the stream's device. When the dispatcher thread's current device is GPU 0 but it launches a graph captured on GPU 1 with a stream created on GPU 1, the call hangs or silently fails.
+The pipeline's dispatcher thread (`realtime_pipeline::Impl::dispatcher_loop`) calls `cudaSetDevice(device_id)` once, with the device captured on the thread that called `start()`, and every worker thread does the same. CUDA streams and graphs are bound to the device on which they were created, but `cudaGraphLaunch` dispatches to the **calling thread's current device**, not the stream's device. A graph captured on GPU 1 with a stream created on GPU 1, launched while the dispatcher's current device is GPU 0, hangs or silently fails.
 
 ### 15.2 Fix Required
 
-To support multi-GPU, each `cudaq_host_dispatch_worker_t` needs a `gpu_id` field, and the dispatcher must call `cudaSetDevice(worker.gpu_id)` before `cudaGraphLaunch` and `cudaStreamQuery`.
+To support multi-GPU, each worker needs a per-worker device id (a `gpu_worker_resources` field or a factory-side table), and the pipeline's dispatcher loop must call `cudaSetDevice(worker_device)` before `pre_launch_fn` and `cudaGraphLaunch`, with the worker thread doing the same before touching that worker's stream.
 
 ---
 
-## 16. LLM Implementation Directives (Constraints Checklist)
+## 16. Invariants
 
-When generating code from this specification, the LLM **MUST** strictly adhere to the following constraints:
+The implementation in `realtime_pipeline.cu` keeps the following invariants; changes to the dispatcher, worker, consumer or publish paths must preserve them.
 
-- [ ] **NO CUDA STREAM QUERYING**: Do not use `cudaStreamQuery()` for backpressure or completion checking. It incurs severe driver latency. Rely strictly on `idle_mask` and `ready_flags`.
-- [ ] **NO WEAK ORDERING BUGS**: Do not use `volatile`. Do not use `__threadfence_system()`. You must use `cuda::std::atomic<T, cuda::thread_scope_system>` (or `<cuda/atomic>` with `thread_scope_system`) for all cross-device synchronization.
-- [ ] **NO HEAD OF LINE BLOCKING**: The host dispatcher MUST NOT statically map slots to predecoders. It must dynamically allocate via `idle_mask`. The consumer MUST harvest out-of-order by scanning all active slots. When all workers run the same model, they MUST share a single `function_id` so the dispatcher can pick any idle worker; per-worker unique IDs cause function-aware routing to degenerate into 1:1 static mapping.
-- [ ] **NO DATA LOSS**: If `idle_mask == 0` (all workers busy), the dispatcher MUST spin on the current slot (`CUDAQ_REALTIME_CPU_RELAX()`). It MUST NOT advance `current_slot` until a worker is allocated and the graph is launched.
-- [ ] **NO RACE CONDITIONS ON TAGS**: `inflight_slot_tags` does not need to be atomic because index `[worker_id]` is exclusively owned by the active flow once the dispatcher clears the bit in `idle_mask`, until the worker thread restores the bit.
-- [ ] **READY FLAG CLAIMING**: The CPU poller MUST claim each completion exactly once using compare_exchange_strong(1, 2) on the ready flag; use relaxed memory order on CAS failure. The worker MUST clear the flag (store 0) in `release_job`.
-- [ ] **BACKPRESSURE MODEL**: The producer (ring_buffer_injector) MUST check `slot_occupied[slot]` for backpressure, NOT `tx_flags`. This mirrors the hsb model where `ring_flag`/`rx_flags` is the sole sender-receiver backpressure mechanism. The dispatcher still writes `tx_flags = IN_FLIGHT` for the consumer's benefit, but the producer does not read `tx_flags`. The consumer uses `poll_tx()` to distinguish in-flight from completed results.
-- [ ] **CONSUMER MEMORY ORDERING**: The consumer MUST set `slot_occupied[s] = 0` BEFORE calling `cudaq_host_ringbuffer_clear_slot`, with a `__sync_synchronize()` fence between them, to prevent the producer-consumer race on ARM.
-- [ ] **DMA DATA MOVEMENT**: Use `cudaMemcpyAsync` (DMA engine) for data copies. Input copy is issued via `pre_launch_fn` callback before graph launch at offset `CUDAQ_RPC_HEADER_SIZE` (24 bytes) using `cudaMemcpyHostToDevice` from the pinned ring buffer host pointer. Output copy is captured inside the graph. Do not use SM-based byte-copy kernels for fixed-address transfers.
-- [ ] **NO INPUT KERNEL IN GRAPH**: The captured CUDA graph must NOT contain an input-copy kernel. All input data movement is handled by the `pre_launch_fn` DMA callback issued on the worker stream before `cudaGraphLaunch`.
-- [ ] **DEFERRED COMPLETION**: When the CPU stage returns `DEFERRED_COMPLETION`, the pipeline MUST release `idle_mask` but MUST NOT write `tx_flags`. The external caller MUST call `complete_deferred(slot)` to signal completion.
-- [ ] **SHUTDOWN**: Use a `consumer_stop` (or equivalent) flag so the consumer thread can exit after a grace period even when `total_completed < total_submitted`; join the consumer after setting the flag so the process exits cleanly. Shut down the PyMatching queue before stopping the pipeline.
+- **No CUDA stream querying**: `cudaStreamQuery()` is not used for backpressure or completion checking (it incurs severe driver latency). Completion is observed through `idle_mask`, `ready_flags` and `tx_flags` only.
+- **No weak-ordering bugs**: No `volatile`, no `__threadfence_system()`. Cross-device synchronization uses `cuda::std::atomic<T, cuda::thread_scope_system>` (or `<cuda/atomic>` with `thread_scope_system`); host-only flags use release/acquire atomics.
+- **No head-of-line blocking**: The dispatcher never maps slots to predecoders statically; it allocates dynamically through `idle_mask`. The consumer harvests out-of-order by scanning all occupied slots. Workers running the same model share a single `function_id` so the dispatcher can pick any idle worker; per-worker unique ids degenerate function-aware routing into a 1:1 static mapping.
+- **No data loss**: When no idle worker serves the request's `function_id`, the dispatcher spins on the current slot (`CUDAQ_REALTIME_CPU_RELAX()`) with `rx_flags` untouched. It advances only after a worker is allocated and the launch attempted. Only a bad magic or an unknown `function_id` drops a slot; on the internal ring the injector rejects unknown ids up front and a drop frees the slot with a `success=false` completion, and drops are never counted in `Stats::dispatched`.
+- **Tag ownership**: `inflight_slot_tags[w]` is written by the dispatcher (release) before it clears bit `w`, and the worker thread reads it (acquire) only after observing its bit clear, so the tag is the one for the current assignment and stays stable until that thread sets the bit again. Only the dispatcher clears `idle_mask` bits; in CPU-stage mode only worker thread `w` sets bit `w` (a failed launch is handed to it through `worker_launch_failed[w]`), and in GPU-only mode the host callback sets the bit last, after publishing. The tag for a worker therefore cannot change while that worker's flow is active.
+- **Ready-flag claiming**: The CPU poller claims each completion exactly once with `compare_exchange_strong(1, 2)` on the ready flag, relaxed on failure; the worker clears the flag (store 0) in `release_job`.
+- **Backpressure model**: The producer (`ring_buffer_injector`) checks `slot_occupied[slot]`, never `tx_flags`, mirroring the hsb model where `ring_flag`/`rx_flags` is the sole sender-receiver backpressure mechanism. `slot_request[slot]` and `slot_occupied[slot]` are written before the slot is signalled. Between dispatch and publication `tx_flags` stays 0; the slot is tracked in flight by pipeline-private state, and the consumer treats any non-zero `tx_flags` as a published response.
+- **Slot recycling order**: The consumer calls `cudaq_host_ringbuffer_clear_slot` (`tx_flags` only) BEFORE it stores `slot_occupied[s] = 0` (release), and the dispatcher clears `rx_flags[s]` BEFORE it takes the worker (Section 7.2). Both orders keep a refilled slot from losing its flag to a late clear.
+- **External-ring slot ownership**: From dispatch to `publish()` the slot is the pipeline's: `rx_flags[s]` holds the frame, `slot_occupied[s]` is set, and the dispatcher neither re-dispatches the slot nor dispatches a slot whose `tx_flags[s]` the transport has not cleared. `publish()` releases `rx_flags[s]` before `slot_occupied[s]`. Stages take the request id and PTP timestamp from `cpu_stage_context`, never from the RX page, whose bytes are valid only until the transport has published `num_slots` further frames (Section 7.3).
+- **Published value**: `tx_flags[slot]` is either 0 or the host address of the TX slot that holds the `RPCResponse`; no other value is ever stored. On an external ring the pipeline never polls or clears `tx_flags` (the transport's TX kernel does) and reports completion at publish time on the publishing thread.
+- **Launch errors**: A failed `cudaGraphLaunch` produces an `RPCResponse` with the `cudaError_t` in `status` in the TX slot, a completion with `success = false` and `cuda_error`, and a worker that is reusable afterwards. Errors never hang the pipeline.
+- **In-place aliasing**: On the internal ring the TX slot is the RX slot. Every response writer (dispatcher failure path, CPU stages, PyMatching threads) reads the request fields it needs before writing the response.
+- **DMA data movement**: `cudaMemcpyAsync` (DMA engine) moves the data. The input copy is issued by `pre_launch_fn` before the graph launch at offset `CUDAQ_RPC_HEADER_SIZE` (24 bytes), `cudaMemcpyHostToDevice` from the pinned ring buffer host pointer. The output copy is captured inside the graph. No SM-based byte-copy kernels for fixed-address transfers.
+- **No input kernel in graph**: The captured CUDA graph contains no input-copy kernel; all input data movement is the `pre_launch_fn` DMA callback issued on the worker stream before `cudaGraphLaunch`.
+- **Deferred completion**: When the CPU stage returns `DEFERRED_COMPLETION`, the pipeline releases `idle_mask` and publishes nothing. The caller completes the slot with `complete_deferred(slot)`, which publishes the TX slot address; it stays callable after `stop()`. Because the worker stream is reused immediately, a stage must copy the predecoder output it needs before returning `DEFERRED_COMPLETION`.
+- **Shutdown**: `stop()` orders producer stop, grace wait (internal ring only), `shutdown_flag`, dispatcher join (which synchronizes all worker streams), `consumer_stop`, consumer join, worker joins, so the process exits even when `total_completed < total_submitted`. Applications shut the PyMatching queue down and then stop the pipeline; the reverse order is also safe.
+- **Device affinity**: The dispatcher and worker threads run on the device current on the thread calling `start()`; factory-created streams and graphs must belong to it.
