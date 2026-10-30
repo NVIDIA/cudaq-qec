@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace cudaq::qec {
@@ -96,6 +97,11 @@ struct decoding_task_graph::impl {
   std::size_t pool_width = 1;
   std::vector<std::int32_t> pool_worker_cpus;
   std::unique_ptr<detail::thread_pool> parallel_pool;
+
+  // Most bytes per record context: one chunk of the graph's single raw-input
+  // node, when it meters its own. Longer tagged records run as several;
+  // async graphs join queued rounds up to it. Zero: records taken as given.
+  std::size_t record_bytes = 0;
 
   // Preallocated record contexts and the scheduler that runs them. Their
   // complete definitions stay in the executor translation unit.
@@ -274,6 +280,8 @@ struct decoding_task_graph::impl {
     std::atomic<std::uint32_t> completion_waiters{0};
     std::atomic<bool> coordinator_waiting{false};
     uint64_t finish_target = 0;
+    /// Admit queued rounds together: record_bytes is nonzero.
+    bool coalesce = false;
     int cuda_device_id = -1;
     bool needs_reset = false;
     mutable std::mutex snapshot_mutex;
@@ -343,12 +351,21 @@ struct decoding_task_graph::impl {
   bool enqueue_sweep(const uint8_t *syndrome, std::size_t len,
                      std::optional<round_type> type, int cuda_device_id);
   bool flush_sweep(int cuda_device_id);
+  /// One record through one context; enqueue_sweep() cuts long ones.
+  bool sweep_record(const uint8_t *syndrome, std::size_t len,
+                    std::optional<round_type> type, int cuda_device_id);
   /// Allocate the worker pool and record contexts after graph compilation.
   void prepare_event_runtime(std::size_t context_count, bool dispatcher_thread);
   /// Drop every record, join entry and replica lease, as a new shot needs.
   void discard_records();
-  /// Fold a finished record's captured node state into the graph-level view.
-  void apply_record_context(record_context &c);
+  /// Fold a finished record's captured node state into the graph-level view,
+  /// one public operation at a time.
+  /// @return Operations before the last that advanced the result, and the
+  /// generation the last started from.
+  std::pair<std::uint64_t, std::uint64_t>
+  apply_record_context(record_context &c);
+  /// The mid-shot generation refresh_streaming_progress() would publish.
+  std::uint64_t pending_generation() const;
   /// Retire the oldest asynchronous record and publish its progress.
   void retire_record_context(record_context &c);
   /// Worker zero of an asynchronous session: admit and retire records.
@@ -429,8 +446,12 @@ struct decoding_task_graph::impl {
   void synchronize_async_streaming();
   /// Drain accepted input without flushing, then release graph exclusivity.
   void drain_async_streaming();
-  /// Drain accepted input, flush once, and release graph exclusivity.
+  /// Drain accepted input and flush once; return when the result is
+  /// published. A failed or cancelled session first releases the graph,
+  /// and a failure rethrows.
   void finish_async_streaming();
+  /// Wait for a finished session to release the graph.
+  void settle_async_streaming();
   /// Discard queued input and release graph exclusivity for reset.
   void cancel_async_streaming();
 

@@ -28,6 +28,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
@@ -35,6 +36,11 @@
 namespace cudaq::qec {
 
 namespace {
+
+// Record contexts an asynchronous graph keeps, its records in flight. Each
+// takes up to a chunk of queued rounds, a layer period for a windowed graph,
+// so 16 cover several hundred rounds.
+constexpr std::size_t async_record_contexts = 16;
 
 /// Every type a node's ports name must be registered: a wire into an
 /// unregistered one would fail as a bare type mismatch, and an edge_value
@@ -805,6 +811,16 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
     require_registered_port_types(*i->nodes[n], i->node_ids[n]);
   i->compile_wires();
   if (options.async_streaming) {
+    std::size_t pooled_fires = 0;
+    bool indexed = false;
+    std::size_t fire_slots = 0;
+    // Fires that may run at once: every copy of a pooled node, and of an
+    // indexed one even when it has one, since records pipeline.
+    for (const auto &entry : i->streaming_nodes) {
+      if (entry.replicas.size() > 1 || !entry.indexed.empty())
+        pooled_fires += entry.replicas.size();
+      indexed = indexed || !entry.indexed.empty();
+    }
     i->prepare_async_streaming(options.async_queue_capacity, i->n_round,
                                options.async_coordinator_cpu,
                                options.async_spin_pause_iters);
@@ -816,6 +832,14 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
         throw std::invalid_argument(
             "task_graph_options: async_num_workers must be at least 1");
       i->pool_width = *options.async_num_workers;
+    } else if (indexed) {
+      // Indexed fires leave one worker for other events: one more than the
+      // fires.
+      i->pool_width =
+          std::max(i->pool_width,
+                   std::min<std::size_t>(
+                       pooled_fires + 1,
+                       std::max(1u, std::thread::hardware_concurrency())));
     }
     // The coordinator spins, so a worker on its core is an error; two
     // workers on one core can be deliberate, so that is a warning.
@@ -841,22 +865,25 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
                     i->pool_worker_cpus.size(), i->pool_width);
       i->pool_width = i->pool_worker_cpus.size();
     }
-    std::size_t pooled_fires = 0;
-    for (const auto &entry : i->streaming_nodes)
-      if (entry.replicas.size() > 1)
-        pooled_fires += entry.replicas.size();
-    if (pooled_fires > i->pool_width)
-      CUDA_QEC_WARN("task graph: {} fire-pool copies but {} async workers; "
+    // Indexed fires leave one worker for other events.
+    fire_slots =
+        indexed && i->pool_width > 1 ? i->pool_width - 1 : i->pool_width;
+    if (pooled_fires > fire_slots)
+      CUDA_QEC_WARN("task graph: {} node copies may fire at once but {} "
+                    "async workers{}; "
                     "some copies can never run concurrently",
-                    pooled_fires, i->pool_width);
+                    pooled_fires, i->pool_width,
+                    indexed ? ", one kept for other events" : "");
   }
   // Built once, after the options it depends on have been validated. The
   // parked coordinator cannot start a session before assembly returns. An
-  // asynchronous graph gets one record context per queue slot, so every
-  // accepted record is admitted at once.
+  // asynchronous graph's queue holds enqueues, which are cheap; its record
+  // contexts, each with an event store and join-table share, are fewer.
   if (i->nodes.size() > 1 || !i->streaming_nodes.empty())
     i->prepare_event_runtime(
-        options.async_streaming ? options.async_queue_capacity : 1,
+        options.async_streaming
+            ? std::min(options.async_queue_capacity, async_record_contexts)
+            : 1,
         /*dispatcher_thread=*/options.async_streaming);
   return std::unique_ptr<decoding_task_graph>(
       new decoding_task_graph(std::move(i)));

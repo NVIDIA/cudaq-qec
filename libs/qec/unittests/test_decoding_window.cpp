@@ -6113,8 +6113,9 @@ void expect_pattern_streams(const std::string &output,
 // one layer feeds W, and W[k-1]'s forward delta W[k]'s receive_0. Built
 // with @p options and @p max_in_flight copies of W, it streams as the
 // reference decodes, in records of @p record measurements.
-void expect_sliding_streams(const task_graph_options &options,
-                            std::size_t max_in_flight, std::size_t record) {
+std::unique_ptr<decoding_task_graph>
+sliding_topology(const task_graph_options &options, std::size_t max_in_flight,
+                 const std::string &decoder = "single_error_lut") {
   const auto g = sliding_graph(2, 5);
   std::vector<task_graph_node_config> nodes(2);
   nodes[0].id = "ingest";
@@ -6123,17 +6124,22 @@ void expect_sliding_streams(const task_graph_options &options,
   nodes[0].windows = {{"W", g.layers.at(0).request, ""}};
   nodes[1].id = "W";
   nodes[1].kind = "decode_window";
-  nodes[1].decoder_type = "single_error_lut";
+  nodes[1].decoder_type = decoder;
   nodes[1].node_params.insert("num_receives", std::size_t{1});
   nodes[1].max_in_flight = max_in_flight;
-  auto graph = decoding_task_graph::from_topology(
+  return decoding_task_graph::from_topology(
       std::move(nodes),
       {{"measurements", "output", "ingest", "input"},
        {"ingest", "W", "W", "input"},
        {"W", "forward", "W", "receive_0", -1},
        {"W", "output", "output", "input"}},
       options);
-  expect_graph_streams(*graph, g, false, record);
+}
+
+void expect_sliding_streams(const task_graph_options &options,
+                            std::size_t max_in_flight, std::size_t record) {
+  expect_graph_streams(*sliding_topology(options, max_in_flight),
+                       sliding_graph(2, 5), false, record);
 }
 
 } // namespace
@@ -6154,16 +6160,18 @@ TEST(WindowedGraph, StreamsThePatternAsTheReference) {
     }
 } // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
 
-// A record can contain many interleaved A/B commits. Retiring every A delta
-// before the B deltas must not make the bounded output stager grow with it.
-TEST(WindowedGraph, LargeRecordsRetireInterleavedLayersInRoundOrder) {
+// Records of 1000 rounds, each completing many interleaved A and B windows,
+// stream as the reference decodes them with layout @p commit and @p buffer:
+// synchronous or asynchronous, with a fixed or an open shot length.
+static void expect_large_records_stream(std::size_t commit,
+                                        std::size_t buffer) {
   constexpr std::size_t rounds = 1001;
   auto spec = wide_readout_spec();
   spec.num_rounds = rounds;
   const experiment_template tmpl(spec);
   const cudaqx::heterogeneous_map params{
-      {"commit_rounds", std::size_t{4}},
-      {"buffer_rounds", std::size_t{2}},
+      {"commit_rounds", commit},
+      {"buffer_rounds", buffer},
       {"output", std::string{"corrections"}}};
   parallel_window_reference reference(spec, lowered_graph(spec, params), rounds,
                                       "single_error_lut");
@@ -6233,6 +6241,20 @@ TEST(WindowedGraph, LargeRecordsRetireInterleavedLayersInRoundOrder) {
             }
           }
         }
+} // end - expect_large_records_stream()
+
+// A record can contain many interleaved A/B commits. Retiring every A delta
+// before the B deltas must not make the bounded output stager grow with it.
+TEST(WindowedGraph, LargeRecordsRetireInterleavedLayersInRoundOrder) {
+  expect_large_records_stream(4, 2);
+}
+
+// The executor takes a long record in records of one ingest chunk, a period
+// of rounds of the widest round, the readout's 5 measurements. With commit 3
+// and buffer 1 a chunk is 25 bytes, which cuts 4-measurement rounds, as a
+// node metering its own chunks accepts.
+TEST(WindowedGraph, LargeRecordsCutMidRoundStream) {
+  expect_large_records_stream(3, 1);
 }
 
 // describe_schedule() of the pattern's topology lists exactly the
@@ -6584,6 +6606,65 @@ TEST(WindowedGraph, JoinTablesHoldWhatARecordPublishes) {
     EXPECT_EQ(warning.find("join table"), std::string::npos) << warning;
 }
 
+// The pattern P with @p copies of each layer, built asynchronously with
+// @p workers, or the default pool when zero; returns the warnings about
+// copies that cannot run concurrently and the graph's thread count.
+static std::pair<std::vector<std::string>, std::size_t>
+pooled_pattern_warnings(std::size_t copies, std::size_t workers) {
+  namespace logging = cudaq::qec::detail;
+  std::mutex mutex;
+  std::vector<std::string> warnings;
+  logging::forwarder_config config;
+  task_graph_options options;
+  std::vector<task_graph_node_config> nodes;
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{4}},
+                                         {"buffer_rounds", std::size_t{2}}};
+  std::size_t threads = 0;
+  config.callback = [&](logging::forwarded_log_record &&record) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (record.level == logging::log_level::warn &&
+        record.message.find("never run concurrently") != std::string::npos)
+      warnings.push_back(record.message);
+  };
+  options.async_streaming = true;
+  if (workers != 0)
+    options.async_num_workers = workers;
+  nodes.push_back(pattern_node(wide_readout_spec(), params, copies));
+  logging::set_forwarder(std::move(config));
+  threads = decoding_task_graph::from_topology(std::move(nodes),
+                                               pattern_edges(), options)
+                ->async_thread_count();
+  logging::flush_logs();
+  logging::clear_forwarder();
+  return {warnings, threads};
+} // end - pooled_pattern_warnings()
+
+// Records pipeline, so every copy of both layers can fire at once, one copy
+// each included, and an indexed fire always leaves one worker for ingestion
+// and deliveries. The default pool holds both: 2 x copies and that worker,
+// then the coordinator, up to the machine's threads.
+TEST(WindowedGraph, DefaultAsyncPoolRunsEveryCopyBesideIngest) {
+  const std::size_t hardware =
+      std::max(1u, std::thread::hardware_concurrency());
+  for (const std::size_t copies : {std::size_t{1}, std::size_t{4}}) {
+    SCOPED_TRACE(::testing::Message() << "copies " << copies);
+    const auto workers = 2 * copies + 1;
+    const auto [warnings, threads] = pooled_pattern_warnings(copies, 0);
+    EXPECT_EQ(threads, std::min(workers, hardware) + 1);
+    if (hardware >= workers)
+      EXPECT_TRUE(warnings.empty()) << warnings.front();
+  }
+}
+
+// An explicit pool smaller than the copies plus the worker fires leave free
+// says that some copies can never run concurrently.
+TEST(WindowedGraph, PoolTooSmallForEveryCopyWarns) {
+  EXPECT_EQ(pooled_pattern_warnings(4, 8).first.size(), 1u);
+  EXPECT_TRUE(pooled_pattern_warnings(4, 9).first.empty());
+  EXPECT_EQ(pooled_pattern_warnings(1, 2).first.size(), 1u);
+  EXPECT_TRUE(pooled_pattern_warnings(1, 3).first.empty());
+}
+
 // A sliding window, whose sends feed its own next instance, streams as the
 // reference decodes in the same ways: a window waits for its predecessor's
 // delta however many copies could fire.
@@ -6813,6 +6894,56 @@ TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther) {
       << "no two windows of one layer decoded at once";
   jitter_lut::reset();
 } // end - TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther)
+
+// Streamed faster than they decode, so records are admitted together, with
+// four copies per layer finishing in random order, the pattern and a
+// sliding window count completed_operations exactly as synchronously.
+TEST(WindowedGraph, AsyncCountsCompletedOperationsAsSyncDoes) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto m =
+      memory_measurements(tmpl, R, detectors_of(reference.model(), 5));
+  task_graph_options async_options;
+  std::vector<task_graph_node_config> nodes;
+  async_options.async_streaming = true;
+  async_options.async_num_workers = 8;
+  nodes.push_back(pattern_node(spec, load_params()));
+  const std::array<std::pair<std::unique_ptr<decoding_task_graph>,
+                             std::unique_ptr<decoding_task_graph>>,
+                   2>
+      graphs{std::pair{decoding_task_graph::from_topology(std::move(nodes),
+                                                          pattern_edges(), {}),
+                       load_graph(4, "jitter_lut", 8)},
+             std::pair{sliding_topology({}, 1),
+                       sliding_topology(async_options, 4, "jitter_lut")}};
+  // Streams the shot in records of @p record measurements; returns the count.
+  const auto count = [&](decoding_task_graph &graph, std::size_t record) {
+    graph.reset_decoder();
+    for (std::size_t at = 0; at < m.size(); at += record) {
+      const auto len = std::min(record, m.size() - at);
+      graph.enqueue_syndrome(m.data() + at, len,
+                             at + len == m.size() ? round_type::FINAL
+                                                  : round_type::BULK);
+    }
+    return graph.streaming_result().completed_operations;
+  };
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 300;
+  for (std::size_t g = 0; g < graphs.size(); ++g)
+    for (const std::size_t record :
+         {std::size_t{1}, std::size_t{4}, std::size_t{7}}) {
+      const auto want = count(*graphs[g].first, record);
+      for (int shot = 0; shot < 10; ++shot) {
+        SCOPED_TRACE(::testing::Message() << "graph " << g << ", record "
+                                          << record << ", shot " << shot);
+        EXPECT_EQ(count(*graphs[g].second, record), want);
+      }
+    }
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, AsyncCountsCompletedOperationsAsSyncDoes)
 
 // Read mid-shot, with decodes finishing in random order, the output's
 // coverage is [0, frontier) and never shrinks, and its value is exactly the

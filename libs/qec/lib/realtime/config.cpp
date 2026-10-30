@@ -3051,7 +3051,7 @@ llvm::json::Object task_graph_json_schema() {
                  llvm::json::Object{{"type", "boolean"}, {"default", false}}},
                 {"async_queue_capacity", llvm::json::Object{{"type", "integer"},
                                                             {"minimum", 1},
-                                                            {"default", 8}}},
+                                                            {"default", 32}}},
                 {"async_coordinator_cpu",
                  llvm::json::Object{
                      {"type", "integer"}, {"minimum", -1}, {"default", -1}}},
