@@ -377,8 +377,8 @@ int main(int argc, char *argv[]) {
 
   // -- CPU stage callback ---
   pipeline.set_cpu_stage(
-      [&deferred_outputs, &pymatch_queue, out_sz = model_output_bytes, rb_bases,
-       page_size](const rt_pipeline::cpu_stage_context &ctx) -> size_t {
+      [&deferred_outputs, &pymatch_queue, out_sz = model_output_bytes](
+          const rt_pipeline::cpu_stage_context &ctx) -> size_t {
         auto *wctx = static_cast<WorkerCtx *>(ctx.user_context);
         auto *pd = wctx->predecoder;
 
@@ -394,33 +394,26 @@ int main(int argc, char *argv[]) {
 
         pd->release_job(job.slot_idx);
 
-        // Host view of the RX page that carried this request.
-        const uint8_t *slot_host = rb_bases.rx_data_host +
-                                   static_cast<size_t>(origin_slot) * page_size;
-        auto *rpc_hdr = reinterpret_cast<const rt_sdk::RPCHeader *>(slot_host);
-        uint32_t rid = rpc_hdr->request_id;
-
-        // The TX ring is separate from the RX ring, so the response header
-        // does not inherit the request's identity: echo request_id and
-        // ptp_timestamp into the TX slot now, while the request header is
-        // still readable. The PyMatching thread fills in magic, status,
-        // result_len and the payload later.
+        // The request's identity comes from the stage context, captured by
+        // the dispatcher: the RX page is not read here, since the transport
+        // may overwrite it one ring lap after it was published (see
+        // pipeline_stage_config::external_ringbuffer). The TX ring is
+        // separate from the RX ring, so the response header does not inherit
+        // that identity: echo request_id and ptp_timestamp into the TX slot
+        // now; the PyMatching thread fills in magic, status, result_len and
+        // the payload later.
+        const uint32_t rid = static_cast<uint32_t>(ctx.request_id);
         auto *resp = static_cast<rt_sdk::RPCResponse *>(ctx.response_buffer);
-        resp->request_id = rpc_hdr->request_id;
-        resp->ptp_timestamp = rpc_hdr->ptp_timestamp;
+        resp->request_id = rid;
+        resp->ptp_timestamp = ctx.ptp_timestamp;
 
         const uint8_t *pred_out = deferred_outputs[origin_slot].data();
-        int input_nz = 0;
-        const uint8_t *inp = slot_host + CUDAQ_RPC_HEADER_SIZE;
-        for (size_t k = 0; k < out_sz - 1; ++k)
-          input_nz += (inp[k] != 0);
         int output_nz = 0;
         for (size_t k = 1; k < out_sz; ++k)
           output_nz += (pred_out[k] != 0);
 
         std::cout << "  [RDMA+TRT] Shot " << rid << ": received "
                   << (out_sz - 1) << " detectors"
-                  << " (input_nonzero=" << input_nz << ")"
                   << ", predecoder logical_pred=" << (int)pred_out[0]
                   << ", residual_nonzero=" << output_nz << std::endl;
 

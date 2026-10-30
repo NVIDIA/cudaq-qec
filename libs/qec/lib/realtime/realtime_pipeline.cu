@@ -277,9 +277,13 @@ struct realtime_pipeline::Impl {
   // Slot-to-request mapping. On the internal ring the injector fills
   // slot_request/slot_occupied before it signals the slot and the consumer
   // clears slot_occupied. On an external ring the dispatcher records the
-  // header's request id at dispatch, because the response may have
-  // overwritten the slot by the time the completion is reported.
+  // header's request id and takes slot_occupied at dispatch, and publish()
+  // clears it: the slot belongs to the pipeline in between (see
+  // dispatcher_loop). slot_ptp holds the header's PTP timestamp for both
+  // rings; stages get it and the request id through cpu_stage_context rather
+  // than re-reading the RX slot.
   std::vector<uint64_t> slot_request;
+  std::vector<uint64_t> slot_ptp;
   std::vector<uint8_t> slot_occupied;
 
   // Stats (atomic counters)
@@ -326,6 +330,7 @@ struct realtime_pipeline::Impl {
     worker_launch_failed.resize(cfg.num_workers, 0);
     slot_cuda_error.resize(cfg.num_slots, 0);
     slot_request.resize(cfg.num_slots, 0);
+    slot_ptp.resize(cfg.num_slots, 0);
     slot_occupied.resize(cfg.num_slots, 0);
   }
 
@@ -484,12 +489,20 @@ struct realtime_pipeline::Impl {
   // kernel consumes and zeroes the flag itself, so the pipeline never polls
   // or clears it; the completion is reported right here, on the publishing
   // thread (a worker thread, the complete_deferred() caller, or the
-  // dispatcher's launch-failure path).
+  // dispatcher's launch-failure path), and the RX slot, owned by the
+  // pipeline since dispatch, is handed back to the transport.
   void publish(int slot, uint8_t *tx_host) {
     __atomic_store_n(&active_rb_.tx_flags_host[slot],
                      reinterpret_cast<uint64_t>(tx_host), __ATOMIC_RELEASE);
-    if (external_ring_)
+    if (external_ring_) {
+      // Report while slot_request still describes this request. Then the
+      // rx_flag, so the transport may publish the next frame into the page,
+      // and only then the occupancy the dispatcher waits on, so it never
+      // takes the stale flag value for a new frame.
       report_completion(slot);
+      __atomic_store_n(&active_rb_.rx_flags_host[slot], 0, __ATOMIC_RELEASE);
+      __atomic_store_n(&slot_occupied[slot], 0, __ATOMIC_RELEASE);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -500,9 +513,22 @@ struct realtime_pipeline::Impl {
   /// @details Walks the ring in slot order. A non-zero rx_flag is the host
   /// address of a slot holding an RPCHeader. The request is handed to a free
   /// worker that serves its function id (pre-launch hook, cudaGraphLaunch,
-  /// post-launch hook, all on the worker's stream), the rx_flag is cleared
-  /// and the cursor advances. Memory ordering mirrors the ring producers:
-  /// acquire on rx_flags, release on the rx clear and on every tx publish.
+  /// post-launch hook, all on the worker's stream) and the cursor advances.
+  /// On the internal ring the rx_flag is cleared once the launch is
+  /// enqueued; the injector's slot_occupied keeps the slot until the
+  /// response is harvested. On an external ring the slot is owned by the
+  /// pipeline from dispatch until publish(): the rx_flag keeps holding the
+  /// frame, which stops a transport that publishes only into a released page
+  /// (the GpuRoce transceiver) from presenting the next lap's frame while
+  /// this request is in flight, and so keeps the TX slot and the per-slot
+  /// request state to one request at a time. The page bytes are not covered
+  /// by that: the transceiver re-arms the receive as soon as it publishes a
+  /// frame, so they are valid only until num_slots more frames have arrived.
+  /// Everything the pipeline needs is therefore taken at dispatch (header
+  /// fields, and the input by pre_launch_fn), and stages read request_id
+  /// and ptp_timestamp from cpu_stage_context. Memory ordering mirrors the
+  /// ring producers: acquire on rx_flags, release on the rx clear and on
+  /// every tx publish.
   void dispatcher_loop() {
     cudaSetDevice(device_id);
 
@@ -521,9 +547,27 @@ struct realtime_pipeline::Impl {
     };
 
     while (shutdown_flag.load(cuda::std::memory_order_acquire) == 0) {
+      if (external_ring_ &&
+          __atomic_load_n(&slot_occupied[cursor], __ATOMIC_ACQUIRE)) {
+        // Still owned by the request dispatched from it: the rx_flag holds
+        // that frame until publish() releases the slot. Checked before the
+        // flag, so a stale value is never taken for a new frame. Waiting
+        // keeps dispatch in ring order and makes the ring depth the
+        // in-flight window, as the injector's round robin does on the
+        // internal ring.
+        CUDAQ_REALTIME_CPU_RELAX();
+        continue;
+      }
       const uint64_t rx =
           __atomic_load_n(&rb.rx_flags_host[cursor], __ATOMIC_ACQUIRE);
       if (rx == 0) {
+        CUDAQ_REALTIME_CPU_RELAX();
+        continue;
+      }
+      if (external_ring_ &&
+          __atomic_load_n(&rb.tx_flags_host[cursor], __ATOMIC_ACQUIRE) != 0) {
+        // The transport has not taken the previous response out of this TX
+        // slot yet; the next request must not overwrite it.
         CUDAQ_REALTIME_CPU_RELAX();
         continue;
       }
@@ -567,10 +611,16 @@ struct realtime_pipeline::Impl {
       }
 
       const uint64_t bit = 1ULL << w;
-      if (external_ring_)
+      slot_ptp[cursor] = ptp;
+      if (external_ring_) {
+        // Take the slot; publish() gives it back (see the class comment on
+        // ownership above).
         slot_request[cursor] = rid;
+        __atomic_store_n(&slot_occupied[cursor], 1, __ATOMIC_RELEASE);
+      }
       // Store the tag now; the worker is taken (idle bit cleared) only after
-      // the launch is enqueued and the RX flag is cleared, see below.
+      // the launch is enqueued and, on the internal ring, the RX flag is
+      // cleared, see below.
       __atomic_store_n(&inflight_slot_tags[w], static_cast<int>(cursor),
                        __ATOMIC_RELEASE);
 
@@ -588,15 +638,14 @@ struct realtime_pipeline::Impl {
 
       live_dispatched.fetch_add(1, cuda::std::memory_order_relaxed);
 
-      // Release the RX slot once the launch work is enqueued, and only then
-      // take the worker: nothing can complete this slot (and let the
-      // producer refill it) before its rx_flag is cleared, so a follow-up
-      // request in the same slot never loses its rx_flag to this clear. On
-      // an external ring the transport may refill the page as soon as the
-      // flag reads 0, while a pre-launch H2D copy may still be queued on
-      // the stream; a pre_launch_fn that copies asynchronously carries that
-      // exposure.
-      __atomic_store_n(&rb.rx_flags_host[cursor], 0, __ATOMIC_RELEASE);
+      // Internal ring: release the RX flag once the launch work is enqueued,
+      // and only then take the worker: nothing can complete this slot (and
+      // let the injector refill it) before its rx_flag is cleared, so a
+      // follow-up request in the same slot never loses its rx_flag to this
+      // clear. External ring: the flag stays set until publish() releases
+      // the slot.
+      if (!external_ring_)
+        __atomic_store_n(&rb.rx_flags_host[cursor], 0, __ATOMIC_RELEASE);
       idle_mask.fetch_and(~bit, cuda::std::memory_order_acq_rel);
 
       if (err != cudaSuccess) {
@@ -680,6 +729,8 @@ struct realtime_pipeline::Impl {
       cpu_stage_context ctx;
       ctx.worker_id = worker_id;
       ctx.origin_slot = origin;
+      ctx.request_id = slot_request[origin];
+      ctx.ptp_timestamp = slot_ptp[origin];
       ctx.gpu_output = nullptr;
       ctx.gpu_output_size = 0;
       ctx.response_buffer = tx_host;

@@ -607,15 +607,12 @@ protected:
   /// frame RPCResponse + payload in the TX slot, release the predecoder.
   size_t finish_job(const cpu_stage_context &ctx, WorkerCtx *wc,
                     const pre_decoder_job &job) {
-    // Read the request header before touching the response: on the internal
-    // ring ctx.response_buffer is this same RX slot.
-    const uint8_t *rx_slot =
-        rx_base_ + static_cast<size_t>(ctx.origin_slot) * kSlotSize;
-    rt_sdk::RPCHeader hdr;
-    std::memcpy(&hdr, rx_slot, sizeof(hdr));
-
+    // The request's identity comes from the context, captured at dispatch;
+    // the RX slot is not re-read (on the internal ring ctx.response_buffer
+    // is that same slot, on an external ring the page may be overwritten a
+    // lap later).
     RecordedJob rec;
-    rec.request_id = hdr.request_id;
+    rec.request_id = static_cast<uint32_t>(ctx.request_id);
     rec.worker_id = ctx.worker_id;
     rec.origin_slot = ctx.origin_slot;
     rec.function_id = wc->function_id;
@@ -626,8 +623,8 @@ protected:
     const size_t written = sizeof(rt_sdk::RPCResponse) + kSkipTrtBytes;
     EXPECT_GE(ctx.max_response_size, written);
     auto *out = static_cast<uint8_t *>(ctx.response_buffer);
-    write_rpc_response(out, hdr.request_id, 0,
-                       static_cast<uint32_t>(kSkipTrtBytes), hdr.ptp_timestamp);
+    write_rpc_response(out, rec.request_id, 0,
+                       static_cast<uint32_t>(kSkipTrtBytes), ctx.ptp_timestamp);
     std::memcpy(out + sizeof(rt_sdk::RPCResponse), rec.payload.data(),
                 kSkipTrtBytes);
 
@@ -666,13 +663,10 @@ protected:
     pre_decoder_job job{};
     if (!wc->pd->poll_next_job(job))
       return 0;
-    const uint8_t *rx_slot =
-        rx_base_ + static_cast<size_t>(ctx.origin_slot) * kSlotSize;
-    rt_sdk::RPCHeader hdr;
-    std::memcpy(&hdr, rx_slot, sizeof(hdr));
     wc->pd->release_job(job.slot_idx);
     std::lock_guard<std::mutex> lock(mu_);
-    deferred_.push_back({ctx.origin_slot, hdr.request_id, ctx.response_buffer});
+    deferred_.push_back({ctx.origin_slot, static_cast<uint32_t>(ctx.request_id),
+                         ctx.response_buffer});
     return DEFERRED_COMPLETION;
   }
 
@@ -1068,6 +1062,70 @@ TEST_F(PipelineDispatchTest, SustainedThroughput_200Requests) {
 
   pipeline_->stop();
   expect_stats(kTotalRequests, kTotalRequests, kTotalRequests);
+}
+
+// External ring: a slot belongs to the pipeline from dispatch until its
+// response is published. The rx_flag keeps holding the frame, the dispatcher
+// does not take the slot again when its cursor comes back around, publish()
+// hands the RX slot back, and a new frame in a slot whose previous response
+// the transport has not taken yet waits for that. The test plays the
+// transport: frames land in ring order, one per slot.
+TEST_F(PipelineDispatchTest, ExternalRingHoldsSlotUntilResponsePublished) {
+  ASSERT_NO_FATAL_FAILURE(
+      make_passthrough_pipeline({kTestFunctionId}, true, deferring_cb()));
+  pipeline_->start();
+  auto *rx = reinterpret_cast<atomic_uint64_sys *>(rx_flags_host_);
+  auto *tx = reinterpret_cast<atomic_uint64_sys *>(tx_flags_host_);
+  const auto n = static_cast<uint32_t>(kNumSlots);
+
+  auto in = make_payload(1.0f);
+  submit_rpc_to_slot(0, kTestFunctionId, in.data(), kSkipTrtBytes, 11);
+  ASSERT_TRUE(wait_until([&] { return deferred_jobs().size() == 1; }, 5000));
+  EXPECT_EQ(deferred_jobs()[0].request_id, 11u);
+
+  // Held: the frame stays published to the pipeline, nothing is on TX.
+  EXPECT_EQ(rx[0].load(cuda::std::memory_order_acquire),
+            reinterpret_cast<uint64_t>(rx_data_host_))
+      << "rx_flag must hold the frame while the request is in flight";
+  EXPECT_EQ(tx[0].load(cuda::std::memory_order_acquire), 0u);
+
+  // One lap of frames: the cursor comes back to the held slot 0 and must not
+  // dispatch its stale frame again.
+  for (uint32_t s = 1; s < n; ++s)
+    submit_rpc_to_slot(s, kTestFunctionId, in.data(), kSkipTrtBytes, 11 + s);
+  ASSERT_TRUE(wait_until([&] { return deferred_jobs().size() == n; }, 5000));
+  usleep(20000);
+  EXPECT_EQ(pipeline_->stats().dispatched, n)
+      << "A held slot must not be dispatched again";
+
+  // Publishing the response hands the RX slot back.
+  auto first = deferred_jobs()[0];
+  write_rpc_response(first.response_buffer, first.request_id, 0, 0);
+  pipeline_->complete_deferred(first.origin_slot);
+  ASSERT_TRUE(wait_rx_cleared(0)) << "publish() must release the RX slot";
+  EXPECT_EQ(tx[0].load(cuda::std::memory_order_acquire),
+            reinterpret_cast<uint64_t>(tx_data_host_));
+  ASSERT_TRUE(wait_completions(1));
+
+  // The transport (this test) has not taken the response yet: the next frame
+  // in slot 0 waits until it does.
+  submit_rpc_to_slot(0, kTestFunctionId, in.data(), kSkipTrtBytes, 11 + n);
+  usleep(20000);
+  EXPECT_EQ(pipeline_->stats().dispatched, n)
+      << "A slot whose previous response is still on TX must wait";
+  tx[0].store(0, cuda::std::memory_order_release);
+  ASSERT_TRUE(
+      wait_until([&] { return deferred_jobs().size() == n + 1; }, 5000));
+  EXPECT_EQ(deferred_jobs()[n].request_id, 11u + n);
+  EXPECT_EQ(deferred_jobs()[n].origin_slot, 0);
+
+  for (size_t i = 1; i <= n; ++i) {
+    auto j = deferred_jobs()[i];
+    write_rpc_response(j.response_buffer, j.request_id, 0, 0);
+    pipeline_->complete_deferred(j.origin_slot);
+  }
+  ASSERT_TRUE(wait_completions(static_cast<int>(n) + 1));
+  pipeline_->stop();
 }
 
 TEST_F(PipelineDispatchTest, DeferredCompletion) {

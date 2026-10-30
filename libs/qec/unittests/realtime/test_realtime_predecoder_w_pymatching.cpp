@@ -420,9 +420,11 @@ int main(int argc, char *argv[]) {
 
         // Host view of the RX slot that carried this request
         // (job.ring_buffer_ptr is the device view seen by the pre-launch copy).
+        // Reading it here is fine on the internal ring, whose slot stays
+        // occupied until the response is harvested; the request's identity
+        // still comes from the stage context, as it must on an external ring.
         const uint8_t *slot_host = rb_bases.rx_data_host +
                                    static_cast<size_t>(origin_slot) * slot_size;
-        auto *rpc_hdr = reinterpret_cast<const rt_sdk::RPCHeader *>(slot_host);
 
         // Syndrome density: count nonzero in input and output residuals
         const uint8_t *input_u8 = slot_host + CUDAQ_RPC_HEADER_SIZE;
@@ -440,15 +442,15 @@ int main(int argc, char *argv[]) {
 
         pd->release_job(job.slot_idx);
 
-        uint32_t rid = rpc_hdr->request_id;
+        const uint32_t rid = static_cast<uint32_t>(ctx.request_id);
 
-        // Echo the request identity into the response header now, while the
-        // request header is still readable; the PyMatching thread fills in
-        // magic, status, result_len and the payload later. On the internal
-        // ring the TX area is the RX slot itself, so this is a self-assignment.
+        // Echo the request identity into the response header now; the
+        // PyMatching thread fills in magic, status, result_len and the
+        // payload later. On the internal ring the TX area is the RX slot
+        // itself, so this rewrites the fields with their own values.
         auto *resp = static_cast<rt_sdk::RPCResponse *>(ctx.response_buffer);
-        resp->request_id = rpc_hdr->request_id;
-        resp->ptp_timestamp = rpc_hdr->ptp_timestamp;
+        resp->request_id = rid;
+        resp->ptp_timestamp = ctx.ptp_timestamp;
 
         pymatch_queue.push({origin_slot, rid, ctx.response_buffer});
 

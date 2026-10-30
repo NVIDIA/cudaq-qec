@@ -54,11 +54,24 @@ struct pipeline_stage_config {
   /// this mode (the FPGA/emulator owns the producer side).
   ///
   /// The ring's host views must be set and its RX/TX strides must match the
-  /// transport's slot size. The pipeline's dispatcher polls and clears
-  /// rx_flags; responses are written through
+  /// transport's slot size.
+  ///
+  /// Slot ownership: the transport publishes a frame by storing the RX
+  /// slot's host address into rx_flags. From the moment the dispatcher takes
+  /// that request until its response is published, the slot (its rx_flag,
+  /// TX slot and request state) belongs to the pipeline; publish() hands it
+  /// back by storing 0 into rx_flags. A transport that publishes into a page
+  /// only once its rx_flag is 0 (the GpuRoce transceiver) therefore never
+  /// presents two requests from one slot at a time. The page bytes are not
+  /// covered by that: the GpuRoce transceiver re-arms a page's receive as
+  /// soon as it publishes a frame, so they stay valid only until num_slots
+  /// more frames have arrived. The pipeline takes what it needs at dispatch,
+  /// and stages read cpu_stage_context::request_id and ptp_timestamp rather
+  /// than the RX slot. Responses are written through
   /// cpu_stage_context::response_buffer (the TX slot) and published by
   /// storing the TX slot's host address into tx_flags, which the transport
-  /// consumes and clears itself. The completion handler runs on the
+  /// consumes and clears itself; a slot whose previous response the transport
+  /// has not taken yet is not dispatched. The completion handler runs on the
   /// publishing thread in this mode.
   void *external_ringbuffer = nullptr;
 };
@@ -112,6 +125,14 @@ struct cpu_stage_context {
   int worker_id;
   /// @brief Ring buffer slot that originated this request.
   int origin_slot;
+  /// @brief Request id of this request, taken from the RPC header at
+  /// dispatch (the injector's 64-bit id on the internal ring).
+  uint64_t request_id;
+  /// @brief PTP timestamp of this request, taken from the RPC header at
+  /// dispatch. Use these two fields rather than re-reading the RX slot: on
+  /// an external ring the transport may overwrite the page one ring lap
+  /// after it was published.
+  uint64_t ptp_timestamp;
   /// @brief Pointer to GPU inference output (nullptr in poll mode).
   const void *gpu_output;
   /// @brief Size of GPU output in bytes.
@@ -307,7 +328,9 @@ public:
   /// DEFERRED_COMPLETION and the deferred work has finished writing the
   /// response into the slot's TX area (cpu_stage_context::response_buffer).
   /// Publishes the TX slot's host address into tx_flags; on an external ring
-  /// the completion handler runs on the calling thread.
+  /// the completion handler runs on the calling thread and the RX slot is
+  /// handed back to the transport (see
+  /// pipeline_stage_config::external_ringbuffer).
   /// @param slot Ring buffer slot index to complete.
   void complete_deferred(int slot);
 

@@ -341,8 +341,8 @@ Expected output:
        Mode: Real FPGA (2-tool)
        Config: d13_r104
    ...
-   [RDMA+TRT] Shot 0: received 17472 detectors (input_nonzero=939),
-              predecoder logical_pred=1, residual_nonzero=23
+   [RDMA+TRT] Shot 0: received 17472 detectors, predecoder logical_pred=1,
+              residual_nonzero=23
 
    ========================================
      PREDECODER BRIDGE TEST: PASS

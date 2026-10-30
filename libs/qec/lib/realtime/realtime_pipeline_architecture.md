@@ -81,7 +81,12 @@ classDiagram
 
 The pipeline spawns four categories of threads, each pinnable to a specific CPU core.
 On an external (transport-owned) ring no consumer thread is started; completions are
-reported from the publishing thread.
+reported from the publishing thread, and a slot is owned by the pipeline from dispatch
+until its response is published: `rx_flags[S]` keeps holding the frame and `slot_occupied[S]`
+is set until `publish()` releases them (flag first). The GpuRoce transceiver publishes
+into a page only once its flag is 0, so one slot carries one request at a time; its page
+bytes, however, are re-armed for the next lap as soon as a frame is published, so stages
+read `cpu_stage_context::request_id` / `ptp_timestamp` instead of the RX page.
 
 ```mermaid
 flowchart LR
@@ -176,7 +181,7 @@ sequenceDiagram
 
     Disp->>GPU: cudaGraphLaunch graph_exec W, stream W
     Disp->>Disp: mark slot S in-flight (pipeline-private), tx_flags untouched
-    Disp->>RB: rx_flags S .store 0, release, free rx slot
+    Disp->>RB: rx_flags S .store 0, release, free rx slot (internal ring; an external ring holds it until publish)
     Disp->>Disp: idle_mask.fetch_and ~1 shl W, acq_rel, mark W busy (after the rx clear)
     Note over Disp: Producer uses slot_occupied[] for backpressure,<br>not tx_flags
 
@@ -215,7 +220,7 @@ sequenceDiagram
     Cons->>RB: clear_slot S: tx_flags = 0
     Cons->>Cons: slot_occupied S = 0, release
     Note over Prod: Slot S now available for next submission
-    Note over PMW,App: External ring: no Consumer thread. publish() calls<br>completion_handler on the publishing thread and the<br>transport's TX kernel consumes and clears tx_flags
+    Note over PMW,App: External ring: no Consumer thread. publish() calls<br>completion_handler on the publishing thread, hands the RX slot<br>back (rx_flags S = 0, then slot_occupied S = 0) and the<br>transport's TX kernel consumes and clears tx_flags
 ```
 
 ## 4. Atomic Variables Reference
@@ -227,7 +232,7 @@ and the memory ordering used.
 
 | Atomic | Type | Scope | Writer(s) | Reader(s) | Ordering |
 |--------|------|-------|-----------|-----------|----------|
-| `rx_flags[slot]` | `cuda::atomic<uint64_t, system>` | Producer ↔ Dispatcher | Producer (signal), Dispatcher (clear) | Dispatcher (poll) | store: `release`, load: `acquire` |
+| `rx_flags[slot]` | `cuda::atomic<uint64_t, system>` | Producer ↔ Dispatcher | Producer (signal), Dispatcher (clear, internal ring), `publish()` (clear, external ring) | Dispatcher (poll) | store: `release`, load: `acquire` |
 | `tx_flags[slot]` | `cuda::atomic<uint64_t, system>` | Publisher ↔ Consumer / transport | Worker thread, PyMatch worker (via `complete_deferred`), GPU-only callback, dispatcher launch-failure path (TX slot host address); Consumer (clear, internal ring) or transport TX kernel (clear, external ring) | Consumer (poll, internal ring) or transport TX kernel (external ring). Not used for producer backpressure. | store: `release`, load: `acquire` |
 
 ### Worker Pool Scheduling
@@ -277,7 +282,7 @@ stateDiagram-v2
         RPCHeader (24B) + payload in rx_data
     end note
 
-    RX_SIGNALED --> DISPATCHED : Dispatcher reads rx_flags, launches graph, clears rx_flags
+    RX_SIGNALED --> DISPATCHED : Dispatcher reads rx_flags, launches graph, clears rx_flags (internal ring) or takes slot_occupied (external ring)
     note right of DISPATCHED
         slot_occupied = 1, rx_flags = 0, tx_flags = 0
         pipeline tracks in-flight (slot_occupied, inflight_slot_tags)
@@ -409,9 +414,18 @@ memory model. Key ordering guarantees:
    once the producer sees a free slot it may refill it and a worker may publish
    the next response, which a late `clear_slot()` would wipe.
 
-6. **Dispatcher → Worker (handoff):** the dispatcher clears `rx_flags[S]`
-   before `idle_mask.fetch_and` takes the worker, so the slot cannot be
-   completed and refilled while its old `rx_flag` clear is still pending.
+6. **Dispatcher → Worker (handoff):** on the internal ring the dispatcher
+   clears `rx_flags[S]` before `idle_mask.fetch_and` takes the worker, so
+   the slot cannot be completed and refilled while its old `rx_flag` clear
+   is still pending.
+
+7. **External ring (slot ownership):** the dispatcher stores
+   `slot_occupied[S] = 1` (release) at dispatch and leaves `rx_flags[S]` set;
+   `publish()` reports the completion, stores `rx_flags[S] = 0` (release) and
+   then `slot_occupied[S] = 0` (release). The dispatcher loads
+   `slot_occupied[S]` (acquire) before `rx_flags[S]`, so a stale flag value is
+   never taken for a new frame, and does not dispatch a slot whose
+   `tx_flags[S]` the transport has not cleared yet.
 
 ```mermaid
 flowchart LR
