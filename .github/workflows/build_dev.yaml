@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   build-cudaqx-dev:
-    name: Build CUDA-QX Dev Image
+    name: Build CUDA-QX Dev and CUDAQ-QEC Dev Image
     if: ${{ github.repository == 'NVIDIA/cudaq-qec' }}
     strategy:
       matrix:
@@ -81,15 +81,23 @@ jobs:
           echo "Versioned release: $ver"
           other_tag=$ver
         fi
-        TAGS="-t ghcr.io/nvidia/cudaqx-dev:${{ steps.get-cudaq-version-short.outputs.commit_date }}-${{ steps.get-cudaq-version-short.outputs.shortref }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
-        TAGS+=" -t ghcr.io/nvidia/cudaqx-dev:${{ steps.get-cudaq-version-short.outputs.shortref }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
-        if [ -n "$other_tag" ]; then
-          TAGS+=" -t ghcr.io/nvidia/cudaqx-dev:${other_tag}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
-        fi
+        # Publish identical images under both the old (cudaqx-dev) and new
+        # (cudaq-qec-dev) package names.
+        IMAGE_REPOS="ghcr.io/nvidia/cudaqx-dev ghcr.io/nvidia/cudaq-qec-dev"
+        TAGS=""
+        for repo in $IMAGE_REPOS; do
+          TAGS+=" -t ${repo}:${{ steps.get-cudaq-version-short.outputs.commit_date }}-${{ steps.get-cudaq-version-short.outputs.shortref }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
+          TAGS+=" -t ${repo}:${{ steps.get-cudaq-version-short.outputs.shortref }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
+          if [ -n "$other_tag" ]; then
+            TAGS+=" -t ${repo}:${other_tag}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
+          fi
+        done
         docker build $TAGS -f docker/build_env/cudaqx.dev.Dockerfile . \
           --build-arg base_image=ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main \
           --build-arg cuda_version=${{ matrix.cuda_version }}
-        docker push -a ghcr.io/nvidia/cudaqx-dev
+        for repo in $IMAGE_REPOS; do
+          docker push -a ${repo}
+        done
       shell: bash --noprofile --norc -euo pipefail {0}
 
   build-cudaqx-pydev:
@@ -177,9 +185,6 @@ jobs:
         fi
 
         # Perform build
-        TAGS="-t ghcr.io/nvidia/cudaqx-dev:${{ steps.get-cudaq-version-short.outputs.commit_date }}-${{ steps.get-cudaq-version-short.outputs.shortref }}-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
-        TAGS+=" -t ghcr.io/nvidia/cudaqx-dev:${{ steps.get-cudaq-version-short.outputs.shortref }}-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
-
         other_tag=""
         is_main_branch=${{ github.ref_name == 'main' }}
         is_versioned=${{ startsWith(github.ref_name, 'releases/') }}
@@ -191,9 +196,17 @@ jobs:
           other_tag=$ver
         fi
 
-        if [ -n "$other_tag" ]; then
-          TAGS+=" -t ghcr.io/nvidia/cudaqx-dev:${other_tag}-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
-        fi
+        # Publish identical images under both the old (cudaqx-dev) and new
+        # (cudaq-qec-dev) package names.
+        IMAGE_REPOS="ghcr.io/nvidia/cudaqx-dev ghcr.io/nvidia/cudaq-qec-dev"
+        TAGS=""
+        for repo in $IMAGE_REPOS; do
+          TAGS+=" -t ${repo}:${{ steps.get-cudaq-version-short.outputs.commit_date }}-${{ steps.get-cudaq-version-short.outputs.shortref }}-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
+          TAGS+=" -t ${repo}:${{ steps.get-cudaq-version-short.outputs.shortref }}-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
+          if [ -n "$other_tag" ]; then
+            TAGS+=" -t ${repo}:${other_tag}-py${{ matrix.python }}-${{ matrix.platform }}-cu${{ matrix.cuda_version }}"
+          fi
+        done
         BUILDARGS="--build-arg base_image=ghcr.io/nvidia/cuda-quantum-devdeps:manylinux-${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main"
         BUILDARGS+=" --build-arg python_version=${{ matrix.python }}"
         BUILDARGS+=" --build-arg cuda_version=${{ matrix.cuda_version }}"
@@ -201,7 +214,9 @@ jobs:
         # For some reason, this fails on amd64 unless DOCKER_BUILDKIT=0 is set.
         # The exact error is: too many open files.
         DOCKER_BUILDKIT=0 docker build $TAGS $BUILDARGS -f docker/build_env/cudaqx.wheel.Dockerfile .
-        docker push -a ghcr.io/nvidia/cudaqx-dev
+        for repo in $IMAGE_REPOS; do
+          docker push -a ${repo}
+        done
       shell: bash --noprofile --norc -euo pipefail {0}
 
   # cleanup:
@@ -213,7 +228,7 @@ jobs:
   #   - name: Delete untagged images
   #     uses: actions/delete-package-versions@v5
   #     with: 
-  #       package-name: cudaqx-dev
+  #       package-name: cudaq-qec-dev
   #       package-type: 'container'
   #       min-versions-to-keep: 0
   #       delete-only-untagged-versions: 'true'
