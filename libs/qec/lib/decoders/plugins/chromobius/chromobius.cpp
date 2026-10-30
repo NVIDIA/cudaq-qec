@@ -117,10 +117,7 @@ public:
   }
 
   decoder_result decode(const std::vector<float_t> &syndrome) override {
-    if (syndrome.size() != syndrome_size) {
-      throw std::runtime_error(
-          "Chromobius syndrome length must match the number of detectors");
-    }
+    check_syndrome_size(syndrome.size());
 
     std::fill(packed_detection_events.begin(), packed_detection_events.end(),
               uint8_t{0});

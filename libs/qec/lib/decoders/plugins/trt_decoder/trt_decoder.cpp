@@ -986,9 +986,9 @@ trt_decoder::decode(const std::vector<float_t> &syndrome,
                     cancellation_token tok) {
   // Validate syndrome size
   if (syndrome.size() != syndrome_size_per_sample_) {
-    throw std::runtime_error("Syndrome size mismatch: expected " +
-                             std::to_string(syndrome_size_per_sample_) +
-                             " but got " + std::to_string(syndrome.size()));
+    throw std::invalid_argument("Syndrome size mismatch: expected " +
+                                std::to_string(syndrome_size_per_sample_) +
+                                " but got " + std::to_string(syndrome.size()));
   }
 
   // For models with batch_size > 1, zero-pad to fill the batch
@@ -1044,7 +1044,7 @@ trt_decoder::decode_batch(const std::vector<std::vector<float_t>> &syndromes,
   // Validate all syndrome sizes match expected size
   for (size_t i = 0; i < syndromes.size(); ++i) {
     if (syndromes[i].size() != syndrome_size_per_sample_) {
-      throw std::runtime_error(
+      throw std::invalid_argument(
           "Syndrome size mismatch at index " + std::to_string(i) +
           ": expected " + std::to_string(syndrome_size_per_sample_) +
           " but got " + std::to_string(syndromes[i].size()));
