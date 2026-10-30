@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# GPU RoCE bridge and HSB playback tools for QLDPC graph-launched decoder
+# HSB FPGA syndrome-playback tool
 # ==============================================================================
-# Gated by CUDAQX_QEC_ENABLE_HSB_TOOLS.  Requires:
-#   - holoscan-sensor-bridge build (hololink_core for playback)
-#   - cuda-quantum/realtime build (libcudaq-realtime*, gpu_roce bridge libs)
-#   - DOCA 3.3+ (for gpu_roce_transceiver)
+# Gated by CUDAQX_QEC_ENABLE_HSB_TOOLS.  Builds hsb_fpga_syndrome_playback,
+# which requires a holoscan-sensor-bridge build (hololink_core) and the
+# cuda-quantum realtime headers (CUDAQ_REALTIME_ROOT or a CUDA-Q install
+# with realtime; the playback tool includes dispatch_kernel_launch.h).  The
+# gpu_roce_transceiver, DOCA and holoscan discovery below is not used by that
+# target and only warns when missing.
 # These are NOT CI tests -- they need FPGA hardware or an FPGA emulator.
 
 if (NOT HOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR)
@@ -53,8 +55,7 @@ find_library(GPU_ROCE_TRANSCEIVER_LIB
 
 if (NOT GPU_ROCE_TRANSCEIVER_LIB)
   message(WARNING
-    "Could not find gpu_roce_transceiver library. "
-    "gpu_roce_qldpc_graph_decoder_bridge will not be built.")
+    "gpu_roce_transceiver library not found (optional for this directory).")
 endif()
 
 # --------------------------------------------------------------------------- #
@@ -210,119 +211,5 @@ set_target_properties(hsb_fpga_syndrome_playback PROPERTIES
 install(TARGETS hsb_fpga_syndrome_playback
   COMPONENT qec-tools
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-# =========================================================================== #
-# gpu_roce_qldpc_graph_decoder_bridge
-# =========================================================================== #
-# Bridge tool: GpuRoceTransceiver <-> HOST_LOOP graph dispatch
-# (CPU-launched CUDA graph with Relay BP decoder)
-
-if (GPU_ROCE_TRANSCEIVER_LIB AND CUDAQ_REALTIME_INCLUDE_DIR AND
-    CUDAQ_REALTIME_LIBRARY AND CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY AND
-    CUDAQ_REALTIME_BRIDGE_GPU_ROCE_LIBRARY AND
-    DOCA_INCLUDE_DIR AND DOCA_VERBS_LIB AND DOCA_COMMON_LIB AND
-    DOCA_GPUNETIO_LIB)
-
-  message(STATUS "Building gpu_roce_qldpc_graph_decoder_bridge")
-  message(STATUS "  GPU RoCE Transceiver: ${GPU_ROCE_TRANSCEIVER_LIB}")
-  message(STATUS "  cuda-quantum realtime: ${CUDAQ_REALTIME_LIBRARY}")
-  message(STATUS "  cuda-quantum host dispatch: ${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}")
-  message(STATUS "  cuda-quantum bridge gpu-roce: ${CUDAQ_REALTIME_BRIDGE_GPU_ROCE_LIBRARY}")
-
-  # cudaq-qec-realtime-decoding transitively pulls in cudaq-qec, which
-  # references CUDA-Q quantum runtime symbols.
-  find_library(_CUDAQ_LIBRARY NAMES cudaq
-    PATHS ${CUDAQ_INSTALL_PREFIX} $ENV{CUDAQ_INSTALL_PREFIX}
-          ${CUDAQ_DIR}/.. $ENV{CUDAQ_DIR}/..
-    PATH_SUFFIXES lib)
-  find_library(_NVQIR_LIBRARY NAMES nvqir
-    PATHS ${CUDAQ_INSTALL_PREFIX} $ENV{CUDAQ_INSTALL_PREFIX}
-          ${CUDAQ_DIR}/.. $ENV{CUDAQ_DIR}/..
-    PATH_SUFFIXES lib)
-
-  add_executable(gpu_roce_qldpc_graph_decoder_bridge
-    gpu_roce_qldpc_graph_decoder_bridge.cpp
-    cuda_link_stub.cu
-  )
-
-  set_target_properties(gpu_roce_qldpc_graph_decoder_bridge PROPERTIES
-    LINKER_LANGUAGE CUDA
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-  )
-
-  target_include_directories(gpu_roce_qldpc_graph_decoder_bridge
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}
-      ${CUDAToolkit_INCLUDE_DIRS}
-      ${CMAKE_CURRENT_SOURCE_DIR}/../../include
-      ${CMAKE_SOURCE_DIR}/libs/core/include
-      ${CUDAQ_REALTIME_INCLUDE_DIR}
-  )
-
-  target_link_libraries(gpu_roce_qldpc_graph_decoder_bridge
-    PRIVATE
-      ${CUDAQ_REALTIME_DISPATCH_LIBRARY}
-      ${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}
-      ${CUDAQ_REALTIME_BRIDGE_GPU_ROCE_LIBRARY}
-      ${GPU_ROCE_TRANSCEIVER_LIB}
-      ${BASE_RECEIVER_OP_LIB}
-      ${HSB_CORE_LIB}
-      ${HSB_COMMON_LIB}
-      ${CUDAQ_REALTIME_LIBRARY}
-      cudaq-qec-realtime-decoding
-      # Device-graph scheduler path: absorb the proprietary cudevice archive
-      # WHOLE so the enqueue/get/reset DEVICE_CALL handlers + register/populate
-      # shims merge into this exe's cubin (device-linked with the dispatch
-      # kernel) and stay in the dynamic table for the plugin's dlsym lookups.
-      $<$<TARGET_EXISTS:cudaq-qec-realtime-cudevice-proprietary>:$<LINK_LIBRARY:WHOLE_ARCHIVE,cudaq-qec-realtime-cudevice-proprietary>>
-      $<$<BOOL:${_CUDAQ_LIBRARY}>:${_CUDAQ_LIBRARY}>
-      $<$<BOOL:${_NVQIR_LIBRARY}>:${_NVQIR_LIBRARY}>
-      CUDA::cudart
-      CUDA::cuda_driver
-      ${DOCA_VERBS_LIB}
-      ${DOCA_GPUNETIO_LIB}
-      ${DOCA_COMMON_LIB}
-      ${IBVERBS_LIB}
-      Threads::Threads
-      ${CMAKE_DL_LIBS}
-  )
-
-  target_link_options(gpu_roce_qldpc_graph_decoder_bridge PRIVATE
-    "LINKER:--allow-shlib-undefined"
-    # Export the proprietary register/populate C-ABI shims so the dlopen'd
-    # nv-qldpc plugin (capture_decode_graph) and this bridge resolve them via
-    # dlsym(RTLD_DEFAULT, ...).
-    "LINKER:--export-dynamic"
-  )
-
-  if (holoscan_FOUND)
-    target_link_libraries(gpu_roce_qldpc_graph_decoder_bridge PRIVATE holoscan::core)
-  endif()
-
-  get_filename_component(CUDAQ_REALTIME_LIB_DIR "${CUDAQ_REALTIME_LIBRARY}" DIRECTORY)
-  set_target_properties(gpu_roce_qldpc_graph_decoder_bridge PROPERTIES
-    BUILD_RPATH "${CUDAQ_REALTIME_LIB_DIR};${DOCA_LIB_DIR};${CMAKE_BINARY_DIR}/lib/decoder-plugins"
-    INSTALL_RPATH "${CUDAQ_REALTIME_LIB_DIR};${DOCA_LIB_DIR};${CMAKE_BINARY_DIR}/lib/decoder-plugins"
-  )
-
-else()
-  if (NOT GPU_ROCE_TRANSCEIVER_LIB)
-    message(WARNING "gpu_roce_transceiver library not found. "
-                    "gpu_roce_qldpc_graph_decoder_bridge will not be built.")
-  endif()
-  if (NOT CUDAQ_REALTIME_LIBRARY OR NOT CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY)
-    message(WARNING "cuda-quantum realtime libraries not found. "
-                    "Set CUDAQ_REALTIME_ROOT to enable gpu_roce_qldpc_graph_decoder_bridge.")
-  endif()
-  if (NOT CUDAQ_REALTIME_BRIDGE_GPU_ROCE_LIBRARY)
-    message(WARNING "cuda-quantum bridge gpu-roce library not found. "
-                    "Set CUDAQ_REALTIME_ROOT to enable gpu_roce_qldpc_graph_decoder_bridge.")
-  endif()
-  if (NOT DOCA_INCLUDE_DIR OR NOT DOCA_VERBS_LIB)
-    message(WARNING "DOCA libraries not found. "
-                    "gpu_roce_qldpc_graph_decoder_bridge requires DOCA.")
-  endif()
-endif()
 
 # gpu_roce_predecoder_bridge is now in unittests/realtime/

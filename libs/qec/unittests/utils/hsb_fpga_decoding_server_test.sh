@@ -14,7 +14,7 @@
 #   FPGA/emulator --RDMA WRITE--> server cpu_roce rx ring
 #   server        --RDMA SEND---> FPGA SIF TX (captured by the ILA)
 #
-# Division of labor (identical to gpu_roce_qldpc_graph_decoder_test.sh):
+# Division of labor:
 #   - decoding_server (--transport=cpu_roce --qp_config=hsb_fpga) owns the
 #     RDMA ring and prints its endpoint line (QEC_DECODING_SERVER_ENDPOINT
 #     qp=... rkey=... buffer_addr=...).  It performs
@@ -51,7 +51,7 @@
 #   shared libs, and the decoder plugins -- is consumed PREBUILT: on a dev rig
 #   from the /workspaces/*/build trees, and in a productized container from
 #   their installed locations.  This script never builds cuda-quantum, HSB, or
-#   the decoder server, and needs no proprietary .a at build time.  A clean,
+#   the decoder server, and needs no extra build-time inputs.  A clean,
 #   unconfigured rig cannot bootstrap from it.
 set -euo pipefail
 
@@ -118,8 +118,8 @@ GPU_ROCE_NUM_PAGES=auto
 # repo and has no default path -- point at it with --nv-qldpc-plugin or the
 # CUDAQ_QEC_NV_QLDPC_PLUGIN env var (eventual home: a GitHub release artifact
 # via all_libs_release.yml).  The pymatching profile never uses it.  The
-# proprietary cudevice archive is NOT a concern of this script: it is a
-# build-time input to the decoder server, which is consumed prebuilt here.
+# decoder server's build-time inputs are NOT a concern of this script: the
+# server is consumed prebuilt here.
 NV_QLDPC_PLUGIN="${CUDAQ_QEC_NV_QLDPC_PLUGIN:-}"
 
 # Network defaults
@@ -469,7 +469,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ============================================================================
-# Network Setup (mirrors gpu_roce_qldpc_graph_decoder_test.sh)
+# Network Setup
 # ============================================================================
 
 detect_interfaces() {
@@ -978,18 +978,18 @@ ensure_nv_qldpc_plugin() {
     # would collapse to "$plugin_dir/", which -e reports as an existing
     # directory -- a false "already present".
     if [[ -z "$NV_QLDPC_PLUGIN" ]]; then
-        _err "nv-qldpc profile requires the plugin path: pass --nv-qldpc-plugin PATH"
-        _err "or set CUDAQ_QEC_NV_QLDPC_PLUGIN (eventual home: all_libs_release.yml artifact)."
-        return 1
+        echo "SKIP: nv-qldpc profile requires the prebuilt nv-qldpc plugin:" \
+             "pass --nv-qldpc-plugin PATH or set CUDAQ_QEC_NV_QLDPC_PLUGIN" >&2
+        exit 77
     fi
     local link="${plugin_dir}/$(basename "$NV_QLDPC_PLUGIN")"
     if [[ -e "$link" ]]; then
         return 0
     fi
     if [[ ! -f "$NV_QLDPC_PLUGIN" ]]; then
-        _err "nv-qldpc plugin not found: $NV_QLDPC_PLUGIN"
-        _err "Build it in the proprietary cuda-qx tree or pass --nv-qldpc-plugin PATH."
-        return 1
+        echo "SKIP: nv-qldpc plugin not found: ${NV_QLDPC_PLUGIN};" \
+             "pass --nv-qldpc-plugin PATH or set CUDAQ_QEC_NV_QLDPC_PLUGIN" >&2
+        exit 77
     fi
     mkdir -p "$plugin_dir"
     ln -sf "$NV_QLDPC_PLUGIN" "$link"
@@ -1283,6 +1283,15 @@ start_server() {
     _info "Server PID: $SERVER_PID"
 
     wait_for_pattern "$server_log" "$ready_pattern" 60 "$SERVER_PID" >/dev/null || {
+        # A decoding_server built without the device-graph component refuses
+        # device_graph dispatch at startup and never prints READY: that is a
+        # SKIP (77), not a failure.
+        if [[ "$TRANSPORT" == "gpu_roce" ]] && grep -qE 'device-graph component is not linked into this binary|built without device_graph dispatch support' "$server_log"; then
+            echo "SKIP: --transport gpu_roce uses device_graph dispatch, which requires a" \
+                 "decoding_server built with the device-graph component (not part of" \
+                 "released builds); use --transport cpu_roce for host dispatch" >&2
+            exit 77
+        fi
         _err "Decoding server did not become ready"
         _err "--- Server log ---"
         cat "$server_log" >&2
