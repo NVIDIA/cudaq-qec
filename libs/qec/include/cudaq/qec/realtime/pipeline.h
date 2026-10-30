@@ -174,17 +174,21 @@ struct completion {
   uint64_t request_id;
   /// @brief Ring buffer slot that held this request.
   int slot;
-  /// @brief True unless the graph launch for this request failed.
+  /// @brief False when the graph launch for this request failed, or when the
+  /// dispatcher dropped the request (bad framing in an internal-ring slot the
+  /// injector filled); no response is published for a dropped request.
   bool success;
-  /// @brief cudaError_t of a failed cudaGraphLaunch (0 on success). The TX
-  /// slot then holds an RPCResponse whose status carries the same code.
+  /// @brief cudaError_t of a failed cudaGraphLaunch (0 on success and for a
+  /// dropped request). The TX slot then holds an RPCResponse whose status
+  /// carries the same code.
   int cuda_error;
 };
 
 /// @brief Callback invoked for each completed request: on the consumer thread
 /// for the internal ring, on the thread that publishes the response for an
 /// external ring (a worker thread, the complete_deferred() caller, or the
-/// dispatcher after a failed launch).
+/// dispatcher after a failed launch), and on the dispatcher thread for a
+/// request it dropped.
 /// @param c Metadata for the completed or errored request.
 using completion_callback = std::function<void(const completion &c)>;
 
@@ -217,10 +221,14 @@ public:
   /// @param request_id Caller-assigned request identifier.
   /// @return True if accepted, false if all slots are busy (backpressure) or
   /// the pipeline is stopping or stopped.
+  /// @throws std::invalid_argument If the pipeline is started and no worker
+  /// serves @p function_id.
   bool try_submit(uint32_t function_id, const void *payload,
                   size_t payload_size, uint64_t request_id);
 
   /// @brief Submit a request, spinning until a slot becomes available.
+  /// @throws std::invalid_argument If the pipeline is started and no worker
+  /// serves @p function_id.
   /// @param function_id RPC function identifier.
   /// @param payload Pointer to the payload data.
   /// @param payload_size Size of the payload in bytes.

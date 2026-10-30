@@ -119,7 +119,7 @@ The dispatcher thread and every worker thread call `cudaSetDevice(device_id)` fi
 
 ### 4.3 Function-Aware Worker Selection
 
-The dispatcher routes each request to a worker whose `function_id` matches the RPC header's `function_id`; a request whose `function_id` no worker serves is dropped (its RX flag is cleared and nothing is counted). This is correct for mixed worker pools (e.g., different model types). For pools of interchangeable workers running the same model, all workers **must** share a single `function_id` to avoid head-of-line blocking — otherwise the dispatcher waits for the one specific worker that matches even when other workers are idle.
+The dispatcher routes each request to a worker whose `function_id` matches the RPC header's `function_id`; `ring_buffer_injector` refuses a `function_id` no worker serves (`std::invalid_argument`, once the pipeline is started), so on the internal ring only bad framing reaches the dispatcher's drop path; a dropped internal-ring request is reported as a completion with `success=false` and its slot is freed, while a dropped external-ring frame is left unanswered. Drops are not counted in `Stats::dispatched`. This is correct for mixed worker pools (e.g., different model types). For pools of interchangeable workers running the same model, all workers **must** share a single `function_id` to avoid head-of-line blocking — otherwise the dispatcher waits for the one specific worker that matches even when other workers are idle.
 
 ### 4.4 Dispatcher Logic (Pseudocode)
 ```cpp
@@ -140,15 +140,14 @@ void realtime_pipeline::Impl::dispatcher_loop() {
         // Producer convention: a non-zero rx_flag is the host address of the RX slot
         auto *slot_host = reinterpret_cast<uint8_t*>(rx_value);
         auto *hdr = reinterpret_cast<const RPCHeader*>(slot_host);
-        if (hdr->magic != RPC_MAGIC_REQUEST) {                 // drop, not counted
-            atomic_store(&rb.rx_flags_host[cursor], 0, release); advance(); continue;
-        }
+        if (hdr->magic != RPC_MAGIC_REQUEST) { drop(); continue; }   // see drop() below
         // Copy the header fields before anything can overwrite the slot
         uint32_t fid = hdr->function_id, rid = hdr->request_id;
         uint64_t ptp = hdr->ptp_timestamp;
-        if (no worker_resources[i].function_id == fid) {        // drop, not counted
-            atomic_store(&rb.rx_flags_host[cursor], 0, release); advance(); continue;
-        }
+        if (no worker_resources[i].function_id == fid) { drop(); continue; }
+        // drop(): internal ring, slot filled by the injector -> completion{success=false, cuda_error=0},
+        //         total_completed++, rx_flag = 0, then slot_occupied = 0 (the consumer's order);
+        //         otherwise rx_flag = 0 only. Not counted as dispatched. advance().
 
         // First idle worker (ffsll over idle_mask) whose function_id matches
         int w = acquire_worker(fid);
@@ -583,7 +582,7 @@ The implementation in `realtime_pipeline.cu` keeps the following invariants; cha
 - **No CUDA stream querying**: `cudaStreamQuery()` is not used for backpressure or completion checking (it incurs severe driver latency). Completion is observed through `idle_mask`, `ready_flags` and `tx_flags` only.
 - **No weak-ordering bugs**: No `volatile`, no `__threadfence_system()`. Cross-device synchronization uses `cuda::std::atomic<T, cuda::thread_scope_system>` (or `<cuda/atomic>` with `thread_scope_system`); host-only flags use release/acquire atomics.
 - **No head-of-line blocking**: The dispatcher never maps slots to predecoders statically; it allocates dynamically through `idle_mask`. The consumer harvests out-of-order by scanning all occupied slots. Workers running the same model share a single `function_id` so the dispatcher can pick any idle worker; per-worker unique ids degenerate function-aware routing into a 1:1 static mapping.
-- **No data loss**: When no idle worker serves the request's `function_id`, the dispatcher spins on the current slot (`CUDAQ_REALTIME_CPU_RELAX()`) with `rx_flags` untouched. It advances only after a worker is allocated and the launch attempted. Only a bad magic or an unknown `function_id` drops a slot, and drops are not counted in `Stats::dispatched`.
+- **No data loss**: When no idle worker serves the request's `function_id`, the dispatcher spins on the current slot (`CUDAQ_REALTIME_CPU_RELAX()`) with `rx_flags` untouched. It advances only after a worker is allocated and the launch attempted. Only a bad magic or an unknown `function_id` drops a slot; on the internal ring the injector rejects unknown ids up front and a drop frees the slot with a `success=false` completion, and drops are never counted in `Stats::dispatched`.
 - **Tag ownership**: `inflight_slot_tags[w]` is written by the dispatcher (release) before it clears bit `w`, and the worker thread reads it (acquire) only after observing its bit clear, so the tag is the one for the current assignment and stays stable until that thread sets the bit again. Only the dispatcher clears `idle_mask` bits; in CPU-stage mode only worker thread `w` sets bit `w` (a failed launch is handed to it through `worker_launch_failed[w]`), and in GPU-only mode the host callback sets the bit last, after publishing. The tag for a worker therefore cannot change while that worker's flow is active.
 - **Ready-flag claiming**: The CPU poller claims each completion exactly once with `compare_exchange_strong(1, 2)` on the ready flag, relaxed on failure; the worker clears the flag (store 0) in `release_job`.
 - **Backpressure model**: The producer (`ring_buffer_injector`) checks `slot_occupied[slot]`, never `tx_flags`, mirroring the hsb model where `ring_flag`/`rx_flags` is the sole sender-receiver backpressure mechanism. `slot_request[slot]` and `slot_occupied[slot]` are written before the slot is signalled. Between dispatch and publication `tx_flags` stays 0; the slot is tracked in flight by pipeline-private state, and the consumer treats any non-zero `tx_flags` as a published response.

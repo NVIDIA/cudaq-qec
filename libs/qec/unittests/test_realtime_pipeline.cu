@@ -842,6 +842,62 @@ TEST_F(PipelineDispatchTest, RestartThrows) {
   expect_stats(0, 0, 0);
 }
 
+// The injector refuses a function id no worker serves instead of letting the
+// dispatcher drop it, which on the internal ring used to leak the slot.
+TEST_F(PipelineDispatchTest, UnknownFunctionIdRejected) {
+  ASSERT_NO_FATAL_FAILURE(
+      make_passthrough_pipeline({kTestFunctionId}, false, passthrough_cb()));
+  pipeline_->start();
+  auto inj = pipeline_->create_injector();
+  auto in = make_payload(1.0f);
+  EXPECT_THROW(inj.try_submit(kTestFunctionId + 1, in.data(), kSkipTrtBytes, 1),
+               std::invalid_argument);
+  EXPECT_THROW(inj.submit(kTestFunctionId + 1, in.data(), kSkipTrtBytes, 2),
+               std::invalid_argument);
+  inj.submit(kTestFunctionId, in.data(), kSkipTrtBytes, 3);
+  ASSERT_TRUE(wait_completions(1));
+  pipeline_->stop();
+  expect_stats(1, 1, 1);
+}
+
+// A request the dispatcher cannot serve (here: its magic was corrupted after
+// submission) is reported as a failed completion and its slot is freed, so
+// the ring loses nothing. The request is submitted before start() so the
+// corruption is race-free.
+TEST_F(PipelineDispatchTest, DroppedRequestFreesSlot) {
+  ASSERT_NO_FATAL_FAILURE(
+      make_passthrough_pipeline({kTestFunctionId}, false, passthrough_cb()));
+  auto inj = pipeline_->create_injector();
+  auto in = make_payload(1.0f);
+  ASSERT_TRUE(inj.try_submit(kTestFunctionId, in.data(), kSkipTrtBytes, 7));
+  auto *hdr = reinterpret_cast<rt_sdk::RPCHeader *>(
+      pipeline_->ringbuffer_bases().rx_data_host);
+  hdr->magic = 0xDEADBEEF;
+  __sync_synchronize();
+
+  pipeline_->start();
+  ASSERT_TRUE(wait_completions(1)) << "A dropped request must complete";
+  auto cs = completions();
+  ASSERT_EQ(cs.size(), 1u);
+  EXPECT_EQ(cs[0].request_id, 7u);
+  EXPECT_EQ(cs[0].slot, 0);
+  EXPECT_FALSE(cs[0].success);
+  EXPECT_EQ(cs[0].cuda_error, 0);
+  EXPECT_EQ(pipeline_->stats().dispatched, 0u);
+
+  // One full lap: the last submit lands in the freed slot 0 and must not
+  // block.
+  const int n = static_cast<int>(kNumSlots);
+  for (int r = 0; r < n; ++r)
+    inj.submit(kTestFunctionId, in.data(), kSkipTrtBytes,
+               static_cast<uint64_t>(100 + r));
+  ASSERT_TRUE(wait_completions(n + 1));
+  for (const auto &c : completions())
+    EXPECT_EQ(c.success, c.request_id != 7u);
+  pipeline_->stop();
+  expect_stats(n + 1, n + 1, n);
+}
+
 TEST_F(PipelineDispatchTest, StatsCounter) {
   ASSERT_NO_FATAL_FAILURE(
       make_passthrough_pipeline({kTestFunctionId}, false, passthrough_cb()));

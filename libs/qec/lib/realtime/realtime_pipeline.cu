@@ -486,6 +486,21 @@ struct realtime_pipeline::Impl {
     total_completed.fetch_add(1, std::memory_order_relaxed);
   }
 
+  // Report a request the dispatcher dropped (bad framing or a function id no
+  // worker serves) as completed with success=false and no CUDA error, so the
+  // caller hears about it and stop()'s drain does not wait for it.
+  void report_dropped(int slot) {
+    if (completion_handler) {
+      completion c;
+      c.request_id = slot_request[slot];
+      c.slot = slot;
+      c.success = false;
+      c.cuda_error = 0;
+      completion_handler(c);
+    }
+    total_completed.fetch_add(1, std::memory_order_relaxed);
+  }
+
   // Publish the response held at `tx_host` (the TX slot of `slot`): a release
   // store of the TX slot host address into tx_flags_host[slot]. On the
   // internal ring the consumer thread picks the flag up, reports the
@@ -542,11 +557,21 @@ struct realtime_pipeline::Impl {
     uint32_t cursor = 0;
 
     // Drop the request at the cursor: clear its rx_flag and move on. Drops
-    // are not counted. On the internal ring the injector only emits valid
-    // headers for known function ids, so a drop there is a caller bug and
-    // the slot stays occupied.
+    // do not count as dispatched. On the internal ring a slot the injector
+    // filled is reported as a failed completion and freed (rx_flag first,
+    // then slot_occupied, the consumer's order); the injector rejects
+    // unknown function ids up front, so this is the bad-framing safety net.
+    // On an external ring nothing is held yet, the frame is simply left
+    // unanswered.
     auto drop = [&]() {
+      const bool held =
+          !external_ring_ &&
+          __atomic_load_n(&slot_occupied[cursor], __ATOMIC_ACQUIRE);
+      if (held)
+        report_dropped(static_cast<int>(cursor));
       __atomic_store_n(&rb.rx_flags_host[cursor], 0, __ATOMIC_RELEASE);
+      if (held)
+        __atomic_store_n(&slot_occupied[cursor], 0, __ATOMIC_RELEASE);
       cursor = (cursor + 1) % ns;
     };
 
@@ -895,6 +920,10 @@ void realtime_pipeline::complete_deferred(int slot) {
 
 struct ring_buffer_injector::State {
   RingBufferManager *ring = nullptr;
+  // The worker table, valid once `started`: try_submit rejects a function id
+  // no worker serves instead of letting the dispatcher drop it.
+  const std::vector<gpu_worker_resources> *worker_resources = nullptr;
+  std::atomic<bool> *started = nullptr;
   std::vector<uint64_t> *slot_request = nullptr;
   std::vector<uint8_t> *slot_occupied = nullptr;
   std::atomic<uint64_t> *total_submitted = nullptr;
@@ -914,6 +943,8 @@ ring_buffer_injector realtime_pipeline::create_injector() {
   }
   auto s = std::make_unique<ring_buffer_injector::State>();
   s->ring = impl_->ring.get();
+  s->worker_resources = &impl_->worker_resources;
+  s->started = &impl_->started;
   s->slot_request = &impl_->slot_request;
   s->slot_occupied = &impl_->slot_occupied;
   s->total_submitted = &impl_->total_submitted;
@@ -950,6 +981,18 @@ bool ring_buffer_injector::try_submit(uint32_t function_id, const void *payload,
   // Nothing services the ring once stop() has begun.
   if (state_->producer_stop->load(std::memory_order_acquire))
     return false;
+  // A function id no worker serves would only be dropped by the dispatcher;
+  // refuse it here. Before start() the table is not built yet and the
+  // dispatcher's drop path is the safety net.
+  if (state_->started->load(std::memory_order_acquire)) {
+    bool known = false;
+    for (const auto &wr : *state_->worker_resources)
+      known = known || wr.function_id == function_id;
+    if (!known)
+      throw std::invalid_argument("ring_buffer_injector: no worker serves "
+                                  "function_id " +
+                                  std::to_string(function_id));
+  }
   uint32_t cur = state_->next_slot.load(std::memory_order_relaxed);
   uint32_t slot = cur % static_cast<uint32_t>(state_->num_slots);
   if (__atomic_load_n(&(*state_->slot_occupied)[slot], __ATOMIC_ACQUIRE))
