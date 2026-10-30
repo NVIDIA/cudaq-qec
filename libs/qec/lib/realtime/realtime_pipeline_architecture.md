@@ -260,6 +260,7 @@ and the memory ordering used.
 | `total_completed` | `std::atomic<uint64_t>` | Consumer ↔ Main | Consumer (internal ring) / publishing thread (external ring) | Main (stats) | fetch_add: `relaxed`, load: `relaxed` |
 | `backpressure_stalls` | `std::atomic<uint64_t>` | Injector ↔ Main | Injector | Main (stats) | fetch_add: `relaxed`, load: `relaxed` |
 | `started` | `std::atomic<bool>` | Main thread | start()/stop() | destructor, start() | implicit seq_cst |
+| `stopped` | `std::atomic<bool>` | Main thread | stop() | start() (throws: a pipeline is single use) | implicit seq_cst |
 
 ### Injector Slot Claiming
 

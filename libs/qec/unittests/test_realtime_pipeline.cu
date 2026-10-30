@@ -826,6 +826,22 @@ TEST_F(PipelineDispatchTest, ShutdownClean) {
   EXPECT_EQ(completion_count_.load(), 0);
 }
 
+// A pipeline is single use: its stop flags are never reset, so a restart
+// would spawn threads that exit at once while the injector kept accepting
+// requests. start() after stop() throws, and the injector refuses.
+TEST_F(PipelineDispatchTest, RestartThrows) {
+  ASSERT_NO_FATAL_FAILURE(
+      make_passthrough_pipeline({kTestFunctionId}, false, passthrough_cb()));
+  pipeline_->start();
+  auto inj = pipeline_->create_injector();
+  pipeline_->stop();
+  EXPECT_THROW(pipeline_->start(), std::logic_error);
+  auto in = make_payload(1.0f);
+  EXPECT_FALSE(inj.try_submit(kTestFunctionId, in.data(), kSkipTrtBytes, 1))
+      << "The injector must refuse once the pipeline has stopped";
+  expect_stats(0, 0, 0);
+}
+
 TEST_F(PipelineDispatchTest, StatsCounter) {
   ASSERT_NO_FATAL_FAILURE(
       make_passthrough_pipeline({kTestFunctionId}, false, passthrough_cb()));

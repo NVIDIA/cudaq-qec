@@ -521,6 +521,7 @@ Driven through the public `realtime_pipeline` API with passthrough predecoders:
 
 - **Grace period**: After the producer stops submitting, `stop()` waits up to 5 seconds for `total_completed >= total_submitted` (internal ring only; an external ring cannot be drained by count because the transport owns the request stream).
 - **Dispatcher shutdown**: `stop()` then sets `shutdown_flag = 1` and joins the dispatcher thread. The dispatcher synchronizes all worker streams before returning, so every graph and every GPU-only host callback has finished and published.
+- **Single use**: the stop flags are never reset, so `start()` after `stop()` throws `std::logic_error` and `ring_buffer_injector::try_submit()` returns false once `stop()` has begun; construct a new pipeline instead.
 - **Consumer and workers**: `consumer_stop` is set after the dispatcher has joined, so the consumer thread (internal ring) exits even when `total_completed < total_submitted`; the worker threads are joined last. This keeps `stop()` from hanging on requests that never complete.
 - **PyMatching thread pool**: Shut the queue down (`pymatch_queue.shutdown()` unblocks all waiting threads), then stop the pipeline and join the PyMatching worker threads. The reverse order is also safe: `complete_deferred()` stays callable after `stop()`, so a decode that finishes late still publishes into ring memory that lives until the pipeline is destroyed.
 

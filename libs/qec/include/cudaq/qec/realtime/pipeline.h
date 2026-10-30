@@ -215,7 +215,8 @@ public:
   /// @param payload Pointer to the payload data.
   /// @param payload_size Size of the payload in bytes.
   /// @param request_id Caller-assigned request identifier.
-  /// @return True if accepted, false if all slots are busy (backpressure).
+  /// @return True if accepted, false if all slots are busy (backpressure) or
+  /// the pipeline is stopping or stopped.
   bool try_submit(uint32_t function_id, const void *payload,
                   size_t payload_size, uint64_t request_id);
 
@@ -293,11 +294,13 @@ public:
   /// @throws std::logic_error If GPU-only mode (no CPU stage) is combined
   /// with an external ring buffer: nothing would frame an RPCResponse in the
   /// TX slot for the transport to send.
+  /// @throws std::logic_error If the pipeline was stopped before: a pipeline
+  /// is single use, construct a new one instead.
   void start();
 
   /// @brief Signal shutdown, join all threads, free resources.
   /// @note Safe to call multiple times. Subsequent calls are no-ops once the
-  /// pipeline has fully stopped.
+  /// pipeline has fully stopped, and the pipeline cannot be started again.
   void stop();
 
   /// @brief Create a software injector for testing without FPGA hardware.

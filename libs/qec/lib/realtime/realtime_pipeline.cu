@@ -301,6 +301,9 @@ struct realtime_pipeline::Impl {
   std::vector<std::thread> worker_threads;
 
   std::atomic<bool> started{false};
+  // Set by stop_all(): the stop flags are never reset, so a pipeline is
+  // single use and start() refuses to run again.
+  std::atomic<bool> stopped{false};
 
   // -----------------------------------------------------------------------
   // Lifecycle
@@ -450,6 +453,7 @@ struct realtime_pipeline::Impl {
     }
 
     started = false;
+    stopped = true;
   }
 
   /// @brief Release the owned ring buffer after shutdown.
@@ -850,6 +854,10 @@ void realtime_pipeline::set_completion_handler(completion_callback handler) {
 void realtime_pipeline::start() {
   if (impl_->started)
     return;
+  if (impl_->stopped)
+    throw std::logic_error(
+        "realtime_pipeline is single use: start() after stop() is not "
+        "supported; construct a new pipeline");
   impl_->start_threads();
 }
 
@@ -939,6 +947,9 @@ ring_buffer_injector::operator=(ring_buffer_injector &&) noexcept = default;
 bool ring_buffer_injector::try_submit(uint32_t function_id, const void *payload,
                                       size_t payload_size,
                                       uint64_t request_id) {
+  // Nothing services the ring once stop() has begun.
+  if (state_->producer_stop->load(std::memory_order_acquire))
+    return false;
   uint32_t cur = state_->next_slot.load(std::memory_order_relaxed);
   uint32_t slot = cur % static_cast<uint32_t>(state_->num_slots);
   if (__atomic_load_n(&(*state_->slot_occupied)[slot], __ATOMIC_ACQUIRE))
