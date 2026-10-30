@@ -157,6 +157,7 @@ def test_from_topology_races_an_ensemble_of_windows():
 
     node = qec.TaskGraphNodeConfig()
     node.id = "ens"
+    node.kind = "ensemble"
     node.ensemble = ens
     assert node.ensemble.join_strategy == "deadline"
 

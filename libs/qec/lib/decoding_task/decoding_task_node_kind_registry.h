@@ -92,12 +92,18 @@ using node_factory =
 
 /// How a pattern kind expands. A node of a pattern kind is never built:
 /// from_topology() rewrites it into plain nodes and edges before any node is
-/// checked, as it does an ensemble entry, so the expanded graph is validated
-/// as a hand-written one is.
+/// checked, so the expanded graph is validated as a hand-written one is.
 struct node_pattern {
-  using lowering = std::function<void(task_graph_node_config cfg,
-                                      std::vector<task_graph_node_config> &out,
-                                      std::vector<task_graph_edge> &edges)>;
+  /// What a lowering may ask for once its nodes are built, for what only
+  /// built nodes know: their ports' types and widths. Handed the node ids,
+  /// the nodes, which it may rebuild, and the edges, which it may extend.
+  using wiring =
+      std::function<void(const std::vector<std::string> &ids,
+                         std::vector<std::unique_ptr<task_graph_node>> &built,
+                         std::vector<task_graph_edge> &edges)>;
+  using lowering = std::function<wiring(
+      task_graph_node_config cfg, std::vector<task_graph_node_config> &out,
+      std::vector<task_graph_edge> &edges)>;
   using window_layers =
       std::vector<std::pair<std::string, experimental::window_request>>;
   using window_declaration = std::function<window_layers(
@@ -106,7 +112,8 @@ struct node_pattern {
   /// Append the nodes replacing pattern node `cfg` to `out`, move the edges
   /// naming cfg.id onto them, and append their own edges. Throws
   /// std::invalid_argument naming the pattern when `cfg` is not one it can
-  /// expand. Required.
+  /// expand. Returns the wiring to run once those nodes are built, or empty.
+  /// Required.
   lowering lower;
   /// The window requests the lowered nodes read, by layer name, from the
   /// pattern's parameters and template. A configuration registers each as
