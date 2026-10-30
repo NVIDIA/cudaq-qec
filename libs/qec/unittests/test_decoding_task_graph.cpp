@@ -13,6 +13,7 @@
 #include "../lib/decoding_task/decoding_task_node_kind_registry.h"
 #include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "../lib/decoding_task/decoding_task_predecoder_node.h"
+#include "../lib/decoding_task/decoding_task_streaming_node.h"
 #include "../lib/decoding_task/decoding_task_window_node.h"
 #include "../lib/realtime/decode_target.h"
 #include "../lib/realtime/realtime_decoding.h"
@@ -1328,6 +1329,280 @@ TEST(DecodingTaskGraph, StreamingNodeRequiresDecoderAndDWidthsToMatch) {
         }
       },
       std::invalid_argument);
+}
+
+// Model a native decoder over rounds of different widths, taking one round
+// per tagged enqueue. Each round's parity commits, as a provisional
+// publication, when the next round arrives; FINAL commits the last and ends
+// the shot, reporting its rounds when @p count_final. An untagged shot ends
+// once D's width has arrived, its rounds unreported.
+class unequal_round_probe_decoder final : public decoder,
+                                          public streaming_correction_provider {
+public:
+  unequal_round_probe_decoder(std::size_t width, bool count_final)
+      : decoder(decoder_init(sparse_binary_matrix::from_nested_csr(
+                                 4, 1, {{0}, {0}, {0}, {0}}),
+                             sparse_binary_matrix::from_nested_csr(1, 1, {{0}}),
+                             {},
+                             sparse_binary_matrix::from_nested_csr(
+                                 4, width, {{0}, {1}, {2}, {3}})),
+                decode_result_type::observables),
+        width_(width), count_final_(count_final) {}
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    return decoder_result{true, {0}};
+  }
+  bool enqueue_syndrome(const uint8_t *input, std::size_t length) override {
+    finalized_.reset();
+    pending_ ^= parity(input, length);
+    received_ += length;
+    if (received_ < width_)
+      return false;
+    received_ = 0;
+    frame_[0] ^= pending_;
+    pending_ = 0;
+    return true;
+  }
+  bool enqueue_syndrome(const uint8_t *input, std::size_t length,
+                        round_type type) override {
+    finalized_.reset();
+    frame_[0] ^= pending_;
+    pending_ = parity(input, length);
+    ++rounds_;
+    if (type == round_type::FINAL)
+      end_shot();
+    return true;
+  }
+  const uint8_t *get_obs_corrections() const override { return frame_.data(); }
+  const uint8_t *peek_obs_corrections() const override { return frame_.data(); }
+  const uint8_t *finalize_obs_corrections() override {
+    if (rounds_)
+      end_shot();
+    return frame_.data();
+  }
+  std::optional<std::uint64_t> finalized_round_count() const override {
+    return finalized_;
+  }
+  void clear_corrections() override { frame_[0] = 0; }
+  void reset_decoder() override {
+    frame_[0] = pending_ = 0;
+    rounds_ = received_ = 0;
+    finalized_.reset();
+  }
+
+private:
+  static uint8_t parity(const uint8_t *input, std::size_t length) {
+    uint8_t out = 0;
+    for (std::size_t i = 0; i < length; ++i)
+      out ^= input[i];
+    return out;
+  }
+  void end_shot() {
+    frame_[0] ^= pending_;
+    pending_ = 0;
+    if (count_final_)
+      finalized_ = rounds_;
+    rounds_ = 0;
+  }
+  std::size_t width_ = 0;
+  bool count_final_ = false;
+  std::array<uint8_t, 1> frame_{0};
+  uint8_t pending_ = 0;
+  std::uint64_t rounds_ = 0;
+  std::size_t received_ = 0;
+  std::optional<std::uint64_t> finalized_;
+};
+
+// Rounds 1, 3, 3 and 4 measurements wide: 11 measurements, which rounds of
+// the typical width, 3, do not divide, so the default schedule has none.
+constexpr std::array<uint64_t, 4> unequal_widths{1, 3, 3, 4};
+
+// A streaming node over rounds @p widths measurements wide, typically 3,
+// around the probe above.
+static std::unique_ptr<decoding_task_graph>
+make_unequal_round_graph(std::array<uint64_t, 4> widths, bool async,
+                         bool count_final) {
+  auto spec = phase_width_spec(widths);
+  task_graph_node_config node;
+  std::vector<task_graph_node_config> nodes;
+  spec.measurements_per_round = 3;
+  node.id = "native";
+  node.kind = "streaming";
+  node.dem = spec;
+  node.decoder_instance = std::make_unique<unequal_round_probe_decoder>(
+      widths[0] + widths[1] + widths[2] + widths[3], count_final);
+  nodes.push_back(std::move(node));
+  return decoding_task_graph::from_topology(
+      std::move(nodes), {},
+      {.async_streaming = async, .async_queue_capacity = 2});
+} // end - make_unequal_round_graph()
+
+// Feed a tagged shot of @p rounds rounds, 1, 3, ..., 3 and 4 measurements
+// wide, one per call, its last tagged FINAL when @p final; none completes
+// the output before FINAL. Returns the parity of its measurements.
+static uint8_t enqueue_unequal_shot(decoding_task_graph &graph,
+                                    std::size_t rounds, bool final = true) {
+  uint8_t parity = 0;
+  for (std::size_t r = 0; r < rounds; ++r) {
+    const bool last = r + 1 == rounds;
+    const std::size_t width = r == 0 ? 1 : last ? 4 : 3;
+    const std::size_t at = (r * 5 + rounds) % width;
+    std::vector<uint8_t> round(width, 0);
+    round[at] = static_cast<uint8_t>((r + rounds) % 2);
+    parity ^= round[at];
+    (void)graph.enqueue_syndrome(round.data(), round.size(),
+                                 last && final ? round_type::FINAL
+                                               : round_type::BULK);
+    if (!last || !final)
+      EXPECT_NE(graph.streaming_result().status,
+                task_graph_streaming_status::complete);
+  } // end - for(r)
+  return parity;
+} // end - enqueue_unequal_shot()
+
+// Rounds of different widths give the node no fixed schedule, so it reports
+// exact intervals: provisional corrections join the output at FINAL, which
+// commits the rounds the decoder reports, whatever the shot's length. A
+// decoder that cannot count them still publishes the whole shot at FINAL,
+// its rounds left out of the coverage.
+TEST(DecodingTaskGraph, StreamingNodeStreamsTaggedShotsOfUnequalRounds) {
+  for (const bool async : {false, true})
+    for (const bool count_final : {true, false}) {
+      auto graph = make_unequal_round_graph(unequal_widths, async, count_final);
+      SCOPED_TRACE(::testing::Message()
+                   << "async=" << async << " count_final=" << count_final);
+      for (const std::size_t rounds : {4, 6, 5}) {
+        const auto parity = enqueue_unequal_shot(*graph, rounds);
+        const auto &result = graph->streaming_result();
+        SCOPED_TRACE(rounds);
+        EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+        EXPECT_EQ(graph->get_obs_corrections()[0], parity);
+        EXPECT_EQ(result.outputs[0].coverage_begin_round, 0u);
+        EXPECT_EQ(result.outputs[0].coverage_end_round,
+                  count_final ? rounds : 0u);
+        graph->clear_corrections();
+      }
+    } // end - for(count_final)
+} // end - TEST(DecodingTaskGraph,
+  // StreamingNodeStreamsTaggedShotsOfUnequalRounds)
+
+// An untagged shot is the template's length, so a decoder that does not
+// report its rounds still commits the next four of the stream.
+TEST(DecodingTaskGraph, StreamingNodeStreamsUntaggedShotsOfUnequalRounds) {
+  for (const bool async : {false, true}) {
+    auto graph = make_unequal_round_graph(unequal_widths, async,
+                                          /*count_final=*/false);
+    SCOPED_TRACE(async ? "async" : "sync");
+    for (std::size_t shot = 0; shot < 3; ++shot) {
+      std::vector<uint8_t> record(11, 0);
+      SCOPED_TRACE(shot);
+      record[shot] = 1;
+      record[10 - shot] ^= static_cast<uint8_t>(shot % 2);
+      (void)graph->enqueue_syndrome(record.data(), record.size());
+      EXPECT_EQ(graph->get_obs_corrections()[0], shot % 2 == 0 ? 1 : 0);
+      EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round,
+                4 * shot);
+      EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round,
+                4 * (shot + 1));
+      graph->clear_corrections();
+    }
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph,
+  // StreamingNodeStreamsUntaggedShotsOfUnequalRounds)
+
+// StreamingNodeFinalShotEndsItsStream over rounds of different widths: a
+// FINAL shot follows the untagged shots before it, and the shot after it
+// begins a new stream from round 0.
+TEST(DecodingTaskGraph, StreamingNodeOverUnequalRoundsFinalShotEndsItsStream) {
+  for (const bool async : {false, true}) {
+    auto graph = make_unequal_round_graph(unequal_widths, async,
+                                          /*count_final=*/true);
+    const auto expect_shot = [&](uint8_t parity, std::uint64_t begin,
+                                 std::uint64_t end) {
+      const auto &output = graph->streaming_result().outputs[0];
+      EXPECT_EQ(graph->get_obs_corrections()[0], parity);
+      EXPECT_EQ(output.coverage_begin_round, begin);
+      EXPECT_EQ(output.coverage_end_round, end);
+      graph->clear_corrections();
+    };
+    const auto untagged = [&](std::size_t set, std::uint64_t index) {
+      std::vector<uint8_t> record(11, 0);
+      record[set] = 1;
+      (void)graph->enqueue_syndrome(record.data(), record.size());
+      expect_shot(1, 4 * index, 4 * (index + 1));
+    };
+    SCOPED_TRACE(async ? "async" : "sync");
+    untagged(0, 0);
+    untagged(5, 1);
+    expect_shot(enqueue_unequal_shot(*graph, 5), 8, 13);
+    untagged(10, 0);
+    untagged(3, 1);
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph,
+  // StreamingNodeOverUnequalRoundsFinalShotEndsItsStream)
+
+// A reset drops a shot partway through: only the next one reaches the
+// output, covering its own rounds from round 0.
+TEST(DecodingTaskGraph, StreamingNodeOverUnequalRoundsResetsMidShot) {
+  for (const bool async : {false, true}) {
+    auto graph = make_unequal_round_graph(unequal_widths, async,
+                                          /*count_final=*/true);
+    uint8_t parity = 0;
+    SCOPED_TRACE(async ? "async" : "sync");
+    // Its parity is 1, as the next shot's is, so a leak would cancel it.
+    EXPECT_EQ(enqueue_unequal_shot(*graph, 2, /*final=*/false), 1);
+    graph->reset_decoder();
+    parity = enqueue_unequal_shot(*graph, 6);
+    EXPECT_EQ(graph->get_obs_corrections()[0], parity);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 0u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 6u);
+  }
+}
+
+// Without a schedule, an exact node commits every round of its stream
+// itself, so the graph refuses two in one output when built, as it did
+// before they streamed. Rounds a typical width divides keep the node its
+// schedule, on which two combine.
+TEST(DecodingTaskGraph, StreamingNodesOverUnequalRoundsCombineOnASchedule) {
+  auto refused = decoding_task_graph::combine(
+      make_unequal_round_graph(unequal_widths, false, true),
+      make_unequal_round_graph(unequal_widths, false, true));
+  auto scheduled = decoding_task_graph::combine(
+      make_unequal_round_graph({1, 3, 3, 5}, false, true),
+      make_unequal_round_graph({1, 3, 3, 5}, false, true));
+  std::vector<uint8_t> record(12, 0);
+  EXPECT_FALSE(refused->supports_streaming());
+  EXPECT_NE(refused->streaming_incompatibility_reason().find(
+                "does not declare its effective firing and commit schedule"),
+            std::string::npos)
+      << refused->streaming_incompatibility_reason();
+  ASSERT_TRUE(scheduled->supports_streaming())
+      << scheduled->streaming_incompatibility_reason();
+  record[0] = 1;
+  (void)scheduled->enqueue_syndrome(record.data(), record.size());
+  EXPECT_EQ(scheduled->streaming_result().outputs[0].coverage_end_round, 4u);
+} // end - TEST(DecodingTaskGraph,
+  // StreamingNodesOverUnequalRoundsCombineOnASchedule)
+
+// A node over rounds of different widths takes an untagged shot's rounds
+// from its template, so it must be given them.
+TEST(DecodingTaskGraph, StreamingNodeOverUnequalRoundsNeedsItsRoundCount) {
+  const auto d = std::make_shared<const sparse_binary_matrix>(
+      sparse_binary_matrix::from_nested_csr(4, 11, {{0}, {1}, {2}, {3}}));
+  const auto o = std::make_shared<const sparse_binary_matrix>(
+      sparse_binary_matrix::from_nested_csr(1, 1, {{0}}));
+  EXPECT_THROW(
+      {
+        streaming_decoder_node node(
+            d, o, std::make_unique<unequal_round_probe_decoder>(11, true), 3,
+            /*equal_rounds=*/false);
+      },
+      std::invalid_argument);
+  EXPECT_NO_THROW({
+    streaming_decoder_node node(
+        d, o, std::make_unique<unequal_round_probe_decoder>(11, true), 3,
+        /*equal_rounds=*/false, /*num_rounds=*/4);
+  });
 }
 
 // Returns a different single-fault explanation on each call and counts the

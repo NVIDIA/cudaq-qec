@@ -757,6 +757,10 @@ void decoding_task_graph::impl::compile_wires() {
             "ones that publish on a schedule; wire them to separate outputs");
         break;
       }
+      // A staged output folds exact intervals, so its contributors need not
+      // agree on a schedule, but each of several must declare one: one
+      // without, a streaming node over rounds of different widths, commits
+      // every round of its stream, which another would commit again.
       if (staged != 0) {
         auto &stager = output_stagers[k];
         stager.enabled = true;
@@ -764,7 +768,8 @@ void decoding_task_graph::impl::compile_wires() {
         stager.whole.assign(stager.bits.size(), 0);
         for (const auto si : output_streaming_nodes[k])
           streaming_node_staged[si] = 1;
-        continue;
+        if (output_streaming_nodes[k].size() == 1)
+          continue;
       }
       std::optional<window_spec> shared;
       std::string first_endpoint;
@@ -786,6 +791,8 @@ void decoding_task_graph::impl::compile_wires() {
                 "schedule");
             break;
           }
+          if (staged != 0)
+            continue;
           if (first_endpoint.empty()) {
             shared = schedule;
             first_endpoint = endpoint;
@@ -1056,7 +1063,7 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
       if (final)
         fold_whole_shot(stager);
       if (stager.generation > output.generation) {
-        output.coverage_begin_round = 0;
+        output.coverage_begin_round = stager.begin;
         output.coverage_end_round = stager.frontier;
         output.generation = stager.generation;
         output.status = task_graph_streaming_status::available;
@@ -1182,9 +1189,11 @@ void decoding_task_graph::impl::consume_streaming_result() {
     if (k < output_stagers.size()) {
       auto &stager = output_stagers[k];
       std::fill(stager.bits.begin(), stager.bits.end(), uint8_t{0});
-      // Consuming a complete shot starts the next one from round 0.
+      // The next value covers the rounds after the frontier. Consuming a
+      // complete shot starts the next one from round 0.
+      stager.begin = stager.frontier;
       if (output.status == task_graph_streaming_status::complete) {
-        stager.frontier = 0;
+        stager.frontier = stager.begin = 0;
         stager.clear_pending();
       }
     }
@@ -1230,7 +1239,7 @@ void decoding_task_graph::impl::reset_streaming_progress() {
     output.closure = task_graph_closure::not_checked;
   }
   for (auto &stager : output_stagers) {
-    stager.frontier = 0;
+    stager.frontier = stager.begin = 0;
     stager.generation = 0;
     stager.has_whole = false;
     stager.clear_pending();
@@ -1520,8 +1529,9 @@ const uint8_t *decoding_task_graph::get_obs_corrections() const {
   auto &g = *impl_;
   g.require_streaming_support("get_obs_corrections");
   // One streaming node owning the whole buffer returns its corrections in
-  // place, no copy.
-  if (g.streaming_nodes.size() == 1 &&
+  // place, no copy, unless its output is staged: its corrections are then a
+  // delta, handed to the stager and cleared.
+  if (g.streaming_nodes.size() == 1 && !g.streaming_node_staged[0] &&
       g.streaming_nodes[0].replicas.size() == 1 &&
       g.streaming_nodes[0].capability->num_observables() == g.n_obs &&
       g.streaming_node_output_offsets[0].size() == 1 &&
