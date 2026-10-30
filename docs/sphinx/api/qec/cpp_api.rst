@@ -211,6 +211,7 @@ Decoder Interfaces
 
 .. doxygenclass:: cudaq::qec::decoder
     :members:
+    :protected-members:
 
 .. doxygenstruct:: cudaq::qec::decoder_result
     :members:
