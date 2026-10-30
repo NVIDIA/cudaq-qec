@@ -112,9 +112,9 @@ node_kind_registration register_dlclose_test_pattern() {
   spec.requires_decoder = false;
   spec.requires_dem = false;
   schema.validate = [](const cudaqx::heterogeneous_map &) {};
-  pattern.lower = [](task_graph_node_config cfg,
-                     std::vector<task_graph_node_config> &out,
-                     std::vector<task_graph_edge> &edges) {
+  pattern.lower =
+      [](task_graph_node_config cfg, std::vector<task_graph_node_config> &out,
+         std::vector<task_graph_edge> &edges) -> node_pattern::wiring {
     task_graph_node_config inner;
     inner.id = cfg.id + ".inner";
     inner.kind = "node_kind_dlclose_plugin";
@@ -125,6 +125,7 @@ node_kind_registration register_dlclose_test_pattern() {
         e.from_node = inner.id;
     }
     out.push_back(std::move(inner));
+    return {};
   };
   pattern.windows = [](const cudaqx::heterogeneous_map &,
                        const experiment_template &) {

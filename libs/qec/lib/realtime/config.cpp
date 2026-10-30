@@ -310,6 +310,12 @@ static void finalize_parsed_args(const decoder_schema &schema,
 /// them by node and port name.
 using task_graph_node_spec = decoder_config::task_graph_spec::node_spec;
 
+/// Whether the node is an ensemble pattern, whose members and join are its
+/// own keys.
+static bool is_ensemble_node(const task_graph_node_spec &node) {
+  return node.resolved_kind() == "ensemble";
+}
+
 /// Whether a node needs no entry-level DEM: its kind takes none, it carries
 /// its own, or every member node does.
 static bool task_graph_node_describes_itself(const task_graph_node_spec &node) {
@@ -333,23 +339,24 @@ reject_lowered_only_kind(const cudaq::qec::task_graph_node_kind_spec *kind,
   if (kind && kind->lowered_only)
     throw std::runtime_error(where + " has type '" + type +
                              "', which only the lowering of a pattern "
-                             "produces; write an 'ensemble' entry instead");
+                             "produces; write an 'ensemble' node instead");
 }
 
-/// The checks for an `ensemble` pattern entry. The YAML traits have resolved
+/// The checks for an `ensemble` node. The YAML traits have resolved
 /// join_strategy and its parameters and the builder's lowering checks the
 /// wiring, which leaves the node form; the member nodes join `typed`.
 static void validate_ensemble_node(
     const task_graph_node_spec &node, const std::string &where,
     std::vector<std::pair<const task_graph_node_spec *, std::string>> &typed) {
-  if (!node.type.empty())
-    throw std::runtime_error(where + " is an ensemble and takes no type");
+  if (!node.ensemble.has_value())
+    throw std::runtime_error(where + " is an ensemble and needs members and a "
+                                     "join_strategy");
   const auto &members = node.ensemble->members;
   for (std::size_t i = 0; i < members.size(); ++i)
     for (const auto &n : members[i].nodes) {
       const std::string node_where = where + " ensemble member " +
                                      std::to_string(i) + " node '" + n.id + "'";
-      if (n.ensemble.has_value())
+      if (is_ensemble_node(n))
         throw std::runtime_error(node_where + " nests an ensemble, which is "
                                               "not supported yet");
       typed.emplace_back(&n, node_where);
@@ -423,14 +430,13 @@ static void validate_task_graph(const decoder_config &config) {
       throw std::runtime_error(who + ": duplicate task_graph node id '" +
                                node.id + "'");
     ids.push_back(node.id);
-    if (node.ensemble.has_value() && !node.windows.empty())
+    if (is_ensemble_node(node) && !node.windows.empty())
       throw std::runtime_error(node_context(node.id) +
-                               " is an ensemble entry, which takes no "
-                               "windows; only an ingest node takes windows");
-    if (node.ensemble.has_value())
+                               " is an ensemble, which takes no windows; "
+                               "only an ingest node takes windows");
+    if (is_ensemble_node(node))
       validate_ensemble_node(node, node_context(node.id), typed);
-    else
-      typed.emplace_back(&node, node_context(node.id));
+    typed.emplace_back(&node, node_context(node.id));
   }
   for (const auto &[typed_node, where] : typed) {
     const auto &node = *typed_node;
@@ -1364,16 +1370,14 @@ struct CustomMappingTraits<inner_form> {
 // depends on the resolved node kind, so no key list can be written here.
 using ensemble_spec_t = task_graph_spec_t::node_spec::ensemble_spec;
 
-// The ensemble block and the node list refer to each other, so these are
+// The ensemble's keys and the node list refer to each other, so these are
 // declared before the node traits and defined after them.
 template <>
 struct MappingTraits<ensemble_spec_t::member> {
   static void mapping(IO &io, ensemble_spec_t::member &m);
 };
-template <>
-struct MappingTraits<ensemble_spec_t> {
-  static void mapping(IO &io, ensemble_spec_t &e);
-};
+/// An ensemble node's own keys: members, join_strategy and join_params.
+static void map_ensemble_keys(IO &io, ensemble_spec_t &e);
 
 /// A `dem_chunks` value: the block, or the name of a data_artifacts entry.
 /// A list is kept only to be rejected.
@@ -1701,7 +1705,12 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
     }
     if (key == "type") {
       io.mapRequired("type", node.type);
+      read_ensemble(io, node);
       return;
+    }
+    if (key == "members" || key == "join_strategy" || key == "join_params") {
+      if (read_ensemble(io, node))
+        return;
     }
     if (key == "dem_chunks") {
       map_dem_chunks(io, node.dem_chunks, node.dem_chunks_artifact,
@@ -1794,14 +1803,6 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       return;
     }
 
-    if (key == "ensemble") {
-      // A pattern in place of a node; the builder lowers it. Everything the
-      // block holds is parsed by its own traits.
-      node.ensemble.emplace();
-      io.mapRequired("ensemble", *node.ensemble);
-      return;
-    }
-
     // The straddle flags move a window's decode-input column range; guards
     // move which of its rounds commit. Only the latter is expressible here, so
     // say which key replaces which rather than reporting an unknown key.
@@ -1826,15 +1827,15 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
 
   static void output(IO &io, node_spec &node) {
     io.mapRequired("id", node.id);
-    if (node.ensemble.has_value()) {
-      io.mapRequired("ensemble", *node.ensemble);
-      return;
-    }
     // An alias is an accepted spelling on input only, so emission writes the
     // canonical name and a document round-trips to one form.
     const auto *kind = cudaq::qec::find_task_graph_node_kind(node.type);
     std::string type = kind ? kind->name : node.type;
     io.mapRequired("type", type);
+    if (node.ensemble.has_value()) {
+      map_ensemble_keys(io, *node.ensemble);
+      return;
+    }
     map_dem_chunks(io, node.dem_chunks, node.dem_chunks_artifact,
                    "task_graph node '" + node.id + "'");
     if (!node.windows.empty()) {
@@ -1888,6 +1889,20 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
   }
 
 private:
+  /// Whether `type` names an ensemble, whose members and join are read
+  /// together, by whichever of `type` and those keys arrives first.
+  static bool read_ensemble(IO &io, node_spec &node) {
+    std::string type_value;
+    io.mapOptional("type", type_value);
+    if (cudaq::qec::resolved_task_graph_node_kind(type_value) != "ensemble")
+      return false;
+    if (!node.ensemble.has_value()) {
+      node.ensemble.emplace();
+      map_ensemble_keys(io, *node.ensemble);
+    }
+    return true;
+  }
+
   static void store_partition(const partition_form &form, node_spec &node) {
     node.partition_label = form.label;
     node.partition_columns.clear();
@@ -1931,7 +1946,7 @@ void MappingTraits<ensemble_spec_t::member>::mapping(
   io.mapOptional("edges", m.edges);
 }
 
-void MappingTraits<ensemble_spec_t>::mapping(IO &io, ensemble_spec_t &e) {
+static void map_ensemble_keys(IO &io, ensemble_spec_t &e) {
   io.mapRequired("members", e.members);
   io.mapRequired("join_strategy", e.join_strategy);
   // join_params belongs to the strategy, whose schema is registered under its
@@ -2663,9 +2678,23 @@ decoder_params_json_schema(const decoder_schema &schema,
 /// parameters appear as node keys, and each kind's clause forbids the keys that
 /// belong only to other kinds. A newly registered kind shows up here without an
 /// edit to this function.
-/// The `ensemble` pattern entry: members of nodes (the node schema itself)
-/// and edges, a registered join_strategy and, per strategy, its join_params.
-llvm::json::Object ensemble_json_schema() {
+/// The `ensemble` kind's keys, added to `node_properties`: members of nodes
+/// (the node schema itself) and edges, a registered join_strategy and, per
+/// strategy, its join_params. Returns the clause requiring them of an
+/// ensemble node, forbidding it every other node key, and forbidding them of
+/// every other node, as the parser does.
+llvm::json::Object ensemble_json_schema(llvm::json::Object &node_properties) {
+  const auto forbid = [](std::vector<std::string> keys) {
+    llvm::json::Array out;
+    for (const auto &key : keys)
+      out.push_back(llvm::json::Object{
+          {"not", llvm::json::Object{{"required", llvm::json::Array{key}}}}});
+    return out;
+  };
+  std::vector<std::string> node_only;
+  for (const auto &[key, value] : node_properties)
+    if (key != "id" && key != "type" && key != "max_in_flight")
+      node_only.push_back(key.str());
   llvm::json::Array names, per_strategy;
   for (const auto &name : cudaq::qec::registered_selection_strategies()) {
     names.push_back(name);
@@ -2714,21 +2743,27 @@ llvm::json::Object ensemble_json_schema() {
                  llvm::json::Object{{"$ref", "#/$defs/task_graph_edge"}}}}}}},
       {"required", llvm::json::Array{"nodes", "edges"}},
       {"additionalProperties", false}};
+  node_properties["members"] = llvm::json::Object{
+      {"type", "array"}, {"minItems", 1}, {"items", std::move(member)}};
+  node_properties["join_strategy"] =
+      llvm::json::Object{{"type", "string"}, {"enum", std::move(names)}};
+  node_properties["join_params"] = llvm::json::Object{{"type", "object"}};
+  llvm::json::Array constraints = forbid(std::move(node_only));
+  for (auto &clause : per_strategy)
+    constraints.push_back(std::move(clause));
   llvm::json::Object ensemble{
-      {"type", "object"},
-      {"properties",
-       llvm::json::Object{
-           {"members", llvm::json::Object{{"type", "array"},
-                                          {"minItems", 1},
-                                          {"items", std::move(member)}}},
-           {"join_strategy",
-            llvm::json::Object{{"type", "string"}, {"enum", std::move(names)}}},
-           {"join_params", llvm::json::Object{{"type", "object"}}}}},
       {"required", llvm::json::Array{"members", "join_strategy"}},
-      {"additionalProperties", false}};
-  if (!per_strategy.empty())
-    ensemble["allOf"] = std::move(per_strategy);
-  return ensemble;
+      {"allOf", std::move(constraints)}};
+  return llvm::json::Object{
+      {"if",
+       llvm::json::Object{
+           {"properties",
+            llvm::json::Object{
+                {"type", llvm::json::Object{{"const", "ensemble"}}}}},
+           {"required", llvm::json::Array{"type"}}}},
+      {"then", std::move(ensemble)},
+      {"else", llvm::json::Object{{"allOf", forbid({"members", "join_strategy",
+                                                    "join_params"})}}}};
 }
 
 llvm::json::Object task_graph_json_schema() {
@@ -2780,9 +2815,9 @@ llvm::json::Object task_graph_json_schema() {
       {"stim_dem_path", llvm::json::Object{{"type", "string"}}},
       {"partition",
        llvm::json::Object{{"$ref", "#/$defs/task_graph_partition"}}},
-      {"ensemble", ensemble_json_schema()},
   };
   llvm::json::Array per_kind;
+  per_kind.push_back(ensemble_json_schema(node_properties));
   for (const auto &kind : kinds) {
     const auto *schema =
         find_decoder_schema(cudaq::qec::task_graph_node_schema_name(kind));
@@ -2857,16 +2892,10 @@ llvm::json::Object task_graph_json_schema() {
         {"then", std::move(then_clause)}});
   }
 
-  // A node names a `type`; a pattern entry names `ensemble` instead.
-  llvm::json::Object node{
-      {"type", "object"},
-      {"properties", std::move(node_properties)},
-      {"required", llvm::json::Array{"id"}},
-      {"oneOf",
-       llvm::json::Array{
-           llvm::json::Object{{"required", llvm::json::Array{"type"}}},
-           llvm::json::Object{{"required", llvm::json::Array{"ensemble"}}}}},
-      {"additionalProperties", false}};
+  llvm::json::Object node{{"type", "object"},
+                          {"properties", std::move(node_properties)},
+                          {"required", llvm::json::Array{"id", "type"}},
+                          {"additionalProperties", false}};
   if (!per_kind.empty())
     node["allOf"] = std::move(per_kind);
 
@@ -3022,7 +3051,7 @@ llvm::json::Object task_graph_json_schema() {
                  llvm::json::Object{{"type", "boolean"}, {"default", false}}},
                 {"async_queue_capacity", llvm::json::Object{{"type", "integer"},
                                                             {"minimum", 1},
-                                                            {"default", 8}}},
+                                                            {"default", 32}}},
                 {"async_coordinator_cpu",
                  llvm::json::Object{
                      {"type", "integer"}, {"minimum", -1}, {"default", -1}}},

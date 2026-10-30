@@ -2964,7 +2964,7 @@ TEST(DecodingTaskGraph, JsonSchemaDescribesTaskGraphAndItsKinds) {
   // test file is exported too.
   EXPECT_NE(schema.find("\"start_guard\""), std::string::npos);
   EXPECT_NE(schema.find("\"unused_knob\""), std::string::npos);
-  // A node entry may be an ensemble pattern instead of a typed node.
+  // An ensemble node's keys, with each strategy's parameters.
   EXPECT_NE(schema.find("\"ensemble\""), std::string::npos);
   EXPECT_NE(schema.find("\"join_strategy\""), std::string::npos);
   // Members hold nodes of the node schema itself; each strategy's parameters
@@ -2994,25 +2994,25 @@ TEST(DecodingTaskGraph, EnsembleYamlParsesRoundTripsAndLowers) {
   namespace cfg = cudaq::qec::decoding::config;
   auto multi_config = cfg::multi_decoder_config::from_yaml_str(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: deadline
-            join_params: {deadline_us: 200000, soft_stop_before_us: 100000}
-            members:
-              - nodes:
-                  - {id: a, type: single_window, inner: {type: single_error_lut}}
-                edges: [{from: input, to: a}, {from: a, to: output}]
-              - nodes:
-                  - {id: b, type: single_window, inner: {type: single_error_lut}}
-                  - {id: x, type: xor}
-                edges:
-                  - {from: input, to: b}
-                  - {from: b, to: x.a}
-                  - {from: b, to: x.b}
-                  - {from: x, to: output}
+          type: ensemble
+          join_strategy: deadline
+          join_params: {deadline_us: 200000, soft_stop_before_us: 100000}
+          members:
+            - nodes:
+                - {id: a, type: single_window, inner: {type: single_error_lut}}
+              edges: [{from: input, to: a}, {from: a, to: output}]
+            - nodes:
+                - {id: b, type: single_window, inner: {type: single_error_lut}}
+                - {id: x, type: xor}
+              edges:
+                - {from: input, to: b}
+                - {from: b, to: x.a}
+                - {from: b, to: x.b}
+                - {from: x, to: output}
 )"));
   const auto &node = multi_config.decoders.at(0).task_graph->nodes.at(0);
   ASSERT_TRUE(node.ensemble.has_value());
-  EXPECT_TRUE(node.type.empty());
+  EXPECT_EQ(node.type, "ensemble");
   EXPECT_EQ(node.ensemble->members.size(), 2u);
   EXPECT_EQ(node.ensemble->join_strategy, "deadline");
   EXPECT_EQ(node.ensemble->join_params.map().get<std::size_t>("deadline_us"),
@@ -3052,16 +3052,16 @@ decoders:
           residual_from: parity_check
           inner: {type: single_error_lut}
         - id: ens
-          ensemble:
-            join_strategy: deadline
-            join_params: {deadline_us: 500000}
-            members:
-              - nodes:
-                  - {id: a, type: single_window, window_size: 5, push_candidates: true, cancellable: true, inner: {type: single_error_lut}}
-                edges: [{from: input, to: a}]
-              - nodes:
-                  - {id: b, type: single_window, window_size: 5, inner: {type: multi_error_lut, lut_error_depth: 2}}
-                edges: [{from: input, to: b}, {from: b, to: output}]
+          type: ensemble
+          join_strategy: deadline
+          join_params: {deadline_us: 500000}
+          members:
+            - nodes:
+                - {id: a, type: single_window, window_size: 5, push_candidates: true, cancellable: true, inner: {type: single_error_lut}}
+              edges: [{from: input, to: a}]
+            - nodes:
+                - {id: b, type: single_window, window_size: 5, inner: {type: multi_error_lut, lut_error_depth: 2}}
+              edges: [{from: input, to: b}, {from: b, to: output}]
         - id: combine
           type: xor
       edges:
@@ -3089,11 +3089,11 @@ decoders:
   // the server, which only streams, rejects the graph.
   auto raw = cfg::multi_decoder_config::from_yaml_str(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: first
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          type: ensemble
+          join_strategy: first
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+              edges: [{from: input, to: a}, {from: a, to: output}]
 )"));
   EXPECT_NE(cfg::configure_decoders(raw), 0);
   cfg::finalize_decoders();
@@ -3114,7 +3114,7 @@ TEST(DecodingTaskGraph, EnsembleYamlRejectsLoweredKindsAndBadPatterns) {
   rejects(ensemble_yaml(R"(
         - {id: fan, type: ensemble_fanout}
 )"),
-          "write an 'ensemble' entry instead");
+          "write an 'ensemble' node instead");
   // Nor is a selection strategy a decoder type.
   rejects(ensemble_yaml(R"(
         - {id: w, type: single_window, inner: {type: deadline, deadline_us: 5}}
@@ -3122,39 +3122,39 @@ TEST(DecodingTaskGraph, EnsembleYamlRejectsLoweredKindsAndBadPatterns) {
           "no parameter schema is registered");
   rejects(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: best
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          type: ensemble
+          join_strategy: best
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+              edges: [{from: input, to: a}, {from: a, to: output}]
 )"),
           "not a registered selection strategy");
+  // The ensemble's keys belong to its type alone.
   rejects(ensemble_yaml(R"(
         - id: ens
           type: xor
-          ensemble:
-            join_strategy: first
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          join_strategy: first
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+              edges: [{from: input, to: a}, {from: a, to: output}]
 )"),
-          "takes no type");
+          "Unknown key");
   rejects(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: deadline
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          type: ensemble
+          join_strategy: deadline
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+              edges: [{from: input, to: a}, {from: a, to: output}]
 )"),
           "deadline_us");
   // Member wiring is the builder's to check.
   auto unwired = cfg::multi_decoder_config::from_yaml_str(ensemble_yaml(R"(
         - id: ens
-          ensemble:
-            join_strategy: first
-            members:
-              - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
+          type: ensemble
+          join_strategy: first
+          members:
+            - nodes: [{id: a, type: single_window, inner: {type: single_error_lut}}]
 )"));
   try {
     cudaq::qec::decoding::host::build_task_graph(unwired.decoders.at(0));
@@ -10936,6 +10936,44 @@ TEST(DecodingTaskGraph, AsyncStreamingDestructorJoinsPendingDecode) {
   EXPECT_NO_THROW(destroy.get());
 } // end - AsyncStreamingDestructorJoinsPendingDecode
 
+// A pool worker that fails before it holds a record, here pinning itself to
+// a device that does not exist, stops the session; FINAL rethrows its error
+// rather than wait for a result that never comes. A reset from a watchdog
+// unblocks a hung FINAL so the test fails instead of hanging.
+TEST(DecodingTaskGraph, AsyncFinalRethrowsAWorkerFailureOutsideARecord) {
+  auto h = sparse_binary_matrix::from_nested_csr(1, 1, {{0}});
+  auto graph = std::make_unique<decoding_task_graph>(
+      std::make_unique<pinned_decoder>(h, /*device=*/1 << 20),
+      std::vector<std::vector<uint32_t>>{{0}},
+      std::vector<std::vector<uint32_t>>{{0}},
+      task_graph_options{.async_streaming = true});
+  const uint8_t zero = 0;
+  std::string error;
+  std::atomic<bool> done{false};
+  std::atomic<bool> rescued{false};
+  struct joiner {
+    std::thread t;
+    ~joiner() { t.join(); }
+  } watchdog{std::thread([&] {
+    for (int i = 0; i < 500 && !done.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!done.load()) {
+      rescued = true;
+      graph->reset_decoder();
+    }
+  })};
+  try {
+    graph->enqueue_syndrome(&zero, 1, round_type::FINAL);
+    (void)graph->streaming_result();
+  } catch (const std::exception &e) {
+    error = e.what();
+  }
+  done = true;
+
+  EXPECT_FALSE(rescued) << "FINAL hung until a reset";
+  EXPECT_NE(error.find("out of range"), std::string::npos) << error;
+}
+
 TEST(DecodingTaskGraph, CudaDeviceIdIsNulloptWhenNoNodeIsPinned) {
   auto g = make_single_node_graph(/*device=*/-1);
   EXPECT_FALSE(g->cuda_device_id().has_value());
@@ -12662,6 +12700,13 @@ public:
   bool enqueue(const uint8_t *syndrome, std::size_t len, round_type) override {
     const auto record = records_++;
     probe_->log(id_, record);
+    if (mode_ == "wide") {
+      probe_->log(id_ + ".len", len); // how many rounds this record held
+      // Rounds admitted together share a buffer: each starts where the last
+      // ended.
+      probe_->log(id_ + ".joined", syndrome && syndrome == last_end_);
+      last_end_ = syndrome ? syndrome + len : nullptr;
+    }
     probe_->maybe_block(id_, record);
     value_out_.get<logical_outcome>().bits[0] =
         syndrome && len ? syndrome[0] : uint8_t{0};
@@ -12703,6 +12748,8 @@ public:
   }
   const uint8_t *corrections() const override { return &correction_; }
   void clear_corrections() override { correction_ = 0; }
+  // Whether the node takes raw measurements: `source`, or `wide`.
+  bool raw() const { return mode_ == "source" || mode_ == "wide"; }
   void reset_streaming_state() override {
     probe_->resetting();
     if (probe_->reset_fails(id_))
@@ -12712,25 +12759,28 @@ public:
     received_ = 0;
     records_ = 0;
     skipped_ = 0;
+    last_end_ = nullptr;
   }
-  std::size_t num_msyn_per_decode() const override {
-    return mode_ == "source" ? 1 : 0;
-  }
+  std::size_t num_msyn_per_decode() const override { return raw() ? 1 : 0; }
   std::size_t num_msyn_per_round() const override { return 1; }
   std::size_t num_observables() const override { return 1; }
+  // `wide` takes up to 64 rounds a record, so rounds admitted together
+  // fit in one.
   std::optional<std::size_t> raw_chunk_limit() const override {
+    if (mode_ == "wide")
+      return 64;
     return mode_ == "source" ? std::optional<std::size_t>{1} : std::nullopt;
   }
   bool supports_raw_streaming_input(std::size_t slot) const override {
-    return mode_ == "source" && slot == 0;
+    return raw() && slot == 0;
   }
   bool supports_streaming_input(std::size_t slot) const override {
-    return mode_ != "source" && slot < (joins() ? 2u : 1u);
+    return !raw() && slot < (joins() ? 2u : 1u);
   }
   std::optional<window_spec> derive_streaming_schedule(
       std::size_t output_slot,
       const std::vector<input_schedule> &inputs) const override {
-    if (mode_ == "source")
+    if (raw())
       return streaming_task_graph_node::derive_streaming_schedule(output_slot,
                                                                   inputs);
     if (output_slot != 0 || inputs.empty())
@@ -12747,7 +12797,7 @@ public:
   }
   bool accepts_input_type(std::size_t slot,
                           edge_value_type type) const override {
-    if (mode_ == "source")
+    if (raw())
       return slot == 0 && type == edge_value_type("measurement_results");
     return supports_streaming_input(slot) &&
            type == edge_value_type("logical_outcome");
@@ -12757,7 +12807,7 @@ public:
   }
   void execute_indexed(const std::vector<edge_value> &inputs,
                        std::vector<edge_value> &outputs) const override {
-    outputs[0] = mode_ == "source" ? value_out_ : inputs[0];
+    outputs[0] = raw() ? value_out_ : inputs[0];
   }
   std::vector<std::string> inputs() const override {
     return joins() ? std::vector<std::string>{"a", "b"}
@@ -12781,6 +12831,7 @@ private:
   std::size_t received_ = 0;
   std::size_t skipped_ = 0;
   std::size_t records_ = 0;
+  const uint8_t *last_end_ = nullptr; ///< where `wide`'s last round ended
   uint8_t pending_[2] = {0, 0};
   edge_value value_out_;
 };
@@ -12920,6 +12971,105 @@ TEST(DecodingTaskGraph, ConcurrentRecordsPipelineUpstreamNodes) {
   // Every record flips D's bit, so five records leave it set.
   EXPECT_EQ(result.values[0], 1u);
 }
+
+// Rounds queued while the graph is behind are admitted together: with B
+// stalled, a burst of tagged rounds waits in the queue, and the coordinator
+// takes several as one record. W still receives them one round at a time,
+// in order, and each counts as a completed operation, as synchronously.
+TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
+  if (std::thread::hardware_concurrency() < 3)
+    GTEST_SKIP() << "pipelining needs at least three CPU threads";
+  ASSERT_TRUE(pipeline_probe_registered);
+  constexpr std::size_t rounds = 40;
+  std::size_t joined = 0;
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  active_pipeline_probe = probe;
+  nodes.push_back(pipeline_node("W", "wide"));
+  nodes.push_back(pipeline_node("B", "pass"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "W", "input"},
+       {"W", "output", "B", "input"},
+       {"B", "output", "output", "input"}},
+      {.async_streaming = true, .async_queue_capacity = 64});
+  for (int shot = 0; shot < 5 && joined == 0; ++shot) {
+    SCOPED_TRACE("shot " + std::to_string(shot));
+    const auto records = pipeline_records(rounds);
+    const auto lengths_before = probe->records("W.len").size();
+    const auto joined_before = probe->records("W.joined").size();
+    graph->reset_decoder();
+    probe->block_on("B", 0); // B numbers each shot's records from 0
+    for (std::size_t i = 0; i + 1 < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+    ASSERT_TRUE(probe->wait_until_blocking());
+    probe->release();
+    EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+    const auto result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    const auto lengths = probe->records("W.len");
+    const auto joins = probe->records("W.joined");
+    EXPECT_EQ(lengths.size() - lengths_before, rounds);
+    for (std::size_t k = lengths_before; k < lengths.size(); ++k)
+      EXPECT_EQ(lengths[k], 1u);
+    for (std::size_t k = joined_before; k < joins.size(); ++k)
+      joined += joins[k];
+    EXPECT_EQ(result.completed_operations, rounds);
+  }
+  EXPECT_GT(joined, 0u) << "no shot admitted queued rounds together";
+} // end - TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether)
+
+// By default a producer may run 32 rounds ahead of a stalled graph, more
+// than its 16 record contexts, without waiting, and then waits: the queue
+// holds rounds, not contexts, and bounds how far behind a FINAL can be.
+// Released, the graph takes every round, in order.
+TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue) {
+  if (std::thread::hardware_concurrency() < 3)
+    GTEST_SKIP() << "pipelining needs at least three CPU threads";
+  ASSERT_TRUE(pipeline_probe_registered);
+  constexpr std::size_t ahead = 32; // the default async_queue_capacity
+  constexpr std::size_t rounds = ahead + 2;
+  const auto records = pipeline_records(rounds);
+  std::size_t received = 0;
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  task_graph_options options;
+  active_pipeline_probe = probe;
+  options.async_streaming = true;
+  ASSERT_EQ(options.async_queue_capacity, ahead);
+  nodes.push_back(pipeline_node("W", "wide"));
+  nodes.push_back(pipeline_node("B", "pass"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "W", "input"},
+       {"W", "output", "B", "input"},
+       {"B", "output", "output", "input"}},
+      options);
+  probe->block_on("B", 0);
+  auto producer = std::async(std::launch::async, [&] {
+    for (std::size_t i = 0; i < ahead; ++i)
+      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+  });
+  const bool ran_ahead =
+      producer.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  auto beyond = std::async(std::launch::async, [&] {
+    graph->enqueue_syndrome(&records[ahead], 1, round_type::BULK);
+  });
+  const bool waited = beyond.wait_for(std::chrono::milliseconds(200)) ==
+                      std::future_status::timeout;
+  probe->release();
+  producer.get();
+  beyond.get();
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  EXPECT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::complete);
+  for (const auto len : probe->records("W.len"))
+    received += len;
+
+  EXPECT_TRUE(ran_ahead) << "the producer waited before filling the queue";
+  EXPECT_TRUE(waited) << "the producer ran past a full queue";
+  EXPECT_EQ(received, rounds);
+} // end - TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue)
 
 TEST(DecodingTaskGraph, DispatcherParksWhileRecordsAreBlocked) {
   if (std::thread::hardware_concurrency() < 3)
@@ -13224,6 +13374,8 @@ struct index_fire {
 };
 static std::mutex index_fires_mutex;
 static std::vector<index_fire> index_fires;
+/// Called with k as each fire of a `join` starts, when set.
+static std::function<void(std::int64_t)> index_fire_hook;
 
 /// Indexed one-byte probes. `tag` relays its input and publishes with the
 /// index of its own fire ordinal, and publishes nothing from `limit` on.
@@ -13269,6 +13421,8 @@ public:
             const std::vector<const edge_value *> &inputs) override {
     const int a = inputs[0]->get<logical_outcome>().bits[0];
     const int b = inputs[1] ? inputs[1]->get<logical_outcome>().bits[0] : -1;
+    if (index_fire_hook)
+      index_fire_hook(k);
     {
       std::lock_guard<std::mutex> lock(index_fires_mutex);
       index_fires.push_back({k, a, b});
@@ -14505,6 +14659,122 @@ TEST(DecodingTaskGraph, IndexedJoinGrowsAndSaysSoOnce) {
       << warnings[0];
 }
 
+// A join with no edge back into itself resolves FINAL's last instances while
+// its earlier fires still run: R publishes up to index 8, so J[9] has a but
+// never b, and the flush fires it with b absent. J[8] holds its fire until
+// J[9]'s starts, which happens only if the flush does not wait for J[8].
+TEST(DecodingTaskGraph, IndexedFlushOverlapsEarlierFires) {
+  if (std::thread::hardware_concurrency() < 4)
+    GTEST_SKIP() << "overlap needs at least four CPU threads";
+  ASSERT_TRUE(index_probe_registered);
+  constexpr std::int64_t last_with_b = 8; // R publishes indices 0..7
+  const std::vector<uint8_t> records = {1, 0, 1, 1, 0, 0, 1, 0, 1, 1};
+  std::mutex mutex;
+  std::condition_variable started;
+  bool terminal_started = false;
+  bool overlapped = false;
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  index_fire_hook = [&](std::int64_t k) {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (k == last_with_b + 1) {
+      terminal_started = true;
+      started.notify_all();
+    } else if (k == last_with_b) {
+      overlapped = started.wait_for(lock, std::chrono::seconds(2),
+                                    [&] { return terminal_started; });
+    }
+  };
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("R", "tag", last_with_b));
+  nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, /*copies=*/2));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      // R's branch first: within a record, a later sibling branch waits for
+      // an earlier one it meets, so T's, which may hold J[8], must not hold
+      // R back from ending its shot.
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "R", "input"},
+       {"A", "output", "T", "input"},
+       {"T", "output", "J", "a"},
+       {"R", "output", "J", "b", /*index_offset=*/-1},
+       {"J", "output", "output", "input"}},
+      {.async_streaming = true, .async_queue_capacity = 16});
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  const auto result = graph->streaming_result();
+  index_fire_hook = nullptr;
+
+  EXPECT_TRUE(overlapped) << "J[9] waited for J[8] to finish";
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    ASSERT_EQ(index_fires.size(), records.size());
+    for (const auto &fire : index_fires)
+      if (fire.k == last_with_b + 1)
+        EXPECT_EQ(fire.b, -1) << "J[9]'s b should be absent";
+  }
+} // end - TEST(DecodingTaskGraph, IndexedFlushOverlapsEarlierFires)
+
+// Decodes leave a worker for everything else: with two workers and J's two
+// copies held mid-fire, T still takes every record, rather than waiting for
+// a fire to finish; released, the shot completes.
+TEST(DecodingTaskGraph, FiresLeaveAWorkerForOtherEvents) {
+  ASSERT_TRUE(index_probe_registered);
+  const std::vector<uint8_t> records = {1, 0, 1, 1, 0, 0, 1, 0, 1, 1};
+  std::mutex mutex;
+  std::condition_variable released;
+  bool release = false;
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  index_fire_hook = [&](std::int64_t) {
+    std::unique_lock<std::mutex> lock(mutex);
+    released.wait_for(lock, std::chrono::seconds(10), [&] { return release; });
+  };
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("R", "tag"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, /*copies=*/2));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "R", "input"},
+       {"A", "output", "T", "input"},
+       {"T", "output", "J", "a"},
+       {"R", "output", "J", "b", /*index_offset=*/-1},
+       {"J", "output", "output", "input"}},
+      {.async_streaming = true,
+       .async_queue_capacity = 16,
+       .async_num_workers = 2});
+  for (std::size_t i = 0; i + 1 < records.size(); ++i)
+    graph->enqueue_syndrome(&records[i], 1);
+  const bool took_every_record = probe->wait_for_count("T", records.size() - 1);
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    release = true;
+  }
+  released.notify_all();
+  EXPECT_TRUE(graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL));
+  const auto result = graph->streaming_result();
+  index_fire_hook = nullptr;
+
+  EXPECT_TRUE(took_every_record) << "T waited for a held fire";
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+  EXPECT_EQ(result.values[0], expected_join_parity(records, records.size()));
+} // end - TEST(DecodingTaskGraph, FiresLeaveAWorkerForOtherEvents)
+
 // ---------------------------------------------------------------------------
 // Staged outputs
 // ---------------------------------------------------------------------------
@@ -14898,6 +15168,7 @@ TEST(ParallelWindowLowering, RejectsAPatternInsideAnEnsemble) {
   spec.members.push_back(std::move(member));
   spec.join_strategy = "first";
   ensemble.id = "E";
+  ensemble.kind = "ensemble";
   ensemble.ensemble = std::move(spec);
   nodes.push_back(std::move(ensemble));
   expect_lowering_error(
@@ -15099,9 +15370,9 @@ const bool relay_pattern_registered = [] {
   spec.name = "test_only_relay";
   spec.requires_decoder = false;
   spec.requires_dem = false;
-  pattern.lower = [](task_graph_node_config cfg,
-                     std::vector<task_graph_node_config> &out,
-                     std::vector<task_graph_edge> &edges) {
+  pattern.lower =
+      [](task_graph_node_config cfg, std::vector<task_graph_node_config> &out,
+         std::vector<task_graph_edge> &edges) -> node_pattern::wiring {
     const std::string inner = cfg.id + ".inner";
     relay_lowered_ids().push_back(cfg.id);
     for (auto &e : edges) {
@@ -15111,6 +15382,7 @@ const bool relay_pattern_registered = [] {
         e.from_node = inner;
     }
     out.push_back(rep5_streaming_node(inner));
+    return {};
   };
   register_pattern_kind(std::move(spec), {}, std::move(pattern));
   return true;
@@ -15155,6 +15427,7 @@ TEST(PatternKind, IsRejectedInsideAnEnsemble) {
   spec.members.push_back(std::move(member));
   spec.join_strategy = "first";
   ensemble.id = "E";
+  ensemble.kind = "ensemble";
   ensemble.ensemble = std::move(spec);
   nodes.push_back(std::move(ensemble));
   relay_lowered_ids().clear();
@@ -15181,9 +15454,9 @@ TEST(PatternKind, RegistrationReplacesTheOtherForm) {
   };
   spec.name = name;
   EXPECT_THROW(register_pattern_kind(spec, {}, pattern), std::invalid_argument);
-  pattern.lower = [](task_graph_node_config,
-                     std::vector<task_graph_node_config> &,
-                     std::vector<task_graph_edge> &) {};
+  pattern.lower =
+      [](task_graph_node_config, std::vector<task_graph_node_config> &,
+         std::vector<task_graph_edge> &) -> node_pattern::wiring { return {}; };
 
   register_pattern_kind(spec, {}, pattern);
   EXPECT_NE(find_node_pattern(name), nullptr);

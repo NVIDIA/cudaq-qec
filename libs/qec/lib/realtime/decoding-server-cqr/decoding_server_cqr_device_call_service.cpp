@@ -54,7 +54,6 @@ public:
     table_.entries = const_cast<cudaq_function_entry_t *>(entries);
     table_.count = count;
     table_.deviceId = kHostDispatchDeviceId;
-    table_.mailbox = nullptr;
   }
 
   const DeviceCallDispatchTable &dispatchTable() const noexcept override {

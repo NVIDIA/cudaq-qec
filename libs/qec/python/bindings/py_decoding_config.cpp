@@ -318,9 +318,9 @@ void bindDecodingConfig(nb::module_ &mod) {
 
   nb::class_<ensemble_spec>(
       mod_cfg, "task_graph_ensemble",
-      "An ensemble pattern written in place of a node (task_graph_node."
-      "ensemble): members raced against each other, one answer kept by "
-      "join_strategy ('first', 'deadline').")
+      "The members and join of a task_graph_node of type 'ensemble' "
+      "(task_graph_node.ensemble): members raced against each other, one "
+      "answer kept by join_strategy ('first', 'deadline').")
       .def(nb::init<>())
       .def_rw("members", &ensemble_spec::members)
       .def_rw("join_strategy", &ensemble_spec::join_strategy)
@@ -479,7 +479,7 @@ void bindDecodingConfig(nb::module_ &mod) {
               "Explicit column ranges this node owns. Parsed and emitted; "
               "not yet honored at construction.")
       .def_rw("ensemble", &task_graph_spec::node_spec::ensemble,
-              "An ensemble pattern in place of a node; `type` stays empty and "
+              "The members and join of a node of type 'ensemble', for which "
               "the node fields are ignored.")
       .def("resolved_kind", &task_graph_spec::node_spec::resolved_kind,
            "The node kind this node builds: the canonical name of the kind "

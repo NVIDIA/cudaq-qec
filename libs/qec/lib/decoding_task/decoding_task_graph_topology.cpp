@@ -28,12 +28,19 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <unordered_set>
+#include <utility>
 
 namespace cudaq::qec {
 
 namespace {
+
+// Record contexts an asynchronous graph keeps, its records in flight. Each
+// takes up to a chunk of queued rounds, a layer period for a windowed graph,
+// so 16 cover several hundred rounds.
+constexpr std::size_t async_record_contexts = 16;
 
 /// Every type a node's ports name must be registered: a wire into an
 /// unregistered one would fail as a bare type mismatch, and an edge_value
@@ -426,11 +433,11 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
   ensemble_wiring wiring;
   const std::string id = wiring.id = cfg.id;
   const std::string what = "from_topology: ensemble '" + id + "'";
-  auto spec = std::move(*cfg.ensemble);
   if (id.empty())
     throw std::invalid_argument("from_topology: every node needs an id");
-  if (spec.members.empty())
+  if (!cfg.ensemble || cfg.ensemble->members.empty())
     throw std::invalid_argument(what + " has no members");
+  auto spec = std::move(*cfg.ensemble);
   if (spec.join_strategy.empty())
     throw std::invalid_argument(what + " names no join_strategy");
   const std::string fan = wiring.fan = id + ".fanout",
@@ -472,11 +479,9 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
     if (m.nodes.empty())
       throw std::invalid_argument(member + " has no nodes");
     for (auto &n : m.nodes) {
-      if (n.ensemble)
-        throw std::invalid_argument(member + " nests an ensemble, which is "
-                                             "not supported yet");
-      // Member nodes are not lowered, and parallel_window's ingest must be
-      // fed by measurements alone, never by a fan-out.
+      // Member nodes are not lowered: an ensemble does not nest yet, and
+      // parallel_window's ingest must be fed by measurements alone, never by
+      // a fan-out.
       if (find_node_pattern(n.kind))
         throw std::invalid_argument(
             member + " has " + find_task_graph_node_kind(n.kind)->name + " '" +
@@ -537,18 +542,18 @@ ensemble_wiring lower_ensemble(task_graph_node_config cfg,
   return wiring;
 }
 
-/// Rewrite every pattern entry of `nodes`, an ensemble or a node of a
-/// pattern kind, into plain nodes, in place, so the result is in topological
-/// order whenever the input was. Only ensembles need wiring once built. The
+/// Rewrite every node of a pattern kind in `nodes` into plain nodes, in
+/// place, so the result is in topological order whenever the input was.
+/// Returns the wiring each pattern asks for once its nodes are built. The
 /// caller holds the registry lock, which keeps each lowering registered
 /// while it runs.
-std::vector<ensemble_wiring>
+std::vector<node_pattern::wiring>
 lower_patterns(std::vector<task_graph_node_config> &nodes,
                std::vector<task_graph_edge> &edges) {
-  std::vector<ensemble_wiring> wirings;
+  std::vector<node_pattern::wiring> wirings;
   std::vector<task_graph_node_config> lowered;
   if (std::none_of(nodes.begin(), nodes.end(), [](const auto &cfg) {
-        return cfg.ensemble.has_value() || find_node_pattern(cfg.kind);
+        return find_node_pattern(cfg.kind) != nullptr;
       }))
     return wirings;
   // A lone pattern gets the single-node wiring before it stops being one
@@ -558,20 +563,17 @@ lower_patterns(std::vector<task_graph_node_config> &nodes,
              {nodes[0].id, "output", "output", "input"}};
   lowered.reserve(nodes.size());
   for (auto &cfg : nodes) {
-    const node_pattern *pattern =
-        cfg.ensemble ? nullptr : find_node_pattern(cfg.kind);
+    const node_pattern *pattern = find_node_pattern(cfg.kind);
     // A pattern's nodes take its id as their prefix, so a reserved one is
     // named before lowering hides it.
-    if ((cfg.ensemble || pattern) &&
+    if (pattern &&
         (cfg.id == "measurements" || cfg.id == "dets" || cfg.id == "output"))
       throw std::invalid_argument("from_topology: node id '" + cfg.id +
                                   "' is reserved for a synthetic endpoint");
-    if (cfg.ensemble)
-      wirings.push_back(lower_ensemble(std::move(cfg), lowered, edges));
-    else if (pattern)
-      pattern->lower(std::move(cfg), lowered, edges);
-    else
+    if (!pattern)
       lowered.push_back(std::move(cfg));
+    else if (auto wire = pattern->lower(std::move(cfg), lowered, edges))
+      wirings.push_back(std::move(wire));
   } // end - for(cfg)
   nodes = std::move(lowered);
   return wirings;
@@ -698,6 +700,27 @@ void wire_patterns(const std::vector<ensemble_wiring> &wirings,
   edges.insert(edges.begin(), handles.begin(), handles.end());
 }
 
+// Its members and join live in the config's `ensemble` field rather than
+// its parameters, so the kind registers none.
+const bool ensemble_registered = [] {
+  task_graph_node_kind_spec spec;
+  node_pattern pattern;
+  spec.name = "ensemble";
+  spec.requires_decoder = spec.requires_dem = false;
+  pattern.lower = [](task_graph_node_config cfg,
+                     std::vector<task_graph_node_config> &out,
+                     std::vector<task_graph_edge> &edges) {
+    return [w = lower_ensemble(std::move(cfg), out, edges)](
+               const std::vector<std::string> &ids,
+               std::vector<std::unique_ptr<task_graph_node>> &built,
+               std::vector<task_graph_edge> &edges) {
+      wire_patterns({w}, ids, built, edges);
+    };
+  };
+  register_pattern_kind(std::move(spec), {}, std::move(pattern));
+  return true;
+}();
+
 /// The windows a windowed topology's nodes read: one template per ingest
 /// node and every variant of every layer, built once for the graph as
 /// validation checks them. Nodes keep shared handles to what they read, so
@@ -788,6 +811,16 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
     require_registered_port_types(*i->nodes[n], i->node_ids[n]);
   i->compile_wires();
   if (options.async_streaming) {
+    std::size_t pooled_fires = 0;
+    bool indexed = false;
+    std::size_t fire_slots = 0;
+    // Fires that may run at once: every copy of a pooled node, and of an
+    // indexed one even when it has one, since records pipeline.
+    for (const auto &entry : i->streaming_nodes) {
+      if (entry.replicas.size() > 1 || !entry.indexed.empty())
+        pooled_fires += entry.replicas.size();
+      indexed = indexed || !entry.indexed.empty();
+    }
     i->prepare_async_streaming(options.async_queue_capacity, i->n_round,
                                options.async_coordinator_cpu,
                                options.async_spin_pause_iters);
@@ -799,6 +832,14 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
         throw std::invalid_argument(
             "task_graph_options: async_num_workers must be at least 1");
       i->pool_width = *options.async_num_workers;
+    } else if (indexed) {
+      // Indexed fires leave one worker for other events: one more than the
+      // fires.
+      i->pool_width =
+          std::max(i->pool_width,
+                   std::min<std::size_t>(
+                       pooled_fires + 1,
+                       std::max(1u, std::thread::hardware_concurrency())));
     }
     // The coordinator spins, so a worker on its core is an error; two
     // workers on one core can be deliberate, so that is a warning.
@@ -824,22 +865,25 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
                     i->pool_worker_cpus.size(), i->pool_width);
       i->pool_width = i->pool_worker_cpus.size();
     }
-    std::size_t pooled_fires = 0;
-    for (const auto &entry : i->streaming_nodes)
-      if (entry.replicas.size() > 1)
-        pooled_fires += entry.replicas.size();
-    if (pooled_fires > i->pool_width)
-      CUDA_QEC_WARN("task graph: {} fire-pool copies but {} async workers; "
+    // Indexed fires leave one worker for other events.
+    fire_slots =
+        indexed && i->pool_width > 1 ? i->pool_width - 1 : i->pool_width;
+    if (pooled_fires > fire_slots)
+      CUDA_QEC_WARN("task graph: {} node copies may fire at once but {} "
+                    "async workers{}; "
                     "some copies can never run concurrently",
-                    pooled_fires, i->pool_width);
+                    pooled_fires, i->pool_width,
+                    indexed ? ", one kept for other events" : "");
   }
   // Built once, after the options it depends on have been validated. The
   // parked coordinator cannot start a session before assembly returns. An
-  // asynchronous graph gets one record context per queue slot, so every
-  // accepted record is admitted at once.
+  // asynchronous graph's queue holds enqueues, which are cheap; its record
+  // contexts, each with an event store and join-table share, are fewer.
   if (i->nodes.size() > 1 || !i->streaming_nodes.empty())
     i->prepare_event_runtime(
-        options.async_streaming ? options.async_queue_capacity : 1,
+        options.async_streaming
+            ? std::min(options.async_queue_capacity, async_record_contexts)
+            : 1,
         /*dispatcher_thread=*/options.async_streaming);
   return std::unique_ptr<decoding_task_graph>(
       new decoding_task_graph(std::move(i)));
@@ -1029,7 +1073,8 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
     i->nodes.push_back(std::move(node));
     i->node_replicas.push_back(std::move(replicas));
   }
-  wire_patterns(patterns, i->node_ids, i->nodes, edges);
+  for (const auto &wire : patterns)
+    wire(i->node_ids, i->nodes, edges);
 
   if (infer_edges) {
     const auto outs = i->nodes[0]->outputs();

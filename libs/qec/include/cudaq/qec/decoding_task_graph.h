@@ -176,13 +176,14 @@ task_graph_node_params_schema(const std::string &type) {
 
 struct task_graph_node_config;
 
-/// An ensemble pattern: member subgraphs run concurrently, one answer
-/// kept. Written in place of a node (`task_graph_node_config::ensemble`) and
-/// lowered by from_topology() into an `ensemble_fanout`, `ensemble_join`,
-/// and the members. Every member node input that accepts a `%candidate_sink` is
-/// wired to the ensemble's candidate sink and every one that accepts a
-/// `cancellation_token` to its cancellation token. A member whose edges reach
-/// `output` (a `logical_outcome`) has that value pushed into the sink.
+/// The members and join of a node of kind `ensemble`
+/// (`task_graph_node_config::ensemble`): member subgraphs run concurrently and
+/// one answer is kept. from_topology() lowers the node into an
+/// `ensemble_fanout`, `ensemble_join`, and the members. Every member node input
+/// that accepts a `%candidate_sink` is wired to the ensemble's candidate sink
+/// and every one that accepts a `cancellation_token` to its cancellation token.
+/// A member whose edges reach `output` (a `logical_outcome`) has that value
+/// pushed into the sink.
 ///
 /// The pattern node has one input, `input`, and one output, `output`. Whatever
 /// feeds `input` (a shot, or a streaming producer's windows of measurements or
@@ -257,8 +258,8 @@ struct task_graph_node_config {
   /// neither of which is recoverable from D and O.
   std::unique_ptr<decoder> decoder_instance;
 
-  /// When set, this entry is an ensemble pattern rather than a node: `kind` and
-  /// the fields above are ignored, and from_topology() lowers it in place.
+  /// The members and join of a node of kind `ensemble`, which from_topology()
+  /// lowers in place; the fields above are ignored for it.
   std::optional<task_graph_ensemble_spec> ensemble;
 };
 
@@ -296,7 +297,8 @@ struct task_graph_output_progress {
 /// update. Generation alone must therefore never be used as a readiness test.
 /// `result_revision` advances whenever any output or graph status changes.
 /// `completed_operations` counts public enqueue operations that advanced the
-/// aggregate result, even when several complete before the next read.
+/// aggregate result, even when several complete before the next read. An
+/// asynchronous graph counts them as a synchronous one would.
 /// Only reset_decoder() advances shot_epoch.
 struct task_graph_streaming_result {
   std::uint64_t shot_epoch = 0;
@@ -340,9 +342,9 @@ struct task_graph_streaming_result {
 /// serialised -- an overlapping call throws `std::logic_error`. An
 /// async-streaming graph instead has one internal coordinator that dispatches
 /// records to pool workers; its public streaming calls provide copied input
-/// and coherent snapshots. Records overlap, up to `async_queue_capacity` at
-/// once, but each node still sees them in order and every value a record
-/// moves between nodes is buffered per record.
+/// and coherent snapshots. Records overlap, a bounded number at once, but each
+/// node still sees them in order and every value a record moves between nodes
+/// is buffered per record.
 class decoding_task_graph {
 public:
   /// Construct from an already-built decoder and D/O in nested-row form.

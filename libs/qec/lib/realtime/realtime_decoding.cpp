@@ -487,6 +487,7 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
 
   cudaq::qec::task_graph_node_config node;
   node.id = ns.id;
+  node.kind = ns.resolved_kind();
   if (ns.ensemble.has_value()) {
     // A pattern: translate its member nodes (each with the usual DEM fallback
     // and decoder handling) and hand the pattern itself to the builder, which
@@ -505,7 +506,6 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
     node.ensemble = std::move(spec);
     return node;
   }
-  node.kind = ns.resolved_kind();
   node.node_params = ns.node_params.map();
   node.max_in_flight = ns.max_in_flight;
   node.windows = ns.windows;

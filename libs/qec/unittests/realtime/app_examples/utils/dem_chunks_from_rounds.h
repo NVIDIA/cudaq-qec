@@ -248,7 +248,9 @@ inline cudaq::qec::dem_chunks_spec dem_chunks_from_rounds(
   for (std::size_t i = 0; i + 1 < chain.size(); ++i)
     spec.connections.push_back({chain[i], chain[i + 1]});
   spec.connections.push_back({chain[bulk_first], chain[bulk_first]});
-  printf("DEM chunks: %zu rounds before the repeating round, %zu after\n",
-         bulk_first, R - 1 - bulk_last);
+  // Standard error, so a caller's standard output stays machine-readable.
+  fprintf(stderr,
+          "DEM chunks: %zu rounds before the repeating round, %zu after\n",
+          bulk_first, R - 1 - bulk_last);
   return spec;
 }
