@@ -9,9 +9,9 @@ FROM $base_image AS deps
 ARG cuda_version=12.6
 
 LABEL org.opencontainers.image.description="Dev tools for building and testing CUDA-QX libraries"
-LABEL org.opencontainers.image.source="https://github.com/NVIDIA/cudaqx"
-LABEL org.opencontainers.image.title="cudaqx-dev"
-LABEL org.opencontainers.image.url="https://github.com/NVIDIA/cudaqx"
+LABEL org.opencontainers.image.source="https://github.com/NVIDIA/cudaq-qec"
+LABEL org.opencontainers.image.title="cudaq-qec-dev"
+LABEL org.opencontainers.image.url="https://github.com/NVIDIA/cudaq-qec"
 
 # Work around nvidia-container-toolkit 1.17.1 rejecting its own IMEX default
 ENV NVIDIA_IMEX_CHANNELS=""

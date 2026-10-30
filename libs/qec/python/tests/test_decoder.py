@@ -442,20 +442,48 @@ def test_decoder_different_matrix_sizes(matrix_shape, syndrome_size):
     assert np.all((0 <= result) & (result <= 1))
 
 
-# FIXME add this back
-# def test_decoder_error_handling():
-#     H = Tensor(create_test_matrix())
-#     decoder = qec.get_decoder('example_byod', H)
+FIXED_WIDTH_DECODERS = [
+    "single_error_lut", "multi_error_lut", "single_error_lut_example",
+    "pymatching"
+]
 
-#     # Test with incorrect syndrome size
-#     with pytest.raises(ValueError):
-#         wrong_syndrome = np.random.random(15).tolist()  # Wrong size
-#         decoder.decode(wrong_syndrome)
 
-#     # Test with invalid syndrome type
-#     with pytest.raises(TypeError):
-#         wrong_type_syndrome = "invalid"
-#         decoder.decode(wrong_type_syndrome)
+@pytest.mark.parametrize("name", FIXED_WIDTH_DECODERS)
+@pytest.mark.parametrize("length", [0, 1, 3])
+@pytest.mark.parametrize("as_numpy", [False, True])
+def test_decoder_rejects_wrong_syndrome_length(name, length, as_numpy):
+    H = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.uint8)
+    decoder = qec.get_decoder(name, H)
+    syndrome = [1.0] * length
+    if as_numpy:
+        syndrome = np.array(syndrome, dtype=np.float64)
+
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode(syndrome)
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode_async(syndrome).get()
+    batch = np.array([syndrome]) if as_numpy else [syndrome]
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode_batch(batch)
+
+    # The decoder stays usable after rejecting an input.
+    assert decoder.decode([0.0, 0.0]).converged
+
+
+@pytest.mark.parametrize("name", FIXED_WIDTH_DECODERS)
+def test_decoder_batch_rejects_ragged_rows(name):
+    H = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.uint8)
+    decoder = qec.get_decoder(name, H)
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode_batch([[0.0, 1.0], [1.0]])
+
+
+def test_decode_batch_wrong_width_uint8_issue_884():
+    H = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.uint8)
+    decoder = qec.get_decoder("single_error_lut", H)
+    decoder.decode_batch(np.array([[0, 0]], dtype=np.uint8))
+    with pytest.raises(ValueError, match="length 1 but this decoder expects 2"):
+        decoder.decode_batch(np.array([[0]], dtype=np.uint8))
 
 
 def test_decoder_reproducibility():
