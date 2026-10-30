@@ -115,6 +115,7 @@ Chunk types
 
 .. doxygenfunction:: cudaq::qec::dem_chunk_from_spec
 .. doxygenfunction:: cudaq::qec::dem_chunks_from_spec
+.. doxygenfunction:: cudaq::qec::memory_dem_chunks_from_decoder_inputs
 
 Stitch, close, and merge
 ------------------------
@@ -294,6 +295,8 @@ Graph
 .. doxygenfunction:: cudaq::qec::registered_edge_value_types
 
 .. doxygenenum:: cudaq::qec::task_graph_streaming_status
+
+.. doxygenenum:: cudaq::qec::task_graph_closure
 
 .. doxygenstruct:: cudaq::qec::task_graph_output_progress
     :members:

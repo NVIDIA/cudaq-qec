@@ -176,13 +176,14 @@ task_graph_node_params_schema(const std::string &type) {
 
 struct task_graph_node_config;
 
-/// An ensemble pattern: member subgraphs run concurrently, one answer
-/// kept. Written in place of a node (`task_graph_node_config::ensemble`) and
-/// lowered by from_topology() into an `ensemble_fanout`, `ensemble_join`,
-/// and the members. Every member node input that accepts a `%candidate_sink` is
-/// wired to the ensemble's candidate sink and every one that accepts a
-/// `cancellation_token` to its cancellation token. A member whose edges reach
-/// `output` (a `logical_outcome`) has that value pushed into the sink.
+/// The members and join of a node of kind `ensemble`
+/// (`task_graph_node_config::ensemble`): member subgraphs run concurrently and
+/// one answer is kept. from_topology() lowers the node into an
+/// `ensemble_fanout`, `ensemble_join`, and the members. Every member node input
+/// that accepts a `%candidate_sink` is wired to the ensemble's candidate sink
+/// and every one that accepts a `cancellation_token` to its cancellation token.
+/// A member whose edges reach `output` (a `logical_outcome`) has that value
+/// pushed into the sink.
 ///
 /// The pattern node has one input, `input`, and one output, `output`. Whatever
 /// feeds `input` (a shot, or a streaming producer's windows of measurements or
@@ -257,8 +258,8 @@ struct task_graph_node_config {
   /// neither of which is recoverable from D and O.
   std::unique_ptr<decoder> decoder_instance;
 
-  /// When set, this entry is an ensemble pattern rather than a node: `kind` and
-  /// the fields above are ignored, and from_topology() lowers it in place.
+  /// The members and join of a node of kind `ensemble`, which from_topology()
+  /// lowers in place; the fields above are ignored for it.
   std::optional<task_graph_ensemble_spec> ensemble;
 };
 
@@ -278,6 +279,8 @@ struct task_graph_output_progress {
   std::uint64_t coverage_begin_round = 0;
   std::uint64_t coverage_end_round = 0;
   task_graph_streaming_status status = task_graph_streaming_status::pending;
+  /// The shot's closure over the windows that reach this output, so far.
+  task_graph_closure closure = task_graph_closure::not_checked;
 };
 
 /// Graph-owned streaming result. `values` contains all named outputs at their
@@ -294,7 +297,8 @@ struct task_graph_output_progress {
 /// update. Generation alone must therefore never be used as a readiness test.
 /// `result_revision` advances whenever any output or graph status changes.
 /// `completed_operations` counts public enqueue operations that advanced the
-/// aggregate result, even when several complete before the next read.
+/// aggregate result, even when several complete before the next read. An
+/// asynchronous graph counts them as a synchronous one would.
 /// Only reset_decoder() advances shot_epoch.
 struct task_graph_streaming_result {
   std::uint64_t shot_epoch = 0;
@@ -307,6 +311,8 @@ struct task_graph_streaming_result {
   std::string error;
   std::vector<task_graph_output_progress> outputs;
   std::vector<uint8_t> values;
+  /// The outputs' closures combined: closed only when every output's is.
+  task_graph_closure closure = task_graph_closure::not_checked;
 };
 
 /// @brief Decode pipeline as a composable, testable object.
@@ -336,9 +342,9 @@ struct task_graph_streaming_result {
 /// serialised -- an overlapping call throws `std::logic_error`. An
 /// async-streaming graph instead has one internal coordinator that dispatches
 /// records to pool workers; its public streaming calls provide copied input
-/// and coherent snapshots. Records overlap, up to `async_queue_capacity` at
-/// once, but each node still sees them in order and every value a record
-/// moves between nodes is buffered per record.
+/// and coherent snapshots. Records overlap, a bounded number at once, but each
+/// node still sees them in order and every value a record moves between nodes
+/// is buffered per record.
 class decoding_task_graph {
 public:
   /// Construct from an already-built decoder and D/O in nested-row form.
@@ -554,7 +560,15 @@ public:
 
   /// Walk the node/edge DAG for one shot: detect(m) then execute each node.
   ///
-  /// Does not touch the streaming accumulation buffer.
+  /// Does not touch the streaming accumulation buffer, except in a graph
+  /// whose nodes decode only a stream, such as a windowed one: that graph
+  /// runs the shot through its stream, from a reset graph, in rounds with
+  /// FINAL on the last, and leaves it reset. `converged` is then whether
+  /// every window reaching the output converged.
+  ///
+  /// @throws std::logic_error if such a graph holds a shot in progress, or a
+  /// completed shot not yet consumed with clear_corrections(): run() would
+  /// discard it.
   ///
   /// @throws std::logic_error if more than one edge reaches `output`: a
   /// multi-output program reduced to its first output is a different program,
@@ -648,6 +662,9 @@ private:
   /// Wraps a compiled impl. Only assemble() calls this, so no graph can reach a
   /// caller without having gone through compile_wires().
   explicit decoding_task_graph(std::unique_ptr<impl> i);
+  /// run_all() through the stream, for a graph whose nodes decode only one.
+  std::vector<logical_outcome> run_streamed(const measurement_results &m,
+                                            const char *who) const;
 
   /// Finish a hand-filled impl: compile its string edges to wires and wrap it.
   /// The one path every builder ends on.

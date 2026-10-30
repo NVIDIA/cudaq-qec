@@ -63,6 +63,7 @@ public:
   /// A shot's partial rounds and publications carry across deliveries, so
   /// copies would split one stream.
   bool supports_fire_pool() const override { return false; }
+  bool has_one_shot_path() const override { return false; }
 
   /// Take one chunk of a record; true when it readied a publication, which
   /// is then current.
@@ -77,6 +78,9 @@ public:
   const edge_value *streaming_output(std::size_t slot) const override;
   /// The logical value's: the whole shot. Windows cover no commit.
   std::optional<committed_coverage> streaming_coverage() const override;
+  /// Every publication reports its coverage exactly: a window's carries no
+  /// delta and none, the logical value's the whole shot, folded at FINAL.
+  bool exact_interval_coverage() const override { return true; }
   /// The logical value, once published; zero otherwise.
   const uint8_t *corrections() const override { return corrections_.data(); }
   /// Zero the corrections; after the shot is flushed, start the next shot,
@@ -102,6 +106,9 @@ public:
   std::optional<std::size_t> raw_chunk_limit() const override {
     return core_.record_limit();
   }
+  std::size_t max_publications_per_delivery() const override {
+    return core_.max_ready_per_record();
+  }
   bool supports_raw_streaming_input(std::size_t slot) const override {
     return slot == 0;
   }
@@ -117,7 +124,7 @@ private:
   /// Copy every ready index's windows out of the ring, releasing the views.
   void collect();
   /// Throws std::logic_error, naming @p call, while publications wait.
-  void check_handed_over(const std::string &call) const;
+  void check_handed_over(const char *call) const;
   /// Forget the publications handed over.
   void clear_publications();
 

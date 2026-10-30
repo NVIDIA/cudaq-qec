@@ -487,6 +487,7 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
 
   cudaq::qec::task_graph_node_config node;
   node.id = ns.id;
+  node.kind = ns.resolved_kind();
   if (ns.ensemble.has_value()) {
     // A pattern: translate its member nodes (each with the usual DEM fallback
     // and decoder handling) and hand the pattern itself to the builder, which
@@ -505,7 +506,6 @@ cudaq::qec::task_graph_node_config translate_task_graph_node(
     node.ensemble = std::move(spec);
     return node;
   }
-  node.kind = ns.resolved_kind();
   node.node_params = ns.node_params.map();
   node.max_in_flight = ns.max_in_flight;
   node.windows = ns.windows;
@@ -823,6 +823,7 @@ int configure_decoders(
     return 4;
   }
   warn_async_graph_contention(decoder_configs);
+  warn_windowed_serving(config);
 
   // Seeded with the pass-through BULK row: a document declaring only a `final`
   // row must keep the id every producer sends.
@@ -1044,6 +1045,36 @@ void at(const std::string &where, Step &&step) {
 }
 
 } // namespace
+
+// Windowed decoders are found from their nodes' kinds, as built.
+void warn_windowed_serving(
+    const cudaq::qec::decoding::config::multi_decoder_config &config) {
+  const bool final_row = std::any_of(
+      config.syndrome_mapping.begin(), config.syndrome_mapping.end(),
+      [](const auto &row) { return row.type == "final"; });
+  for (const auto &cfg : config.decoders) {
+    if (!cfg.task_graph ||
+        std::none_of(cfg.task_graph->nodes.begin(), cfg.task_graph->nodes.end(),
+                     [](const node_spec &node) {
+                       return node.resolved_kind() == "decode_window" ||
+                              declares_windows(node);
+                     }))
+      continue;
+    if (!cfg.task_graph->options.async_streaming)
+      CUDA_QEC_WARN("decoder {} runs a windowed task graph synchronously, so "
+                    "its window decodes do not overlap later rounds; set "
+                    "async_streaming",
+                    cfg.id);
+    if (!final_row)
+      CUDA_QEC_WARN("decoder {} runs a windowed task graph, but "
+                    "syndrome_mapping has no final row to end its shots",
+                    cfg.id);
+    if (cfg.dispatch == config::DecoderDispatch::device_graph)
+      CUDA_QEC_WARN("decoder {} runs a windowed task graph, which is served "
+                    "with dispatch: host only",
+                    cfg.id);
+  } // end - for(cfg)
+} // end - warn_windowed_serving()
 
 cudaq::qec::data_artifact_store
 fill_data_artifact_store(const config::multi_decoder_config &config,

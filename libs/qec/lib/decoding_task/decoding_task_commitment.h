@@ -59,12 +59,28 @@ struct scheduled_window {
   window_port output;
   std::vector<window_send> sends;
   std::vector<window_dependency> inputs;
+  bool operator==(const scheduled_window &) const = default;
 };
 
-/// Every window of a shot, by layer in the order given, then by k.
+/// The decoders a node builds for one variant of its layer, and the sha256
+/// the store records the variant under.
+struct variant_decoders {
+  std::string node;
+  variant_key variant;
+  std::size_t decoders = 0;
+  std::string sha256;
+  bool operator==(const variant_decoders &) const = default;
+};
+
+/// Every window of a shot, by layer in the order given, then by k, and, by
+/// node and variant, the decoders each node builds for the variants the
+/// shot uses. Only describe_schedule() lists the decoders.
 struct window_schedule {
   std::size_t num_rounds = 0;
   std::vector<scheduled_window> windows;
+  std::vector<variant_decoders> decoders;
+  /// By ingest node: the sha256 the store records its template under.
+  std::map<std::string, std::string> templates;
 };
 
 /// The windows of a @p num_rounds round shot and their dependencies.
@@ -124,5 +140,21 @@ std::map<std::string, std::vector<window_layer>>
 validate_window_topology(const std::vector<task_graph_node_config> &nodes,
                          const std::vector<task_graph_edge> &edges,
                          data_artifact_store &store);
+
+/// The windows a @p num_rounds round shot of a topology decodes, as
+/// from_topology() would build it with @p options: every ingest node's
+/// windows, scheduled apart, and the decoders each node builds per variant
+/// the shot uses: one per copy for the bulk, as an asynchronous graph runs
+/// max_in_flight copies, and one for each prefix or terminal variant, which
+/// the copies share; with the sha256 of each variant and template, as the
+/// store records them. Lowers patterns and validates the windows as
+/// from_topology() does, but builds no node. Internal until cudaq-edem fixes
+/// what a window is; empty for a topology without windows.
+/// @throws std::invalid_argument as from_topology() does for the layout, or
+/// if a template admits no shot of @p num_rounds rounds.
+window_schedule describe_schedule(std::vector<task_graph_node_config> nodes,
+                                  std::vector<task_graph_edge> edges,
+                                  const task_graph_options &options,
+                                  std::size_t num_rounds);
 
 } // namespace cudaq::qec

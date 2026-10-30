@@ -194,9 +194,10 @@ parallel_window_requests(const cudaqx::heterogeneous_map &checked,
 // The parameters are checked first, as the builder checks every node's, so
 // a configuration built in code is held to the parsed one's rules. The
 // layers share the pattern's inner decoder recipe; each builds its own.
-void lower_parallel_window(task_graph_node_config cfg,
-                           std::vector<task_graph_node_config> &out,
-                           std::vector<task_graph_edge> &edges) {
+node_pattern::wiring
+lower_parallel_window(task_graph_node_config cfg,
+                      std::vector<task_graph_node_config> &out,
+                      std::vector<task_graph_edge> &edges) {
   const std::string id = cfg.id;
   const std::string what = "from_topology: parallel_window '" + id + "'";
   const std::string ingest = id + ".ingest", a = id + ".A", b = id + ".B",
@@ -287,7 +288,8 @@ void lower_parallel_window(task_graph_node_config cfg,
   b_cfg.node_params.insert("num_receives", std::size_t{2});
   sum_cfg.id = sum;
   sum_cfg.kind = "xor";
-  sum_cfg.node_params.insert("num_inputs", std::size_t{corrected ? 3 : 2});
+  sum_cfg.node_params.insert("num_inputs",
+                             static_cast<std::size_t>(corrected ? 3 : 2));
   out.push_back(std::move(ingest_cfg));
   out.push_back(std::move(a_cfg));
   out.push_back(std::move(b_cfg));
@@ -301,6 +303,7 @@ void lower_parallel_window(task_graph_node_config cfg,
   edges.push_back({b, "output", sum, "in_1"});
   if (corrected)
     edges.push_back({ingest, "logical", sum, "in_2"});
+  return {};
 } // end - lower_parallel_window()
 
 } // namespace cudaq::qec
