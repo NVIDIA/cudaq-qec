@@ -125,7 +125,8 @@ runs:
       if: steps.check-cache.outputs.valid == 'false' && inputs.lookup-only == 'false'
       run: |
           bash .github/workflows/scripts/install_git_cli.sh
-          apt install -y --no-install-recommends ccache
+          cuda_ver=$(nvcc --version | sed -n 's/^.*release \([0-9]\+\.[0-9]\+\).*$/\1/p')
+          apt install -y --no-install-recommends ccache libnvjitlink-dev-${cuda_ver//./-}
       shell: bash --noprofile --norc -euo pipefail {0}
 
     - name: Build CUDAQ
