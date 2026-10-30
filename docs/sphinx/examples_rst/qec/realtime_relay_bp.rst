@@ -121,14 +121,14 @@ The plugin must be obtained as a pre-built binary as shown below.
 
       ERROR: nv-qldpc-decoder does not support graph dispatch
 
-   Use the version from the ``ghcr.io/nvidia/cudaqx`` container instead, as
+   Use the version from the ``ghcr.io/nvidia/cudaq-qec`` container instead, as
    shown below.
 
 Extract the plugin from the container without running it:
 
 .. code-block:: bash
 
-   IMAGE=ghcr.io/nvidia/cudaqx:cu13-latest    # or cu12-latest
+   IMAGE=ghcr.io/nvidia/cudaq-qec:cu13-latest    # or cu12-latest
 
    docker pull "$IMAGE"
    CID=$(docker create "$IMAGE")

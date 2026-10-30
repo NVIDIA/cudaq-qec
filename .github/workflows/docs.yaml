@@ -76,9 +76,9 @@ jobs:
         id: set-container
         run: |
           if [[ "$GITHUB_REF" =~ ^refs/heads/releases/v(.+)$ ]]; then
-            echo "container=ghcr.io/nvidia/cudaqx-dev:${BASH_REMATCH[1]}-amd64-cu12.6" >> $GITHUB_OUTPUT
+            echo "container=ghcr.io/nvidia/cudaq-qec-dev:${BASH_REMATCH[1]}-amd64-cu12.6" >> $GITHUB_OUTPUT
           else
-            echo "container=ghcr.io/nvidia/cudaqx-dev:latest-amd64-cu12.6" >> $GITHUB_OUTPUT
+            echo "container=ghcr.io/nvidia/cudaq-qec-dev:latest-amd64-cu12.6" >> $GITHUB_OUTPUT
           fi
 
   build:

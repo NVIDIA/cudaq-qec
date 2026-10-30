@@ -12,16 +12,20 @@ available on this repository. It will always contain a recent version of CUDA-Q
 The instructions below provide a complete set of commands to get you up and
 running. There are images available called
 
-- `ghcr.io/nvidia/cudaqx-dev:latest-amd64-cu12.6` for AMD64 platforms with CUDA >= 12.6, < 13
-- `ghcr.io/nvidia/cudaqx-dev:latest-amd64-cu13.0` for AMD64 platforms with CUDA >= 13.0
-- `ghcr.io/nvidia/cudaqx-dev:latest-arm64-cu12.6` for ARM64 platforms with CUDA >= 12.6, < 13
-- `ghcr.io/nvidia/cudaqx-dev:latest-arm64-cu13.0` for ARM64 platforms with CUDA >= 13.0
+- `ghcr.io/nvidia/cudaq-qec-dev:latest-amd64-cu12.6` for AMD64 platforms with CUDA >= 12.6, < 13
+- `ghcr.io/nvidia/cudaq-qec-dev:latest-amd64-cu13.0` for AMD64 platforms with CUDA >= 13.0
+- `ghcr.io/nvidia/cudaq-qec-dev:latest-arm64-cu12.6` for ARM64 platforms with CUDA >= 12.6, < 13
+- `ghcr.io/nvidia/cudaq-qec-dev:latest-arm64-cu13.0` for ARM64 platforms with CUDA >= 13.0
+
+These images used to be published as `ghcr.io/nvidia/cudaqx-dev`. The 0.9.0
+release is the last one to publish under that name; use `cudaq-qec-dev` going
+forward.
 
 With the image appropriate for your system, run
 
 ```bash
 docker pull <image-name>
-docker run -it --gpus all --name cudaqx-dev <image-name>
+docker run -it --gpus all --name cudaq-qec-dev <image-name>
 ```
 
 If your system does not have local GPUs (eg. a Macbook), omit the `--gpus all`

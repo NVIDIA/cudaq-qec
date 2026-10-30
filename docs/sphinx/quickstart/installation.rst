@@ -49,13 +49,13 @@ CUDA-Q QEC is available as a Docker container with all dependencies pre-installe
 
 .. code-block:: bash
 
-    docker pull ghcr.io/nvidia/cudaqx
+    docker pull ghcr.io/nvidia/cudaq-qec
 
 2. Run the container:
 
 .. code-block:: bash
 
-    docker run --gpus all -it ghcr.io/nvidia/cudaqx
+    docker run --gpus all -it ghcr.io/nvidia/cudaq-qec
 
 .. note::
 
