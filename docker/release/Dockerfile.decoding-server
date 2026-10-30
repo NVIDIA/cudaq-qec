@@ -328,6 +328,8 @@ COPY --from=builder /workspaces/cudaq-qec/docker/release/decoding-server-example
                     /workspaces/cudaq-qec/docker/release/decoding-server-examples/build.sh \
                     /workspaces/cudaq-qec/libs/qec/unittests/realtime/app_examples/surface_code-*.cpp \
                     /root/examples/
+COPY --from=builder /workspaces/cudaq-qec/libs/qec/unittests/realtime/app_examples/utils/dem_chunks_from_rounds.h \
+                    /root/examples/utils/
 # The realtime decoding demo (docs: examples_rst/qec/realtime_decoding_demo):
 # a CMake project that drives the installed decoding_server from a lowered
 # kernel over UDP or RoCE, or from the FPGA playback tool.
