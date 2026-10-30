@@ -21,17 +21,10 @@ int main() {
   std::cout << "H:\n";
   H.dump();
 
-  // Access the logical observables
-  auto observables = steane->get_pauli_observables_matrix();
-  auto Lz = steane->get_observables_z();
-
   // Data qubits the logical Z observable is supported on
+  auto Lz = steane->get_observables_z();
   std::cout << "Lz:\n";
   Lz.dump();
-
-  // Observables are stacked as Z over X for mat-vec multiplication
-  std::cout << "Obs:\n";
-  observables.dump();
 
   // How many shots to run the experiment
   int nShots = 3;
@@ -50,8 +43,8 @@ int main() {
   auto [syndromes, data] = cudaq::qec::sample_memory_circuit(
       *steane, cudaq::qec::operation::prep0, nShots, nRounds, noise);
 
-  // With noise, many syndromes will flip each QEC cycle, these are the
-  // syndrome differences from the previous cycle.
+  // Each row holds one shot's detectors: the syndrome differences between
+  // consecutive rounds, plus the boundary detectors.
   std::cout << "syndromes:\n";
   syndromes.dump();
 
@@ -65,52 +58,47 @@ int main() {
   std::cout << "logical_mz each shot:\n";
   logical_mz.dump();
 
-  // Select a decoder
-  auto decoder = cudaq::qec::get_decoder("single_error_lut", H);
+  // The detector error model (DEM) of the same circuit and noise relates each
+  // error mechanism to the detectors it flips and to the logical observables
+  // it flips. Its detectors match the columns of the sampled syndromes.
+  auto dem = cudaq::qec::dem_from_memory_circuit(
+      *steane, cudaq::qec::operation::prep0, nRounds, noise);
 
-  // Initialize a pauli_frame to track the logical errors
-  cudaqx::tensor<uint8_t> pauli_frame({observables.shape()[0]});
+  // Select a decoder that decodes a whole shot against the DEM
+  auto decoder =
+      cudaq::qec::get_decoder("single_error_lut", dem.detector_error_matrix);
 
   // Start a loop to count the number of logical errors
   size_t numLerrors = 0;
+  size_t numDetectors = syndromes.shape()[1];
   for (size_t shot = 0; shot < nShots; ++shot) {
     std::cout << "shot: " << shot << "\n";
 
-    for (size_t round = 0; round < nRounds; ++round) {
-      std::cout << "round: " << round << "\n";
+    // Access this shot's row of the syndrome tensor
+    cudaqx::tensor<uint8_t> syndrome({numDetectors});
+    syndrome.borrow(syndromes.data() + numDetectors * shot);
+    std::cout << "syndrome:\n";
+    syndrome.dump();
 
-      // Access one row of the syndrome tensor
-      size_t count = shot * nRounds + round;
-      size_t stride = syndromes.shape()[1];
-      cudaqx::tensor<uint8_t> syndrome({stride});
-      syndrome.borrow(syndromes.data() + stride * count);
-      std::cout << "syndrome:\n";
-      syndrome.dump();
+    // Decode the syndrome into the most likely error mechanisms
+    auto result = decoder->decode(syndrome);
+    cudaqx::tensor<uint8_t> result_tensor;
+    cudaq::qec::convert_vec_soft_to_tensor_hard(result.result, result_tensor);
+    std::cout << "decode result:\n";
+    result_tensor.dump();
 
-      // Decode the syndrome
-      auto result = decoder->decode(syndrome);
-      cudaqx::tensor<uint8_t> result_tensor;
-      cudaq::qec::convert_vec_soft_to_tensor_hard(result.result, result_tensor);
-      std::cout << "decode result:\n";
-      result_tensor.dump();
-
-      // See if the decoded result anti-commutes with observables
-      auto decoded_observables = observables.dot(result_tensor);
-      std::cout << "decoded observable:\n";
-      decoded_observables.dump();
-
-      // update from previous stabilizer round
-      pauli_frame = (pauli_frame + decoded_observables) % 2;
-      std::cout << "pauli frame:\n";
-      pauli_frame.dump();
-    }
+    // Predict whether those errors flipped the logical observable
+    auto predicted_flip = dem.observables_flips_matrix.dot(result_tensor) % 2;
+    std::cout << "predicted observable flip:\n";
+    predicted_flip.dump();
 
     // prep0 means we expected to measure out 0.
     uint8_t expected_mz = 0;
-    // Apply the pauli frame correction to our logical measurement
-    uint8_t corrected_mz = (logical_mz.at({0, shot}) + pauli_frame.at({0})) % 2;
+    // Apply the predicted flip to our logical measurement
+    uint8_t corrected_mz =
+        (logical_mz.at({0, shot}) + predicted_flip.at({0})) % 2;
 
-    // Check if Logical_mz + pauli_frame_X = 0?
+    // Check if Logical_mz + predicted flip = 0?
     std::cout << "Corrected readout: " << +corrected_mz << "\n";
     std::cout << "Expected readout: " << +expected_mz << "\n";
     if (corrected_mz != expected_mz)
