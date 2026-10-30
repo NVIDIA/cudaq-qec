@@ -57,10 +57,9 @@ struct node_build_context {
   /// when the flat form omitted it or native observable streaming needs no
   /// closed matrix. Kinds needing only D and O ignore it.
   std::shared_ptr<const sparse_binary_matrix> h;
-  /// The node's closed DEM when its matrices came from a `dem`; null for the
-  /// flat form or native observable streaming. Carries the error rates and
-  /// observable model beside `h`, for a kind that needs more of the DEM than
-  /// its matrices.
+  /// Dense legacy model for a raw Stim-text source; null for chunked and flat
+  /// sources. Chunked models are closed sparsely during preparation instead
+  /// of retaining a dense detectors x faults allocation here.
   std::shared_ptr<const detector_error_model> closed_dem;
   /// Rebuildable fixed-width memory recipe for arbitrary-length FINAL tails.
   std::shared_ptr<const dem_chunks_spec> memory_spec;
@@ -77,6 +76,15 @@ struct node_build_context {
   std::vector<experimental::ingest_window> windows;
   /// A decode_window node's layer: the request of the ingest port it reads.
   std::optional<experimental::window_request> layer;
+  /// A decode_window node's receives, by index: the first instance from
+  /// which each is guaranteed, if any (first_guaranteed_receive()).
+  std::vector<std::optional<std::int64_t>> guaranteed_receives;
+  /// Which of the node's copies this build is, of how many; a kind whose
+  /// copies share state keeps it in *shared, which the first copy fills
+  /// and the build keeps for the node's others. Null outside from_topology.
+  std::size_t copy = 0;
+  std::size_t copies = 1;
+  std::shared_ptr<void> *shared = nullptr;
 };
 
 using node_factory =
@@ -84,12 +92,18 @@ using node_factory =
 
 /// How a pattern kind expands. A node of a pattern kind is never built:
 /// from_topology() rewrites it into plain nodes and edges before any node is
-/// checked, as it does an ensemble entry, so the expanded graph is validated
-/// as a hand-written one is.
+/// checked, so the expanded graph is validated as a hand-written one is.
 struct node_pattern {
-  using lowering = std::function<void(task_graph_node_config cfg,
-                                      std::vector<task_graph_node_config> &out,
-                                      std::vector<task_graph_edge> &edges)>;
+  /// What a lowering may ask for once its nodes are built, for what only
+  /// built nodes know: their ports' types and widths. Handed the node ids,
+  /// the nodes, which it may rebuild, and the edges, which it may extend.
+  using wiring =
+      std::function<void(const std::vector<std::string> &ids,
+                         std::vector<std::unique_ptr<task_graph_node>> &built,
+                         std::vector<task_graph_edge> &edges)>;
+  using lowering = std::function<wiring(
+      task_graph_node_config cfg, std::vector<task_graph_node_config> &out,
+      std::vector<task_graph_edge> &edges)>;
   using window_layers =
       std::vector<std::pair<std::string, experimental::window_request>>;
   using window_declaration = std::function<window_layers(
@@ -98,7 +112,8 @@ struct node_pattern {
   /// Append the nodes replacing pattern node `cfg` to `out`, move the edges
   /// naming cfg.id onto them, and append their own edges. Throws
   /// std::invalid_argument naming the pattern when `cfg` is not one it can
-  /// expand. Required.
+  /// expand. Returns the wiring to run once those nodes are built, or empty.
+  /// Required.
   lowering lower;
   /// The window requests the lowered nodes read, by layer name, from the
   /// pattern's parameters and template. A configuration registers each as

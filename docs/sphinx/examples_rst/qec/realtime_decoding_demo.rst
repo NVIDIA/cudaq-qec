@@ -6,7 +6,25 @@ Realtime Decoding with CUDA-Q Decoding Server
    This page describes a C++ example that you compile against the *installed*
    CUDA-Q QEC SDK. The decoding server and the FPGA playback tool it drives are
    **deliverables** — prebuilt and installed alongside the SDK, not built from
-   this example.
+   this example. The SDK, both deliverables and this example ship in the
+   CUDA-Q decoding container, published on the NGC catalog at
+   https://catalog.ngc.nvidia.com/orgs/nv-quantum/cudaq-qec/containers/cudaq-decoding:
+
+   .. code-block:: bash
+
+      docker run -it --gpus all nvcr.io/nv-quantum/cudaq-qec/cudaq-decoding:cu13-latest
+      cd ~/examples/realtime_decoding_demo
+
+   Alternatively, use the ``cu12-latest`` tag for CUDA 12. The paths and
+   commands on this page are as used inside that container. The ``cpu_roce``
+   and FPGA paths additionally need the host's network and RDMA devices passed
+   through, for example:
+
+   .. code-block:: bash
+
+      docker run -it --gpus all --net host --privileged \
+          --device /dev/infiniband -v /dev:/dev --shm-size 1g \
+          nvcr.io/nv-quantum/cudaq-qec/cudaq-decoding:cu13-latest
 
 This example drives the delivered ``decoding_server`` from two different
 syndrome sources, both decoding through the **same prebuilt server**:
@@ -35,12 +53,21 @@ For the software-only pymatching benchmark see
 Deliverables versus the example
 -------------------------------
 
-**Deliverables** (installed, not built by this example):
+**Deliverables** (installed, not built by this example), at these paths in
+the container:
 
-- ``decoding_server`` — the standalone server that owns the decoder instances.
-- ``hsb_fpga_syndrome_playback`` — the FPGA playback tool (present only in
-  the hololink-enabled deliverable image).
-- the QEC + realtime libraries and the decoder plugins.
+- ``/opt/nvidia/cudaq-qec/bin/decoding_server`` — the standalone server that
+  owns the decoder instances.
+- ``/opt/nvidia/cudaq-qec/bin/hsb_fpga_syndrome_playback`` — the FPGA
+  playback tool.
+- ``/opt/nvidia/cudaq-qec/lib`` — the QEC libraries, with the decoder plugins
+  in ``/opt/nvidia/cudaq-qec/lib/decoder-plugins``.
+- ``/opt/nvidia/cudaq-realtime`` — the realtime libraries.
+- ``/opt/nvidia/cudaq`` — CUDA-Q itself (``nvq++``, headers and runtime).
+
+The container exports these locations as ``CUDAQX_INSTALL_DIR``,
+``CUDAQ_REALTIME_DIR`` and ``CUDA_QUANTUM_PATH``. The build and the run script
+below read those variables, so no path flags are needed inside the container.
 
 **The example** (the only thing you compile) is two sources, each built two
 ways against the installed SDK — using only installed headers and libraries:
@@ -58,6 +85,17 @@ ways against the installed SDK — using only installed headers and libraries:
 Building the example
 --------------------
 
+In the container the example lives at ``~/examples/realtime_decoding_demo``
+and the prefixes come from the environment:
+
+.. code-block:: bash
+
+   cd ~/examples/realtime_decoding_demo
+   cmake -S . -B build
+   cmake --build build
+
+Against an SDK installed elsewhere, pass the prefixes explicitly:
+
 .. code-block:: bash
 
    cmake -S . -B build \
@@ -65,7 +103,8 @@ Building the example
      -DCUDAQX_INSTALL_DIR=<cuda-qx install prefix>
    cmake --build build
 
-In a CUDA-Q QEC container ``CUDAQ_INSTALL_DIR`` defaults to ``/usr/local/cudaq``.
+In the decoding container, ``CUDAQ_INSTALL_DIR`` defaults to ``/opt/nvidia/cudaq``
+and ``CUDAQX_INSTALL_DIR`` to ``/opt/nvidia/cudaq-qec``.
 If the realtime libraries are in a separate prefix, add
 ``-DCUDAQ_REALTIME_DIR=<realtime prefix>``. The lowered kernel links the
 realtime dispatch archive (relocatable CUDA device code), so the build needs a
@@ -79,15 +118,17 @@ Running
 
 ``run_realtime_decoding.sh`` resolves the deliverables from ``--install-prefix``
 and the two example binaries from ``--example-build-dir`` (default ``./build``).
+In the decoding container ``--install-prefix`` defaults to
+``/opt/nvidia/cudaq-qec`` and can be omitted, as in the commands below.
 
 QPU-kernel source (software, UDP, no hardware)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: bash
 
-   ./run_realtime_decoding.sh --source qpu-kernel --decoder pymatching            --install-prefix <prefix>
-   ./run_realtime_decoding.sh --source qpu-kernel --decoder multi_error_lut       --install-prefix <prefix>
-   ./run_realtime_decoding.sh --source qpu-kernel --decoder nv-qldpc-decoder --gpu 0 --install-prefix <prefix>
+   ./run_realtime_decoding.sh --source qpu-kernel --decoder pymatching
+   ./run_realtime_decoding.sh --source qpu-kernel --decoder multi_error_lut
+   ./run_realtime_decoding.sh --source qpu-kernel --decoder nv-qldpc-decoder --gpu 0
 
 The lowered kernel runs the surface-code memory experiment and streams each
 shot's syndromes to the server over the ``udp`` wire; every decoder is served
@@ -112,9 +153,9 @@ and waits for the RoCE v2 GIDs:
    # IPs default to 10.0.0.1 (channel) / 10.0.0.2 (daemon); override with
    # CUDAQ_CPU_ROCE_TEST_CHANNEL_IP / CUDAQ_CPU_ROCE_TEST_DAEMON_IP.
 
-   ./run_realtime_decoding.sh --source qpu-kernel --decoder pymatching            --wire cpu_roce --setup-network --install-prefix <prefix>
-   ./run_realtime_decoding.sh --source qpu-kernel --decoder multi_error_lut       --wire cpu_roce --setup-network --install-prefix <prefix>
-   ./run_realtime_decoding.sh --source qpu-kernel --decoder nv-qldpc-decoder --gpu 0 --wire cpu_roce --setup-network --install-prefix <prefix>
+   ./run_realtime_decoding.sh --source qpu-kernel --decoder pymatching            --wire cpu_roce --setup-network
+   ./run_realtime_decoding.sh --source qpu-kernel --decoder multi_error_lut       --wire cpu_roce --setup-network
+   ./run_realtime_decoding.sh --source qpu-kernel --decoder nv-qldpc-decoder --gpu 0 --wire cpu_roce --setup-network
 
 The server's READY ``port=`` is then the TCP rendezvous port (the RDMA wire
 itself is negotiated via the QP/rkey exchange); dispatch stays ``host``, and
@@ -126,16 +167,13 @@ FPGA source (real FPGA over RoCE)
 .. code-block:: bash
 
    ./run_realtime_decoding.sh --source fpga --decoder pymatching \
-       --setup-network --device <nic> --bridge-ip <host-ip> --fpga-ip <fpga-ip> \
-       --install-prefix <prefix>
+       --setup-network --device <nic> --bridge-ip <host-ip> --fpga-ip <fpga-ip>
 
    ./run_realtime_decoding.sh --source fpga --decoder multi_error_lut \
-       --setup-network --device <nic> --bridge-ip <host-ip> --fpga-ip <fpga-ip> \
-       --install-prefix <prefix>
+       --setup-network --device <nic> --bridge-ip <host-ip> --fpga-ip <fpga-ip>
 
    ./run_realtime_decoding.sh --source fpga --decoder nv-qldpc-decoder --gpu 0 \
-       --setup-network --device <nic> --bridge-ip <host-ip> --fpga-ip <fpga-ip> \
-       --install-prefix <prefix>
+       --setup-network --device <nic> --bridge-ip <host-ip> --fpga-ip <fpga-ip>
 
 ``--setup-network`` configures the ConnectX interface (needs ``sudo``);
 ``--spacing`` (default 10 µs) paces the playback so it does not overrun the
@@ -217,14 +255,14 @@ orientation and per-round bit order and cannot consume these artifacts).
 .. code-block:: bash
 
    ./run_realtime_decoding.sh --source qpu-kernel --decoder trt_decoder \
-       --ising-artifacts-dir <dir> --install-prefix <prefix>
+       --ising-artifacts-dir <dir>
 
    ./run_realtime_decoding.sh --source qpu-kernel --decoder trt_decoder --wire cpu_roce \
-       --setup-network --ising-artifacts-dir <dir> --install-prefix <prefix>
+       --setup-network --ising-artifacts-dir <dir>
 
    ./run_realtime_decoding.sh --source fpga --decoder trt_decoder \
        --setup-network --device <nic> --bridge-ip <host-ip> --fpga-ip <fpga-ip> \
-       --ising-artifacts-dir <dir> --install-prefix <prefix>
+       --ising-artifacts-dir <dir>
 
 On the FPGA source the playback BRAM (512 frames) caps this geometry at **56
 shots** per run (9 frames per shot: 8 syndrome slices + 1 corrections frame);
@@ -288,7 +326,8 @@ Decoders
      - TRT plugin + Ising artifacts (opt-in)
 
 The ``nv-qldpc-decoder`` profile needs the prebuilt plugin — auto-found in the
-install prefix, else ``--nv-qldpc-plugin <path.so>`` — and a GPU; if the plugin
+install prefix (``/opt/nvidia/cudaq-qec/lib/decoder-plugins`` in the
+container), else ``--nv-qldpc-plugin <path.so>`` — and a GPU; if the plugin
 is unavailable the script exits ``77`` (skip).
 
 

@@ -48,6 +48,17 @@ ingest_node::ingest_node(
         0);
   }
   logical_ = logical_outcome{corrections_, true};
+  // Every publication a record can ready, each window buffer at its layer's
+  // most rows, so no shot allocates, FINAL's burst included.
+  ready_.resize(core_.max_ready_per_record());
+  for (auto &entry : ready_) {
+    entry.present.assign(layers_, 0);
+    for (std::size_t l = 0; l < layers_; ++l) {
+      window_rows rows;
+      rows.detectors.reserve(core_.max_window_rows(l));
+      entry.windows.emplace_back(std::move(rows));
+    }
+  }
 } // end - ingest_node()
 
 // One-shot paths stream the shot through the graph instead.
@@ -157,8 +168,8 @@ void ingest_node::reset_streaming_state() {
   std::fill(corrections_.begin(), corrections_.end(), 0);
 }
 
-// A publication's buffers are kept for the next shot, so once every index a
-// record can ready has been seen, collecting allocates nothing.
+// The publications are sized at construction for the most a record can
+// ready; growing past them would mean that bound is wrong.
 void ingest_node::collect() {
   while (const auto *p = core_.poll()) {
     if (filled_ == ready_.size())
@@ -178,10 +189,10 @@ void ingest_node::collect() {
 }
 
 // The current publication counts as handed over; those after it wait.
-void ingest_node::check_handed_over(const std::string &call) const {
+void ingest_node::check_handed_over(const char *call) const {
   if (logical_current_ || current_ == none || current_ + 1 >= filled_)
     return;
-  throw std::logic_error("ingest: " + call + " while " +
+  throw std::logic_error(std::string("ingest: ") + call + " while " +
                          std::to_string(filled_ - current_ - 1) +
                          " publications wait to be handed over; "
                          "publish_next() hands each over");

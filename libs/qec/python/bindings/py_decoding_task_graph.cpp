@@ -72,6 +72,11 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .value("COMPLETE", task_graph_streaming_status::complete)
       .value("FAILED", task_graph_streaming_status::failed);
 
+  nb::enum_<task_graph_closure>(mod, "TaskGraphClosure")
+      .value("NOT_CHECKED", task_graph_closure::not_checked)
+      .value("CLOSED", task_graph_closure::closed)
+      .value("OPEN", task_graph_closure::open);
+
   nb::class_<task_graph_output_progress>(mod, "TaskGraphOutputProgress")
       .def_ro("name", &task_graph_output_progress::name)
       .def_ro("value_offset", &task_graph_output_progress::value_offset)
@@ -81,7 +86,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
               &task_graph_output_progress::coverage_begin_round)
       .def_ro("coverage_end_round",
               &task_graph_output_progress::coverage_end_round)
-      .def_ro("status", &task_graph_output_progress::status);
+      .def_ro("status", &task_graph_output_progress::status)
+      .def_ro("closure", &task_graph_output_progress::closure);
 
   nb::class_<task_graph_streaming_result>(mod, "TaskGraphStreamingResult")
       .def_ro("shot_epoch", &task_graph_streaming_result::shot_epoch)
@@ -94,7 +100,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
               &task_graph_streaming_result::operation_completed)
       .def_ro("error", &task_graph_streaming_result::error)
       .def_ro("outputs", &task_graph_streaming_result::outputs)
-      .def_ro("values", &task_graph_streaming_result::values);
+      .def_ro("values", &task_graph_streaming_result::values)
+      .def_ro("closure", &task_graph_streaming_result::closure);
 
   // -------------------------------------------------------------------------
   // Primitive task functions
@@ -146,17 +153,16 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
             self.ensemble = std::move(spec);
           },
           nb::rv_policy::reference_internal,
-          "When set, this entry is an ensemble pattern rather than a node: "
-          "kind and the fields above are ignored. Assigning consumes the "
-          "spec.");
+          "The members and join of a node of kind 'ensemble', for which the "
+          "fields above are ignored. Assigning consumes the spec.");
 
   // Member node configs are consumed, as from_topology() consumes its nodes.
   nb::class_<task_graph_ensemble_spec>(
       mod, "TaskGraphEnsembleSpec",
       "Member subgraphs raced against each other, one answer kept; set on\n"
-      "TaskGraphNodeConfig.ensemble in place of a kind. join_strategy names a\n"
-      "selection strategy ('first', 'deadline') and join_params its\n"
-      "parameters. add_member() consumes its node configs.")
+      "TaskGraphNodeConfig.ensemble of a node of kind 'ensemble'.\n"
+      "join_strategy names a selection strategy ('first', 'deadline') and\n"
+      "join_params its parameters. add_member() consumes its node configs.")
       .def(nb::init<>())
       .def_rw("join_strategy", &task_graph_ensemble_spec::join_strategy)
       .def_rw("join_params", &task_graph_ensemble_spec::join_params)

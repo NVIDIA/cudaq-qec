@@ -183,6 +183,15 @@ build_task_graph(
     const cudaq::qec::decoding::config::decoder_config &decoder_config,
     const std::filesystem::path &base_dir = std::filesystem::current_path());
 
+/// Warn of each windowed decoder in @p config whose serving settings undo
+/// what its windows are for: a windowed task graph overlaps its decodes with
+/// later rounds only with async_streaming, ends a shot only at a FINAL
+/// round, which only a `final` syndrome_mapping row sends, and is served
+/// with dispatch: host only. A decoder is windowed when a node of its graph
+/// is a decode_window or a pattern that declares windows.
+__attribute__((visibility("default"))) void warn_windowed_serving(
+    const cudaq::qec::decoding::config::multi_decoder_config &config);
+
 __attribute__((visibility("default"))) void
 get_corrections(std::size_t decoder_id, uint8_t *corrections,
                 std::uint64_t correction_length, bool reset);

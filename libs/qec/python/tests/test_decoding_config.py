@@ -1059,6 +1059,7 @@ def test_task_graph_ensemble_roundtrips_through_yaml():
     ens.members = [member]
     node = qec.task_graph_node()
     node.id = "ens"
+    node.type = "ensemble"
     node.ensemble = ens
 
     graph = qec.task_graph_spec()
@@ -1074,13 +1075,33 @@ def test_task_graph_ensemble_roundtrips_through_yaml():
 
     parsed = qec.decoder_config.from_yaml_str(dc.to_yaml_str())
     node2 = parsed.task_graph.nodes[0]
-    assert node2.type == ""
+    assert node2.type == "ensemble"
     assert node2.ensemble is not None
     assert node2.ensemble.join_strategy == "deadline"
     assert node2.ensemble.join_params["deadline_us"] == 200
     assert node2.ensemble.members[0].nodes[0].id == "a"
     assert node2.ensemble.members[0].edges[1].to_node == "output"
     assert parsed.task_graph == dc.task_graph
+
+    # The schema polices the ensemble keys as the parser does: an ensemble
+    # node takes no other node key, and no other node takes its keys.
+    jsonschema = pytest.importorskip("jsonschema")
+    yaml = pytest.importorskip("yaml")
+    import json
+    validator = jsonschema.Draft202012Validator(
+        json.loads(qec.decoder_config_json_schema()))
+    document = yaml.safe_load(qec_yaml_for(dc))
+    validator.validate(document)
+    with_inner = yaml.safe_load(qec_yaml_for(dc))
+    with_inner["decoders"][0]["task_graph"]["nodes"][0]["inner"] = {
+        "type": "pymatching"
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(with_inner)
+    on_xor = yaml.safe_load(qec_yaml_for(dc))
+    on_xor["decoders"][0]["task_graph"]["nodes"][0]["type"] = "xor"
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(on_xor)
 
 
 def test_task_graph_edges_carry_ports():
@@ -1495,6 +1516,19 @@ def test_parallel_window_pattern_and_pool_options_parse():
     options.async_num_workers = 3
     options.async_worker_cpus = [1, 2]
     assert options.async_num_workers == 3
+
+
+def test_parallel_window_pattern_round_trips_through_yaml():
+    mdc = qec.multi_decoder_config.from_yaml_str(_PATTERN_YAML)
+    emitted = mdc.to_yaml_str()
+    again = qec.multi_decoder_config.from_yaml_str(emitted)
+    assert again == mdc
+    node = again.decoders[0].task_graph.nodes[0]
+    assert node.type == "parallel_window"
+    assert node.node_params["commit_rounds"] == 3
+    assert node.node_params["gap_rounds"] == 9
+    assert node.node_params["output"] == "corrected_logical"
+    assert node.max_in_flight == 4
 
 
 def test_parallel_window_pattern_validates_against_the_schema():
