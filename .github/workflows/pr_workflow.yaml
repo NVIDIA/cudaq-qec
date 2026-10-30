@@ -80,6 +80,7 @@ jobs:
               - 'libs/qec/**/*.h'
               - 'libs/qec/**/*.in'
               - 'libs/qec/**/*.py'
+              - 'libs/qec/unittests/memory-experiment-generator/requirements.txt'
               - 'libs/qec/**/CMakeLists.txt'
             build-examples-qec:
               - 'docs/sphinx/examples/qec/**'

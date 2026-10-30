@@ -6154,6 +6154,87 @@ TEST(WindowedGraph, StreamsThePatternAsTheReference) {
     }
 } // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
 
+// A record can contain many interleaved A/B commits. Retiring every A delta
+// before the B deltas must not make the bounded output stager grow with it.
+TEST(WindowedGraph, LargeRecordsRetireInterleavedLayersInRoundOrder) {
+  constexpr std::size_t rounds = 1001;
+  auto spec = wide_readout_spec();
+  spec.num_rounds = rounds;
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{4}},
+      {"buffer_rounds", std::size_t{2}},
+      {"output", std::string{"corrections"}}};
+  parallel_window_reference reference(spec, lowered_graph(spec, params), rounds,
+                                      "single_error_lut");
+  std::vector<std::uint8_t> detectors(reference.model().row.back(), 0);
+  // Nonzero corrections from separated A-prefix, B-bulk and A-terminal cores.
+  for (const auto round : {0u, 41u, 997u}) {
+    const auto flipped = detectors_of(reference.model(), rep5_checks * round);
+    for (std::size_t i = 0; i < detectors.size(); ++i)
+      detectors[i] ^= flipped[i];
+  }
+  const auto measurements = memory_measurements(tmpl, rounds, detectors);
+  const auto expected = reference.decode(detectors).frame;
+  ASSERT_EQ(expected, std::vector<std::uint8_t>{1});
+  const auto readout = tmpl.measurement_offset(rounds - 1, rounds);
+  for (const bool open : {false, true})
+    for (const bool asynchronous : {false, true})
+      for (const std::size_t copies : {1u, 4u})
+        for (const std::string output : {"corrections", "corrected_logical"}) {
+          if (!asynchronous && copies != 1)
+            continue;
+          SCOPED_TRACE(::testing::Message()
+                       << "open=" << open << " async=" << asynchronous
+                       << " copies=" << copies << " output=" << output);
+          auto configured = spec;
+          if (open)
+            configured.num_rounds.reset();
+          auto node = pattern_node(configured, params, copies);
+          node.node_params.insert("output", output);
+          std::vector<task_graph_node_config> nodes;
+          nodes.push_back(std::move(node));
+          auto edges = pattern_edges();
+          edges.push_back({"P", "output", "output", "copy"});
+          task_graph_options options;
+          options.async_streaming = asynchronous;
+          options.async_num_workers = 2 * copies;
+          options.async_queue_capacity = 2;
+          auto graph = decoding_task_graph::from_topology(
+              std::move(nodes), std::move(edges), options);
+          auto want = expected;
+          if (output == "corrected_logical") {
+            const auto logical = raw_logical(tmpl, rounds, measurements);
+            for (std::size_t i = 0; i < want.size(); ++i)
+              want[i] ^= logical[i];
+          }
+          // Reuse the same deployment and record contexts across packet sizes
+          // and epochs; the large record contains 1,000 regular rounds.
+          for (const std::size_t packet_rounds : {7u, 1000u, 7u, 1000u}) {
+            SCOPED_TRACE(packet_rounds);
+            graph->reset_decoder();
+            const auto packet = packet_rounds * rep5_checks;
+            for (std::size_t at = 0; at < readout; at += packet)
+              graph->enqueue_syndrome(measurements.data() + at,
+                                      std::min(packet, readout - at),
+                                      round_type::BULK);
+            graph->enqueue_syndrome(measurements.data() + readout,
+                                    measurements.size() - readout,
+                                    round_type::FINAL);
+            const auto result = graph->streaming_result();
+            ASSERT_EQ(result.status, task_graph_streaming_status::complete)
+                << result.error;
+            ASSERT_EQ(result.outputs.size(), 2);
+            EXPECT_EQ(result.values,
+                      (std::vector<std::uint8_t>{want[0], want[0]}));
+            for (const auto &sink : result.outputs) {
+              EXPECT_EQ(sink.coverage_begin_round, 0);
+              EXPECT_EQ(sink.coverage_end_round, rounds);
+            }
+          }
+        }
+}
+
 // describe_schedule() of the pattern's topology lists exactly the
 // reference's windows at every shot length up to 30: each instance's node,
 // k, rounds, zones, ports and dependencies. Each node builds a decoder per
