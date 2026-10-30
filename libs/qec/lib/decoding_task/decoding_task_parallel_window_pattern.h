@@ -15,6 +15,7 @@
 
 #include "cuda-qx/core/heterogeneous_map.h"
 #include "decoding_task_experiment_template.h"
+#include "decoding_task_node_kind_registry.h"
 #include "cudaq/qec/decoding_task_graph.h"
 #include "cudaq/qec/window_request.h"
 #include <utility>
@@ -49,9 +50,10 @@ parallel_window_requests(const cudaqx::heterogeneous_map &params,
 /// stim_dem, a built decoder or flat matrices, which its layers cannot use,
 /// it is not fed by exactly one edge into 'input', an edge names another
 /// port, its output is corrected_logical but its template has no readout
-/// map, or as parallel_window_requests() does.
-void lower_parallel_window(task_graph_node_config cfg,
-                           std::vector<task_graph_node_config> &out,
-                           std::vector<task_graph_edge> &edges);
+/// map, or as parallel_window_requests() does. Asks for no wiring.
+node_pattern::wiring
+lower_parallel_window(task_graph_node_config cfg,
+                      std::vector<task_graph_node_config> &out,
+                      std::vector<task_graph_edge> &edges);
 
 } // namespace cudaq::qec

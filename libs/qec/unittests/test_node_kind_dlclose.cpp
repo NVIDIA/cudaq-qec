@@ -267,7 +267,7 @@ TEST(NodeKindDlclose, UnregisterWaitsForActiveLowering) {
   // Throws once released, so the build ends without a node to build.
   pattern.lower = [&](task_graph_node_config,
                       std::vector<task_graph_node_config> &,
-                      std::vector<task_graph_edge> &) {
+                      std::vector<task_graph_edge> &) -> node_pattern::wiring {
     lowering_entered.store(true, std::memory_order_release);
     while (!release_lowering.load(std::memory_order_acquire))
       std::this_thread::yield();
@@ -368,9 +368,9 @@ TEST(NodeKindDlclose, StalePatternTokenPreservesReplacement) {
   pattern_spec.name = kind_name;
   pattern_spec.requires_decoder = false;
   pattern_spec.requires_dem = false;
-  pattern.lower = [](task_graph_node_config,
-                     std::vector<task_graph_node_config> &,
-                     std::vector<task_graph_edge> &) {};
+  pattern.lower =
+      [](task_graph_node_config, std::vector<task_graph_node_config> &,
+         std::vector<task_graph_edge> &) -> node_pattern::wiring { return {}; };
   pattern_registration = register_scoped_pattern_kind(std::move(pattern_spec),
                                                       {}, std::move(pattern));
   EXPECT_NE(find_node_pattern(kind_name), nullptr);

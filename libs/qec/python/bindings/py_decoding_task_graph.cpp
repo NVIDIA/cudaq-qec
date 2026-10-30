@@ -153,17 +153,16 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
             self.ensemble = std::move(spec);
           },
           nb::rv_policy::reference_internal,
-          "When set, this entry is an ensemble pattern rather than a node: "
-          "kind and the fields above are ignored. Assigning consumes the "
-          "spec.");
+          "The members and join of a node of kind 'ensemble', for which the "
+          "fields above are ignored. Assigning consumes the spec.");
 
   // Member node configs are consumed, as from_topology() consumes its nodes.
   nb::class_<task_graph_ensemble_spec>(
       mod, "TaskGraphEnsembleSpec",
       "Member subgraphs raced against each other, one answer kept; set on\n"
-      "TaskGraphNodeConfig.ensemble in place of a kind. join_strategy names a\n"
-      "selection strategy ('first', 'deadline') and join_params its\n"
-      "parameters. add_member() consumes its node configs.")
+      "TaskGraphNodeConfig.ensemble of a node of kind 'ensemble'.\n"
+      "join_strategy names a selection strategy ('first', 'deadline') and\n"
+      "join_params its parameters. add_member() consumes its node configs.")
       .def(nb::init<>())
       .def_rw("join_strategy", &task_graph_ensemble_spec::join_strategy)
       .def_rw("join_params", &task_graph_ensemble_spec::join_params)

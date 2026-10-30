@@ -1776,6 +1776,128 @@ decoders:
                std::runtime_error);
 }
 
+namespace {
+
+void expect_yaml11_numeric_exponents(const std::string &yaml) {
+  // Test numeric-token interoperability, not to_chars' choice of exponent or
+  // fixed notation. YAML 1.1 requires a decimal point in an exponent mantissa.
+  static const std::regex bare_exponent(
+      R"((^|[\s\[,])[-+]?[0-9]+[eE][-+]?[0-9]+($|[\s,\]]))");
+  EXPECT_FALSE(std::regex_search(yaml, bare_exponent)) << yaml;
+}
+
+} // namespace
+
+TEST(DecoderSchemaTest, UnregisteredDecoderRatesRoundtripExactly) {
+  using namespace cudaq::qec::decoding::config;
+  auto decoder = create_test_empty_decoder_config(0);
+  decoder.type = "unregistered_exact_rate_decoder";
+  ASSERT_EQ(find_decoder_schema(decoder.type), nullptr);
+  decoder.error_rate_vec.assign(decoder.block_size, 0.12345678901234567);
+  decoder.error_rate_vec[0] = 1e-6;
+  decoder.error_rate_vec[1] = std::nextafter(0.001, 1.0);
+  decoder.error_rate_vec[2] = std::numeric_limits<double>::denorm_min();
+  decoder.error_rate_vec[3] = std::nextafter(1.0, 0.0);
+  multi_decoder_config original;
+  original.decoders.push_back(std::move(decoder));
+  const auto emitted = original.to_yaml_str(200);
+  expect_yaml11_numeric_exponents(emitted);
+  const auto parsed = multi_decoder_config::from_yaml_str(emitted);
+  EXPECT_EQ(parsed, original);
+  EXPECT_EQ(parsed.decoders.front().error_rate_vec,
+            original.decoders.front().error_rate_vec);
+}
+
+TEST(DecoderSchemaTest, PreservesFloatingPointParametersExactly) {
+  using namespace cudaq::qec::decoding::config;
+  // Schema-only metadata is enough to exercise configuration serialization;
+  // this test never creates a decoder or registers a stand-in executor.
+  register_decoder_schema({"exact_parameter_engine",
+                           {{"gain", param_kind::f64},
+                            {"weights", param_kind::f64_vec},
+                            {"matrix", param_kind::f64_matrix}}});
+  register_decoder_schema(
+      {"exact_parameter_decoder",
+       {{"gain", param_kind::f64},
+        {"weights", param_kind::f64_vec},
+        {"matrix", param_kind::f64_matrix},
+        {"label", param_kind::string},
+        {"fixed", param_kind::subschema, false, "exact_parameter_engine"},
+        {"engine", param_kind::string},
+        {"engine_params", param_kind::discriminated, false, "", "engine"}}});
+
+  const std::string label = "001,alpha;beta='quoted':a=b/with spaces\nnext";
+  for (const auto gain :
+       {1e-6, 1e20, std::nextafter(0.001, 1.0), 0.12345678901234567,
+        std::numeric_limits<double>::denorm_min(), std::nextafter(1.0, 0.0)}) {
+    SCOPED_TRACE(gain);
+    const std::vector<double> weights{gain, -gain, 1.2345678901234567e-20};
+    const std::vector<std::vector<double>> matrix{
+        {gain, -gain}, {1.2345678901234567e-20, gain}};
+    cudaqx::heterogeneous_map nested;
+    nested.insert("gain", gain);
+    nested.insert("weights", weights);
+    nested.insert("matrix", matrix);
+    cudaqx::heterogeneous_map arguments = nested;
+    arguments.insert("label", label);
+    arguments.insert("fixed", nested);
+    arguments.insert("engine", "exact_parameter_engine");
+    arguments.insert("engine_params", nested);
+    auto decoder = create_test_empty_decoder_config(0);
+    decoder.type = "exact_parameter_decoder";
+    decoder.decoder_custom_args = arguments;
+    multi_decoder_config original;
+    original.decoders.push_back(std::move(decoder));
+    const auto emitted = original.to_yaml_str(200);
+    expect_yaml11_numeric_exponents(emitted);
+    const auto parsed = multi_decoder_config::from_yaml_str(emitted);
+    EXPECT_EQ(parsed, original);
+    const auto &roundtrip = parsed.decoders.front().decoder_custom_args.map();
+    EXPECT_EQ(roundtrip.get<double>("gain"), gain);
+    EXPECT_EQ(roundtrip.get<std::vector<double>>("weights"), weights);
+    EXPECT_EQ(roundtrip.get<std::vector<std::vector<double>>>("matrix"),
+              matrix);
+    EXPECT_EQ(roundtrip.get<std::string>("label"), label);
+    for (const auto *section : {"fixed", "engine_params"}) {
+      const auto child = roundtrip.get<cudaqx::heterogeneous_map>(section);
+      EXPECT_EQ(child.get<double>("gain"), gain);
+      EXPECT_EQ(child.get<std::vector<double>>("weights"), weights);
+      EXPECT_EQ(child.get<std::vector<std::vector<double>>>("matrix"), matrix);
+    }
+  }
+}
+
+TEST(DecoderSchemaTest, DiscriminatedSchemaPrefixRoundtrips) {
+  using namespace cudaq::qec::decoding::config;
+  register_decoder_schema(
+      {"prefixed_parameter_engine.demo", {{"passes", param_kind::int32}}});
+  register_decoder_schema(
+      {"prefixed_parameter_decoder",
+       {{"engine", param_kind::string},
+        {"engine_params", param_kind::discriminated, false, "", "engine", false,
+         "prefixed_parameter_engine."}}});
+  auto parsed = multi_decoder_config::from_yaml_str(R"(
+decoders:
+  - id: 0
+    type: prefixed_parameter_decoder
+    block_size: 2
+    syndrome_size: 1
+    H_sparse: [0, -1]
+    O_sparse: [0, -1]
+    D_sparse: [0, -1]
+    decoder_custom_args:
+      engine: demo
+      engine_params: {passes: 3}
+)");
+  const auto &arguments = parsed.decoders.front().decoder_custom_args.map();
+  EXPECT_EQ(arguments.get<std::string>("engine"), "demo");
+  EXPECT_EQ(arguments.get<cudaqx::heterogeneous_map>("engine_params")
+                .get<int>("passes"),
+            3);
+  const auto emitted = parsed.to_yaml_str();
+  EXPECT_EQ(multi_decoder_config::from_yaml_str(emitted), parsed);
+}
+
 TEST(DecoderSchemaTest, CustomArgsForUnregisteredTypeThrow) {
   const std::string yaml = R"(
 decoders:
@@ -2177,12 +2299,13 @@ TEST(DecoderYAMLTest, DescribeDecoderTypeNamesEitherTaskGraphForm) {
   decoderless.task_graph->nodes.back().type = "XOR";
   EXPECT_EQ(decoderless.describe_decoder_type(), "xor");
 
-  // An ensemble entry names its members.
+  // An ensemble node names its members.
   decoder_config raced;
   raced.task_graph.emplace();
   raced.task_graph->nodes.emplace_back();
   auto &ens = raced.task_graph->nodes.back();
   ens.id = "ens";
+  ens.type = "ensemble";
   ens.ensemble.emplace();
   ens.ensemble->members.resize(2);
   ens.ensemble->members[0].nodes = node_list;
@@ -2420,6 +2543,56 @@ TEST(DecoderDemChunksYAMLTest, ParsesAllPhases) {
   EXPECT_EQ(chunks->connections.size(), 3u);
   EXPECT_FALSE(chunks->is_empty());
   EXPECT_TRUE(chunks->has_repeating_phase());
+}
+
+TEST(MemoryExperimentYaml, PreservesEveryPhaseProbabilityExactly) {
+  namespace config = cudaq::qec::decoding::config;
+  auto configuration =
+      config::multi_decoder_config::from_yaml_str(dem_chunks_yaml(3));
+  ASSERT_EQ(configuration.decoders.size(), 1u);
+  auto &entry = configuration.decoders.front();
+  ASSERT_TRUE(entry.dem_chunks.has_value());
+  // A native phase fixture keeps this framework serialization regression
+  // independent of circuit characterization and the generator executable.
+  for (const auto probability :
+       {0.0, 1.0, 1e-6, std::numeric_limits<double>::denorm_min(),
+        std::nextafter(0.001, 1.0), std::numeric_limits<double>::min(),
+        std::nextafter(1.0, 0.0), 0.12345678901234567}) {
+    SCOPED_TRACE(probability);
+    for (auto &phase : entry.dem_chunks->phases)
+      for (auto &rate : phase.spec.error_rates)
+        rate = probability;
+    const auto configuration_yaml = configuration.to_yaml_str();
+    expect_yaml11_numeric_exponents(configuration_yaml);
+    EXPECT_EQ(config::multi_decoder_config::from_yaml_str(configuration_yaml),
+              configuration);
+    const auto decoder_yaml = entry.to_yaml_str();
+    expect_yaml11_numeric_exponents(decoder_yaml);
+    EXPECT_EQ(config::decoder_config::from_yaml_str(decoder_yaml).dem_chunks,
+              entry.dem_chunks);
+  }
+  EXPECT_THROW(config::multi_decoder_config::from_yaml_str(
+                   dem_chunks_yaml(3) + "\nunknown_field: 1\n"),
+               std::runtime_error);
+}
+
+TEST(MemoryExperimentYaml, InvalidPhaseModelUsesConfigurationExceptionType) {
+  namespace config = cudaq::qec::decoding::config;
+  auto configuration =
+      config::multi_decoder_config::from_yaml_str(dem_chunks_yaml(3));
+  auto yaml = configuration.to_yaml_str();
+  const auto field = yaml.find("num_rounds:");
+  ASSERT_NE(field, std::string::npos);
+  const auto value = yaml.find(':', field) + 1;
+  const auto end = yaml.find('\n', value);
+  ASSERT_NE(end, std::string::npos);
+  yaml.replace(value, end - value, " 1");
+  try {
+    (void)config::multi_decoder_config::from_yaml_str(yaml);
+    FAIL() << "invalid phase-model horizon was accepted";
+  } catch (const std::runtime_error &error) {
+    EXPECT_NE(std::string(error.what()).find("num_rounds"), std::string::npos);
+  }
 }
 
 TEST(DecoderDemChunksYAMLTest, ParsedPhasesExpandAndClose) {
@@ -3488,7 +3661,7 @@ TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded) {
 } // end - TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded)
 
 // Only an ingest node takes windows: a node whose type is a decoder plugin,
-// and an ensemble entry, are rejected rather than having theirs dropped.
+// and an ensemble node, are rejected rather than having theirs dropped.
 TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles) {
   namespace cfg = cudaq::qec::decoding::config;
   const auto rejects = [](const std::string &yaml, const std::string &text) {
@@ -3507,20 +3680,20 @@ TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles) {
     task_graph:
       nodes:
         - id: e
+          type: ensemble
           windows:
             A: {period: 4, zones: {commit: [0, 2]}, ports: {input: {disposition: closed}, output: {disposition: open}}}
-          ensemble:
-            join_strategy: deadline
-            join_params: {deadline_us: 200000}
-            members:
-              - nodes:
-                  - {id: a, type: single_window, inner: {type: single_error_lut}}
-                edges: [{from: input, to: a}, {from: a, to: output}]
+          join_strategy: deadline
+          join_params: {deadline_us: 200000}
+          members:
+            - nodes:
+                - {id: a, type: single_window, inner: {type: single_error_lut}}
+              edges: [{from: input, to: a}, {from: a, to: output}]
       edges:
         - {from: measurements, to: e}
         - {from: e, to: output}
 )",
-          "is an ensemble entry, which takes no windows");
+          "is an ensemble, which takes no windows");
 } // end - TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles)
 
 // An empty value where a value of several forms belongs (dem_chunks, a
@@ -4563,7 +4736,8 @@ TEST(PatternKind, FillsTheStoreWithTheWindowsItsHookDeclares) {
   params.params.push_back({"rounds", cfg::param_kind::uint64});
   pattern.lower = [](cudaq::qec::task_graph_node_config,
                      std::vector<cudaq::qec::task_graph_node_config> &,
-                     std::vector<cudaq::qec::task_graph_edge> &) {};
+                     std::vector<cudaq::qec::task_graph_edge> &)
+      -> cudaq::qec::node_pattern::wiring { return {}; };
   pattern.windows = [&](const cudaqx::heterogeneous_map &node_params,
                         const cudaq::qec::experiment_template &) {
     seen_rounds = node_params.get<std::size_t>("rounds");
@@ -4622,14 +4796,14 @@ decoders:
         - {from: pw, to: output}
 )";
   const std::string nested = flat + R"(        - id: e
-          ensemble:
-            join_strategy: deadline
-            join_params: {deadline_us: 200000}
-            members:
-              - nodes:
-                  - )" + pattern +
+          type: ensemble
+          join_strategy: deadline
+          join_params: {deadline_us: 200000}
+          members:
+            - nodes:
+                - )" + pattern +
                              R"(
-                edges: [{from: input, to: pw}, {from: pw, to: output}]
+              edges: [{from: input, to: pw}, {from: pw, to: output}]
       edges:
         - {from: measurements, to: e}
         - {from: e, to: output}

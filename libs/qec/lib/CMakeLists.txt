@@ -93,6 +93,7 @@ set(QEC_SOURCES
   decoder_config_payload_provider.cpp
   dem_construction_code.cpp
   experiments.cpp
+  memory_dem_chunks.cpp
   stabilizer_utils.cpp
 )
 
