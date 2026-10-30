@@ -797,8 +797,10 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
     std::size_t pooled_fires = 0;
     bool indexed = false;
     std::size_t fire_slots = 0;
+    // Fires that may run at once: every copy of a pooled node, and of an
+    // indexed one even when it has one, since records pipeline.
     for (const auto &entry : i->streaming_nodes) {
-      if (entry.replicas.size() > 1)
+      if (entry.replicas.size() > 1 || !entry.indexed.empty())
         pooled_fires += entry.replicas.size();
       indexed = indexed || !entry.indexed.empty();
     }
@@ -814,8 +816,8 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
             "task_graph_options: async_num_workers must be at least 1");
       i->pool_width = *options.async_num_workers;
     } else if (indexed) {
-      // Records pipeline, so every copy can fire at once, and indexed fires
-      // leave one worker for other events: one more than the copies.
+      // Indexed fires leave one worker for other events: one more than the
+      // fires.
       i->pool_width =
           std::max(i->pool_width,
                    std::min<std::size_t>(
@@ -850,7 +852,8 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
     fire_slots =
         indexed && i->pool_width > 1 ? i->pool_width - 1 : i->pool_width;
     if (pooled_fires > fire_slots)
-      CUDA_QEC_WARN("task graph: {} fire-pool copies but {} async workers{}; "
+      CUDA_QEC_WARN("task graph: {} node copies may fire at once but {} "
+                    "async workers{}; "
                     "some copies can never run concurrently",
                     pooled_fires, i->pool_width,
                     indexed ? ", one kept for other events" : "");

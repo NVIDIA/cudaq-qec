@@ -10936,6 +10936,44 @@ TEST(DecodingTaskGraph, AsyncStreamingDestructorJoinsPendingDecode) {
   EXPECT_NO_THROW(destroy.get());
 } // end - AsyncStreamingDestructorJoinsPendingDecode
 
+// A pool worker that fails before it holds a record, here pinning itself to
+// a device that does not exist, stops the session; FINAL rethrows its error
+// rather than wait for a result that never comes. A reset from a watchdog
+// unblocks a hung FINAL so the test fails instead of hanging.
+TEST(DecodingTaskGraph, AsyncFinalRethrowsAWorkerFailureOutsideARecord) {
+  auto h = sparse_binary_matrix::from_nested_csr(1, 1, {{0}});
+  auto graph = std::make_unique<decoding_task_graph>(
+      std::make_unique<pinned_decoder>(h, /*device=*/1 << 20),
+      std::vector<std::vector<uint32_t>>{{0}},
+      std::vector<std::vector<uint32_t>>{{0}},
+      task_graph_options{.async_streaming = true});
+  const uint8_t zero = 0;
+  std::string error;
+  std::atomic<bool> done{false};
+  std::atomic<bool> rescued{false};
+  struct joiner {
+    std::thread t;
+    ~joiner() { t.join(); }
+  } watchdog{std::thread([&] {
+    for (int i = 0; i < 500 && !done.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!done.load()) {
+      rescued = true;
+      graph->reset_decoder();
+    }
+  })};
+  try {
+    graph->enqueue_syndrome(&zero, 1, round_type::FINAL);
+    (void)graph->streaming_result();
+  } catch (const std::exception &e) {
+    error = e.what();
+  }
+  done = true;
+
+  EXPECT_FALSE(rescued) << "FINAL hung until a reset";
+  EXPECT_NE(error.find("out of range"), std::string::npos) << error;
+}
+
 TEST(DecodingTaskGraph, CudaDeviceIdIsNulloptWhenNoNodeIsPinned) {
   auto g = make_single_node_graph(/*device=*/-1);
   EXPECT_FALSE(g->cuda_device_id().has_value());

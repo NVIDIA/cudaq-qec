@@ -6639,17 +6639,21 @@ pooled_pattern_warnings(std::size_t copies, std::size_t workers) {
   return {warnings, threads};
 } // end - pooled_pattern_warnings()
 
-// Records pipeline, so every copy of both layers can fire at once, and an
-// indexed fire always leaves one worker for ingestion and deliveries. The
-// default pool holds both: 2 x 4 copies and that worker, then the
-// coordinator, up to the machine's threads.
+// Records pipeline, so every copy of both layers can fire at once, one copy
+// each included, and an indexed fire always leaves one worker for ingestion
+// and deliveries. The default pool holds both: 2 x copies and that worker,
+// then the coordinator, up to the machine's threads.
 TEST(WindowedGraph, DefaultAsyncPoolRunsEveryCopyBesideIngest) {
   const std::size_t hardware =
       std::max(1u, std::thread::hardware_concurrency());
-  const auto [warnings, threads] = pooled_pattern_warnings(4, 0);
-  EXPECT_EQ(threads, std::min<std::size_t>(9, hardware) + 1);
-  if (hardware >= 9)
-    EXPECT_TRUE(warnings.empty()) << warnings.front();
+  for (const std::size_t copies : {std::size_t{1}, std::size_t{4}}) {
+    SCOPED_TRACE(::testing::Message() << "copies " << copies);
+    const auto workers = 2 * copies + 1;
+    const auto [warnings, threads] = pooled_pattern_warnings(copies, 0);
+    EXPECT_EQ(threads, std::min(workers, hardware) + 1);
+    if (hardware >= workers)
+      EXPECT_TRUE(warnings.empty()) << warnings.front();
+  }
 }
 
 // An explicit pool smaller than the copies plus the worker fires leave free
@@ -6657,6 +6661,8 @@ TEST(WindowedGraph, DefaultAsyncPoolRunsEveryCopyBesideIngest) {
 TEST(WindowedGraph, PoolTooSmallForEveryCopyWarns) {
   EXPECT_EQ(pooled_pattern_warnings(4, 8).first.size(), 1u);
   EXPECT_TRUE(pooled_pattern_warnings(4, 9).first.empty());
+  EXPECT_EQ(pooled_pattern_warnings(1, 2).first.size(), 1u);
+  EXPECT_TRUE(pooled_pattern_warnings(1, 3).first.empty());
 }
 
 // A sliding window, whose sends feed its own next instance, streams as the

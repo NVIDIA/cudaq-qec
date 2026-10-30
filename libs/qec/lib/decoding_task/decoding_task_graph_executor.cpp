@@ -2011,8 +2011,9 @@ private:
     if (running != 0)
       --running;
     notify_workers();
-    if (c && c->gated)
-      owner.wake_async_stream();
+    // Wake a parked coordinator to end the session, whether or not the
+    // failed worker held a record.
+    owner.wake_async_stream();
   }
 
 public:
