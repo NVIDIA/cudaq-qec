@@ -12662,8 +12662,13 @@ public:
   bool enqueue(const uint8_t *syndrome, std::size_t len, round_type) override {
     const auto record = records_++;
     probe_->log(id_, record);
-    if (mode_ == "wide")
+    if (mode_ == "wide") {
       probe_->log(id_ + ".len", len); // how many rounds this record held
+      // Rounds admitted together share a buffer: each starts where the last
+      // ended.
+      probe_->log(id_ + ".joined", syndrome && syndrome == last_end_);
+      last_end_ = syndrome ? syndrome + len : nullptr;
+    }
     probe_->maybe_block(id_, record);
     value_out_.get<logical_outcome>().bits[0] =
         syndrome && len ? syndrome[0] : uint8_t{0};
@@ -12716,12 +12721,13 @@ public:
     received_ = 0;
     records_ = 0;
     skipped_ = 0;
+    last_end_ = nullptr;
   }
   std::size_t num_msyn_per_decode() const override { return raw() ? 1 : 0; }
   std::size_t num_msyn_per_round() const override { return 1; }
   std::size_t num_observables() const override { return 1; }
   // `wide` takes up to 64 rounds a record, so rounds admitted together
-  // reach it as one.
+  // fit in one.
   std::optional<std::size_t> raw_chunk_limit() const override {
     if (mode_ == "wide")
       return 64;
@@ -12787,6 +12793,7 @@ private:
   std::size_t received_ = 0;
   std::size_t skipped_ = 0;
   std::size_t records_ = 0;
+  const uint8_t *last_end_ = nullptr; ///< where `wide`'s last round ended
   uint8_t pending_[2] = {0, 0};
   edge_value value_out_;
 };
@@ -12929,16 +12936,14 @@ TEST(DecodingTaskGraph, ConcurrentRecordsPipelineUpstreamNodes) {
 
 // Rounds queued while the graph is behind are admitted together: with B
 // stalled, a burst of tagged rounds waits in the queue, and the coordinator
-// takes several as one record, which W, metering 64 rounds, receives in one
-// call. Every round still arrives, in order. W publishes once per record it
-// receives, so a batch advances the result once and counts as one completed
-// operation, the public counter's batched rule.
+// takes several as one record. W still receives them one round at a time,
+// in order, and each counts as a completed operation, as synchronously.
 TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
   if (std::thread::hardware_concurrency() < 3)
     GTEST_SKIP() << "pipelining needs at least three CPU threads";
   ASSERT_TRUE(pipeline_probe_registered);
   constexpr std::size_t rounds = 40;
-  std::size_t widest = 0;
+  std::size_t joined = 0;
   auto probe = std::make_shared<pipeline_probe>();
   std::vector<task_graph_node_config> nodes;
   active_pipeline_probe = probe;
@@ -12950,11 +12955,11 @@ TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
        {"W", "output", "B", "input"},
        {"B", "output", "output", "input"}},
       {.async_streaming = true, .async_queue_capacity = 64});
-  for (int shot = 0; shot < 5 && widest < 2; ++shot) {
+  for (int shot = 0; shot < 5 && joined == 0; ++shot) {
     SCOPED_TRACE("shot " + std::to_string(shot));
     const auto records = pipeline_records(rounds);
     const auto lengths_before = probe->records("W.len").size();
-    std::size_t received = 0;
+    const auto joined_before = probe->records("W.joined").size();
     graph->reset_decoder();
     probe->block_on("B", 0); // B numbers each shot's records from 0
     for (std::size_t i = 0; i + 1 < records.size(); ++i)
@@ -12965,14 +12970,15 @@ TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
     const auto result = graph->streaming_result();
     EXPECT_EQ(result.status, task_graph_streaming_status::complete);
     const auto lengths = probe->records("W.len");
-    for (std::size_t k = lengths_before; k < lengths.size(); ++k) {
-      received += lengths[k];
-      widest = std::max(widest, lengths[k]);
-    }
-    EXPECT_EQ(received, rounds);
-    EXPECT_EQ(result.completed_operations, lengths.size() - lengths_before);
+    const auto joins = probe->records("W.joined");
+    EXPECT_EQ(lengths.size() - lengths_before, rounds);
+    for (std::size_t k = lengths_before; k < lengths.size(); ++k)
+      EXPECT_EQ(lengths[k], 1u);
+    for (std::size_t k = joined_before; k < joins.size(); ++k)
+      joined += joins[k];
+    EXPECT_EQ(result.completed_operations, rounds);
   }
-  EXPECT_GE(widest, 2u) << "no shot admitted queued rounds together";
+  EXPECT_GT(joined, 0u) << "no shot admitted queued rounds together";
 } // end - TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether)
 
 // By default a producer may run 32 rounds ahead of a stalled graph, more

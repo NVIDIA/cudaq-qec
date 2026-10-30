@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace cudaq::qec {
@@ -357,8 +358,14 @@ struct decoding_task_graph::impl {
   void prepare_event_runtime(std::size_t context_count, bool dispatcher_thread);
   /// Drop every record, join entry and replica lease, as a new shot needs.
   void discard_records();
-  /// Fold a finished record's captured node state into the graph-level view.
-  void apply_record_context(record_context &c);
+  /// Fold a finished record's captured node state into the graph-level view,
+  /// one public operation at a time.
+  /// @return Operations before the last that advanced the result, and the
+  /// generation the last started from.
+  std::pair<std::uint64_t, std::uint64_t>
+  apply_record_context(record_context &c);
+  /// The mid-shot generation refresh_streaming_progress() would publish.
+  std::uint64_t pending_generation() const;
   /// Retire the oldest asynchronous record and publish its progress.
   void retire_record_context(record_context &c);
   /// Worker zero of an asynchronous session: admit and retire records.

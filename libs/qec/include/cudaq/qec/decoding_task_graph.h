@@ -297,9 +297,7 @@ struct task_graph_output_progress {
 /// `result_revision` advances whenever any output or graph status changes.
 /// `completed_operations` counts public enqueue operations that advanced the
 /// aggregate result, even when several complete before the next read. An
-/// asynchronous graph that admits queued operations together, while it is
-/// behind (see `task_graph_options::async_queue_capacity`), counts each time
-/// they advanced the result as one operation, up to how many it admitted.
+/// asynchronous graph counts them as a synchronous one would.
 /// Only reset_decoder() advances shot_epoch.
 struct task_graph_streaming_result {
   std::uint64_t shot_epoch = 0;

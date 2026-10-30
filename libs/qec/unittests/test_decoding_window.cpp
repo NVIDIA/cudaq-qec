@@ -6113,8 +6113,9 @@ void expect_pattern_streams(const std::string &output,
 // one layer feeds W, and W[k-1]'s forward delta W[k]'s receive_0. Built
 // with @p options and @p max_in_flight copies of W, it streams as the
 // reference decodes, in records of @p record measurements.
-void expect_sliding_streams(const task_graph_options &options,
-                            std::size_t max_in_flight, std::size_t record) {
+std::unique_ptr<decoding_task_graph>
+sliding_topology(const task_graph_options &options, std::size_t max_in_flight,
+                 const std::string &decoder = "single_error_lut") {
   const auto g = sliding_graph(2, 5);
   std::vector<task_graph_node_config> nodes(2);
   nodes[0].id = "ingest";
@@ -6123,17 +6124,22 @@ void expect_sliding_streams(const task_graph_options &options,
   nodes[0].windows = {{"W", g.layers.at(0).request, ""}};
   nodes[1].id = "W";
   nodes[1].kind = "decode_window";
-  nodes[1].decoder_type = "single_error_lut";
+  nodes[1].decoder_type = decoder;
   nodes[1].node_params.insert("num_receives", std::size_t{1});
   nodes[1].max_in_flight = max_in_flight;
-  auto graph = decoding_task_graph::from_topology(
+  return decoding_task_graph::from_topology(
       std::move(nodes),
       {{"measurements", "output", "ingest", "input"},
        {"ingest", "W", "W", "input"},
        {"W", "forward", "W", "receive_0", -1},
        {"W", "output", "output", "input"}},
       options);
-  expect_graph_streams(*graph, g, false, record);
+}
+
+void expect_sliding_streams(const task_graph_options &options,
+                            std::size_t max_in_flight, std::size_t record) {
+  expect_graph_streams(*sliding_topology(options, max_in_flight),
+                       sliding_graph(2, 5), false, record);
 }
 
 } // namespace
@@ -6882,6 +6888,56 @@ TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther) {
       << "no two windows of one layer decoded at once";
   jitter_lut::reset();
 } // end - TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther)
+
+// Streamed faster than they decode, so records are admitted together, with
+// four copies per layer finishing in random order, the pattern and a
+// sliding window count completed_operations exactly as synchronously.
+TEST(WindowedGraph, AsyncCountsCompletedOperationsAsSyncDoes) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 40;
+  parallel_window_reference reference(spec, lowered_graph(spec, load_params()),
+                                      R, "single_error_lut");
+  const auto m =
+      memory_measurements(tmpl, R, detectors_of(reference.model(), 5));
+  task_graph_options async_options;
+  std::vector<task_graph_node_config> nodes;
+  async_options.async_streaming = true;
+  async_options.async_num_workers = 8;
+  nodes.push_back(pattern_node(spec, load_params()));
+  const std::array<std::pair<std::unique_ptr<decoding_task_graph>,
+                             std::unique_ptr<decoding_task_graph>>,
+                   2>
+      graphs{std::pair{decoding_task_graph::from_topology(std::move(nodes),
+                                                          pattern_edges(), {}),
+                       load_graph(4, "jitter_lut", 8)},
+             std::pair{sliding_topology({}, 1),
+                       sliding_topology(async_options, 4, "jitter_lut")}};
+  // Streams the shot in records of @p record measurements; returns the count.
+  const auto count = [&](decoding_task_graph &graph, std::size_t record) {
+    graph.reset_decoder();
+    for (std::size_t at = 0; at < m.size(); at += record) {
+      const auto len = std::min(record, m.size() - at);
+      graph.enqueue_syndrome(m.data() + at, len,
+                             at + len == m.size() ? round_type::FINAL
+                                                  : round_type::BULK);
+    }
+    return graph.streaming_result().completed_operations;
+  };
+  jitter_lut::reset();
+  jitter_lut::max_delay_us = 300;
+  for (std::size_t g = 0; g < graphs.size(); ++g)
+    for (const std::size_t record :
+         {std::size_t{1}, std::size_t{4}, std::size_t{7}}) {
+      const auto want = count(*graphs[g].first, record);
+      for (int shot = 0; shot < 10; ++shot) {
+        SCOPED_TRACE(::testing::Message() << "graph " << g << ", record "
+                                          << record << ", shot " << shot);
+        EXPECT_EQ(count(*graphs[g].second, record), want);
+      }
+    }
+  jitter_lut::reset();
+} // end - TEST(WindowedGraph, AsyncCountsCompletedOperationsAsSyncDoes)
 
 // Read mid-shot, with decodes finishing in random order, the output's
 // coverage is [0, frontier) and never shrinks, and its value is exactly the
