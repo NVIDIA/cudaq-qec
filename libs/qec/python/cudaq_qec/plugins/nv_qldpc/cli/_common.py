@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under    #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Shared plumbing of the CLI commands: the argument parser, the inputs (circuit -> DEM matrices and nominal rates; device data
 from a .dets + metadata pair, a .npy / .npz array, or a DEM simulation; the TCBP model), the learn_noise keyword set,
 per-pass records and the JSON writer."""

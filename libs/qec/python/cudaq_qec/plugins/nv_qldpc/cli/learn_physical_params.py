@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under    #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Physical noise parameters, rates = A q (learn_noise mode parametric).
 
     python -m ...learn_physical_params --print-tags > tags.json          # sentinel values for the tag circuit

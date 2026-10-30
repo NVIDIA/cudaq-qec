@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under    #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Command-line front ends of the in-plugin noise learning (python -m cudaq_qec.plugins.nv_qldpc.cli.<command>):
 
     init_tcbp_model         circuit.stim --out surface.tcbp          # init_tcbp_model() -> TCBP model (once per code family)

@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under    #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """End-to-end nv-qldpc TCBP model setup + noise learning on a stim-generated surface code (CI-sized, GPU).
 
 Self-contained (stim only): a distance-3 rotated memory circuit with stim's four noise strengths gives the structure;
