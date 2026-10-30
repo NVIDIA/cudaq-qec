@@ -254,7 +254,7 @@ at the intended `--round_interval_us`. The async queue must be large enough to
 absorb temporary producer/coordinator skew, or queue-full waits dominate the
 result.
 
-By default a paced tail starts when the producer reaches FINAL. An execution that decodes inside its enqueue calls, such as a synchronous graph or a direct decoder, can fall behind its pacing, so it reaches FINAL late and its tail leaves that lateness out. `--tail_from_schedule` starts the tail when FINAL was due instead, which compares synchronous and asynchronous executions fairly: the FINAL-enqueue component then includes how late the producer was. It has no effect without `--round_interval_us`.
+By default a paced tail starts when the producer reaches FINAL. An execution that decodes inside its enqueue calls, such as a synchronous graph or a direct decoder, can fall behind its pacing, so it reaches FINAL late and its tail leaves that lateness out. `--tail_from_schedule` starts the tail when FINAL was due instead, which compares synchronous and asynchronous executions fairly: the FINAL-enqueue component then includes how late the producer was, and BULK enqueue time after FINAL was due counts in the tail only, not also in the per-round work, so `latency_*` does not count it twice. It has no effect without `--round_interval_us`.
 
 The `rounds/s` value uses a separate wall-clock interval around each
 instance's complete timed shot loop. It includes pacing, decoder reset, and

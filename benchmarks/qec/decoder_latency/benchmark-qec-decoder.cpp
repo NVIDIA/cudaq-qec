@@ -1503,30 +1503,36 @@ uint64_t stream_shot(benchmark_target &target, const benchmark_data &data,
                      double *final_enqueue_us = nullptr,
                      double *correction_readout_us = nullptr) {
   const std::vector<uint8_t> &syn = data.hard_measurements[shot];
+  const bool scheduled_tail =
+      opts.tail_from_schedule && opts.round_interval.count() > 0;
   double work = 0.0;
   std::size_t offset = 0;
 
   target.reset();
   const auto shot_start = clock_type::now();
+  const auto final_due =
+      shot_start +
+      static_cast<int64_t>(round_widths.size() - 1) * opts.round_interval;
+  // A scheduled tail starts when FINAL was due, so BULK work after then
+  // counts in the tail only, not twice.
+  const auto work_end =
+      scheduled_tail ? final_due : clock_type::time_point::max();
   for (std::size_t r = 0; r + 1 < round_widths.size(); ++r) {
     if (opts.round_interval.count() > 0)
       spin_until(shot_start + static_cast<int64_t>(r) * opts.round_interval);
     const auto rs = clock_type::now();
     target.enqueue(syn.data() + offset, round_widths[r], /*final=*/false);
-    work += elapsed_us(rs, clock_type::now());
+    work += elapsed_us(std::min(rs, work_end),
+                       std::min(clock_type::now(), work_end));
     offset += round_widths[r];
   }
-  const auto final_due =
-      shot_start +
-      static_cast<int64_t>(round_widths.size() - 1) * opts.round_interval;
   if (opts.round_interval.count() > 0)
     spin_until(final_due);
   // From when FINAL was due, a producer that fell behind its pacing (a
   // synchronous graph decoding inline) is charged for its lateness.
-  const auto tail_start =
-      opts.tail_from_schedule && opts.round_interval.count() > 0
-          ? std::min(final_due, clock_type::now())
-          : clock_type::now();
+  const auto tail_start = scheduled_tail
+                              ? std::min(final_due, clock_type::now())
+                              : clock_type::now();
   target.enqueue(syn.data() + offset, round_widths.back(), /*final=*/true);
   const auto enqueue_done = clock_type::now();
   const uint64_t corrections = target.corrections();
