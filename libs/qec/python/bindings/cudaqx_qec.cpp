@@ -4,13 +4,9 @@
  */
 
 #include "py_code.h"
-#include "py_decoder.h"
 #include "py_decoding.h"
-#include "py_decoding_config.h"
-#include "py_decoding_task_graph.h"
 #include "py_dem_construction.h"
 #include "py_dem_sampling.h"
-#include "py_extended_dem.h"
 #include "py_surface_code.h"
 
 // Only built when cudaq-realtime is available; see qec/python/CMakeLists.txt.
@@ -27,15 +23,15 @@ NB_MODULE(_pycudaqx_qec_the_suffix_matters_cudaq_qec, mod) {
   // Ensure cudaq is loaded so its nanobind-registered types are available
   // before any QEC binding tries to return or consume them.
   nanobind::module_::import_("cudaq");
+  // The CUDA-Q-free bindings live in cudaq_qec._qec_core; share its `qecrt`
+  // submodule so everything below lands in the one cudaq_qec.qecrt namespace.
+  auto core = nanobind::module_::import_("cudaq_qec._qec_core");
+  mod.attr("qecrt") = core.attr("qecrt");
   cudaq::qec::bindCode(mod);
-  cudaq::qec::bindDecoder(mod);
-  cudaq::qec::decoding::config::bindDecodingConfig(mod);
   cudaq::qec::decoding::bindDecoding(mod);
   cudaq::qec::dem_sampler::bindDemSampling(mod);
   cudaq::qec::surface_code::bindSurfaceCode(mod);
-  cudaq::qec::bindDemConstruction(mod);
-  cudaq::qec::bindExtendedDem(mod);
-  cudaq::qec::bindDecodingTaskGraph(mod);
+  cudaq::qec::bindDemConstructionCode(core);
 #ifdef CUDAQX_QEC_HAS_CUDAQ_REALTIME
   cudaq::qec::playback::bindPlaybackEmulator(mod);
 #endif

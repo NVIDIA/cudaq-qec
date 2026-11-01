@@ -235,7 +235,7 @@ target_link_libraries(cudaq-qec-realtime-decoding
     cudaq-qec-decoders
   PRIVATE
     LLVMSupport
-    CUDA::cudart
+    CUDA::cudart_static
     $<$<BOOL:${CUDAQ_REALTIME_LIBRARY}>:${CUDAQ_REALTIME_LIBRARY}>
 )
 

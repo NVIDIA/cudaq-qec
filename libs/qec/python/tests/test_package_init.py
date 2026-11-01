@@ -12,7 +12,9 @@ import pytest
 
 import cudaq_qec as qec
 
-_NATIVE_EXT = "_pycudaqx_qec_the_suffix_matters_cudaq_qec"
+# Whichever native extension the package imports first (the CUDA-Q one when
+# cudaq is installed, else the CUDA-Q-free core) is made to fail.
+_NATIVE_EXTS = ("_pycudaqx_qec_the_suffix_matters_cudaq_qec", "_qec_core")
 _PROBE_PKG = "_qec_init_native_import_probe"
 
 
@@ -30,12 +32,12 @@ class _RaisingLoader:
 
 class _RaisingFinder:
 
-    def __init__(self, fullname, message):
-        self.fullname = fullname
+    def __init__(self, fullnames, message):
+        self.fullnames = fullnames
         self.message = message
 
     def find_spec(self, fullname, path, target=None):
-        if fullname != self.fullname:
+        if fullname not in self.fullnames:
             return None
         return importlib.machinery.ModuleSpec(fullname,
                                               _RaisingLoader(self.message))
@@ -44,9 +46,9 @@ class _RaisingFinder:
 def _load_init_with_native_import_error(message):
     # Load the real package __init__ under a temporary name so the native
     # extension import can fail without replacing the live cudaq_qec module.
-    ext_name = f"{_PROBE_PKG}.{_NATIVE_EXT}"
-    finder = _RaisingFinder(ext_name, message)
-    added = [_PROBE_PKG, f"{_PROBE_PKG}.patch", ext_name]
+    ext_names = [f"{_PROBE_PKG}.{ext}" for ext in _NATIVE_EXTS]
+    finder = _RaisingFinder(ext_names, message)
+    added = [_PROBE_PKG, f"{_PROBE_PKG}.patch", *ext_names]
     sys.meta_path.insert(0, finder)
     try:
         patch_mod = types.ModuleType(f"{_PROBE_PKG}.patch")

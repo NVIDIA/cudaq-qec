@@ -19,8 +19,12 @@ not require a GPU to use, but some components are GPU-accelerated.
 
 ## Optional Dependencies
 
-Some decoders require additional dependencies to operate. You can install them with
+The base package is CUDA-Q-free: decoders (including `nv-qldpc-decoder`),
+decoding configuration and task graphs, and DEM construction from matrices.
+Codes, circuit experiments and real-time decoding from CUDA-Q kernels need
+CUDA-Q, and some decoders require additional dependencies. Install them with
 
+- `pip install cudaq-qec[cudaq]` for CUDA-Q (codes, experiments, device calls)
 - `pip install cudaq-qec[tensor-network-decoder]` for the Tensor Network Decoder
 - `pip install cudaq-qec[trt-decoder]` for the TensorRT Decoder
 

@@ -1,6 +1,76 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
+import importlib.util
+import os
+
+# CUDA-Q is an optional dependency (`pip install cudaq-qec-cuXX[cudaq]`).
+# The decoders, decoding configuration, DEM construction and task graphs live
+# in the CUDA-Q-free `_qec_core` extension; codes, experiments, device calls,
+# GPU DEM sampling and the surface-code layout need CUDA-Q and are bound by
+# `_pycudaqx_qec_the_suffix_matters_cudaq_qec`. Set CUDAQ_QEC_DISABLE_CUDAQ=1
+# to behave as if CUDA-Q were not installed.
+_HAS_CUDAQ = (os.environ.get("CUDAQ_QEC_DISABLE_CUDAQ", "0") == "0" and
+              importlib.util.find_spec("cudaq") is not None)
+
+
+def has_cudaq() -> bool:
+    """Whether the CUDA-Q-dependent part of cudaq_qec is available."""
+    return _HAS_CUDAQ
+
+
+def _cudaq_install_hint() -> str:
+    import importlib.metadata as _md
+    dist = "cudaq-qec"
+    for candidate in ("cudaq-qec-cu12", "cudaq-qec-cu13"):
+        try:
+            _md.version(candidate)
+            dist = candidate
+            break
+        except _md.PackageNotFoundError:
+            pass
+    return f'pip install "{dist}[cudaq]"'
+
+
+# Names that need CUDA-Q. Without it, touching one raises an ImportError that
+# says what to install (see __getattr__ below).
+_CUDAQ_ONLY_NAMES = frozenset({
+    "patch",
+    "code",
+    "Code",
+    "TwoQubitDepolarization",
+    "TwoQubitBitFlip",
+    "operation",
+    "get_code",
+    "get_available_codes",
+    "generate_random_bit_flips",
+    "sample_memory_circuit",
+    "x_sample_memory_circuit",
+    "z_sample_memory_circuit",
+    "sample_code_capacity",
+    "dem_from_memory_circuit",
+    "x_dem_from_memory_circuit",
+    "z_dem_from_memory_circuit",
+    "decoder_context_from_memory_circuit",
+    "DecoderContext",
+    "d_sparse",
+    "stabilizer_grid",
+    "role_to_str",
+    "sc_orientation",
+    "dem_sampling",
+})
+
+
+def __getattr__(name):
+    if name in _CUDAQ_ONLY_NAMES:
+        reason = ("CUDA-Q support is disabled by CUDAQ_QEC_DISABLE_CUDAQ"
+                  if os.environ.get("CUDAQ_QEC_DISABLE_CUDAQ", "0") != "0" else
+                  "CUDA-Q (the `cudaq` package) is not installed")
+        raise ImportError(f"cudaq_qec.{name} requires CUDA-Q, but {reason}. "
+                          f"Install it with: {_cudaq_install_hint()}")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 def _ensure_cuda_runtime_loaded():
     """Ensure CUDA runtime libraries are in the process before loading native extensions."""
@@ -10,14 +80,13 @@ def _ensure_cuda_runtime_loaded():
         pass
 
 
-_ensure_cuda_runtime_loaded()
-del _ensure_cuda_runtime_loaded
-
-import functools
-
-from .patch import patch
 try:
-    from ._pycudaqx_qec_the_suffix_matters_cudaq_qec import *
+    if _HAS_CUDAQ:
+        _ensure_cuda_runtime_loaded()
+        # Also imports _qec_core and adds the code-object overloads to it, so
+        # the core import below must come second to pick those up.
+        from ._pycudaqx_qec_the_suffix_matters_cudaq_qec import *
+    from ._qec_core import *
 except ImportError as exc:
     err = str(exc)
     if "libcustabilizer" in err or "cuStabilizer" in err:
@@ -32,10 +101,13 @@ except ImportError as exc:
             f"{err}. Ensure 'nvidia-cuda-runtime-cuXX' is installed "
             "alongside 'cuda-quantum-cuXX'.") from exc
     raise
+del _ensure_cuda_runtime_loaded
 
 __version__ = qecrt.__version__
-code = qecrt.code
-Code = qecrt.Code
+if _HAS_CUDAQ:
+    from .patch import patch
+    code = qecrt.code
+    Code = qecrt.Code
 _native_decoder = qecrt.decoder
 Decoder = qecrt.Decoder
 
@@ -73,28 +145,31 @@ def decoder(name):
     return wrap
 
 
-TwoQubitDepolarization = qecrt.TwoQubitDepolarization
-TwoQubitBitFlip = qecrt.TwoQubitBitFlip
-operation = qecrt.operation
-get_code = qecrt.get_code
-get_available_codes = qecrt.get_available_codes
+if _HAS_CUDAQ:
+    TwoQubitDepolarization = qecrt.TwoQubitDepolarization
+    TwoQubitBitFlip = qecrt.TwoQubitBitFlip
+    operation = qecrt.operation
+    get_code = qecrt.get_code
+    get_available_codes = qecrt.get_available_codes
 get_decoder = qecrt.get_decoder
 dem_from_stim_text = qecrt.dem_from_stim_text
 DecoderResult = qecrt.DecoderResult
 BatchDecoderResult = qecrt.BatchDecoderResult
 AsyncDecoderResult = qecrt.AsyncDecoderResult
 DetectorErrorModel = qecrt.DetectorErrorModel
-generate_random_bit_flips = qecrt.generate_random_bit_flips
-sample_memory_circuit = qecrt.sample_memory_circuit
-x_sample_memory_circuit = qecrt.x_sample_memory_circuit
-z_sample_memory_circuit = qecrt.z_sample_memory_circuit
-sample_code_capacity = qecrt.sample_code_capacity
-dem_from_memory_circuit = qecrt.dem_from_memory_circuit
-x_dem_from_memory_circuit = qecrt.x_dem_from_memory_circuit
-z_dem_from_memory_circuit = qecrt.z_dem_from_memory_circuit
-decoder_context_from_memory_circuit = qecrt.decoder_context_from_memory_circuit
-DecoderContext = qecrt.DecoderContext
-d_sparse = qecrt.d_sparse
+if _HAS_CUDAQ:
+    generate_random_bit_flips = qecrt.generate_random_bit_flips
+    sample_memory_circuit = qecrt.sample_memory_circuit
+    x_sample_memory_circuit = qecrt.x_sample_memory_circuit
+    z_sample_memory_circuit = qecrt.z_sample_memory_circuit
+    sample_code_capacity = qecrt.sample_code_capacity
+    dem_from_memory_circuit = qecrt.dem_from_memory_circuit
+    x_dem_from_memory_circuit = qecrt.x_dem_from_memory_circuit
+    z_dem_from_memory_circuit = qecrt.z_dem_from_memory_circuit
+    decoder_context_from_memory_circuit = \
+        qecrt.decoder_context_from_memory_circuit
+    DecoderContext = qecrt.DecoderContext
+    d_sparse = qecrt.d_sparse
 
 dump_pcm = qecrt.dump_pcm
 generate_random_pcm = qecrt.generate_random_pcm
@@ -147,11 +222,11 @@ for _compat_cls_name in _compat.__all__:
     setattr(qecrt.config, _compat_cls_name, getattr(_compat, _compat_cls_name))
 del _compat_cls_name
 
-stabilizer_grid = qecrt.stabilizer_grid
-role_to_str = qecrt.role_to_str
-sc_orientation = qecrt.sc_orientation
-
-from .dem_sampling import dem_sampling
+if _HAS_CUDAQ:
+    stabilizer_grid = qecrt.stabilizer_grid
+    role_to_str = qecrt.role_to_str
+    sc_orientation = qecrt.sc_orientation
+    from .dem_sampling import dem_sampling
 from . import relay_solutions
 
 from .plugins import decoders, codes
@@ -168,15 +243,17 @@ for finder, name, ispkg in iter_namespace(decoders):
     except (ModuleNotFoundError, ImportError) as e:
         pass
 
-for finder, name, ispkg in iter_namespace(codes):
-    try:
-        importlib.import_module(name)
-    except (ModuleNotFoundError, ImportError) as e:
-        pass
+# Codes are CUDA-Q kernels, so code plugins only load with CUDA-Q.
+if _HAS_CUDAQ:
+    for finder, name, ispkg in iter_namespace(codes):
+        try:
+            importlib.import_module(name)
+        except (ModuleNotFoundError, ImportError) as e:
+            pass
 
-try:
-    import cudaq
-    from .loader import qec_set_target_callback
-    cudaq.register_set_target_callback(qec_set_target_callback, "cudaq_qec")
-except ImportError:
-    pass
+    try:
+        import cudaq
+        from .loader import qec_set_target_callback
+        cudaq.register_set_target_callback(qec_set_target_callback, "cudaq_qec")
+    except ImportError:
+        pass

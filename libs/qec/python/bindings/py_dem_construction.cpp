@@ -14,7 +14,9 @@
 #include "type_casters.h"
 #include "cudaq/qec/code_matrices.h"
 #include "cudaq/qec/dem_construction.h"
+#ifdef CUDAQX_QEC_BIND_CODE_BRIDGE
 #include "cudaq/qec/dem_construction_code.h"
+#endif
 #include "cudaq/qec/sparse_binary_matrix.h"
 
 #include <nanobind/nanobind.h>
@@ -99,7 +101,13 @@ void bindDemConstruction(nb::module_ &mod) {
       "    num_rounds: Number of syndrome measurement rounds (default 1).\n"
       "Returns:\n"
       "    detector_error_model ready for any decoder.");
+}
 
+#ifdef CUDAQX_QEC_BIND_CODE_BRIDGE
+// The overloads that take a cudaq_qec code object need libcudaq-qec (and
+// through it CUDA-Q). The CUDA-Q extension module binds them into the
+// CUDA-Q-free module, next to the matrix-based overloads.
+void bindDemConstructionCode(nb::module_ &mod) {
   // -------------------------------------------------------------------------
   // css_matrices_from_code — bridge from code objects
   // -------------------------------------------------------------------------
@@ -132,5 +140,6 @@ void bindDemConstruction(nb::module_ &mod) {
       "Returns:\n"
       "    detector_error_model.");
 }
+#endif // CUDAQX_QEC_BIND_CODE_BRIDGE
 
 } // namespace cudaq::qec

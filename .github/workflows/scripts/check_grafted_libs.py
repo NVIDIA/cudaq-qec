@@ -1,15 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Fail if `auditwheel repair` grafted a library it should not have.
+"""Fail if `auditwheel repair` grafted any library into the wheel.
 
 auditwheel copies external dependencies into `<pkg>.libs/` under a
 hash-suffixed SONAME (e.g. `libfoo-1a2b3c4d.so`) and rewrites the dependents to
-point at that copy. If the library also ships un-hashed elsewhere in the wheel,
-the two copies have different SONAMEs, so both can be loaded into the same
-process, each with its own global state (e.g. the decoder registry). CUDA-Q
-libraries must never be grafted either; they come from the cuda-quantum wheel.
+point at that copy. The cudaq-qec wheels ship nothing that way: every runtime
+dependency either comes from a sibling wheel (cuda-quantum, cuquantum,
+tensorrt, the CUDA runtime) or is linked statically, so any `.libs/` content
+means a dependency was not excluded. Two cases are called out specially
+because they are actively harmful rather than merely bloat: a grafted copy of
+a library the wheel already ships un-hashed (two SONAMEs, two copies of the
+global state such as the decoder registry), and any CUDA-Q library.
 
-The fix for either case is an `--exclude` in the `auditwheel repair` call.
+The fix in every case is an `--exclude` in the `auditwheel repair` call.
 
 Usage: python check_grafted_libs.py <wheel> [<wheel> ...]
 """
@@ -35,6 +38,9 @@ def check_wheel(path):
             errors.append(f"{lib} duplicates {unhashed} already in the wheel")
         elif unhashed.startswith("libcudaq"):
             errors.append(f"{lib} is a CUDA-Q library and must not be grafted")
+        else:
+            errors.append(f"{lib} was grafted; the wheel must not carry a "
+                          "`.libs/` directory")
     return errors
 
 

@@ -7,4 +7,6 @@
 namespace nb = nanobind;
 namespace cudaq::qec {
 void bindDemConstruction(nb::module_ &mod);
+// Only compiled with CUDAQX_QEC_BIND_CODE_BRIDGE (the CUDA-Q extension).
+void bindDemConstructionCode(nb::module_ &mod);
 } // namespace cudaq::qec

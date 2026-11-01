@@ -44,21 +44,48 @@ if (CUDAQ_QEC_DECODERS_ONLY)
   return()
 endif()
 
+# CUDA-Q-free module: decoders, decoding config, DEM construction from
+# matrices, extended DEMs, task graph. `import cudaq_qec` needs only this one,
+# so a cudaq-qec wheel works without CUDA-Q installed. cudart is linked
+# statically (and kept local) so the base wheel has no CUDA runtime wheel
+# dependency either.
+set(CORE_MODULE_NAME _qec_core)
+
+cudaqx_add_pymodule(${CORE_MODULE_NAME}
+  bindings/cudaq_qec_core.cpp
+  bindings/py_decoder.cpp
+  bindings/py_decoding_task_graph.cpp
+  bindings/py_decoding_config.cpp
+  bindings/py_dem_construction.cpp
+  bindings/py_extended_dem.cpp
+)
+
+target_link_libraries(${CORE_MODULE_NAME}
+  PRIVATE
+    cudaq-qec-decoders
+    cudaq-qec-realtime-decoding
+    CUDA::cudart_static
+)
+target_link_options(${CORE_MODULE_NAME} PRIVATE
+  $<$<CXX_COMPILER_ID:GNU>:-Wl,--exclude-libs,libcudart_static.a>
+)
+
+# CUDA-Q-dependent module: codes, experiments, device calls, DEM sampling,
+# surface-code layout. Binds into the core module's `qecrt` submodule.
 set(MODULE_NAME _pycudaqx_qec_the_suffix_matters_cudaq_qec)
 
 cudaqx_add_pymodule(${MODULE_NAME}
   bindings/cudaqx_qec.cpp
   bindings/py_code.cpp
-  bindings/py_decoder.cpp
-  bindings/py_decoding_task_graph.cpp
-  bindings/py_decoding_config.cpp
   bindings/py_decoding.cpp
   bindings/py_dem_construction.cpp
   bindings/py_dem_sampling.cpp
-  bindings/py_extended_dem.cpp
   bindings/py_surface_code.cpp
   bindings/py_patch.cpp
 )
+target_compile_definitions(${MODULE_NAME} PRIVATE CUDAQX_QEC_BIND_CODE_BRIDGE)
+
+set(QEC_PY_MODULES ${CORE_MODULE_NAME} ${MODULE_NAME})
 
 target_link_libraries(${MODULE_NAME}
   PRIVATE
@@ -86,9 +113,11 @@ endif()
 
 find_package(CUDAToolkit REQUIRED)
 target_link_libraries(${MODULE_NAME} PRIVATE CUDA::cudart)
-target_include_directories(${MODULE_NAME} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+foreach(_m IN LISTS QEC_PY_MODULES)
+  target_include_directories(${_m} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+endforeach()
 
-set_target_properties(${MODULE_NAME} PROPERTIES
+set_target_properties(${QEC_PY_MODULES} PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/cudaq_qec")
 
 if (NOT SKBUILD)
@@ -101,6 +130,7 @@ if (NOT SKBUILD)
     COMMENT "Copying Python files to binary directory"
   )
 
+  add_dependencies(${CORE_MODULE_NAME} copy_qec_python_files)
   add_dependencies(${MODULE_NAME} copy_qec_python_files)
 endif()
 
@@ -108,19 +138,19 @@ endif()
 # ==============================================================================
 
 if (NOT SKBUILD)
-  set_target_properties(${MODULE_NAME} PROPERTIES
+  set_target_properties(${QEC_PY_MODULES} PROPERTIES
     BUILD_RPATH "$ORIGIN"
     INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
   )
 
   # Let CMake automatically add paths of linked libraries to the RPATH:
-  set_target_properties(${MODULE_NAME} PROPERTIES
+  set_target_properties(${QEC_PY_MODULES} PROPERTIES
     INSTALL_RPATH_USE_LINK_PATH TRUE
   )
 else()
   # CUDA-Q install its libraries in site-packages/lib (or dist-packages/lib)
   # Thus, we need the $ORIGIN/../lib
-  set_target_properties(${MODULE_NAME} PROPERTIES
+  set_target_properties(${QEC_PY_MODULES} PROPERTIES
     INSTALL_RPATH "$ORIGIN/lib:$ORIGIN/../lib"
   )
 endif()
@@ -133,32 +163,7 @@ install(DIRECTORY cudaq_qec
   DESTINATION .
 )
 
-install(TARGETS ${MODULE_NAME}
+install(TARGETS ${QEC_PY_MODULES}
   COMPONENT qec-python
   DESTINATION cudaq_qec/
 )
-
-# Undocumented: also ship the cudaq-free decoders module (_qec_decoders_standalone,
-# the same one the decoders-only build produces) inside the wheel, so the
-# decoders can be used without importing cudaq: `import _qec_decoders_standalone`.
-# It links only cudaq-qec-decoders + cudart. It is installed at the wheel root,
-# NOT under cudaq_qec/: importing anything under cudaq_qec runs cudaq_qec/__init__
-# -> patch.py -> `from cudaq import qvector`, which would pull in cudaq. Wheel
-# (SKBUILD) only; $ORIGIN/${CMAKE_INSTALL_LIBDIR} resolves the in-package
-# libcudaq-qec-decoders.so (with its decoder-plugins/ sibling) in cudaq_qec/lib.
-if (SKBUILD)
-  cudaqx_add_pymodule(_qec_decoders_standalone
-    bindings/cudaqx_qec_decoders_only.cpp
-    bindings/py_decoder.cpp
-  )
-  target_link_libraries(_qec_decoders_standalone PRIVATE
-    cudaq-qec-decoders CUDA::cudart)
-  target_include_directories(_qec_decoders_standalone PRIVATE
-    ${CUDAToolkit_INCLUDE_DIRS})
-  set_target_properties(_qec_decoders_standalone PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python"
-    INSTALL_RPATH "$ORIGIN/${CMAKE_INSTALL_LIBDIR}")
-  install(TARGETS _qec_decoders_standalone
-    COMPONENT qec-python
-    DESTINATION .)
-endif()

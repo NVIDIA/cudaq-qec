@@ -17,7 +17,23 @@ option is to use the Docker container as described below.)
     # Install QEC library
     pip install cudaq-qec
 
-CUDA-Q QEC provides optional pip-installable components:
+The base package is CUDA-Q-free and lightweight: it contains the decoders
+(including the ``nv-qldpc-decoder``), the decoding configuration and task
+graph tooling, and DEM construction from parity-check matrices. Working with
+codes and circuits (``get_code``, ``sample_memory_circuit``,
+``dem_from_memory_circuit``, real-time decoding from CUDA-Q kernels, GPU DEM
+sampling) requires CUDA-Q, which is an optional extra:
+
+.. code-block:: bash
+
+    # Install QEC library together with CUDA-Q
+    pip install cudaq-qec[cudaq]
+
+Without the extra, those functions raise an ``ImportError`` that names the
+command above. ``cudaq_qec.has_cudaq()`` reports whether CUDA-Q support is
+available.
+
+CUDA-Q QEC provides further optional pip-installable components:
 
 .. code-block:: bash
 
