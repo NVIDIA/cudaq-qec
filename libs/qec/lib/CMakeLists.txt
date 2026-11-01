@@ -230,6 +230,7 @@ if(TARGET ${LIBRARY_NAME})
       cudaq::cudaq-operator
     PRIVATE
       cudaq::cudaq-common
+      cudaq::cudaq-em-default
   )
 
   target_link_libraries(${LIBRARY_NAME} PRIVATE
