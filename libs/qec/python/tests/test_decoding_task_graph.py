@@ -765,6 +765,7 @@ def _measurements(checks, rounds, data=None, measurement=None):
     return out
 
 
+@pytest.mark.requires_cudaq
 @pytest.mark.parametrize("distance", [3, 5])
 @pytest.mark.parametrize("x_checks", [False, True])
 def test_parallel_window_decodes_surface_code_single_faults(distance, x_checks):
@@ -791,6 +792,7 @@ def test_parallel_window_decodes_surface_code_single_faults(distance, x_checks):
                 assert got == [0] * len(logicals), f"check {j} in round {r}"
 
 
+@pytest.mark.requires_cudaq
 def test_parallel_window_surface_code_paths_agree():
     """On random surface-code shots, synchronous and asynchronous streaming
     and the one-shot run give the same corrections."""

@@ -1750,6 +1750,7 @@ def _predecoder_yaml(with_global):
 _REP5_MSYN = 20
 
 
+@pytest.mark.requires_cudaq
 def test_predecoder_topology_configures_and_serves_a_shot():
     # The config-layer half of the residual story: the kind is reachable from
     # YAML, the residual edge wires up, and the graph decodes real syndromes.
@@ -2002,6 +2003,7 @@ def test_multi_node_task_graph_with_a_bad_edge_port_is_rejected():
         qec.finalize_decoders()
 
 
+@pytest.mark.requires_cudaq
 def test_multi_node_task_graph_serves_a_shot_via_configure_decoders():
     import cudaq
 
@@ -2087,6 +2089,7 @@ _GUARDED_WINDOW_YAML = ("""decoders:
 """)
 
 
+@pytest.mark.requires_cudaq
 def test_a_kernel_can_close_a_guarded_window_by_naming_a_final_row():
     # A guarded window withholds its trailing rounds for a successor that never
     # arrives at the end of a stream; naming a `type: final` row from a kernel
@@ -2137,6 +2140,7 @@ def test_a_kernel_can_close_a_guarded_window_by_naming_a_final_row():
         f"both runs returned {bulk}")
 
 
+@pytest.mark.requires_cudaq
 def test_enqueue_syndromes_mapped_names_a_syndrome_mapping_row():
     # A Python device kernel can name a syndrome_mapping row.  It needs its own
     # kernel name because the device-kernel registry holds one argument count
@@ -2186,6 +2190,7 @@ syndrome_mapping:
         qec.finalize_decoders()
 
 
+@pytest.mark.requires_cudaq
 def test_enqueue_syndromes_mapped_rejects_an_undeclared_row():
     # An id no row declares is a configuration error, the same answer the
     # decoding server gives.  Break-it: have shape_for_mapping_id fall back to

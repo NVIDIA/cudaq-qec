@@ -72,6 +72,9 @@ def dem_sampling(
                 )
             break
 
+    import cudaq_qec as _qec
+    if not _qec.has_cudaq():
+        _qec._require_cudaq("dem_sampling")
     from . import _pycudaqx_qec_the_suffix_matters_cudaq_qec as _qecmod
 
     return _qecmod.qecrt.dem_sampling(check_matrix, num_shots,

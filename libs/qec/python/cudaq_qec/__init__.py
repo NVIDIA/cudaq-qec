@@ -62,13 +62,18 @@ _CUDAQ_ONLY_NAMES = frozenset({
 })
 
 
+def _require_cudaq(name):
+    """Raise the ImportError for a CUDA-Q-only feature `name`."""
+    reason = ("CUDA-Q support is disabled by CUDAQ_QEC_DISABLE_CUDAQ"
+              if os.environ.get("CUDAQ_QEC_DISABLE_CUDAQ", "0") != "0" else
+              "CUDA-Q (the `cudaq` package) is not installed")
+    raise ImportError(f"cudaq_qec.{name} requires CUDA-Q, but {reason}. "
+                      f"Install it with: {_cudaq_install_hint()}")
+
+
 def __getattr__(name):
     if name in _CUDAQ_ONLY_NAMES:
-        reason = ("CUDA-Q support is disabled by CUDAQ_QEC_DISABLE_CUDAQ"
-                  if os.environ.get("CUDAQ_QEC_DISABLE_CUDAQ", "0") != "0" else
-                  "CUDA-Q (the `cudaq` package) is not installed")
-        raise ImportError(f"cudaq_qec.{name} requires CUDA-Q, but {reason}. "
-                          f"Install it with: {_cudaq_install_hint()}")
+        _require_cudaq(name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

@@ -401,6 +401,15 @@ jobs:
           PYTHONPATH="/cudaq-install:$GITHUB_WORKSPACE/build_qec/python" \
             pytest -v libs/qec/python/tests/
 
+      # CUDA-Q is an optional extra of the wheel. Run the suite again as if it
+      # were not installed: CUDA-Q-only tests are skipped (see tests/conftest.py)
+      # and the decoder stack must work with no `cudaq` in the process.
+      - name: Run GPU Python tests without CUDA-Q
+        run: |
+          CUDAQ_QEC_DISABLE_CUDAQ=1 \
+          PYTHONPATH="/cudaq-install:$GITHUB_WORKSPACE/build_qec/python" \
+            pytest -v libs/qec/python/tests/
+
   # ==========================================================================
   # Multi-GPU tests - decoder placement across >= 2 GPUs (uses build artifacts
   # from build-and-test).

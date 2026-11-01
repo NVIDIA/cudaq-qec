@@ -97,10 +97,15 @@ if echo $platform | grep -qi "amd64"; then
   ${python} -m pip install stim beliefmatching
 fi
 
+# CUDA-Q is an optional extra of the wheel: run the suite once as installed
+# (with the `all` extra, so CUDA-Q is present) and once as if CUDA-Q were not
+# installed, which skips the CUDA-Q-only tests (see tests/conftest.py).
 if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
   ${python} -m pytest -v -s libs/qec/python/tests/
+  CUDAQ_QEC_DISABLE_CUDAQ=1 ${python} -m pytest -v -s libs/qec/python/tests/
 else
   ${python} -m pytest -v -s libs/qec/python/tests/ --ignore=libs/qec/python/tests/test_trt_decoder.py
+  CUDAQ_QEC_DISABLE_CUDAQ=1 ${python} -m pytest -v -s libs/qec/python/tests/ --ignore=libs/qec/python/tests/test_trt_decoder.py
 fi
 
 # Verify that the correct version of cuda-quantum and cudaq-qec were installed.

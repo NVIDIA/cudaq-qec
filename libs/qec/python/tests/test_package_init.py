@@ -90,6 +90,7 @@ def test_native_extension_import_diagnostics(native_msg, match, wrapped):
         assert str(ei.value) == native_msg
 
 
+@pytest.mark.requires_cudaq
 def test_package_import_tolerates_missing_cudaq_and_plugins(monkeypatch):
     # Optional cudaq and plugin imports are swallowed; public helpers such as
     # get_code must still be available after the package finishes importing.
