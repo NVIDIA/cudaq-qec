@@ -753,6 +753,9 @@ endif()
 #   - cudaq-qec-realtime-decoding-server-cqr / -simulation-cqr (the cudaq-realtime
 #     host-dispatch server + simulated-QPU client; built only when the cudaq
 #     device_call service is available)
+#   - decoding_server (the shipped server executable itself, so the whole
+#     closure the binary loads at startup is inspected, not just its libraries;
+#     built only when cudaq-realtime is found)
 #
 # Unlike the decoder/realtime closure check above, the server libraries DO
 # legitimately depend on libcudaq-common / libcudaq-operator (they provide the
@@ -765,6 +768,7 @@ set(_srv_closure_targets "")
 foreach(_t IN ITEMS
     cudaq-qec-realtime-decoding-server-cqr
     cudaq-qec-realtime-decoding-simulation-cqr
+    decoding_server
     )
   if(TARGET ${_t})
     list(APPEND _srv_closure_targets ${_t})
@@ -797,8 +801,9 @@ if(_srv_closure_targets)
   # Search path for the transitive soname walk: build tree first, then the
   # CUDA-Q install and realtime prefixes so intentionally-allowed deps
   # (common/operator/realtime) resolve and their subtrees are inspected too.
-  # The server libraries only DT_NEEDED libs in lib/ (decoder plugins are
-  # dlopen'd, never linked), so lib/decoder-plugins is not needed here.
+  # The server libraries and executable only DT_NEEDED libs in lib/ (decoder
+  # plugins are dlopen'd, never linked), so lib/decoder-plugins is not needed
+  # here.
   set(_srv_closure_search "${CMAKE_BINARY_DIR}/lib")
   if(DEFINED CUDAQ_INSTALL_DIR AND CUDAQ_INSTALL_DIR)
     string(APPEND _srv_closure_search "|${CUDAQ_INSTALL_DIR}/lib")
