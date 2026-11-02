@@ -207,7 +207,9 @@ To also build the bridge and playback tools for emulated or FPGA testing:
 
    # 2. Build holoscan-sensor-bridge (tag 2.6.0-EA2)
    #    Requires cmake >= 3.30.4 (HSB -> find_package(holoscan) -> rapids_logger).
-   #    If your system cmake is older: pip install cmake
+   #    The cudaqx-dev image ships cmake 3.28, so install a newer one and put it first on PATH:
+   #      pip install cmake
+   #      export PATH="$(python3 -c 'import cmake,os;print(os.path.join(os.path.dirname(cmake.__file__),"data","bin"))'):$PATH"
    git clone --branch 2.6.0-EA2 \
      https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
    cd holoscan-sensor-bridge
@@ -234,13 +236,13 @@ To also build the bridge and playback tools for emulated or FPGA testing:
    cd ../..
 
    # 3. Build libcudaq-realtime with Hololink tools enabled
-   #    This produces libcudaq-realtime-bridge-gpu-roce.so (needed by the bridge
+   #    This produces libcudaq-realtime-bridge-hololink.so (needed by the bridge
    #    tool) as well as the FPGA emulator.
    cd cudaq-realtime-src/realtime && mkdir -p build && cd build
    cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime \
      -DCUDAQ_REALTIME_ENABLE_HOLOLINK_TOOLS=ON \
-     -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=../../holoscan-sensor-bridge \
-     -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=../../holoscan-sensor-bridge/build \
+     -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/path/to/holoscan-sensor-bridge \
+     -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/path/to/holoscan-sensor-bridge/build \
      ..
    ninja && ninja install
    cd ../../..
