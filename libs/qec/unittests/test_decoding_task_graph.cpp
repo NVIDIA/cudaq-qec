@@ -482,6 +482,87 @@ TEST(DecodingTaskGraph, HostDispatchRoutesToTaskGraph) {
   cudaq::qec::decoding::config::finalize_decoders();
 }
 
+// A streaming result's logical read is the one release check every reader
+// shares: the last output's bits from first, once each is released. It is
+// null without a logical output, for a range past it or empty, for a bit not
+// yet released, or for values too short to hold the flagged bits.
+TEST(DecodingTaskGraph, StreamingResultGatesLogicalReadsOnRelease) {
+  cudaq::qec::task_graph_streaming_result result;
+  cudaq::qec::task_graph_output_progress corrections;
+  cudaq::qec::task_graph_output_progress logical;
+
+  EXPECT_EQ(result.logical_measurements(0, 1), nullptr);
+  corrections.value_width = 2;
+  result.outputs = {corrections};
+  result.values = {1, 0};
+  EXPECT_EQ(result.logical_measurements(0, 1), nullptr);
+
+  logical.value_offset = 2;
+  logical.value_width = 3;
+  logical.released = {1, 0, 1};
+  result.outputs.push_back(logical);
+  result.values = {1, 0, 1, 1, 0};
+  ASSERT_NE(result.logical_measurements(0, 1), nullptr);
+  EXPECT_EQ(*result.logical_measurements(0, 1), 1);
+  ASSERT_NE(result.logical_measurements(2, 1), nullptr);
+  EXPECT_EQ(*result.logical_measurements(2, 1), 0);
+  EXPECT_EQ(result.logical_measurements(1, 1), nullptr);
+  EXPECT_EQ(result.logical_measurements(0, 3), nullptr);
+  EXPECT_EQ(result.logical_measurements(2, 2), nullptr);
+  EXPECT_EQ(result.logical_measurements(3, 1), nullptr);
+  EXPECT_EQ(result.logical_measurements(0, 0), nullptr);
+  result.values.resize(4);
+  EXPECT_EQ(result.logical_measurements(2, 1), nullptr);
+}
+
+// host::get_logical_measurements refuses a plain decoder and a task graph
+// without a logical output.
+TEST(DecodingTaskGraph, HostRefusesLogicalMeasurementsADecoderLacks) {
+  namespace host = cudaq::qec::decoding::host;
+  const std::string yaml = R"(decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+  - id: 1
+    type: single_error_lut
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0,-1,1,-1,2,-1]
+    O_sparse: [0,-1,1,-1,2,-1]
+    D_sparse: [0,-1,1,-1,2,-1]
+)";
+  std::vector<uint8_t> logical(1, 0);
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(cudaq::qec::decoding::config::configure_decoders(config), 0);
+
+  EXPECT_THROW(host::get_logical_measurements(0, 0, logical.data(), 1, false),
+               std::invalid_argument);
+  EXPECT_THROW(host::get_logical_measurements(1, 0, logical.data(), 1, false),
+               std::invalid_argument);
+  cudaq::qec::decoding::config::finalize_decoders();
+} // end - TEST(DecodingTaskGraph, HostRefusesLogicalMeasurementsADecoderLacks)
+
 TEST(DecodingTaskGraph, ConfigureDecodersAcceptsAFinalRowAndServesBothShapes) {
   // The YAML half: a document with a `final` row configures, and both shapes
   // are enqueueable.  With no session this runs the inline path, so it pins

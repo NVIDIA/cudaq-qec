@@ -26,6 +26,7 @@ namespace cudaq::qec::decoding_server::slot {
 using cudaq::qec::decoding::rpc::bit_packed_bytes;
 using cudaq::qec::decoding::rpc::kEnqueueSyndromesFunctionId;
 using cudaq::qec::decoding::rpc::kGetCorrectionsFunctionId;
+using cudaq::qec::decoding::rpc::kGetLogicalMeasurementsFunctionId;
 using cudaq::qec::decoding::rpc::kMaxSyndromeBits;
 using cudaq::qec::decoding::rpc::kResetDecoderFunctionId;
 using cudaq::qec::decoding::rpc::RpcStatus;
@@ -95,6 +96,28 @@ inline bool parse_enqueue(const void *rx_slot, std::size_t slot_size,
   return true;
 }
 
+/// The header of a fixed-size request slot ([RPCHeader][Payload]) carrying
+/// @p function_id, with its payload copied into @p payload; null when the
+/// slot is not one. The payload may be followed by trailing bytes.
+template <typename Payload>
+const RPCHeader *parse_fixed(const void *rx_slot, std::size_t slot_size,
+                             uint32_t function_id, Payload &payload) {
+  const RPCHeader *header = nullptr;
+  if (!rx_slot || slot_size < sizeof(RPCHeader))
+    return nullptr;
+  header = static_cast<const RPCHeader *>(rx_slot);
+  if (header->magic != cudaq::realtime::RPC_MAGIC_REQUEST ||
+      header->function_id != function_id)
+    return nullptr;
+  if (header->arg_len < sizeof(Payload) ||
+      header->arg_len > slot_size - sizeof(RPCHeader))
+    return nullptr;
+  std::memcpy(&payload,
+              static_cast<const uint8_t *>(rx_slot) + sizeof(RPCHeader),
+              sizeof(Payload));
+  return header;
+}
+
 /// Validated view of a get_corrections request slot
 /// ([RPCHeader][GetCorrectionsRequestPayload]).
 struct GetCorrectionsView {
@@ -106,21 +129,40 @@ struct GetCorrectionsView {
 
 inline bool parse_get_corrections(const void *rx_slot, std::size_t slot_size,
                                   GetCorrectionsView &out) {
-  using cudaq::qec::decoding::rpc::GetCorrectionsRequestPayload;
-  if (!rx_slot || slot_size < sizeof(RPCHeader))
+  cudaq::qec::decoding::rpc::GetCorrectionsRequestPayload req;
+  const RPCHeader *header =
+      parse_fixed(rx_slot, slot_size, kGetCorrectionsFunctionId, req);
+  if (!header)
     return false;
-  const auto *header = static_cast<const RPCHeader *>(rx_slot);
-  if (header->magic != cudaq::realtime::RPC_MAGIC_REQUEST ||
-      header->function_id != kGetCorrectionsFunctionId)
-    return false;
-  if (header->arg_len < sizeof(GetCorrectionsRequestPayload) ||
-      header->arg_len > slot_size - sizeof(RPCHeader))
-    return false;
-  GetCorrectionsRequestPayload req;
-  std::memcpy(&req, static_cast<const uint8_t *>(rx_slot) + sizeof(RPCHeader),
-              sizeof(req));
   out.header = header;
   out.decoder_id = req.decoder_id;
+  out.return_size = req.return_size;
+  out.reset = req.reset != 0;
+  return true;
+}
+
+/// Validated view of a get_logical_measurements request slot
+/// ([RPCHeader][GetLogicalMeasurementsRequestPayload]): `return_size`
+/// logical measurements from `first`.
+struct GetLogicalMeasurementsView {
+  const RPCHeader *header = nullptr;
+  int64_t decoder_id = 0;
+  int64_t first = 0;
+  int64_t return_size = 0;
+  bool reset = false;
+};
+
+inline bool parse_get_logical_measurements(const void *rx_slot,
+                                           std::size_t slot_size,
+                                           GetLogicalMeasurementsView &out) {
+  cudaq::qec::decoding::rpc::GetLogicalMeasurementsRequestPayload req;
+  const RPCHeader *header =
+      parse_fixed(rx_slot, slot_size, kGetLogicalMeasurementsFunctionId, req);
+  if (!header)
+    return false;
+  out.header = header;
+  out.decoder_id = req.decoder_id;
+  out.first = req.first;
   out.return_size = req.return_size;
   out.reset = req.reset != 0;
   return true;
@@ -135,19 +177,11 @@ struct ResetView {
 
 inline bool parse_reset(const void *rx_slot, std::size_t slot_size,
                         ResetView &out) {
-  using cudaq::qec::decoding::rpc::ResetRequestPayload;
-  if (!rx_slot || slot_size < sizeof(RPCHeader))
+  cudaq::qec::decoding::rpc::ResetRequestPayload req;
+  const RPCHeader *header =
+      parse_fixed(rx_slot, slot_size, kResetDecoderFunctionId, req);
+  if (!header)
     return false;
-  const auto *header = static_cast<const RPCHeader *>(rx_slot);
-  if (header->magic != cudaq::realtime::RPC_MAGIC_REQUEST ||
-      header->function_id != kResetDecoderFunctionId)
-    return false;
-  if (header->arg_len < sizeof(ResetRequestPayload) ||
-      header->arg_len > slot_size - sizeof(RPCHeader))
-    return false;
-  ResetRequestPayload req;
-  std::memcpy(&req, static_cast<const uint8_t *>(rx_slot) + sizeof(RPCHeader),
-              sizeof(req));
   out.header = header;
   out.decoder_id = req.decoder_id;
   return true;

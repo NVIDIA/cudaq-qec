@@ -1410,6 +1410,7 @@ void bindDecoder(nb::module_ &mod) {
         "function_enqueue_syndromes_mapped._ZN5cudaq3qec8decoding24enqueue_syndromes_mappedEmRKSt6vectorINS_14measure_handleESaIS3_EEmm.init_func",
         "function_enqueue_syndromes_test._ZN5cudaq3qec8decoding22enqueue_syndromes_testEmRKSt6vectorIbSaIbEEm.init_func",
         "function_get_corrections._ZN5cudaq3qec8decoding15get_correctionsEmmb.init_func",
+        "function_get_logical_measurements._ZN5cudaq3qec8decoding24get_logical_measurementsEmmmb.init_func",
         "function_reset_decoder._ZN5cudaq3qec8decoding13reset_decoderEm.init_func"};
     // clang-format on
     for (const auto &funcName : initFuncNames) {

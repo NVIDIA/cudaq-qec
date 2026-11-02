@@ -255,6 +255,19 @@ std::vector<uint8_t> make_get_corrections_payload(int64_t return_size,
   return payload;
 }
 
+std::vector<uint8_t>
+make_get_logical_measurements_payload(int64_t first, int64_t return_size,
+                                      bool reset, int64_t decoder_id = 0) {
+  GetLogicalMeasurementsRequestPayload req{};
+  req.decoder_id = decoder_id;
+  req.first = first;
+  req.return_size = return_size;
+  req.reset = reset ? 1 : 0;
+  std::vector<uint8_t> payload(sizeof(req));
+  std::memcpy(payload.data(), &req, sizeof(req));
+  return payload;
+}
+
 std::vector<uint8_t> make_reset_payload(int64_t decoder_id = 0) {
   ResetRequestPayload req{};
   req.decoder_id = decoder_id;
@@ -300,6 +313,29 @@ TEST(RpcSlotParse, AcceptsAnExactlySizedEnqueueRequestPayload) {
   EXPECT_EQ(view.packed_bits[0], 1u);
 }
 
+// A get_logical_measurements request is 25 bytes under its own function id;
+// each parser accepts only its own request, and a short payload is refused.
+TEST(RpcSlotParse, ParsesALogicalMeasurementsRequestAsItsOwn) {
+  auto gl = make_cqr_slot(kGetLogicalMeasurementsFunctionId, 31,
+                          make_get_logical_measurements_payload(2, 3, true, 4));
+  auto gc = make_cqr_slot(kGetCorrectionsFunctionId, 32,
+                          make_get_corrections_payload(3, true, 4));
+  auto short_logical = make_cqr_slot(kGetLogicalMeasurementsFunctionId, 33,
+                                     make_get_corrections_payload(3, true, 4));
+  slot::GetLogicalMeasurementsView view;
+  slot::GetCorrectionsView corrections;
+  ASSERT_TRUE(slot::parse_get_logical_measurements(gl.data(), gl.size(), view));
+  EXPECT_EQ(view.decoder_id, 4);
+  EXPECT_EQ(view.first, 2);
+  EXPECT_EQ(view.return_size, 3);
+  EXPECT_TRUE(view.reset);
+  EXPECT_FALSE(slot::parse_get_corrections(gl.data(), gl.size(), corrections));
+  EXPECT_FALSE(
+      slot::parse_get_logical_measurements(gc.data(), gc.size(), view));
+  EXPECT_FALSE(slot::parse_get_logical_measurements(
+      short_logical.data(), short_logical.size(), view));
+}
+
 TEST(RpcSlotParse, PeeksTheDecoderIdFromEveryRequestKind) {
   uint64_t id = 0;
   auto eq = make_cqr_slot(kEnqueueSyndromesFunctionId, 1,
@@ -313,6 +349,11 @@ TEST(RpcSlotParse, PeeksTheDecoderIdFromEveryRequestKind) {
   auto rst = make_cqr_slot(kResetDecoderFunctionId, 3, make_reset_payload(7));
   ASSERT_TRUE(slot::peek_decoder_id(rst.data(), rst.size(), id));
   EXPECT_EQ(id, 7u);
+  auto gl =
+      make_cqr_slot(kGetLogicalMeasurementsFunctionId, 5,
+                    make_get_logical_measurements_payload(0, 1, false, 8));
+  ASSERT_TRUE(slot::peek_decoder_id(gl.data(), gl.size(), id));
+  EXPECT_EQ(id, 8u);
   // Empty payload has no decoder_id to peek.
   auto bare = make_cqr_slot(kResetDecoderFunctionId, 4);
   EXPECT_FALSE(slot::peek_decoder_id(bare.data(), bare.size(), id));
@@ -1582,6 +1623,33 @@ TEST(DecodingSessionInline, ServesAWindowedGraphMidShotAndAtFinal) {
   EXPECT_GE(matched, shots * 3) << "too few mid-shot reads to compare";
   EXPECT_GT(ones, 0u) << "every frame read was 0";
 }
+
+// A plain decoder and a graph without a logical output answer
+// get_logical_measurements with BAD_REQUEST, before or after FINAL.
+TEST(DecodingSessionInline, RefusesLogicalMeasurementsItDoesNotHave) {
+  using cudaq::qec::round_type;
+  std::vector<uint8_t> tx(64);
+  const std::vector<uint8_t> bits(windowed_round_bits, 0);
+  auto [plain, decoder] = make_session();
+  auto read = make_cqr_slot(kGetLogicalMeasurementsFunctionId, 41,
+                            make_get_logical_measurements_payload(0, 1, false));
+
+  plain->handle_get_logical_measurements(read.data(), tx.data(), read.size());
+  expect_tx_status(tx, RpcStatus::BAD_REQUEST, 41);
+  auto session = DecodingSession::create(windowed_graph(false),
+                                         /*want_device_graph=*/false,
+                                         bulk_and_final_rows());
+  for (std::size_t r = 0; r < 30; ++r) {
+    auto enqueue = make_cqr_slot(kEnqueueSyndromesFunctionId, 43,
+                                 make_enqueue_payload(r, bits, r == 29));
+    session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
+    if (r == 0 || r == 29) {
+      session->handle_get_logical_measurements(read.data(), tx.data(),
+                                               read.size());
+      expect_tx_status(tx, RpcStatus::BAD_REQUEST, 41);
+    }
+  }
+} // end - TEST(DecodingSessionInline, RefusesLogicalMeasurementsItDoesNotHave)
 
 // A document with one windowed decoder: the pattern over a two-detector
 // chain whose faults stay in their rounds, so its boundary prior is set.

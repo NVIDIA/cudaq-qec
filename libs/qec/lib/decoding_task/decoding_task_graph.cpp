@@ -1534,6 +1534,40 @@ const uint8_t *decoding_task_graph::get_obs_corrections() const {
   return g.streaming_result_state.values.data();
 }
 
+// Bounds come from the released flags, which only a logical output has, and
+// from values, so a result of any shape is read safely.
+const uint8_t *
+task_graph_streaming_result::logical_measurements(std::size_t first,
+                                                  std::size_t count) const {
+  if (outputs.empty() || count == 0)
+    return nullptr;
+  const auto &output = outputs.back();
+  const auto &flags = output.released;
+  if (first > flags.size() || count > flags.size() - first ||
+      output.value_offset > values.size() ||
+      first + count > values.size() - output.value_offset)
+    return nullptr;
+  for (std::size_t i = first; i < first + count; ++i)
+    if (!flags[i])
+      return nullptr;
+  return values.data() + output.value_offset + first;
+}
+
+const uint8_t *decoding_task_graph::get_logical_measurements() const {
+  return get_logical_measurements(0, get_num_logical_measurements());
+}
+
+// A graph has no logical output, so every read is refused.
+const uint8_t *
+decoding_task_graph::get_logical_measurements(std::size_t, std::size_t) const {
+  throw std::logic_error("decoding_task_graph::get_logical_measurements: the "
+                         "graph has no logical output");
+}
+
+std::size_t decoding_task_graph::get_num_logical_measurements() const {
+  return 0;
+}
+
 // Refresh preallocated values; enqueue owns all metadata changes.
 const task_graph_streaming_result &
 decoding_task_graph::streaming_result() const {

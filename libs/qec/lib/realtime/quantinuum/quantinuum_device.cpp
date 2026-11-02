@@ -57,6 +57,18 @@ __qpu__ std::vector<bool> get_corrections(std::uint64_t decoder_id,
   return result;
 }
 
+__qpu__ std::vector<bool> get_logical_measurements(std::uint64_t decoder_id,
+                                                   std::uint64_t first,
+                                                   std::uint64_t return_size,
+                                                   bool reset) {
+  std::vector<bool> result(return_size);
+  auto il = cudaq::device_call(get_logical_measurements_ui64, decoder_id, first,
+                               return_size, static_cast<uint64_t>(reset));
+  for (std::size_t i = 0; i < return_size; i++)
+    result[i] = (il >> i) & 1;
+  return result;
+}
+
 __qpu__ void reset_decoder(std::uint64_t decoder_id) {
   cudaq::device_call(reset_decoder_ui64, decoder_id);
 }

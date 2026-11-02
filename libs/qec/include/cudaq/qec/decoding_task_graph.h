@@ -281,6 +281,10 @@ struct task_graph_output_progress {
   task_graph_streaming_status status = task_graph_streaming_status::pending;
   /// The shot's closure over the windows that reach this output, so far.
   task_graph_closure closure = task_graph_closure::not_checked;
+  /// Logical output only: 1 per bit once that logical measurement is final
+  /// (its readout has arrived and every correction that can flip it is
+  /// committed). Empty for a correction output.
+  std::vector<std::uint8_t> released;
 };
 
 /// Graph-owned streaming result. `values` contains all named outputs at their
@@ -313,6 +317,13 @@ struct task_graph_streaming_result {
   std::vector<uint8_t> values;
   /// The outputs' closures combined: closed only when every output's is.
   task_graph_closure closure = task_graph_closure::not_checked;
+
+  /// Logical measurements [@p first, @p first + @p count) of the logical
+  /// output, the last, or null unless every one is released. Null too
+  /// without a logical output, or for an empty range or one past it. Every
+  /// logical read applies this one release check.
+  const uint8_t *logical_measurements(std::size_t first,
+                                      std::size_t count) const;
 };
 
 /// @brief Decode pipeline as a composable, testable object.
@@ -486,6 +497,25 @@ public:
   /// synchronous graph, another graph operation is in flight.
   const uint8_t *get_obs_corrections() const;
 
+  /// Host-accessible logical measurements buffer
+  /// (get_num_logical_measurements() bytes): the raw logical readout with the
+  /// corrections applied, from the graph's output named `logical`. Null until
+  /// all are released (by FINAL at the latest) and after the shot is
+  /// consumed; otherwise as get_obs_corrections().
+  ///
+  /// @throws std::logic_error If the graph has no logical output, streaming
+  /// is unsupported or, for a synchronous graph, another graph operation is
+  /// in flight.
+  const uint8_t *get_logical_measurements() const;
+
+  /// Logical measurements [@p first, @p first + @p count), or null until all
+  /// of them are released.
+  ///
+  /// @throws std::out_of_range If the range is empty or runs past
+  /// get_num_logical_measurements(); otherwise as get_logical_measurements().
+  const uint8_t *get_logical_measurements(std::size_t first,
+                                          std::size_t count) const;
+
   /// Return values and per-output publication state from the latest streaming
   /// operation. A zero-valued output is distinguishable from an unavailable
   /// one through its status and generation. Coverage is the half-open round
@@ -535,6 +565,9 @@ public:
 
   /// Number of observables (= corrections buffer length).
   std::size_t get_num_observables() const;
+
+  /// Number of logical measurements; 0 without a logical output.
+  std::size_t get_num_logical_measurements() const;
 
   /// Whether the compiled graph supports incremental streaming execution.
   /// A false result does not affect run(), run_all(), or other batch APIs.

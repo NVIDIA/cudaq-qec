@@ -1,7 +1,8 @@
 # Decoding Server Message Format
 
-Byte-level reference for the three data-plane RPCs the decoding server
-accepts: `enqueue_syndromes`, `get_corrections`, and `reset_decoder`.
+Byte-level reference for the four data-plane RPCs the decoding server
+accepts: `enqueue_syndromes`, `get_corrections`, `get_logical_measurements`,
+and `reset_decoder`.
 
 Source of truth in code:
 
@@ -53,6 +54,7 @@ that do not need it simply do not wait.
 |---|---|---|---|
 | `enqueue_syndromes` | `0x7ED8BE82` | `32 + ceil(N/8)` | none |
 | `get_corrections` | `0x882D5BA1` | `17` | `ceil(R/8)` bytes |
+| `get_logical_measurements` | `0x3056A149` | `25` | `ceil(R/8)` bytes |
 | `reset_decoder` | `0x977A59CF` | `8` | none |
 
 ## `enqueue_syndromes`
@@ -115,10 +117,14 @@ Offset       | Size | Field
 | Decode complete, `R` == decoder observable count | `OK` | `C` |
 | `arg_len < 17`, `R <= 0`, or `R != observable count` | `BAD_REQUEST` | 0 |
 | No decode completed yet in this epoch | `NOT_READY` | 0 |
+| `reset = 1` on a decoder with logical measurements before its shot has ended | `NOT_READY` | 0 |
 | Session latched `failed`, or decoder threw | `INTERNAL_ERROR` | 0 |
 
 `reset = 1` clears the correction bits after copying them out (decoder
-`clear_corrections()`); queued syndromes and decoder state survive.
+`clear_corrections()`); queued syndromes and decoder state survive. A decoder
+with logical measurements applies every correction of the shot to them, so it
+is consumed only once a FINAL round has ended the shot: a client polling with
+`reset = 1` gets `NOT_READY` until then.
 
 Example: `decoder_id = 1`, `return_size = 3`, `reset = 1`, `request_id = 7`;
 corrections `{1, 0, 1}`:
@@ -129,6 +135,47 @@ req:  52 51 55 43  A1 5B 2D 88  11 00 00 00  07 00 00 00  00×8
 resp: 53 51 55 43  00 00 00 00  01 00 00 00  07 00 00 00  00×8
       05
 ```
+
+## `get_logical_measurements`
+
+Kernel API: `std::vector<bool> get_logical_measurements(uint64_t decoder_id, uint64_t first, uint64_t return_size, bool reset)`.
+Reads logical measurements `[first, first + R)`: the raw logical readout with
+the decoder's corrections applied. Only a task graph with an output named
+`logical` has them. Each is released once its readout has arrived and every
+correction that can flip it is committed; all are released by the FINAL
+round.
+
+Schema: `args = { INT64, INT64, INT64, UINT8 }`, `results = { BIT_PACKED }`.
+
+Request (49 bytes total):
+
+```text
+Offset   | Size | Field
+---------+------+-----------------------------------------
+24 .. 31 | 8    | decoder_id
+32 .. 39 | 8    | first
+40 .. 47 | 8    | return_size == R
+48       | 1    | reset        0x00 / 0x01, not padded
+```
+
+Response, `C = ceil(R/8)`:
+
+```text
+Offset       | Size | Field
+-------------+------+-------------------------------------------------
+24 .. 24+C-1 | C    | logical measurements  LSB-first; bit i is first + i
+```
+
+| Condition | `status` | `result_len` |
+|---|---|---|
+| Every logical measurement in the range released | `OK` | `C` |
+| `arg_len < 25`, `R <= 0`, `first < 0`, the range runs past the logical measurements, or the decoder has none | `BAD_REQUEST` | 0 |
+| One in the range not released yet, or `reset = 1` before the shot has ended | `NOT_READY` | 0 |
+| Session latched `failed`, or decoder threw | `INTERNAL_ERROR` | 0 |
+
+`reset = 1` consumes the shot after copying, as `get_corrections` does. A
+`device_graph` ring does not register this function: it serves only plain
+decoders and single-node graphs, neither of which has logical measurements.
 
 ## `reset_decoder`
 
@@ -161,7 +208,7 @@ message must keep `decoder_id` at offset 24.
 | `INVALID_DECODER` | 1 | `decoder_id` not registered |
 | `BAD_REQUEST` | 2 | Bad magic, unknown `function_id`, or the per-RPC checks above |
 | `INTERNAL_ERROR` | 3 | Decoder exception, or latched enqueue failure |
-| `NOT_READY` | 4 | `get_corrections` before a decode completed |
+| `NOT_READY` | 4 | A read before its result is ready; retry |
 | `BUSY` | 5 | Reserved; not emitted by the current server |
 | `SYNDROMES_DROPPED` | 6 | Reserved; not emitted by the current server |
 

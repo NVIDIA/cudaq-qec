@@ -237,6 +237,28 @@ else()
 endif()
 
 # =========================================================================== #
+# Decoding-server host-call table
+# =========================================================================== #
+# Checks the server's HOST_CALL entries against the wire-format payload
+# structs; needs only the table library, no transport or decoder.
+if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET cudaq-qec-realtime-decoding-server-cqr)
+  include(GoogleTest)
+
+  add_executable(test_decoding_server_host_call_table
+    test_decoding_server_host_call_table.cpp)
+  target_include_directories(test_decoding_server_host_call_table PRIVATE
+    ${CUDAQ_REALTIME_INCLUDE_DIR}
+    ${CUDAToolkit_INCLUDE_DIRS}
+  )
+  target_link_libraries(test_decoding_server_host_call_table PRIVATE
+    GTest::gtest_main
+    cudaq-qec-realtime-decoding-server-cqr
+  )
+  add_dependencies(CUDAQXQECUnitTests test_decoding_server_host_call_table)
+  gtest_discover_tests(test_decoding_server_host_call_table)
+endif()
+
+# =========================================================================== #
 # Two-process decoding-server test (UDP transport)
 # =========================================================================== #
 # decoding_server is a decoder-agnostic decoding-server process: the

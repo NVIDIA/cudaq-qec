@@ -55,7 +55,7 @@ struct round_plan {
 };
 
 /// Per-event plan-time state: every frame whose bytes are known before t0.
-/// `reset`/`get_corrections` have exactly one. A `stream` has one per round
+/// `reset` and the reads have exactly one. A `stream` has one per round
 /// only when its round count is fixed and its source is pre-drawable;
 /// otherwise (streamed source, or `until=`) it has none and builds live.
 using event_plan = std::vector<round_plan>;

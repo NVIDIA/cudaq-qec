@@ -12,6 +12,7 @@
 #include "emulator.h"
 #include "session.h"
 #include "syndrome_source.h"
+#include "cudaq/qec/realtime/decoding_config.h"
 
 #ifdef QEC_TEST_PLAYBACK_CPU_ROCE
 #include "cudaq/realtime/cpu_transport/roce_wrapper.h"
@@ -840,3 +841,37 @@ TEST_F(CpuRoceBackend,
 }
 
 #endif // QEC_TEST_PLAYBACK_CPU_ROCE
+
+// ─── InprocBackend ──────────────────────────────────────────────────────────
+//
+// Decoders realized in this process, each read through its own
+// DecodingSession.
+
+// A plain decoder answers an in-process get_logical_measurements read with
+// BAD_REQUEST.
+TEST(InprocBackend, RefusesLogicalMeasurementsAPlainDecoderLacks) {
+  const auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(R"(
+decoders:
+  - id: 0
+    type: single_error_lut
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0,-1,1,-1,2,-1]
+    O_sparse: [0,-1,1,-1,2,-1]
+    D_sparse: [0,-1,1,-1,2,-1]
+)");
+  auto sessions = make_inproc_sessions(config);
+  std::unordered_map<std::uint64_t, session *> router;
+  for (auto &[id, s] : sessions)
+    router[id] = s.get();
+  auto sched = parse("0 reset\n"
+                     "+0 get_logical_measurements return_size=1\n",
+                     {0}, 1000);
+  auto result = run(plan(sched, router, {}, {}));
+
+  ASSERT_EQ(result.records.size(), 2u);
+  EXPECT_EQ(result.records[1].op, operation::get_logical_measurements);
+  EXPECT_EQ(result.records[1].status,
+            static_cast<std::int32_t>(RpcStatus::BAD_REQUEST));
+}
