@@ -7,6 +7,8 @@ Relay BP Decoding with CUDA-Q Realtime
   from source and is not part of any distributed CUDA-Q QEC binaries.
   Use the ``releases/v0.6.0`` branch of cudaq-qec together with the
   ``releases/v0.14.1`` branch of cuda-quantum for this walkthrough.
+  Build in the ``ghcr.io/nvidia/cudaqx-dev:0.6.0-<arch>-cu13.0`` image (or
+  ``-cu12.6``), which provides the matching CUDA-Q SDK.
 
 This guide explains how to build, test, and run the nv-qldpc-decoder Relay BP
 decoder using CUDA-Q's realtime host dispatch system.  The decoder runs as a
