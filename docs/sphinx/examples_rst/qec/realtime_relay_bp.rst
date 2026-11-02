@@ -7,6 +7,8 @@ Relay BP Decoding with CUDA-Q Realtime
   from source and is not part of any distributed CUDA-Q QEC binaries.
   Use the ``releases/v0.6.0`` branch of cudaq-qec together with the
   ``releases/v0.14.1`` branch of cuda-quantum for this walkthrough.
+  Build in the ``ghcr.io/nvidia/cudaqx-dev:0.6.0-<arch>-cu13.0`` image (or
+  ``-cu12.6``), which provides the matching CUDA-Q SDK.
 
 This guide explains how to build, test, and run the nv-qldpc-decoder Relay BP
 decoder using CUDA-Q's realtime dispatch system.  The decoder is driven by a
@@ -43,8 +45,7 @@ self-relaunching CUDA graph:
 This replaces the earlier ``HOST_LOOP`` design (a CPU thread launching one
 graph per request).  ``libcudaq-realtime`` provides the scheduler
 (``cudaq_create_dispatch_graph_regular`` / ``cudaq_launch_dispatch_graph`` in
-``dispatch_kernel.cu``); the closed-source proprietary archive provides the
-``DEVICE_CALL`` handlers (see *Obtaining the proprietary components* below).
+``dispatch_kernel.cu``).
 
 Prerequisites
 -------------
@@ -81,26 +82,13 @@ Software
   three configurations -- see *Obtaining the nv-qldpc-decoder plugin* below
   for how to install it.
 
-Obtaining the proprietary components
+Obtaining the nv-qldpc-decoder plugin
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The realtime decode path uses **two** closed-source artifacts that are not
-built from this (cudaq-qec) repository:
-
-- ``libcudaq-qec-nv-qldpc-decoder.so`` -- the Relay BP decoder **plugin**,
-  ``dlopen``'d at runtime.  It supplies the device-launchable cooperative
-  decode graph (``capture_decode_graph``).
-- ``libcudaq-qec-realtime-cudevice-proprietary.a`` -- a static **archive**
-  needed at **build** time.  It contains the ``enqueue_syndromes`` /
-  ``get_corrections`` / ``reset_decoder`` ``DEVICE_CALL`` handlers (the device
-  functions the scheduler dispatches).  It is linked ``WHOLE_ARCHIVE`` and
-  device-linked into the bridge, and is pointed at via the
-  ``-DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=<path>`` CMake variable.
-  Both artifacts come from the same closed-source decoder package; build the
-  ``cudaq-qec-realtime-cudevice-proprietary`` target from the proprietary
-  decoder sources to produce the ``.a``.
-
-The plugin must be obtained as a pre-built binary as shown below.
+The ``libcudaq-qec-nv-qldpc-decoder.so`` plugin is closed-source and is not
+built from this (cudaq-qec) repository.  It is ``dlopen``'d at runtime and
+supplies the device-launchable decode graph (``capture_decode_graph``).  It
+must be obtained as a pre-built binary as shown below.
 
 .. important::
 
@@ -186,9 +174,9 @@ Key files within ``cudaq-qec``:
              config_nv_qldpc_relay.yml              # Relay BP decoder config
              syndromes_nv_qldpc_relay.txt           # 100 test syndrome shots
        utils/
-         gpu_roce_qldpc_graph_decoder_bridge.cpp    # Bridge tool (RDMA <-> decoder)
-         gpu_roce_qldpc_graph_decoder_test.sh       # Orchestration script
-         hsb_fpga_syndrome_playback.cpp        # Playback tool (loads syndromes)
+         hololink_qldpc_graph_decoder_bridge.cpp    # Bridge tool (RDMA <-> decoder)
+         hololink_qldpc_graph_decoder_test.sh       # Orchestration script
+         hololink_fpga_syndrome_playback.cpp        # Playback tool (loads syndromes)
 
 The FPGA emulator is in the ``cuda-quantum`` repository:
 
@@ -196,7 +184,7 @@ The FPGA emulator is in the ``cuda-quantum`` repository:
 
    cuda-quantum/realtime/
      unittests/utils/
-       hsb_fpga_emulator.cpp                   # Software FPGA emulator
+       hololink_fpga_emulator.cpp                   # Software FPGA emulator
 
 Building
 --------
@@ -245,34 +233,31 @@ To also build the bridge and playback tools for emulated or FPGA testing:
    cmake --build . --target gpu_roce_transceiver hololink_core
    cd ../..
 
-   # 3. Build libcudaq-realtime with HSB tools enabled
+   # 3. Build libcudaq-realtime with Hololink tools enabled
    #    This produces libcudaq-realtime-bridge-gpu-roce.so (needed by the bridge
    #    tool) as well as the FPGA emulator.
    cd cudaq-realtime-src/realtime && mkdir -p build && cd build
    cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime \
-     -DCUDAQ_REALTIME_ENABLE_HSB_TOOLS=ON \
+     -DCUDAQ_REALTIME_ENABLE_HOLOLINK_TOOLS=ON \
      -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=../../holoscan-sensor-bridge \
      -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=../../holoscan-sensor-bridge/build \
      ..
    ninja && ninja install
    cd ../../..
 
-   # 4. Build cudaq-qec with HSB tools enabled.
-   #    CUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE supplies the DEVICE_CALL
-   #    handlers (WHOLE_ARCHIVE-linked into the bridge + test).
+   # 4. Build cudaq-qec with Hololink tools enabled.
    cmake -S cudaq-qec -B cudaq-qec/build \
      -DCMAKE_BUILD_TYPE=Release \
      -DCUDAQ_DIR=/path/to/cudaq-install/lib/cmake/cudaq/ \
      -DCUDAQ_REALTIME_ROOT=/tmp/cudaq-realtime \
-     -DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=/path/to/libcudaq-qec-realtime-cudevice-proprietary.a \
      -DCUDAQX_ENABLE_LIBS="qec" \
      -DCUDAQX_INCLUDE_TESTS=ON \
-     -DCUDAQX_QEC_ENABLE_HSB_TOOLS=ON \
+     -DCUDAQX_QEC_ENABLE_HOLOLINK_TOOLS=ON \
      -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/path/to/holoscan-sensor-bridge \
      -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/path/to/holoscan-sensor-bridge/build
    cmake --build cudaq-qec/build --target \
-     gpu_roce_qldpc_graph_decoder_bridge \
-     hsb_fpga_syndrome_playback
+     hololink_qldpc_graph_decoder_bridge \
+     hololink_fpga_syndrome_playback
 
 Using the orchestration script
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -281,7 +266,7 @@ The orchestration script can build everything automatically:
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh \
+   ./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh \
      --build \
      --hsb-dir /path/to/holoscan-sensor-bridge \
      --cuda-quantum-dir /path/to/cuda-quantum \
@@ -295,8 +280,7 @@ with the nv-qldpc-decoder configured for Relay BP.  It simulates a surface code
 with ``stim`` and generates syndromes on the fly, so it can run an arbitrary
 number of shots.
 
-Build the app example (it links the same plugin + proprietary archive as the
-bridge):
+Build the app example (it uses the same plugin as the bridge):
 
 .. code-block:: bash
 
@@ -361,7 +345,7 @@ Running the Emulated Test
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh \
+   ./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh \
      --emulate \
      --build \
      --setup-network \
@@ -374,7 +358,7 @@ After the initial build and network setup, subsequent runs are faster:
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh --emulate
+   ./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh --emulate
 
 FPGA End-to-End Test
 --------------------
@@ -402,7 +386,7 @@ Running the FPGA Test
 
 .. code-block:: bash
 
-   ./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh \
+   ./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh \
      --build \
      --setup-network \
      --device mlx5_5 \
@@ -488,7 +472,7 @@ Orchestration Script Reference
 
 .. code-block:: text
 
-   gpu_roce_qldpc_graph_decoder_test.sh [options]
+   hololink_qldpc_graph_decoder_test.sh [options]
 
 Modes
 ^^^^^
