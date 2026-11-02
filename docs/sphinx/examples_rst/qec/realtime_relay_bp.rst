@@ -141,7 +141,7 @@ Key files within ``cudaqx``:
      unittests/
        realtime/
          qec_graph_decode_test/
-           test_realtime_qldpc_graph_decoding_host_loop.cpp  # v0.7 unit test
+           test_realtime_qldpc_graph_decoding.cpp  # unit test
          qec_roce_decode_test/
            data/
              config_nv_qldpc_relay.yml              # Relay BP decoder config
