@@ -5,6 +5,8 @@ Relay BP Decoding with CUDA-Q Realtime
 
   The following information is about a C++ demonstration that must be built
   from source and is not part of any distributed CUDA-Q QEC binaries.
+  Use the ``releases/v0.6.0`` branch of cudaq-qec together with the
+  ``releases/v0.14.1`` branch of cuda-quantum for this walkthrough.
 
 This guide explains how to build, test, and run the nv-qldpc-decoder Relay BP
 decoder using CUDA-Q's realtime host dispatch system.  The decoder runs as a
@@ -77,7 +79,7 @@ Extract the plugin from the container without running it:
 
 .. code-block:: bash
 
-   IMAGE=ghcr.io/nvidia/cudaqx:cu13-latest    # or cu12-latest
+   IMAGE=ghcr.io/nvidia/cudaqx:cu13-0.6.0    # or cu12-0.6.0
 
    docker pull "$IMAGE"
    CID=$(docker create "$IMAGE")
@@ -109,10 +111,10 @@ Source Repositories
      - Version
    * - **cudaqx**
      - https://github.com/NVIDIA/cudaqx
-     - Branch ``releases/v0.7.0``
+     - Branch ``releases/v0.6.0``
    * - **cuda-quantum** (realtime)
      - https://github.com/NVIDIA/cuda-quantum
-     - Branch ``releases/v0.15.1``
+     - Branch ``releases/v0.14.1``
    * - **holoscan-sensor-bridge**
      - https://github.com/nvidia-holoscan/holoscan-sensor-bridge
      - Tag ``2.6.0-EA2``
@@ -169,7 +171,7 @@ If you only need to run the unit test, you can build without
    # 1. Build libcudaq-realtime
    git clone https://github.com/NVIDIA/cuda-quantum.git cudaq-realtime-src
    cd cudaq-realtime-src
-   git checkout releases/v0.15.1
+   git checkout releases/v0.14.1
    cd realtime && mkdir -p build && cd build
    cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime ..
    ninja && ninja install
@@ -197,7 +199,7 @@ To also build the bridge and playback tools for emulated or FPGA testing:
    cd cudaq-realtime-src
    git sparse-checkout init --cone
    git sparse-checkout set realtime
-   git checkout releases/v0.15.1
+   git checkout releases/v0.14.1
    cd ..
 
    # 2. Build holoscan-sensor-bridge (tag 2.6.0-EA2)
