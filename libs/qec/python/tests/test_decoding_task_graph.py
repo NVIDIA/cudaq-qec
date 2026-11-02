@@ -716,8 +716,13 @@ def _surface_memory(distance, p, x_checks=False):
     return spec, checks, logicals
 
 
-def _surface_pattern(spec, distance, copies=1, async_streaming=False):
-    """The pattern over spec, decoding with pymatching into corrections."""
+def _surface_pattern(spec,
+                     distance,
+                     copies=1,
+                     async_streaming=False,
+                     logical=False):
+    """The pattern over spec, decoding with pymatching into corrections, and
+    with logical, which needs a readout map, into logical measurements."""
     node = qec.TaskGraphNodeConfig()
     node.id = "pw"
     node.kind = "parallel_window"
@@ -728,7 +733,7 @@ def _surface_pattern(spec, distance, copies=1, async_streaming=False):
         "commit_rounds": distance,
         "buffer_rounds": distance,
         "gap_rounds": 3 * distance,
-        "output": "corrections",
+        "output": "corrections_and_logical" if logical else "corrections",
     }
     node.max_in_flight = copies
     options = qec.TaskGraphOptions()
@@ -811,3 +816,56 @@ def test_parallel_window_surface_code_paths_agree():
         assert list(one_shot.run(m).bits) == want
         ones += sum(want)
     assert ones > 0, "every shot corrected nothing"
+
+
+def _with_readout(spec, rows):
+    """spec with rows as its readout phase's m2o_sparse."""
+    phases = spec.phases
+    entry = phases[1]
+    readout = entry.spec
+    readout.m2o_sparse = rows
+    entry.spec = readout
+    phases[1] = entry
+    spec.phases = phases
+    return spec
+
+
+def test_parallel_window_returns_logical_measurements_apart():
+    """With a readout map, the pattern returns its logical measurements
+    apart from the corrections: None until FINAL and again once the shot is
+    consumed, as the logical output's released flags say. Without one,
+    asking for them is refused."""
+    distance = 3
+    rounds = 8 * distance + 1
+    spec, checks, logicals = _surface_memory(distance, 0.01)
+    plain = _surface_pattern(spec, distance)
+    # Each logical reads the readout round's first measurement, check 0's.
+    spec = _with_readout(spec, [0, -1] * len(logicals))
+    q = checks[0][0]
+    bits = _measurements(checks, rounds, data=(0, q))
+    want = [int(q in qubits) for qubits in logicals]
+    for graph in (_surface_pattern(spec, distance, logical=True),
+                  _surface_pattern(spec, distance, 4, True, logical=True)):
+        assert graph.get_num_logical_measurements() == len(logicals)
+        record = len(checks)
+        graph.reset_decoder()
+        graph.enqueue_syndrome(bytes(bits[:-record]))
+        assert graph.get_logical_measurements() is None
+        released = graph.streaming_result().outputs[-1].released
+        assert list(released) == [0] * len(logicals)
+        graph.enqueue_syndrome(bytes(bits[-record:]), qec.round_type.FINAL)
+        released = graph.streaming_result().outputs[-1].released
+        assert list(released) == [1] * len(logicals)
+        assert list(graph.get_obs_corrections()) == want
+        # The raw readout is 1: check 0 holds the flipped qubit.
+        assert list(graph.get_logical_measurements()) == [1 ^ c for c in want]
+        assert list(graph.get_logical_measurements(0, 1)) == [1 ^ want[0]]
+        with pytest.raises(IndexError):
+            graph.get_logical_measurements(0, len(logicals) + 1)
+        with pytest.raises(IndexError):
+            graph.get_logical_measurements(len(logicals))
+        graph.clear_corrections()
+        assert graph.get_logical_measurements() is None
+    assert plain.get_num_logical_measurements() == 0
+    with pytest.raises(RuntimeError, match="no output named 'logical'"):
+        plain.get_logical_measurements()

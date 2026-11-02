@@ -875,3 +875,78 @@ decoders:
   EXPECT_EQ(result.records[1].status,
             static_cast<std::int32_t>(RpcStatus::BAD_REQUEST));
 }
+
+// A windowed graph with a final readout answers a mid-shot logical read
+// NOT_READY. After enqueue_data ends the shot it answers 0: the raw readout,
+// 1, with the corrections (1) applied. A plain decoder answers BAD_REQUEST.
+TEST(InprocBackend, ReadsLogicalMeasurementsOnceTheShotEnds) {
+  const auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(R"(
+decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], m2o_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+          output: corrections_and_logical
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+  - id: 1
+    type: single_error_lut
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0,-1,1,-1,2,-1]
+    O_sparse: [0,-1,1,-1,2,-1]
+    D_sparse: [0,-1,1,-1,2,-1]
+syndrome_mapping:
+  - {id: 1, type: final}
+)");
+  auto sessions = make_inproc_sessions(config);
+  std::unordered_map<std::uint64_t, session *> router;
+  for (auto &[id, s] : sessions)
+    router[id] = s.get();
+  // Two shots of 29 quiet rounds and a readout round whose first
+  // measurement flipped: one read each, as each read consumes its shot.
+  const std::string shot = "+0 stream source=0b00 rounds=29 every=0\n"
+                           "+0 enqueue_data source=0b10\n";
+  auto sched = parse("0 reset\n"
+                     "+0 stream source=0b00 rounds=29 every=0\n"
+                     "+0 get_logical_measurements return_size=1 reset=0\n"
+                     "+0 enqueue_data source=0b10\n"
+                     "+0 get_logical_measurements 0 reset=1\n" +
+                         shot + "+0 get_corrections 1\n" +
+                         "+0 get_logical_measurements session=1 "
+                         "return_size=1\n",
+                     {0, 1}, 1000);
+  auto result = run(plan(sched, router, {}, {.final_mapping_id = 1}));
+
+  ASSERT_EQ(result.records.size(), 9u);
+  EXPECT_EQ(result.records[2].status,
+            static_cast<std::int32_t>(RpcStatus::NOT_READY));
+  for (const std::size_t read : {4u, 7u}) {
+    SCOPED_TRACE(to_string(result.records[read].op));
+    EXPECT_EQ(result.records[read].status,
+              static_cast<std::int32_t>(RpcStatus::OK));
+    EXPECT_TRUE(result.records[read].read_completed);
+    EXPECT_FALSE(result.records[read].correction_mismatch);
+  }
+  EXPECT_EQ(result.records[4].op, operation::get_logical_measurements);
+  EXPECT_EQ(result.records[8].status,
+            static_cast<std::int32_t>(RpcStatus::BAD_REQUEST));
+} // end - TEST(InprocBackend, ReadsLogicalMeasurementsOnceTheShotEnds)

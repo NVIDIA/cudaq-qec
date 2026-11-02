@@ -244,8 +244,9 @@ only means that some node fired.  Use ``streaming_result()`` for result
 readiness.  It returns the named output values together with each output's
 status, generation, value range, and half-open round coverage.  This makes an
 available all-zero correction distinguishable from an output that has not
-fired.  The graph-level generation advances only after every named output
-passes the corresponding publication barrier.  ``result_revision`` advances
+fired.  The graph-level generation advances only after every correction output
+passes the corresponding publication barrier; a logical output (see
+`Logical measurements`_) is no part of it.  ``result_revision`` advances
 on any output or graph-status change, including progress before that aggregate
 barrier.  A ``FINAL`` round marks published outputs complete; outputs that
 never published and the aggregate graph remain pending.  Reset starts a new
@@ -483,7 +484,10 @@ windows that decode concurrently. It is written as one node and lowers into an
 
 Every window decodes a model of fixed size with the inner decoder, and windows
 finish in any order; the output folds their corrections in round order, so it
-is a staged output (see `Staged outputs`_).
+is a staged output (see `Staged outputs`_). When a phase of the template has
+``m2o_sparse``, ``output`` must say whether the pattern also wires the graph's
+``logical`` output, the corrected logical measurements (see `Logical
+measurements`_).
 
 .. code-block:: yaml
 
@@ -498,7 +502,6 @@ is a staged output (see `Staged outputs`_).
              commit_rounds: 5
              buffer_rounds: 5
              gap_rounds: 15
-             output: corrections
              max_in_flight: 4
              inner: {type: pymatching}
          edges:
@@ -527,10 +530,12 @@ configuration time.
      - Rounds a B window commits, between two A windows. Defaults to
        ``commit_rounds + 2 * buffer_rounds``.
    * - ``output``
-     - ``corrections`` (default): the correction alone, which is what
-       ``get_obs_corrections()`` and a decoding server's ``get_corrections``
-       return. ``corrected_logical``: the logical readout with the correction
-       applied, which needs ``m2o_sparse`` on the final phase.
+     - Required when a phase of the template has ``m2o_sparse``.
+       ``corrections_and_logical``: the pattern also wires the graph's
+       ``logical`` output. ``corrections``: corrections only, so a shot may
+       be consumed mid-shot, as configurations written before the logical
+       output expect. Without a readout map, unset means ``corrections``.
+       ``corrected_logical`` is refused.
    * - ``input_boundary``
      - ``columns`` (default): an A window's open input gets one boundary
        column per detector of the round before it, with one shared prior.
@@ -574,6 +579,85 @@ held (``closed``), checked and failed (``open``), or not checked
 ``run_async``) stream the shot through the same windows, and their
 ``logical_outcome`` reports ``converged``: whether every window's decoder
 converged.
+
+.. _Logical measurements:
+
+Logical measurements
+++++++++++++++++++++
+
+A graph returns two results. Its **corrections** are the committed flips of
+the logical observables: ``get_obs_corrections()``, ``run()`` and a decoding
+server's ``get_corrections`` return them, mid-shot as the committed prefix and
+at the end of the shot in full. Its **logical measurements** are the raw
+logical readout with those corrections applied: ``get_logical_measurements()``
+and a decoding server's ``get_logical_measurements`` return them.
+
+A logical measurement is *released*, final for the shot, once its readout has
+arrived and every correction that can flip it is committed. An observable read
+at the end of the shot is released at FINAL; one read mid-circuit is released
+mid-shot, as soon as the corrections cover the round that reads it, when the
+corrections are a staged output (see `Staged outputs`_), as the
+``parallel_window`` pattern's are. With scheduled contributors, every logical
+measurement is released at FINAL.
+``get_logical_measurements(first, count)`` returns a range once each in it is
+released, and ``streaming_result()`` gives the logical output's ``released``
+flags.
+
+The raw logical value comes from the template's readout maps: each phase's
+``m2o_sparse`` lists, per observable, the measurements of its round that the
+observable's value XORs in, and an empty row adds nothing. Any phase but a
+repeating one may carry one, so the final readout and a mid-circuit readout
+can define different observables, or contribute to the same one. A readout in
+the template's prefix, the phases before the repeating one, is read as it
+arrives; one after it is placed only by the shot's length, so it is read at
+FINAL.
+
+The logical measurements are the graph output named ``logical``. A
+``logical_readout`` node reads the raw logical value and an ``xor`` applies
+the corrections to it:
+
+.. code-block:: yaml
+
+   nodes:
+     - {id: ingest, type: ingest, windows: {...}}
+     - {id: W, type: decode_window, num_receives: 1, inner: {type: pymatching}}
+     - {id: R, type: logical_readout}     # reads the entry's dem_chunks
+     - {id: L, type: xor}
+   edges:
+     - {from: measurements, to: ingest}
+     - {from: measurements, to: R}
+     - {from: ingest.W, to: W}
+     - {from: W.forward, to: W.receive_0, index_offset: -1}
+     - {from: W, to: output.corrections}
+     - {from: W, to: L.a}
+     - {from: R, to: L.b}
+     - {from: L, to: output.logical}
+
+A ``parallel_window`` pattern wires the same itself with
+``output: corrections_and_logical``, which needs a phase of its template with
+a readout map, an edge from it to the graph's output, and no ``logical``
+output the graph names itself.
+
+The logical output is kept apart from the corrections:
+
+* it is last in ``streaming_result()``, ``pending`` until one of its logical
+  measurements is released, and ``complete`` at FINAL;
+* it is not among ``output_names()``, ``get_num_observables()`` counts only
+  the corrections, and ``get_num_logical_measurements()`` its own width;
+* one-shot calls (``run``, ``run_all``, ``run_batch``, ``run_async``) return
+  the corrections alone.
+
+The logical measurements apply every correction of the shot, so a graph with
+a logical output consumes a shot only once it has ended: ``clear_corrections()``
+before FINAL is refused, and a read with ``reset``, ``get_corrections``'
+included, is not ready until then: the decoding server answers ``NOT_READY``,
+and the realtime decoding API raises.
+
+Building checks it: a graph has at most one ``logical`` output, and a
+correction output beside it; one ``logical_readout`` node must reach it, and
+none may reach another output. A ``logical_readout`` node reads only the
+rounds its template reads, so it joins any stream, whatever the other nodes'
+schedules.
 
 Ensembles
 +++++++++

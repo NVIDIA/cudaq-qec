@@ -363,15 +363,15 @@ void data_artifact_store::add_stim_dem(std::string_view text,
 // Builds each variant key on the store's template, at the first shot length
 // and instance that has it, as variant_instances() lists them. A hash hit whose
 // request or key differs means the window bytes missed a field, as for
-// templates. A window holding the readout round gets m2o when the template has
-// a readout map: the key fixes where a window ends, so every instance of a
-// variant agrees.
+// templates. A window holding the readout round gets m2o when the last phase
+// holds every readout map (a mid-circuit readout lies in no such window): the
+// key fixes where a window ends, so every instance of a variant agrees.
 void data_artifact_store::add_windows(
     const std::shared_ptr<const experiment_template> &context,
     const window_request &request) {
   const auto hash = template_hash(context->spec(), "add_windows");
   const auto &t = templates_.at(hash).handle;
-  const bool readout_map = !t->readout().empty();
+  const bool readout_map = t->reads_only_at_end();
   for (const auto &[key, k, R] : variant_instances(*t, request)) {
     const auto bytes = window_bytes(hash, request, key);
     auto window_hash = sha256_hex(bytes);

@@ -92,6 +92,9 @@ struct task_graph_node_kind_spec {
   /// Whether the kind reads window requests from a `windows` map, one output
   /// port per layer. Every other kind rejects `windows`.
   bool takes_windows = false;
+  /// Whether the kind reads its node's dem_chunks template whole: the shot is
+  /// never expanded into matrices for it, and its builder gets the template.
+  bool takes_template = false;
   /// Least values of the kind's uint64 parameters, by key. Registration adds
   /// the check to the kind's parameter validation, and the JSON schema
   /// publishes each one in the kind's clause, so the two agree.
@@ -304,6 +307,9 @@ struct task_graph_output_progress {
 /// aggregate result, even when several complete before the next read. An
 /// asynchronous graph counts them as a synchronous one would.
 /// Only reset_decoder() advances shot_epoch.
+///
+/// A logical output, when present, comes last in `values`; the aggregate
+/// generation, status and closure cover the correction outputs only.
 struct task_graph_streaming_result {
   std::uint64_t shot_epoch = 0;
   std::uint64_t result_revision = 0;
@@ -538,7 +544,8 @@ public:
   /// graph, this first drains all accepted records without flushing guarded
   /// tails.
   ///
-  /// @throws std::logic_error If another graph operation is in flight.
+  /// @throws std::logic_error If another graph operation is in flight, or
+  /// the graph has a logical output and its shot has not ended.
   /// @throws std::runtime_error If asynchronous processing failed.
   void clear_corrections();
 
@@ -563,7 +570,8 @@ public:
   /// `get_num_msyn_per_decode()` per call.
   std::size_t get_num_msyn_per_round() const;
 
-  /// Number of observables (= corrections buffer length).
+  /// Number of observables (= corrections buffer length), excluding the
+  /// logical output.
   std::size_t get_num_observables() const;
 
   /// Number of logical measurements; 0 without a logical output.
@@ -584,7 +592,7 @@ public:
   /// Which bits are which: one name per output, in the order
   /// get_obs_corrections() concatenates them and run_all() returns them.  Each
   /// is the sink edge's `to_input`, or its producer's name when left at the
-  /// default.  Fixed at build.
+  /// default.  Excludes the logical output.  Fixed at build.
   const std::vector<std::string> &output_names() const;
 
   // ---------------------------------------------------------------------------
@@ -605,11 +613,12 @@ public:
   ///
   /// @throws std::logic_error if more than one edge reaches `output`: a
   /// multi-output program reduced to its first output is a different program,
-  /// so it is refused rather than answered.  Use run_all().
+  /// so it is refused rather than answered.  Use run_all().  The logical
+  /// output is not counted.
   logical_outcome run(const measurement_results &m) const;
 
-  /// run() for any number of outputs: one outcome per edge reaching `output`,
-  /// in output_names() order.
+  /// run() for any number of outputs: one outcome per correction output, in
+  /// output_names() order.
   std::vector<logical_outcome> run_all(const measurement_results &m) const;
 
   /// @brief Run one full shot asynchronously.

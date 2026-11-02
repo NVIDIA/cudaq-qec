@@ -45,6 +45,7 @@
 #include "../lib/decoding_task/decoding_task_experiment_template.h"
 #include "../lib/decoding_task/decoding_task_ingest_core.h"
 #include "../lib/decoding_task/decoding_task_ingest_node.h"
+#include "../lib/decoding_task/decoding_task_logical_readout_node.h"
 #include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "cudaq/qec/code.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -957,6 +958,28 @@ TEST(DecodingWindow, M2oReadsTheReadoutRound) {
   expect_error([&] { window_from_dem_chunks(tmpl, b, 1, R, true); },
                "readout round");
 } // end - TEST(DecodingWindow, M2oReadsTheReadoutRound)
+
+// A template that reads an observable mid-circuit has no window m2o: no
+// window holding the readout round also holds the earlier reading round. The
+// store builds none, and asking for one is refused.
+TEST(DecodingWindow, M2oNeedsEveryReadoutOnTheLastPhase) {
+  auto spec = mid_readout_spec(5);
+  spec.num_rounds.reset();
+  const std::size_t R = 9;
+  const auto b = layered(2, 2, 3).b;
+  data_artifact_store store;
+  const auto context = store.add_template(spec);
+
+  expect_error(
+      [&] {
+        window_from_dem_chunks(context, b, window_instances(b, R).end - 1, R,
+                               true);
+      },
+      "m2o needs every readout map on the last phase");
+  store.add_windows(context, b);
+  for (const auto &[key, window] : store.find_windows(*context, b))
+    EXPECT_FALSE(window->m2o.has_value());
+}
 
 // Without D_sparse the stream is detector-packed, so m2o reads the readout
 // round at its detector offsets, which is what the whole-shot memory
@@ -3106,8 +3129,7 @@ std::vector<std::vector<window_request>> ingest_layouts() {
 // them unlike bulk, with no prefix or suffix at all, with a first round
 // narrower than the rest, and with a wider readout round or narrower ones,
 // one as narrow as a single measurement beside rounds of a hundred. Windows
-// are handed over before FINAL once complete, and the raw logical value is
-// the readout round's through m2o.
+// are handed over before FINAL once complete.
 TEST(IngestCore, StreamsShotsCutAnywhere) {
   std::mt19937 rng(7);
   for (const auto &spec :
@@ -3124,8 +3146,7 @@ TEST(IngestCore, StreamsShotsCutAnywhere) {
     for (auto R = std::size_t{40}; R >= context->min_rounds(); --R)
       lengths.push_back(R);
     for (const auto &requests : ingest_layouts()) {
-      ingest_core core(context, layers_of(requests),
-                       !context->readout().empty());
+      ingest_core core(context, layers_of(requests));
       for (const auto R : lengths) {
         SCOPED_TRACE("R=" + std::to_string(R) + ", " +
                      std::to_string(requests.size()) + " layers");
@@ -3136,7 +3157,6 @@ TEST(IngestCore, StreamsShotsCutAnywhere) {
           return;
         if (R >= 30)
           EXPECT_GT(early, 0u) << "nothing was handed over before FINAL";
-        EXPECT_EQ(core.logical(), s.logical());
         core.reset();
       } // end - for(R)
     } // end - for(requests)
@@ -3165,7 +3185,7 @@ TEST(IngestCore, StreamsAShotOfFixedLength) {
   ASSERT_FALSE(context->repeats());
   ASSERT_EQ(context->min_rounds(), 3u);
   for (const auto &layout : ingest_layouts()) {
-    ingest_core core(context, layers_of(layout), false);
+    ingest_core core(context, layers_of(layout));
     for (int i = 0; i < 5; ++i) {
       const shot s(spec, 3, rng);
       std::size_t early = 0;
@@ -3173,7 +3193,7 @@ TEST(IngestCore, StreamsAShotOfFixedLength) {
       core.reset();
     }
   }
-  ingest_core core(context, layers_of(requests), false);
+  ingest_core core(context, layers_of(requests));
   for (const auto len : {4u * 4u, 4u * 4u + 1u, 4u * 6u + 3u}) {
     core.reset();
     expect_throw<std::invalid_argument>(
@@ -3195,16 +3215,15 @@ TEST(IngestCore, StreamsAShotOfFixedLength) {
 // The readout round may arrive before FINAL, in part or whole: a record
 // longer than the rounds before it, then a FINAL record with the rest, or
 // nothing at all. Its measurements are never taken for a bulk round, so the
-// shot's views and logical value are as they would be had FINAL carried it.
+// shot's views are as they would be had FINAL carried it.
 TEST(IngestCore, TakesAReadoutRoundThatArrivesBeforeFinal) {
   const auto layers = layered(3, 3, 9);
   const std::vector<window_request> requests{layers.a, layers.b};
   std::mt19937 rng(23);
   // Streams s in records of the given lengths, the last of them FINAL, and
-  // checks every view and the logical value.
+  // checks every view.
   const auto streams = [&](const shot &s, std::vector<std::size_t> lengths) {
-    ingest_core core(s.context, layers_of(requests),
-                     !s.context->readout().empty());
+    ingest_core core(s.context, layers_of(requests));
     std::size_t at = 0;
     std::size_t views = 0;
     for (std::size_t i = 0; i < lengths.size(); ++i) {
@@ -3223,7 +3242,6 @@ TEST(IngestCore, TakesAReadoutRoundThatArrivesBeforeFinal) {
     ASSERT_EQ(at, s.measurements.size());
     EXPECT_TRUE(core.done());
     EXPECT_GT(views, 0u);
-    EXPECT_EQ(core.logical(), s.logical());
   };
   // 14 rounds of 4 measurements, then a readout round of 5.
   const shot wide(wide_readout_spec(), 15, rng);
@@ -3242,7 +3260,7 @@ TEST(IngestCore, TakesAnyLegalRecordWhenNothingIsHeld) {
   const auto context = std::make_shared<const experiment_template>(
       one_measurement_readout_spec());
   const std::vector<std::uint8_t> record(400, 0);
-  ingest_core core(context, layers_of({sliding(2, 5)}), false);
+  ingest_core core(context, layers_of({sliding(2, 5)}));
   ASSERT_EQ(core.record_limit(), 200u);
   EXPECT_EQ(core.enqueue(record.data(), 99, false), ingest_status::accepted);
   EXPECT_EQ(core.enqueue(record.data(), 200, false), ingest_status::accepted);
@@ -3254,7 +3272,7 @@ TEST(IngestCore, RejectsARecordLongerThanAPeriod) {
   const auto spec = arbitrary_memory_spec(5, true);
   const auto context = std::make_shared<const experiment_template>(spec);
   const auto layers = layered(3, 3, 9);
-  ingest_core core(context, layers_of({layers.a, layers.b}), false);
+  ingest_core core(context, layers_of({layers.a, layers.b}));
   const std::vector<std::uint8_t> record(core.record_limit() + 1, 0);
   EXPECT_EQ(core.record_limit(), 12u * 4u);
   expect_throw<std::invalid_argument>(
@@ -3275,7 +3293,7 @@ TEST(IngestCore, RejectsAFinalRecordThatEndsNoShot) {
   const auto context = std::make_shared<const experiment_template>(spec);
   const auto layers = layered(3, 3, 9);
   const std::vector<std::uint8_t> record(48, 0);
-  ingest_core core(context, layers_of({layers.a, layers.b}), false);
+  ingest_core core(context, layers_of({layers.a, layers.b}));
   const auto rejects = [&](std::size_t before, std::size_t final_len,
                            const std::string &text) {
     core.reset();
@@ -3322,7 +3340,7 @@ TEST(IngestCore, HoldsEveryRoundAViewNeeds) {
   const std::vector<window_request> requests{layers.a, layers.b};
   std::mt19937 rng(11);
   const shot s(spec, 200, rng);
-  ingest_core core(s.context, layers_of(requests), false);
+  ingest_core core(s.context, layers_of(requests));
   const auto ring = core.ring_rounds();
   const auto period = 12u * 4u;
   std::vector<const window_view *> out;
@@ -3381,7 +3399,7 @@ TEST(IngestCore, AViewReadsOnlyItsRounds) {
   const auto layers = layered(3, 3, 9);
   std::mt19937 rng(5);
   const shot s(arbitrary_memory_spec(5, true), 40, rng);
-  ingest_core core(s.context, layers_of({layers.a, layers.b}), false);
+  ingest_core core(s.context, layers_of({layers.a, layers.b}));
   const ingest_publication *p = nullptr;
   const window_view *view = nullptr;
   for (std::size_t at = 0; !p; at += 48) {
@@ -3406,14 +3424,14 @@ TEST(IngestCore, AViewReadsOnlyItsRounds) {
           " in the ring");
 } // end - TEST(IngestCore, AViewReadsOnlyItsRounds)
 
-// A view out holds its shot: reset() waits for it, and the core reads the
-// logical value only from a last phase with m2o_sparse.
-TEST(IngestCore, ChecksResetAndReadout) {
+// A view out holds its shot: reset() waits for it; and the layers share a
+// period.
+TEST(IngestCore, ChecksResetAndPeriods) {
   const auto layers = layered(3, 3, 9);
   const std::vector<window_request> requests{layers.a, layers.b};
   std::mt19937 rng(3);
   const shot s(arbitrary_memory_spec(5, true), 40, rng);
-  ingest_core core(s.context, layers_of(requests), false);
+  ingest_core core(s.context, layers_of(requests));
   const ingest_publication *p = nullptr;
   for (std::size_t at = 0; !p; at += 48) {
     ASSERT_LE(at + 48, s.measurements.size());
@@ -3423,24 +3441,13 @@ TEST(IngestCore, ChecksResetAndReadout) {
   }
   expect_throw<std::logic_error>([&] { core.reset(); },
                                  "ingest: reset() with views out");
-  EXPECT_TRUE(core.logical().empty());
-  auto no_readout = arbitrary_memory_spec(5, true);
-  no_readout.phases.back().spec.m2o_sparse.clear();
   expect_throw<std::invalid_argument>(
-      [&] {
-        ingest_core(std::make_shared<const experiment_template>(no_readout),
-                    layers_of(requests), true);
-      },
-      "ingest: read_logical needs the last phase's m2o_sparse");
-  expect_throw<std::invalid_argument>(
-      [&] {
-        ingest_core(s.context, layers_of({layers.a, sliding(2, 5)}), false);
-      },
+      [&] { ingest_core(s.context, layers_of({layers.a, sliding(2, 5)})); },
       "ingest: the layers' periods differ: 12 and 2");
-} // end - TEST(IngestCore, ChecksResetAndReadout)
+} // end - TEST(IngestCore, ChecksResetAndPeriods)
 
 // Records, polls and releases allocate nothing once the core is built, with
-// three suffix phases held back, and reading the logical value.
+// three suffix phases held back.
 TEST(IngestCore, AllocatesNothingPerRecord) {
   if (QEC_TEST_SANITIZED)
     GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
@@ -3450,8 +3457,7 @@ TEST(IngestCore, AllocatesNothingPerRecord) {
   std::mt19937 rng(5);
   for (const auto &spec : {distinct_suffix_spec(), wide_readout_spec()}) {
     const shot s(spec, 120, rng);
-    ingest_core core(s.context, layers_of(requests),
-                     !s.context->readout().empty());
+    ingest_core core(s.context, layers_of(requests));
     std::size_t allocations = 0;
     for (std::size_t at = 0; at < s.measurements.size();) {
       const auto len = std::min<std::size_t>(17, s.measurements.size() - at);
@@ -3468,7 +3474,6 @@ TEST(IngestCore, AllocatesNothingPerRecord) {
       at += len;
     }
     EXPECT_TRUE(core.done());
-    EXPECT_EQ(core.logical(), s.logical());
     EXPECT_EQ(allocations, 0u);
   } // end - for(spec)
 } // end - TEST(IngestCore, AllocatesNothingPerRecord)
@@ -3592,8 +3597,7 @@ public:
       cores_.push_back(std::make_unique<decode_window_core>(
           store_, context_, layer.request, decoder_name, params, slots));
     }
-    ingest_ = std::make_unique<ingest_core>(context_, std::move(layers),
-                                            !context_->readout().empty());
+    ingest_ = std::make_unique<ingest_core>(context_, std::move(layers));
   } // end - core_pipeline()
 
   // Decodes one shot of measurements.
@@ -3948,8 +3952,7 @@ TEST(DecodeWindowCore, PipelineServesShotsOfAnyLengthInAnyOrder) {
 }
 
 // The same on sampled shots with PyMatching, where windows commit several
-// faults and send what they leave; the raw logical value is the readout
-// round's through m2o.
+// faults and send what they leave.
 TEST(DecodeWindowCore, PipelineDecodesSampledShotsAsTheReference) {
   constexpr std::size_t R = 20;      // two periods of each layout
   constexpr std::size_t shots = 500; // a hundred or so with several faults
@@ -3968,10 +3971,6 @@ TEST(DecodeWindowCore, PipelineDecodesSampledShotsAsTheReference) {
         ASSERT_NO_FATAL_FAILURE(expect_pipeline_matches(
             pipeline, reference, production, syndrome, R))
             << "shot " << i;
-        EXPECT_EQ(
-            pipeline.ingest().logical(),
-            raw_logical(*pipeline.context(), R,
-                        memory_measurements(*pipeline.context(), R, syndrome)));
       }
     } // end - for(g)
   } // end - for(spec)
@@ -4012,8 +4011,8 @@ TEST(DecodeWindowCore, AMissingResidualIsRejected) {
                        {}, 2);
   decode_window_core b(store, context, g.layers[1].request, "single_error_lut",
                        {}, 2);
-  ingest_core ingest(
-      context, {{g.layers[0].request, 4}, {g.layers[1].request, 4}}, false);
+  ingest_core ingest(context,
+                     {{g.layers[0].request, 4}, {g.layers[1].request, 4}});
   std::vector<std::uint8_t> m(context->measurement_offset(R, R));
   for (auto &x : m)
     x = static_cast<std::uint8_t>(rng() & 1);
@@ -4095,7 +4094,7 @@ TEST(DecodeWindowCore, AFailedDecodeLeavesItsSlotEmpty) {
   store.add_windows(context, g.layers[0].request);
   decode_window_core a(store, context, g.layers[0].request, "failing_lut", {},
                        1);
-  ingest_core ingest(context, {{g.layers[0].request, 4}}, false);
+  ingest_core ingest(context, {{g.layers[0].request, 4}});
   const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
   std::vector<const window_view *> views;
   for (std::size_t at = 0; views.size() < 2; at += ingest.record_limit()) {
@@ -4175,8 +4174,8 @@ TEST(DecodeWindowCore, AnUnsatisfiedSolutionFailsOrIsReported) {
                             verify_residual_mode::report);
   decode_window_core fail(store, context, request, "blind_decoder", {}, 1,
                           verify_residual_mode::fail);
-  ingest_core noisy_ingest(context, {{request, 1}}, false);
-  ingest_core quiet_ingest(context, {{request, 1}}, false);
+  ingest_core noisy_ingest(context, {{request, 1}});
+  ingest_core quiet_ingest(context, {{request, 1}});
   // The first window ingest hands over from a shot of measurements m.
   const auto first_view = [](ingest_core &ingest,
                              const std::vector<std::uint8_t> &m) {
@@ -4238,8 +4237,8 @@ TEST(DecodeWindowCore, VerifyResidualNamesAnImportedRow) {
                        1);
   decode_window_core b(store, context, g.layers[1].request, "blind_decoder", {},
                        1, verify_residual_mode::fail);
-  ingest_core ingest(
-      context, {{g.layers[0].request, 4}, {g.layers[1].request, 4}}, false);
+  ingest_core ingest(context,
+                     {{g.layers[0].request, 4}, {g.layers[1].request, 4}});
   const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
   const ingest_publication *p = nullptr;
   for (std::size_t at = 0; !p || !p->views[1]; at += ingest.record_limit()) {
@@ -4408,7 +4407,7 @@ TEST(DecodeWindowCore, AWindowFiresIntoOneSlotAtATime) {
   const auto context = store.add_template(spec);
   store.add_windows(context, g.layers[0].request);
   decode_window_core a(store, context, g.layers[0].request, "gated_lut", {}, 2);
-  ingest_core ingest(context, {{g.layers[0].request, 8}}, false);
+  ingest_core ingest(context, {{g.layers[0].request, 8}});
   const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
   const window_view *edge = nullptr; // a prefix or terminal window
   const window_view *bulk = nullptr;
@@ -4509,8 +4508,8 @@ TEST(DecodeWindowCore, ARejectedFireLeavesItsSlotAsItWas) {
                        {}, 2);
   decode_window_core b(store, context, g.layers[1].request, "single_error_lut",
                        {}, 2);
-  ingest_core ingest(
-      context, {{g.layers[0].request, 8}, {g.layers[1].request, 8}}, false);
+  ingest_core ingest(context,
+                     {{g.layers[0].request, 8}, {g.layers[1].request, 8}});
   std::vector<std::uint8_t> m(context->measurement_offset(R, R));
   std::vector<const window_view *> a_views;
   std::vector<const window_view *> b_views;
@@ -4575,8 +4574,8 @@ TEST(DecodeWindowCore, RejectsAnotherLayersViewOfTheSameSize) {
     store.add_windows(context, layer.request);
   decode_window_core a(store, context, g.layers[0].request, "single_error_lut",
                        {}, 2);
-  ingest_core ingest(
-      context, {{g.layers[0].request, 8}, {g.layers[1].request, 8}}, false);
+  ingest_core ingest(context,
+                     {{g.layers[0].request, 8}, {g.layers[1].request, 8}});
   const std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
   const window_view *b_view = nullptr;
   for (std::size_t at = 0; !b_view || b_view->variant.position;
@@ -4609,8 +4608,8 @@ TEST(DecodeWindowCore, RejectsWhatIsNotItsWindow) {
                        {}, 2);
   decode_window_core b(store, context, g.layers[1].request, "single_error_lut",
                        {}, 2);
-  ingest_core ingest(
-      context, {{g.layers[0].request, 4}, {g.layers[1].request, 4}}, false);
+  ingest_core ingest(context,
+                     {{g.layers[0].request, 4}, {g.layers[1].request, 4}});
   const auto m = memory_measurements(
       *context, R, std::vector<std::uint8_t>(context->row_offset(R, R), 0));
   std::vector<const window_view *> a_views;
@@ -4967,8 +4966,6 @@ TEST(WindowPayloads, AreEdgeValuesRefilledInPlace) {
 struct node_publication {
   std::optional<std::int64_t> index;
   std::vector<std::optional<window_rows>> windows; ///< One per layer
-  std::optional<std::vector<std::uint8_t>> logical;
-  std::optional<streaming_task_graph_node::committed_coverage> coverage;
 };
 
 // The publication @p node holds, copied.
@@ -4976,19 +4973,18 @@ node_publication current_publication(const ingest_node &node,
                                      std::size_t layers) {
   node_publication out;
   out.index = node.published_index(0);
-  // Every window port carries the publication's index; the logical value,
-  // folded over the whole shot, carries none.
+  // Every window port carries the publication's index, and there is no
+  // other port; a window commits nothing, so no publication has coverage.
   for (std::size_t l = 0; l < layers; ++l)
     EXPECT_EQ(node.published_index(l), out.index);
   EXPECT_FALSE(node.published_index(layers).has_value());
+  EXPECT_EQ(node.streaming_output(layers), nullptr);
+  EXPECT_FALSE(node.streaming_coverage().has_value());
   for (std::size_t l = 0; l < layers; ++l) {
     const auto *value = node.streaming_output(l);
     out.windows.push_back(value ? std::optional{value->get<window_rows>()}
                                 : std::nullopt);
   }
-  if (const auto *value = node.streaming_output(layers))
-    out.logical = value->get<logical_outcome>().bits;
-  out.coverage = node.streaming_coverage();
   return out;
 }
 
@@ -5050,20 +5046,19 @@ void expect_window_rows(const shot &s, const window_request &request,
 // An ingest node publishes each index's windows, numbered from 0, the first
 // index any layer has: every window the shot holds, once, in index order,
 // with the shot's rows, and none it does not. A record may ready several
-// indices, at FINAL all that remain, and each is handed over in turn. With
-// read_logical, flush() then publishes the readout round's logical value,
-// alone, over the whole shot, and only once. One node serves shots of any
-// length in any order.
+// indices, at FINAL all that remain, and each is handed over in turn;
+// flush() then publishes nothing. One node serves shots of any length in
+// any order.
 // No delivery readies more publications than the node declares, which
 // sizes its consumers' join tables: whole records of every length, the
-// FINAL one readying all that remain, and the logical value's flush.
+// FINAL one readying all that remain.
 TEST(IngestNode, ReadiesNoMoreThanItDeclaresPerDelivery) {
   std::mt19937 rng(31);
   const auto spec = wide_readout_spec();
   const auto context = std::make_shared<const experiment_template>(spec);
   std::size_t most = 0; // the most one delivery readied
   for (const auto &requests : ingest_layouts()) {
-    ingest_node node(context, named_windows(requests), true);
+    ingest_node node(context, named_windows(requests));
     const auto declared = node.max_publications_per_delivery();
     const auto limit = *node.raw_chunk_limit();
     for (auto R = context->min_rounds(); R <= 40; ++R) {
@@ -5082,10 +5077,7 @@ TEST(IngestNode, ReadiesNoMoreThanItDeclaresPerDelivery) {
         EXPECT_LE(readied, declared) << "record at " << at;
         most = std::max(most, readied);
       }
-      std::size_t flushed = 0;
-      for (bool more = node.flush(); more; more = node.publish_next())
-        ++flushed;
-      EXPECT_LE(flushed, declared);
+      EXPECT_FALSE(node.flush());
     }
   }
   // A FINAL record readies several windows, so the bound is not one.
@@ -5105,7 +5097,7 @@ TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
                      window_instances(later.b, 30).begin),
             0);
   for (const auto &requests : layouts) {
-    ingest_node node(context, named_windows(requests), true);
+    ingest_node node(context, named_windows(requests));
     for (const auto R :
          {context->min_rounds(), std::size_t{30}, std::size_t{13},
           std::size_t{22}, context->min_rounds() + 1}) {
@@ -5119,12 +5111,10 @@ TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
         end = std::max(end, window_instances(request, R).end);
       }
       const auto got = stream_into(node, s, requests.size(), rng);
-      ASSERT_EQ(got.size(), static_cast<std::size_t>(end - first) + 1);
-      for (std::size_t i = 0; i + 1 < got.size(); ++i) {
+      ASSERT_EQ(got.size(), static_cast<std::size_t>(end - first));
+      for (std::size_t i = 0; i < got.size(); ++i) {
         const auto k = first + static_cast<std::int64_t>(i);
         ASSERT_EQ(got[i].index, std::optional<std::int64_t>(i));
-        EXPECT_FALSE(got[i].logical.has_value());
-        EXPECT_FALSE(got[i].coverage.has_value());
         for (std::size_t l = 0; l < requests.size(); ++l) {
           const auto instances = window_instances(requests[l], R);
           ASSERT_EQ(got[i].windows[l].has_value(),
@@ -5134,16 +5124,6 @@ TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
             expect_window_rows(s, requests[l], k, *got[i].windows[l]);
         }
       } // end - for(i)
-      EXPECT_FALSE(got.back().index.has_value());
-      EXPECT_EQ(got.back().logical, s.logical());
-      ASSERT_TRUE(got.back().coverage.has_value());
-      EXPECT_EQ(got.back().coverage->begin_round, 0u);
-      EXPECT_EQ(got.back().coverage->end_round,
-                streaming_task_graph_node::whole_shot);
-      EXPECT_EQ(std::vector<std::uint8_t>(node.corrections(),
-                                          node.corrections() +
-                                              node.num_observables()),
-                s.logical());
       EXPECT_FALSE(node.flush());
       // Clearing a flushed shot's corrections starts the next shot.
       node.clear_corrections();
@@ -5153,24 +5133,21 @@ TEST(IngestNode, PublishesEachIndexsWindowsFromZero) {
 
 // An ingest node takes raw measurements on `input`, in chunks no longer
 // than a period of its widest rounds, and offers one port of windows per
-// layer, then, with read_logical, `logical`, of the readout's observables.
-// It streams only.
+// layer, and no correction. It streams only.
 TEST(IngestNode, DeclaresItsPorts) {
   const auto layers = layered(3, 3, 9);
   const auto context =
       std::make_shared<const experiment_template>(wide_readout_spec());
   const std::vector<experimental::ingest_window> windows{{"A", layers.a, ""},
                                                          {"B", layers.b, ""}};
-  ingest_node reading(context, windows, true);
-  ingest_node not_reading(context, windows, false);
-  const ingest_core core(context, layers_of({layers.a, layers.b}), false);
+  ingest_node reading(context, windows);
+  const ingest_core core(context, layers_of({layers.a, layers.b}));
   std::vector<edge_value> outputs;
   EXPECT_EQ(reading.inputs(), std::vector<std::string>{"input"});
-  EXPECT_EQ(reading.outputs(), (std::vector<std::string>{"A", "B", "logical"}));
-  EXPECT_EQ(not_reading.outputs(), (std::vector<std::string>{"A", "B"}));
+  EXPECT_EQ(reading.outputs(), (std::vector<std::string>{"A", "B"}));
   EXPECT_TRUE(reading.output_type(1) == edge_value_type::of<window_rows>());
-  EXPECT_TRUE(reading.output_type(2) == logical_outcome_type);
-  EXPECT_FALSE(not_reading.output_type(2).has_value());
+  EXPECT_FALSE(reading.output_type(2).has_value());
+  EXPECT_FALSE(reading.reads_logical());
   EXPECT_TRUE(reading.accepts_input_type(0, measurement_results_type));
   EXPECT_FALSE(reading.accepts_input_type(0, detection_events_type));
   EXPECT_TRUE(reading.supports_raw_streaming_input(0));
@@ -5189,8 +5166,7 @@ TEST(IngestNode, DeclaresItsPorts) {
   const auto schedule = reading.streaming_schedule();
   ASSERT_TRUE(schedule.has_value());
   EXPECT_TRUE(*schedule == (window_spec{period, period, 0, 0}));
-  EXPECT_EQ(reading.num_observables(), 1u);
-  EXPECT_EQ(not_reading.num_observables(), 0u);
+  EXPECT_EQ(reading.num_observables(), 0u);
   expect_throw<std::logic_error>(
       [&] { reading.execute_indexed({}, outputs); },
       "ingest: the node streams; it has no one-shot path");
@@ -5198,14 +5174,14 @@ TEST(IngestNode, DeclaresItsPorts) {
 
 // Every publication is handed over before the node takes more: enqueue()
 // or flush() while some still wait is rejected, naming how many. flush()
-// publishes nothing before FINAL, and the logical value only once.
+// publishes nothing.
 TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore) {
   const auto layers = layered(3, 3, 9);
   const auto spec = wide_readout_spec();
   const auto context = std::make_shared<const experiment_template>(spec);
   std::mt19937 rng(31);
   const shot s(spec, 40, rng);
-  ingest_node node(context, named_windows({layers.a, layers.b}), true);
+  ingest_node node(context, named_windows({layers.a, layers.b}));
   const auto limit = *node.raw_chunk_limit();
   const auto total = s.measurements.size();
   // The FINAL record: the shot's last limit measurements or fewer.
@@ -5245,26 +5221,24 @@ TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore) {
           " publications wait to be handed over");
   while (node.publish_next())
     ;
-  EXPECT_TRUE(node.flush());
-  EXPECT_FALSE(node.publish_next());
   EXPECT_FALSE(node.flush());
+  EXPECT_FALSE(node.publish_next());
 } // end - TEST(IngestNode, HandsEveryPublicationOverBeforeTakingMore)
 
 // A graph that reads outputs in place reads them after publish_next() says
 // nothing more waits, so the last publication stays current until the node
-// takes more: the FINAL record's last window, then the logical value.
+// takes more: the FINAL record's last window, until flush().
 TEST(IngestNode, KeepsTheLastPublicationCurrent) {
   const auto layers = layered(3, 3, 9);
   const auto spec = wide_readout_spec();
   const auto context = std::make_shared<const experiment_template>(spec);
   std::mt19937 rng(41);
   const shot s(spec, 40, rng);
-  ingest_node node(context, named_windows({layers.a, layers.b}), true);
+  ingest_node node(context, named_windows({layers.a, layers.b}));
   const auto limit = *node.raw_chunk_limit();
   const auto total = s.measurements.size();
   const auto final_start = (total - 1) / limit * limit;
   const std::size_t window_ports = 2;
-  const std::size_t logical_port = 2;
   // The last publication's value and index on each window port.
   std::vector<const edge_value *> last(window_ports, nullptr);
   std::vector<std::optional<std::int64_t>> last_index(window_ports);
@@ -5286,17 +5260,15 @@ TEST(IngestNode, KeepsTheLastPublicationCurrent) {
     EXPECT_EQ(node.published_index(l), last_index[l]) << "port " << l;
   }
 
-  ASSERT_TRUE(node.flush());
+  EXPECT_FALSE(node.flush());
   EXPECT_FALSE(node.publish_next());
-  EXPECT_NE(node.streaming_output(logical_port), nullptr);
-  EXPECT_TRUE(node.streaming_coverage().has_value());
   for (std::size_t l = 0; l < window_ports; ++l)
     EXPECT_EQ(node.streaming_output(l), nullptr) << "port " << l;
 } // end - TEST(IngestNode, KeepsTheLastPublicationCurrent)
 
-// From its first shot, an ingest node streams a shot, publications and
-// logical value included, FINAL's burst of windows too, without
-// allocating: windows are copied into buffers sized at construction.
+// From its first shot, an ingest node streams a shot, FINAL's burst of
+// windows included, without allocating: windows are copied into buffers
+// sized at construction.
 TEST(IngestNode, StreamsAShotWithoutAllocating) {
   if (QEC_TEST_SANITIZED)
     GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
@@ -5306,7 +5278,7 @@ TEST(IngestNode, StreamsAShotWithoutAllocating) {
   const auto context = std::make_shared<const experiment_template>(spec);
   std::mt19937 rng(37);
   const shot s(spec, 60, rng);
-  ingest_node node(context, named_windows({layers.a, layers.b}), true);
+  ingest_node node(context, named_windows({layers.a, layers.b}));
   const auto limit = *node.raw_chunk_limit();
   std::size_t allocations = 0;
   std::size_t published = 0;
@@ -5336,6 +5308,250 @@ TEST(IngestNode, StreamsAShotWithoutAllocating) {
 } // end - TEST(IngestNode, StreamsAShotWithoutAllocating)
 
 // ---------------------------------------------------------------------------
+// The logical_readout node
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// @p spec with @p m2o as its last phase's m2o_sparse.
+dem_chunks_spec with_readout(dem_chunks_spec spec,
+                             std::vector<std::int64_t> m2o) {
+  phase_of(spec, phase_name::dem_final).m2o_sparse = std::move(m2o);
+  return spec;
+}
+
+// Specs with readouts of several shapes: wide, narrow, one measurement after
+// rounds of 100, and a fixed shot with no repeating phase.
+std::vector<dem_chunks_spec> readout_specs() {
+  return {wide_readout_spec(), with_readout(narrow_readout_spec(), {0, 1, -1}),
+          with_readout(one_measurement_readout_spec(), {0, -1}),
+          with_readout(linear_spec(), {0, 3, -1})};
+}
+
+} // namespace
+
+// A logical_readout node streams a shot cut anywhere and publishes the final
+// readout's value once: at flush() after FINAL, or, for a template that does
+// not repeat, with the chunk completing it. One-shot reads the same value.
+// Clearing a flushed shot starts the next, of any length.
+TEST(LogicalReadoutNode, PublishesTheRawLogicalOnceAtTheEnd) {
+  std::mt19937 rng(41);
+  for (const auto &spec : readout_specs()) {
+    const auto context = std::make_shared<const experiment_template>(spec);
+    logical_readout_node node(context);
+    const auto lengths =
+        context->repeats()
+            ? std::vector<std::size_t>{context->min_rounds(), 30, 13, 22,
+                                       context->min_rounds() + 1}
+            : std::vector<std::size_t>{context->min_rounds(),
+                                       context->min_rounds()};
+    for (const auto R : lengths) {
+      SCOPED_TRACE("R=" + std::to_string(R));
+      const shot s(spec, R, rng);
+      const auto &m = s.measurements;
+      const std::vector<std::uint8_t> zero(s.logical().size(), 0);
+      std::vector<edge_value> outputs(1);
+      for (std::size_t at = 0; at < m.size();) {
+        const auto len = std::min<std::size_t>(1 + rng() % 13, m.size() - at);
+        const bool last = at + len == m.size();
+        EXPECT_EQ(node.enqueue(m.data() + at, len,
+                               last ? round_type::FINAL : round_type::BULK),
+                  last && !context->repeats());
+        EXPECT_EQ(node.streaming_output(0) != nullptr,
+                  last && !context->repeats());
+        at += len;
+      }
+      if (context->repeats())
+        EXPECT_EQ(std::vector<std::uint8_t>(node.corrections(),
+                                            node.corrections() +
+                                                node.num_observables()),
+                  zero);
+      ASSERT_TRUE(node.flush());
+      ASSERT_NE(node.streaming_output(0), nullptr);
+      EXPECT_EQ(node.streaming_output(0)->get<logical_outcome>().bits,
+                s.logical());
+      ASSERT_TRUE(node.streaming_coverage().has_value());
+      EXPECT_EQ(node.streaming_coverage()->begin_round, 0u);
+      EXPECT_EQ(node.streaming_coverage()->end_round,
+                streaming_task_graph_node::whole_shot);
+      EXPECT_EQ(std::vector<std::uint8_t>(node.corrections(),
+                                          node.corrections() +
+                                              node.num_observables()),
+                s.logical());
+      EXPECT_FALSE(node.publish_next());
+      EXPECT_FALSE(node.flush());
+      node.execute_indexed({edge_value{measurement_results{m}}}, outputs);
+      EXPECT_EQ(outputs[0].get<logical_outcome>().bits, s.logical());
+      node.clear_corrections();
+    } // end - for(R)
+  } // end - for(spec)
+} // end - TEST(LogicalReadoutNode, PublishesTheRawLogicalOnceAtTheEnd)
+
+// A logical_readout node takes raw measurements on `input` and offers the
+// observables on `output`, shares ingest's round width, publishes on no
+// schedule, and runs one-shot too.
+TEST(LogicalReadoutNode, DeclaresItsPorts) {
+  const auto layers = layered(3, 3, 9);
+  std::mt19937 rng(47);
+  for (const auto &spec : readout_specs()) {
+    const auto context = std::make_shared<const experiment_template>(spec);
+    logical_readout_node node(context);
+    const shot s(spec, context->min_rounds(), rng);
+    EXPECT_EQ(node.inputs(), std::vector<std::string>{"input"});
+    EXPECT_EQ(node.outputs(), std::vector<std::string>{"output"});
+    EXPECT_EQ(node.output_type(0), logical_outcome_type);
+    EXPECT_FALSE(node.output_type(1).has_value());
+    EXPECT_EQ(node.output_value_size(0), s.logical().size());
+    EXPECT_TRUE(node.accepts_input_type(0, measurement_results_type));
+    EXPECT_FALSE(node.accepts_input_type(0, logical_outcome_type));
+    EXPECT_FALSE(node.accepts_input_type(1, measurement_results_type));
+    EXPECT_TRUE(node.supports_raw_streaming_input(0));
+    EXPECT_FALSE(node.raw_chunk_limit().has_value());
+    EXPECT_EQ(node.num_observables(), s.logical().size());
+    if (context->repeats())
+      EXPECT_EQ(node.num_msyn_per_round(),
+                ingest_node(context, named_windows({layers.a, layers.b}))
+                    .num_msyn_per_round());
+    EXPECT_FALSE(node.streaming_schedule().has_value());
+    EXPECT_FALSE(node.exact_interval_coverage());
+    EXPECT_TRUE(node.reads_logical());
+    // FINAL places a repeating template's readout round; otherwise it is the
+    // last round.
+    EXPECT_EQ(node.logical_completion_rounds(),
+              context->repeats()
+                  ? std::vector<std::optional<std::uint64_t>>{std::nullopt}
+                  : std::vector<std::optional<std::uint64_t>>{
+                        context->min_rounds() - 1});
+    EXPECT_TRUE(node.has_one_shot_path());
+    EXPECT_FALSE(node.supports_fire_pool());
+    EXPECT_EQ(node.streaming(), &node);
+  } // end - for(spec)
+} // end - TEST(LogicalReadoutNode, DeclaresItsPorts)
+
+// A logical_readout node refuses a template without a readout map, a shot
+// shorter than its prefix and suffix rounds, and a chunk after FINAL until
+// the next shot.
+TEST(LogicalReadoutNode, RefusesWhatItCannotRead) {
+  const auto unread = std::make_shared<const experiment_template>(
+      with_readout(wide_readout_spec(), {}));
+  const auto context =
+      std::make_shared<const experiment_template>(wide_readout_spec());
+  const std::vector<std::uint8_t> four(4, 1);
+  const std::vector<std::uint8_t> five(5, 1);
+  std::vector<edge_value> outputs(1);
+
+  expect_error([&] { logical_readout_node node(unread); }, "logical_readout",
+               "no phase of the template carries m2o_sparse");
+  expect_error(
+      [&] {
+        experiment_template(with_readout(wide_readout_spec(), {0, 5, -1}));
+      },
+      "m2o_sparse reads measurement 5");
+  logical_readout_node node(context);
+  // A 4-measurement first round and a 5-measurement readout round.
+  expect_error(
+      [&] { node.enqueue(four.data(), four.size(), round_type::FINAL); },
+      "the shot holds 4 measurements, fewer than the 9 of its prefix and "
+      "suffix rounds");
+  node.reset_streaming_state();
+  expect_error(
+      [&] {
+        node.execute_indexed({edge_value{measurement_results{four}}}, outputs);
+      },
+      "fewer than the 9 of its prefix and suffix rounds");
+  node.enqueue(four.data(), four.size(), round_type::BULK);
+  node.enqueue(five.data(), five.size(), round_type::FINAL);
+  expect_throw<std::logic_error>(
+      [&] { node.enqueue(four.data(), four.size(), round_type::BULK); },
+      "a chunk after FINAL");
+  node.clear_corrections();
+  EXPECT_FALSE(node.enqueue(four.data(), four.size(), round_type::BULK));
+} // end - TEST(LogicalReadoutNode, RefusesWhatItCannotRead)
+
+// A mid-circuit readout is read as it arrives: the chunk completing it
+// publishes with coverage up to that round, while the final readout waits
+// for FINAL. One-shot gives the same value.
+TEST(LogicalReadoutNode, ReadsAMidCircuitReadoutAsItArrives) {
+  auto spec = mid_readout_spec(5);
+  spec.num_rounds.reset();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  logical_readout_node node(context);
+  std::mt19937 rng(53);
+  std::vector<edge_value> outputs(1);
+  // The mid-circuit readout round is the third, of 4 measurements each.
+  constexpr std::size_t mid_end = 12;
+
+  EXPECT_EQ(node.logical_completion_rounds(),
+            (std::vector<std::optional<std::uint64_t>>{2, std::nullopt}));
+  for (const auto R :
+       {context->min_rounds(), std::size_t{12}, std::size_t{30}}) {
+    SCOPED_TRACE("R=" + std::to_string(R));
+    const shot s(spec, R, rng);
+    const auto &m = s.measurements;
+    const auto readout = context->measurement_offset(R - 1, R);
+    const std::vector<std::uint8_t> want{
+        m[context->measurement_offset(2, R) + 1],
+        static_cast<std::uint8_t>(m[readout] ^ m[readout + 2])};
+    std::size_t published = 0;
+    for (std::size_t at = 0; at < m.size(); at += 5) {
+      const auto len = std::min<std::size_t>(5, m.size() - at);
+      const bool reads_mid = at < mid_end && at + len >= mid_end;
+      EXPECT_EQ(node.enqueue(m.data() + at, len,
+                             at + len == m.size() ? round_type::FINAL
+                                                  : round_type::BULK),
+                reads_mid)
+          << "chunk at " << at;
+      if (!reads_mid)
+        continue;
+      ++published;
+      ASSERT_NE(node.streaming_output(0), nullptr);
+      EXPECT_EQ(node.streaming_output(0)->get<logical_outcome>().bits[0],
+                want[0]);
+      ASSERT_TRUE(node.streaming_coverage().has_value());
+      EXPECT_EQ(node.streaming_coverage()->end_round, 3u);
+    }
+    EXPECT_EQ(published, 1u);
+    ASSERT_TRUE(node.flush());
+    EXPECT_EQ(node.streaming_output(0)->get<logical_outcome>().bits, want);
+    EXPECT_EQ(node.streaming_coverage()->end_round,
+              streaming_task_graph_node::whole_shot);
+    node.execute_indexed({edge_value{measurement_results{m}}}, outputs);
+    EXPECT_EQ(outputs[0].get<logical_outcome>().bits, want);
+    node.clear_corrections();
+  } // end - for(R)
+} // end - TEST(LogicalReadoutNode, ReadsAMidCircuitReadoutAsItArrives)
+
+// From its first shot, a logical_readout node streams a shot and publishes
+// its value without allocating.
+TEST(LogicalReadoutNode, StreamsAShotWithoutAllocating) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
+                    "new";
+  const auto spec = wide_readout_spec();
+  const auto context = std::make_shared<const experiment_template>(spec);
+  std::mt19937 rng(43);
+  const shot s(spec, 60, rng);
+  logical_readout_node node(context);
+  std::size_t allocations = 0;
+
+  for (const auto *which : {"first", "second"}) {
+    allocations = 0;
+    for (std::size_t at = 0; at < s.measurements.size(); at += 7) {
+      const auto len = std::min<std::size_t>(7, s.measurements.size() - at);
+      const auto type = at + len == s.measurements.size() ? round_type::FINAL
+                                                          : round_type::BULK;
+      allocations += allocation_counter::during(
+          [&] { node.enqueue(s.measurements.data() + at, len, type); });
+    }
+    allocations += allocation_counter::during([&] { node.flush(); });
+    EXPECT_EQ(node.streaming_output(0)->get<logical_outcome>().bits,
+              s.logical());
+    EXPECT_EQ(allocations, 0u) << "the " << which << " shot allocated";
+    node.clear_corrections();
+  }
+} // end - TEST(LogicalReadoutNode, StreamsAShotWithoutAllocating)
+
+// ---------------------------------------------------------------------------
 // The decode_window node
 // ---------------------------------------------------------------------------
 
@@ -5351,7 +5567,8 @@ struct window_publication {
 // executor that joins by index runs it, one fire at a time: each index
 // ingest hands over fires its layers in g's order, and each receive is a
 // copy of the producer's send, kept as a join keeps it. What every window
-// published is kept, by node and window, with the logical value.
+// published is kept, by node and window, along with the raw logical value
+// when the template has a readout map.
 class node_pipeline {
 public:
   node_pipeline(const dem_chunks_spec &spec, const window_graph &g,
@@ -5363,8 +5580,9 @@ public:
       store_.add_windows(context_, layer.request);
       windows.push_back({layer.node, layer.request, ""});
     }
-    ingest_ = std::make_unique<ingest_node>(context_, windows,
-                                            !context_->readout().empty());
+    ingest_ = std::make_unique<ingest_node>(context_, windows);
+    if (!context_->readout().empty())
+      readout_ = std::make_unique<logical_readout_node>(context_);
     for (const auto &layer : g.layers) {
       std::size_t receives = 0;
       for (const auto &e : g.edges)
@@ -5381,9 +5599,9 @@ public:
            std::size_t record = 0) {
     start();
     feed(measurements, record, measurements.size());
-    for (bool more = ingest_->flush(); more; more = ingest_->publish_next())
-      logical_ =
-          ingest_->streaming_output(nodes_.size())->get<logical_outcome>().bits;
+    EXPECT_FALSE(ingest_->flush());
+    if (readout_ && readout_->flush())
+      logical_ = readout_->streaming_output(0)->get<logical_outcome>().bits;
   }
 
   // Feeds a shot's first @p records records, none FINAL, and stops there,
@@ -5412,6 +5630,8 @@ private:
   // A new shot: every node reset, and nothing kept from the last.
   void start() {
     ingest_->reset_streaming_state();
+    if (readout_)
+      readout_->reset_streaming_state();
     for (auto &node : nodes_)
       node->reset_streaming_state();
     published_.clear();
@@ -5431,6 +5651,8 @@ private:
       const auto len = std::min(size, end - at);
       const auto type = at + len == measurements.size() ? round_type::FINAL
                                                         : round_type::BULK;
+      if (readout_)
+        EXPECT_FALSE(readout_->enqueue(measurements.data() + at, len, type));
       for (bool more = ingest_->enqueue(measurements.data() + at, len, type);
            more; more = ingest_->publish_next())
         fire_index();
@@ -5503,6 +5725,7 @@ private:
   data_artifact_store store_;
   std::shared_ptr<const experiment_template> context_;
   std::unique_ptr<ingest_node> ingest_;
+  std::unique_ptr<logical_readout_node> readout_; ///< With a readout map
   std::vector<std::unique_ptr<decode_window_node>> nodes_;
   std::map<std::pair<std::string, std::int64_t>, window_publication> published_;
   // Each send, by producer layer, index and port, as a join holds it.
@@ -5812,7 +6035,7 @@ TEST(DecodeWindowNode, RejectsWhatIsNotAnInstance) {
                        {}, 2, verify_residual_mode::none);
   decode_window_node blind(store, context, g.layers[0].request, "blind_decoder",
                            {}, 0, verify_residual_mode::fail);
-  ingest_core ingest(context, {{g.layers[0].request, 1}}, false);
+  ingest_core ingest(context, {{g.layers[0].request, 1}});
   const ingest_publication *p = nullptr;
   for (std::size_t at = 0; !p; at += ingest.record_limit()) {
     ASSERT_LT(at + ingest.record_limit(), m.size());
@@ -6006,7 +6229,9 @@ TEST(DataArtifactStore, StoresBuiltAtOnceShareWhatTheyBuild) {
 namespace {
 
 // A parallel_window pattern node P over @p spec with @p params, fed by
-// measurements and read at the output, as from_topology takes it.
+// measurements and read at the output, as from_topology takes it. A template
+// with a readout map gets output: corrections_and_logical unless @p params
+// sets output.
 task_graph_node_config
 pattern_node(const dem_chunks_spec &spec,
              const cudaqx::heterogeneous_map &params,
@@ -6018,6 +6243,8 @@ pattern_node(const dem_chunks_spec &spec,
   cfg.dem = spec;
   cfg.decoder_type = decoder;
   cfg.node_params = params;
+  if (spec.has_readout() && !params.contains("output"))
+    cfg.node_params.insert("output", std::string("corrections_and_logical"));
   cfg.max_in_flight = max_in_flight;
   return cfg;
 }
@@ -6054,13 +6281,22 @@ stream_shot(decoding_task_graph &graph,
   return {corrections, corrections + graph.get_num_observables()};
 }
 
+// @p graph's logical measurements; empty while it has none.
+std::vector<std::uint8_t>
+logical_measurements(const decoding_task_graph &graph) {
+  const auto *bits = graph.get_logical_measurements();
+  if (!bits)
+    return {};
+  return {bits, bits + graph.get_num_logical_measurements()};
+}
+
 // The graph @p graph, of layout @p g over wide_readout_spec(), streams
 // single faults in records of @p record measurements (the graph's round
-// for 0) as the reference decodes them, at every shot length up to 60:
-// with @p corrected false its corrections are the reference's frame, and
-// with it true that frame applied to the raw logical value.
+// for 0) as the reference decodes them, at every shot length up to 60: its
+// corrections match the reference's frame, and its logical measurements, if
+// any, that frame applied to the raw logical value.
 void expect_graph_streams(decoding_task_graph &graph, const window_graph &g,
-                          bool corrected, std::size_t record) {
+                          std::size_t record) {
   const auto spec = wide_readout_spec();
   const experiment_template tmpl(spec);
   std::size_t flipped = 0; // shots whose expected value is not zero
@@ -6075,38 +6311,36 @@ void expect_graph_streams(decoding_task_graph &graph, const window_graph &g,
     for (std::size_t c = R % 7; c < s.h.size(); c += 7) {
       const auto detectors = detectors_of(s, c);
       const auto measurements = memory_measurements(tmpl, R, detectors);
-      auto want = reference.decode(detectors).frame;
-      if (corrected) {
-        const auto logical = raw_logical(tmpl, R, measurements);
-        for (std::size_t j = 0; j < want.size(); ++j)
-          want[j] ^= logical.at(j);
-      }
+      const auto want = reference.decode(detectors).frame;
+      auto logical = raw_logical(tmpl, R, measurements);
+      for (std::size_t j = 0; j < want.size(); ++j)
+        logical.at(j) ^= want[j];
       flipped += std::count(want.begin(), want.end(), 1) != 0;
       EXPECT_EQ(stream_shot(graph, measurements, record), want)
           << "column " << c;
+      if (graph.get_num_logical_measurements() != 0)
+        EXPECT_EQ(logical_measurements(graph), logical) << "column " << c;
     }
   } // end - for(R)
   // A graph that published nothing would match only zero values.
   EXPECT_GT(flipped, 0u);
 } // end - expect_graph_streams()
 
-// The pattern over wide_readout_spec() with @p output, built with
-// @p options and @p max_in_flight copies of each layer, streams as the
+// The pattern over wide_readout_spec() (so with a logical output), built
+// with @p options and @p max_in_flight copies of each layer, streams as the
 // reference decodes, in records of @p record measurements.
-void expect_pattern_streams(const std::string &output,
-                            const task_graph_options &options,
+void expect_pattern_streams(const task_graph_options &options,
                             std::size_t max_in_flight, std::size_t record) {
   const auto spec = wide_readout_spec();
   const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
                                          {"buffer_rounds", std::size_t{1}},
-                                         {"gap_rounds", std::size_t{3}},
-                                         {"output", output}};
+                                         {"gap_rounds", std::size_t{3}}};
   std::vector<task_graph_node_config> nodes;
   nodes.push_back(pattern_node(spec, params, max_in_flight));
   auto graph = decoding_task_graph::from_topology(std::move(nodes),
                                                   pattern_edges(), options);
-  expect_graph_streams(*graph, lowered_graph(spec, params),
-                       output == "corrected_logical", record);
+  ASSERT_EQ(graph->get_num_logical_measurements(), 1u);
+  expect_graph_streams(*graph, lowered_graph(spec, params), record);
 }
 
 // A sliding window W over wide_readout_spec(), written by hand: ingest's
@@ -6139,32 +6373,382 @@ sliding_topology(const task_graph_options &options, std::size_t max_in_flight,
 void expect_sliding_streams(const task_graph_options &options,
                             std::size_t max_in_flight, std::size_t record) {
   expect_graph_streams(*sliding_topology(options, max_in_flight),
-                       sliding_graph(2, 5), false, record);
+                       sliding_graph(2, 5), record);
 }
 
 } // namespace
 
 // The pattern, lowered and built by from_topology, streams through the
-// executor as the reference decodes: synchronously, asynchronously, and
-// asynchronously with four copies of each layer decoding at once, in
-// records of a round or of 5 measurements, cut anywhere.
+// executor as the reference decodes, corrections and logical measurements:
+// synchronously, asynchronously, and asynchronously with four copies of each
+// layer decoding at once, in records of a round or of 5 measurements, cut
+// anywhere.
 TEST(WindowedGraph, StreamsThePatternAsTheReference) {
   task_graph_options async;
   async.async_streaming = true;
-  for (const std::string output : {"corrections", "corrected_logical"})
-    for (const std::size_t record : {std::size_t{0}, std::size_t{5}}) {
-      SCOPED_TRACE("output: " + output + ", record " + std::to_string(record));
-      EXPECT_NO_THROW(expect_pattern_streams(output, {}, 1, record));
-      EXPECT_NO_THROW(expect_pattern_streams(output, async, 1, record));
-      EXPECT_NO_THROW(expect_pattern_streams(output, async, 4, record));
-    }
+  for (const std::size_t record : {std::size_t{0}, std::size_t{5}}) {
+    SCOPED_TRACE("record " + std::to_string(record));
+    EXPECT_NO_THROW(expect_pattern_streams({}, 1, record));
+    EXPECT_NO_THROW(expect_pattern_streams(async, 1, record));
+    EXPECT_NO_THROW(expect_pattern_streams(async, 4, record));
+  }
 } // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
 
-// Without `output`, the pattern publishes the correction alone, so what a
-// caller reads as corrections, a decoding server's get_corrections included,
-// is never the corrected logical value.
-TEST(WindowedGraph, PatternOutputsCorrectionsByDefault) {
+// The pattern's corrections, which get_obs_corrections() returns, never
+// include the logical value; get_logical_measurements() returns the
+// corrected logical value, null until FINAL and again once the shot is
+// consumed. The logical output is last, pending until FINAL, and not a
+// one-shot outcome.
+TEST(WindowedGraph, PatternKeepsTheLogicalMeasurementsApart) {
   const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}}};
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, params), R,
+                                      "single_error_lut");
+  std::vector<task_graph_node_config> nodes;
+  std::vector<std::uint8_t> measurements;
+  std::vector<std::uint8_t> frame;
+  std::vector<std::uint8_t> logical; ///< The corrected logical value
+  const uint8_t *corrections = nullptr;
+
+  nodes.push_back(pattern_node(spec, params, 1));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges(), {});
+  // A fault the frame corrects, so corrected and raw logical values differ.
+  for (std::size_t c = 0; c < reference.model().h.size(); ++c) {
+    measurements =
+        memory_measurements(tmpl, R, detectors_of(reference.model(), c));
+    frame = reference.decode(detectors_of(reference.model(), c)).frame;
+    if (frame == std::vector<std::uint8_t>{1})
+      break;
+  }
+  ASSERT_EQ(frame, std::vector<std::uint8_t>{1});
+  logical = raw_logical(tmpl, R, measurements);
+  logical.at(0) ^= 1;
+  ASSERT_EQ(graph->output_names().size(), 1u);
+  EXPECT_NE(graph->output_names()[0], "logical");
+  EXPECT_EQ(graph->get_num_observables(), 1u);
+  EXPECT_EQ(graph->get_num_logical_measurements(), 1u);
+
+  // Mid-shot: no logical measurements, and the output says so.
+  const auto readout = tmpl.measurement_offset(R - 1, R);
+  graph->enqueue_syndrome(measurements.data(), readout, round_type::BULK);
+  EXPECT_EQ(graph->get_logical_measurements(), nullptr);
+  {
+    const auto &result = graph->streaming_result();
+    ASSERT_EQ(result.outputs.size(), 2u);
+    EXPECT_EQ(result.outputs.back().name, "logical");
+    EXPECT_EQ(result.outputs.back().value_offset, 1u);
+    EXPECT_EQ(result.outputs.back().status,
+              task_graph_streaming_status::pending);
+    EXPECT_EQ(result.values.size(), 2u);
+  }
+  graph->enqueue_syndrome(measurements.data() + readout,
+                          measurements.size() - readout, round_type::FINAL);
+  corrections = graph->get_obs_corrections();
+  EXPECT_EQ(std::vector<std::uint8_t>(corrections, corrections + 1), frame);
+  EXPECT_EQ(logical_measurements(*graph), logical);
+  {
+    const auto &result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.outputs.back().status,
+              task_graph_streaming_status::complete);
+    EXPECT_EQ(result.outputs.back().coverage_end_round, R);
+    EXPECT_EQ(result.values, (std::vector<std::uint8_t>{frame[0], logical[0]}));
+  }
+  graph->clear_corrections();
+  EXPECT_EQ(graph->get_logical_measurements(), nullptr);
+
+  // One-shot calls return the corrections alone.
+  graph->reset_decoder();
+  const auto outcomes = graph->run_all(measurement_results{measurements});
+  ASSERT_EQ(outcomes.size(), 1u);
+  EXPECT_EQ(outcomes[0].bits, frame);
+  EXPECT_EQ(graph->run(measurement_results{measurements}).bits, frame);
+} // end - TEST(WindowedGraph, PatternKeepsTheLogicalMeasurementsApart)
+
+// Over mid_readout_spec, the pattern releases the mid-circuit readout
+// mid-shot, once every correction that can flip it is committed, with its
+// final value; the final readout is released only at FINAL. Synchronously,
+// asynchronously, and with four copies of each layer.
+TEST(WindowedGraph, PatternReleasesAMidCircuitReadoutMidShot) {
+  auto spec = mid_readout_spec(5);
+  spec.num_rounds.reset();
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}}};
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, params), R,
+                                      "single_error_lut");
+  const auto &model = reference.model();
+  const auto readout = tmpl.measurement_offset(R - 1, R);
+  task_graph_options async;
+  std::size_t flipped = 0; // shots whose mid-circuit value is flipped
+
+  async.async_streaming = true;
+  for (const auto &[options, copies] :
+       {std::pair{task_graph_options{}, std::size_t{1}},
+        std::pair{async, std::size_t{1}}, std::pair{async, std::size_t{4}}}) {
+    SCOPED_TRACE(::testing::Message() << "async=" << options.async_streaming
+                                      << " copies=" << copies);
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pattern_node(spec, params, copies));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    ASSERT_EQ(graph->get_num_logical_measurements(), 2u);
+    for (std::size_t c = 0; c < model.h.size(); c += 3) {
+      const auto detectors = detectors_of(model, c);
+      const auto m = memory_measurements(tmpl, R, detectors);
+      const auto frame = reference.decode(detectors).frame;
+      const std::vector<std::uint8_t> want{
+          static_cast<std::uint8_t>(m[tmpl.measurement_offset(2, R) + 1] ^
+                                    frame.at(0)),
+          static_cast<std::uint8_t>(m[readout] ^ m[readout + 2] ^ frame.at(1))};
+      std::optional<std::size_t> released_at;
+      flipped += frame[0];
+      graph->reset_decoder();
+      for (std::size_t r = 0; r < R; ++r) {
+        const auto at = tmpl.measurement_offset(r, R);
+        graph->enqueue_syndrome(
+            m.data() + at, tmpl.measurement_offset(r + 1, R) - at,
+            r + 1 == R ? round_type::FINAL : round_type::BULK);
+        const auto *mid = graph->get_logical_measurements(0, 1);
+        if (r + 1 < R)
+          EXPECT_EQ(graph->get_logical_measurements(1, 1), nullptr);
+        if (!mid) {
+          EXPECT_FALSE(released_at) << "a released outcome was withdrawn";
+          continue;
+        }
+        if (!released_at)
+          released_at = r;
+        EXPECT_EQ(*mid, want[0]) << "column " << c << ", round " << r;
+      } // end - for(r)
+      ASSERT_TRUE(released_at.has_value()) << "column " << c;
+      EXPECT_LT(*released_at, R - 1)
+          << "the mid-circuit readout waited for FINAL";
+      EXPECT_EQ(logical_measurements(*graph), want) << "column " << c;
+    } // end - for(c)
+  } // end - for(options, copies)
+  EXPECT_GT(flipped, 0u);
+} // end - TEST(WindowedGraph, PatternReleasesAMidCircuitReadoutMidShot)
+
+// A shot cancelled by reset_decoder() after its mid-circuit readout was
+// released keeps nothing released: the next shot starts with every flag
+// clear and releases its own values. Synchronously and asynchronously.
+TEST(WindowedGraph, ACancelledShotKeepsNoRelease) {
+  auto spec = mid_readout_spec(5);
+  spec.num_rounds.reset();
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}}};
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, params), R,
+                                      "single_error_lut");
+  const auto &model = reference.model();
+  const auto readout = tmpl.measurement_offset(R - 1, R);
+  const auto cancelled = memory_measurements(tmpl, R, detectors_of(model, 0));
+  const auto detectors = detectors_of(model, 3);
+  const auto m = memory_measurements(tmpl, R, detectors);
+  const auto frame = reference.decode(detectors).frame;
+  const std::vector<std::uint8_t> want{
+      static_cast<std::uint8_t>(m[tmpl.measurement_offset(2, R) + 1] ^
+                                frame.at(0)),
+      static_cast<std::uint8_t>(m[readout] ^ m[readout + 2] ^ frame.at(1))};
+  task_graph_options async;
+
+  async.async_streaming = true;
+  for (const auto &options : {task_graph_options{}, async}) {
+    SCOPED_TRACE(options.async_streaming ? "async" : "sync");
+    std::vector<task_graph_node_config> nodes;
+    std::size_t r = 0;
+    nodes.push_back(pattern_node(spec, params, 1));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    graph->reset_decoder();
+    for (; r + 1 < R && !graph->get_logical_measurements(0, 1); ++r) {
+      const auto at = tmpl.measurement_offset(r, R);
+      graph->enqueue_syndrome(cancelled.data() + at,
+                              tmpl.measurement_offset(r + 1, R) - at,
+                              round_type::BULK);
+    }
+    ASSERT_LT(r + 1, R) << "the mid-circuit readout waited for FINAL";
+
+    graph->reset_decoder();
+    EXPECT_EQ(graph->get_logical_measurements(0, 1), nullptr);
+    for (const auto released :
+         graph->streaming_result().outputs.back().released)
+      EXPECT_EQ(released, 0);
+    for (r = 0; r < R; ++r) {
+      const auto at = tmpl.measurement_offset(r, R);
+      graph->enqueue_syndrome(
+          m.data() + at, tmpl.measurement_offset(r + 1, R) - at,
+          r + 1 == R ? round_type::FINAL : round_type::BULK);
+      // The new shot's readout round, round 2, has not arrived yet.
+      if (r < 2)
+        EXPECT_EQ(graph->get_logical_measurements(0, 1), nullptr)
+            << "round " << r;
+    }
+    EXPECT_EQ(logical_measurements(*graph), want);
+  } // end - for(options)
+} // end - TEST(WindowedGraph, ACancelledShotKeepsNoRelease)
+
+// A shot started by clear_corrections() after FINAL, as a reset read starts
+// one, releases nothing early: the consumed shot's coverage does not carry
+// into it. Its mid-circuit readout waits for its own round, and every value
+// is its own. Synchronously and asynchronously.
+TEST(WindowedGraph, AShotAfterAConsumedOneReleasesOnItsOwn) {
+  auto spec = mid_readout_spec(5);
+  spec.num_rounds.reset();
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}}};
+  constexpr std::size_t R = 30;
+  parallel_window_reference reference(spec, lowered_graph(spec, params), R,
+                                      "single_error_lut");
+  const auto &model = reference.model();
+  const auto readout = tmpl.measurement_offset(R - 1, R);
+  const auto consumed = memory_measurements(tmpl, R, detectors_of(model, 0));
+  const auto detectors = detectors_of(model, 3);
+  const auto m = memory_measurements(tmpl, R, detectors);
+  const auto frame = reference.decode(detectors).frame;
+  const std::vector<std::uint8_t> want{
+      static_cast<std::uint8_t>(m[tmpl.measurement_offset(2, R) + 1] ^
+                                frame.at(0)),
+      static_cast<std::uint8_t>(m[readout] ^ m[readout + 2] ^ frame.at(1))};
+  task_graph_options async;
+  const auto stream = [&](decoding_task_graph &graph,
+                          const std::vector<std::uint8_t> &shot,
+                          std::size_t r) {
+    const auto at = tmpl.measurement_offset(r, R);
+    graph.enqueue_syndrome(shot.data() + at,
+                           tmpl.measurement_offset(r + 1, R) - at,
+                           r + 1 == R ? round_type::FINAL : round_type::BULK);
+  };
+
+  async.async_streaming = true;
+  for (const auto &options : {task_graph_options{}, async}) {
+    SCOPED_TRACE(options.async_streaming ? "async" : "sync");
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pattern_node(spec, params, 1));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
+    graph->reset_decoder();
+    for (std::size_t r = 0; r < R; ++r)
+      stream(*graph, consumed, r);
+    ASSERT_NE(graph->get_logical_measurements(), nullptr);
+    graph->clear_corrections();
+    for (std::size_t r = 0; r < R; ++r) {
+      stream(*graph, m, r);
+      // The new shot's readout round, round 2, has not arrived yet.
+      if (r < 2)
+        EXPECT_EQ(graph->get_logical_measurements(0, 1), nullptr)
+            << "round " << r;
+    }
+    EXPECT_EQ(logical_measurements(*graph), want);
+  } // end - for(options)
+} // end - TEST(WindowedGraph, AShotAfterAConsumedOneReleasesOnItsOwn)
+
+// A failed shot keeps nothing released, even what it released before
+// failing: its logical measurements are not final. A FINAL record that ends
+// the shot mid-round fails it after the mid-circuit readout is released.
+TEST(WindowedGraph, AFailedShotKeepsNoRelease) {
+  auto spec = mid_readout_spec(5);
+  spec.num_rounds.reset();
+  const experiment_template tmpl(spec);
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}}};
+  constexpr std::size_t R = 30;
+  const std::vector<std::uint8_t> round(
+      tmpl.measurement_offset(1, R) - tmpl.measurement_offset(0, R), 0);
+  std::vector<task_graph_node_config> nodes;
+  std::size_t r = 0;
+
+  nodes.push_back(pattern_node(spec, params, 1));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges(), {});
+  graph->reset_decoder();
+  for (; r + 1 < R && !graph->get_logical_measurements(0, 1); ++r)
+    graph->enqueue_syndrome(round.data(), round.size(), round_type::BULK);
+  ASSERT_LT(r + 1, R) << "the mid-circuit readout waited for FINAL";
+  EXPECT_ANY_THROW(graph->enqueue_syndrome(round.data(), 1, round_type::FINAL));
+  ASSERT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::failed);
+  for (const auto released : graph->streaming_result().outputs.back().released)
+    EXPECT_EQ(released, 0);
+  graph->clear_corrections();
+  EXPECT_EQ(graph->get_logical_measurements(0, 1), nullptr);
+}
+
+// The logical output is the one whose sink edge names it: a node called
+// `logical`, wired to output under its own name, is a correction output.
+TEST(WindowedGraph, ANodeNamedLogicalIsACorrectionOutput) {
+  const auto g = sliding_graph(2, 5);
+  std::vector<task_graph_node_config> nodes(2);
+
+  nodes[0].id = "ingest";
+  nodes[0].kind = "ingest";
+  nodes[0].dem = wide_readout_spec();
+  nodes[0].windows = {{"logical", g.layers.at(0).request, ""}};
+  nodes[1].id = "logical";
+  nodes[1].kind = "decode_window";
+  nodes[1].decoder_type = "single_error_lut";
+  nodes[1].node_params.insert("num_receives", std::size_t{1});
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "ingest", "input"},
+       {"ingest", "logical", "logical", "input"},
+       {"logical", "forward", "logical", "receive_0", -1},
+       {"logical", "output", "output", "input"}},
+      {});
+  EXPECT_EQ(graph->output_names(), std::vector<std::string>{"logical"});
+  EXPECT_EQ(graph->get_num_logical_measurements(), 0u);
+  expect_graph_streams(*graph, g, 0);
+}
+
+// A graph with a logical output refuses clear_corrections() until FINAL ends
+// the shot; a graph without one still consumes mid-shot.
+TEST(WindowedGraph, ALogicalShotIsConsumedOnlyOnceItEnds) {
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}}};
+  constexpr std::size_t R = 20;
+  for (const bool readout : {true, false}) {
+    SCOPED_TRACE(readout ? "logical output" : "corrections alone");
+    const auto spec =
+        readout ? wide_readout_spec() : with_readout(wide_readout_spec(), {});
+    const experiment_template tmpl(spec);
+    const std::vector<std::uint8_t> m(tmpl.measurement_offset(R, R), 0);
+    const auto last = tmpl.measurement_offset(R - 1, R);
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pattern_node(spec, params, 1));
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), {});
+    graph->enqueue_syndrome(m.data(), last, round_type::BULK);
+    if (!readout) {
+      EXPECT_NO_THROW(graph->clear_corrections());
+      continue;
+    }
+    expect_throw<std::logic_error>([&] { graph->clear_corrections(); },
+                                   "the shot has not ended");
+    graph->enqueue_syndrome(m.data() + last, m.size() - last,
+                            round_type::FINAL);
+    EXPECT_NE(graph->get_logical_measurements(), nullptr);
+    EXPECT_NO_THROW(graph->clear_corrections());
+    EXPECT_EQ(graph->get_logical_measurements(), nullptr);
+  } // end - for(readout)
+} // end - TEST(WindowedGraph, ALogicalShotIsConsumedOnlyOnceItEnds)
+
+// Over a template without a readout map, the pattern has no logical output,
+// and asking for its logical measurements is refused.
+TEST(WindowedGraph, PatternWithoutAReadoutMapHasNoLogicalOutput) {
+  const auto spec = with_readout(wide_readout_spec(), {});
   const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
                                          {"buffer_rounds", std::size_t{1}},
                                          {"gap_rounds", std::size_t{3}}};
@@ -6173,8 +6757,186 @@ TEST(WindowedGraph, PatternOutputsCorrectionsByDefault) {
   nodes.push_back(pattern_node(spec, params, 1));
   auto graph =
       decoding_task_graph::from_topology(std::move(nodes), pattern_edges(), {});
-  expect_graph_streams(*graph, lowered_graph(spec, params), false, 0);
+  EXPECT_EQ(graph->get_num_logical_measurements(), 0u);
+  EXPECT_EQ(graph->streaming_result().outputs.size(), 1u);
+  expect_throw<std::logic_error>(
+      [&] { graph->get_logical_measurements(); },
+      "get_logical_measurements: the graph has no output named 'logical'");
+  expect_graph_streams(*graph, lowered_graph(spec, params), 0);
 }
+
+// Over a template with a readout map, `output` must be set:
+// corrections_and_logical wires the logical output, which refuses a mid-shot
+// clear_corrections(); corrections returns corrections alone, which may be
+// consumed mid-shot. corrections_and_logical needs a readout map, and
+// corrected_logical is refused, pointing at the logical output.
+TEST(WindowedGraph, PatternOutputChoosesTheLogicalOutput) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  constexpr std::size_t R = 10;
+  const std::vector<std::uint8_t> round(
+      tmpl.measurement_offset(1, R) - tmpl.measurement_offset(0, R), 0);
+  cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                   {"buffer_rounds", std::size_t{1}},
+                                   {"gap_rounds", std::size_t{3}}};
+  std::vector<task_graph_node_config> nodes;
+  const auto build = [&](const dem_chunks_spec &dem) {
+    nodes.clear();
+    nodes.push_back(pattern_node(dem, params, 1));
+    return decoding_task_graph::from_topology(std::move(nodes), pattern_edges(),
+                                              {});
+  };
+  const auto mid_shot = [&](decoding_task_graph &graph) {
+    graph.reset_decoder();
+    for (std::size_t r = 0; r < 3; ++r)
+      graph.enqueue_syndrome(round.data(), round.size(), round_type::BULK);
+  };
+
+  // Unset, as pattern_node() would not leave it.
+  nodes.push_back(pattern_node(arbitrary_memory_spec(5), params, 1));
+  nodes.back().dem = spec;
+  expect_throw<std::invalid_argument>(
+      [&] {
+        decoding_task_graph::from_topology(std::move(nodes), pattern_edges(),
+                                           {});
+      },
+      "has a readout map (m2o_sparse), so it needs `output`");
+
+  params.insert("output", std::string("corrections_and_logical"));
+  auto wired = build(spec);
+  EXPECT_EQ(wired->get_num_logical_measurements(), 1u);
+  mid_shot(*wired);
+  EXPECT_THROW(wired->clear_corrections(), std::logic_error);
+  expect_throw<std::invalid_argument>(
+      [&] { build(arbitrary_memory_spec(5)); },
+      "no phase of its template has m2o_sparse");
+
+  params.insert("output", std::string("corrections"));
+  auto graph = build(spec);
+  EXPECT_EQ(graph->get_num_logical_measurements(), 0u);
+  expect_graph_streams(*graph, lowered_graph(spec, params), 0);
+  mid_shot(*graph);
+  EXPECT_NO_THROW(graph->clear_corrections());
+
+  params.insert("output", std::string("corrected_logical"));
+  expect_throw<std::runtime_error>([&] { build(spec); },
+                                   "output: corrected_logical is replaced by "
+                                   "output: corrections_and_logical");
+} // end - TEST(WindowedGraph, PatternOutputChoosesTheLogicalOutput)
+
+// A hand-written windowed graph wires its own logical output (a sliding
+// window XORed with a logical_readout node) and streams as the reference
+// decodes.
+TEST(WindowedGraph, StreamsAHandWiredLogicalOutput) {
+  const auto g = sliding_graph(2, 5);
+  std::vector<task_graph_node_config> nodes(4);
+  task_graph_options async;
+  async.async_streaming = true;
+
+  nodes[0].id = "ingest";
+  nodes[0].kind = "ingest";
+  nodes[0].dem = wide_readout_spec();
+  nodes[0].windows = {{"W", g.layers.at(0).request, ""}};
+  nodes[1].id = "W";
+  nodes[1].kind = "decode_window";
+  nodes[1].decoder_type = "single_error_lut";
+  nodes[1].node_params.insert("num_receives", std::size_t{1});
+  nodes[2].id = "R";
+  nodes[2].kind = "logical_readout";
+  nodes[2].dem = wide_readout_spec();
+  nodes[3].id = "L";
+  nodes[3].kind = "xor";
+  for (const auto &options : {task_graph_options{}, async}) {
+    std::vector<task_graph_node_config> copies;
+    for (const auto &node : nodes) {
+      auto &copy = copies.emplace_back();
+      copy.id = node.id;
+      copy.kind = node.kind;
+      copy.dem = node.dem;
+      copy.windows = node.windows;
+      copy.decoder_type = node.decoder_type;
+      copy.node_params = node.node_params;
+    }
+    auto graph = decoding_task_graph::from_topology(
+        std::move(copies),
+        {{"measurements", "output", "ingest", "input"},
+         {"measurements", "output", "R", "input"},
+         {"ingest", "W", "W", "input"},
+         {"W", "forward", "W", "receive_0", -1},
+         {"W", "output", "L", "a"},
+         {"R", "output", "L", "b"},
+         {"W", "output", "output", "corrections"},
+         {"L", "output", "output", "logical"}},
+        options);
+    SCOPED_TRACE(options.async_streaming ? "async" : "sync");
+    EXPECT_EQ(graph->output_names(), std::vector<std::string>{"corrections"});
+    ASSERT_EQ(graph->get_num_logical_measurements(), 1u);
+    expect_graph_streams(*graph, g, 0);
+  }
+} // end - TEST(WindowedGraph, StreamsAHandWiredLogicalOutput)
+
+// Building checks the logical output: one, fed by one logical_readout node
+// that feeds no other output, beside a correction output; and a
+// logical_readout node needs dem_chunks.
+TEST(WindowedGraph, ChecksTheLogicalOutputWhenBuilt) {
+  const auto spec = wide_readout_spec();
+  const cudaqx::heterogeneous_map params{
+      {"commit_rounds", std::size_t{2}},
+      {"buffer_rounds", std::size_t{1}},
+      {"gap_rounds", std::size_t{3}},
+      {"output", std::string("corrections")}};
+  // The pattern, wiring no logical output of its own, a logical_readout node
+  // R, given dem_chunks or else flat matrices, and @p edges past the
+  // pattern's.
+  const auto build = [&](std::vector<task_graph_edge> edges,
+                         bool readout_dem = true) {
+    std::vector<task_graph_node_config> nodes;
+    auto all = pattern_edges();
+    nodes.push_back(pattern_node(spec, params, 1));
+    auto &readout = nodes.emplace_back();
+    readout.id = "R";
+    readout.kind = "logical_readout";
+    if (readout_dem) {
+      readout.dem = spec;
+    } else {
+      readout.d_sparse = {{0}};
+      readout.o_sparse = {{0}};
+    }
+    all.push_back({"measurements", "output", "R", "input"});
+    all.insert(all.end(), edges.begin(), edges.end());
+    return decoding_task_graph::from_topology(std::move(nodes), all, {});
+  };
+
+  expect_error([&] { build({{"R", "output", "output", "raw"}}); },
+               "node 'R' reads the logical value, which only the output "
+               "named 'logical' carries, but it reaches output 'raw'");
+  expect_error(
+      [&] {
+        build({{"R", "output", "output", "logical"},
+               {"R", "output", "output", "logical"}});
+      },
+      "two edges reach output 'logical'");
+  expect_error([&] { build({{"P", "output", "output", "logical"}}); },
+               "output 'logical' is the corrected logical measurement, but no "
+               "logical_readout node reaches it");
+  expect_error(
+      [&] {
+        std::vector<task_graph_node_config> nodes;
+        auto &readout = nodes.emplace_back();
+        readout.id = "R";
+        readout.kind = "logical_readout";
+        readout.dem = spec;
+        decoding_task_graph::from_topology(
+            std::move(nodes),
+            {{"measurements", "output", "R", "input"},
+             {"R", "output", "output", "logical"}},
+            {});
+      },
+      "output 'logical' is the graph's only output");
+  expect_error(
+      [&] { build({{"R", "output", "output", "logical"}}, false); },
+      "node 'R': a logical_readout node reads its template from dem_chunks");
+} // end - TEST(WindowedGraph, ChecksTheLogicalOutputWhenBuilt)
 
 // Records of 1000 rounds, each completing many interleaved A and B windows,
 // stream as the reference decodes them with layout @p commit and @p buffer:
@@ -6185,10 +6947,8 @@ static void expect_large_records_stream(std::size_t commit,
   auto spec = wide_readout_spec();
   spec.num_rounds = rounds;
   const experiment_template tmpl(spec);
-  const cudaqx::heterogeneous_map params{
-      {"commit_rounds", commit},
-      {"buffer_rounds", buffer},
-      {"output", std::string{"corrections"}}};
+  const cudaqx::heterogeneous_map params{{"commit_rounds", commit},
+                                         {"buffer_rounds", buffer}};
   parallel_window_reference reference(spec, lowered_graph(spec, params), rounds,
                                       "single_error_lut");
   std::vector<std::uint8_t> detectors(reference.model().row.back(), 0);
@@ -6202,61 +6962,56 @@ static void expect_large_records_stream(std::size_t commit,
   const auto expected = reference.decode(detectors).frame;
   ASSERT_EQ(expected, std::vector<std::uint8_t>{1});
   const auto readout = tmpl.measurement_offset(rounds - 1, rounds);
+  const auto logical = raw_logical(tmpl, rounds, measurements);
   for (const bool open : {false, true})
     for (const bool asynchronous : {false, true})
-      for (const std::size_t copies : {1u, 4u})
-        for (const std::string output : {"corrections", "corrected_logical"}) {
-          if (!asynchronous && copies != 1)
-            continue;
-          SCOPED_TRACE(::testing::Message()
-                       << "open=" << open << " async=" << asynchronous
-                       << " copies=" << copies << " output=" << output);
-          auto configured = spec;
-          if (open)
-            configured.num_rounds.reset();
-          auto node = pattern_node(configured, params, copies);
-          node.node_params.insert("output", output);
-          std::vector<task_graph_node_config> nodes;
-          nodes.push_back(std::move(node));
-          auto edges = pattern_edges();
-          edges.push_back({"P", "output", "output", "copy"});
-          task_graph_options options;
-          options.async_streaming = asynchronous;
-          options.async_num_workers = 2 * copies;
-          options.async_queue_capacity = 2;
-          auto graph = decoding_task_graph::from_topology(
-              std::move(nodes), std::move(edges), options);
-          auto want = expected;
-          if (output == "corrected_logical") {
-            const auto logical = raw_logical(tmpl, rounds, measurements);
-            for (std::size_t i = 0; i < want.size(); ++i)
-              want[i] ^= logical[i];
-          }
-          // Reuse the same deployment and record contexts across packet sizes
-          // and epochs; the large record contains 1,000 regular rounds.
-          for (const std::size_t packet_rounds : {7u, 1000u, 7u, 1000u}) {
-            SCOPED_TRACE(packet_rounds);
-            graph->reset_decoder();
-            const auto packet = packet_rounds * rep5_checks;
-            for (std::size_t at = 0; at < readout; at += packet)
-              graph->enqueue_syndrome(measurements.data() + at,
-                                      std::min(packet, readout - at),
-                                      round_type::BULK);
-            graph->enqueue_syndrome(measurements.data() + readout,
-                                    measurements.size() - readout,
-                                    round_type::FINAL);
-            const auto result = graph->streaming_result();
-            ASSERT_EQ(result.status, task_graph_streaming_status::complete)
-                << result.error;
-            ASSERT_EQ(result.outputs.size(), 2);
-            EXPECT_EQ(result.values,
-                      (std::vector<std::uint8_t>{want[0], want[0]}));
-            for (const auto &sink : result.outputs) {
-              EXPECT_EQ(sink.coverage_begin_round, 0);
-              EXPECT_EQ(sink.coverage_end_round, rounds);
-            }
+      for (const std::size_t copies : {1u, 4u}) {
+        if (!asynchronous && copies != 1)
+          continue;
+        SCOPED_TRACE(::testing::Message()
+                     << "open=" << open << " async=" << asynchronous
+                     << " copies=" << copies);
+        auto configured = spec;
+        if (open)
+          configured.num_rounds.reset();
+        std::vector<task_graph_node_config> nodes;
+        nodes.push_back(pattern_node(configured, params, copies));
+        auto edges = pattern_edges();
+        edges.push_back({"P", "output", "output", "copy"});
+        task_graph_options options;
+        options.async_streaming = asynchronous;
+        options.async_num_workers = 2 * copies;
+        options.async_queue_capacity = 2;
+        auto graph = decoding_task_graph::from_topology(
+            std::move(nodes), std::move(edges), options);
+        // Reuse the same deployment and record contexts across packet sizes
+        // and epochs; the large record contains 1,000 regular rounds.
+        for (const std::size_t packet_rounds : {7u, 1000u, 7u, 1000u}) {
+          SCOPED_TRACE(packet_rounds);
+          graph->reset_decoder();
+          const auto packet = packet_rounds * rep5_checks;
+          for (std::size_t at = 0; at < readout; at += packet)
+            graph->enqueue_syndrome(measurements.data() + at,
+                                    std::min(packet, readout - at),
+                                    round_type::BULK);
+          graph->enqueue_syndrome(measurements.data() + readout,
+                                  measurements.size() - readout,
+                                  round_type::FINAL);
+          const auto result = graph->streaming_result();
+          ASSERT_EQ(result.status, task_graph_streaming_status::complete)
+              << result.error;
+          // The two correction outputs, then the logical one.
+          ASSERT_EQ(result.outputs.size(), 3);
+          EXPECT_EQ(result.values,
+                    (std::vector<std::uint8_t>{
+                        expected[0], expected[0],
+                        static_cast<std::uint8_t>(expected[0] ^ logical[0])}));
+          for (const auto &sink : result.outputs) {
+            EXPECT_EQ(sink.coverage_begin_round, 0);
+            EXPECT_EQ(sink.coverage_end_round, rounds);
           }
         }
+      } // end - for(copies)
 } // end - expect_large_records_stream()
 
 // A record can contain many interleaved A/B commits. Retiring every A delta
@@ -6615,7 +7370,7 @@ TEST(WindowedGraph, JoinTablesHoldWhatARecordPublishes) {
   };
   async.async_streaming = true;
   logging::set_forwarder(std::move(config));
-  EXPECT_NO_THROW(expect_pattern_streams("corrections", async, 4, 0));
+  EXPECT_NO_THROW(expect_pattern_streams(async, 4, 0));
   logging::flush_logs();
   logging::clear_forwarder();
   for (const auto &warning : warnings)
@@ -6901,9 +7656,10 @@ TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther) {
   }
   const auto &result = graph->streaming_result();
   releaser.join();
-  EXPECT_EQ(
-      std::vector<std::uint8_t>(result.values.begin(), result.values.end()),
-      reference.decode(shot).frame);
+  EXPECT_EQ(std::vector<std::uint8_t>(result.values.begin(),
+                                      result.values.begin() +
+                                          graph->get_num_observables()),
+            reference.decode(shot).frame);
   EXPECT_GT(jitter_lut::spanned_records, 0u)
       << "no record was taken while a window decoded";
   EXPECT_GT(jitter_lut::peak_of_one_size(), 1u)
@@ -6998,9 +7754,10 @@ TEST(WindowedGraph, MidShotReadsMatchTheirCoverage) {
             frontier)
           for (std::size_t j = 0; j < folded.size(); ++j)
             folded[j] ^= want.windows[i].frame[j];
-      EXPECT_EQ(
-          std::vector<std::uint8_t>(result.values.begin(), result.values.end()),
-          folded)
+      EXPECT_EQ(std::vector<std::uint8_t>(result.values.begin(),
+                                          result.values.begin() +
+                                              graph->get_num_observables()),
+                folded)
           << "at frontier " << frontier;
     } // end - for(at)
     EXPECT_EQ(frontier, R);
@@ -7410,7 +8167,10 @@ TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders) {
       graph->reset_decoder();
       allocation_counting_lut::decode_allocations = 0;
       const auto all = allocation_counter::on_every_thread_during(stream);
-      ASSERT_EQ(graph->streaming_result().values, want);
+      const auto &values = graph->streaming_result().values;
+      ASSERT_EQ(std::vector<std::uint8_t>(values.begin(),
+                                          values.begin() + want.size()),
+                want);
       ASSERT_GE(all, allocation_counting_lut::decode_allocations.load());
       extra.push_back(all - allocation_counting_lut::decode_allocations);
     }

@@ -1040,6 +1040,10 @@ void get_logical_measurements(std::size_t decoder_id, std::uint64_t first,
   // clear_corrections may touch device memory in some plugins.
   target.pin_device();
   const auto &live = target.streaming_result();
+  if (live.status == task_graph_streaming_status::failed)
+    throw std::runtime_error(
+        fmt::format("get_logical_measurements: decoder {}'s shot failed: {}",
+                    decoder_id, live.error));
   ret = live.logical_measurements(first, logical_length);
   if (!ret)
     throw std::runtime_error(fmt::format(
