@@ -544,6 +544,7 @@ void decoding_task_graph::impl::compile_wires() {
 
     streaming_node_output_offsets.assign(streaming_nodes.size(), {});
     streaming_node_outputs.assign(streaming_nodes.size(), {});
+    streaming_node_cancelled_outputs.assign(streaming_nodes.size(), {});
     output_streaming_nodes.assign(num_sinks, {});
     if (!obs_conflict)
       for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
@@ -556,6 +557,8 @@ void decoding_task_graph::impl::compile_wires() {
           if (output_has_parity_contributor[k] ? path.parity : path.reachable) {
             output_streaming_nodes[k].push_back(si);
           }
+          if (!output_has_parity_contributor[k] && path.reachable)
+            streaming_node_cancelled_outputs[si].push_back(k);
         }
       }
     streaming_result_state.outputs.resize(num_sinks);

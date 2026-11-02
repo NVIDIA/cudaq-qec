@@ -1584,6 +1584,54 @@ TEST(DecodingTaskGraph, StreamingNodesOverUnequalRoundsCombineOnASchedule) {
 } // end - TEST(DecodingTaskGraph,
   // StreamingNodesOverUnequalRoundsCombineOnASchedule)
 
+// StreamingResultPublishesAParityCancelledOutput over rounds of different
+// widths: a node whose paths to an output all cancel still commits its
+// rounds there, so the zero result publishes, and completes at FINAL.
+TEST(DecodingTaskGraph,
+     StreamingNodeOverUnequalRoundsPublishesACancelledOutput) {
+  for (const bool async : {false, true}) {
+    auto spec = phase_width_spec(unequal_widths);
+    task_graph_node_config node;
+    task_graph_node_config combine;
+    std::vector<task_graph_node_config> nodes;
+    std::vector<uint8_t> record(11, 0);
+    SCOPED_TRACE(async ? "async" : "sync");
+    spec.measurements_per_round = 3;
+    node.id = "native";
+    node.kind = "streaming";
+    node.dem = spec;
+    node.decoder_instance =
+        std::make_unique<unequal_round_probe_decoder>(11, true);
+    combine.id = "combine";
+    combine.kind = "xor";
+    nodes.push_back(std::move(node));
+    nodes.push_back(std::move(combine));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "native", "input"},
+         {"native", "output", "combine", "a"},
+         {"native", "output", "combine", "b"},
+         {"combine", "output", "output", "input"}},
+        {.async_streaming = async, .async_queue_capacity = 2});
+    ASSERT_TRUE(graph->supports_streaming())
+        << graph->streaming_incompatibility_reason();
+    record[0] = 1;
+    (void)graph->enqueue_syndrome(record.data(), record.size());
+    EXPECT_EQ(graph->get_obs_corrections()[0], 0);
+    EXPECT_EQ(graph->streaming_result().outputs[0].status,
+              task_graph_streaming_status::available);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 4u);
+    graph->clear_corrections();
+    EXPECT_EQ(enqueue_unequal_shot(*graph, 6), 1);
+    EXPECT_EQ(graph->get_obs_corrections()[0], 0);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_begin_round, 4u);
+    EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 10u);
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph,
+  // StreamingNodeOverUnequalRoundsPublishesACancelledOutput)
+
 // A node over rounds of different widths takes an untagged shot's rounds
 // from its template, so it must be given them.
 TEST(DecodingTaskGraph, StreamingNodeOverUnequalRoundsNeedsItsRoundCount) {

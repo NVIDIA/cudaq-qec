@@ -204,6 +204,9 @@ struct decoding_task_graph::impl {
   std::vector<output_stager> output_stagers;
   std::vector<uint8_t> streaming_node_staged; // by streaming node
   std::vector<std::vector<std::size_t>> streaming_node_outputs; // sinks fed
+  // Sinks whose every path cancels: a staged one takes the node's commit
+  // intervals without its flips, so its zero value still publishes.
+  std::vector<std::vector<std::size_t>> streaming_node_cancelled_outputs;
   void stage_delta(std::size_t k,
                    streaming_task_graph_node::committed_coverage coverage,
                    const std::vector<uint8_t> &bits);
