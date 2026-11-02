@@ -1630,8 +1630,9 @@ TEST(DecodingSessionInline, ServesAWindowedGraphMidShotAndAtFinal) {
 }
 
 // A windowed graph with a logical output answers get_logical_measurements
-// NOT_READY until FINAL, then with a synchronous twin's values; a reset read
-// starts the next shot. get_corrections answers as before.
+// NOT_READY until FINAL, then with a synchronous twin's values. A reset read
+// of either result consumes the shot for both: after get_corrections with
+// reset, a logical read answers NOT_READY until the next shot.
 TEST(DecodingSessionInline, ServesLogicalMeasurementsOnceTheShotEnds) {
   using cudaq::qec::round_type;
   constexpr std::size_t R = 30;
@@ -1647,6 +1648,7 @@ TEST(DecodingSessionInline, ServesLogicalMeasurementsOnceTheShotEnds) {
                                            bulk_and_final_rows());
     auto twin = windowed_graph(false, true);
     for (std::size_t shot = 0; shot < shots; ++shot) {
+      const bool consume_logical = shot % 2 == 0; // else get_corrections
       twin->reset_decoder();
       for (std::size_t r = 0; r < R; ++r) {
         const bool last = r + 1 == R;
@@ -1659,9 +1661,9 @@ TEST(DecodingSessionInline, ServesLogicalMeasurementsOnceTheShotEnds) {
                                      make_enqueue_payload(r, bits, last));
         session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
         expect_tx_status(tx, RpcStatus::OK, rid);
-        auto read =
-            make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
-                          make_get_logical_measurements_payload(0, 1, last));
+        auto read = make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                                  make_get_logical_measurements_payload(
+                                      0, 1, last && consume_logical));
         session->handle_get_logical_measurements(read.data(), tx.data(),
                                                  read.size());
         if (!last) {
@@ -1676,13 +1678,27 @@ TEST(DecodingSessionInline, ServesLogicalMeasurementsOnceTheShotEnds) {
             << "shot " << shot;
         ones += tx[sizeof(RPCResponse)] & 1u;
       } // end - for(r)
+      if (!consume_logical) {
+        auto consume = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
+                                     make_get_corrections_payload(1, true));
+        session->handle_get_corrections(consume.data(), tx.data(),
+                                        consume.size());
+        expect_tx_status(tx, RpcStatus::OK, rid);
+        auto gone =
+            make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                          make_get_logical_measurements_payload(0, 1, false));
+        session->handle_get_logical_measurements(gone.data(), tx.data(),
+                                                 gone.size());
+        expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+      }
       // The reset read consumed the shot.
       auto after = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
                                  make_get_corrections_payload(1, false));
       session->handle_get_corrections(after.data(), tx.data(), after.size());
       expect_tx_status(tx, RpcStatus::NOT_READY, rid);
     } // end - for(shot)
-    EXPECT_EQ(session->get_logical_measurements_count.load(), shots * R);
+    EXPECT_EQ(session->get_logical_measurements_count.load(),
+              shots * R + shots / 2);
   } // end - for(async)
   EXPECT_GT(ones, 0u) << "every logical measurement read was 0";
 } // end - TEST(DecodingSessionInline, ServesLogicalMeasurementsOnceTheShotEnds)

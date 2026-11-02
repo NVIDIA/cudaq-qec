@@ -72,7 +72,9 @@ logical_readout_node::logical_readout_node(
 } // end - logical_readout_node()
 
 // Each m2o_sparse row (ended by -1) is an observable; each value a
-// measurement of the round. A measurement listed twice in a row cancels.
+// measurement of the round. dem_chunks_spec::validate() keeps every value
+// inside its round and unrepeated within a row; the index is checked again
+// here, at construction, since it addresses by_measurement.
 void logical_readout_node::add_reading_round(
     const std::vector<std::int64_t> &m2o, std::uint64_t r, std::size_t begin,
     std::size_t width, std::vector<reading_round> &out,
@@ -86,6 +88,11 @@ void logical_readout_node::add_reading_round(
       ++observable;
       continue;
     }
+    if (value < 0 || static_cast<std::uint64_t>(value) >= width)
+      throw std::invalid_argument(
+          "logical_readout: round " + std::to_string(r) +
+          "'s m2o_sparse reads measurement " + std::to_string(value) +
+          " of the " + std::to_string(width) + " its round has");
     by_measurement[static_cast<std::size_t>(value)].push_back(observable);
     reads[observable] = 1;
     any = true;
@@ -184,9 +191,11 @@ bool logical_readout_node::enqueue(const uint8_t *msyn, std::size_t len,
     next_ = next_ + 1 == tail_ ? 0 : next_ + 1;
   }
   seen_ = end;
+  // Copies between buffers sized at construction, so nothing allocates.
   if (read) {
-    corrections_ = read_;
-    logical_.get<logical_outcome>().bits = corrections_;
+    std::copy(read_.begin(), read_.end(), corrections_.begin());
+    std::copy(corrections_.begin(), corrections_.end(),
+              logical_.get<logical_outcome>().bits.begin());
     current_ = true;
   }
   if (type != round_type::FINAL)
@@ -205,7 +214,7 @@ bool logical_readout_node::flush() {
   current_ = false;
   if (!ended_ || published_)
     return false;
-  corrections_ = read_;
+  std::copy(read_.begin(), read_.end(), corrections_.begin());
   for (const auto &round : tail_rounds_)
     for (std::size_t p = 0; p < round.width; ++p) {
       auto at = next_ + round.begin + p;
@@ -214,7 +223,8 @@ bool logical_readout_node::flush() {
       if (kept_[at] & 1)
         add_reading(round, p, corrections_);
     }
-  logical_.get<logical_outcome>().bits = corrections_;
+  std::copy(corrections_.begin(), corrections_.end(),
+            logical_.get<logical_outcome>().bits.begin());
   read_end_ = whole_shot;
   current_ = true;
   published_ = true;

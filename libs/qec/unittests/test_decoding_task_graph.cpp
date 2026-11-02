@@ -663,9 +663,10 @@ TEST(DecodingTaskGraph, AScheduledLogicalOutputReleasesOnlyAtFinal) {
 } // end - TEST(DecodingTaskGraph, AScheduledLogicalOutputReleasesOnlyAtFinal)
 
 // host::get_logical_measurements reads a configured graph's logical output
-// after FINAL; a reset read consumes the shot. Mid-shot, a reset read of
-// either result is not ready. A plain decoder and a range past the count are
-// refused.
+// after FINAL. A reset read of either result consumes the shot for both, so
+// after get_corrections with reset the logical read waits for the next shot.
+// Mid-shot, a reset read of either is not ready. A plain decoder and a range
+// past the count are refused.
 TEST(DecodingTaskGraph, HostReadsLogicalMeasurementsOnceTheShotEnds) {
   namespace host = cudaq::qec::decoding::host;
   const std::string yaml = R"(decoders:
@@ -728,8 +729,10 @@ syndrome_mapping:
                             /*syndrome_mapping_id=*/1);
     round[0] = 0;
     host::get_corrections(0, corrections.data(), 1, false);
-    host::get_logical_measurements(0, 0, logical.data(), 1, true);
+    host::get_logical_measurements(0, 0, logical.data(), 1, shot == 0);
     EXPECT_EQ(logical[0], 1 ^ corrections[0]) << "shot " << shot;
+    if (shot == 1)
+      host::get_corrections(0, corrections.data(), 1, true);
     EXPECT_THROW(host::get_logical_measurements(0, 0, logical.data(), 1, false),
                  std::runtime_error);
   }

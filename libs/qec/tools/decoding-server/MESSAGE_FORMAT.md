@@ -174,7 +174,11 @@ Offset       | Size | Field
 | Session latched `failed`, or decoder threw | `INTERNAL_ERROR` | 0 |
 
 `reset = 1` consumes the shot after copying, as `get_corrections` does. A
-`device_graph` ring does not register this function: it serves only plain
+reset read of either result consumes the shot for both: after
+`get_corrections` with `reset = 1`, this read answers `NOT_READY` until the
+next shot releases. Read the logical measurements first, or read the
+corrections with `reset = 0`. A `device_graph` ring does not register this
+function: it serves only plain
 decoders and single-node graphs, neither of which has logical measurements.
 
 ## `reset_decoder`

@@ -89,7 +89,7 @@ inline uint64_t now_ns() {
 constexpr int32_t kMissing = INT32_MIN; // stamp absent (mode / early return)
 
 struct Sample {
-  uint8_t kind; // 0 enqueue, 1 get_corrections, 2 reset, 3 logical, 4 other
+  uint8_t kind; // 0 enqueue, 1 get_corrections, 2 reset, 3 other, 4 logical
   uint32_t rid;
   int32_t total;
   int32_t stage_parse, stage_decode, stage_respond;
@@ -108,8 +108,8 @@ inline uint8_t kind_of(uint32_t function_id) {
   if (function_id == kResetDecoderFunctionId)
     return 2;
   if (function_id == kGetLogicalMeasurementsFunctionId)
-    return 3;
-  return 4;
+    return 4;
+  return 3;
 }
 
 // b - a in ns, kMissing when either stamp is absent, clamped to int32.
@@ -252,8 +252,8 @@ inline void report() {
       {"stage_respond", &Sample::stage_respond},
   };
   const char *kind_names[] = {"enqueue_syndromes", "get_corrections",
-                              "reset_decoder", "get_logical_measurements",
-                              "other"};
+                              "reset_decoder", "other",
+                              "get_logical_measurements"};
 
   std::vector<int32_t> vals;
   for (int kind = 0; kind < 5; ++kind) {

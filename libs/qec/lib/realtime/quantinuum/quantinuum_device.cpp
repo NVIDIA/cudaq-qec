@@ -62,6 +62,7 @@ __qpu__ std::vector<bool> get_logical_measurements(std::uint64_t decoder_id,
                                                    std::uint64_t return_size,
                                                    bool reset) {
   std::vector<bool> result(return_size);
+  // The host call refuses return_size > 64, so the shifts stay in range.
   auto il = cudaq::device_call(get_logical_measurements_ui64, decoder_id, first,
                                return_size, static_cast<uint64_t>(reset));
   for (std::size_t i = 0; i < return_size; i++)

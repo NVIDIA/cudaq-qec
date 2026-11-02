@@ -81,7 +81,9 @@ __qpu__ std::vector<bool> get_corrections(std::uint64_t decoder_id,
 /// @param first The first logical measurement to return.
 /// @param return_size The number of logical measurements to return.
 /// @param reset Whether to reset the decoder corrections after retrieving
-/// them. Allowed only after the FINAL round.
+/// them. Allowed only after the FINAL round. A reset read of either this or
+/// get_corrections consumes the shot for both, so read the logical
+/// measurements before a get_corrections that resets.
 /// @return Logical measurements [first, first + return_size).
 __qpu__ std::vector<bool> get_logical_measurements(std::uint64_t decoder_id,
                                                    std::uint64_t first,

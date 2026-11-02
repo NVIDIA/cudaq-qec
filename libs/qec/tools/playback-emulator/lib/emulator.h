@@ -26,7 +26,9 @@ namespace cudaq::qec::playback {
 /// Parse a line-oriented playback description into a `schedule`. A line is
 /// `<trigger> <op> [key=value...]`: the trigger is a tick (`deadline_ns =
 /// tick*tick_ns`), a run-time-resolved `+N` delta, or `-` for `+0`; `session=N`
-/// (default 0) must be in `known_decoder_ids`. Throws std::invalid_argument.
+/// (default 0) must be in `known_decoder_ids`. A read's `reset=` defaults to 1
+/// for `get_corrections` and to 0 for `get_logical_measurements`, which is
+/// most often mid-shot. Throws std::invalid_argument.
 schedule parse(std::string_view text,
                const std::vector<std::uint64_t> &known_decoder_ids,
                std::uint64_t tick_ns);

@@ -611,6 +611,8 @@ void decoding_task_graph::impl::compile_wires() {
       output_width[k] = width;
       total += width;
     }
+    // There is a correction output: compile_wires() requires an output, and
+    // order_logical_output() refuses a logical output standing alone.
     n_obs = obs_conflict ? 0
                          : output_offset[num_correction_outputs - 1] +
                                output_width[num_correction_outputs - 1];
