@@ -53,12 +53,13 @@ public:
   }
 
   decoder_result decode(const std::vector<float_t> &syndrome) override {
+    // Reject a wrong-length syndrome before the loop below indexes it.
+    check_syndrome_size(syndrome.size());
     // This is a simple decoder that simply results
     decoder_result result{false, std::vector<float_t>(block_size, 0.0)};
 
     // Convert syndrome to a string
     std::string syndrome_str(syndrome.size(), '0');
-    assert(syndrome_str.length() == syndrome_size);
     bool anyErrors = false;
     for (std::size_t i = 0; i < syndrome_size; i++) {
       if (cudaq::qec::convert_soft_to_hard(syndrome[i])) {

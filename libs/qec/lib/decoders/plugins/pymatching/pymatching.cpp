@@ -277,10 +277,12 @@ public:
   /// @brief Decode the syndrome using the MWPM decoder.
   /// @param syndrome The syndrome to decode.
   /// @return The decoder result.
-  /// @throws std::runtime_error if no matching solution is found or a decode
-  /// is already running on this decoder, or std::out_of_range if an edge is
-  /// not found in the prepared error-column lookup.
+  /// @throws std::invalid_argument if the syndrome length is not the number of
+  /// detectors, std::runtime_error if no matching solution is found or a
+  /// decode is already running on this decoder, or std::out_of_range if an
+  /// edge is not found in the prepared error-column lookup.
   decoder_result decode(const std::vector<float_t> &syndrome) override {
+    check_syndrome_size(syndrome.size());
     const decode_exclusive_guard guard(decode_active);
     const auto result_size =
         decode_to_observables ? get_inputs().num_observables() : block_size;

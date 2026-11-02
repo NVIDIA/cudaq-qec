@@ -69,7 +69,7 @@ jobs:
       - name: Install build requirements
         run: |
           apt update
-          apt install -y --no-install-recommends wget
+          apt install -y --no-install-recommends wget jq
           # custabilizer-cuXX is pulled in transitively by cuquantum-python-cuXX;
           # it provides the headers/library that FindcuStabilizer.cmake locates.
           pip install "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"

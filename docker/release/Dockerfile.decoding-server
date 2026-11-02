@@ -199,6 +199,7 @@ ARG CUDA_VERSION
 # Runtime packages beyond the base image's cudart:
 #   - RDMA userspace, libnl, and the DOCA GPUNetIO runtime (gpu_roce)
 #   - NVRTC (hololink_core JIT)
+#   - nvJitLink (linked by libcudaq-realtime)
 #   - libgomp (OpenMP, linked by decoding_server and libcudaq-qec)
 #   - binutils + libc/libstdc++ dev files, so nvq++ can link user programs
 #   - cmake, ninja, g++ and nvcc (+ cudart dev files), so CMake projects
@@ -239,6 +240,7 @@ RUN --mount=type=bind,from=toolchain,source=/opt/cudaq-src/realtime/scripts/deps
     apt-get install -y --no-install-recommends \
         libibverbs1 ibverbs-providers \
         cuda-nvrtc-${CUDA_VER_DASH} \
+        libnvjitlink-${CUDA_VER_DASH} \
         libnl-3-200 libnl-route-3-200 \
         libgomp1 \
         binutils libc6-dev libstdc++-13-dev \
