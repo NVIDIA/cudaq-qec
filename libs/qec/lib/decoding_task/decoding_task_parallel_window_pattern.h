@@ -42,9 +42,11 @@ parallel_window_requests(const cudaqx::heterogeneous_map &params,
 /// Lower pattern @p cfg, of id P, into P.ingest, P.A, P.B and P.sum,
 /// appended to @p out in that order, and their edges, appended to
 /// @p edges. The edge into P's input feeds P.ingest instead, and the edges
-/// from P's output leave P.sum. With `output: corrected_logical`, the
-/// default, P.ingest reads the logical value into P.sum's third input. The
-/// inner decoder, max_in_flight and verify_residual go to both layers.
+/// from P's output leave P.sum, which carries the correction alone by default
+/// (`output: corrections`). With `output: corrected_logical`, P.ingest also
+/// reads the logical value into P.sum's third input, so P.sum carries that
+/// value with the correction applied. The inner decoder, max_in_flight and
+/// verify_residual go to both layers.
 /// @throws std::invalid_argument naming the pattern if it has no id, its
 /// parameters are invalid, it has no dem_chunks template, it carries a
 /// stim_dem, a built decoder or flat matrices, which its layers cannot use,

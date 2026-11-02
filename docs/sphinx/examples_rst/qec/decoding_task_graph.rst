@@ -527,9 +527,10 @@ configuration time.
      - Rounds a B window commits, between two A windows. Defaults to
        ``commit_rounds + 2 * buffer_rounds``.
    * - ``output``
-     - ``corrected_logical`` (default): the logical readout with the
-       correction applied, which needs ``m2o_sparse`` on the final phase.
-       ``corrections``: the correction alone.
+     - ``corrections`` (default): the correction alone, which is what
+       ``get_obs_corrections()`` and a decoding server's ``get_corrections``
+       return. ``corrected_logical``: the logical readout with the correction
+       applied, which needs ``m2o_sparse`` on the final phase.
    * - ``input_boundary``
      - ``columns`` (default): an A window's open input gets one boundary
        column per detector of the round before it, with one shared prior.

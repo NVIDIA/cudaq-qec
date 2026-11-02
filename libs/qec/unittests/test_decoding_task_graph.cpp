@@ -14939,8 +14939,9 @@ void expect_lowering_error(Check &&check, const std::string &text) {
 
 } // namespace
 
-// The pattern lowers into the hand-written parallel-window graph: P.ingest
-// with layers A and B reading the logical value, P.A and P.B with the
+// With output: corrected_logical, the pattern lowers into the hand-written
+// parallel-window graph: P.ingest with layers A and B reading the logical
+// value, P.A and P.B with the
 // pattern's inner decoder and layer parameters, and P.sum over both layers
 // and the logical, with the edges between them and the outer edges moved
 // onto P.ingest and P.sum.
@@ -14954,7 +14955,8 @@ TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
                            {"buffer_rounds", std::size_t{3}},
                            {"gap_rounds", std::size_t{9}},
                            {"boundary_prior", 0.04},
-                           {"verify_residual", std::string("report")}},
+                           {"verify_residual", std::string("report")},
+                           {"output", std::string("corrected_logical")}},
                           /*max_in_flight=*/4);
   ASSERT_EQ(p.nodes.size(), 4u);
   const auto &ingest = p.nodes[0];
@@ -15129,7 +15131,7 @@ TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
   unusable([](auto &cfg) { cfg.d_sparse = {{0}}; }, "takes no flat matrices");
   unusable([](auto &cfg) { cfg.windows = {{"A", {}, ""}}; },
            "takes no windows: its layers are A and B");
-  // corrected_logical, the default, reads the template's readout map.
+  // corrected_logical reads the template's readout map.
   expect_lowering_error(
       [&] {
         lower({{"measurements", "output", "P", "input"}}, spec,

@@ -236,7 +236,9 @@ lower_parallel_window(task_graph_node_config cfg,
   const experiment_template context(*cfg.dem);
   const auto [request_a, request_b] =
       parallel_window_requests(cfg.node_params, context);
-  corrected = cfg.node_params.get<std::string>("output", "corrected_logical") ==
+  // Corrections by default: what a caller reads as corrections, the decoding
+  // server's get_corrections included, must not be the logical value.
+  corrected = cfg.node_params.get<std::string>("output", "corrections") ==
               "corrected_logical";
 
   // The outer edges: exactly one into `input`, any number out of `output`.

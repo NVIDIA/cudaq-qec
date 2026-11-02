@@ -6160,6 +6160,22 @@ TEST(WindowedGraph, StreamsThePatternAsTheReference) {
     }
 } // end - TEST(WindowedGraph, StreamsThePatternAsTheReference)
 
+// Without `output`, the pattern publishes the correction alone, so what a
+// caller reads as corrections, a decoding server's get_corrections included,
+// is never the corrected logical value.
+TEST(WindowedGraph, PatternOutputsCorrectionsByDefault) {
+  const auto spec = wide_readout_spec();
+  const cudaqx::heterogeneous_map params{{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}}};
+  std::vector<task_graph_node_config> nodes;
+
+  nodes.push_back(pattern_node(spec, params, 1));
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), pattern_edges(), {});
+  expect_graph_streams(*graph, lowered_graph(spec, params), false, 0);
+}
+
 // Records of 1000 rounds, each completing many interleaved A and B windows,
 // stream as the reference decodes them with layout @p commit and @p buffer:
 // synchronous or asynchronous, with a fixed or an open shot length.
