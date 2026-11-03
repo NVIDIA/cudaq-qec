@@ -12715,6 +12715,7 @@ public:
   }
   bool enqueue_edge_value(const edge_value &value, std::size_t slot) override {
     const uint8_t bit = value.get<logical_outcome>().bits[0];
+    probe_->log(id_ + ".value", bit);
     if (mode_ == "skip" && (skipped_++ % 2) == 0)
       return false; // publishes on every other record only
     if (joins()) {
@@ -13018,6 +13019,94 @@ TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
   }
   EXPECT_GT(joined, 0u) << "no shot admitted queued rounds together";
 } // end - TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether)
+
+// A queued operation can cross a window boundary even when all operations
+// admitted together fit the window's initial capacity. Recheck its remaining
+// capacity after every chunk so every byte reaches the decoder.
+TEST(DecodingTaskGraph, QueuedRoundsRespectTheRemainingWindowCapacity) {
+  for (const std::size_t capacity : {1u, 32u})
+    for (const std::size_t workers : {1u, 4u}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "queue=" << capacity << " workers=" << workers);
+      auto probe = std::make_shared<async_stream_probe>(/*blocked=*/true);
+      auto h = sparse_binary_matrix::from_nested_csr(1, 1, {{0}});
+      decoding_task_graph graph(
+          std::make_unique<async_stream_probe_decoder>(h, probe),
+          {{0, 1, 2, 3, 4}}, {{0}},
+          {.async_streaming = true,
+           .async_queue_capacity = capacity,
+           .async_num_workers = workers});
+      const uint8_t ones[5] = {1, 1, 1, 1, 1};
+      graph.enqueue_syndrome(ones, 5, round_type::BULK);
+      ASSERT_TRUE(probe->wait_for_count(1));
+      // Keep the first decode blocked while filling the bounded queue. The
+      // rest is submitted after release so the queue-one control cannot hang.
+      const auto burst = std::min<std::size_t>(39, capacity - 1);
+      for (std::size_t i = 0; i < burst; ++i)
+        graph.enqueue_syndrome(ones, 2, round_type::BULK);
+      probe->release();
+      for (std::size_t i = burst; i < 39; ++i)
+        graph.enqueue_syndrome(ones, 2, round_type::BULK);
+      graph.enqueue_syndrome(ones, 2, round_type::FINAL);
+
+      // 5 + 39 * 2 + 2 = 85 bytes: exactly 17 complete five-byte windows,
+      // each with parity one, regardless of packet or admitted-record cuts.
+      EXPECT_EQ(probe->syndromes(),
+                std::vector<std::vector<float_t>>(17, {1.0f}));
+      const auto result = graph.streaming_result();
+      EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+      EXPECT_EQ(result.generation, 17u);
+      EXPECT_EQ(result.completed_operations, 17u);
+    }
+}
+
+// Coalescing must preserve each publication until all its deliveries have
+// consumed it. Counts or final XOR parity alone can hide overwritten values.
+TEST(DecodingTaskGraph, QueuedRoundsKeepEveryPublicationValue) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  constexpr std::size_t rounds = 40;
+  const auto records = pipeline_records(rounds);
+  const std::vector<std::size_t> expected(records.begin(), records.end());
+  for (const std::size_t workers : {1u, 4u}) {
+    SCOPED_TRACE(::testing::Message() << "workers=" << workers);
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("W", "wide"));
+    nodes.push_back(pipeline_node("B", "pass"));
+    nodes.push_back(pipeline_node("C", "pass"));
+    nodes.push_back(pipeline_node("D", "pass"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "W", "input"},
+         {"W", "output", "B", "input"},
+         {"B", "output", "C", "input"},
+         {"W", "output", "D", "input"},
+         {"C", "output", "output", "left"},
+         {"D", "output", "output", "right"}},
+        {.async_streaming = true,
+         .async_queue_capacity = 64,
+         .async_num_workers = workers});
+    probe->block_on("B", 0);
+    graph->enqueue_syndrome(records.data(), 1, round_type::BULK);
+    ASSERT_TRUE(probe->wait_until_blocking());
+    for (std::size_t i = 1; i + 1 < rounds; ++i)
+      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+    probe->release();
+    graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+
+    const auto result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.completed_operations, rounds);
+    EXPECT_EQ(result.values, (std::vector<uint8_t>{0, 0}));
+    for (const auto *node : {"B", "C", "D"})
+      EXPECT_EQ(probe->records(std::string(node) + ".value"), expected)
+          << "consumer " << node;
+    const auto joined = probe->records("W.joined");
+    EXPECT_NE(std::find(joined.begin(), joined.end(), 1u), joined.end())
+        << "no queued rounds were admitted together";
+  }
+}
 
 // By default a producer may run 32 rounds ahead of a stalled graph, more
 // than its 16 record contexts, without waiting, and then waits: the queue
