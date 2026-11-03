@@ -46,32 +46,31 @@ Detector Error Model
 
 .. _dyn_dem_cpp_api:
 
-Dynamic DEM Construction
-========================
+Dynamic DEM
+===========
 
-Build a code-capacity or phenomenological DEM from CSS generator matrices
-(no Stim circuit required), or compose per-round DEM chunks that can be
-stitched and closed into a flat :cpp:struct:`cudaq::qec::detector_error_model`.
-See :doc:`/examples_rst/qec/dyn_dem` for a walkthrough.
+The ``dem_chunks`` model types. See :doc:`/examples_rst/qec/dyn_dem`.
 
-CSS matrices and noise
-----------------------
-
-.. doxygenstruct:: cudaq::qec::css_code_matrices
+.. doxygenstruct:: cudaq::qec::dem_chunks_spec
     :members:
 
-.. doxygenstruct:: cudaq::qec::css_noise_params
+.. doxygenstruct:: cudaq::qec::phase_spec_entry
     :members:
 
-.. doxygenfunction:: cudaq::qec::css_matrices_from_code
-.. doxygenfunction:: cudaq::qec::dem_from_css_matrices(const css_code_matrices &, const css_noise_params &, std::size_t)
-.. doxygenfunction:: cudaq::qec::dem_from_css_matrices(const code &, const css_noise_params &, std::size_t)
+.. doxygenstruct:: cudaq::qec::phase_connection
+    :members:
 
-Extended DEM chunks
--------------------
+.. doxygenstruct:: cudaq::qec::seam_connection
+    :members:
 
-Seam and phase identifiers
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. doxygenstruct:: cudaq::qec::dem_chunk_spec
+    :members:
+
+.. doxygenstruct:: cudaq::qec::seam_spec_entry
+    :members:
+
+.. doxygenstruct:: cudaq::qec::dem_seam_spec
+    :members:
 
 .. doxygenstruct:: cudaq::qec::seam_id
     :members:
@@ -84,79 +83,7 @@ Seam and phase identifiers
 .. doxygennamespace:: cudaq::qec::phase_name
     :members:
 
-Chunk types
-~~~~~~~~~~~
-
-.. doxygenstruct:: cudaq::qec::extended_dem
-    :members:
-
-.. doxygenfunction:: cudaq::qec::extended_dem_from_css_matrices
-
-.. doxygenstruct:: cudaq::qec::dem_seam_spec
-    :members:
-
-.. doxygenstruct:: cudaq::qec::seam_spec_entry
-    :members:
-
-.. doxygenstruct:: cudaq::qec::dem_chunk_spec
-    :members:
-
-.. doxygenstruct:: cudaq::qec::seam_connection
-    :members:
-
-.. doxygenstruct:: cudaq::qec::phase_connection
-    :members:
-
-.. doxygenstruct:: cudaq::qec::phase_spec_entry
-    :members:
-
-.. doxygenstruct:: cudaq::qec::dem_chunks_spec
-    :members:
-
-.. doxygenfunction:: cudaq::qec::dem_chunk_from_spec
-.. doxygenfunction:: cudaq::qec::dem_chunks_from_spec
 .. doxygenfunction:: cudaq::qec::memory_dem_chunks_from_decoder_inputs
-
-Stitch, close, and merge
-------------------------
-
-.. doxygenenum:: cudaq::qec::prior_combine_mode
-
-.. doxygenfunction:: cudaq::qec::dem_stitch
-.. doxygenfunction:: cudaq::qec::dem_stitch_all
-.. doxygenfunction:: cudaq::qec::dem_stitch_merged
-.. doxygenfunction:: cudaq::qec::dem_close
-.. doxygenfunction:: cudaq::qec::dem_close_all
-.. doxygenfunction:: cudaq::qec::dem_merge_duplicate_columns
-.. doxygenfunction:: cudaq::qec::are_dem_columns_unique
-.. doxygenfunction:: cudaq::qec::assert_dem_columns_unique
-
-Streaming decoder maps
-----------------------
-
-.. doxygenfunction:: cudaq::qec::dem_chunk_rounds
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_rounds
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_detector_round
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse(const std::vector<extended_dem> &, seam_id, seam_id)
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse(const dem_chunks_spec &)
-.. doxygenfunction:: cudaq::qec::dem_chunks_measurement_count
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_sparse
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_pcm
-
-Compact chunk forms
--------------------
-
-.. doxygenvariable:: cudaq::qec::compact_chain_repeating_visits
-
-.. doxygenstruct:: cudaq::qec::compact_chain
-    :members:
-
-.. doxygenstruct:: cudaq::qec::chunked_observable_map
-    :members:
-
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_compact_chain
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_chunked(const std::vector<extended_dem> &, std::size_t, std::size_t, std::uint64_t)
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_chunked(const dem_chunks_spec &)
 
 .. _dem_sampling_cpp_api:
 
