@@ -20,9 +20,9 @@ one-bit correction:
 .. code-block:: text
 
    # <trigger> <op> [key=value...]
-   0 reset
-   1 stream source=0 rounds=3 every=2
-   - get_corrections return_size=1
+   0 reset session=0
+   1 stream session=0 source=0 rounds=3 every=2
+   - get_corrections session=0 return_size=1
 
 Save it to a file (e.g. ``schedule.txt``) and run it from the command line or
 from Python:
@@ -82,10 +82,7 @@ The **operations** are listed below. Arguments in ``[brackets]`` are optional.
      - Description
    * - ``reset``
      - Resets the decoder.
-   * - ``stream source=<source_id> [rounds=N] [every=N]``
-
-       ``stream source=<source_id> until=NAME [min_rounds=N] [max_rounds=N]
-       [every=N]``
+   * - ``stream source=<source_id> [rounds=N | until=NAME] [every=N]``
      - Sends syndromes from ``source=``, one call per round. ``rounds=N``
        sends exactly ``N`` rounds (default 1). ``every=N`` waits ``N`` ticks
        between rounds (default 1; ``0`` sends as fast as possible). With
@@ -186,7 +183,7 @@ has an integer ID, which ``source=`` refers to. Any source can be used with
      - Description
      - How to create
    * - ``static``
-     - Replays fixed rounds in order. Best for exactly reproducible tests.
+     - Replays fixed rounds in order.
      - Python: ``{"type": "static", "rounds": [[0, 1], ...]}``
 
        CLI: ``--source=ID:FILE``, one round per line.
