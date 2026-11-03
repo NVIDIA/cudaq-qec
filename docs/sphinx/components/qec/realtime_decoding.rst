@@ -92,6 +92,8 @@ embeds a shared DEM-chunk model, one graph per independent patch and BULK/FINAL
 syndrome mappings. Output defaults to corrections;
 ``--pattern-arg=output=corrected_logical`` requests the corrected logical outcome.
 ``--help`` lists geometry, decoder, pattern and per-graph worker options.
+See :doc:`/examples_rst/qec/task_graph_parallel_window` for how the
+``parallel_window`` graph decodes and its options.
 
 ``--workers-per-graph=N`` sets the graph's worker-pool size and the pattern node's
 ``max_in_flight`` field to N, giving each A/B layer the same capacity. The layers

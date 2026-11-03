@@ -31,6 +31,7 @@
 #include <optional>
 #include <regex>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
@@ -6597,3 +6598,82 @@ TEST(SyndromeMappingYAMLTest, JsonSchemaAcceptsTheSectionAndPolicesRows) {
   EXPECT_NE(schema.find("\"bulk\""), std::string::npos);
   EXPECT_NE(schema.find("\"final\""), std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Documentation examples
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The text of docs/sphinx/examples/qec/yaml/@p name.
+std::string docs_yaml(const std::string &name) {
+  const auto path =
+      std::filesystem::path(CUDAQX_QEC_DOCS_EXAMPLES_DIR) / "yaml" / name;
+  std::ifstream file(path);
+  std::stringstream text;
+  if (!file)
+    throw std::runtime_error("cannot open " + path.string());
+  text << file.rdbuf();
+  return text.str();
+}
+
+// Streams a shot of @p rounds rounds of the docs' distance-5 repetition code
+// into @p graph, a round per call and the last FINAL, with data qubit
+// @p qubit flipped from round @p from on; returns its corrections.
+std::vector<std::uint8_t>
+stream_rep5_shot(cudaq::qec::decoding_task_graph &graph, std::size_t rounds,
+                 std::size_t qubit, std::size_t from) {
+  const std::size_t checks = graph.get_num_msyn_per_round();
+  std::vector<std::uint8_t> round(checks, 0);
+  graph.reset_decoder();
+  for (std::size_t r = 0; r < rounds; ++r) {
+    // Check i reads data qubits i and i + 1.
+    for (std::size_t i = 0; i < checks; ++i)
+      round[i] = r >= from && (qubit == i || qubit == i + 1);
+    graph.enqueue_syndrome(round.data(), round.size(),
+                           r + 1 == rounds ? cudaq::qec::round_type::FINAL
+                                           : cudaq::qec::round_type::BULK);
+  }
+  const auto *corrections = graph.get_obs_corrections();
+  return {corrections, corrections + graph.get_num_observables()};
+} // end - stream_rep5_shot()
+
+} // namespace
+
+// The docs' parallel_window example and the same graph written out node by
+// node build the same windows and decode alike: every single data-qubit flip,
+// at the start, middle and end of shots of every length up to 40 rounds, gives
+// the correction the repetition code's observable needs. Both end shots
+// through a final syndrome_mapping row.
+TEST(DocsExamples, ParallelWindowYamlMatchesItsLowering) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::build_task_graph;
+  using cudaq::qec::decoding::host::fill_data_artifact_store;
+  const auto pattern = cfg::multi_decoder_config::from_yaml_str(
+      docs_yaml("task_graph_parallel_window.yaml"));
+  const auto lowered = cfg::multi_decoder_config::from_yaml_str(
+      docs_yaml("task_graph_parallel_window_lowered.yaml"));
+  const auto pattern_windows =
+      records_of(fill_data_artifact_store(pattern, "."), "window");
+  ASSERT_FALSE(pattern_windows.empty());
+  EXPECT_EQ(pattern_windows,
+            records_of(fill_data_artifact_store(lowered, "."), "window"));
+  for (const auto *config : {&pattern, &lowered}) {
+    ASSERT_EQ(config->syndrome_mapping.size(), 2u);
+    EXPECT_EQ(config->syndrome_mapping.at(1).type, "final");
+  }
+
+  auto by_pattern = build_task_graph(pattern.decoders.at(0));
+  auto by_hand = build_task_graph(lowered.decoders.at(0));
+  ASSERT_TRUE(by_pattern->supports_streaming())
+      << by_pattern->streaming_incompatibility_reason();
+  for (std::size_t rounds = 2; rounds <= 40; ++rounds)
+    for (const std::size_t from : {std::size_t{0}, rounds / 2, rounds - 1})
+      for (std::size_t qubit = 0; qubit < 5; ++qubit) {
+        SCOPED_TRACE("rounds " + std::to_string(rounds) + ", qubit " +
+                     std::to_string(qubit) + " from " + std::to_string(from));
+        const std::vector<std::uint8_t> want{qubit == 0};
+        EXPECT_EQ(stream_rep5_shot(*by_pattern, rounds, qubit, from), want);
+        EXPECT_EQ(stream_rep5_shot(*by_hand, rounds, qubit, from), want);
+      }
+} // end - TEST(DocsExamples, ParallelWindowYamlMatchesItsLowering)

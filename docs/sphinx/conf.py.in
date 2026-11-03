@@ -107,6 +107,7 @@ exclude_patterns = [
     'api/qec/python_realtime_decoding_api.rst',
     'api/qec/cpp_realtime_decoding_api.rst',
     'api/qec/realtime_pipeline_api.rst',
+    'examples_rst/qec/task_graph_provisional.rst',
 ]
 
 # The reST default role (used for this markup: `text`) to use for all documents.
@@ -307,6 +308,10 @@ nitpick_ignore = [
 # prefix via doc_replacements.
 nitpick_ignore_regex = [
     ('py:class', r'cudaq_qec\._pycudaqx_qec_the_suffix_matters_cudaq_qec\..*'),
+    # Provisional types, deliberately left out of the API reference.
+    ('cpp:identifier',
+     r'(cudaq::qec::)?experimental::(window_request|ingest_window)'),
+    ('cpp:identifier', r'data_artifact'),
 ]
 
 napoleon_google_docstring = True

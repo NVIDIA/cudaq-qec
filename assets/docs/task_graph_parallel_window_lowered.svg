@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300" font-family="Lato, 'Helvetica Neue', Arial, sans-serif">
+  <title>The nodes a parallel_window node builds: ingest feeds layers A and B, A hands corrections to B, and an xor sums both layers</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+  </defs>
+  <rect width="900" height="300" fill="#ffffff"/>
+
+  <!-- What the pattern builds -->
+  <rect x="182" y="14" width="566" height="272" rx="10" fill="none" stroke="#999" stroke-dasharray="6 4"/>
+  <text x="196" y="36" font-size="12" fill="#555">pw  (type: parallel_window)</text>
+
+  <g fill="none" stroke="#555" stroke-width="1.6" marker-end="url(#arrow)">
+    <path d="M150,150 L198,150"/>
+    <path d="M320,138 C360,138 360,72 398,72"/>
+    <path d="M320,162 C360,162 360,228 398,228"/>
+    <path d="M450,102 L450,196"/>
+    <path d="M510,102 L510,196"/>
+    <path d="M550,72 C590,72 585,138 618,138"/>
+    <path d="M550,228 C590,228 585,162 618,162"/>
+    <path d="M720,150 L778,150"/>
+  </g>
+  <g font-size="12" fill="#555">
+    <text x="328" y="128">A</text>
+    <text x="328" y="180">B</text>
+    <text x="444" y="145" text-anchor="end">forward</text>
+    <text x="444" y="161" text-anchor="end">A[k−1] → B[k]</text>
+    <text x="516" y="145">backward</text>
+    <text x="516" y="161">A[k] → B[k]</text>
+    <text x="608" y="128">a</text>
+    <text x="608" y="180">b</text>
+  </g>
+
+  <rect x="20" y="127" width="130" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
+  <text x="85" y="155" font-size="14" text-anchor="middle" fill="#1a1a1a">measurements</text>
+
+  <g fill="#f1f8e4" stroke="#76b900" stroke-width="1.6">
+    <rect x="200" y="122" width="120" height="56" rx="6"/>
+    <rect x="400" y="44" width="150" height="58" rx="6"/>
+    <rect x="620" y="122" width="100" height="56" rx="6"/>
+  </g>
+  <rect x="400" y="198" width="150" height="58" rx="6" fill="#e8f0fa" stroke="#4f8fd6" stroke-width="1.6"/>
+  <g text-anchor="middle" fill="#1a1a1a">
+    <text x="260" y="146" font-size="14" font-weight="bold">ingest</text>
+    <text x="260" y="164" font-size="12" fill="#555">ingest</text>
+    <text x="475" y="68" font-size="14" font-weight="bold">A</text>
+    <text x="475" y="86" font-size="12" fill="#555">decode_window</text>
+    <text x="475" y="222" font-size="14" font-weight="bold">B</text>
+    <text x="475" y="240" font-size="12" fill="#555">decode_window</text>
+    <text x="670" y="146" font-size="14" font-weight="bold">sum</text>
+    <text x="670" y="164" font-size="12" fill="#555">xor</text>
+  </g>
+
+  <rect x="780" y="127" width="100" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
+  <text x="830" y="155" font-size="14" text-anchor="middle" fill="#1a1a1a">output</text>
+</svg>

@@ -75,7 +75,7 @@ streaming_spec.num_rounds = None  # remove fixed round count
 streaming_graph = qec.DecodingTaskGraph.from_spec(streaming_spec,
                                                   "single_error_lut")
 
-print(f"streaming msyn/round: {streaming_graph.get_num_msyn_per_decode()}")
+print(f"streaming msyn/round: {streaming_graph.get_num_msyn_per_round()}")
 print(f"streaming observables: {streaming_graph.get_num_observables()}")
 # [End from_spec]
 
@@ -108,33 +108,25 @@ print(f"batch results: {len(results)} shots processed")
 
 # ---------------------------------------------------------------------------
 # [Begin streaming]
-# Streaming interface: enqueue_syndrome accumulates syndrome bytes one round
-# at a time.  Returns True when the window fires and corrections are ready.
-# Call get_obs_corrections() immediately after to read the result, then
-# clear_corrections() to reset the XOR accumulator before the next window.
-# Call reset_decoder() between shots to clear accumulation buffers.
+# Stream a 10-round shot one round per call, tagging the last round FINAL.
 # ---------------------------------------------------------------------------
 
 graph = qec.DecodingTaskGraph.from_spec(streaming_spec, "single_error_lut")
-# A slid window has room for one round per fire, so deliver a round per call
-# rather than the whole window.
 per_round = graph.get_num_msyn_per_round()
-k = graph.get_num_observables()
-
-# Simulate 10 rounds of zero syndromes (no errors).  The window fires once it
-# holds get_num_msyn_per_decode() bytes, then on every round after.
 num_rounds = 10
 for round_idx in range(num_rounds):
-    zero_syndrome = bytes(per_round)
-    fired = graph.enqueue_syndrome(zero_syndrome)
-    if fired:
-        corrections = graph.get_obs_corrections()
-        print(f"round {round_idx}: fired, corrections = {list(corrections)}")
-        graph.clear_corrections()
+    syndrome = bytes(per_round)  # zero syndrome: no errors
+    if round_idx < num_rounds - 1:
+        graph.enqueue_syndrome(syndrome)
+    else:
+        graph.enqueue_syndrome(syndrome, qec.round_type.FINAL)
 
-# Full reset between shots.
-graph.reset_decoder()
-print("decoder reset for next shot")
+progress = graph.streaming_result().outputs[0]
+print(f"status: {progress.status}")
+print(f"corrections: {list(graph.get_obs_corrections())}")
+
+# Start the next shot.
+graph.clear_corrections()
 # [End streaming]
 
 # ---------------------------------------------------------------------------

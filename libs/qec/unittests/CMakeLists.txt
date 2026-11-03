@@ -65,6 +65,9 @@ if(TARGET cudaq-qec-decoding-server)
     target_link_libraries(test_decoders_yaml PRIVATE cudaq-qec-chromobius)
     target_compile_definitions(test_decoders_yaml PRIVATE CUDAQX_QEC_HAS_CHROMOBIUS)
   endif()
+  # The documentation's example configurations, which the tests build.
+  target_compile_definitions(test_decoders_yaml PRIVATE
+    CUDAQX_QEC_DOCS_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../docs/sphinx/examples/qec")
   add_dependencies(CUDAQXQECUnitTests test_decoders_yaml)
   gtest_discover_tests(test_decoders_yaml)
 

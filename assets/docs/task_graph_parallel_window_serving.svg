@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 270" width="900" height="270" font-family="Lato, 'Helvetica Neue', Arial, sans-serif">
+  <title>Serving a parallel-window decoder: rounds are enqueued with a bulk row, the last with a final row, and corrections are read back</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+  </defs>
+  <rect width="900" height="270" fill="#ffffff"/>
+
+  <!-- Caller -->
+  <rect x="20" y="40" width="200" height="190" rx="8" fill="#eeeeee" stroke="#888"/>
+  <text x="120" y="66" font-size="14" font-weight="bold" text-anchor="middle" fill="#1a1a1a">quantum kernel</text>
+  <text x="120" y="86" font-size="12" text-anchor="middle" fill="#555">realtime decoding API</text>
+
+  <!-- Server -->
+  <rect x="520" y="20" width="360" height="230" rx="8" fill="#ffffff" stroke="#888"/>
+  <text x="700" y="44" font-size="14" font-weight="bold" text-anchor="middle" fill="#1a1a1a">decoding server</text>
+  <rect x="540" y="58" width="150" height="70" rx="6" fill="#f7f7f7" stroke="#aaa"/>
+  <text x="615" y="78" font-size="12" font-weight="bold" text-anchor="middle" fill="#1a1a1a">syndrome_mapping</text>
+  <text x="615" y="98" font-size="12" text-anchor="middle" fill="#1a1a1a">id 0: bulk</text>
+  <text x="615" y="116" font-size="12" text-anchor="middle" fill="#1a1a1a">id 1: final</text>
+  <rect x="540" y="146" width="320" height="86" rx="6" fill="#f1f8e4" stroke="#76b900" stroke-width="1.6"/>
+  <text x="700" y="170" font-size="13" font-weight="bold" text-anchor="middle" fill="#1a1a1a">parallel_window task graph</text>
+  <text x="700" y="190" font-size="12" text-anchor="middle" fill="#555">dispatch: host, async_streaming: true</text>
+  <text x="700" y="208" font-size="12" text-anchor="middle" fill="#555">windows decode on host worker threads</text>
+
+  <!-- Calls -->
+  <g fill="none" stroke="#555" stroke-width="1.6" marker-end="url(#arrow)">
+    <path d="M220,100 L518,100"/>
+    <path d="M220,150 L518,150"/>
+    <path d="M518,205 L222,205"/>
+  </g>
+  <g font-size="12" fill="#1a1a1a">
+    <text x="236" y="92">each round: enqueue with row 0 (bulk)</text>
+    <text x="236" y="142">last round: enqueue with row 1 (final)</text>
+    <text x="236" y="197">get_corrections</text>
+  </g>
+  <g font-size="11" fill="#555">
+    <text x="236" y="221">mid-shot: rounds [0, frontier)</text>
+    <text x="236" y="236">after final: the whole shot</text>
+  </g>
+</svg>

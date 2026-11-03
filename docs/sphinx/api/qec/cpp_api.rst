@@ -220,26 +220,12 @@ Decoder Interfaces
 Decoding Task Graph
 ===================
 
-A ``decoding_task_graph`` is a composable decode pipeline backed by a
-node/edge DAG. Each node is an instance of a registered node kind; query the
-available kinds with ``registered_task_graph_node_kinds()``. Edges route typed
-values between nodes at construction time.
-
-Built-in factories:
-
-- ``from_spec`` / public constructor — single decoder wrapped in a
-  window-accumulation node.
-- ``from_topology`` — any topology of ``task_graph_node_config`` nodes wired
-  by ``task_graph_edge`` edges.
-- ``combine`` — two independent decoders whose logical outcomes are
-  XOR'd; each branch applies its own D matrix.
-
-The graph exposes both a **streaming interface** (``enqueue_syndrome`` /
-``get_obs_corrections``) that accumulates syndrome rounds per window, and
-**one-shot execution** (``run`` / ``run_async``) that processes one full shot.
-``run_batch`` processes a collection; one-shot execution is commonly used for
-offline analysis.
-
+A ``decoding_task_graph`` is a decoder pipeline of nodes wired by edges. Build
+one with ``from_spec`` (one decoder in a window), ``combine`` (two decoders
+whose corrections are XORed) or ``from_topology`` (any nodes and edges). Run it
+on complete shots with ``run`` and ``run_batch``, or stream rounds with
+``enqueue_syndrome``. See :doc:`/examples_rst/qec/decoding_task_graph` and
+:doc:`/examples_rst/qec/task_graph_parallel_window`.
 
 I/O types
 ---------
@@ -262,20 +248,6 @@ I/O types
 
 Graph
 -----
-
-.. doxygenstruct:: cudaq::qec::experimental::round_range
-    :members:
-
-.. doxygenenum:: cudaq::qec::experimental::port_disposition
-.. doxygenenum:: cudaq::qec::experimental::send_mode
-.. doxygenenum:: cudaq::qec::experimental::input_boundary
-.. doxygenenum:: cudaq::qec::experimental::parallel_resolution
-
-.. doxygenstruct:: cudaq::qec::experimental::window_request
-    :members:
-
-.. doxygenstruct:: cudaq::qec::experimental::ingest_window
-    :members:
 
 .. doxygenstruct:: cudaq::qec::task_graph_edge
     :members:
