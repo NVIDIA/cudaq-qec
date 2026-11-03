@@ -1933,6 +1933,55 @@ TEST(DecodingSessionInline, ACancelledShotServesNoStaleReadout) {
   } // end - for(async)
 } // end - TEST(DecodingSessionInline, ACancelledShotServesNoStaleReadout)
 
+// On a graph with a logical output, a reset read of a failed shot answers
+// INTERNAL_ERROR, not the NOT_READY a client would poll on until FINAL.
+// reset_decoder starts the next shot, which ends as usual.
+TEST(DecodingSessionInline, ReportsAFailedShotToAResetRead) {
+  using cudaq::qec::round_type;
+  constexpr std::size_t R = 30;
+  std::uint32_t rid = 0;
+  std::vector<uint8_t> tx(64);
+  const std::vector<uint8_t> zeros(windowed_round_bits, 0);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    auto session = DecodingSession::create(windowed_graph(async, true),
+                                           /*want_device_graph=*/false,
+                                           bulk_and_final_rows());
+    // FINAL on the first round, shorter than the model's shortest shot.
+    auto short_shot = make_cqr_slot(kEnqueueSyndromesFunctionId, ++rid,
+                                    make_enqueue_payload(0, zeros, true));
+    session->handle_enqueue(short_shot.data(), tx.data(), short_shot.size());
+    auto corrections = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
+                                     make_get_corrections_payload(1, true));
+    session->handle_get_corrections(corrections.data(), tx.data(),
+                                    corrections.size());
+    expect_tx_status(tx, RpcStatus::INTERNAL_ERROR, rid);
+    auto logical =
+        make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                      make_get_logical_measurements_payload(0, 1, true));
+    session->handle_get_logical_measurements(logical.data(), tx.data(),
+                                             logical.size());
+    expect_tx_status(tx, RpcStatus::INTERNAL_ERROR, rid);
+
+    auto reset =
+        make_cqr_slot(kResetDecoderFunctionId, ++rid, make_reset_payload());
+    session->handle_reset(reset.data(), tx.data(), reset.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+    for (std::size_t r = 0; r < R; ++r) {
+      auto enqueue = make_cqr_slot(kEnqueueSyndromesFunctionId, ++rid,
+                                   make_enqueue_payload(r, zeros, r + 1 == R));
+      session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
+      expect_tx_status(tx, RpcStatus::OK, rid);
+    }
+    auto consume =
+        make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                      make_get_logical_measurements_payload(0, 1, true));
+    session->handle_get_logical_measurements(consume.data(), tx.data(),
+                                             consume.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+  } // end - for(async)
+} // end - TEST(DecodingSessionInline, ReportsAFailedShotToAResetRead)
+
 // A document with one windowed decoder: the pattern over a two-detector
 // chain whose faults stay in their rounds, so its boundary prior is set.
 std::string windowed_yaml(bool async, bool final_row,

@@ -998,12 +998,20 @@ void get_corrections(std::size_t decoder_id, uint8_t *corrections,
 
   const auto target = resolve_target(decoder_id);
   target.validate_corrections(corrections, correction_length);
-  // As the server's NOT_READY: a reset read waits for the shot's end.
-  if (reset && !target.may_consume())
+  // As the server's NOT_READY: a reset read waits for the shot's end, which
+  // a failed shot never reaches. Only a graph with a logical output waits.
+  if (reset && !target.may_consume()) {
+    const auto &live = target.streaming_result();
+    if (live.status == task_graph_streaming_status::failed)
+      throw std::runtime_error(
+          fmt::format("get_corrections: decoder {}'s shot failed: {}; "
+                      "reset_decoder() starts the next shot",
+                      decoder_id, live.error));
     throw std::runtime_error(fmt::format(
         "get_corrections: decoder {}'s shot has not ended; a reset read is "
         "ready only after its FINAL round",
         decoder_id));
+  }
 
   // clear_corrections may touch device memory in some plugins.
   target.pin_device();
@@ -1042,7 +1050,8 @@ void get_logical_measurements(std::size_t decoder_id, std::uint64_t first,
   const auto &live = target.streaming_result();
   if (live.status == task_graph_streaming_status::failed)
     throw std::runtime_error(
-        fmt::format("get_logical_measurements: decoder {}'s shot failed: {}",
+        fmt::format("get_logical_measurements: decoder {}'s shot failed: {}; "
+                    "reset_decoder() starts the next shot",
                     decoder_id, live.error));
   ret = live.logical_measurements(first, logical_length);
   if (!ret)

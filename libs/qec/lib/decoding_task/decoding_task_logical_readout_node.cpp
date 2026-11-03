@@ -169,18 +169,30 @@ bool logical_readout_node::enqueue(const uint8_t *msyn, std::size_t len,
   const auto end = seen_ + len;
   const auto skip = len > tail_ ? len - tail_ : 0;
   bool read = false; // the chunk completed a prefix reading round
+  // Copies between buffers sized at construction, so nothing allocates.
+  const auto publish = [this] {
+    std::copy(read_.begin(), read_.end(), corrections_.begin());
+    std::copy(corrections_.begin(), corrections_.end(),
+              logical_.get<logical_outcome>().bits.begin());
+    current_ = true;
+  };
   if (ended_)
     throw std::logic_error("logical_readout: a chunk after FINAL; clear the "
                            "corrections or reset to start the next shot");
   current_ = false;
   while (next_round_ < head_rounds_.size()) {
     const auto &round = head_rounds_[next_round_];
+    const auto round_end = round.begin + round.width;
     const auto from = std::max(round.begin, seen_);
-    const auto to = std::min(round.begin + round.width, end);
+    const auto to = std::min(round_end, end);
+    // Publish before a round the chunk only starts adds to read_, so the
+    // value holds no more than its coverage.
+    if (read && end < round_end)
+      publish();
     for (auto p = from; p < to; ++p)
       if (msyn[p - seen_] & 1)
         add_reading(round, p - round.begin, read_);
-    if (end < round.begin + round.width)
+    if (end < round_end)
       break;
     read_end_ = round.round + 1;
     ++next_round_;
@@ -191,13 +203,8 @@ bool logical_readout_node::enqueue(const uint8_t *msyn, std::size_t len,
     next_ = next_ + 1 == tail_ ? 0 : next_ + 1;
   }
   seen_ = end;
-  // Copies between buffers sized at construction, so nothing allocates.
-  if (read) {
-    std::copy(read_.begin(), read_.end(), corrections_.begin());
-    std::copy(corrections_.begin(), corrections_.end(),
-              logical_.get<logical_outcome>().bits.begin());
-    current_ = true;
-  }
+  if (read && !current_)
+    publish();
   if (type != round_type::FINAL)
     return read;
   if (seen_ < head_ + tail_)

@@ -745,6 +745,79 @@ syndrome_mapping:
   cudaq::qec::decoding::config::finalize_decoders();
 } // end - TEST(DecodingTaskGraph, HostReadsLogicalMeasurementsOnceTheShotEnds)
 
+// On a graph with a logical output, a reset read of a failed shot says the
+// shot failed and that reset_decoder() starts the next, not that the shot
+// has not ended. The next shot then ends as usual.
+TEST(DecodingTaskGraph, HostReportsAFailedShotToAResetRead) {
+  namespace host = cudaq::qec::decoding::host;
+  const std::string yaml = R"(decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], m2o_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+          output: corrections_and_logical
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+syndrome_mapping:
+  - {id: 1, type: final}
+)";
+  constexpr std::size_t rounds = 30;
+  constexpr std::size_t width = 2; // measurements a round
+  std::vector<uint8_t> round(width, 0);
+  std::vector<uint8_t> corrections(1, 0);
+  std::vector<uint8_t> logical(1, 0);
+  std::string error;
+  const auto message_of = [](auto &&read) -> std::string {
+    try {
+      read();
+    } catch (const std::runtime_error &e) {
+      return e.what();
+    }
+    return "no runtime_error";
+  };
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(cudaq::qec::decoding::config::configure_decoders(config), 0);
+
+  // FINAL on the first round, shorter than the model's shortest shot.
+  EXPECT_ANY_THROW(host::enqueue_syndromes(0, round.data(), width, 0,
+                                           /*syndrome_mapping_id=*/1));
+  error = message_of(
+      [&] { host::get_corrections(0, corrections.data(), 1, true); });
+  EXPECT_NE(error.find("shot failed"), std::string::npos) << error;
+  EXPECT_NE(error.find("reset_decoder"), std::string::npos) << error;
+  error = message_of(
+      [&] { host::get_logical_measurements(0, 0, logical.data(), 1, true); });
+  EXPECT_NE(error.find("shot failed"), std::string::npos) << error;
+  EXPECT_NE(error.find("reset_decoder"), std::string::npos) << error;
+
+  host::reset_decoder(0);
+  for (std::size_t r = 0; r + 1 < rounds; ++r)
+    host::enqueue_syndromes(0, round.data(), width, r);
+  host::enqueue_syndromes(0, round.data(), width, rounds - 1,
+                          /*syndrome_mapping_id=*/1);
+  EXPECT_NO_THROW(
+      host::get_logical_measurements(0, 0, logical.data(), 1, true));
+  cudaq::qec::decoding::config::finalize_decoders();
+} // end - TEST(DecodingTaskGraph, HostReportsAFailedShotToAResetRead)
+
 TEST(DecodingTaskGraph, ConfigureDecodersAcceptsAFinalRowAndServesBothShapes) {
   // The YAML half: a document with a `final` row configures, and both shapes
   // are enqueueable.  With no session this runs the inline path, so it pins

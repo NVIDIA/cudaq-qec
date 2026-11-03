@@ -169,7 +169,7 @@ Offset       | Size | Field
 | Condition | `status` | `result_len` |
 |---|---|---|
 | Every logical measurement in the range released | `OK` | `C` |
-| `arg_len < 25`, `R <= 0`, `first < 0`, the range runs past the logical measurements, or the decoder has none | `BAD_REQUEST` | 0 |
+| `arg_len < 25`, `R = 0`, `[first, first + R)` runs past the logical measurements, or the decoder has none | `BAD_REQUEST` | 0 |
 | One in the range not released yet, or `reset = 1` before the shot has ended | `NOT_READY` | 0 |
 | Session latched `failed`, or decoder threw | `INTERNAL_ERROR` | 0 |
 

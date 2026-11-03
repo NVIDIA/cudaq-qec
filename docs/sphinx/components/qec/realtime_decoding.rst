@@ -48,7 +48,7 @@ Once the decoding algorithm has processed the detectors it provides a vector of 
 This vector then executes a matrix-vector multiply with the observables flips matrix to yield a new vector of length `numObs` which contains an entry of `1` if the observable is predicted to have flipped.
 
 Thus once a decoder is configured, we can view the realtime decoder as a transformation of data starting from a vector of raw measurements, then transformed into detectors via `D`, then error predictions via `H`, then observable flip predictions via `O`. This last step is what is returned via `get_corrections`. The user configures how many bits of information are returned, and what they represent via the `O` matrix in the decoder config.
-A task graph whose model describes its readouts (a phase's `m2o_sparse`) can also return the logical measurements themselves, the raw readout with the corrections applied, via `get_logical_measurements`. Each is released once its readout has arrived and every correction that can flip it is committed: a mid-circuit readout can be released mid-shot, and all are by the shot's final round. A read names the first logical measurement it wants and how many.
+A task graph whose model describes its readouts (a phase's `m2o_sparse`) can also return the logical measurements themselves, the raw readout with the corrections applied, via `get_logical_measurements`, once it has an output named `logical`; a `parallel_window` pattern with `output: corrections_and_logical` wires one. Each is released once its readout has arrived and every correction that can flip it is committed: a mid-circuit readout can be released mid-shot, and all are by the shot's final round. A read names the first logical measurement it wants and how many.
 
 Similarly, the user determines how many measurements are needed for the decoder via the `D` matrix in the decoder config, and they are sent to the decoder via `enqueue_syndromes`.
 For flexibility, the user can choose to send all measurements with a single `enqueue_syndromes` call, or send them over several calls.
@@ -90,9 +90,11 @@ The parallel-window ingest contract determines actual shot length at FINAL;
 the repeating model accepts valid lengths at or above its minimum rather than
 enforcing the recorded horizon. The generated YAML
 embeds a shared DEM-chunk model, one graph per independent patch and BULK/FINAL
-syndrome mappings. The model embeds the readout map, so each graph returns its
-corrections through ``get_corrections`` and its corrected logical measurements
-through ``get_logical_measurements``.
+syndrome mappings. The model embeds the readout map, and the generator writes
+``output: corrections``, so each graph returns its corrections through
+``get_corrections``. ``--pattern-arg=output=corrections_and_logical`` also
+wires the graph's ``logical`` output, whose corrected logical measurements
+``get_logical_measurements`` returns.
 ``--help`` lists geometry, decoder, pattern and per-graph worker options.
 
 ``--workers-per-graph=N`` sets the graph's worker-pool size and the pattern node's

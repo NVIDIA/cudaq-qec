@@ -5521,6 +5521,56 @@ TEST(LogicalReadoutNode, ReadsAMidCircuitReadoutAsItArrives) {
   } // end - for(R)
 } // end - TEST(LogicalReadoutNode, ReadsAMidCircuitReadoutAsItArrives)
 
+// A chunk that completes one reading round and starts the next publishes
+// only what the completed rounds read, as its coverage says; the next chunk
+// completes the round and adds its reading.
+TEST(LogicalReadoutNode, PublishesNoPartOfAReadingRoundInProgress) {
+  auto spec = mid_readout_spec(8);
+  const auto mid = phase_id::from_name("mid_readout");
+  const auto second = phase_id::from_name("second_readout");
+  dem_chunk_spec phase;
+  std::vector<edge_value> outputs(1);
+  spec.num_rounds.reset();
+  // A second mid-circuit readout, in round 3, whose first measurement reads
+  // observable 1. Like the bulk after it, it flips only observable 1.
+  for (const auto &p : spec.phases)
+    if (p.id == phase_name::dem_bulk)
+      phase = p.spec;
+  phase.m2o_sparse = {-1, 0, -1};
+  spec.phases.push_back({second, phase});
+  for (auto &connection : spec.connections)
+    if (connection.from_phase == mid)
+      connection.from_phase = second;
+  spec.connections.push_back({mid, second});
+  const auto context = std::make_shared<const experiment_template>(spec);
+  logical_readout_node node(context);
+  const std::size_t R = context->min_rounds() + 2;
+  const auto start = context->measurement_offset(3, R);
+  const auto end = context->measurement_offset(4, R);
+  std::vector<std::uint8_t> m(context->measurement_offset(R, R), 0);
+  m[start] = 1;
+
+  // Round 2 whole and round 3's first measurement.
+  ASSERT_TRUE(node.enqueue(m.data(), start + 1, round_type::BULK));
+  ASSERT_TRUE(node.streaming_coverage().has_value());
+  EXPECT_EQ(node.streaming_coverage()->end_round, 3u);
+  ASSERT_NE(node.streaming_output(0), nullptr);
+  EXPECT_EQ(node.streaming_output(0)->get<logical_outcome>().bits,
+            (std::vector<std::uint8_t>{0, 0}));
+  EXPECT_EQ(node.corrections()[1], 0);
+  // The rest of round 3.
+  ASSERT_TRUE(
+      node.enqueue(m.data() + start + 1, end - start - 1, round_type::BULK));
+  EXPECT_EQ(node.streaming_coverage()->end_round, 4u);
+  EXPECT_EQ(node.streaming_output(0)->get<logical_outcome>().bits,
+            (std::vector<std::uint8_t>{0, 1}));
+  EXPECT_FALSE(node.enqueue(m.data() + end, m.size() - end, round_type::FINAL));
+  ASSERT_TRUE(node.flush());
+  node.execute_indexed({edge_value{measurement_results{m}}}, outputs);
+  EXPECT_EQ(node.streaming_output(0)->get<logical_outcome>().bits,
+            outputs[0].get<logical_outcome>().bits);
+} // end - TEST(LogicalReadoutNode, PublishesNoPartOfAReadingRoundInProgress)
+
 // From its first shot, a logical_readout node streams a shot and publishes
 // its value without allocating.
 TEST(LogicalReadoutNode, StreamsAShotWithoutAllocating) {
