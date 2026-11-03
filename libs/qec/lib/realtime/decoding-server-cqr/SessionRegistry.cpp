@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "SessionRegistry.h"
 #include "../realtime_decoding.h"
@@ -70,9 +67,14 @@ SyndromeMappingTable make_mapping_table(const multi_decoder_config &config) {
 
 void SessionRegistry::load_from_config(const multi_decoder_config &config,
                                        const std::string &source_name,
-                                       const std::filesystem::path &base_dir) {
+                                       const std::filesystem::path &base_dir,
+                                       bool warn_serving) {
   const auto mapping_table = make_mapping_table(config);
-  for (const auto &dc : config.decoders) {
+  // Decoders and nodes naming a pinned Stim DEM are built from its text, read
+  // once and checked against the pin.
+  const auto pinned =
+      cudaq::qec::decoding::host::with_pinned_stim_dems(config, base_dir);
+  for (const auto &dc : pinned.decoders) {
     if (dc.id < 0)
       throw std::runtime_error("Negative decoder id " + std::to_string(dc.id) +
                                " in " + source_name);
@@ -144,6 +146,8 @@ void SessionRegistry::load_from_config(const multi_decoder_config &config,
     }
   }
 
+  if (warn_serving)
+    cudaq::qec::decoding::host::warn_windowed_serving(config);
   CUDA_QEC_INFO("SessionRegistry: loaded {} decoder session(s)",
                 sessions_.size());
 }

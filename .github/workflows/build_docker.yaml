@@ -31,7 +31,7 @@ on:
         required: false
       pub_tag:
         type: string
-        description: Docker tag to use for published image (e.g. ghcr.io/nvidia/cudaqx:latest-pub, defaults to private repo if blank)
+        description: Comma-separated Docker tag(s) for the published image (e.g. ghcr.io/nvidia/cudaq-qec:cu12-0.9.0,ghcr.io/nvidia/cudaqx:cu12-0.9.0). The image is being renamed from cudaqx to cudaq-qec; publish to both names for 0.9.0, cudaq-qec only afterwards. Defaults to the private repo if blank.
         required: false
 
 jobs:

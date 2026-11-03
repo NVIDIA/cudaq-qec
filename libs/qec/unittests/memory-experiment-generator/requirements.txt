@@ -1,0 +1,2 @@
+# Dependencies for the generator's black-box tests, not the installed tool.
+PyYAML>=6.0

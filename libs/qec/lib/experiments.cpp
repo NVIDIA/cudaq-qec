@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cudaq/qec/experiments.h"
 #include "device/memory_circuit.h"
@@ -275,11 +272,12 @@ sample_memory_circuit(const code &code, operation statePrep,
     throw std::runtime_error(
         "sample_memory_circuit_error - requested state prep kernel not found.");
 
-  auto &prep = code.get_operation<code::one_qubit_encoding>(statePrep);
   if (!(statePrep == operation::prep0 || statePrep == operation::prep1 ||
         statePrep == operation::prepp || statePrep == operation::prepm))
     throw std::runtime_error(
         "sample_memory_circuit_error - invalid requested state prep kernel.");
+
+  auto &prep = code.get_operation<code::one_qubit_encoding>(statePrep);
 
   bool is_z_prep =
       statePrep == operation::prep0 || statePrep == operation::prep1;
@@ -325,9 +323,17 @@ sample_memory_circuit(const code &code, operation statePrep,
   // Sample the memory circuit and collect all raw measurements.
   cudaq::sample_options opts{
       .shots = numShots, .noise = noise, .explicit_measurements = true};
-  auto result = cudaq::sample(opts, memory_circuit, stabRound, prep, numData,
-                              numAncx, numAncz, numRounds, xVec, zVec, obs_flat,
-                              num_obs, !is_z_prep);
+  auto result = [&] {
+    try {
+      return cudaq::sample(opts, memory_circuit, stabRound, prep, numData,
+                           numAncx, numAncz, numRounds, xVec, zVec, obs_flat,
+                           num_obs, !is_z_prep);
+    } catch (...) {
+      // Clear CUDA-Q's borrowed noise pointer before opts is destroyed.
+      cudaq::get_platform().reset_noise();
+      throw;
+    }
+  }();
 
   // mzTable[shot, meas_idx] = raw 0/1 outcome; shape (numShots,
   // numMeasPerShot). Measurement layout per shot: numRounds*numCols ancilla,
@@ -514,6 +520,30 @@ std::vector<std::int64_t> d_sparse(const cudaq::M2DSparseMatrix &m2d) {
   }
   return out;
 }
+
+// Rows keep their order and their indices' order; only the offset changes.
+std::vector<std::int64_t> m2o_sparse(const cudaq::M2OSparseMatrix &m2o,
+                                     std::size_t first_measurement) {
+  std::vector<std::int64_t> out;
+  if (first_measurement > m2o.num_measurements)
+    throw std::invalid_argument(
+        "m2o_sparse: first_measurement " + std::to_string(first_measurement) +
+        " is past the " + std::to_string(m2o.num_measurements) +
+        " measurements of the shot");
+  for (const auto &row : m2o.rows) {
+    for (const auto meas : row) {
+      if (meas < first_measurement || meas >= m2o.num_measurements)
+        throw std::invalid_argument("m2o_sparse: measurement " +
+                                    std::to_string(meas) +
+                                    " lies outside the final phase [" +
+                                    std::to_string(first_measurement) + ", " +
+                                    std::to_string(m2o.num_measurements) + ")");
+      out.push_back(static_cast<std::int64_t>(meas - first_measurement));
+    }
+    out.push_back(-1);
+  } // end - for(row)
+  return out;
+} // end - m2o_sparse()
 
 /// Bridge from CUDA-Q circuit analysis to the QEC-owned sparse matrix a
 /// decoder is constructed from.

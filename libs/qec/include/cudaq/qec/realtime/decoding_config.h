@@ -1,21 +1,20 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
 #include "cuda-qx/core/heterogeneous_map.h"
 #include "cudaq/qec/decoding_task_graph_config.h"
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/window_request.h"
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace cudaq::qec::decoding::config {
@@ -84,15 +83,19 @@ struct decoder_config {
   ///   - Chunk form: dem_chunks (which carries phases, connections, seam, and
   ///     num_rounds internally). The flat fields are derived by expanding the
   ///     phases, and must be omitted.
-  ///   - DEM form: stim_dem_path, the Stim model text itself. The decoder
-  ///     derives its dimensions, observable mapping and error rates from it.
-  ///     H_sparse, O_sparse and error_rate_vec must be omitted; D_sparse is
-  ///     still required, while block_size and syndrome_size are optional
-  ///     checked assertions.
+  ///   - DEM form: stim_dem or stim_dem_path, the Stim model text itself,
+  ///     inline or by file. The decoder derives its dimensions, observable
+  ///     mapping and error rates from it. H_sparse, O_sparse and
+  ///     error_rate_vec must be omitted; D_sparse is still required, while
+  ///     block_size and syndrome_size are optional checked assertions.
   ///
   /// Throughout a configuration, a `*_path` key names a file and a key without
   /// the suffix carries its contents inline: `stim_dem_path` is read from disk,
-  /// while a node's `stim_dem` is the model text itself.
+  /// while `stim_dem` is the model text itself. A `stim_dem` with no spaces,
+  /// tabs or line breaks instead names a data_artifacts Stim DEM entry: any
+  /// such value is taken as a name, which is safe because Stim model text
+  /// always contains them. Parsing resolves the name; a configuration built in
+  /// code is resolved where its models are built.
   ///
   /// Chunk form stays authoritative: decoder construction hands the chunks to
   /// the decoder, alone for one that declared it reads chunks natively
@@ -107,6 +110,11 @@ struct decoder_config {
   /// resolved against the configuration file's directory, or the process
   /// working directory for a programmatic or raw-string configuration.
   std::string stim_dem_path;
+  /// The same model's text inline; at most one of the two is set.
+  std::string stim_dem;
+  /// The data_artifacts entry `stim_dem` names, if it names one; stim_dem or
+  /// stim_dem_path is then a copy of that entry's text or path.
+  std::string stim_dem_artifact;
   std::vector<std::int64_t> H_sparse;
   std::vector<std::int64_t> O_sparse;
   /// Maps raw measurements to detectors. Orthogonal to the model source and
@@ -127,6 +135,9 @@ struct decoder_config {
   /// H_sparse.empty(). Nonempty H_sparse is exactly the state
   /// expand_dem_chunks() leaves behind, allowing round-trip through YAML.
   std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
+  /// The data_artifacts entry `dem_chunks` names, if it names one rather than
+  /// holding the block; dem_chunks is then a copy of that entry's template.
+  std::string dem_chunks_artifact;
   decoder_custom_args_t decoder_custom_args;
 
   /// Decoder task graph topology.  When set, `type` must be absent and either
@@ -168,6 +179,15 @@ struct decoder_config {
       decoder_custom_args_t node_params;
       /// DEM for this node alone; falls back to the entry-level DEM.
       std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
+      /// The data_artifacts entry `dem_chunks` names, if it names one; the
+      /// field above is then a copy of that entry's template.
+      std::string dem_chunks_artifact;
+      /// An ingest node's layers, sorted by name: each names an output port
+      /// and the window request published on it. Their order carries no
+      /// meaning; parsing YAML sorts them by name, so keep a hand-built list
+      /// sorted for it to round-trip equal. Experimental, as the request
+      /// type is.
+      std::vector<cudaq::qec::experimental::ingest_window> windows;
       /// This node's own matrices, in the entry-level flat form and the same
       /// -1-separated row encoding. Use them for a detector map that follows no
       /// round structure; a node takes these or `dem_chunks`, never both.
@@ -196,16 +216,22 @@ struct decoder_config {
       /// spellings; setting both on one node is an error rather than a
       /// precedence.
       std::string stim_dem_path;
+      /// The data_artifacts entry `stim_dem` names, if it names one; one of
+      /// the two fields above is then a copy of that entry's text or path.
+      std::string stim_dem_artifact;
+      /// Copies of the node that may fire at once in asynchronous
+      /// streaming; see `task_graph_node_config::max_in_flight`.
+      std::uint64_t max_in_flight = 1;
       /// Which DEM columns this node owns, as a label ("local", "boundary") or
       /// explicit ranges.  Parsed, validated, and emitted; not yet honored at
       /// construction, which rejects a partitioned node.
       std::string partition_label;
       std::vector<column_range> partition_columns;
 
-      /// An ensemble pattern written in place of a node: member subgraphs
-      /// raced against each other, one answer kept (the YAML spelling of
-      /// `cudaq::qec::task_graph_ensemble_spec`). `type` stays empty and the
-      /// node fields above are ignored; the entry is lowered by the builder.
+      /// The members and join of a node of type `ensemble`, written as its
+      /// own keys: member subgraphs raced against each other, one answer kept
+      /// (the YAML spelling of `cudaq::qec::task_graph_ensemble_spec`). The
+      /// node fields above are ignored; the builder lowers the node.
       struct ensemble_spec {
         struct member {
           std::vector<node_spec> nodes;
@@ -390,8 +416,34 @@ struct syndrome_mapping_config {
   __attribute__((visibility("default"))) void validate() const;
 };
 
+/// One entry of a configuration's `data_artifacts`: data declared once and
+/// named wherever a block is expected. Exactly one kind is set: dem_chunks,
+/// stim_dem, stim_dem_path, window (with its context) or edem_path.
+struct data_artifact {
+  /// Unique, and without spaces, tabs or line breaks, so a `stim_dem` naming
+  /// it is told apart from model text.
+  std::string name;
+  /// An experiment template.
+  std::optional<cudaq::qec::dem_chunks_spec> dem_chunks;
+  /// A Stim DEM, inline or by file.
+  std::string stim_dem;
+  std::string stim_dem_path;
+  /// A window request, experimental as the request type is, and the name of
+  /// the dem_chunks entry it is built on.
+  std::optional<cudaq::qec::experimental::window_request> window;
+  std::string context;
+  /// A packed .edem file. Reserved: rejected until the cudaq-edem migration.
+  std::string edem_path;
+  /// Optional sha256 of a file-backed entry's bytes, in hexadecimal.
+  std::string sha256;
+  bool operator==(const data_artifact &) const = default;
+};
+
 class multi_decoder_config {
 public:
+  /// Named data, sorted by name, that decoders and nodes reference.
+  /// References are resolved when the configuration is parsed.
+  std::vector<data_artifact> data_artifacts;
   std::vector<decoder_config> decoders;
   /// Optional server-level transport section. The standalone server's CLI
   /// defaults may fill an empty section only for non-GPU-RoCE, host-only
@@ -450,6 +502,20 @@ expand_dem_chunks(decoder_config &config);
 /// representable; a document that passes the JSON Schema may still be
 /// rejected by those hooks when parsed.
 __attribute__((visibility("default"))) std::string decoder_config_json_schema();
+
+} // namespace cudaq::qec::decoding::config
+
+/// C entry point for decoder_config_json_schema(), for callers that have the
+/// installed libraries but not the Python package: a tool can dlopen
+/// libcudaq-qec-realtime-decoding (which pulls in the decoder library, whose
+/// initialiser loads the decoder-plugins directory next to it) and read the
+/// schema of exactly that installation. The returned text lives in a
+/// process-lifetime buffer owned by the library; do not free it. Each call
+/// regenerates it, so plugins loaded after an earlier call are included.
+extern "C" __attribute__((visibility("default"))) const char *
+cudaq_qec_decoder_config_json_schema();
+
+namespace cudaq::qec::decoding::config {
 
 /// @brief Configure the decoders (`multi_decoder_config` variant). This
 /// function configures both local decoders, and if running on remote target

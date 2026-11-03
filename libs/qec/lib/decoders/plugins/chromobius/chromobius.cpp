@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "chromobius/decode/decoder.h"
 #include "stim.h"
@@ -120,10 +117,7 @@ public:
   }
 
   decoder_result decode(const std::vector<float_t> &syndrome) override {
-    if (syndrome.size() != syndrome_size) {
-      throw std::runtime_error(
-          "Chromobius syndrome length must match the number of detectors");
-    }
+    check_syndrome_size(syndrome.size());
 
     std::fill(packed_detection_events.begin(), packed_detection_events.end(),
               uint8_t{0});

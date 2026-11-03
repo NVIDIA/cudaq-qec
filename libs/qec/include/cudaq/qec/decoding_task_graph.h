@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // decoding_task_graph: a node/edge DAG representing a decode pipeline.
 //
@@ -24,10 +21,12 @@
 #include "cudaq/qec/decoding_task_graph_config.h"
 #include "cudaq/qec/decoding_task_types.h"
 #include "cudaq/qec/extended_dem.h"
+#include "cudaq/qec/window_request.h"
 #include <any>
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -68,7 +67,9 @@ struct task_graph_node_kind_spec {
   /// (an `inner:` block or a plugin-valued `type`). An `xor` node does not.
   bool requires_decoder = true;
   /// Whether the kind needs a DEM (`dem_chunks` or flat matrices) to build its
-  /// D and O matrices.
+  /// D and O matrices. A kind that wraps a decoder but reads no DEM builds
+  /// its decoders itself, from what it receives, so configuration gives it
+  /// the decoder's name and parameters rather than a built decoder.
   bool requires_dem = true;
   /// Optional policy describing the inner decoder's outputs. When absent, the
   /// output preserves the original observable-model policy: a decoder given O
@@ -88,6 +89,16 @@ struct task_graph_node_kind_spec {
   /// Whether the kind exists only as a lowering target and is not part of the
   /// graph description a user writes. The config layer rejects such a `type`.
   bool lowered_only = false;
+  /// Whether the kind reads window requests from a `windows` map, one output
+  /// port per layer. Every other kind rejects `windows`.
+  bool takes_windows = false;
+  /// Least values of the kind's uint64 parameters, by key. Registration adds
+  /// the check to the kind's parameter validation, and the JSON schema
+  /// publishes each one in the kind's clause, so the two agree.
+  std::map<std::string, std::uint64_t> parameter_minimums;
+  /// Greatest values of the kind's uint64 parameters, by key, checked and
+  /// published as the minimums are.
+  std::map<std::string, std::uint64_t> parameter_maximums;
   /// Optional policy deciding whether the inner decoder needs the DEM's
   /// observable model. An absent policy means yes. When the policy returns
   /// false, the topology withholds O and leaves projection to the node.
@@ -165,13 +176,14 @@ task_graph_node_params_schema(const std::string &type) {
 
 struct task_graph_node_config;
 
-/// An ensemble pattern: member subgraphs run concurrently, one answer
-/// kept. Written in place of a node (`task_graph_node_config::ensemble`) and
-/// lowered by from_topology() into an `ensemble_fanout`, `ensemble_join`,
-/// and the members. Every member node input that accepts a `%candidate_sink` is
-/// wired to the ensemble's candidate sink and every one that accepts a
-/// `cancellation_token` to its cancellation token. A member whose edges reach
-/// `output` (a `logical_outcome`) has that value pushed into the sink.
+/// The members and join of a node of kind `ensemble`
+/// (`task_graph_node_config::ensemble`): member subgraphs run concurrently and
+/// one answer is kept. from_topology() lowers the node into an
+/// `ensemble_fanout`, `ensemble_join`, and the members. Every member node input
+/// that accepts a `%candidate_sink` is wired to the ensemble's candidate sink
+/// and every one that accepts a `cancellation_token` to its cancellation token.
+/// A member whose edges reach `output` (a `logical_outcome`) has that value
+/// pushed into the sink.
 ///
 /// The pattern node has one input, `input`, and one output, `output`. Whatever
 /// feeds `input` (a shot, or a streaming producer's windows of measurements or
@@ -206,10 +218,18 @@ struct task_graph_node_config {
   std::string kind = default_task_graph_node_kind;
   /// The kind's own parameters: window_size, step_size, guards, ...
   cudaqx::heterogeneous_map node_params;
+  /// Copies of this node that may fire at once in asynchronous streaming,
+  /// each on its own record. Above one, the kind must keep no state across
+  /// deliveries (`task_graph_node::supports_fire_pool`) and build its inner
+  /// decoder from `decoder_type`, since every copy needs one.
+  std::size_t max_in_flight = 1;
 
   /// DEM for this node. When absent, `d_sparse`/`o_sparse` below supply the
   /// matrices directly.
   std::optional<dem_chunks_spec> dem;
+  /// The layers of a kind that takes windows: each names an output port and
+  /// its window request. Experimental, as the request type is.
+  std::vector<experimental::ingest_window> windows;
   /// Pre-expanded matrices, used when `dem` is absent. Rows are CSR:
   /// `d_sparse` maps measurements to detectors, `o_sparse` fault columns to
   /// observables, and `h_sparse` detectors to the fault columns that trigger
@@ -238,8 +258,8 @@ struct task_graph_node_config {
   /// neither of which is recoverable from D and O.
   std::unique_ptr<decoder> decoder_instance;
 
-  /// When set, this entry is an ensemble pattern rather than a node: `kind` and
-  /// the fields above are ignored, and from_topology() lowers it in place.
+  /// The members and join of a node of kind `ensemble`, which from_topology()
+  /// lowers in place; the fields above are ignored for it.
   std::optional<task_graph_ensemble_spec> ensemble;
 };
 
@@ -259,6 +279,8 @@ struct task_graph_output_progress {
   std::uint64_t coverage_begin_round = 0;
   std::uint64_t coverage_end_round = 0;
   task_graph_streaming_status status = task_graph_streaming_status::pending;
+  /// The shot's closure over the windows that reach this output, so far.
+  task_graph_closure closure = task_graph_closure::not_checked;
 };
 
 /// Graph-owned streaming result. `values` contains all named outputs at their
@@ -275,7 +297,8 @@ struct task_graph_output_progress {
 /// update. Generation alone must therefore never be used as a readiness test.
 /// `result_revision` advances whenever any output or graph status changes.
 /// `completed_operations` counts public enqueue operations that advanced the
-/// aggregate result, even when several complete before the next read.
+/// aggregate result, even when several complete before the next read. An
+/// asynchronous graph counts them as a synchronous one would.
 /// Only reset_decoder() advances shot_epoch.
 struct task_graph_streaming_result {
   std::uint64_t shot_epoch = 0;
@@ -288,6 +311,8 @@ struct task_graph_streaming_result {
   std::string error;
   std::vector<task_graph_output_progress> outputs;
   std::vector<uint8_t> values;
+  /// The outputs' closures combined: closed only when every output's is.
+  task_graph_closure closure = task_graph_closure::not_checked;
 };
 
 /// @brief Decode pipeline as a composable, testable object.
@@ -315,9 +340,11 @@ struct task_graph_streaming_result {
 /// threads, collect one `run_async` before starting the next, and do not
 /// overlap streaming with one-shot calls. Overlap is detected rather than
 /// serialised -- an overlapping call throws `std::logic_error`. An
-/// async-streaming graph instead has one internal coordinator as its sole
-/// node-state mutator; its public streaming calls provide copied input and
-/// coherent snapshots.
+/// async-streaming graph instead has one internal coordinator that dispatches
+/// records to pool workers; its public streaming calls provide copied input
+/// and coherent snapshots. Records overlap, a bounded number at once, but each
+/// node still sees them in order and every value a record moves between nodes
+/// is buffered per record.
 class decoding_task_graph {
 public:
   /// Construct from an already-built decoder and D/O in nested-row form.
@@ -513,6 +540,10 @@ public:
   /// A false result does not affect run(), run_all(), or other batch APIs.
   bool supports_streaming() const noexcept;
 
+  /// Threads an asynchronous graph owns: its coordinator and the pool workers
+  /// that run fires. Zero for a synchronous graph.
+  std::size_t async_thread_count() const noexcept;
+
   /// Empty when supports_streaming() is true; otherwise the first deterministic
   /// build-time reason streaming execution is unavailable.
   const std::string &streaming_incompatibility_reason() const noexcept;
@@ -529,7 +560,15 @@ public:
 
   /// Walk the node/edge DAG for one shot: detect(m) then execute each node.
   ///
-  /// Does not touch the streaming accumulation buffer.
+  /// Does not touch the streaming accumulation buffer, except in a graph
+  /// whose nodes decode only a stream, such as a windowed one: that graph
+  /// runs the shot through its stream, from a reset graph, in rounds with
+  /// FINAL on the last, and leaves it reset. `converged` is then whether
+  /// every window reaching the output converged.
+  ///
+  /// @throws std::logic_error if such a graph holds a shot in progress, or a
+  /// completed shot not yet consumed with clear_corrections(): run() would
+  /// discard it.
   ///
   /// @throws std::logic_error if more than one edge reaches `output`: a
   /// multi-output program reduced to its first output is a different program,
@@ -623,6 +662,9 @@ private:
   /// Wraps a compiled impl. Only assemble() calls this, so no graph can reach a
   /// caller without having gone through compile_wires().
   explicit decoding_task_graph(std::unique_ptr<impl> i);
+  /// run_all() through the stream, for a graph whose nodes decode only one.
+  std::vector<logical_outcome> run_streamed(const measurement_results &m,
+                                            const char *who) const;
 
   /// Finish a hand-filled impl: compile its string edges to wires and wrap it.
   /// The one path every builder ends on.

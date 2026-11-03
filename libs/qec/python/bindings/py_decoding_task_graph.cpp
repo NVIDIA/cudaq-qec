@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "py_decoding_task_graph.h"
 #include "type_casters.h"
@@ -75,6 +72,11 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .value("COMPLETE", task_graph_streaming_status::complete)
       .value("FAILED", task_graph_streaming_status::failed);
 
+  nb::enum_<task_graph_closure>(mod, "TaskGraphClosure")
+      .value("NOT_CHECKED", task_graph_closure::not_checked)
+      .value("CLOSED", task_graph_closure::closed)
+      .value("OPEN", task_graph_closure::open);
+
   nb::class_<task_graph_output_progress>(mod, "TaskGraphOutputProgress")
       .def_ro("name", &task_graph_output_progress::name)
       .def_ro("value_offset", &task_graph_output_progress::value_offset)
@@ -84,7 +86,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
               &task_graph_output_progress::coverage_begin_round)
       .def_ro("coverage_end_round",
               &task_graph_output_progress::coverage_end_round)
-      .def_ro("status", &task_graph_output_progress::status);
+      .def_ro("status", &task_graph_output_progress::status)
+      .def_ro("closure", &task_graph_output_progress::closure);
 
   nb::class_<task_graph_streaming_result>(mod, "TaskGraphStreamingResult")
       .def_ro("shot_epoch", &task_graph_streaming_result::shot_epoch)
@@ -97,7 +100,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
               &task_graph_streaming_result::operation_completed)
       .def_ro("error", &task_graph_streaming_result::error)
       .def_ro("outputs", &task_graph_streaming_result::outputs)
-      .def_ro("values", &task_graph_streaming_result::values);
+      .def_ro("values", &task_graph_streaming_result::values)
+      .def_ro("closure", &task_graph_streaming_result::closure);
 
   // -------------------------------------------------------------------------
   // Primitive task functions
@@ -131,7 +135,9 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("id", &task_graph_node_config::id)
       .def_rw("kind", &task_graph_node_config::kind)
       .def_rw("node_params", &task_graph_node_config::node_params)
+      .def_rw("max_in_flight", &task_graph_node_config::max_in_flight)
       .def_rw("dem", &task_graph_node_config::dem)
+      .def_rw("windows", &task_graph_node_config::windows)
       .def_rw("d_sparse", &task_graph_node_config::d_sparse)
       .def_rw("o_sparse", &task_graph_node_config::o_sparse)
       .def_rw("h_sparse", &task_graph_node_config::h_sparse)
@@ -147,17 +153,16 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
             self.ensemble = std::move(spec);
           },
           nb::rv_policy::reference_internal,
-          "When set, this entry is an ensemble pattern rather than a node: "
-          "kind and the fields above are ignored. Assigning consumes the "
-          "spec.");
+          "The members and join of a node of kind 'ensemble', for which the "
+          "fields above are ignored. Assigning consumes the spec.");
 
   // Member node configs are consumed, as from_topology() consumes its nodes.
   nb::class_<task_graph_ensemble_spec>(
       mod, "TaskGraphEnsembleSpec",
       "Member subgraphs raced against each other, one answer kept; set on\n"
-      "TaskGraphNodeConfig.ensemble in place of a kind. join_strategy names a\n"
-      "selection strategy ('first', 'deadline') and join_params its\n"
-      "parameters. add_member() consumes its node configs.")
+      "TaskGraphNodeConfig.ensemble of a node of kind 'ensemble'.\n"
+      "join_strategy names a selection strategy ('first', 'deadline') and\n"
+      "join_params its parameters. add_member() consumes its node configs.")
       .def(nb::init<>())
       .def_rw("join_strategy", &task_graph_ensemble_spec::join_strategy)
       .def_rw("join_params", &task_graph_ensemble_spec::join_params)
@@ -188,7 +193,13 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("async_coordinator_cpu",
               &task_graph_options::async_coordinator_cpu)
       .def_rw("async_spin_pause_iters",
-              &task_graph_options::async_spin_pause_iters);
+              &task_graph_options::async_spin_pause_iters)
+      .def_rw("async_num_workers", &task_graph_options::async_num_workers,
+              "Pool threads for an asynchronous graph; None sizes the pool\n"
+              "from the graph.")
+      .def_rw("async_worker_cpus", &task_graph_options::async_worker_cpus,
+              "CPUs for the pool threads, round-robin; empty inherits the\n"
+              "process's affinity.");
 
   // -------------------------------------------------------------------------
   // DecodingTaskGraph
@@ -220,7 +231,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       "With TaskGraphOptions.async_streaming enabled, BULK enqueue calls\n"
       "return False after copying input; streaming_result() waits for "
       "accepted\n"
-      "input and returns its completion state.\n"
+      "input and returns its completion state. Records overlap: a later\n"
+      "record runs ahead on nodes that finished the earlier ones.\n"
       "Tagging the last round round_type.FINAL commits what a guarded window\n"
       "withheld; it is the only way to end a stream.")
       .def_static("from_spec", &decoding_task_graph::from_spec, nb::arg("spec"),

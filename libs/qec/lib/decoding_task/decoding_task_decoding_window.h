@@ -1,0 +1,384 @@
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Internal header: decoding windows built from dem_chunks. A window is the
+// problem statement of one decode task, as in the EDEM window specification:
+// its zones, ports, imports, sends and measurement maps. A window request
+// (window_request.h) names a layer's windows relative to an anchor;
+// window_from_dem_chunks() builds window k of a shot. receive_send(),
+// solve_window() and commit_window() are the task's canonical workload, run
+// once per shot on a window_workspace sized beforehand.
+// Never included from a public header.
+
+#pragma once
+
+#include "cuda-qx/core/heterogeneous_map.h"
+#include "decoding_task_experiment_template.h"
+#include "cudaq/qec/decoder.h"
+#include "cudaq/qec/detector_error_model.h"
+#include "cudaq/qec/sparse_binary_matrix.h"
+#include "cudaq/qec/window_request.h"
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace cudaq::qec {
+
+// The request types are experimental in the public API; the window code uses
+// them throughout.
+using experimental::input_boundary;
+using experimental::parallel_resolution;
+using experimental::port_disposition;
+using experimental::round_range;
+using experimental::send_mode;
+using experimental::window_request;
+using experimental::window_round_limit;
+
+/// Half-open model columns [begin, end).
+struct column_range {
+  std::size_t begin = 0;
+  std::size_t end = 0;
+  bool operator==(const column_range &) const = default;
+};
+
+/// Half-open window indices [begin, end).
+struct index_range {
+  std::int64_t begin = 0;
+  std::int64_t end = 0;
+};
+
+/// A built port. A window edge at the shot's first or last round is a
+/// physical boundary, not a port.
+struct window_port {
+  bool exists = false;
+  port_disposition disposition = port_disposition::open;
+  input_boundary boundary = input_boundary::columns; ///< An open input's
+  double prior = 0.0;  ///< An open input's boundary-column prior
+  round_range imports; ///< A closed output's imported rounds
+  bool operator==(const window_port &) const = default;
+};
+
+/// Why a commit column's parallel column, one with the same rows in the
+/// window, lets the decoder's choice between them change the commitment or
+/// the logical.
+enum class parallel_conflict {
+  other_zone,   ///< The parallel column is in another zone
+  boundary,     ///< It is a virtual-outcome or truncated crossing column
+  outside_rows, ///< Same zone, but rows outside the window differ
+  observable,   ///< Same zone and full rows, different observable effect
+};
+
+/// A commit column and a parallel column the decoder could pick instead.
+struct parallel_columns {
+  std::size_t commit_column = 0;
+  std::size_t other_column = 0;
+  parallel_conflict conflict = parallel_conflict::other_zone;
+  bool operator==(const parallel_columns &) const = default;
+};
+
+/// A built send: its rounds, clipped to the window, and their own rows.
+struct window_send {
+  std::string id;
+  send_mode mode = send_mode::delta;
+  std::vector<round_range> rounds;
+  std::vector<std::size_t> rows;
+  bool operator==(const window_send &) const = default;
+};
+
+/// An affine map over GF(2): output = matrix * input + offset. The inputs
+/// and outputs are partitioned into ports, listed by size.
+struct affine_map {
+  sparse_binary_matrix matrix; ///< One row per output, one column per input
+  std::vector<std::uint8_t> offset;
+  std::vector<std::size_t> input_sizes;
+  std::vector<std::size_t> output_sizes;
+};
+
+/// A window's model in the forms a decode kernel uses. Columns are fault
+/// columns, then boundary or crossing columns, then logical-error columns;
+/// rows are the window's own, then its imported ones. The logical-error
+/// columns touch no detector, so H stops before them.
+struct window_model {
+  sparse_binary_matrix h;     ///< Rows by the decoder's columns, canonical CSC
+  sparse_binary_matrix o;     ///< Observables by every column, canonical CSC
+  std::vector<double> priors; ///< One per column
+};
+
+/// A window decode problem; mirrors the EDEM window spec. Built from
+/// dem_chunks in this release.
+struct decoding_window {
+  std::shared_ptr<const experiment_template> context;
+  std::int64_t k = 0;
+  std::size_t shot_rounds = 0;
+  round_range rounds; ///< The window's occurrences
+  round_range commit; ///< Commit zone
+  std::vector<round_range> buffers;
+  window_port input;
+  window_port output;
+  std::vector<window_send> sends;
+  /// Own rows, then imported rows. Fault columns in occurrence order, then
+  /// for an open input one virtual-outcome column per input seam detector,
+  /// or the truncated crossing columns, then one logical-error column per
+  /// observable.
+  window_model model;
+  std::size_t num_own_rows = 0;
+  std::size_t num_fault_columns = 0;
+  std::size_t num_virtual_outcome_columns = 0;
+  std::size_t num_crossing_columns = 0;
+  std::size_t num_logical_error_columns = 0;
+  column_range commit_columns;
+  /// Each commit column's first conflicting parallel column, found while
+  /// the full rows are known; empty when the column options resolve them.
+  std::vector<parallel_columns> parallel_conflicts;
+  /// For each fault column, the unmerged fault columns it stands for,
+  /// counted from the window's first. The one its corrections are reported
+  /// against comes first: the most likely, and under most_likely the most
+  /// likely of the effect whose columns together are most likely.
+  std::vector<std::vector<std::size_t>> fault_column_sources;
+  /// (v_in, m) -> (own rows, then the virtual outcomes on the commit zone's
+  /// outgoing wire and on the output port's wire, where those are ports).
+  affine_map m2d;
+  std::size_t num_virtual_outcomes = 0; ///< Width of v_in
+  std::size_t num_measurements = 0;     ///< Measurements of the rounds
+  std::optional<affine_map> m2o;        ///< m -> raw observables, on request
+
+  /// Columns the inner decoder sees: every column but the logical-error ones,
+  /// which touch no detector.
+  std::size_t num_decoder_columns() const {
+    return num_fault_columns + num_virtual_outcome_columns +
+           num_crossing_columns;
+  }
+};
+
+/// The rounds @p request's windows span, relative to their anchor: from
+/// the first zone's first round to the last zone's end. Allocates nothing.
+/// @p request must have a commit zone; check_window_request() checks that.
+round_range zone_span(const window_request &request);
+
+/// The rounds of @p zone, relative to a window's anchor, for the window
+/// anchored at @p anchor, clipped to [0, @p end): the shot's rounds, or
+/// those known so far. Every place a window's rounds are found clips so.
+inline round_range clip_rounds(round_range zone, std::int64_t anchor,
+                               std::int64_t end) {
+  return {std::max<std::int64_t>(0, anchor + zone.begin),
+          std::min(end, anchor + zone.end)};
+}
+
+/// The rounds the model of a window of @p request reads, relative to its
+/// anchor: from the round before its first, whose measurements give v_in,
+/// to the end of the chunks it stitches. A window whose reach meets the
+/// shot's prefix or its end has a prefix or terminal variant. Allocates
+/// nothing.
+round_range model_reach(const experiment_template &t,
+                        const window_request &request);
+
+/// The instances k of @p request whose commit zone, clipped to the shot,
+/// is non-empty in a @p num_rounds round shot.
+/// @throws std::invalid_argument if the request has no commit zone or a
+/// period below 1.
+index_range window_instances(const window_request &request,
+                             std::size_t num_rounds);
+
+/// The rounds, zones, ports and sends of window @p k of @p request in a
+/// @p num_rounds round shot: window_from_dem_chunks() without the model and
+/// the maps, so it stitches no chunks.
+/// @throws std::invalid_argument as window_from_dem_chunks(), except for
+/// m2o.
+decoding_window place_window(std::shared_ptr<const experiment_template> context,
+                             const window_request &request, std::int64_t k,
+                             std::size_t num_rounds);
+
+/// Build window @p k of @p request in a @p num_rounds round shot.
+/// @param with_m2o Also build m2o, which needs the window to hold the
+/// shot's readout round.
+/// @throws std::invalid_argument as check_window_request() if the request is
+/// invalid, or naming the operation if window k does not exist or m2o cannot
+/// be built.
+decoding_window
+window_from_dem_chunks(std::shared_ptr<const experiment_template> context,
+                       const window_request &request, std::int64_t k,
+                       std::size_t num_rounds, bool with_m2o = false);
+
+/// The canonical workload after decoding.
+struct window_outputs {
+  std::vector<std::uint8_t> committed;          ///< e' = C AND e
+  std::vector<std::vector<std::uint8_t>> sends; ///< One per window send
+  std::vector<std::uint8_t> frame;              ///< O * e'
+};
+
+/// Which windows of a layer share a model. position is k while the shot's
+/// prefix reaches the rounds the window's model reads; terminal is R minus
+/// the anchor while the shot's end does. A key with neither is the layer's
+/// bulk. Windows with equal keys are the same problem up to a shift of
+/// rounds, so a layer has finitely many variants for every shot length.
+struct variant_key {
+  std::optional<std::int64_t> position;
+  std::optional<std::int64_t> terminal;
+  /// True for the layer's bulk.
+  bool bulk() const { return !position && !terminal; }
+  auto operator<=>(const variant_key &) const = default;
+};
+
+/// The variant key of window @p k of @p request in a @p num_rounds shot.
+variant_key window_variant(const experiment_template &context,
+                           const window_request &request, std::int64_t k,
+                           std::size_t num_rounds);
+
+/// What window_variant() reads of a layer and its template, found once by
+/// variant_bounds_of() for a caller that asks per window.
+struct variant_bounds {
+  round_range reach;              ///< model_reach() of the request
+  std::int64_t prefix_rounds = 0; ///< The template's prefix rounds
+  std::int64_t end_rounds = 0;    ///< Rounds kept from the shot's end
+};
+
+/// @p request's variant bounds on @p context.
+/// @throws std::invalid_argument if the request's anchor is invalid.
+variant_bounds variant_bounds_of(const experiment_template &context,
+                                 const window_request &request);
+
+/// window_variant() from @p bounds, those of @p request. Allocates
+/// nothing and does not check the request.
+variant_key window_variant(const variant_bounds &bounds,
+                           const window_request &request, std::int64_t k,
+                           std::size_t num_rounds);
+
+/// One window of a layer, as ingest hands it over by value: which window it
+/// is, its rounds and model, where its first row lies in the shot, and its
+/// own rows' detectors. A decode_window reads nothing else of ingest. It is
+/// the edge-value type "window_rows", which an executor may copy into its
+/// joins.
+struct window_rows {
+  std::int64_t k = 0;
+  round_range rounds;        ///< The window's rounds, clipped to the shot
+  variant_key variant;       ///< Its model among the layer's variants
+  std::size_t first_row = 0; ///< Its first round's first row in the shot
+  std::vector<std::uint8_t> detectors; ///< Its own rows, round by round
+};
+
+/// A shot length past which a layer gains no variant: every key appears in
+/// some shot of [context.min_rounds(), variant_probe_rounds()).
+std::size_t variant_probe_rounds(const experiment_template &context,
+                                 const window_request &request);
+
+/// Where a variant first appears: its key, and an instance and shot length
+/// that have it.
+struct variant_instance {
+  variant_key key;
+  std::int64_t k = 0;
+  std::size_t num_rounds = 0;
+};
+
+/// Every variant of @p request, each with the first shot length, from the
+/// shortest, and the first instance in it that has it, over the shots
+/// variant_probe_rounds() bounds.
+/// @throws std::invalid_argument as check_window_request() if the request
+/// is invalid.
+std::vector<variant_instance>
+variant_instances(const experiment_template &context,
+                  const window_request &request);
+
+/// Check that two windows are the same problem up to a shift of rounds.
+/// @throws std::invalid_argument naming the first field they differ in.
+void check_same_window_up_to_shift(const decoding_window &a,
+                                   const decoding_window &b);
+
+/// Check that the layer's bulk windows k_bulk and k_bulk + 1 are the same
+/// problem up to a shift, which lets one bulk model serve every bulk window.
+/// @throws std::invalid_argument as check_same_window_up_to_shift().
+void check_translation_invariance(
+    std::shared_ptr<const experiment_template> context,
+    const window_request &request);
+
+/// A window's model as dense matrices, for tests and diagnostics: H spans
+/// every column, with no entries in the logical-error columns. At large
+/// distances this takes gigabytes.
+detector_error_model dense_model(const window_model &model);
+
+/// One window's decode: the estimate, whether the decoder converged and the
+/// estimate explains the detectors, and the canonical workload's outputs.
+struct window_solution {
+  std::vector<std::uint8_t> estimate; ///< e, one per model column
+  bool converged = true;
+  bool satisfied = true; ///< H e = d over every row of the window
+  window_outputs outputs;
+};
+
+/// One window's per-shot buffers. make_window_workspace() sizes them once,
+/// at configuration time, and solve_window() and commit_window() reuse them
+/// on every shot, so they allocate nothing. Each decode in flight needs its
+/// own.
+struct window_workspace {
+  std::vector<float_t> syndrome;       ///< The decoder's input, one per row
+  std::vector<std::uint8_t> explained; ///< H e, one per row
+  std::vector<std::uint8_t> delta;     ///< H e', one per row
+  window_solution solution;            ///< The last decode
+};
+
+/// A workspace sized for @p window's rows, columns and sends.
+window_workspace make_window_workspace(const decoding_window &window);
+
+/// Commit @p ws.solution.estimate, and write the window's sends and frame
+/// update to @p ws.solution.outputs. Allocates nothing.
+/// @param detectors The window's detector values, one per model row.
+/// @param ws A workspace from make_window_workspace() for @p window.
+/// @throws std::invalid_argument if @p detectors has the wrong length or
+/// @p ws is not sized for @p window.
+void commit_window(const decoding_window &window,
+                   const std::vector<std::uint8_t> &detectors,
+                   window_workspace &ws);
+
+/// Commit @p estimate on a workspace of its own, which allocates; for tests
+/// and diagnostics.
+/// @param detectors The window's detector values, one per model row.
+/// @param estimate The decoder's estimate, one per model column.
+/// @throws std::invalid_argument if a vector has the wrong length.
+window_outputs commit_window(const decoding_window &window,
+                             const std::vector<std::uint8_t> &detectors,
+                             const std::vector<std::uint8_t> &estimate);
+
+/// Apply send @p send of window @p sender to window @p receiver's detectors:
+/// a delta flips the receiver's own rows of the send's rounds, and a
+/// residual sets the receiver's imported rows. Rows are matched through the
+/// shot, so the two windows must be of one shot on one template. Every row
+/// is checked before any is changed. Allocates nothing.
+/// @param values The send's values, one per row of it.
+/// @param detectors The receiver's detectors, one per model row; updated.
+/// @throws std::invalid_argument if the windows are of different shots, the
+/// sender has no such send, a vector has the wrong length, or a row of the
+/// send is not one the receiver takes in the send's mode.
+void receive_send(const decoding_window &receiver,
+                  const decoding_window &sender, std::size_t send,
+                  const std::vector<std::uint8_t> &values,
+                  std::vector<std::uint8_t> &detectors);
+
+/// A decoder over @p window's model, @p name with @p params: H over the
+/// decoder's columns with their priors, returning fault columns. Null when
+/// the window has no rows or no decoder columns, so nothing to decode.
+/// @throws as get_decoder() does, and std::invalid_argument if the decoder
+/// returns observables, or does not take the window's rows and return its
+/// decoder columns.
+std::unique_ptr<decoder>
+make_window_decoder(const decoding_window &window, const std::string &name,
+                    const cudaqx::heterogeneous_map &params = {});
+
+/// Decode @p window's @p detectors with @p dec, from make_window_decoder(),
+/// into @p ws.solution, and commit the estimate. A null @p dec estimates no
+/// fault. Columns the decoder does not see, the logical-error ones, are
+/// never estimated. Allocates nothing beyond what the decoder's decode()
+/// does.
+/// @param ws A workspace from make_window_workspace() for @p window.
+/// @throws std::invalid_argument if @p detectors has the wrong length, @p ws
+/// is not sized for @p window, or the decoder returns the wrong number of
+/// columns.
+void solve_window(const decoding_window &window, decoder *dec,
+                  const std::vector<std::uint8_t> &detectors,
+                  window_workspace &ws);
+
+} // namespace cudaq::qec

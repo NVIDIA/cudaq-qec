@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoding_task_graph.h"
@@ -73,6 +70,13 @@ TEST(ChromobiusDecoder, checkKnownObservableFlip) {
   EXPECT_TRUE(result.converged);
   ASSERT_EQ(result.result.size(), 1);
   EXPECT_EQ(result.result[0], 1.0);
+}
+
+TEST(ChromobiusDecoder, checkWrongSyndromeLengthThrows) {
+  auto decoder = cudaq::qec::decoder::get(
+      "chromobius", std::string_view{chromobius_dem}, make_params());
+  std::vector<cudaq::qec::float_t> syndrome = {0, 0, 0};
+  EXPECT_THROW((void)decoder->decode(syndrome), std::invalid_argument);
 }
 
 TEST(ChromobiusDecoder, checkPcmInputThrows) {

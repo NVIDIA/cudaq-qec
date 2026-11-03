@@ -172,7 +172,10 @@ __device__ void my_decoder::decode_impl(
     std::size_t num_measurements,
     std::size_t num_observables) {
   
-  // Example: Simple single-threaded implementation
+  // Example: Simple single-threaded implementation.  The dispatch kernel
+  // calls the RPC handler, and through it decode_impl, on every thread of
+  // its block, so a single-threaded decoder must guard its work on thread 0
+  // (or partition it across the threads).
   if (threadIdx.x == 0 && blockIdx.x == 0) {
     
     // Step 1: Compute syndrome from measurements
@@ -185,7 +188,9 @@ __device__ void my_decoder::decode_impl(
     // Step 3: Corrections are written to output buffer
   }
   
-  // For multi-threaded implementations, add __syncthreads() as needed
+  // For multi-threaded implementations, add __syncthreads() as needed;
+  // every thread of the block must reach each barrier (no early returns
+  // before it), and there is no grid-wide sync.
 }
 
 __device__ void my_decoder::compute_syndrome(
@@ -223,9 +228,10 @@ __device__ void my_decoder::decode_syndrome(
 ```
 
 **Performance tips:**
-- For large problems, parallelize across threads/blocks
+- For large problems, parallelize across the threads of the dispatcher block
+  (one block of `threads_per_block` threads; there is no grid-wide sync)
 - Use shared memory for intermediate results
-- Consider cooperative groups for complex synchronization
+- Consider block-scoped cooperative groups for complex synchronization
 - Profile with `nsight-compute` to optimize memory access patterns
 
 ---
@@ -267,6 +273,16 @@ constexpr std::size_t kMaxMeasurementBytes = 1024;
 ///
 /// On an in-place ring tx_slot aliases rx_slot, so the handler must read
 /// everything it needs from the request before writing the response.
+///
+/// Threading: the dispatch kernel runs one block of threads_per_block threads
+/// and calls this handler on every thread of that block, with identical
+/// arguments, between two __syncthreads(); blockIdx.x is always 0 and only
+/// thread 0's return value is recorded (other threads may return early).
+/// Side-effecting work must therefore be guarded on thread 0 or written for
+/// N threads; a read-modify-write of slot memory is not safe unguarded.
+/// Here decode_impl guards itself and thread 0 alone writes result_len.
+/// Block barriers inside a handler are allowed only if every thread reaches
+/// them; there is no grid-wide sync (this is not a cooperative launch).
 __device__ int my_decode_rpc(const void* rx_slot, void* tx_slot,
                              std::size_t slot_size) {
   using cudaq::realtime::RPCHeader;
@@ -293,11 +309,14 @@ __device__ int my_decode_rpc(const void* rx_slot, void* tx_slot,
   for (std::size_t i = 0; i < ctx.num_measurements; ++i)
     local_measurements[i] = measurements[i];
 
-  // Call the CRTP decoder interface
+  // Call the CRTP decoder interface on every thread; decode_impl decides
+  // which threads do the work.
   g_my_decoder->decode(local_measurements, corrections,
                        ctx.num_measurements, ctx.num_observables);
 
-  response->result_len = static_cast<std::uint32_t>(ctx.num_observables);
+  // Thread 0 owns the response; the kernel records only its return value.
+  if (threadIdx.x == 0)
+    response->result_len = static_cast<std::uint32_t>(ctx.num_observables);
   return 0; // Success
 }
 
@@ -606,7 +625,10 @@ The mock decoder demonstrates:
 - Consider warp-level primitives for reductions
 
 ### Correctness
-- Start with single-threaded implementation, parallelize later
+- Start with a single-threaded implementation guarded on thread 0 (the
+  dispatch kernel calls the handler on every thread of its block), then
+  parallelize across that block later; every `__syncthreads()` must be
+  reached by all threads
 - Write comprehensive unit tests before integration testing
 - Test edge cases (all-zero syndromes, maximum-weight syndromes, etc.)
 - Validate against CPU reference implementation

@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import pytest
 import numpy as np
 import cudaq_qec as qec
@@ -41,6 +36,47 @@ def test_decoder_initialization_with_fortran_order():
     r_c = decoder_c.decode(syndrome)
     assert r_f.converged == r_c.converged
     assert list(r_f.result) == list(r_c.result)
+
+
+def test_decode_accepts_ndarray_syndromes():
+    """decode / decode_batch take NumPy arrays directly (any numeric or bool
+    dtype, any layout) and hand the decoder the same values as the list
+    forms; soft float syndromes are preserved exactly. An echo decoder makes
+    the values the decoder received observable."""
+
+    @qec.decoder("echo_syndrome_byod")
+    class EchoDecoder:
+
+        def __init__(self, H, **kwargs):
+            qec.Decoder.__init__(self, H)
+
+        def decode(self, syndrome):
+            res = qec.DecoderResult()
+            res.converged = True
+            res.result = list(syndrome)
+            return res
+
+    decoder = qec.get_decoder("echo_syndrome_byod", H)
+    rows = [create_test_syndrome(), create_test_syndrome()]
+    ref = decoder.decode_batch(rows)
+    soft = np.array(rows)
+    np.testing.assert_array_equal(ref.result, soft)
+    for arr in (soft, np.asfortranarray(soft), np.vstack([soft, soft])[::2]):
+        got = decoder.decode_batch(arr)
+        np.testing.assert_array_equal(got.result, soft)
+        np.testing.assert_array_equal(got.converged, ref.converged)
+    np.testing.assert_array_equal(decoder.decode(soft[1]).result, soft[1])
+    hard = (soft > 0.5).astype(np.uint8)
+    for arr in (hard, hard.astype(bool), hard.astype(np.int64),
+                hard.astype(np.float32), hard.tolist()):
+        np.testing.assert_array_equal(decoder.decode_batch(arr).result, hard)
+    np.testing.assert_array_equal(decoder.decode(hard[0]).result, hard[0])
+    np.testing.assert_array_equal(
+        decoder.decode(hard[0].tolist()).result, hard[0])
+    with pytest.raises(TypeError):
+        decoder.decode_batch(soft.astype(np.complex128))
+    with pytest.raises(TypeError):
+        decoder.decode_batch(np.zeros((2, 3, 10)))
 
 
 def test_decoder_api():
@@ -406,20 +442,48 @@ def test_decoder_different_matrix_sizes(matrix_shape, syndrome_size):
     assert np.all((0 <= result) & (result <= 1))
 
 
-# FIXME add this back
-# def test_decoder_error_handling():
-#     H = Tensor(create_test_matrix())
-#     decoder = qec.get_decoder('example_byod', H)
+FIXED_WIDTH_DECODERS = [
+    "single_error_lut", "multi_error_lut", "single_error_lut_example",
+    "pymatching"
+]
 
-#     # Test with incorrect syndrome size
-#     with pytest.raises(ValueError):
-#         wrong_syndrome = np.random.random(15).tolist()  # Wrong size
-#         decoder.decode(wrong_syndrome)
 
-#     # Test with invalid syndrome type
-#     with pytest.raises(TypeError):
-#         wrong_type_syndrome = "invalid"
-#         decoder.decode(wrong_type_syndrome)
+@pytest.mark.parametrize("name", FIXED_WIDTH_DECODERS)
+@pytest.mark.parametrize("length", [0, 1, 3])
+@pytest.mark.parametrize("as_numpy", [False, True])
+def test_decoder_rejects_wrong_syndrome_length(name, length, as_numpy):
+    H = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.uint8)
+    decoder = qec.get_decoder(name, H)
+    syndrome = [1.0] * length
+    if as_numpy:
+        syndrome = np.array(syndrome, dtype=np.float64)
+
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode(syndrome)
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode_async(syndrome).get()
+    batch = np.array([syndrome]) if as_numpy else [syndrome]
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode_batch(batch)
+
+    # The decoder stays usable after rejecting an input.
+    assert decoder.decode([0.0, 0.0]).converged
+
+
+@pytest.mark.parametrize("name", FIXED_WIDTH_DECODERS)
+def test_decoder_batch_rejects_ragged_rows(name):
+    H = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.uint8)
+    decoder = qec.get_decoder(name, H)
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode_batch([[0.0, 1.0], [1.0]])
+
+
+def test_decode_batch_wrong_width_uint8_issue_884():
+    H = np.array([[1, 1, 0], [0, 1, 1]], dtype=np.uint8)
+    decoder = qec.get_decoder("single_error_lut", H)
+    decoder.decode_batch(np.array([[0, 0]], dtype=np.uint8))
+    with pytest.raises(ValueError, match="length 1 but this decoder expects 2"):
+        decoder.decode_batch(np.array([[0]], dtype=np.uint8))
 
 
 def test_decoder_reproducibility():

@@ -1,11 +1,7 @@
 #!/bin/bash
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Same two-process MIXED-DISPATCH test as surface_code-4-yaml-mixed-dispatch-
 # test.sh, except decoder 1 is a single_window task graph hosting nv-qldpc

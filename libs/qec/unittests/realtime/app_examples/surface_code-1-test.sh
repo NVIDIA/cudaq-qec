@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Abort on failure
 set -e
@@ -144,7 +139,12 @@ else
     return_code=1
   fi
 
-  # Step 2: Replay syndromes with --load_syndrome.
+  # Step 2: Replay syndromes with --load_syndrome. A replay sends every
+  # round untagged, so it cannot end a shot that needs a final row
+  # (--parallel_window); SKIP_SYNDROME_REPLAY=1 stops after the capture.
+  if [[ -n "${SKIP_SYNDROME_REPLAY:-}" ]]; then
+    echo "Step 2: skipped (SKIP_SYNDROME_REPLAY)"
+  else
   echo "Step 2: Replaying syndromes from $SYNDROME_FILE"
   $EXE_PATH1 --distance $DISTANCE --num_shots $SYNDROME_NUM_SHOTS \
     --num_rounds $NUM_ROUNDS \
@@ -164,6 +164,7 @@ else
   else
     echo "Error: Syndrome replay did not complete"
     return_code=1
+  fi
   fi
 fi
 

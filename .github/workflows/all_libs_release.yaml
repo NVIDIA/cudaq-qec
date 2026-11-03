@@ -33,8 +33,8 @@ jobs:
       image: >-
         ${{
           inputs.release-number == '0.0.0'
-          && format('ghcr.io/nvidia/cudaqx-dev:{0}-{1}-cu{2}', 'latest', matrix.runner.arch, matrix.cuda_version)
-          || format('ghcr.io/nvidia/cudaqx-dev:{0}-{1}-cu{2}', inputs.release-number, matrix.runner.arch, matrix.cuda_version)
+          && format('ghcr.io/nvidia/cudaq-qec-dev:{0}-{1}-cu{2}', 'latest', matrix.runner.arch, matrix.cuda_version)
+          || format('ghcr.io/nvidia/cudaq-qec-dev:{0}-{1}-cu{2}', inputs.release-number, matrix.runner.arch, matrix.cuda_version)
         }}
       env:
         NVIDIA_VISIBLE_DEVICES: ${{ env.NVIDIA_VISIBLE_DEVICES }}
@@ -80,11 +80,15 @@ jobs:
             ls
             # Show release info (and save to summary)
             gh release view -R ${{ inputs.assets_repo }} ${{ inputs.assets_tag }} >> $GITHUB_STEP_SUMMARY
-            # Extract the decoder that needs to be embedded in the release
+            # Extract the decoders that need to be embedded in the release.
+            # QEC_EXTERNAL_DECODERS is consumed as a CMake list
+            # (libs/qec/CMakeLists.txt), so multiple paths are
+            # semicolon-separated.
             mkdir -p tmp
             tar -C tmp -xzvf nv-qldpc-decoder-${{ matrix.runner.arch }}_ubuntu24.04_cuda${{ matrix.cuda_version }}_release.tar.gz
             test -f tmp/libcudaq-qec-nv-qldpc-decoder.so
-            echo "QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so" >> $GITHUB_ENV
+            test -f tmp/libcudaq-qec-nv-fusion-decoder.so
+            echo "QEC_EXTERNAL_DECODERS=$(pwd)/tmp/libcudaq-qec-nv-qldpc-decoder.so;$(pwd)/tmp/libcudaq-qec-nv-fusion-decoder.so" >> $GITHUB_ENV
             # The proprietary cudevice archive is optional: it only enables
             # device_graph dispatch in the decoding_server binary and the
             # device-graph realtime tests, neither of which ships in the
@@ -146,13 +150,14 @@ jobs:
 
       - name: Save build artifacts
         run: |
-          # The decoding server is not shipped in the official release, so
-          # remove its executables (and example configs) as well as the
-          # loadable service-plugin library itself from the install prefix
+          # The decoding server and its configuration generator are not shipped
+          # in the official release. Remove their executables, server example
+          # configs, and loadable service-plugin library from the install prefix
           # and the install manifest before zipping. Without removing the
           # library, the server remained activatable via
           # CUDAQ_DEVICE_CALL_CHANNEL even with the launcher binary gone.
           for f in /usr/local/cudaq/bin/decoding_server* \
+                   /usr/local/cudaq/bin/memory-experiment-generator \
                    /usr/local/cudaq/lib/libcudaq-qec-realtime-decoding-server-cqr.so; do
             [ -e "$f" ] || continue
             rm -f "$f"
@@ -173,13 +178,19 @@ jobs:
       # Run tests
       # ========================================================================
       #
+      - name: Install generator CLI test requirements
+        run: |
+          cli_python=$(ctest --test-dir "${{ steps.build.outputs.build-dir }}" --show-only=json-v1 |
+            jq -er '.tests[] | select(.name == "memory_experiment_generator_cli") | .command[0]')
+          "$cli_python" -m pip install --break-system-packages -r libs/qec/unittests/memory-experiment-generator/requirements.txt
+
       - name: Run tests
         run: cmake --build ${{ steps.build.outputs.build-dir }} --target run_tests
 
       # ========================================================================
       # Run python tests
       # ========================================================================
- 
+
       - name: Install python requirements
         env:
           LD_LIBRARY_PATH: ${{ env.MPI_PATH }}/lib:${{ env.LD_LIBRARY_PATH }}

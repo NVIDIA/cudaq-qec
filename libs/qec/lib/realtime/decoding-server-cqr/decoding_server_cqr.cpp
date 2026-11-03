@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /// cudaq-realtime (cqr) DeviceCallService plugin for the decoding server.
 ///
@@ -84,7 +81,10 @@ static void init_server() {
     reg->load_from_config(std::string(cfg));
   } else if (const auto config = cudaq::qec::decoding::config::
                  last_configured_multi_decoder_config()) {
-    reg->load_from_config(*config, "configure_decoders()");
+    // configure_decoders() already warned about this config's serving.
+    reg->load_from_config(*config, "configure_decoders()",
+                          std::filesystem::current_path(),
+                          /*warn_serving=*/false);
   } else {
     throw std::runtime_error(
         "decoding-server config not found: set CUDAQ_QEC_DECODER_CONFIG to a "

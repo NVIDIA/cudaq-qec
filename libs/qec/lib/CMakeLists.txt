@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 set(LIBRARY_NAME cudaq-qec)
 set(DECODERS_LIBRARY_NAME cudaq-qec-decoders)
@@ -72,6 +67,15 @@ set(DECODERS_SOURCES
   decoding_task/decoding_task_window_node.cpp
   decoding_task/decoding_task_memory_window_node.cpp
   decoding_task/decoding_task_xor_node.cpp
+  decoding_task/decoding_task_experiment_template.cpp
+  decoding_task/decoding_task_decoding_window.cpp
+  decoding_task/decoding_task_commitment.cpp
+  decoding_task/decoding_task_data_artifacts.cpp
+  decoding_task/decoding_task_ingest_core.cpp
+  decoding_task/decoding_task_ingest_node.cpp
+  decoding_task/decoding_task_decode_window_core.cpp
+  decoding_task/decoding_task_decode_window_node.cpp
+  decoding_task/decoding_task_parallel_window_pattern.cpp
   decoder_init.cpp
   decoder_config_payload.cpp
   decoder_config_schema.cpp
@@ -89,6 +93,7 @@ set(QEC_SOURCES
   decoder_config_payload_provider.cpp
   dem_construction_code.cpp
   experiments.cpp
+  memory_dem_chunks.cpp
   stabilizer_utils.cpp
 )
 
@@ -225,6 +230,7 @@ if(TARGET ${LIBRARY_NAME})
       cudaq::cudaq-operator
     PRIVATE
       cudaq::cudaq-common
+      cudaq::cudaq-em-default
   )
 
   target_link_libraries(${LIBRARY_NAME} PRIVATE

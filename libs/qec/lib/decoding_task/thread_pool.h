@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.
- * All rights reserved.
- *
- * This source code and the accompanying materials are made available under
- * the terms of the Apache License 2.0 which accompanies this distribution.
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /// @file
 ///
@@ -26,6 +23,20 @@
 #include <thread>
 #include <type_traits>
 #include <vector>
+
+// CPU pause hint for spin loops, as cudaq-realtime defines it.
+#ifndef CUDAQ_REALTIME_CPU_RELAX
+#if defined(__x86_64__)
+#include <xmmintrin.h>
+#define CUDAQ_REALTIME_CPU_RELAX() _mm_pause()
+#elif defined(__aarch64__)
+#define CUDAQ_REALTIME_CPU_RELAX() __asm__ volatile("yield" ::: "memory")
+#else
+#define CUDAQ_REALTIME_CPU_RELAX()                                             \
+  do {                                                                         \
+  } while (0)
+#endif
+#endif
 
 namespace cudaq::qec::detail {
 

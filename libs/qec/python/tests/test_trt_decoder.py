@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """
 TRT Decoder Tests
 
@@ -985,7 +980,7 @@ class TestTRTDecoderBatchValidation:
         else:
             syndromes = [invalid_syndrome]
 
-        with pytest.raises(RuntimeError, match="Syndrome size mismatch"):
+        with pytest.raises(ValueError, match="Syndrome size mismatch"):
             decoder.decode_batch(syndromes)
 
     def test_decode_single_syndrome_size_mismatch(self,
@@ -996,7 +991,7 @@ class TestTRTDecoderBatchValidation:
         # Create syndrome with wrong size
         wrong_size_syndrome = [0.0] * (syndrome_size + 5)
 
-        with pytest.raises(RuntimeError, match="Syndrome size mismatch"):
+        with pytest.raises(ValueError, match="Syndrome size mismatch"):
             decoder.decode(wrong_size_syndrome)
 
     def test_decode_batch_empty_list(self, decoder_with_batch_size):

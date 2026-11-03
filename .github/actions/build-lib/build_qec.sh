@@ -1,4 +1,7 @@
 #!/bin/sh
+
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 set -e
 
 . "$(dirname "$0")/setup_custabilizer.sh"
@@ -65,6 +68,7 @@ cmake -S libs/qec -B "$build_dir" \
   -DCUDAQX_BINDINGS_PYTHON=ON \
   -DCMAKE_INSTALL_PREFIX="$install_prefix" \
   -DCUDAQ_REALTIME_ROOT=$CUDAQ_REALTIME_ROOT \
+  -DCUDAQX_QEC_ENABLE_REALTIME_PIPELINE=ON \
   -DCUDAQX_QEC_ENABLE_HSB_TOOLS=ON \
   -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=$HSB_ROOT \
   -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=$HSB_BUILD \

@@ -1,4 +1,7 @@
 #!/bin/sh
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Shared helper used by the CI build scripts to make sure the cuStabilizer
 # library (shipped inside the cuquantum-python pip wheel) is installed in the
 # active Python environment before CMake configures the QEC library.

@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2025 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
@@ -989,9 +986,9 @@ trt_decoder::decode(const std::vector<float_t> &syndrome,
                     cancellation_token tok) {
   // Validate syndrome size
   if (syndrome.size() != syndrome_size_per_sample_) {
-    throw std::runtime_error("Syndrome size mismatch: expected " +
-                             std::to_string(syndrome_size_per_sample_) +
-                             " but got " + std::to_string(syndrome.size()));
+    throw std::invalid_argument("Syndrome size mismatch: expected " +
+                                std::to_string(syndrome_size_per_sample_) +
+                                " but got " + std::to_string(syndrome.size()));
   }
 
   // For models with batch_size > 1, zero-pad to fill the batch
@@ -1047,7 +1044,7 @@ trt_decoder::decode_batch(const std::vector<std::vector<float_t>> &syndromes,
   // Validate all syndrome sizes match expected size
   for (size_t i = 0; i < syndromes.size(); ++i) {
     if (syndromes[i].size() != syndrome_size_per_sample_) {
-      throw std::runtime_error(
+      throw std::invalid_argument(
           "Syndrome size mismatch at index " + std::to_string(i) +
           ": expected " + std::to_string(syndrome_size_per_sample_) +
           " but got " + std::to_string(syndromes[i].size()));
@@ -1417,10 +1414,16 @@ build_engine_from_onnx(const std::string &onnx_model_path,
     throw std::runtime_error("Failed to create TensorRT builder");
   }
 
-  auto network =
-      std::unique_ptr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(
-          1U << static_cast<uint32_t>(
-              nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED)));
+#if NV_TENSORRT_MAJOR >= 11
+  // Strongly typed mode is always on in TensorRT 11; the flag is deprecated.
+  constexpr nvinfer1::NetworkDefinitionCreationFlags networkFlags = 0U;
+#else
+  constexpr nvinfer1::NetworkDefinitionCreationFlags networkFlags =
+      1U << static_cast<uint32_t>(
+          nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
+#endif
+  auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(
+      builder->createNetworkV2(networkFlags));
   if (!network) {
     throw std::runtime_error("Failed to create TensorRT network");
   }

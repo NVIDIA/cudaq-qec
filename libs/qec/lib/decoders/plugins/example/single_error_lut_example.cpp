@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
@@ -56,12 +53,13 @@ public:
   }
 
   decoder_result decode(const std::vector<float_t> &syndrome) override {
+    // Reject a wrong-length syndrome before the loop below indexes it.
+    check_syndrome_size(syndrome.size());
     // This is a simple decoder that simply results
     decoder_result result{false, std::vector<float_t>(block_size, 0.0)};
 
     // Convert syndrome to a string
     std::string syndrome_str(syndrome.size(), '0');
-    assert(syndrome_str.length() == syndrome_size);
     bool anyErrors = false;
     for (std::size_t i = 0; i < syndrome_size; i++) {
       if (cudaq::qec::convert_soft_to_hard(syndrome[i])) {

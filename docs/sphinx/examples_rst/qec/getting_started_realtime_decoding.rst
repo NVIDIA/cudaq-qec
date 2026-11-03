@@ -88,6 +88,23 @@ Decoder parameters are validated against the parameter schema each decoder regis
 
 The configuration is then saved to a YAML file for reuse. The YAML format is human-readable, making it easy to inspect, modify, and share configurations across different execution environments.
 
+For finite Surface Code memory experiments, the standalone
+``memory-experiment-generator`` can generate this YAML directly. The required
+``--output=PATH`` selects its destination; there is no default filename. It
+never replaces an existing configuration. Pass the completed file to
+``decoding_server --config=PATH`` explicitly; the server executes the generated
+``parallel_window`` graph and closes shots through its ``final`` mapping. The
+generator does not change server configuration discovery or in-process
+configuration APIs.
+
+.. note::
+
+   DEM-chunk ``error_rates``, flat ``error_rate_vec`` entries and schema-typed floating-point decoder parameters
+   now retain full double precision when configurations are saved. Earlier
+   versions rounded these values to six significant digits. Exported YAML text
+   may therefore change, including decoder-server configurations and
+   ``--save_dem`` output; the input schema is unchanged.
+
 Use :func:`~cudaq_qec.decoder_context_from_memory_circuit` to obtain the parity-check, observable,
 and measurement-to-detector matrices in one call, then assemble the decoder config:
 
@@ -202,6 +219,31 @@ plugins loaded in the process (including out-of-tree ones) appear in it
 automatically. Schema ``validate`` hooks are arbitrary code and cannot be
 represented in JSON Schema, so a file that passes the exported schema may
 still be rejected by a hook when the configuration is parsed.
+
+A ready-made validator for machines that have neither a GPU nor CUDA-Q QEC
+installed ships in ``libs/qec/tools/config-validator/``. It needs only
+``pyyaml`` and ``jsonschema``; the schema file is exported once from an
+installation that has ``cudaq_qec``:
+
+.. code-block:: bash
+
+   # On a machine with cudaq_qec installed:
+   python3 validate_decoder_config.py --export-schema decoder_config.schema.json
+   # Or on a decoding-server installation without the Python package
+   # (DIR holds libcudaq-qec-realtime-decoding.so and decoder-plugins/):
+   python3 validate_decoder_config.py --lib-dir DIR --export-schema decoder_config.schema.json
+   # On any machine:
+   pip install pyyaml jsonschema
+   python3 validate_decoder_config.py --schema decoder_config.schema.json my_config.yaml
+
+The script reads scalars the way the server's LLVM YAML parser does: every
+scalar is text, converted by the type of the field it lands in, so ``6e-05``
+is a float, ``'3'`` is an integer and ``on`` in a string field stays a
+string. A plain ``yaml.safe_load`` follows YAML 1.1 instead (``6e-05``
+becomes a string, ``on`` a boolean), so do not feed these files to the
+schema through ``yaml.safe_load``. Task-graph configurations are reported as
+invalid unless ``--allow-task-graph`` is given. See the ``README.md`` next
+to the script for the full list of rules.
 
 ``cuda_device_id`` pins a GPU-accelerated decoder (e.g. ``nv-qldpc-decoder``
 or ``trt_decoder``) to a specific CUDA device. The same knob is available as

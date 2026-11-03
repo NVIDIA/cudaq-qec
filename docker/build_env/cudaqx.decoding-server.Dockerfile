@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Build environment for the CUDA-QX QEC *decoding server*, built on a plain
 # ubuntu:24.04 base.  This is the decoders-only build
@@ -67,9 +62,10 @@ FROM ${cudaq_image} AS cudaq_realtime
 # Stage 2: the ubuntu:24.04 build environment.
 FROM ubuntu:24.04
 
-# CUDA toolkit version (cudart + nvcc). The realtime .so is CUDA-version
-# agnostic, so this only governs the device code we compile ourselves.
-ARG cuda_version=12.6
+# CUDA toolkit version (cudart + nvcc). It also selects the libnvjitlink
+# package below, so its major must match the cudaq_image's CUDA major
+# (cu13-latest -> 13.x): libcudaq-realtime.so links libnvJitLink.so.<major>.
+ARG cuda_version=13.0
 # LLVM (from apt.llvm.org) used only for LLVMSupport (llvm::yaml / llvm::json).
 # Must be >= 21 for llvm::yaml::IO::error(); 22 matches the pinned version the
 # realtime config parser was written against.
@@ -153,6 +149,7 @@ RUN CUDA_DASH=$(echo "${cuda_version}" | tr '.' '-') \
   && apt-get update && apt-get install -y --no-install-recommends \
        cuda-nvcc-${CUDA_DASH} \
        cuda-cudart-dev-${CUDA_DASH} \
+       libnvjitlink-${CUDA_DASH} \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Optional TensorRT for the cudaq-qec-trt-decoder plugin (opt-in; default off).

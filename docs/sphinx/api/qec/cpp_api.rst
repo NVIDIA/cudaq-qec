@@ -115,6 +115,7 @@ Chunk types
 
 .. doxygenfunction:: cudaq::qec::dem_chunk_from_spec
 .. doxygenfunction:: cudaq::qec::dem_chunks_from_spec
+.. doxygenfunction:: cudaq::qec::memory_dem_chunks_from_decoder_inputs
 
 Stitch, close, and merge
 ------------------------
@@ -211,6 +212,7 @@ Decoder Interfaces
 
 .. doxygenclass:: cudaq::qec::decoder
     :members:
+    :protected-members:
 
 .. doxygenstruct:: cudaq::qec::decoder_result
     :members:
@@ -261,6 +263,20 @@ I/O types
 Graph
 -----
 
+.. doxygenstruct:: cudaq::qec::experimental::round_range
+    :members:
+
+.. doxygenenum:: cudaq::qec::experimental::port_disposition
+.. doxygenenum:: cudaq::qec::experimental::send_mode
+.. doxygenenum:: cudaq::qec::experimental::input_boundary
+.. doxygenenum:: cudaq::qec::experimental::parallel_resolution
+
+.. doxygenstruct:: cudaq::qec::experimental::window_request
+    :members:
+
+.. doxygenstruct:: cudaq::qec::experimental::ingest_window
+    :members:
+
 .. doxygenstruct:: cudaq::qec::task_graph_edge
     :members:
 
@@ -280,6 +296,8 @@ Graph
 .. doxygenfunction:: cudaq::qec::registered_edge_value_types
 
 .. doxygenenum:: cudaq::qec::task_graph_streaming_status
+
+.. doxygenenum:: cudaq::qec::task_graph_closure
 
 .. doxygenstruct:: cudaq::qec::task_graph_output_progress
     :members:

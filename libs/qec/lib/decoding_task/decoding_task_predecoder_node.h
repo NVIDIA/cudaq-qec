@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 // Internal header: predecoder_node — a cheap decode that commits what it
 // explains and passes on what it does not, and the `predecoder` node kind it
@@ -82,6 +79,8 @@ public:
   ~predecoder_node() override;
 
   streaming_task_graph_node *streaming() override { return this; }
+  /// Windows and carry span deliveries, so copies would each see a part.
+  bool supports_fire_pool() const override { return false; }
   decoder_backed_task_graph_node *decoder_backed() override { return this; }
   const decoder_backed_task_graph_node *decoder_backed() const override {
     return this;

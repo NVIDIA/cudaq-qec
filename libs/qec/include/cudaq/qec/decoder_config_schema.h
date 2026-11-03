@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -109,7 +106,8 @@ registered_decoder_schema_names();
 
 /// Validate a custom-args map against the schema registered under
 /// `schema_name`: every key must appear in the schema (nested sections are
-/// checked recursively), every required key must be present, and the schema's
+/// checked recursively) and hold a value of its kind (a uint64 key no
+/// negative integer), every required key must be present, and the schema's
 /// `validate` hook (if any) runs last. Throws std::runtime_error describing
 /// the first violation. Maps that did not come from the YAML parser (e.g.
 /// built programmatically or from a Python dict) get the same checks the

@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2025 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
@@ -411,9 +406,10 @@ class TensorNetworkDecoder:
                 The probability that the logical observable flipped.
         """
         assert hasattr(self, "noise_model")
-        assert len(syndrome) == len(self.check_inds), (
-            f"Syndrome length {len(syndrome)} does not match the number of checks {len(self.check_inds)}."
-        )
+        if len(syndrome) != len(self.check_inds):
+            raise ValueError(
+                f"Syndrome has length {len(syndrome)} but this decoder expects "
+                f"{len(self.check_inds)} (the number of checks).")
         assert all(isinstance(s, float)
                    for s in syndrome), "Syndrome values must be float."
 
@@ -457,7 +453,10 @@ class TensorNetworkDecoder:
 
         assert hasattr(self, "noise_model")
         syndrome_length = syndrome_batch.shape[1]
-        assert syndrome_length == len(self.check_inds)
+        if syndrome_length != len(self.check_inds):
+            raise ValueError(
+                f"Syndrome has length {syndrome_length} but this decoder "
+                f"expects {len(self.check_inds)} (the number of checks).")
 
         # Remove the syndrome tensors from the full tensor network
         tn = TensorNetwork(

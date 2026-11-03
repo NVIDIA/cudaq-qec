@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2025 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 import sys
 import pytest
@@ -142,6 +137,19 @@ def test_decoder_decode_single():
     assert hasattr(res, "result")
     assert isinstance(res.result, np.ndarray)
     assert 0.0 <= res.result[0] <= 1.0
+
+
+@pytest.mark.parametrize("length", [1, 3])
+def test_decoder_rejects_wrong_syndrome_length(length):
+    H, logical, noise = make_simple_code()
+    decoder = qec.get_decoder("tensor_network_decoder",
+                              H,
+                              logical_obs=logical,
+                              noise_model=noise)
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode([0.0] * length)
+    with pytest.raises(ValueError, match="expects 2"):
+        decoder.decode_batch(np.zeros((2, length)))
 
 
 def test_decoder_decode_batch():

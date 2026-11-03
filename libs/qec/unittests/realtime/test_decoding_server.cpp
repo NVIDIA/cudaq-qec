@@ -1,10 +1,7 @@
-/*******************************************************************************
- * Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /// Two-process realtime decoding-server test: this process runs only the
 /// caller (simulated QPU) side; the decoder lives in a separate
@@ -400,6 +397,29 @@ void run_two_process_decode_test(const std::string &config_file) {
   std::string error;
   ASSERT_TRUE(server.start(config_file, error)) << error;
   run_two_process_client_flow(server);
+}
+
+// --export-schema prints the configuration JSON Schema of this installation
+// and exits without serving: the registered decoders (built-in and the
+// plugins the server loaded) all appear in it.
+TEST(DecodingServerTwoProcess, ExportSchemaPrintsInstalledRegistry) {
+  const std::string command = server_path() + " --export-schema 2>/dev/null";
+  FILE *pipe = ::popen(command.c_str(), "r");
+  ASSERT_NE(pipe, nullptr) << "popen failed for " << command;
+  std::string out;
+  std::array<char, 4096> buf{};
+  while (std::size_t n = std::fread(buf.data(), 1, buf.size(), pipe))
+    out.append(buf.data(), n);
+  const int status = ::pclose(pipe);
+  ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0)
+      << "exit status " << status << ", output: " << out.substr(0, 400);
+  EXPECT_NE(out.find("\"https://json-schema.org/draft/2020-12/schema\""),
+            std::string::npos);
+  EXPECT_NE(out.find("\"decoder_params\""), std::string::npos);
+  EXPECT_NE(out.find("\"pymatching\""), std::string::npos);
+  EXPECT_NE(out.find("\"multi_error_lut\""), std::string::npos);
+  // Nothing served: no READY line.
+  EXPECT_EQ(out.find("QEC_DECODING_SERVER_READY"), std::string::npos);
 }
 
 TEST(DecodingServerTwoProcess, TwoProcessHostDispatch) {

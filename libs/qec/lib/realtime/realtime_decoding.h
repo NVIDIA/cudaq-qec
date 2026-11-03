@@ -1,10 +1,7 @@
-/****************************************************************-*- C++ -*-****
- * Copyright (c) 2025 NVIDIA Corporation & Affiliates.                         *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/* -*- C++ -*-
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -12,11 +9,14 @@
 #include "cudaq/qec/realtime/decoding_config.h"
 
 namespace cudaq::qec {
+class data_artifact_store;
 class decoding_task_graph;
 } // namespace cudaq::qec
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <string>
 
 // Note: none of these are intended to be user-facing functions.
 
@@ -60,6 +60,101 @@ resolve_decoder_init(
     const cudaq::qec::decoding::config::decoder_config &decoder_config,
     const std::filesystem::path &base_dir);
 
+/// A Stim DEM entry as read: its text, and the sha256 of that text, which for
+/// a pinned entry is the pin it was checked against.
+struct stim_dem_read {
+  std::string text;
+  std::string sha256;
+  bool operator==(const stim_dem_read &) const = default;
+};
+
+/// Each pinned Stim DEM entry as read_pinned_stim_dems() read it, by entry
+/// name. A read stands in for its entry only while the entry still pins its
+/// sha256, so a map read for one configuration cannot pass bytes another
+/// configuration's pin does not name.
+using pinned_stim_dems = std::map<std::string, stim_dem_read>;
+
+/// Fill a data artifact store from a configuration: every template a window
+/// entry, an ingest layer or a parallel_window pattern is built on, named or
+/// inline, and no other, since experiment_template rejects some models a
+/// plain decoder's dem_chunks accepts; every Stim DEM entry, with a
+/// file-backed one read and checked against its pinned sha256; and every
+/// window variant a window entry, an ingest layer or a pattern needs, the
+/// pattern's layers as its windows <id>.A and <id>.B. A node's layers are
+/// built on the template its DEM is built from: its own dem_chunks, else its
+/// decoder's unless the decoder has flat matrices, which then outrank it, as
+/// when expand_dem_chunks() has run.
+/// A layer builds its own request; while that equals the window entry it
+/// names, as parsing leaves it, the entry must be on the node's template.
+/// Callers include decoding_task_data_artifacts.h to use the store.
+///
+/// @param base_dir Directory a relative `stim_dem_path` resolves against, as
+/// for resolve_decoder_init().
+/// @throws std::runtime_error naming the entry, or the decoder and node, if a
+/// file cannot be read or does not match its sha256, an inline Stim DEM is
+/// pinned, a window entry's context or a layer's entry is not of the right
+/// kind or template, a node with layers or a pattern has no template, a
+/// pattern's parameters are invalid, or a template or
+/// window cannot be built.
+/// @throws std::logic_error naming the same, if the store finds its own
+/// entries inconsistent, which no configuration causes.
+__attribute__((visibility("default"))) cudaq::qec::data_artifact_store
+fill_data_artifact_store(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
+    const std::filesystem::path &base_dir);
+
+/// As above, with each pinned Stim DEM entry's text from `pinned`, as
+/// read_pinned_stim_dems() reads it, rather than read and hashed again.
+/// @throws std::logic_error naming the entry if `pinned` lacks a pinned entry
+/// or read it against another pin.
+__attribute__((visibility("default"))) cudaq::qec::data_artifact_store
+fill_data_artifact_store(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
+    const std::filesystem::path &base_dir, const pinned_stim_dems &pinned);
+
+/// Read each pinned Stim DEM entry of `config` once and check it against its
+/// pin. A caller that both pins the decoders' models and fills a store passes
+/// the result to the overloads of with_pinned_stim_dems() and
+/// fill_data_artifact_store() that take it, so each file is read and hashed
+/// once.
+///
+/// @param base_dir Directory a relative `stim_dem_path` resolves against, as
+/// for resolve_decoder_init().
+/// @throws std::runtime_error naming the entry if a pinned file cannot be read
+/// or does not match its sha256, or if the pinned entry has no file.
+__attribute__((visibility("default"))) pinned_stim_dems read_pinned_stim_dems(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
+    const std::filesystem::path &base_dir);
+
+/// A copy of `config` in which each decoder's and task-graph node's
+/// `stim_dem` that names a data_artifacts entry is resolved as parsing
+/// resolves it, so a configuration built in code names entries too; and in
+/// which each one that names a pinned Stim DEM entry, by an unedited copy of
+/// its path, holds the entry's text in place of the path, so a model built
+/// from the copy is the one checked. Reads the pins with
+/// read_pinned_stim_dems().
+///
+/// @param base_dir Directory a relative `stim_dem_path` resolves against, as
+/// for resolve_decoder_init().
+/// @throws std::runtime_error naming the entry if a pinned file cannot be read
+/// or does not match its sha256, and as parsing does for a bad entry or a
+/// name no Stim DEM entry holds.
+__attribute__((visibility("default")))
+cudaq::qec::decoding::config::multi_decoder_config
+with_pinned_stim_dems(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
+    const std::filesystem::path &base_dir);
+
+/// As above, with each pinned entry's text from `pinned`, as
+/// read_pinned_stim_dems() reads it.
+/// @throws std::logic_error naming the entry if `pinned` lacks a pinned entry
+/// or read it against another pin.
+__attribute__((visibility("default")))
+cudaq::qec::decoding::config::multi_decoder_config
+with_pinned_stim_dems(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
+    const pinned_stim_dems &pinned);
+
 /// Construct and initialize one decoder for realtime use from already-resolved
 /// inputs. The returned decoder is fully configured with its ID and D matrix,
 /// but is not installed in a process-global registry or attached to a worker
@@ -87,6 +182,15 @@ std::unique_ptr<cudaq::qec::decoding_task_graph>
 build_task_graph(
     const cudaq::qec::decoding::config::decoder_config &decoder_config,
     const std::filesystem::path &base_dir = std::filesystem::current_path());
+
+/// Warn of each windowed decoder in @p config whose serving settings undo
+/// what its windows are for: a windowed task graph overlaps its decodes with
+/// later rounds only with async_streaming, ends a shot only at a FINAL
+/// round, which only a `final` syndrome_mapping row sends, and is served
+/// with dispatch: host only. A decoder is windowed when a node of its graph
+/// is a decode_window or a pattern that declares windows.
+__attribute__((visibility("default"))) void warn_windowed_serving(
+    const cudaq::qec::decoding::config::multi_decoder_config &config);
 
 __attribute__((visibility("default"))) void
 get_corrections(std::size_t decoder_id, uint8_t *corrections,

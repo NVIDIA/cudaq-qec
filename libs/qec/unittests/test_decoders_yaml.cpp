@@ -1,19 +1,24 @@
-/*******************************************************************************
- * Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                  *
- * All rights reserved.                                                        *
- *                                                                             *
- * This source code and the accompanying materials are made available under    *
- * the terms of the Apache License 2.0 which accompanies this distribution.    *
- ******************************************************************************/
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "SessionRegistry.h"
+#include "task_graph_test_fixtures.h"
+#include "../lib/decoding_task/decoding_task_commitment.h"
+#include "../lib/decoding_task/decoding_task_data_artifacts.h"
+#include "../lib/decoding_task/decoding_task_decoding_window.h"
+#include "../lib/decoding_task/decoding_task_node_kind_registry.h"
+#include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
 #include "../lib/realtime/realtime_decoding.h"
+#include "../lib/realtime/window_request_yaml.h"
 #include "cudaq/qec/decoder.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include "cudaq/qec/dem_chunks_memory.h"
 #include "cudaq/qec/logger.h"
 #include "cudaq/qec/pcm_utils.h"
 #include "cudaq/qec/realtime/decoding_config.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -24,7 +29,10 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
+#include <regex>
+#include <set>
 #include <stdexcept>
+#include <thread>
 #include <unistd.h>
 
 namespace cudaq::qec {
@@ -57,6 +65,8 @@ struct construction_d_probe {
   static inline std::vector<float_t> last_decode_syndrome;
 
   static inline captured_model model;
+  /// Every model a d_capture_decoder was constructed with, in order.
+  static inline std::vector<captured_model> models;
 };
 
 class d_capture_decoder : public decoder {
@@ -90,6 +100,7 @@ public:
     captured.num_detectors = in.num_detectors();
     captured.num_error_mechanisms = in.num_error_mechanisms();
     captured.num_observables = in.num_observables();
+    construction_d_probe::models.push_back(captured);
     construction_d_probe::model = std::move(captured);
   }
 
@@ -1765,6 +1776,128 @@ decoders:
                std::runtime_error);
 }
 
+namespace {
+
+void expect_yaml11_numeric_exponents(const std::string &yaml) {
+  // Test numeric-token interoperability, not to_chars' choice of exponent or
+  // fixed notation. YAML 1.1 requires a decimal point in an exponent mantissa.
+  static const std::regex bare_exponent(
+      R"((^|[\s\[,])[-+]?[0-9]+[eE][-+]?[0-9]+($|[\s,\]]))");
+  EXPECT_FALSE(std::regex_search(yaml, bare_exponent)) << yaml;
+}
+
+} // namespace
+
+TEST(DecoderSchemaTest, UnregisteredDecoderRatesRoundtripExactly) {
+  using namespace cudaq::qec::decoding::config;
+  auto decoder = create_test_empty_decoder_config(0);
+  decoder.type = "unregistered_exact_rate_decoder";
+  ASSERT_EQ(find_decoder_schema(decoder.type), nullptr);
+  decoder.error_rate_vec.assign(decoder.block_size, 0.12345678901234567);
+  decoder.error_rate_vec[0] = 1e-6;
+  decoder.error_rate_vec[1] = std::nextafter(0.001, 1.0);
+  decoder.error_rate_vec[2] = std::numeric_limits<double>::denorm_min();
+  decoder.error_rate_vec[3] = std::nextafter(1.0, 0.0);
+  multi_decoder_config original;
+  original.decoders.push_back(std::move(decoder));
+  const auto emitted = original.to_yaml_str(200);
+  expect_yaml11_numeric_exponents(emitted);
+  const auto parsed = multi_decoder_config::from_yaml_str(emitted);
+  EXPECT_EQ(parsed, original);
+  EXPECT_EQ(parsed.decoders.front().error_rate_vec,
+            original.decoders.front().error_rate_vec);
+}
+
+TEST(DecoderSchemaTest, PreservesFloatingPointParametersExactly) {
+  using namespace cudaq::qec::decoding::config;
+  // Schema-only metadata is enough to exercise configuration serialization;
+  // this test never creates a decoder or registers a stand-in executor.
+  register_decoder_schema({"exact_parameter_engine",
+                           {{"gain", param_kind::f64},
+                            {"weights", param_kind::f64_vec},
+                            {"matrix", param_kind::f64_matrix}}});
+  register_decoder_schema(
+      {"exact_parameter_decoder",
+       {{"gain", param_kind::f64},
+        {"weights", param_kind::f64_vec},
+        {"matrix", param_kind::f64_matrix},
+        {"label", param_kind::string},
+        {"fixed", param_kind::subschema, false, "exact_parameter_engine"},
+        {"engine", param_kind::string},
+        {"engine_params", param_kind::discriminated, false, "", "engine"}}});
+
+  const std::string label = "001,alpha;beta='quoted':a=b/with spaces\nnext";
+  for (const auto gain :
+       {1e-6, 1e20, std::nextafter(0.001, 1.0), 0.12345678901234567,
+        std::numeric_limits<double>::denorm_min(), std::nextafter(1.0, 0.0)}) {
+    SCOPED_TRACE(gain);
+    const std::vector<double> weights{gain, -gain, 1.2345678901234567e-20};
+    const std::vector<std::vector<double>> matrix{
+        {gain, -gain}, {1.2345678901234567e-20, gain}};
+    cudaqx::heterogeneous_map nested;
+    nested.insert("gain", gain);
+    nested.insert("weights", weights);
+    nested.insert("matrix", matrix);
+    cudaqx::heterogeneous_map arguments = nested;
+    arguments.insert("label", label);
+    arguments.insert("fixed", nested);
+    arguments.insert("engine", "exact_parameter_engine");
+    arguments.insert("engine_params", nested);
+    auto decoder = create_test_empty_decoder_config(0);
+    decoder.type = "exact_parameter_decoder";
+    decoder.decoder_custom_args = arguments;
+    multi_decoder_config original;
+    original.decoders.push_back(std::move(decoder));
+    const auto emitted = original.to_yaml_str(200);
+    expect_yaml11_numeric_exponents(emitted);
+    const auto parsed = multi_decoder_config::from_yaml_str(emitted);
+    EXPECT_EQ(parsed, original);
+    const auto &roundtrip = parsed.decoders.front().decoder_custom_args.map();
+    EXPECT_EQ(roundtrip.get<double>("gain"), gain);
+    EXPECT_EQ(roundtrip.get<std::vector<double>>("weights"), weights);
+    EXPECT_EQ(roundtrip.get<std::vector<std::vector<double>>>("matrix"),
+              matrix);
+    EXPECT_EQ(roundtrip.get<std::string>("label"), label);
+    for (const auto *section : {"fixed", "engine_params"}) {
+      const auto child = roundtrip.get<cudaqx::heterogeneous_map>(section);
+      EXPECT_EQ(child.get<double>("gain"), gain);
+      EXPECT_EQ(child.get<std::vector<double>>("weights"), weights);
+      EXPECT_EQ(child.get<std::vector<std::vector<double>>>("matrix"), matrix);
+    }
+  }
+}
+
+TEST(DecoderSchemaTest, DiscriminatedSchemaPrefixRoundtrips) {
+  using namespace cudaq::qec::decoding::config;
+  register_decoder_schema(
+      {"prefixed_parameter_engine.demo", {{"passes", param_kind::int32}}});
+  register_decoder_schema(
+      {"prefixed_parameter_decoder",
+       {{"engine", param_kind::string},
+        {"engine_params", param_kind::discriminated, false, "", "engine", false,
+         "prefixed_parameter_engine."}}});
+  auto parsed = multi_decoder_config::from_yaml_str(R"(
+decoders:
+  - id: 0
+    type: prefixed_parameter_decoder
+    block_size: 2
+    syndrome_size: 1
+    H_sparse: [0, -1]
+    O_sparse: [0, -1]
+    D_sparse: [0, -1]
+    decoder_custom_args:
+      engine: demo
+      engine_params: {passes: 3}
+)");
+  const auto &arguments = parsed.decoders.front().decoder_custom_args.map();
+  EXPECT_EQ(arguments.get<std::string>("engine"), "demo");
+  EXPECT_EQ(arguments.get<cudaqx::heterogeneous_map>("engine_params")
+                .get<int>("passes"),
+            3);
+  const auto emitted = parsed.to_yaml_str();
+  EXPECT_EQ(multi_decoder_config::from_yaml_str(emitted), parsed);
+}
+
 TEST(DecoderSchemaTest, CustomArgsForUnregisteredTypeThrow) {
   const std::string yaml = R"(
 decoders:
@@ -1862,6 +1995,42 @@ TEST(DecoderSchemaTest, ValidateCustomArgsChecksProgrammaticMaps) {
   multi_decoder_config multi;
   multi.decoders.push_back(unregistered);
   EXPECT_THROW(multi.validate_custom_args(), std::runtime_error);
+}
+
+// get<std::size_t> reads a stored int, long or short, so a negative one would
+// read as a huge count and pass any minimum. A uint64 parameter rejects it
+// instead, whichever signed type holds it, and still takes a non-negative one.
+TEST(DecoderSchemaTest, Uint64ParamsRejectNegativeIntegers) {
+  using namespace cudaq::qec::decoding::config;
+  const auto with_count = [](auto count) {
+    cudaqx::heterogeneous_map args;
+    args.insert("count", count);
+    return args;
+  };
+  const auto rejects = [](const cudaqx::heterogeneous_map &args) {
+    try {
+      validate_custom_args("uint64_sign_demo", args);
+      ADD_FAILURE() << "a negative count validated";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(
+                    "Key 'count' in 'uint64_sign_demo' parameters does not "
+                    "hold a non-negative int"),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  register_decoder_schema({"uint64_sign_demo",
+                           {
+                               {"count", param_kind::uint64},
+                           }});
+
+  rejects(with_count(-1));
+  rejects(with_count(-1L));
+  rejects(with_count(short{-1}));
+  EXPECT_NO_THROW(validate_custom_args("uint64_sign_demo", with_count(0)));
+  EXPECT_NO_THROW(validate_custom_args("uint64_sign_demo", with_count(3L)));
+  EXPECT_NO_THROW(
+      validate_custom_args("uint64_sign_demo", with_count(std::size_t{7})));
 }
 
 TEST(DecoderSchemaTest, ProgrammaticConfigsMaterializeSchemaDefaults) {
@@ -1989,6 +2158,15 @@ decoders:
   EXPECT_NO_THROW(config.validate_custom_args());
 }
 
+TEST(DecoderSchemaTest, CEntryPointReturnsTheSameSchema) {
+  // The C symbol exists for tools that load the library without the Python
+  // package; it must hand out the same document as the C++ function.
+  using namespace cudaq::qec::decoding::config;
+  const char *text = cudaq_qec_decoder_config_json_schema();
+  ASSERT_NE(text, nullptr);
+  EXPECT_EQ(std::string(text), decoder_config_json_schema());
+}
+
 TEST(DecoderSchemaTest, JsonSchemaExportReflectsRegistry) {
   using namespace cudaq::qec::decoding::config;
 
@@ -2014,6 +2192,37 @@ TEST(DecoderSchemaTest, JsonSchemaExportReflectsRegistry) {
   // Required keys and unknown-key rejection are carried over.
   EXPECT_NE(text.find("\"error_rate_vec\""), std::string::npos);
   EXPECT_NE(text.find("\"additionalProperties\": false"), std::string::npos);
+
+  // An int32 parameter carries the width of its stored type, so a document
+  // that overflows it fails offline exactly as it fails when parsed.
+  EXPECT_NE(text.find("\"maximum\": 2147483647"), std::string::npos);
+  EXPECT_NE(text.find("\"minimum\": -2147483648"), std::string::npos);
+  // Envelope: id is int64, cuda_device_id a non-negative int32.
+  EXPECT_NE(text.find("\"maximum\": 9223372036854775807"), std::string::npos);
+  EXPECT_NE(text.find("\"minimum\": -9223372036854775808"), std::string::npos);
+}
+
+TEST(DecoderConfigTest, NegativeCudaDeviceIdIsRejectedWhenParsed) {
+  using namespace cudaq::qec::decoding::config;
+  // decoder construction refuses a negative device id and the exported
+  // schema bounds it at 0; the parser must agree with both.
+  const std::string yaml = R"(decoders:
+  - id: 0
+    type: pymatching
+    cuda_device_id: -1
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0, -1, 1, -1, 2, -1]
+    O_sparse: [0, -1, 1, -1, 2, -1]
+    D_sparse: [0, -1, 1, -1, 2, -1]
+    decoder_custom_args:
+      merge_strategy: smallest_weight
+      error_rate_vec: [0.1, 0.1, 0.1]
+)";
+  EXPECT_THROW(multi_decoder_config::from_yaml_str(yaml), std::runtime_error);
+  std::string ok = yaml;
+  ok.replace(ok.find("cuda_device_id: -1"), 18, "cuda_device_id: 0");
+  EXPECT_NO_THROW(multi_decoder_config::from_yaml_str(ok));
 }
 
 TEST(DecoderConfigTest, SimulationHostPointerWrappersForwardToHostRuntime) {
@@ -2090,12 +2299,13 @@ TEST(DecoderYAMLTest, DescribeDecoderTypeNamesEitherTaskGraphForm) {
   decoderless.task_graph->nodes.back().type = "XOR";
   EXPECT_EQ(decoderless.describe_decoder_type(), "xor");
 
-  // An ensemble entry names its members.
+  // An ensemble node names its members.
   decoder_config raced;
   raced.task_graph.emplace();
   raced.task_graph->nodes.emplace_back();
   auto &ens = raced.task_graph->nodes.back();
   ens.id = "ens";
+  ens.type = "ensemble";
   ens.ensemble.emplace();
   ens.ensemble->members.resize(2);
   ens.ensemble->members[0].nodes = node_list;
@@ -2335,6 +2545,56 @@ TEST(DecoderDemChunksYAMLTest, ParsesAllPhases) {
   EXPECT_TRUE(chunks->has_repeating_phase());
 }
 
+TEST(MemoryExperimentYaml, PreservesEveryPhaseProbabilityExactly) {
+  namespace config = cudaq::qec::decoding::config;
+  auto configuration =
+      config::multi_decoder_config::from_yaml_str(dem_chunks_yaml(3));
+  ASSERT_EQ(configuration.decoders.size(), 1u);
+  auto &entry = configuration.decoders.front();
+  ASSERT_TRUE(entry.dem_chunks.has_value());
+  // A native phase fixture keeps this framework serialization regression
+  // independent of circuit characterization and the generator executable.
+  for (const auto probability :
+       {0.0, 1.0, 1e-6, std::numeric_limits<double>::denorm_min(),
+        std::nextafter(0.001, 1.0), std::numeric_limits<double>::min(),
+        std::nextafter(1.0, 0.0), 0.12345678901234567}) {
+    SCOPED_TRACE(probability);
+    for (auto &phase : entry.dem_chunks->phases)
+      for (auto &rate : phase.spec.error_rates)
+        rate = probability;
+    const auto configuration_yaml = configuration.to_yaml_str();
+    expect_yaml11_numeric_exponents(configuration_yaml);
+    EXPECT_EQ(config::multi_decoder_config::from_yaml_str(configuration_yaml),
+              configuration);
+    const auto decoder_yaml = entry.to_yaml_str();
+    expect_yaml11_numeric_exponents(decoder_yaml);
+    EXPECT_EQ(config::decoder_config::from_yaml_str(decoder_yaml).dem_chunks,
+              entry.dem_chunks);
+  }
+  EXPECT_THROW(config::multi_decoder_config::from_yaml_str(
+                   dem_chunks_yaml(3) + "\nunknown_field: 1\n"),
+               std::runtime_error);
+}
+
+TEST(MemoryExperimentYaml, InvalidPhaseModelUsesConfigurationExceptionType) {
+  namespace config = cudaq::qec::decoding::config;
+  auto configuration =
+      config::multi_decoder_config::from_yaml_str(dem_chunks_yaml(3));
+  auto yaml = configuration.to_yaml_str();
+  const auto field = yaml.find("num_rounds:");
+  ASSERT_NE(field, std::string::npos);
+  const auto value = yaml.find(':', field) + 1;
+  const auto end = yaml.find('\n', value);
+  ASSERT_NE(end, std::string::npos);
+  yaml.replace(value, end - value, " 1");
+  try {
+    (void)config::multi_decoder_config::from_yaml_str(yaml);
+    FAIL() << "invalid phase-model horizon was accepted";
+  } catch (const std::runtime_error &error) {
+    EXPECT_NE(std::string(error.what()).find("num_rounds"), std::string::npos);
+  }
+}
+
 TEST(DecoderDemChunksYAMLTest, ParsedPhasesExpandAndClose) {
   const auto config =
       cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
@@ -2560,6 +2820,2087 @@ TEST(DecoderDemChunksYAMLTest, PerPhaseMeasurementMapsRoundTripAndExpand) {
   ASSERT_NE(inputs.measurement_to_detectors(), nullptr);
   EXPECT_EQ(inputs.measurement_to_detectors()->num_cols(), 4u);
 }
+
+// dem_chunks_yaml() with extra keys on the named phase and a round width.
+std::string dem_chunks_yaml_with_readout(const std::string &phase,
+                                         const std::string &extra) {
+  auto yaml = dem_chunks_yaml(3);
+  const auto at = yaml.find("error_rates", yaml.find("name: " + phase));
+  yaml.insert(yaml.find('\n', at) + 1, extra);
+  yaml.insert(yaml.find("      phases:"), "      measurements_per_round: 1\n");
+  return yaml;
+}
+
+// m2o_sparse and observable_names round-trip and are in the schema.
+TEST(DecoderDemChunksYAMLTest, ReadoutMapAndNamesRoundTripAndAreInTheSchema) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto yaml = dem_chunks_yaml_with_readout("final",
+                                           "            m2o_sparse: [0, -1]\n");
+  yaml.insert(yaml.find("      phases:"), "      observable_names: [Z_L]\n");
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(yaml);
+  const std::vector<std::int64_t> want{0, -1};
+  const std::vector<std::string> names{"Z_L"};
+  const auto emitted = parsed.to_yaml_str(200);
+  const auto schema = cfg::decoder_config_json_schema();
+  auto plain = cfg::multi_decoder_config::from_yaml_str(dem_chunks_yaml(3));
+
+  ASSERT_TRUE(parsed.decoders.at(0).dem_chunks.has_value());
+  const auto &spec = *parsed.decoders.at(0).dem_chunks;
+  EXPECT_EQ(spec.get_phase(cudaq::qec::phase_name::dem_final).m2o_sparse, want);
+  EXPECT_EQ(spec.observable_names, names);
+  EXPECT_NE(emitted.find("m2o_sparse"), std::string::npos);
+  EXPECT_NE(emitted.find("observable_names"), std::string::npos);
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed);
+
+  EXPECT_NE(schema.find("\"m2o_sparse\""), std::string::npos);
+  EXPECT_NE(schema.find("\"observable_names\""), std::string::npos);
+
+  // A spec without the new keys emits neither.
+  EXPECT_EQ(plain.to_yaml_str(200).find("m2o_sparse"), std::string::npos);
+  EXPECT_EQ(plain.to_yaml_str(200).find("observable_names"), std::string::npos);
+} // end - TEST(..., ReadoutMapAndNamesRoundTripAndAreInTheSchema)
+
+// Parsing validates m2o_sparse and observable_names, with or without
+// num_rounds.
+TEST(DecoderDemChunksYAMLTest, ReadoutMapAndNamesAreCheckedWhenParsed) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  const auto streaming = [](std::string yaml) {
+    return yaml.substr(0, yaml.find("      num_rounds:")) +
+           yaml.substr(yaml.find("      measurements_per_round:"));
+  };
+  const auto good = dem_chunks_yaml_with_readout(
+      "final", "            m2o_sparse: [0, -1]\n");
+  auto named = dem_chunks_yaml_with_readout("final", "");
+
+  EXPECT_NO_THROW(cfg::multi_decoder_config::from_yaml_str(good));
+  EXPECT_NO_THROW(cfg::multi_decoder_config::from_yaml_str(streaming(good)));
+  rejects(dem_chunks_yaml_with_readout("bulk", "            m2o_sparse: "
+                                               "[0, -1]\n"),
+          "only the last phase");
+  rejects(streaming(dem_chunks_yaml_with_readout("bulk", "            "
+                                                         "m2o_sparse: "
+                                                         "[0, -1]\n")),
+          "only the last phase");
+  rejects(dem_chunks_yaml_with_readout("final", "            m2o_sparse: "
+                                                "[0, -1, 0, -1]\n"),
+          "2 m2o_sparse rows for 1 observables");
+  rejects(dem_chunks_yaml_with_readout("final", "            m2o_sparse: "
+                                                "[1, -1]\n"),
+          "m2o_sparse reads measurement 1, past the 1");
+  named.insert(named.find("      phases:"),
+               "      observable_names: [Z_L, X_L]\n");
+  rejects(named, "2 observable_names for 1 observables");
+} // end - TEST(..., ReadoutMapAndNamesAreCheckedWhenParsed)
+
+// ---------------------------------------------------------------------------
+// Window requests
+// ---------------------------------------------------------------------------
+
+// A hand-written parallel-window layer A: c_A = b = 3, c_B = 9.
+std::string window_a_yaml() {
+  return R"(period: 12
+zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
+ports:
+  input: {disposition: open, prior: 0.01}
+  output: {disposition: open}
+sends: [{id: forward}, {id: backward}]
+)";
+}
+
+// The same layer as a C++ request.
+cudaq::qec::window_request window_a() {
+  using namespace cudaq::qec;
+  window_request a;
+  a.period = 12;
+  a.commit = round_range{0, 3};
+  a.buffers = {{-3, 0}, {3, 6}};
+  a.input = {port_disposition::open, 0.01};
+  a.output = {port_disposition::open, std::nullopt};
+  a.sends = {{"forward", std::nullopt, {}}, {"backward", std::nullopt, {}}};
+  return a;
+}
+
+TEST(WindowRequestYAML, ParsesThePlansLayerA) {
+  EXPECT_EQ(cudaq::qec::window_request_from_yaml_str(window_a_yaml()),
+            window_a());
+}
+
+// Every range may be written [b, e] or {rounds: [b, e]}, and both build the
+// same window.
+TEST(WindowRequestYAML, MapFormRangesEqualListForm) {
+  using namespace cudaq::qec;
+  const std::string list = R"(period: 12
+offset: -9
+zones: {commit: [0, 9]}
+ports:
+  input: {disposition: closed}
+  output: {disposition: closed, imports: [9, 10]}
+sends: [{id: back, mode: residual, rounds: [0, 1]}]
+)";
+  const std::string map = R"(period: 12
+offset: -9
+zones: {commit: {rounds: [0, 9]}}
+ports:
+  input: {disposition: closed}
+  output: {disposition: closed, imports: {rounds: [9, 10]}}
+sends: [{id: back, mode: residual, rounds: {rounds: [0, 1]}}]
+)";
+  const auto tmpl =
+      std::make_shared<const experiment_template>(arbitrary_memory_spec(5));
+  const auto from_list = window_request_from_yaml_str(list);
+  const auto from_map = window_request_from_yaml_str(map);
+  ASSERT_EQ(from_list, from_map);
+  EXPECT_EQ(from_list.output.imports, (round_range{9, 10}));
+  const auto a = window_from_dem_chunks(tmpl, from_list, 2, 40);
+  const auto b = window_from_dem_chunks(tmpl, from_map, 2, 40);
+  EXPECT_NO_THROW(check_same_window_up_to_shift(a, b));
+} // end - TEST(WindowRequestYAML, MapFormRangesEqualListForm)
+
+// Emitting and parsing again gives the same request, for every key.
+TEST(WindowRequestYAML, RoundTrips) {
+  using namespace cudaq::qec;
+  auto full = window_a();
+  auto closed = window_a();
+  full.input.prior.reset();
+  full.input.boundary = input_boundary::truncate;
+  full.sends.push_back({"wide", send_mode::delta, {{-3, 6}}});
+  full.columns.merge_identical = true;
+  full.columns.conflicting_parallel = parallel_resolution::most_likely;
+  closed.offset = -9;
+  closed.input = {port_disposition::closed, std::nullopt};
+  closed.output = {port_disposition::closed, round_range{6, 8}};
+  for (const auto &request : {window_a(), full, closed}) {
+    const auto text = window_request_to_yaml_str(request);
+    EXPECT_EQ(window_request_from_yaml_str(text), request) << text;
+  }
+}
+
+// A send's rounds are one range, [b, e] or {rounds: [b, e]}, or a list of
+// ranges in either form; several ranges are written as a list and read back.
+// A list that mixes numbers and ranges, or holds a malformed range, is
+// rejected.
+TEST(WindowRequestYAML, SendsWithSeveralRangesRoundTrip) {
+  using namespace cudaq::qec;
+  const auto with_backward = [](const std::string &send) {
+    auto yaml = window_a_yaml();
+    yaml.replace(yaml.find("{id: backward}"), 14, send);
+    return yaml;
+  };
+  const auto rejects = [&](const std::string &send, const std::string &text) {
+    try {
+      window_request_from_yaml_str(with_backward(send));
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find("window request: " + text),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  auto request = window_a();
+  request.sends.push_back({"wide", send_mode::delta, {{-3, -2}, {3, 5}}});
+  const auto text = window_request_to_yaml_str(request);
+  EXPECT_EQ(window_request_from_yaml_str(text), request) << text;
+  const auto listed = window_request_from_yaml_str(with_backward(
+      "{id: backward, mode: residual, rounds: [[0, 1], {rounds: [2, 3]}]}"));
+  EXPECT_EQ(listed.sends.at(1).rounds,
+            (std::vector<round_range>{{0, 1}, {2, 3}}));
+  rejects("{id: backward, mode: residual, rounds: [0, [1, 2]]}",
+          "a send's rounds are [begin, end] or a list of ranges");
+  rejects("{id: backward, mode: residual, rounds: [[0, 1, 2]]}",
+          "a round range is [begin, end]");
+} // end - TEST(WindowRequestYAML, SendsWithSeveralRangesRoundTrip)
+
+// The forward-compatible shapes reserved for spatial windows are each
+// rejected with their own message, as are malformed ranges and unknown keys.
+TEST(WindowRequestYAML, RejectsReservedShapes) {
+  using namespace cudaq::qec;
+  const auto rejects = [](const std::string &from, const std::string &to,
+                          const std::string &text) {
+    auto yaml = window_a_yaml();
+    const auto at = yaml.find(from);
+    ASSERT_NE(at, std::string::npos) << from;
+    yaml.replace(at, from.size(), to);
+    try {
+      window_request_from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects("commit: [0, 3]", "commit: {rounds: [0, 3], occurrences: [[0, 1]]}",
+          "'occurrences' is reserved");
+  rejects("commit: [0, 3]", "commit: {rounds: [0, 3], block: 0}",
+          "'block' is reserved");
+  rejects("  output: {disposition: open}",
+          "  output: {disposition: open}\n  west: {disposition: open}",
+          "spatial ports are not supported yet");
+  rejects("period: 12", "period: 12\nresponsibility: [0]",
+          "'responsibility' is reserved");
+  rejects("period: 12", "period: 12\nsoundness_class: strict",
+          "'soundness_class' is reserved");
+  rejects("commit: [0, 3]", "commit: [0, 3, 5]",
+          "a round range is [begin, end]");
+  rejects("period: 12", "period: 12\nperiodd: 5", "unknown key 'periodd'");
+} // end - TEST(WindowRequestYAML, RejectsReservedShapes)
+
+// period, zones and ports are required, as the schema says, rather than
+// left at defaults that build no window.
+TEST(WindowRequestYAML, RejectsMissingRequiredKeys) {
+  using namespace cudaq::qec;
+  const auto rejects = [](const std::string &line, const std::string &key) {
+    auto yaml = window_a_yaml();
+    const auto at = yaml.find(line);
+    ASSERT_NE(at, std::string::npos) << line;
+    yaml.erase(at, line.size());
+    try {
+      window_request_from_yaml_str(yaml);
+      ADD_FAILURE() << "parsed without '" << key << "'";
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(
+          std::string(e.what()).find("missing required key '" + key + "'"),
+          std::string::npos)
+          << e.what();
+    }
+  };
+  rejects("period: 12\n", "period");
+  rejects("zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}\n", "zones");
+  rejects("ports:\n  input: {disposition: open, prior: 0.01}\n"
+          "  output: {disposition: open}\n",
+          "ports");
+} // end - TEST(WindowRequestYAML, RejectsMissingRequiredKeys)
+
+// A well-formed request that breaks a construction rule is rejected when
+// parsed.
+TEST(WindowRequestYAML, RejectsInvalidRequests) {
+  using namespace cudaq::qec;
+  const auto rejects = [](const std::string &from, const std::string &to,
+                          const std::string &text) {
+    auto yaml = window_a_yaml();
+    const auto at = yaml.find(from);
+    ASSERT_NE(at, std::string::npos) << from;
+    yaml.replace(at, from.size(), to);
+    try {
+      window_request_from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find("window request: " + text),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  rejects("period: 12", "period: 0", "period must be at least 1");
+  rejects("[3, 6]]", "[2, 6]]", "zones overlap");
+  rejects("{disposition: open, prior: 0.01}", "{prior: 0.01}",
+          "the input port has no disposition");
+  rejects("prior: 0.01", "prior: 1.5",
+          "the input prior must be strictly between 0 and 1");
+} // end - TEST(WindowRequestYAML, RejectsInvalidRequests)
+
+// An empty value where a range or a send's rounds belong is rejected, where
+// LLVM's YAML reader would otherwise stop the process.
+TEST(WindowRequestYAML, EmptyValuesFailCleanly) {
+  using namespace cudaq::qec;
+  for (const auto &[from, to] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"commit: [0, 3]", "commit: "},
+           {"{id: backward}", "{id: backward, mode: residual, rounds: }"}}) {
+    auto yaml = window_a_yaml();
+    yaml.replace(yaml.find(from), from.size(), to);
+    EXPECT_THROW(window_request_from_yaml_str(yaml), std::invalid_argument)
+        << to;
+  }
+}
+
+// A hand-written parallel-window graph, with a two-input xor, over
+// a streaming rep-code template. edit() changes the text before parsing.
+std::string pw_graph_yaml() {
+  return R"(
+decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: ingest
+          type: ingest
+          windows:
+            A:
+              period: 12
+              zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
+              ports:
+                input: {disposition: open, prior: 0.01}
+                output: {disposition: open}
+              sends: [{id: forward}, {id: backward}]
+            B:
+              period: 12
+              offset: -9
+              zones: {commit: [0, 9]}
+              ports:
+                input: {disposition: closed}
+                output: {disposition: closed}
+        - id: A
+          type: decode_window
+          max_in_flight: 4
+          inner: {type: single_error_lut}
+        - id: B
+          type: decode_window
+          num_receives: 2
+          max_in_flight: 4
+          verify_residual: report
+          inner: {type: single_error_lut}
+        - id: sum
+          type: xor
+      edges:
+        - {from: measurements, to: ingest}
+        - {from: ingest.A, to: A}
+        - {from: ingest.B, to: B}
+        - {from: A.forward, to: B.receive_0, index_offset: -1}
+        - {from: A.backward, to: B.receive_1}
+        - {from: A, to: sum.a}
+        - {from: B, to: sum.b}
+        - {from: sum, to: output}
+)";
+}
+
+// pw_graph_yaml() with `from` replaced by `to`.
+std::string pw_graph_yaml_with(const std::string &from, const std::string &to) {
+  auto yaml = pw_graph_yaml();
+  const auto at = yaml.find(from);
+  if (at == std::string::npos)
+    throw std::logic_error("pw_graph_yaml has no '" + from + "'");
+  return yaml.replace(at, from.size(), to);
+}
+
+// pw_graph_yaml() with an xor of num_inputs inputs: A, B and the raw
+// logical value, as a corrected-logical graph wires it.
+std::string three_input_sum_yaml(const std::string &num_inputs) {
+  auto yaml = pw_graph_yaml_with("        - id: sum\n          type: xor\n",
+                                 "        - id: sum\n          type: xor\n"
+                                 "          num_inputs: " +
+                                     num_inputs + "\n");
+  const std::string edges = "        - {from: A, to: sum.a}\n"
+                            "        - {from: B, to: sum.b}\n";
+  return yaml.replace(yaml.find(edges), edges.size(),
+                      "        - {from: A, to: sum.in_0}\n"
+                      "        - {from: B, to: sum.in_1}\n"
+                      "        - {from: ingest.logical, to: sum.in_2}\n");
+}
+
+// xor's num_inputs parses and round-trips, and below 2 or above 1024 it is
+// rejected.
+TEST(XorNumInputs, ParsesAndIsChecked) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(three_input_sum_yaml("3"));
+  const auto &sum = parsed.decoders.at(0).task_graph->nodes.at(3);
+  const auto emitted = parsed.to_yaml_str(200);
+  ASSERT_EQ(sum.id, "sum");
+  EXPECT_EQ(sum.node_params.map().get<std::size_t>("num_inputs"), 3u);
+  EXPECT_NE(emitted.find("num_inputs"), std::string::npos) << emitted;
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+  for (const auto *n : {"0", "1"})
+    try {
+      cfg::multi_decoder_config::from_yaml_str(three_input_sum_yaml(n));
+      ADD_FAILURE() << "num_inputs " << n << " was accepted";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(
+          std::string(e.what()).find("xor: num_inputs must be at least 2"),
+          std::string::npos)
+          << e.what();
+    }
+  try {
+    cfg::multi_decoder_config::from_yaml_str(three_input_sum_yaml("2000"));
+    ADD_FAILURE() << "num_inputs 2000 was accepted";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(
+        std::string(e.what()).find("xor: num_inputs must be at most 1024"),
+        std::string::npos)
+        << e.what();
+  }
+}
+
+// The layers parse into the ingest node, sorted by name, as the window
+// requests the C++ API writes; decode_window's parameters go to its kind;
+// and the document round-trips.
+TEST(TaskGraphWindowKinds, ParsesThePlansParallelWindowGraph) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using namespace cudaq::qec::experimental;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_graph_yaml());
+  const auto &graph = *parsed.decoders.at(0).task_graph;
+  auto b = window_a();
+  b.offset = -9;
+  b.commit = round_range{0, 9};
+  b.buffers.clear();
+  b.input = {port_disposition::closed, std::nullopt};
+  b.output = {port_disposition::closed, std::nullopt};
+  b.sends.clear();
+  ASSERT_EQ(graph.nodes.size(), 4u);
+  const auto &ingest = graph.nodes[0];
+  ASSERT_EQ(ingest.windows.size(), 2u);
+  EXPECT_EQ(ingest.windows[0], (ingest_window{"A", window_a()}));
+  EXPECT_EQ(ingest.windows[1], (ingest_window{"B", b}));
+  const auto &params = graph.nodes[2].node_params.map();
+  EXPECT_EQ(params.get<std::size_t>("num_receives"), 2u);
+  EXPECT_EQ(graph.nodes[2].max_in_flight, 4u);
+  EXPECT_EQ(params.get<std::string>("verify_residual"), "report");
+  EXPECT_EQ(graph.nodes[2].inner_type, "single_error_lut");
+  EXPECT_EQ(graph.edges[3].index_offset, -1);
+
+  const auto emitted = parsed.to_yaml_str(200);
+  EXPECT_NE(emitted.find("windows:"), std::string::npos);
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+} // end - TEST(TaskGraphWindowKinds, ParsesThePlansParallelWindowGraph)
+
+// A kind's parameter minimums are checked by its parameter validation and
+// published in its clause of the JSON schema, so the two agree. A minimum
+// for a key the kind does not declare as a uint64 parameter is rejected.
+TEST(NodeKindMinimums, AreCheckedAndPublished) {
+  namespace cfg = cudaq::qec::decoding::config;
+  cudaq::qec::task_graph_node_kind_spec spec;
+  cfg::decoder_schema params;
+  cudaqx::heterogeneous_map low;
+  cudaqx::heterogeneous_map enough;
+  spec.name = "minimum_probe";
+  spec.requires_decoder = false;
+  spec.requires_dem = false;
+  spec.parameter_minimums = {{"count", 3}};
+  params.params.push_back({"count", cfg::param_kind::uint64});
+  params.params.push_back({"label", cfg::param_kind::string});
+  low.insert("count", std::size_t{2});
+  enough.insert("count", std::size_t{3});
+  cudaq::qec::register_task_graph_node_kind(spec, params);
+  const auto *schema = cfg::find_decoder_schema(
+      cudaq::qec::task_graph_node_schema_name("minimum_probe"));
+  const auto json = cfg::decoder_config_json_schema();
+  ASSERT_NE(schema, nullptr);
+  try {
+    schema->validate(low);
+    ADD_FAILURE() << "a count below its minimum was accepted";
+  } catch (const std::runtime_error &e) {
+    EXPECT_EQ(std::string(e.what()), "minimum_probe: count must be at least 3");
+  }
+  EXPECT_NO_THROW(schema->validate(enough));
+  EXPECT_NE(json.find("\"minimum\": 3"), std::string::npos);
+  cudaq::qec::unregister_task_graph_node_kind("minimum_probe");
+  for (const std::string key : {"missing", "label"}) {
+    auto bad = spec;
+    bad.parameter_minimums = {{key, 1}};
+    try {
+      cudaq::qec::register_task_graph_node_kind(bad, params);
+      cudaq::qec::unregister_task_graph_node_kind("minimum_probe");
+      ADD_FAILURE() << "a minimum for " << key << " was accepted";
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find("'" + key +
+                                           "', which is not one of its uint64 "
+                                           "parameters"),
+                std::string::npos)
+          << e.what();
+    }
+  }
+} // end - TEST(NodeKindMinimums, AreCheckedAndPublished)
+
+// pw_graph_yaml() with both of each round's faults flipping the observable,
+// and `from` replaced by `to`. pw_graph_yaml()'s faults touch the same
+// detector with different observable effects, which no decoder can tell
+// apart, so validation would reject its windows; as identical twins they are
+// no conflict. Its shot has no length, as a stream's does not.
+std::string pw_build_yaml(const std::string &from = {},
+                          const std::string &to = {}) {
+  auto yaml = pw_graph_yaml();
+  for (auto at = yaml.find("O_sparse: [0, -1]"); at != std::string::npos;
+       at = yaml.find("O_sparse: [0, -1]", at))
+    yaml.replace(at, 17, "O_sparse: [0, 1, -1]");
+  if (from.empty())
+    return yaml;
+  const auto at = yaml.find(from);
+  if (at == std::string::npos)
+    throw std::logic_error("pw_build_yaml has no '" + from + "'");
+  return yaml.replace(at, from.size(), to);
+}
+
+// Expect building decoder 0 of `config` to fail with `text` in the message.
+void expect_build_error(
+    const cudaq::qec::decoding::config::multi_decoder_config &config,
+    const std::string &text) {
+  try {
+    cudaq::qec::decoding::host::build_task_graph(config.decoders.at(0));
+    ADD_FAILURE() << "the graph built; expected: " << text;
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+// Expect decoder 0 of `config` to build into a graph that can stream.
+void expect_streams(
+    const cudaq::qec::decoding::config::multi_decoder_config &config) {
+  const auto graph =
+      cudaq::qec::decoding::host::build_task_graph(config.decoders.at(0));
+  EXPECT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+}
+
+// A graph naming the windowed kinds parses, validates and builds into a
+// graph the executor streams, joining its windows by index.
+TEST(TaskGraphWindowKinds, BuildingMakesAStreamingGraph) {
+  namespace cfg = cudaq::qec::decoding::config;
+  expect_streams(cfg::multi_decoder_config::from_yaml_str(pw_build_yaml()));
+}
+
+// Building a windowed graph validates its windows before anything is built,
+// so each mistake is reported with its own message, ahead of any builder's
+// or the executor's.
+TEST(TaskGraphWindowKinds, BuildingValidatesTheWindowsFirst) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &from, const std::string &to,
+                          const std::string &text) {
+    SCOPED_TRACE(text);
+    expect_build_error(
+        cfg::multi_decoder_config::from_yaml_str(pw_build_yaml(from, to)),
+        text);
+  };
+  rejects("        - {from: measurements, to: ingest}\n", "",
+          "ingest node 'ingest' must be fed by measurements alone");
+  rejects("{from: ingest.A, to: A}", "{from: ingest.C, to: A}",
+          "decode_window node 'A' is fed by 'ingest.C', which is not a window "
+          "port of an ingest node");
+  rejects("{from: ingest.A, to: A}", "{from: measurements, to: A}",
+          "decode_window node 'A' is fed by 'measurements.output', which is "
+          "not a window port of an ingest node");
+  rejects("          type: ingest\n",
+          "          type: ingest\n          read_logical: true\n",
+          "ingest node 'ingest' reads the logical value, but its template's "
+          "last phase has no m2o_sparse");
+  rejects("to: B.receive_1}", "to: B.receive_2}",
+          "decode_window node 'B' has num_receives 2, so it has no input "
+          "'receive_2'");
+  rejects("to: B.receive_1}", "to: B.receive_01}",
+          "decode_window node 'B' has no input 'receive_01'");
+  rejects("to: B.receive_1}", "to: B.receive_99999999999999999999}",
+          "decode_window node 'B' has no input "
+          "'receive_99999999999999999999'");
+  rejects("{from: ingest.B, to: B}",
+          "{from: ingest.B, to: B, index_offset: -1}",
+          "edge ingest.B -> B.input (index_offset -1) has a nonzero "
+          "index_offset");
+  rejects("        - {from: A.backward, to: B.receive_1}\n", "",
+          "validate_commitment: F3: ");
+  rejects(", index_offset: -1}", "}", "reaches round");
+  rejects("              period: 12\n              offset: -9",
+          "              period: 13\n              offset: -9",
+          "have periods 12 and 13");
+  rejects("                input: {disposition: closed}\n",
+          "                input: {disposition: open, prior: 0.01}\n", "F1: ");
+} // end - TEST(TaskGraphWindowKinds, BuildingValidatesTheWindowsFirst)
+
+// A configuration built in code skips the parser, so building also rejects
+// a positive index_offset. Windows of two ingest nodes are two shots: a send
+// between them is rejected, and so are two ingest nodes with different
+// templates that reach one node.
+TEST(TaskGraphWindowKinds, BuildingRejectsMixedShots) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
+  const auto with_second_ingest = [&] {
+    auto config = parsed;
+    auto &decoder = config.decoders.at(0);
+    auto &graph = *decoder.task_graph;
+    auto second = graph.nodes.at(0);
+    second.id = "ingest2";
+    second.dem_chunks = *decoder.dem_chunks;
+    second.dem_chunks->phases.at(0).spec.error_rates.at(0) = 0.02;
+    graph.nodes.push_back(second);
+    graph.edges.push_back({"measurements", "output", "ingest2", "input"});
+    for (auto &edge : graph.edges)
+      if (edge.from_node == "ingest" && edge.from_output == "B")
+        edge.from_node = "ingest2";
+    return config;
+  };
+  auto positive = parsed;
+  auto across = with_second_ingest();
+  auto apart = with_second_ingest();
+  for (auto &edge : positive.decoders.at(0).task_graph->edges)
+    if (edge.from_output == "forward")
+      edge.index_offset = 1;
+  auto &apart_edges = apart.decoders.at(0).task_graph->edges;
+  std::erase_if(apart_edges, [](const auto &edge) {
+    return edge.to_node == "B" && edge.to_input != "input";
+  });
+  expect_build_error(positive, "edge A.forward -> B.receive_0 (index_offset "
+                               "1) has a positive index_offset");
+  expect_build_error(across, "edge A.forward -> B.receive_0 (index_offset -1) "
+                             "joins the windows of ingest nodes 'ingest' and "
+                             "'ingest2'");
+  expect_build_error(apart,
+                     "ingest nodes 'ingest' and 'ingest2' have different "
+                     "templates but both reach 'sum'");
+} // end - TEST(TaskGraphWindowKinds, BuildingRejectsMixedShots)
+
+// A window waits on each send it receives at index_offset 0, from its own
+// index, so receives at offset 0 that close a cycle are rejected, a window
+// receiving its own send among them: no window on the cycle could start. A
+// cycle through an earlier index is a chain through the shot instead; it
+// passes on to the commitment checks, which here find B has no such send.
+TEST(TaskGraphWindowKinds, BuildingRejectsWindowsWaitingOnTheirOwnIndex) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
+  // parsed with A taking one receive, on `edge`.
+  const auto with = [&](const cudaq::qec::task_graph_edge &edge) {
+    auto config = parsed;
+    auto &graph = *config.decoders.at(0).task_graph;
+    for (auto &node : graph.nodes)
+      if (node.id == "A")
+        node.node_params.map().insert("num_receives", std::size_t{1});
+    graph.edges.push_back(edge);
+    return config;
+  };
+  expect_build_error(with({"A", "forward", "A", "receive_0"}),
+                     "decode_window receives at index_offset 0 form a cycle, "
+                     "'A' -> 'A'");
+  expect_build_error(with({"B", "forward", "A", "receive_0"}),
+                     "decode_window receives at index_offset 0 form a cycle, "
+                     "'A' -> 'B' -> 'A'");
+  expect_build_error(with({"B", "forward", "A", "receive_0", -1}),
+                     "B has no send 'forward'");
+} // end - TEST(TaskGraphWindowKinds,
+  // BuildingRejectsWindowsWaitingOnTheirOwnIndex)
+
+// A window's decoders are built from its window models, so building a graph
+// makes no decoder for a decode_window node from the whole shot: every
+// decoder it constructs is one of its layers' windows. None is constructed
+// before the layout is validated, so a layout mistake is reported as
+// itself.
+TEST(TaskGraphWindowKinds, BuildingMakesNoWholeShotDecoderForAWindow) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto yaml = pw_build_yaml();
+  for (auto at = yaml.find("single_error_lut"); at != std::string::npos;
+       at = yaml.find("single_error_lut", at))
+    yaml.replace(at, std::string("single_error_lut").size(),
+                 "d_capture_decoder");
+  const auto parsed = cfg::multi_decoder_config::from_yaml_str(yaml);
+  auto mistaken = parsed;
+  std::erase_if(
+      mistaken.decoders.at(0).task_graph->edges,
+      [](const auto &edge) { return edge.from_output == "backward"; });
+  const auto &decoder = parsed.decoders.at(0);
+  const auto &ingest = decoder.task_graph->nodes.at(0);
+  cudaq::qec::data_artifact_store store;
+  const auto context = store.add_template(
+      ingest.dem_chunks ? *ingest.dem_chunks : *decoder.dem_chunks);
+  std::set<std::vector<std::vector<std::uint32_t>>> windows;
+  for (const auto &layer : ingest.windows) {
+    store.add_windows(context, layer.request);
+    for (const auto &[key, window] :
+         store.find_windows(*context, layer.request))
+      windows.insert(window->model.h.canonicalize().to_nested_csr());
+  }
+  auto &models = cudaq::qec::construction_d_probe::models;
+  models.clear();
+  expect_build_error(mistaken, "validate_commitment: F3: ");
+  EXPECT_TRUE(models.empty());
+  expect_streams(parsed);
+  ASSERT_FALSE(models.empty());
+  for (const auto &model : models)
+    EXPECT_TRUE(windows.count(model.H))
+        << "a decoder of " << model.num_detectors
+        << " detectors is no window's";
+} // end - TEST(TaskGraphWindowKinds, BuildingMakesNoWholeShotDecoderForAWindow)
+
+// Two ingest nodes with different templates may share a graph as long as
+// their windows meet in no node: graph outputs are separate results, not a
+// node they share. Each pipeline validates on its own, and the graph
+// streams.
+TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto config = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
+  auto &decoder = config.decoders.at(0);
+  auto &graph = *decoder.task_graph;
+  const auto nodes = graph.nodes;
+  const auto edges = graph.edges;
+  const auto renamed = [](const std::string &id) {
+    return id == "measurements" || id == "output" ? id : id + "2";
+  };
+  for (auto node : nodes) {
+    node.id = renamed(node.id);
+    if (node.id == "ingest2") {
+      node.dem_chunks = *decoder.dem_chunks;
+      node.dem_chunks->phases.at(0).spec.error_rates.at(0) = 0.02;
+    }
+    graph.nodes.push_back(node);
+  }
+  for (auto edge : edges) {
+    edge.from_node = renamed(edge.from_node);
+    edge.to_node = renamed(edge.to_node);
+    graph.edges.push_back(edge);
+  }
+  expect_streams(config);
+} // end - TEST(TaskGraphWindowKinds, BuildingAcceptsTwoTemplatesOnTwoOutputs)
+
+// Node ids and parameter types are checked before the window layout, which
+// reads both: a repeated id is named as such, and a parameter of the wrong
+// type, or a negative count, is not read as its default or as a huge count.
+TEST(TaskGraphWindowKinds, BuildingChecksIdsAndParametersFirst) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto parsed = cfg::multi_decoder_config::from_yaml_str(pw_build_yaml());
+  auto repeated = parsed;
+  auto mistyped = parsed;
+  auto negative = parsed;
+  for (auto &node : repeated.decoders.at(0).task_graph->nodes)
+    if (node.id == "sum")
+      node.id = "A";
+  for (auto &node : mistyped.decoders.at(0).task_graph->nodes)
+    if (node.id == "B") {
+      node.node_params.map().insert("num_receives", 2.0);
+    }
+  for (auto &node : negative.decoders.at(0).task_graph->nodes)
+    if (node.id == "B")
+      node.node_params.map().insert("num_receives", -1);
+  expect_build_error(repeated, "duplicate node id 'A'");
+  expect_build_error(mistyped, "Key 'num_receives' in from_topology: node 'B' "
+                               "parameters does not hold a non-negative int");
+  expect_build_error(negative, "Key 'num_receives' in from_topology: node 'B' "
+                               "parameters does not hold a non-negative int");
+}
+
+// Misplaced or malformed windows, and a bad verify_residual, are each
+// rejected when parsed, with their own message. verify_residual takes no
+// boolean, which YAML tools would read as a non-string.
+TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(
+      pw_graph_yaml_with("        - id: sum\n          type: xor\n",
+                         "        - id: sum\n          type: xor\n"
+                         "          windows: {C: {period: 1, zones: {commit: "
+                         "[0, 1]}, ports: {input: {disposition: closed}, "
+                         "output: {disposition: closed}}}}\n"),
+      "sets windows, which only an ingest node takes");
+  rejects(pw_graph_yaml_with("          windows:\n            A:",
+                             "          read_logical: false\n"
+                             "          other:\n            A:"),
+          "'other'");
+  rejects(pw_graph_yaml_with("            B:\n", "            logical:\n"),
+          "layer 'logical'");
+  rejects(pw_graph_yaml_with("              offset: -9\n",
+                             "              offset: -9\n"
+                             "              responsibility: [0]\n"),
+          "'responsibility' is reserved");
+  rejects(
+      pw_graph_yaml_with("verify_residual: report", "verify_residual: maybe"),
+      "verify_residual");
+  for (const std::string value : {"false", "true"})
+    rejects(
+        pw_graph_yaml_with("verify_residual: report",
+                           "verify_residual: " + value),
+        "decode_window: verify_residual must be none, fail or report; got '" +
+            value + "'");
+} // end - TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters)
+
+// A layer missing a required key, or well formed but breaking a window
+// construction rule, fails when the config loads rather than when the graph
+// is built.
+TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &from, const std::string &to,
+                          const std::string &text) {
+    const auto yaml = pw_graph_yaml_with(from, to);
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  const std::string a = "            A:\n              period: 12\n";
+  rejects(a, "            A:\n",
+          "window layer 'A': window request: missing required key 'period'");
+  rejects("              zones: {commit: [0, 9]}\n", "",
+          "window layer 'B': window request: missing required key 'zones'");
+  rejects("              ports:\n"
+          "                input: {disposition: closed}\n"
+          "                output: {disposition: closed}\n",
+          "", "window layer 'B': window request: missing required key 'ports'");
+
+  rejects(a, "            A:\n              period: 0\n",
+          "window layer 'A': window request: period must be at least 1");
+  rejects("[[-3, 0], [3, 6]]", "[[-3, 0], [2, 6]]",
+          "window layer 'A': window request: zones overlap");
+  rejects("input: {disposition: closed}", "input: {}",
+          "window layer 'B': window request: the input port has no "
+          "disposition");
+  rejects("output: {disposition: open}", "output: {}",
+          "window layer 'A': window request: the output port has no "
+          "disposition");
+} // end - TEST(TaskGraphWindowKinds, RejectsInvalidRequestsWhenLoaded)
+
+// Only an ingest node takes windows: a node whose type is a decoder plugin,
+// and an ensemble node, are rejected rather than having theirs dropped.
+TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(pw_graph_yaml_with("type: ingest", "type: single_error_lut"),
+          "sets windows, which only an ingest node takes");
+  rejects(R"(decoders:
+  - id: 0
+    task_graph:
+      nodes:
+        - id: e
+          type: ensemble
+          windows:
+            A: {period: 4, zones: {commit: [0, 2]}, ports: {input: {disposition: closed}, output: {disposition: open}}}
+          join_strategy: deadline
+          join_params: {deadline_us: 200000}
+          members:
+            - nodes:
+                - {id: a, type: single_window, inner: {type: single_error_lut}}
+              edges: [{from: input, to: a}, {from: a, to: output}]
+      edges:
+        - {from: measurements, to: e}
+        - {from: e, to: output}
+)",
+          "is an ensemble, which takes no windows");
+} // end - TEST(TaskGraphWindowKinds, RejectsWindowsOnPluginNodesAndEnsembles)
+
+// An empty value where a value of several forms belongs (dem_chunks, a
+// window layer, a partition) is a parse error, where LLVM's YAML reader
+// would otherwise stop the process.
+TEST(TaskGraphWindowKinds, EmptyValuesFailCleanly) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects("decoders:\n  - id: 0\n    type: single_error_lut\n    dem_chunks:\n",
+          "dem_chunks needs a value");
+  rejects(
+      pw_graph_yaml_with("          windows:\n            A:",
+                         "          windows:\n            C:\n            A:"),
+      "a window layer needs a value");
+  rejects(pw_graph_yaml_with("        - id: sum\n          type: xor\n",
+                             "        - id: sum\n          type: xor\n"
+                             "          partition:\n"),
+          "partition needs a value");
+} // end - TEST(TaskGraphWindowKinds, EmptyValuesFailCleanly)
+
+// An ingest node with no windows has nothing to publish.
+TEST(TaskGraphWindowKinds, IngestNeedsAWindow) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto yaml = pw_graph_yaml();
+  const auto begin = yaml.find("          windows:");
+  const auto end = yaml.find("        - id: A");
+  yaml.erase(begin, end - begin);
+  try {
+    cfg::multi_decoder_config::from_yaml_str(yaml);
+    ADD_FAILURE() << "an ingest node without windows parsed";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("needs at least one window"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// data_artifacts
+// ---------------------------------------------------------------------------
+
+// A template, a Stim file pinned by its hash, and the parallel-window
+// layers' requests, named once and referenced from a decoder and its
+// ingest node.
+std::string artifacts_yaml() {
+  return R"(
+data_artifacts:
+  rep_memory:
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+  rep_stim:
+    stim_dem_path: dems/rep.dem
+    sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  pw_A:
+    window:
+      context: rep_memory
+      period: 12
+      zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
+      ports:
+        input: {disposition: open, prior: 0.01}
+        output: {disposition: open}
+      sends: [{id: forward}, {id: backward}]
+  pw_B:
+    window:
+      context: rep_memory
+      period: 12
+      offset: -9
+      zones: {commit: [0, 9]}
+      ports:
+        input: {disposition: closed}
+        output: {disposition: closed}
+decoders:
+  - id: 0
+    dem_chunks: rep_memory
+    task_graph:
+      nodes:
+        - id: ingest
+          type: ingest
+          windows: {A: pw_A, B: pw_B}
+        - {id: A, type: decode_window, inner: {type: single_error_lut}}
+        - id: B
+          type: decode_window
+          num_receives: 2
+          inner: {type: single_error_lut}
+        - {id: sum, type: xor}
+      edges:
+        - {from: measurements, to: ingest}
+        - {from: ingest.A, to: A}
+        - {from: ingest.B, to: B}
+        - {from: A.forward, to: B.receive_0, index_offset: -1}
+        - {from: A.backward, to: B.receive_1}
+        - {from: A, to: sum.a}
+        - {from: B, to: sum.b}
+        - {from: sum, to: output}
+)";
+}
+
+// artifacts_yaml() with `from` replaced by `to`.
+std::string artifacts_yaml_with(const std::string &from,
+                                const std::string &to) {
+  auto yaml = artifacts_yaml();
+  const auto at = yaml.find(from);
+  if (at == std::string::npos)
+    throw std::logic_error("artifacts_yaml has no '" + from + "'");
+  return yaml.replace(at, from.size(), to);
+}
+
+// Entries parse sorted by name; references resolve to copies of the named
+// entries, which keep the name, so emission writes the name back and the
+// document round-trips.
+TEST(DataArtifactsYAML, ReferencesResolveToTheNamedEntries) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using namespace cudaq::qec::experimental;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(artifacts_yaml());
+  const auto &artifacts = parsed.data_artifacts;
+  const auto &decoder = parsed.decoders.at(0);
+  const auto &ingest = decoder.task_graph->nodes.at(0);
+  ASSERT_EQ(artifacts.size(), 4u);
+  EXPECT_EQ(artifacts[0].name, "pw_A");
+  EXPECT_EQ(artifacts[1].name, "pw_B");
+  EXPECT_EQ(artifacts[2].name, "rep_memory");
+  EXPECT_EQ(artifacts[3].name, "rep_stim");
+  ASSERT_TRUE(artifacts[0].window.has_value());
+  EXPECT_EQ(*artifacts[0].window, window_a());
+  EXPECT_EQ(artifacts[0].context, "rep_memory");
+  EXPECT_EQ(artifacts[3].stim_dem_path, "dems/rep.dem");
+  EXPECT_EQ(artifacts[3].sha256.size(), 64u);
+
+  EXPECT_EQ(decoder.dem_chunks_artifact, "rep_memory");
+  ASSERT_TRUE(decoder.dem_chunks.has_value());
+  EXPECT_EQ(*decoder.dem_chunks, *artifacts[2].dem_chunks);
+  ASSERT_EQ(ingest.windows.size(), 2u);
+  EXPECT_EQ(ingest.windows[0].artifact, "pw_A");
+  EXPECT_EQ(ingest.windows[0].request, window_a());
+  EXPECT_EQ(ingest.windows[1].artifact, "pw_B");
+  EXPECT_EQ(ingest.windows[1].request, *artifacts[1].window);
+
+  // The requests are written once, in data_artifacts; the uses name them.
+  const auto emitted = parsed.to_yaml_str(200);
+  std::size_t periods = 0;
+  for (auto at = emitted.find("period:"); at != std::string::npos;
+       at = emitted.find("period:", at + 1))
+    ++periods;
+  EXPECT_EQ(periods, 2u) << emitted;
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+} // end - TEST(DataArtifactsYAML, ReferencesResolveToTheNamedEntries)
+
+// A decoder that names its template builds the same graph as one that writes
+// it inline, and a file without data_artifacts emits none.
+TEST(DataArtifactsYAML, ByNameBuildsWhatInlineBuilds) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const std::string tmpl = R"(
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      num_rounds: 5
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+)";
+  const std::string graph = R"(
+    task_graph:
+      nodes:
+        - {id: w, type: single_window, inner: {type: single_error_lut}}
+      edges:
+        - {from: measurements, to: w}
+        - {from: w, to: output}
+)";
+  auto inline_form = cfg::multi_decoder_config::from_yaml_str(
+      "decoders:\n  - id: 0\n    dem_chunks:" + tmpl + graph);
+  auto by_name = cfg::multi_decoder_config::from_yaml_str(
+      "data_artifacts:\n  t:\n    dem_chunks:" + tmpl +
+      "decoders:\n  - id: 0\n    dem_chunks: t\n" + graph);
+  const auto a =
+      cudaq::qec::decoding::host::build_task_graph(inline_form.decoders.at(0));
+  const auto b =
+      cudaq::qec::decoding::host::build_task_graph(by_name.decoders.at(0));
+  EXPECT_EQ(by_name.decoders.at(0).dem_chunks,
+            inline_form.decoders.at(0).dem_chunks);
+  EXPECT_EQ(a->get_num_msyn_per_decode(), b->get_num_msyn_per_decode());
+  EXPECT_EQ(a->get_num_msyn_per_round(), b->get_num_msyn_per_round());
+  EXPECT_EQ(a->get_num_observables(), b->get_num_observables());
+  EXPECT_EQ(inline_form.to_yaml_str().find("data_artifacts"),
+            std::string::npos);
+} // end - TEST(DataArtifactsYAML, ByNameBuildsWhatInlineBuilds)
+
+// Each malformed entry or reference is rejected when parsed, with its own
+// message.
+TEST(DataArtifactsYAML, RejectsMalformedEntriesAndReferences) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto rejects = [](const std::string &yaml, const std::string &text) {
+    try {
+      cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(artifacts_yaml_with("dem_chunks: rep_memory", "dem_chunks: nowhere"),
+          "names data_artifacts entry 'nowhere', which does not exist");
+  rejects(artifacts_yaml_with("dem_chunks: rep_memory", "dem_chunks: pw_A"),
+          "'pw_A' is a window entry, not a dem_chunks entry");
+  rejects(artifacts_yaml_with("{A: pw_A, B: pw_B}", "{A: rep_memory, B: pw_B}"),
+          "'rep_memory' is a dem_chunks entry, not a window entry");
+  rejects(artifacts_yaml_with("    stim_dem_path: dems/rep.dem\n",
+                              "    stim_dem_path: dems/rep.dem\n"
+                              "    edem_path: x.edem\n"),
+          "entry 'rep_stim' has two kinds");
+  rejects(artifacts_yaml_with("    stim_dem_path: dems/rep.dem\n", ""),
+          "entry 'rep_stim' has no kind");
+  rejects(artifacts_yaml_with("      context: rep_memory\n      period: 12\n"
+                              "      zones: {buffers",
+                              "      context: rep_stim\n      period: 12\n"
+                              "      zones: {buffers"),
+          "context 'rep_stim' is not a dem_chunks entry");
+  rejects(artifacts_yaml_with("stim_dem_path: dems/rep.dem",
+                              "edem_path: gadgets/sec.edem"),
+          "edem_path is not supported until the cudaq-edem migration");
+  rejects(artifacts_yaml_with("stim_dem_path: dems/rep.dem",
+                              "stim_dem: \"error(0.1) D0\""),
+          "sha256 pins a file");
+  rejects(artifacts_yaml_with("sha256: 0123456789abcdef", "sha256: 0123"),
+          "sha256 must be 64 hexadecimal digits");
+  rejects(artifacts_yaml_with("      offset: -9\n",
+                              "      offset: -9\n"
+                              "      responsibility: [0]\n"),
+          "'responsibility' is reserved");
+} // end - TEST(DataArtifactsYAML, RejectsMalformedEntriesAndReferences)
+
+// A reference is written back by name only while the copy still equals the
+// named entry; a copy edited after parsing is written inline, so emitting
+// and parsing again keeps the edit, as the YAML published to remote targets
+// must. A decoder written on its own has no entries to name, so it writes
+// its copies inline.
+TEST(DataArtifactsYAML, EditsAfterParsingAreWrittenInline) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(artifacts_yaml());
+  const auto unchanged = cfg::multi_decoder_config::from_yaml_str(
+      cfg::multi_decoder_config(parsed).to_yaml_str(200));
+  auto edited = parsed;
+  auto &layers = edited.decoders.at(0).task_graph->nodes.at(0).windows;
+  edited.decoders.at(0).dem_chunks->num_rounds = 7;
+  layers.at(0).request.period = 24;
+  const auto again =
+      cfg::multi_decoder_config::from_yaml_str(edited.to_yaml_str(200));
+  const auto &again_layers =
+      again.decoders.at(0).task_graph->nodes.at(0).windows;
+  EXPECT_EQ(unchanged, parsed);
+  EXPECT_EQ(again.decoders.at(0).dem_chunks, edited.decoders.at(0).dem_chunks);
+  EXPECT_TRUE(again.decoders.at(0).dem_chunks_artifact.empty());
+  EXPECT_EQ(again_layers.at(0).request, layers.at(0).request);
+  EXPECT_TRUE(again_layers.at(0).artifact.empty());
+  EXPECT_EQ(again_layers.at(1).artifact, "pw_B");
+  const auto alone = cfg::decoder_config::from_yaml_str(
+      cfg::decoder_config(parsed.decoders.at(0)).to_yaml_str(200));
+  EXPECT_EQ(alone.dem_chunks, parsed.decoders.at(0).dem_chunks);
+  EXPECT_EQ(
+      alone.task_graph->nodes.at(0).windows.at(0).request,
+      parsed.decoders.at(0).task_graph->nodes.at(0).windows.at(0).request);
+} // end - TEST(DataArtifactsYAML, EditsAfterParsingAreWrittenInline)
+
+// A decoder parsed on its own has no data_artifacts to name.
+TEST(DataArtifactsYAML, AStandaloneDecoderCannotNameAnEntry) {
+  namespace cfg = cudaq::qec::decoding::config;
+  try {
+    cfg::decoder_config::from_yaml_str("id: 0\ntype: single_error_lut\n"
+                                       "dem_chunks: rep_memory\n");
+    ADD_FAILURE() << "a standalone decoder resolved a name";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("outside a multi_decoder_config"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+// A name is written back only while the document holds an entry of its kind
+// to resolve it. A copy built in code that keeps a name the document lacks
+// -- written on its own, or beside a model of another form -- writes no
+// reference, so the YAML parses again. With the entry present, a name with
+// no copy is still written, and resolves to the entry.
+TEST(DataArtifactsYAML, NamesWithoutTheirEntryAreNotWritten) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto flat = cfg::decoder_config::from_yaml_str(R"(
+id: 0
+type: multi_error_lut
+block_size: 2
+syndrome_size: 1
+H_sparse: [0, 1, -1]
+O_sparse: [0, -1]
+D_sparse: [0, -1]
+)");
+  auto named = flat;
+  cfg::multi_decoder_config document;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(artifacts_yaml());
+  auto without_copy = parsed;
+  named.stim_dem_artifact = "by_file";
+  named.dem_chunks_artifact = "rep_memory";
+  document.decoders = {named};
+  const auto alone = named.to_yaml_str();
+  const auto in_document = document.to_yaml_str();
+  for (const auto &yaml : {alone, in_document}) {
+    EXPECT_EQ(yaml.find("by_file"), std::string::npos) << yaml;
+    EXPECT_EQ(yaml.find("rep_memory"), std::string::npos) << yaml;
+  }
+  EXPECT_EQ(cfg::decoder_config::from_yaml_str(alone), flat);
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(in_document).decoders,
+            std::vector<cfg::decoder_config>{flat});
+
+  without_copy.decoders.at(0).dem_chunks.reset();
+  const auto emitted = without_copy.to_yaml_str(200);
+  EXPECT_TRUE(
+      std::regex_search(emitted, std::regex("dem_chunks:\\s+rep_memory\\n")))
+      << emitted;
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+} // end - TEST(DataArtifactsYAML, NamesWithoutTheirEntryAreNotWritten)
+
+// ---------------------------------------------------------------------------
+// Data artifact store, filled from a configuration
+// ---------------------------------------------------------------------------
+
+// The Stim DEM artifacts_yaml() names as dems/rep.dem, and the placeholder
+// sha256 it pins the file to.
+constexpr const char *rep_dem_text = "error(0.01) D0\n";
+constexpr const char *placeholder_pin =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+// A temporary directory holding dems/rep.dem, removed on destruction.
+class ScopedArtifactDir {
+public:
+  ScopedArtifactDir() {
+    // Qualified by pid, as ScopedDemFile is, since ctest runs binaries
+    // concurrently.
+    static int counter = 0;
+    dir_ = std::filesystem::temp_directory_path() /
+           ("cudaqx_artifacts_" + std::to_string(::getpid()) + "_" +
+            std::to_string(counter++));
+    std::filesystem::create_directories(dir_ / "dems");
+    std::ofstream(dir_ / "dems" / "rep.dem") << rep_dem_text;
+  }
+  ~ScopedArtifactDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(dir_, ec);
+  }
+  const std::filesystem::path &path() const { return dir_; }
+
+private:
+  std::filesystem::path dir_;
+};
+
+// artifacts_yaml() with dems/rep.dem pinned to its real sha256.
+std::string pinned_artifacts_yaml() {
+  return artifacts_yaml_with(placeholder_pin,
+                             cudaq::qec::sha256_hex(rep_dem_text));
+}
+
+// A store's records of one kind.
+std::vector<cudaq::qec::data_artifact_record>
+records_of(const cudaq::qec::data_artifact_store &store,
+           const std::string &kind) {
+  std::vector<cudaq::qec::data_artifact_record> out;
+  for (const auto &record : store.records())
+    if (record.kind == kind)
+      out.push_back(record);
+  return out;
+}
+
+// The distinct variant keys of request on tmpl, over the shot lengths that
+// hold every key.
+std::set<cudaq::qec::variant_key>
+variant_keys(const cudaq::qec::experiment_template &tmpl,
+             const cudaq::qec::experimental::window_request &request) {
+  std::set<cudaq::qec::variant_key> keys;
+  for (auto R = tmpl.min_rounds();
+       R < cudaq::qec::variant_probe_rounds(tmpl, request); ++R) {
+    const auto instances = cudaq::qec::window_instances(request, R);
+    for (auto k = instances.begin; k < instances.end; ++k)
+      keys.insert(cudaq::qec::window_variant(tmpl, request, k, R));
+  }
+  return keys;
+}
+
+// Filling holds the template once, though the decoder and both window
+// entries name it; the Stim DEM, read from its file and checked against its
+// pin; and every variant of both window entries, which the ingest node's
+// layers name again.
+TEST(DataArtifactStore, FillsFromTheConfig) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto config =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  const auto store =
+      cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+  const auto &artifacts = config.data_artifacts;
+  const auto tmpl = store.find_template(*config.decoders.at(0).dem_chunks);
+  std::size_t variants = 0;
+  ASSERT_EQ(artifacts.size(), 4u);
+  EXPECT_EQ(tmpl, store.find_template(*artifacts[2].dem_chunks));
+  EXPECT_EQ(records_of(store, "dem_chunks").size(), 1u);
+  EXPECT_EQ(records_of(store, "stim_dem"),
+            (std::vector<cudaq::qec::data_artifact_record>{
+                {"stim_dem", std::string(rep_dem_text).size(),
+                 cudaq::qec::sha256_hex(rep_dem_text)}}));
+  for (const auto &entry : {artifacts[0], artifacts[1]}) {
+    const auto keys = variant_keys(*tmpl, *entry.window);
+    variants += keys.size();
+    for (const auto &key : keys)
+      EXPECT_NE(store.find_window(*tmpl, *entry.window, key), nullptr);
+  }
+  EXPECT_EQ(records_of(store, "window").size(), variants);
+} // end - TEST(DataArtifactStore, FillsFromTheConfig)
+
+// Two decoders naming one template, and a third writing the same content
+// inline, each building windows on it, share one entry and one handle.
+TEST(DataArtifactStore, DecodersNamingOneTemplateShareIt) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const std::string tmpl = R"(
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+)";
+  const std::string window = R"(
+  w:
+    window:
+      context: t
+      period: 12
+      offset: -9
+      zones: {commit: [0, 9]}
+      ports:
+        input: {disposition: closed}
+        output: {disposition: closed}
+)";
+  const auto decoder = [](int id, const std::string &dem_chunks) {
+    return "  - id: " + std::to_string(id) + "\n    dem_chunks:" + dem_chunks +
+           R"(    task_graph:
+      nodes:
+        - {id: ingest, type: ingest, windows: {A: w}}
+        - {id: A, type: decode_window, inner: {type: single_error_lut}}
+      edges:
+        - {from: measurements, to: ingest}
+        - {from: ingest.A, to: A}
+        - {from: A, to: output}
+)";
+  };
+  const auto config = cfg::multi_decoder_config::from_yaml_str(
+      "data_artifacts:\n  t:\n    dem_chunks:" + tmpl + window + "decoders:\n" +
+      decoder(0, " t\n") + decoder(1, " t\n") + decoder(2, tmpl));
+  const auto store = cudaq::qec::decoding::host::fill_data_artifact_store(
+      config, std::filesystem::current_path());
+  const auto shared = store.find_template(*config.decoders.at(0).dem_chunks);
+  EXPECT_EQ(records_of(store, "dem_chunks").size(), 1u);
+  EXPECT_EQ(store.find_template(*config.decoders.at(1).dem_chunks), shared);
+  EXPECT_EQ(store.find_template(*config.decoders.at(2).dem_chunks), shared);
+} // end - TEST(DataArtifactStore, DecodersNamingOneTemplateShareIt)
+
+// Only the templates windows are built on are filled: a window entry's
+// context, and the template of a node with window layers. experiment_template
+// is stricter than a plain decoder's dem_chunks, so a model it rejects -- here
+// a suffix phase before FINAL wider than bulk -- leaves filling alone where no
+// window is built on it: on a decoder without a task graph, on a node without
+// layers, and in an entry no window names.
+TEST(DataArtifactStore, FillsOnlyTheTemplatesWindowsAreBuiltOn) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using node_spec = cfg::decoder_config::task_graph_spec::node_spec;
+  const ScopedArtifactDir dir;
+  auto config =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  auto wide = cudaq::qec::multi_terminal_memory_spec(5, 2);
+  auto plain = config.decoders.at(0);
+  cfg::data_artifact entry;
+  node_spec node;
+  for (auto &phase : wide.phases)
+    if (phase.id == cudaq::qec::phase_id::from_name("terminal0"))
+      phase.spec.num_measurements = 5;
+  EXPECT_THROW(cudaq::qec::experiment_template{wide}, std::invalid_argument);
+
+  // A plain decoder expands the model as it is.
+  plain.task_graph.reset();
+  plain.dem_chunks = wide;
+  plain.dem_chunks_artifact.clear();
+  auto expanded = plain;
+  EXPECT_NO_THROW(cfg::expand_dem_chunks(expanded));
+  plain.id = 1;
+  config.decoders.push_back(plain);
+  entry.name = "wide";
+  entry.dem_chunks = wide;
+  config.data_artifacts.push_back(entry);
+  plain.id = 2;
+  plain.dem_chunks_artifact = "wide";
+  config.decoders.push_back(plain);
+  node.id = "w";
+  node.dem_chunks = wide;
+  plain.id = 3;
+  plain.dem_chunks.reset();
+  plain.dem_chunks_artifact.clear();
+  plain.task_graph.emplace();
+  plain.task_graph->nodes.push_back(node);
+  config.decoders.push_back(plain);
+
+  const auto store =
+      cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+  EXPECT_EQ(records_of(store, "dem_chunks").size(), 1u);
+  EXPECT_NO_THROW(store.find_template(*config.decoders.at(0).dem_chunks));
+  EXPECT_THROW(store.find_template(wide), std::logic_error);
+} // end - TEST(DataArtifactStore, FillsOnlyTheTemplatesWindowsAreBuiltOn)
+
+// A node's template is the one translate_task_graph_node() builds its DEM
+// from: its own dem_chunks, else its decoder's while the decoder has no flat
+// matrices. expand_dem_chunks() leaves H_sparse beside dem_chunks, and the
+// node then runs on the flat matrices, so its layers have no template to be
+// built on and are rejected. With dem_chunks of its own, the node builds its
+// windows on that.
+TEST(DataArtifactStore, ANodeOnFlatMatricesHasNoTemplate) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  auto config = parsed;
+  auto &decoder = config.decoders.at(0);
+  auto &ingest = decoder.task_graph->nodes.at(0);
+  decoder.dem_chunks->num_rounds = 12;
+  cfg::expand_dem_chunks(decoder);
+  ASSERT_FALSE(decoder.H_sparse.empty());
+  ASSERT_TRUE(decoder.dem_chunks.has_value());
+  try {
+    cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+    ADD_FAILURE() << "a layer was built on a template the node does not use";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "decoder 0, node 'ingest' has windows but no dem_chunks "
+                  "template: its decoder's dem_chunks is expanded into "
+                  "H_sparse"),
+              std::string::npos)
+        << e.what();
+  }
+
+  ingest.dem_chunks = parsed.data_artifacts.at(2).dem_chunks;
+  const auto store =
+      cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+  EXPECT_NO_THROW(store.find_template(*ingest.dem_chunks));
+  EXPECT_EQ(records_of(store, "dem_chunks").size(), 1u);
+} // end - TEST(DataArtifactStore, ANodeOnFlatMatricesHasNoTemplate)
+
+// By name and inline, a configuration fills a store with the same template
+// and window entries, in the same order; the by-name file adds its Stim DEM.
+TEST(DataArtifactStore, ByNameFillsWhatInlineFills) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto by_name = cudaq::qec::decoding::host::fill_data_artifact_store(
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml()),
+      dir.path());
+  const auto inline_form = cudaq::qec::decoding::host::fill_data_artifact_store(
+      cfg::multi_decoder_config::from_yaml_str(pw_graph_yaml()), dir.path());
+  for (const auto *kind : {"dem_chunks", "window"})
+    EXPECT_EQ(records_of(by_name, kind), records_of(inline_form, kind)) << kind;
+  EXPECT_TRUE(records_of(inline_form, "stim_dem").empty());
+}
+
+// A file that does not match its pin is rejected, naming the entry, the file
+// and both hashes, and so is a missing file. Without a pin, any bytes do.
+TEST(DataArtifactStore, RejectsAFileThatDoesNotMatchItsSha256) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto fill = [&](const std::string &yaml) {
+    cudaq::qec::decoding::host::fill_data_artifact_store(
+        cfg::multi_decoder_config::from_yaml_str(yaml), dir.path());
+  };
+  const auto rejects = [&](const std::string &yaml, const std::string &text) {
+    try {
+      fill(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  rejects(artifacts_yaml(),
+          "data_artifacts.rep_stim: dems/rep.dem has sha256 " +
+              cudaq::qec::sha256_hex(rep_dem_text) + ", but the entry pins " +
+              placeholder_pin);
+  EXPECT_NO_THROW(fill(artifacts_yaml_with(
+      "    sha256: " + std::string(placeholder_pin) + "\n", "")));
+  std::filesystem::remove(dir.path() / "dems" / "rep.dem");
+  rejects(pinned_artifacts_yaml(), "data_artifacts.rep_stim");
+} // end - TEST(DataArtifactStore, RejectsAFileThatDoesNotMatchItsSha256)
+
+// A configuration built in code skips the parser's checks, so filling checks
+// a window entry's context itself: an empty one, one naming no entry, and
+// one naming an entry that is not a template are each rejected, naming the
+// window entry.
+TEST(DataArtifactStore, RejectsAWindowWhoseContextIsNotATemplate) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  const std::vector<std::pair<std::string, std::string>> cases{
+      {"", "a window entry needs a context naming a dem_chunks entry"},
+      {"nowhere", "context 'nowhere' is not a dem_chunks entry"},
+      {"rep_stim", "context 'rep_stim' is not a dem_chunks entry"}};
+  ASSERT_EQ(parsed.data_artifacts.at(0).name, "pw_A");
+  for (const auto &[context, text] : cases) {
+    auto config = parsed;
+    config.data_artifacts[0].context = context;
+    try {
+      cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find("data_artifacts.pw_A: " + text),
+                std::string::npos)
+          << e.what();
+    }
+  }
+} // end - TEST(DataArtifactStore, RejectsAWindowWhoseContextIsNotATemplate)
+
+// An ingest layer that names a window entry is built on the node's template,
+// so that entry's context must be the same template; one on another
+// template is rejected, naming the layer, the entry and its context, and so
+// is a layer naming an entry that is not a window. With the same template,
+// the layer reuses the entry's variants.
+TEST(DataArtifactStore, RejectsALayerWhoseEntryIsOnAnotherTemplate) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  const auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  auto config = parsed;
+  config.decoders.at(0).dem_chunks->phases.at(0).spec.error_rates.at(0) = 0.02;
+  try {
+    cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+    ADD_FAILURE() << "a layer was built on another template";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "decoder 0, node 'ingest', layer 'A': window entry 'pw_A' "
+                  "is built on 'rep_memory', a different template from the "
+                  "node's"),
+              std::string::npos)
+        << e.what();
+  }
+  config = parsed;
+  config.decoders.at(0).task_graph->nodes.at(0).windows.at(0).artifact =
+      "rep_stim";
+  try {
+    cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+    ADD_FAILURE() << "a layer named an entry that is not a window";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("layer 'A': 'rep_stim' is not a "
+                                         "window entry"),
+              std::string::npos)
+        << e.what();
+  }
+  const auto store =
+      cudaq::qec::decoding::host::fill_data_artifact_store(parsed, dir.path());
+  EXPECT_EQ(records_of(store, "dem_chunks").size(), 1u);
+} // end - TEST(DataArtifactStore, RejectsALayerWhoseEntryIsOnAnotherTemplate)
+
+// A layer builds its own request. Once that differs from the entry it names,
+// to_yaml_str() writes it inline, since the name no longer describes it; so
+// the entry's template is no longer checked against the node's.
+TEST(DataArtifactStore, ALayerBuildsItsOwnRequest) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  auto config =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  auto &decoder = config.decoders.at(0);
+  auto &layers = decoder.task_graph->nodes.at(0).windows;
+  decoder.dem_chunks->phases.at(0).spec.error_rates.at(0) = 0.02;
+  for (auto &layer : layers)
+    ++layer.request.offset;
+  const auto store =
+      cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+  const auto tmpl = store.find_template(*decoder.dem_chunks);
+  for (const auto &layer : layers)
+    for (const auto &key : variant_keys(*tmpl, layer.request))
+      EXPECT_NO_THROW(store.find_window(*tmpl, layer.request, key));
+} // end - TEST(DataArtifactStore, ALayerBuildsItsOwnRequest)
+
+// A configuration built in code skips the parser, so filling rejects a pin
+// on an inline Stim DEM as parsing does.
+TEST(DataArtifactStore, RejectsAPinOnAnInlineStimDem) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const ScopedArtifactDir dir;
+  auto config =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  auto &entry = config.data_artifacts.at(3);
+  ASSERT_EQ(entry.name, "rep_stim");
+  entry.stim_dem = rep_dem_text;
+  entry.stim_dem_path.clear();
+  try {
+    cudaq::qec::decoding::host::fill_data_artifact_store(config, dir.path());
+    ADD_FAILURE() << "a pin on an inline Stim DEM was accepted";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "data_artifacts.rep_stim: sha256 pins a file, so it needs a "
+                  "file-backed entry such as stim_dem_path"),
+              std::string::npos)
+        << e.what();
+  }
+} // end - TEST(DataArtifactStore, RejectsAPinOnAnInlineStimDem)
+
+// A caller reads each pinned file once, and both the pinned copy of the
+// configuration and the store take its text and hash from that read, so with
+// the file gone afterwards both still work. A read missing a pinned entry, or
+// made against another pin, is a logic error, not a way past the pin: a
+// configuration whose entry now pins other bytes cannot reuse it.
+TEST(DataArtifactStore, ReusesThePinnedReads) {
+  namespace cfg = cudaq::qec::decoding::config;
+  namespace host = cudaq::qec::decoding::host;
+  const ScopedArtifactDir dir;
+  const host::pinned_stim_dems none;
+  const auto config =
+      cfg::multi_decoder_config::from_yaml_str(pinned_artifacts_yaml());
+  auto repinned = config;
+  const auto pinned = host::read_pinned_stim_dems(config, dir.path());
+  const auto hash = cudaq::qec::sha256_hex(rep_dem_text);
+  EXPECT_EQ(pinned,
+            (host::pinned_stim_dems{{"rep_stim", {rep_dem_text, hash}}}));
+  std::filesystem::remove(dir.path() / "dems" / "rep.dem");
+  EXPECT_EQ(host::with_pinned_stim_dems(config, pinned), config);
+  const auto store = host::fill_data_artifact_store(config, dir.path(), pinned);
+  EXPECT_EQ(records_of(store, "stim_dem"),
+            (std::vector<cudaq::qec::data_artifact_record>{
+                {"stim_dem", std::string(rep_dem_text).size(), hash}}));
+  EXPECT_THROW(host::with_pinned_stim_dems(config, none), std::logic_error);
+  EXPECT_THROW(host::fill_data_artifact_store(config, dir.path(), none),
+               std::logic_error);
+
+  const auto rejects_stale_read = [&](auto &&use) {
+    try {
+      use();
+      ADD_FAILURE() << "a read made against another pin was reused";
+    } catch (const std::logic_error &e) {
+      EXPECT_NE(
+          std::string(e.what()).find("data_artifacts.rep_stim pins sha256 " +
+                                     std::string(placeholder_pin) +
+                                     ", but its text was read against " + hash),
+          std::string::npos)
+          << e.what();
+    }
+  };
+  ASSERT_EQ(repinned.data_artifacts.at(3).name, "rep_stim");
+  repinned.data_artifacts.at(3).sha256 = placeholder_pin;
+  rejects_stale_read([&] { host::with_pinned_stim_dems(repinned, pinned); });
+  rejects_stale_read(
+      [&] { host::fill_data_artifact_store(repinned, dir.path(), pinned); });
+} // end - TEST(DataArtifactStore, ReusesThePinnedReads)
+
+// ---------------------------------------------------------------------------
+// parallel_window pattern and pool options
+// ---------------------------------------------------------------------------
+
+// The reference's pattern form: one node, wired measurements -> pw -> output,
+// with the pool's threads pinned.
+std::string pattern_yaml() {
+  return R"(
+decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      async_streaming: true
+      async_coordinator_cpu: 2
+      async_num_workers: 4
+      async_worker_cpus: [4, 5, 6, 7]
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          output: corrected_logical
+          max_in_flight: 4
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+)";
+}
+
+// pattern_yaml() with `from` replaced by `to`.
+std::string pattern_yaml_with(const std::string &from, const std::string &to) {
+  auto yaml = pattern_yaml();
+  const auto at = yaml.find(from);
+  if (at == std::string::npos)
+    throw std::logic_error("pattern_yaml has no '" + from + "'");
+  return yaml.replace(at, from.size(), to);
+}
+
+// Expect parsing yaml to fail with a message containing text.
+void expect_parse_error(const std::string &yaml, const std::string &text) {
+  namespace cfg = cudaq::qec::decoding::config;
+  try {
+    cfg::multi_decoder_config::from_yaml_str(yaml);
+    ADD_FAILURE() << "expected: " << text;
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+}
+
+// The pattern's parameters and the pool options parse, and the document
+// round-trips; unset options are not written.
+TEST(ParallelWindowPattern, ParsesThePatternForm) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(pattern_yaml());
+  const auto &graph = *parsed.decoders.at(0).task_graph;
+  const auto &params = graph.nodes.at(0).node_params.map();
+  EXPECT_EQ(graph.nodes.at(0).type, "parallel_window");
+  EXPECT_EQ(params.get<std::size_t>("commit_rounds"), 3u);
+  EXPECT_EQ(params.get<std::size_t>("buffer_rounds"), 3u);
+  EXPECT_EQ(params.get<std::size_t>("gap_rounds"), 9u);
+  EXPECT_EQ(params.get<std::string>("output"), "corrected_logical");
+  EXPECT_EQ(graph.nodes.at(0).max_in_flight, 4u);
+  EXPECT_EQ(graph.options.async_num_workers, std::optional<std::size_t>{4});
+  EXPECT_EQ(graph.options.async_worker_cpus, (std::vector<int>{4, 5, 6, 7}));
+  const auto emitted = parsed.to_yaml_str(200);
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+
+  auto plain = cfg::multi_decoder_config::from_yaml_str(pattern_yaml_with(
+      "      async_num_workers: 4\n      async_worker_cpus: [4, 5, 6, 7]\n",
+      ""));
+  EXPECT_FALSE(plain.decoders.at(0).task_graph->options.async_num_workers);
+  EXPECT_EQ(plain.to_yaml_str(200).find("async_num_workers"),
+            std::string::npos);
+  EXPECT_EQ(plain.to_yaml_str(200).find("async_worker_cpus"),
+            std::string::npos);
+} // end - TEST(ParallelWindowPattern, ParsesThePatternForm)
+
+// Building lowers the pattern into pw.ingest, pw.A, pw.B and pw.sum and
+// validates them as a hand-written graph, so the pattern is checked end to
+// end: corrected_logical needs the template's m2o_sparse, and two faults on
+// one detector with different observable effects are ambiguous. With
+// identical twins, or the pattern's conflicting_parallel resolving them in
+// its layers, the graph builds and streams.
+TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto unpooled = [](std::string yaml) {
+    const std::string pool =
+        "      async_num_workers: 4\n      async_worker_cpus: [4, 5, 6, 7]\n";
+    return yaml.replace(yaml.find(pool), pool.size(), "");
+  };
+  const auto corrections = unpooled(
+      pattern_yaml_with("output: corrected_logical", "output: corrections"));
+  auto twins = corrections;
+  for (auto at = twins.find("O_sparse: [0, -1]"); at != std::string::npos;
+       at = twins.find("O_sparse: [0, -1]", at))
+    twins.replace(at, 17, "O_sparse: [0, 1, -1]");
+  expect_build_error(
+      cfg::multi_decoder_config::from_yaml_str(unpooled(pattern_yaml())),
+      "from_topology: parallel_window 'pw' has output: corrected_logical, "
+      "which reads the logical value through the last phase's m2o_sparse, "
+      "and its template has none; use output: corrections");
+  auto resolved = corrections;
+  resolved.replace(resolved.find("          max_in_flight: 4\n"), 0,
+                   "          conflicting_parallel: most_likely\n");
+  expect_build_error(cfg::multi_decoder_config::from_yaml_str(corrections),
+                     "validate_commitment: pw.A[0] (position 0, terminal 3) "
+                     "of the 3-round shot: commit column 0 (round 0) is "
+                     "parallel to column 1 (round 0), which has a different "
+                     "observable effect");
+  expect_streams(cfg::multi_decoder_config::from_yaml_str(twins));
+  expect_streams(cfg::multi_decoder_config::from_yaml_str(resolved));
+} // end - TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt)
+
+// Filling the store from the pattern holds every variant of its two layers,
+// the very windows of the parallel-window graph written by hand with the
+// same sizes and prior. A pattern whose parameters or template give no
+// windows is named.
+TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::fill_data_artifact_store;
+  // The prior the hand-written graph states.
+  const auto pattern =
+      cfg::multi_decoder_config::from_yaml_str(pattern_yaml_with(
+          "          max_in_flight: 4\n", "          boundary_prior: 0.01\n"
+                                          "          max_in_flight: 4\n"));
+  const auto by_hand =
+      cfg::multi_decoder_config::from_yaml_str(pw_graph_yaml());
+  const auto store = fill_data_artifact_store(pattern, ".");
+  const auto tmpl = store.find_template(*pattern.decoders.at(0).dem_chunks);
+  const auto requests = cudaq::qec::parallel_window_requests(
+      pattern.decoders.at(0).task_graph->nodes.at(0).node_params.map(), *tmpl);
+  std::size_t variants = 0;
+  for (const auto &request : {requests.first, requests.second}) {
+    const auto keys = variant_keys(*tmpl, request);
+    variants += keys.size();
+    for (const auto &key : keys)
+      EXPECT_NE(store.find_window(*tmpl, request, key), nullptr);
+  }
+  EXPECT_EQ(records_of(store, "window").size(), variants);
+  EXPECT_EQ(records_of(store, "window"),
+            records_of(fill_data_artifact_store(by_hand, "."), "window"));
+
+  auto uncrossed = cfg::multi_decoder_config::from_yaml_str(pattern_yaml());
+  auto zero = uncrossed;
+  uncrossed.decoders.at(0).dem_chunks = cudaq::qec::single_round_spec();
+  zero.decoders.at(0).task_graph->nodes.at(0).node_params.map().insert(
+      "commit_rounds", std::size_t{0});
+  for (const auto &[config, text] :
+       {std::pair{uncrossed, "decoder 0, node 'pw': parallel_window: no fault "
+                             "crosses into the next round"},
+        std::pair{zero, "decoder 0, node 'pw': parallel_window: "
+                        "commit_rounds must be at least 1"}}) {
+    try {
+      fill_data_artifact_store(config, ".");
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  }
+} // end - TEST(ParallelWindowPattern, FillsTheStoreWithItsWindows)
+
+// A pattern whose template is named in data_artifacts lowers as one with the
+// template inline: the same windows, named <id>.A and <id>.B, the same
+// decoders per variant under the same sha256s, and a store holding the same
+// windows; both build.
+TEST(ParallelWindowPattern, ATemplateByNameLowersAsInline) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::fill_data_artifact_store;
+  const std::string tmpl = R"(
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+)";
+  const std::string graph = R"(
+    task_graph:
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          output: corrections
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+)";
+  const auto inline_form = cfg::multi_decoder_config::from_yaml_str(
+      "decoders:\n  - id: 0\n    dem_chunks:" + tmpl + graph);
+  const auto by_name = cfg::multi_decoder_config::from_yaml_str(
+      "data_artifacts:\n  t:\n    dem_chunks:" + tmpl +
+      "decoders:\n  - id: 0\n    dem_chunks: t\n" + graph);
+  // The 30-round shot of the decoder's pattern node, as its graph lowers it.
+  const auto schedule_of = [](const cfg::multi_decoder_config &config) {
+    const auto &decoder = config.decoders.at(0);
+    const auto &node = decoder.task_graph->nodes.at(0);
+    std::vector<cudaq::qec::task_graph_node_config> nodes(1);
+    nodes[0].id = node.id;
+    nodes[0].kind = node.resolved_kind();
+    nodes[0].dem = *decoder.dem_chunks;
+    nodes[0].node_params = node.node_params.map();
+    nodes[0].decoder_type = "single_error_lut";
+    return cudaq::qec::describe_schedule(std::move(nodes),
+                                         decoder.task_graph->edges, {}, 30);
+  };
+  const auto a = schedule_of(inline_form);
+  const auto b = schedule_of(by_name);
+  std::set<std::string> names;
+  ASSERT_EQ(by_name.decoders.at(0).dem_chunks,
+            inline_form.decoders.at(0).dem_chunks);
+  ASSERT_FALSE(a.windows.empty());
+  EXPECT_EQ(a.windows, b.windows);
+  EXPECT_EQ(a.decoders, b.decoders);
+  EXPECT_EQ(a.templates, b.templates);
+  for (const auto &w : b.windows)
+    names.insert(w.node);
+  EXPECT_EQ(names, (std::set<std::string>{"pw.A", "pw.B"}));
+  EXPECT_EQ(records_of(fill_data_artifact_store(by_name, "."), "window"),
+            records_of(fill_data_artifact_store(inline_form, "."), "window"));
+  EXPECT_NE(
+      cudaq::qec::decoding::host::build_task_graph(by_name.decoders.at(0)),
+      nullptr);
+  EXPECT_NE(
+      cudaq::qec::decoding::host::build_task_graph(inline_form.decoders.at(0)),
+      nullptr);
+} // end - TEST(ParallelWindowPattern, ATemplateByNameLowersAsInline)
+
+// Any pattern kind's windows hook fills the store: it is handed the node's
+// parameters and template, and every variant of each layer it declares is
+// held.
+TEST(PatternKind, FillsTheStoreWithTheWindowsItsHookDeclares) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::fill_data_artifact_store;
+  using cudaq::qec::experimental::port_disposition;
+  const std::string name = "test_only_windowed_pattern";
+  cudaq::qec::task_graph_node_kind_spec spec;
+  cudaq::qec::decoding::config::decoder_schema params;
+  cudaq::qec::node_pattern pattern;
+  cudaq::qec::experimental::window_request closed;
+  std::size_t seen_rounds = 0;
+  closed.period = 1;
+  closed.commit = cudaq::qec::experimental::round_range{0, 1};
+  closed.input.disposition = port_disposition::closed;
+  closed.output.disposition = port_disposition::closed;
+  spec.name = name;
+  spec.requires_decoder = false;
+  params.params.push_back({"rounds", cfg::param_kind::uint64});
+  pattern.lower = [](cudaq::qec::task_graph_node_config,
+                     std::vector<cudaq::qec::task_graph_node_config> &,
+                     std::vector<cudaq::qec::task_graph_edge> &)
+      -> cudaq::qec::node_pattern::wiring { return {}; };
+  pattern.windows = [&](const cudaqx::heterogeneous_map &node_params,
+                        const cudaq::qec::experiment_template &) {
+    seen_rounds = node_params.get<std::size_t>("rounds");
+    return std::vector<
+        std::pair<std::string, cudaq::qec::experimental::window_request>>{
+        {"C", closed}};
+  };
+  cudaq::qec::register_pattern_kind(spec, params, pattern);
+
+  const auto config = cfg::multi_decoder_config::from_yaml_str(
+      pattern_yaml_with("          type: parallel_window\n"
+                        "          commit_rounds: 3\n"
+                        "          buffer_rounds: 3\n"
+                        "          gap_rounds: 9\n"
+                        "          output: corrected_logical\n"
+                        "          max_in_flight: 4\n"
+                        "          inner: {type: single_error_lut}\n",
+                        "          type: " + name +
+                            "\n"
+                            "          rounds: 5\n"));
+  const auto store = fill_data_artifact_store(config, ".");
+  // The hook captures this test's locals.
+  cudaq::qec::unregister_task_graph_node_kind(name);
+  const auto tmpl = store.find_template(*config.decoders.at(0).dem_chunks);
+  const auto keys = variant_keys(*tmpl, closed);
+  EXPECT_EQ(seen_rounds, 5u);
+  ASSERT_FALSE(keys.empty());
+  for (const auto &key : keys)
+    EXPECT_NE(store.find_window(*tmpl, closed, key), nullptr);
+  EXPECT_EQ(records_of(store, "window").size(), keys.size());
+} // end - TEST(PatternKind, FillsTheStoreWithTheWindowsItsHookDeclares)
+
+// Configuring builds no decoder for a pattern, whose layers build their own
+// from their windows: a pattern beside flat matrices is reported as having
+// no template, and one inside an ensemble as expanding only as a node of the
+// graph, with no inner decoder constructed for either.
+TEST(ParallelWindowPattern, ConfiguringBuildsNoDecoderForAPattern) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const std::string flat = R"(
+decoders:
+  - id: 0
+    block_size: 2
+    syndrome_size: 1
+    H_sparse: [0, 1, -1]
+    O_sparse: [0, -1]
+    D_sparse: [0, -1]
+    task_graph:
+      nodes:
+)";
+  const std::string pattern =
+      "{id: pw, type: parallel_window, commit_rounds: 3, buffer_rounds: 3, "
+      "inner: {type: d_capture_decoder}}";
+  const std::string top = flat + "        - " + pattern + R"(
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+)";
+  const std::string nested = flat + R"(        - id: e
+          type: ensemble
+          join_strategy: deadline
+          join_params: {deadline_us: 200000}
+          members:
+            - nodes:
+                - )" + pattern +
+                             R"(
+              edges: [{from: input, to: pw}, {from: pw, to: output}]
+      edges:
+        - {from: measurements, to: e}
+        - {from: e, to: output}
+)";
+  for (const auto &[yaml, text] :
+       {std::pair{top, std::string("from_topology: parallel_window 'pw' has "
+                                   "no dem_chunks template")},
+        std::pair{nested,
+                  std::string("from_topology: ensemble 'e' member 0 has "
+                              "parallel_window 'pw', which expands only as a "
+                              "node of the graph")}}) {
+    cudaq::qec::construction_d_probe::model = {};
+    expect_build_error(cfg::multi_decoder_config::from_yaml_str(yaml), text);
+    EXPECT_EQ(cudaq::qec::construction_d_probe::model.num_detectors, 0u);
+  }
+} // end - TEST(ParallelWindowPattern, ConfiguringBuildsNoDecoderForAPattern)
+
+// Each bad pattern parameter is rejected when parsed, with its own message.
+TEST(ParallelWindowPattern, RejectsBadParameters) {
+  expect_parse_error(pattern_yaml_with("          commit_rounds: 3\n", ""),
+                     "commit_rounds");
+  expect_parse_error(
+      pattern_yaml_with("          commit_rounds: 3\n",
+                        "          commit_rounds: 2147483649\n"),
+      "parallel_window: commit_rounds must be at most 2147483648");
+  expect_parse_error(pattern_yaml_with("buffer_rounds: 3", "buffer_rounds: 0"),
+                     "parallel_window: buffer_rounds must be at least 1");
+  expect_parse_error(pattern_yaml_with("gap_rounds: 9", "gap_rounds: 0"),
+                     "parallel_window: gap_rounds must be at least 1");
+  expect_parse_error(
+      pattern_yaml_with("output: corrected_logical", "output: everything"),
+      "parallel_window: output must be corrected_logical or corrections");
+  expect_parse_error(pattern_yaml_with("gap_rounds: 9",
+                                       "gap_rounds: 9\n"
+                                       "          boundary_prior: 1.5"),
+                     "parallel_window: boundary_prior must be strictly "
+                     "between 0 and 1");
+  expect_parse_error(pattern_yaml_with("gap_rounds: 9",
+                                       "gap_rounds: 9\n"
+                                       "          boundary_prior: 0.01\n"
+                                       "          input_boundary: truncate"),
+                     "parallel_window: boundary_prior is for input_boundary "
+                     "columns");
+  expect_parse_error(
+      pattern_yaml_with("gap_rounds: 9", "gap_rounds: 9\n"
+                                         "          input_boundary: sideways"),
+      "parallel_window: input_boundary must be columns or truncate");
+  expect_parse_error(pattern_yaml_with("gap_rounds: 9",
+                                       "gap_rounds: 9\n"
+                                       "          conflicting_parallel: any"),
+                     "parallel_window: conflicting_parallel must be reject "
+                     "or most_likely");
+  expect_parse_error(pattern_yaml_with("max_in_flight: 4", "max_in_flight: 0"),
+                     "task_graph node 'pw' has max_in_flight 0");
+  expect_parse_error(pattern_yaml_with("max_in_flight: 4",
+                                       "max_in_flight: 4\n"
+                                       "          verify_residual: true"),
+                     "parallel_window: verify_residual must be none, fail or "
+                     "report; got 'true'");
+} // end - TEST(ParallelWindowPattern, RejectsBadParameters)
+
+// A count built in code as a negative int never reaches the pattern's
+// minimum, which would read it as a huge count and pass it.
+TEST(ParallelWindowPattern, RejectsANegativeCountBuiltInCode) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const auto parsed = cfg::multi_decoder_config::from_yaml_str(pattern_yaml());
+  auto params = parsed.decoders.at(0).task_graph->nodes.at(0).node_params.map();
+  params.insert("commit_rounds", -1);
+  try {
+    cfg::validate_custom_args(
+        cudaq::qec::task_graph_node_schema_name("parallel_window"), params);
+    ADD_FAILURE() << "a negative commit_rounds validated";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(
+                  "Key 'commit_rounds' in 'task_graph_node.parallel_window' "
+                  "parameters does not hold a non-negative int"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+// Bad pool options are rejected when parsed, and the graph rejects set ones
+// until the pool applies them.
+TEST(TaskGraphPoolOptions, AreChecked) {
+  expect_parse_error(
+      pattern_yaml_with("async_num_workers: 4", "async_num_workers: 0"),
+      "task_graph.async_num_workers must be at least 1");
+  expect_parse_error(pattern_yaml_with("[4, 5, 6, 7]", "[4, -5]"),
+                     "task_graph.async_worker_cpus has negative CPU -5");
+  // Two workers on one CPU only warn.
+  EXPECT_NO_THROW(
+      (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          pattern_yaml_with("[4, 5, 6, 7]", "[4, 5, 4]")));
+  expect_parse_error(pattern_yaml_with("[4, 5, 6, 7]", "[2, 5]"),
+                     "task_graph.async_worker_cpus includes CPU 2, which "
+                     "async_coordinator_cpu uses");
+} // end - TEST(TaskGraphPoolOptions, AreChecked)
 
 // The chunk form stays the authoritative source, carrying the closed model
 // expand_dem_chunks() would write for any decoder that reads matrices.
@@ -3093,10 +5434,15 @@ TEST(DecoderNodeModelTest, AsyncStreamingOptionsParseAndRoundTrip) {
   yaml.insert(options_at + marker.size(), "      async_streaming: true\n"
                                           "      async_queue_capacity: 3\n"
                                           "      async_coordinator_cpu: 7\n"
-                                          "      async_spin_pause_iters: 99\n");
+                                          "      async_spin_pause_iters: 99\n"
+                                          "      async_num_workers: 5\n"
+                                          "      async_worker_cpus: [2, 3]\n");
 
   const auto config = parse_one(yaml);
   ASSERT_TRUE(config.task_graph.has_value());
+  EXPECT_EQ(config.task_graph->options.async_num_workers, 5u);
+  EXPECT_EQ(config.task_graph->options.async_worker_cpus,
+            (std::vector<int>{2, 3}));
   EXPECT_TRUE(config.task_graph->options.async_streaming);
   EXPECT_EQ(config.task_graph->options.async_queue_capacity, 3u);
   EXPECT_EQ(config.task_graph->options.async_coordinator_cpu, 7);
@@ -3109,6 +5455,10 @@ TEST(DecoderNodeModelTest, AsyncStreamingOptionsParseAndRoundTrip) {
   EXPECT_NE(emitted.find("async_queue_capacity: 3"), std::string::npos);
   EXPECT_NE(emitted.find("async_coordinator_cpu: 7"), std::string::npos);
   EXPECT_NE(emitted.find("async_spin_pause_iters: 99"), std::string::npos);
+  // Short keys are padded to align values.
+  EXPECT_TRUE(std::regex_search(emitted, std::regex("async_num_workers: +5")));
+  EXPECT_TRUE(std::regex_search(
+      emitted, std::regex("async_worker_cpus: +\\[ 2, 3 \\]")));
   const auto round_tripped =
       cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
           emitted);
@@ -3126,6 +5476,205 @@ TEST(DecoderNodeModelTest, RejectsCoordinatorCpuBelowSentinel) {
   yaml.insert(options_at + marker.size(), "      async_streaming: true\n"
                                           "      async_queue_capacity: 3\n"
                                           "      async_coordinator_cpu: -2\n");
+
+  EXPECT_THROW(
+      (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          yaml),
+      std::runtime_error);
+}
+
+TEST(DecoderNodeModelTest, RejectsInvalidAsyncWorkerOptions) {
+  ScopedDemFile dem;
+  for (const char *options :
+       {"      async_worker_cpus: [0, -1]\n", "      async_num_workers: 0\n"}) {
+    auto yaml = node_model_yaml(
+        "          stim_dem_path: " + dem.path().string() + "\n");
+    const std::string marker = "    task_graph:\n";
+    const auto options_at = yaml.find(marker);
+    ASSERT_NE(options_at, std::string::npos);
+    yaml.insert(options_at + marker.size(), options);
+    EXPECT_THROW(
+        (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+            yaml),
+        std::runtime_error)
+        << options;
+  }
+}
+
+TEST(ConfigureDecodersLifecycle, WarnsWhenAsyncGraphsContendForCpus) {
+  using namespace cudaq::qec::decoding::config;
+  if (std::thread::hardware_concurrency() < 2)
+    GTEST_SKIP() << "needs two CPUs to pin";
+  // Decoder 0 pins its coordinator to CPU 0 and its workers to every other
+  // CPU; decoder 1 pins its workers there too. Synchronous decoder 2 pins
+  // CPU 1 as well, which it ignores. The pool runs one worker per pinned
+  // CPU, so each async graph has as many threads as the machine and
+  // together they oversubscribe it.
+  const auto cpus = std::thread::hardware_concurrency();
+  const auto workers = cpus - 1;
+  std::vector<int> worker_cpus;
+  for (unsigned cpu = 1; cpu < cpus; ++cpu)
+    worker_cpus.push_back(static_cast<int>(cpu));
+  const auto async_decoder = [&](int id) {
+    auto config = create_test_sample_realtime_decoder_config(id);
+    config.task_graph.emplace();
+    config.task_graph->type = "single_window";
+    config.task_graph->inner_type = config.type;
+    config.type.clear();
+    config.task_graph->options.async_streaming = true;
+    config.task_graph->options.async_queue_capacity = 2;
+    config.task_graph->options.async_worker_cpus = worker_cpus;
+    config.task_graph->options.async_num_workers = cpus;
+    return config;
+  };
+  multi_decoder_config multi;
+  multi.decoders.push_back(async_decoder(0));
+  multi.decoders.back().task_graph->options.async_coordinator_cpu = 0;
+  multi.decoders.push_back(async_decoder(1));
+  multi.decoders.push_back(async_decoder(2));
+  multi.decoders.back().task_graph->options.async_streaming = false;
+
+  const auto previous = cudaq::qec::detail::get_log_level();
+  cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::warn);
+  testing::internal::CaptureStderr();
+  const int status = configure_decoders(multi);
+  cudaq::qec::detail::flush_logs();
+  const std::string logged = testing::internal::GetCapturedStderr();
+  cudaq::qec::detail::set_log_level(previous);
+  finalize_decoders();
+
+  EXPECT_EQ(status, 0) << logged;
+  EXPECT_NE(logged.find("decoders 0 and 1 both pin CPU 1"), std::string::npos)
+      << logged;
+  EXPECT_EQ(logged.find("decoders 0 and 2"), std::string::npos) << logged;
+  EXPECT_EQ(logged.find("decoders 1 and 2"), std::string::npos) << logged;
+  const auto threads = std::to_string(2 * (workers + 1));
+  EXPECT_NE(logged.find("need " + threads + " threads"), std::string::npos)
+      << logged;
+  EXPECT_NE(logged.find("decoder 1: " + std::to_string(workers + 1)),
+            std::string::npos)
+      << logged;
+}
+
+// A document with one windowed decoder: the pattern over a two-detector
+// chain whose faults stay in their rounds, so its boundary prior is set.
+std::string windowed_serving_yaml(bool async, bool final_row,
+                                  const std::string &dispatch) {
+  return std::string(R"(decoders:
+  - id: 0
+    dispatch: )") +
+         dispatch + R"(
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      async_streaming: )" +
+         (async ? "true" : "false") + R"(
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          output: corrections
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+)" + (final_row ? "syndrome_mapping:\n  - {id: 1, type: final}\n" : "");
+}
+
+// configure_decoders() warns of a windowed decoder's serving settings: run
+// synchronously, with no final row to end its shots, or with dispatch:
+// device_graph, each named; with async_streaming, a final row and host
+// dispatch, nothing is said. Each still configures.
+TEST(ConfigureDecodersLifecycle, WarnsOfAWindowedGraphsServingSettings) {
+  using namespace cudaq::qec::decoding::config;
+  const auto logged_for = [](const std::string &yaml) {
+    auto config = multi_decoder_config::from_yaml_str(yaml);
+    const auto previous = cudaq::qec::detail::get_log_level();
+    cudaq::qec::detail::set_log_level(cudaq::qec::detail::log_level::warn);
+    testing::internal::CaptureStderr();
+    const int status = configure_decoders(config);
+    cudaq::qec::detail::flush_logs();
+    const std::string logged = testing::internal::GetCapturedStderr();
+    cudaq::qec::detail::set_log_level(previous);
+    finalize_decoders();
+    EXPECT_EQ(status, 0) << logged;
+    return logged;
+  };
+  const std::string sync = "decoder 0 runs a windowed task graph "
+                           "synchronously";
+  const std::string no_final = "decoder 0 runs a windowed task graph, but "
+                               "syndrome_mapping has no final row";
+  const std::string device = "decoder 0 runs a windowed task graph, which "
+                             "is served with dispatch: host only";
+  const auto quiet = logged_for(windowed_serving_yaml(true, true, "host"));
+  const auto synchronous =
+      logged_for(windowed_serving_yaml(false, true, "host"));
+  const auto unending = logged_for(windowed_serving_yaml(true, false, "host"));
+  const auto on_device =
+      logged_for(windowed_serving_yaml(true, true, "device_graph"));
+  EXPECT_EQ(quiet.find("windowed task graph"), std::string::npos) << quiet;
+  EXPECT_NE(synchronous.find(sync), std::string::npos) << synchronous;
+  EXPECT_EQ(synchronous.find(no_final), std::string::npos) << synchronous;
+  EXPECT_NE(unending.find(no_final), std::string::npos) << unending;
+  EXPECT_EQ(unending.find(sync), std::string::npos) << unending;
+  EXPECT_NE(on_device.find(device), std::string::npos) << on_device;
+  EXPECT_EQ(on_device.find(sync), std::string::npos) << on_device;
+}
+
+TEST(DecoderNodeModelTest, NodeMaxInFlightParsesRoundTripsAndRejectsZero) {
+  ScopedDemFile dem;
+  auto yaml =
+      node_model_yaml("          stim_dem_path: " + dem.path().string() + "\n");
+  const std::string node_marker = "        - id: w\n";
+  const auto node_at = yaml.find(node_marker);
+  ASSERT_NE(node_at, std::string::npos);
+  yaml.insert(node_at + node_marker.size(), "          max_in_flight: 3\n");
+  const auto config = parse_one(yaml);
+  ASSERT_TRUE(config.task_graph.has_value());
+  ASSERT_EQ(config.task_graph->nodes.size(), 1u);
+  EXPECT_EQ(config.task_graph->nodes.front().max_in_flight, 3u);
+
+  cudaq::qec::decoding::config::multi_decoder_config multi_config;
+  multi_config.decoders.push_back(config);
+  const auto emitted = multi_config.to_yaml_str(200);
+  EXPECT_TRUE(std::regex_search(emitted, std::regex("max_in_flight: +3")))
+      << emitted;
+  const auto round_tripped =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          emitted);
+  EXPECT_EQ(
+      round_tripped.decoders.front().task_graph->nodes.front().max_in_flight,
+      3u);
+
+  auto zero =
+      node_model_yaml("          stim_dem_path: " + dem.path().string() + "\n");
+  zero.insert(zero.find(node_marker) + node_marker.size(),
+              "          max_in_flight: 0\n");
+  EXPECT_THROW(
+      (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          zero),
+      std::runtime_error);
+}
+
+TEST(DecoderNodeModelTest, RejectsNegativeAsyncNumWorkers) {
+  ScopedDemFile dem;
+  auto yaml =
+      node_model_yaml("          stim_dem_path: " + dem.path().string() + "\n");
+  const std::string marker = "    task_graph:\n";
+  const auto options_at = yaml.find(marker);
+  ASSERT_NE(options_at, std::string::npos);
+  yaml.insert(options_at + marker.size(), "      async_num_workers: -1\n");
 
   EXPECT_THROW(
       (void)cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
@@ -3228,6 +5777,500 @@ TEST(DecoderNodeModelTest, TheBuilderTreatsTheTwoSpellingsIdentically) {
     cfg::finalize_decoders();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Stim DEMs named in data_artifacts
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// data_artifacts holding kStimDem by file, as by_file, pinned to `pin` when
+/// one is given, and inline, as inline_text; then `rest`.
+std::string stim_artifacts_yaml(const std::string &dem_path,
+                                const std::string &rest,
+                                const std::string &pin = {}) {
+  return "data_artifacts:\n"
+         "  by_file:\n"
+         "    stim_dem_path: " +
+         dem_path + "\n" + (pin.empty() ? "" : "    sha256: " + pin + "\n") +
+         "  inline_text:\n"
+         "    stim_dem: |\n" +
+         indent_lines(kStimDem, 6) + rest;
+}
+
+/// A DEM-form decoder whose stim_dem holds `model`, an entry's name or text,
+/// then `extra` keys.
+std::string stim_dem_decoder(const std::string &model, int id = 0,
+                             const std::string &extra = {}) {
+  return "  - id: " + std::to_string(id) +
+         "\n"
+         "    type: multi_error_lut\n"
+         "    stim_dem: " +
+         model +
+         "\n"
+         "    D_sparse: [0, -1, 1, -1, 2, -1, 3, -1]\n" +
+         extra;
+}
+
+/// Whether `yaml` writes `key: value`, as the emitter aligns and quotes it.
+bool writes(const std::string &yaml, const std::string &key,
+            const std::string &value) {
+  return std::regex_search(yaml, std::regex(key + ":\\s+'?" + value + "'?\\n"));
+}
+
+/// Text without its leading and trailing whitespace, which a YAML block
+/// scalar need not keep as the file has it.
+std::string trimmed(const std::string &text) {
+  const auto begin = text.find_first_not_of(" \n");
+  const auto end = text.find_last_not_of(" \n");
+  return begin == std::string::npos ? std::string{}
+                                    : text.substr(begin, end - begin + 1);
+}
+
+} // namespace
+
+// A decoder's stim_dem with no whitespace names an entry: a file-backed one
+// gives it the entry's path, an inline one the entry's text. The name is
+// kept, so the document writes it back and round-trips, and each decoder
+// resolves to the model its file form resolves to.
+TEST(StimDemReferences, DecodersNameEntries) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  const auto cwd = std::filesystem::current_path();
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(stim_artifacts_yaml(
+      dem.path(), "decoders:\n" + stim_dem_decoder("by_file") +
+                      stim_dem_decoder("inline_text", 1)));
+  const auto &by_file = parsed.decoders.at(0);
+  const auto &by_text = parsed.decoders.at(1);
+  const auto emitted = parsed.to_yaml_str(200);
+  const auto reference = cudaq::qec::decoding::host::resolve_decoder_init(
+      parse_one(dem_form_yaml(dem.path())), cwd);
+  EXPECT_EQ(by_file.stim_dem_artifact, "by_file");
+  EXPECT_EQ(by_file.stim_dem_path, dem.path());
+  EXPECT_TRUE(by_file.stim_dem.empty());
+  EXPECT_EQ(by_text.stim_dem_artifact, "inline_text");
+  EXPECT_EQ(by_text.stim_dem, parsed.data_artifacts.at(1).stim_dem);
+  EXPECT_TRUE(by_text.stim_dem_path.empty());
+  EXPECT_TRUE(writes(emitted, "stim_dem", "by_file")) << emitted;
+  EXPECT_TRUE(writes(emitted, "stim_dem", "inline_text")) << emitted;
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+  for (const auto *decoder : {&by_file, &by_text}) {
+    const auto inputs =
+        cudaq::qec::decoding::host::resolve_decoder_init(*decoder, cwd);
+    ASSERT_TRUE(inputs.has_stim_dem());
+    EXPECT_EQ(trimmed(inputs.stim_dem()), trimmed(reference.stim_dem()));
+    EXPECT_EQ(inputs.num_error_mechanisms(), reference.num_error_mechanisms());
+  }
+} // end - TEST(StimDemReferences, DecodersNameEntries)
+
+// A decoder's stim_dem holds the model text as a node's does, and like a
+// node's it excludes stim_dem_path.
+TEST(StimDemReferences, DecodersTakeStimDemText) {
+  ScopedServerDemFile dem;
+  cudaq::qec::decoding::config::multi_decoder_config written;
+  const auto text = "|\n" + indent_lines(kStimDem, 6);
+  const auto config = parse_one("decoders:\n" + stim_dem_decoder(text));
+  const auto inputs = cudaq::qec::decoding::host::resolve_decoder_init(
+      config, std::filesystem::current_path());
+  EXPECT_TRUE(config.stim_dem_artifact.empty());
+  EXPECT_EQ(trimmed(config.stim_dem), trimmed(kStimDem));
+  ASSERT_TRUE(inputs.has_stim_dem());
+  EXPECT_EQ(inputs.num_detectors(), 4u);
+  written.decoders.push_back(config);
+  EXPECT_EQ(parse_one(written.to_yaml_str(200)), config);
+  expect_parse_error(
+      "decoders:\n" +
+          stim_dem_decoder(text, 0, "    stim_dem_path: " + dem.path() + "\n"),
+      "sets both stim_dem and stim_dem_path");
+}
+
+// A node's stim_dem names an entry the same way.
+TEST(StimDemReferences, NodesNameEntries) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  for (const std::string name : {"by_file", "inline_text"}) {
+    auto parsed = cfg::multi_decoder_config::from_yaml_str(stim_artifacts_yaml(
+        dem.path(), node_model_yaml("          stim_dem: " + name + "\n")));
+    const auto &node = parsed.decoders.at(0).task_graph->nodes.at(0);
+    const auto &entry = parsed.data_artifacts.at(name == "by_file" ? 0 : 1);
+    const auto emitted = parsed.to_yaml_str(200);
+    EXPECT_EQ(node.stim_dem_artifact, name);
+    EXPECT_EQ(node.stim_dem, entry.stim_dem);
+    EXPECT_EQ(node.stim_dem_path, entry.stim_dem_path);
+    EXPECT_TRUE(writes(emitted, "stim_dem", name)) << emitted;
+    EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+        << emitted;
+  }
+}
+
+// A stim_dem with no whitespace names an entry, so one that names none, or
+// names an entry of another kind, is rejected, as is a name outside a
+// document with data_artifacts, or one whose file meets a stim_dem_path of
+// its own.
+TEST(StimDemReferences, RejectsBadNames) {
+  ScopedServerDemFile dem;
+  const auto with = [&](const std::string &decoders) {
+    return stim_artifacts_yaml(dem.path(), "decoders:\n" + decoders);
+  };
+  const auto window_entry = stim_artifacts_yaml(
+      dem.path(),
+      "  rep_memory:\n"
+      "    dem_chunks:\n"
+      "      seam: {from: next_round, to: prev_round}\n"
+      "      connections: [{from: bulk, to: bulk}]\n"
+      "      phases:\n"
+      "        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, 1, -1], "
+      "O_sparse: [0, -1], error_rates: [0.01, 0.01]}}\n"
+      "decoders:\n" +
+          stim_dem_decoder("rep_memory"));
+  expect_parse_error(with(stim_dem_decoder("nowhere")),
+                     "decoder 0 stim_dem names data_artifacts entry "
+                     "'nowhere', which does not exist");
+  expect_parse_error(window_entry, "'rep_memory' is a dem_chunks entry, not "
+                                   "a Stim DEM entry");
+  expect_parse_error(
+      with(stim_dem_decoder("by_file", 0,
+                            "    stim_dem_path: " + dem.path() + "\n")),
+      "sets both stim_dem and stim_dem_path");
+  try {
+    cudaq::qec::decoding::config::decoder_config::from_yaml_str(
+        "id: 0\ntype: multi_error_lut\nstim_dem: by_file\n"
+        "D_sparse: [0, -1]\n");
+    ADD_FAILURE() << "a standalone decoder resolved a name";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("outside a multi_decoder_config"),
+              std::string::npos)
+        << e.what();
+  }
+} // end - TEST(StimDemReferences, RejectsBadNames)
+
+namespace {
+
+/// The entries of stim_artifacts_yaml(), out of name order, and a sliding
+/// window node; then a DEM-form decoder naming each entry, all as built in
+/// code. The node and the decoders hold `node_name`, `file_name` and
+/// `text_name` as their stim_dem.
+cudaq::qec::decoding::config::multi_decoder_config
+code_built_names(const std::string &dem_path, const std::string &node_name,
+                 const std::string &file_name, const std::string &text_name) {
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(
+          stim_artifacts_yaml(dem_path, node_model_yaml("")));
+  auto decoder = parse_one("decoders:\n" +
+                           stim_dem_decoder("|\n" + indent_lines(kStimDem, 6)));
+  std::reverse(config.data_artifacts.begin(), config.data_artifacts.end());
+  config.decoders.at(0).task_graph->nodes.at(0).stim_dem = node_name;
+  decoder.id = 1;
+  decoder.stim_dem = file_name;
+  config.decoders.push_back(decoder);
+  decoder.id = 2;
+  decoder.stim_dem = text_name;
+  config.decoders.push_back(decoder);
+  return config;
+}
+
+} // namespace
+
+// A configuration built in code names entries as a parsed one does: each
+// decoder and node built from it gets the entry's model, whatever the order
+// of data_artifacts. with_pinned_stim_dems() leaves the caller's
+// configuration as it was; configure_decoders() resolves its names once the
+// configuration is in effect, as it makes its paths absolute, so it is
+// written back by name.
+TEST(StimDemReferences, CodeBuiltConfigsNameEntries) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  auto config =
+      code_built_names(dem.path(), "inline_text", "by_file", "inline_text");
+  const auto before = config;
+  const auto named = cudaq::qec::decoding::host::with_pinned_stim_dems(
+      config, std::filesystem::current_path());
+  const auto &node = named.decoders.at(0).task_graph->nodes.at(0);
+  const auto &by_file = named.decoders.at(1);
+  const auto &by_text = named.decoders.at(2);
+  const auto &text = config.data_artifacts.at(0).stim_dem;
+  EXPECT_EQ(config, before);
+  EXPECT_EQ(node.stim_dem_artifact, "inline_text");
+  EXPECT_EQ(node.stim_dem, text);
+  EXPECT_EQ(by_file.stim_dem_artifact, "by_file");
+  EXPECT_EQ(by_file.stim_dem_path, dem.path());
+  EXPECT_TRUE(by_file.stim_dem.empty());
+  EXPECT_EQ(by_text.stim_dem_artifact, "inline_text");
+  EXPECT_EQ(by_text.stim_dem, text);
+  ASSERT_EQ(cfg::configure_decoders(config), 0);
+  cfg::finalize_decoders();
+  const auto &entry = config.data_artifacts.at(1);
+  const auto emitted = config.to_yaml_str(200);
+  ASSERT_EQ(entry.name, "by_file");
+  EXPECT_EQ(config.decoders.at(0).task_graph->nodes.at(0).stim_dem_artifact,
+            "inline_text");
+  EXPECT_EQ(config.decoders.at(1).stim_dem_artifact, "by_file");
+  EXPECT_EQ(config.decoders.at(1).stim_dem_path, entry.stim_dem_path);
+  EXPECT_EQ(config.decoders.at(2).stim_dem_artifact, "inline_text");
+  EXPECT_TRUE(writes(emitted, "stim_dem", "by_file")) << emitted;
+  EXPECT_TRUE(writes(emitted, "stim_dem", "inline_text")) << emitted;
+} // end - TEST(StimDemReferences, CodeBuiltConfigsNameEntries)
+
+// A configuration built in code is refused, before anything is built, for
+// the names parsing refuses, its own errors naming the decoder or node.
+TEST(StimDemReferences, CodeBuiltConfigsRejectBadNames) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  const auto refused = [&](cfg::multi_decoder_config config,
+                           const std::string &text) {
+    try {
+      cudaq::qec::decoding::host::with_pinned_stim_dems(
+          config, std::filesystem::current_path());
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+    const auto before = config;
+    EXPECT_THROW(cfg::configure_decoders(config), std::runtime_error) << text;
+    EXPECT_EQ(config, before) << text;
+  };
+  auto spaced = code_built_names(dem.path(), "", "by_file", "inline_text");
+  auto twice = spaced;
+  auto unnamed = spaced;
+  auto none = spaced;
+  spaced.data_artifacts.at(0).name = "inline text";
+  twice.data_artifacts.at(0).name = "by_file";
+  unnamed.data_artifacts.at(0).name.clear();
+  none.data_artifacts.clear();
+  refused(code_built_names(dem.path(), "nowhere", "by_file", "inline_text"),
+          "decoder 0, task_graph node 'w' stim_dem names data_artifacts "
+          "entry 'nowhere', which does not exist");
+  refused(code_built_names(dem.path(), "", "by_file", "nowhere"),
+          "decoder 2 stim_dem names data_artifacts entry 'nowhere', which "
+          "does not exist");
+  refused(none, "decoder 1 stim_dem names data_artifacts entry 'by_file', "
+                "which does not exist");
+  refused(spaced, "data_artifacts entry 'inline text' needs a name "
+                  "without spaces");
+  refused(unnamed, "data_artifacts entry '' needs a name without spaces");
+  refused(twice, "data_artifacts has two entries named 'by_file'");
+} // end - TEST(StimDemReferences, CodeBuiltConfigsRejectBadNames)
+
+// A name holds no spaces, tabs or line breaks, so that a stim_dem naming it
+// is told apart from model text: an entry whose name holds one is refused
+// where it is declared, rather than a decoder naming it being read as a
+// model.
+TEST(StimDemReferences, NamesHaveNoWhitespace) {
+  expect_parse_error(R"(
+data_artifacts:
+  "my dem":
+    stim_dem: "error(0.1) D0 L0\nerror(0.1) D0 D1\n"
+decoders:
+  - id: 0
+    type: multi_error_lut
+    stim_dem: "my dem"
+    D_sparse: [0, -1, 1, -1]
+)",
+                     "data_artifacts entry 'my dem' needs a name without "
+                     "spaces");
+}
+
+// A name's error names its node, and keys arrive in no fixed order, so a
+// node without an id is reported as such rather than as node ''.
+TEST(StimDemReferences, NodesWithoutAnIdAreReportedAsSuch) {
+  for (const std::string key : {"stim_dem", "dem_chunks"})
+    expect_parse_error(R"(
+decoders:
+  - id: 0
+    task_graph:
+      nodes:
+        - )" + key + R"(: nowhere
+          type: sliding_window
+          inner: {type: sample_decoder}
+)",
+                       "every task_graph node needs an id");
+}
+
+// with_pinned_stim_dems() gives each decoder and node that names a pinned
+// file entry the entry's text, read once and checked against the pin, in
+// place of its path, so the model built is the one checked. A name of an
+// unpinned entry, and a copy edited after parsing, keep their paths.
+TEST(StimDemReferences, PinnedModelsAreReadOnce) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  const auto pin = cudaq::qec::sha256_hex(kStimDem);
+  const auto yaml = [&](const std::string &with) {
+    return stim_artifacts_yaml(dem.path(),
+                               "decoders:\n" + stim_dem_decoder("by_file") +
+                                   stim_dem_decoder("by_file", 1),
+                               with);
+  };
+  auto config = cfg::multi_decoder_config::from_yaml_str(yaml(pin));
+  auto unpinned = cfg::multi_decoder_config::from_yaml_str(yaml(""));
+  auto bad = cfg::multi_decoder_config::from_yaml_str(yaml(placeholder_pin));
+  config.decoders.at(1).stim_dem_path = dem.path() + ".copy";
+  const auto pinned = cudaq::qec::decoding::host::with_pinned_stim_dems(
+      config, std::filesystem::current_path());
+  const auto kept = cudaq::qec::decoding::host::with_pinned_stim_dems(
+      unpinned, std::filesystem::current_path());
+  EXPECT_EQ(pinned.decoders.at(0).stim_dem, kStimDem);
+  EXPECT_TRUE(pinned.decoders.at(0).stim_dem_path.empty());
+  EXPECT_EQ(pinned.decoders.at(0).stim_dem_artifact, "by_file");
+  EXPECT_EQ(pinned.decoders.at(1), config.decoders.at(1));
+  EXPECT_EQ(pinned.data_artifacts, config.data_artifacts);
+  EXPECT_EQ(kept, unpinned);
+  try {
+    cudaq::qec::decoding::host::with_pinned_stim_dems(
+        bad, std::filesystem::current_path());
+    ADD_FAILURE() << "a file that does not match its pin was read";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("data_artifacts.by_file: " +
+                                         dem.path() + " has sha256 " + pin),
+              std::string::npos)
+        << e.what();
+  }
+} // end - TEST(StimDemReferences, PinnedModelsAreReadOnce)
+
+// A node that names a pinned entry is built from the checked text too.
+TEST(StimDemReferences, PinnedNodeModelsAreReadOnce) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  const auto config =
+      cfg::multi_decoder_config::from_yaml_str(stim_artifacts_yaml(
+          dem.path(), node_model_yaml("          stim_dem: by_file\n"),
+          cudaq::qec::sha256_hex(kStimDem)));
+  const auto pinned = cudaq::qec::decoding::host::with_pinned_stim_dems(
+      config, std::filesystem::current_path());
+  const auto &node = pinned.decoders.at(0).task_graph->nodes.at(0);
+  EXPECT_EQ(node.stim_dem, kStimDem);
+  EXPECT_TRUE(node.stim_dem_path.empty());
+  EXPECT_EQ(node.stim_dem_artifact, "by_file");
+}
+
+// A declared dimension that disagrees with the model names the model as the
+// decoder gives it: the entry it names, though a pin has read the entry's
+// file into text; the file of its own stim_dem_path; or stim_dem, for text
+// it holds itself.
+TEST(StimDemReferences, DimensionErrorsNameTheModel) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  const std::string declared = "    syndrome_size: 9\n";
+  const auto config =
+      cfg::multi_decoder_config::from_yaml_str(stim_artifacts_yaml(
+          dem.path(),
+          "decoders:\n" + stim_dem_decoder("by_file", 0, declared) +
+              stim_dem_decoder("inline_text", 1, declared) +
+              stim_dem_decoder("\"error(0.1) D0 D1 D2 D3\"", 2, declared) +
+              "  - id: 3\n"
+              "    type: multi_error_lut\n"
+              "    stim_dem_path: " +
+              dem.path() + "\n    D_sparse: [0, -1, 1, -1, 2, -1, 3, -1]\n" +
+              declared,
+          cudaq::qec::sha256_hex(kStimDem)));
+  const auto pinned = cudaq::qec::decoding::host::with_pinned_stim_dems(
+      config, std::filesystem::current_path());
+  const std::vector<std::string> sources{"data_artifacts.by_file",
+                                         "data_artifacts.inline_text",
+                                         "stim_dem", dem.path()};
+  ASSERT_TRUE(pinned.decoders.at(0).stim_dem_path.empty());
+  for (std::size_t i = 0; i < sources.size(); ++i) {
+    SCOPED_TRACE(sources[i]);
+    try {
+      cudaq::qec::decoding::host::resolve_decoder_init(
+          pinned.decoders.at(i), std::filesystem::current_path());
+      ADD_FAILURE() << "a declared syndrome_size of 9 was accepted";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(
+                    "syndrome_size (9) does not match the detector count of " +
+                    sources[i] + " (4)"),
+                std::string::npos)
+          << e.what();
+    }
+  }
+} // end - TEST(StimDemReferences, DimensionErrorsNameTheModel)
+
+// The decoding server builds its decoders without configure_decoders(), and
+// checks pins the same way.
+TEST(StimDemReferences, TheServerChecksPins) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedDemFile dem;
+  const auto base = dem.path().parent_path();
+  const auto yaml = [&](const std::string &pin) {
+    return "data_artifacts:\n"
+           "  tiny:\n"
+           "    stim_dem_path: " +
+           dem.path().filename().string() + "\n    sha256: " + pin +
+           "\n"
+           "decoders:\n"
+           "  - id: 0\n"
+           "    type: d_capture_decoder\n"
+           "    stim_dem: tiny\n"
+           "    D_sparse: [0, -1, 1, -1]\n";
+  };
+  cudaq::qec::decoding_server::SessionRegistry rejected;
+  cudaq::qec::decoding_server::SessionRegistry accepted;
+  EXPECT_THROW(
+      rejected.load_from_config(
+          cfg::multi_decoder_config::from_yaml_str(yaml(placeholder_pin)),
+          "test", base),
+      std::runtime_error);
+  EXPECT_NO_THROW(
+      accepted.load_from_config(cfg::multi_decoder_config::from_yaml_str(
+                                    yaml(cudaq::qec::sha256_hex(kTinyDem))),
+                                "test", base));
+}
+
+// As for dem_chunks, an edit made after parsing is written inline, since the
+// name no longer describes the copy.
+TEST(StimDemReferences, EditsAfterParsingAreWrittenInline) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedServerDemFile dem;
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(stim_artifacts_yaml(
+      dem.path(), "decoders:\n" + stim_dem_decoder("by_file")));
+  parsed.decoders.at(0).stim_dem_path = "other.dem";
+  const auto emitted = parsed.to_yaml_str(200);
+  EXPECT_FALSE(writes(emitted, "stim_dem", "by_file")) << emitted;
+  EXPECT_TRUE(writes(emitted, "stim_dem_path", "other.dem")) << emitted;
+}
+
+// Configuring a decoder that names a pinned entry reads the entry's file, so
+// the pin is checked first. Once configured, entries' paths are absolute like
+// the decoders', and the names are still written back.
+TEST(StimDemReferences, ConfigureChecksPinsAndKeepsNames) {
+  namespace cfg = cudaq::qec::decoding::config;
+  ScopedDemFile dem;
+  const auto base = dem.path().parent_path();
+  const auto file = dem.path().filename().string();
+  const auto yaml = [&](const std::string &pin) {
+    return "data_artifacts:\n"
+           "  tiny:\n"
+           "    stim_dem_path: " +
+           file + "\n    sha256: " + pin +
+           "\n"
+           "decoders:\n"
+           "  - id: 0\n"
+           "    type: d_capture_decoder\n"
+           "    stim_dem: tiny\n"
+           "    D_sparse: [0, -1, 1, -1]\n";
+  };
+  auto bad = cfg::multi_decoder_config::from_yaml_str(yaml(placeholder_pin));
+  auto good = cfg::multi_decoder_config::from_yaml_str(
+      yaml(cudaq::qec::sha256_hex(kTinyDem)));
+  try {
+    cfg::configure_decoders(bad, base);
+    ADD_FAILURE() << "a file that does not match its pin was configured";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("data_artifacts.tiny: " + file +
+                                         " has sha256 " +
+                                         cudaq::qec::sha256_hex(kTinyDem)),
+              std::string::npos)
+        << e.what();
+  }
+  ASSERT_EQ(cfg::configure_decoders(good, base), 0);
+  EXPECT_TRUE(std::filesystem::path(good.data_artifacts.at(0).stim_dem_path)
+                  .is_absolute());
+  EXPECT_EQ(good.decoders.at(0).stim_dem_path,
+            good.data_artifacts.at(0).stim_dem_path);
+  EXPECT_TRUE(writes(good.to_yaml_str(200), "stim_dem", "tiny"));
+  cfg::finalize_decoders();
+} // end - TEST(StimDemReferences, ConfigureChecksPinsAndKeepsNames)
 
 TEST(DecoderDemFormTest, JsonSchemaAcceptsDemFormAlongsideTheOtherTwo) {
   const auto schema =

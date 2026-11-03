@@ -1,10 +1,5 @@
-# ============================================================================ #
-# Copyright (c) 2024 - 2025 NVIDIA Corporation & Affiliates.                   #
-# All rights reserved.                                                         #
-#                                                                              #
-# This source code and the accompanying materials are made available under     #
-# the terms of the Apache License 2.0 which accompanies this distribution.     #
-# ============================================================================ #
+# SPDX-FileCopyrightText: Copyright (c) 2024 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Configuration file for the Sphinx documentation builder.
 #
@@ -240,6 +235,8 @@ redirects = {
     "examples_rst/qec/stim_dem_decoder": "decoders.html",
     "examples_rst/qec/dem_sampling": "decoders.html",
     "examples_rst/qec/nv_qldpc_gamma_ensemble_user_guide": "../../performance/nv_qldpc_gamma_ensemble_user_guide.html",
+    # Removed page: its device-graph walkthrough relied on a non-redistributable archive.
+    "examples_rst/qec/realtime_relay_bp": "realtime_decoding_demo.html",
     # CUDA-Q Solvers was removed from this repository after the 0.6.0 release. Point the
     # previously published Solvers pages at CUDA-Q Algorithms, which supersedes
     # it, so existing links and search results do not 404.
@@ -285,6 +282,8 @@ nitpick_ignore = [
     ('cpp:identifier', 'cudaq::qview<>'),
     ('cpp:identifier', 'cudaq::measure_result'),
     ('cpp:identifier', 'cudaq::M2DSparseMatrix'),
+    ('cpp:identifier', 'experimental'),
+    ('cpp:identifier', 'cudaq::qec::experimental'),
     ('py:class', 'SpinOperator'),
     ('py:class', 'cudaq.SpinOperator'),
     ('py:class', 'cudaq::sum_op<cudaq::spin_handler>'),
