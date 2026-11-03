@@ -117,8 +117,9 @@ A signal must be raised by an earlier line than any line that waits on it.
 Signals let one decoder's schedule react to another's, e.g. stream syndromes
 to decoder 0 until decoder 1 has replied. 
 
-If a decoder reply reports an error, the run stops. Lines that never ran have
-``status`` ``-1``, and the reason is in ``result.warnings``.
+If a decoder reply reports an error other than ``4`` (not ready), the run
+stops. Lines that never ran have ``status`` ``-1``, and the reason is in
+``result.warnings``.
 
 Output Format
 ^^^^^^^^^^^^^
@@ -141,12 +142,13 @@ nanoseconds from the start of the run. Columns that list one value per request
    * - ``status``
      - ``0`` is OK. Other values below ``100`` are decoder errors
        (``1`` invalid decoder, ``2`` bad request, ``3`` internal error,
-       ``4`` not ready, ``5`` busy, ``6`` syndromes dropped). A ``stream``
-       instead reports ``100`` (OK), ``101`` (source ran out), ``102``
-       (reached ``max_rounds`` before ``until=``), or ``103`` (error).
+       ``4`` not ready, ``5`` busy, ``6`` syndromes dropped).
+       ``stream`` and ``enqueue_data`` instead report ``100`` (OK), ``101``
+       (source ran out), ``102`` (reached ``max_rounds`` before ``until=``), or
+       ``103`` (error).
        ``-1`` means the line never ran.
    * - ``rounds_streamed``
-     - Rounds actually sent (``stream`` only).
+     - Rounds actually sent (``stream`` and ``enqueue_data`` only).
    * - ``read_completed``
      - ``1`` if a correction was received.
    * - ``syndrome_bits``, ``correction_bits``
