@@ -55,6 +55,8 @@ SERVER_PATH=$5
 NUM_ROUNDS=$6
 DECODER_TYPE=${7:-multi_error_lut}
 NUM_LOGICAL=${8:-1}
+# Further app options for both passes, e.g. --parallel_window.
+EXTRA_CLI_ARGS=${EXTRA_CLI_ARGS:-}
 
 export CUDAQ_DEFAULT_SIMULATOR=stim
 
@@ -71,7 +73,8 @@ APP_LOG=load_dem-2proc-${FULL_SUFFIX}.log
 # [1] Generate the decoder config (no realtime channel needed for this pass).
 $EXE_PATH --distance $DISTANCE --num_rounds $NUM_ROUNDS --num_shots $NUM_SHOTS \
   --num_logical $NUM_LOGICAL --save_dem $CONFIG_FILE \
-  --decoder_type $DECODER_TYPE | tee save_dem-2proc-$FULL_SUFFIX.log
+  --decoder_type $DECODER_TYPE $EXTRA_CLI_ARGS \
+  | tee save_dem-2proc-$FULL_SUFFIX.log
 
 # [2] Start the decoding server on an ephemeral port with that config.
 # For udp the READY port is the UDP data port; for cpu_roce it is the TCP
@@ -151,7 +154,7 @@ done
 QEC_DECODING_SERVER_PORT=$SERVER_PORT \
   $EXE_PATH --distance $DISTANCE --num_shots $NUM_SHOTS \
   --load_dem $CONFIG_FILE --num_rounds $NUM_ROUNDS \
-  --num_logical $NUM_LOGICAL --decoder_type $DECODER_TYPE \
+  --num_logical $NUM_LOGICAL --decoder_type $DECODER_TYPE $EXTRA_CLI_ARGS \
   |& tee $APP_LOG
 
 # [4] Stop the server and collect its dispatch count.

@@ -272,11 +272,12 @@ sample_memory_circuit(const code &code, operation statePrep,
     throw std::runtime_error(
         "sample_memory_circuit_error - requested state prep kernel not found.");
 
-  auto &prep = code.get_operation<code::one_qubit_encoding>(statePrep);
   if (!(statePrep == operation::prep0 || statePrep == operation::prep1 ||
         statePrep == operation::prepp || statePrep == operation::prepm))
     throw std::runtime_error(
         "sample_memory_circuit_error - invalid requested state prep kernel.");
+
+  auto &prep = code.get_operation<code::one_qubit_encoding>(statePrep);
 
   bool is_z_prep =
       statePrep == operation::prep0 || statePrep == operation::prep1;
@@ -322,9 +323,17 @@ sample_memory_circuit(const code &code, operation statePrep,
   // Sample the memory circuit and collect all raw measurements.
   cudaq::sample_options opts{
       .shots = numShots, .noise = noise, .explicit_measurements = true};
-  auto result = cudaq::sample(opts, memory_circuit, stabRound, prep, numData,
-                              numAncx, numAncz, numRounds, xVec, zVec, obs_flat,
-                              num_obs, !is_z_prep);
+  auto result = [&] {
+    try {
+      return cudaq::sample(opts, memory_circuit, stabRound, prep, numData,
+                           numAncx, numAncz, numRounds, xVec, zVec, obs_flat,
+                           num_obs, !is_z_prep);
+    } catch (...) {
+      // Clear CUDA-Q's borrowed noise pointer before opts is destroyed.
+      cudaq::get_platform().reset_noise();
+      throw;
+    }
+  }();
 
   // mzTable[shot, meas_idx] = raw 0/1 outcome; shape (numShots,
   // numMeasPerShot). Measurement layout per shot: numRounds*numCols ancilla,

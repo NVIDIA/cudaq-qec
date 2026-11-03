@@ -50,7 +50,6 @@ if(TENSORRT_INCLUDE_DIR AND TENSORRT_LIBRARY AND TENSORRT_ONNX_PARSER_LIBRARY
     ${TENSORRT_ONNX_PARSER_LIBRARY}
     ${CUDAQ_REALTIME_LIBRARY}
     ${CUDAQ_REALTIME_DISPATCH_LIBRARY}
-    ${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}
     cudaq-realtime-pipeline
     cudaq-qec
     cudaq::cudaq
@@ -142,10 +141,11 @@ endif()
 # gpu_roce_predecoder_bridge
 # =========================================================================== #
 # FPGA bridge: GPU RoCE RDMA -> realtime_pipeline with AI predecoder +
-# PyMatching (HOST_LOOP, external ring buffer from the GpuRoceTransceiver).
+# PyMatching (external ring buffer from the GpuRoceTransceiver, consumed by
+# the realtime_pipeline dispatcher).
 
 if (GPU_ROCE_TRANSCEIVER_LIB AND CUDAQ_REALTIME_INCLUDE_DIR AND
-    CUDAQ_REALTIME_LIBRARY AND CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY AND
+    CUDAQ_REALTIME_LIBRARY AND
     CUDAQ_REALTIME_BRIDGE_GPU_ROCE_LIBRARY AND
     DOCA_INCLUDE_DIR AND DOCA_VERBS_LIB AND DOCA_COMMON_LIB AND
     DOCA_GPUNETIO_LIB AND
@@ -191,7 +191,6 @@ if (GPU_ROCE_TRANSCEIVER_LIB AND CUDAQ_REALTIME_INCLUDE_DIR AND
   target_link_libraries(gpu_roce_predecoder_bridge PRIVATE
     cudaq-realtime-pipeline
     ${CUDAQ_REALTIME_DISPATCH_LIBRARY}
-    ${CUDAQ_REALTIME_HOST_DISPATCH_LIBRARY}
     ${CUDAQ_REALTIME_BRIDGE_GPU_ROCE_LIBRARY}
     ${GPU_ROCE_TRANSCEIVER_LIB}
     ${BASE_RECEIVER_OP_LIB}

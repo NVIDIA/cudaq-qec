@@ -11,7 +11,7 @@ streaming benchmark. The benchmark uses a TensorRT-accelerated neural network
 (the *predecoder*) to reduce syndrome density on the GPU, then feeds the
 residual detectors to a pool of PyMatching MWPM decoders on the CPU. A
 software data injector streams pre-generated syndrome shots through the
-``RealtimePipeline`` at a configurable rate and collects latency, throughput,
+``realtime_pipeline`` at a configurable rate and collects latency, throughput,
 syndrome density, and logical error rate statistics.
 
 The benchmark binary is
@@ -36,9 +36,9 @@ Software
 - **CUDA Toolkit** 12.6 or later
 - **TensorRT** 10.x (headers and libraries)
 - **CUDA-Q SDK** pre-installed (provides ``libcudaq``, ``libnvqir``, ``nvq++``)
-- **CUDA-Q Realtime** libraries (``libcudaq-realtime``,
-  ``libcudaq-realtime-dispatch``, ``libcudaq-realtime-host-dispatch``) built
-  and installed to a known prefix (e.g. ``/tmp/cudaq-realtime``)
+- **CUDA-Q Realtime** libraries (``libcudaq-realtime`` and
+  ``libcudaq-realtime-dispatch``) built and installed to a known prefix
+  (e.g. ``/tmp/cudaq-realtime``)
 
 Additional inputs:
 
@@ -120,6 +120,14 @@ Configure and build:
    cmake --build build -j$(nproc) --target \
      test_realtime_predecoder_w_pymatching \
      cudaq-qec-pymatching
+
+The benchmark links the experimental ``cudaq-realtime-pipeline`` library,
+which owns the host dispatch loop. Its CMake option
+``CUDAQX_QEC_ENABLE_REALTIME_PIPELINE`` defaults to ``ON``, so the library is
+built automatically when ``CUDAQ_REALTIME_ROOT`` resolves to a CUDA-Q
+realtime installation. If the configure output prints
+``RealtimePipeline: skipping``, the benchmark target is skipped as well; the
+rest of that message names the missing prerequisite.
 
 .. note::
 

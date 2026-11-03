@@ -29,7 +29,8 @@ namespace cudaq::qec::realtime::experimental {
 struct core_pinning {
   /// @brief Core for the host dispatcher thread. -1 disables pinning.
   int dispatcher = -1;
-  /// @brief Core for the consumer (completion) thread. -1 disables pinning.
+  /// @brief Core for the consumer (completion) thread of the internal ring.
+  /// -1 disables pinning.
   int consumer = -1;
   /// @brief Base core for worker threads. Workers pin to base, base+1, etc.
   /// -1 disables pinning.
@@ -51,6 +52,27 @@ struct pipeline_stage_config {
   /// (cudaq_ringbuffer_t*) instead of allocating its own. The caller is
   /// responsible for lifetime. ring_buffer_injector is unavailable in
   /// this mode (the FPGA/emulator owns the producer side).
+  ///
+  /// The ring's host views must be set and its RX/TX strides must match the
+  /// transport's slot size.
+  ///
+  /// Slot ownership: the transport publishes a frame by storing the RX
+  /// slot's host address into rx_flags. From the moment the dispatcher takes
+  /// that request until its response is published, the slot (its rx_flag,
+  /// TX slot and request state) belongs to the pipeline; publish() hands it
+  /// back by storing 0 into rx_flags. A transport that publishes into a page
+  /// only once its rx_flag is 0 (the GpuRoce transceiver) therefore never
+  /// presents two requests from one slot at a time. The page bytes are not
+  /// covered by that: the GpuRoce transceiver re-arms a page's receive as
+  /// soon as it publishes a frame, so they stay valid only until num_slots
+  /// more frames have arrived. The pipeline takes what it needs at dispatch,
+  /// and stages read cpu_stage_context::request_id and ptp_timestamp rather
+  /// than the RX slot. Responses are written through
+  /// cpu_stage_context::response_buffer (the TX slot) and published by
+  /// storing the TX slot's host address into tx_flags, which the transport
+  /// consumes and clears itself; a slot whose previous response the transport
+  /// has not taken yet is not dispatched. The completion handler runs on the
+  /// publishing thread in this mode.
   void *external_ringbuffer = nullptr;
 };
 
@@ -103,13 +125,25 @@ struct cpu_stage_context {
   int worker_id;
   /// @brief Ring buffer slot that originated this request.
   int origin_slot;
+  /// @brief Request id of this request, taken from the RPC header at
+  /// dispatch (the injector's 64-bit id on the internal ring).
+  uint64_t request_id;
+  /// @brief PTP timestamp of this request, taken from the RPC header at
+  /// dispatch. Use these two fields rather than re-reading the RX slot: on
+  /// an external ring the transport may overwrite the page one ring lap
+  /// after it was published.
+  uint64_t ptp_timestamp;
   /// @brief Pointer to GPU inference output (nullptr in poll mode).
   const void *gpu_output;
   /// @brief Size of GPU output in bytes.
   size_t gpu_output_size;
-  /// @brief Destination buffer for the RPC response.
+  /// @brief Host pointer to the TX slot of @p origin_slot: write the
+  /// RPCResponse header followed by the payload here before returning a byte
+  /// count or, after DEFERRED_COMPLETION, before calling
+  /// realtime_pipeline::complete_deferred(). On the internal ring this is the
+  /// RX slot itself, so read the request fields before writing.
   void *response_buffer;
-  /// @brief Maximum number of bytes that can be written to @p response_buffer.
+  /// @brief Capacity of @p response_buffer in bytes (the TX slot stride).
   size_t max_response_size;
   /// @brief Opaque user context from gpu_worker_resources::user_context.
   void *user_context;
@@ -124,9 +158,10 @@ struct cpu_stage_context {
 using cpu_stage_callback = std::function<size_t(const cpu_stage_context &ctx)>;
 
 /// @brief Sentinel return value from cpu_stage_callback: release the worker
-/// (idle_mask) but do NOT signal slot completion (tx_flags). The caller
-/// is responsible for calling realtime_pipeline::complete_deferred(slot)
-/// once the deferred work (e.g. a separate decode thread) finishes.
+/// but do NOT publish the slot's response. The caller is responsible for
+/// calling realtime_pipeline::complete_deferred(slot) once the deferred work
+/// (e.g. a separate decode thread) has written the response into
+/// cpu_stage_context::response_buffer.
 static constexpr size_t DEFERRED_COMPLETION = SIZE_MAX;
 
 // ---------------------------------------------------------------------------
@@ -139,13 +174,21 @@ struct completion {
   uint64_t request_id;
   /// @brief Ring buffer slot that held this request.
   int slot;
-  /// @brief True if the request completed without CUDA errors.
+  /// @brief False when the graph launch for this request failed, or when the
+  /// dispatcher dropped the request (bad framing in an internal-ring slot the
+  /// injector filled); no response is published for a dropped request.
   bool success;
-  /// @brief CUDA error code (0 on success).
+  /// @brief cudaError_t of a failed cudaGraphLaunch (0 on success and for a
+  /// dropped request). The TX slot then holds an RPCResponse whose status
+  /// carries the same code.
   int cuda_error;
 };
 
-/// @brief Callback invoked by the consumer thread for each completed request.
+/// @brief Callback invoked for each completed request: on the consumer thread
+/// for the internal ring, on the thread that publishes the response for an
+/// external ring (a worker thread, the complete_deferred() caller, or the
+/// dispatcher after a failed launch), and on the dispatcher thread for a
+/// request it dropped.
 /// @param c Metadata for the completed or errored request.
 using completion_callback = std::function<void(const completion &c)>;
 
@@ -176,11 +219,16 @@ public:
   /// @param payload Pointer to the payload data.
   /// @param payload_size Size of the payload in bytes.
   /// @param request_id Caller-assigned request identifier.
-  /// @return True if accepted, false if all slots are busy (backpressure).
+  /// @return True if accepted, false if all slots are busy (backpressure) or
+  /// the pipeline is stopping or stopped.
+  /// @throws std::invalid_argument If the pipeline is started and no worker
+  /// serves @p function_id.
   bool try_submit(uint32_t function_id, const void *payload,
                   size_t payload_size, uint64_t request_id);
 
   /// @brief Submit a request, spinning until a slot becomes available.
+  /// @throws std::invalid_argument If the pipeline is started and no worker
+  /// serves @p function_id.
   /// @param function_id RPC function identifier.
   /// @param payload Pointer to the payload data.
   /// @param payload_size Size of the payload in bytes.
@@ -206,11 +254,13 @@ private:
 /// @brief Orchestrates GPU inference and CPU post-processing for low-latency
 /// realtime QEC decoding.
 ///
-/// The pipeline manages a ring buffer, a host dispatcher thread, per-worker
-/// GPU streams with captured CUDA graphs, optional CPU worker threads for
-/// post-processing (e.g. PyMatching), and a consumer thread for completion
-/// signaling. It supports both an internal ring buffer (for software testing
-/// via ring_buffer_injector) and an external ring buffer (for FPGA RDMA).
+/// The pipeline manages a ring buffer, its own host dispatcher thread (which
+/// polls the ring's RX flags and launches the per-worker CUDA graphs),
+/// per-worker GPU streams with captured CUDA graphs, optional CPU worker
+/// threads for post-processing (e.g. PyMatching), and completion reporting.
+/// It supports both an internal ring buffer (for software testing via
+/// ring_buffer_injector, harvested by a consumer thread) and an external ring
+/// buffer (for FPGA RDMA, where the transport consumes the responses).
 class realtime_pipeline {
 public:
   /// @brief Construct a pipeline and allocate ring buffer resources.
@@ -232,23 +282,33 @@ public:
   /// @brief Register the CPU worker callback. Must be called before start().
   /// @param callback Function invoked by each worker thread to poll for and
   ///   process completed GPU workloads. If not set, the pipeline operates in
-  ///   GPU-only mode with completion signaled via cudaLaunchHostFunc.
+  ///   GPU-only mode: completion is signaled from a host callback
+  ///   (cudaLaunchHostFunc) enqueued on the worker stream after the graph,
+  ///   and the graph or post_launch_fn owns the TX slot content (the pipeline
+  ///   writes no RPCResponse). GPU-only mode requires the internal ring.
   void set_cpu_stage(cpu_stage_callback callback);
 
   /// @brief Register the completion callback. Must be called before start().
-  /// @param handler Function invoked by the consumer thread for each
-  ///   completed or errored request.
+  /// @param handler Function invoked for each completed or errored request
+  ///   (see completion_callback for the calling thread).
   void set_completion_handler(completion_callback handler);
 
-  /// @brief Allocate resources, build dispatcher config, and spawn all threads.
+  /// @brief Build the worker resources and spawn the dispatcher, worker, and
+  /// consumer threads.
+  /// @note The factory's streams and graphs must belong to the CUDA device
+  /// current on the thread calling start(); the pipeline's threads select
+  /// that device.
   /// @throws std::logic_error If the GPU stage factory was not registered.
-  /// @throws std::logic_error If GPU-only mode is requested with an external
-  /// ring buffer.
+  /// @throws std::logic_error If GPU-only mode (no CPU stage) is combined
+  /// with an external ring buffer: nothing would frame an RPCResponse in the
+  /// TX slot for the transport to send.
+  /// @throws std::logic_error If the pipeline was stopped before: a pipeline
+  /// is single use, construct a new one instead.
   void start();
 
   /// @brief Signal shutdown, join all threads, free resources.
   /// @note Safe to call multiple times. Subsequent calls are no-ops once the
-  /// pipeline has fully stopped.
+  /// pipeline has fully stopped, and the pipeline cannot be started again.
   void stop();
 
   /// @brief Create a software injector for testing without FPGA hardware.
@@ -262,7 +322,8 @@ public:
     uint64_t submitted;
     /// @brief Total requests that completed (success or error).
     uint64_t completed;
-    /// @brief Total packets dispatched by the host dispatcher.
+    /// @brief Total requests handed to a worker (graph launch attempted);
+    /// dropped requests (bad magic, unknown function id) are not counted.
     uint64_t dispatched;
     /// @brief Cumulative producer backpressure stalls.
     uint64_t backpressure_stalls;
@@ -276,7 +337,11 @@ public:
   ///
   /// Call from any thread after the cpu_stage callback returned
   /// DEFERRED_COMPLETION and the deferred work has finished writing the
-  /// response into the slot's ring buffer area.
+  /// response into the slot's TX area (cpu_stage_context::response_buffer).
+  /// Publishes the TX slot's host address into tx_flags; on an external ring
+  /// the completion handler runs on the calling thread and the RX slot is
+  /// handed back to the transport (see
+  /// pipeline_stage_config::external_ringbuffer).
   /// @param slot Ring buffer slot index to complete.
   void complete_deferred(int slot);
 

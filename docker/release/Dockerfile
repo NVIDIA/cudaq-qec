@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-# To build the release image run the following from the top-level of the repo (must clone the cudaqx repo)
+# To build the release image run the following from the top-level of the repo (must clone the cudaq-qec repo)
 #
 # Download the Docker overlay files, may be on a different repo, so adjust this
 # command as necessary.
-# gh release download -R NVIDIA/cudaqx docker-files-12345
+# gh release download -R NVIDIA/cudaq-qec docker-files-12345
 #
-# docker build -t ghcr.io/nvidia/cudaqx:latest . -f docker/release/Dockerfile
+# docker build -t ghcr.io/nvidia/cudaq-qec:latest . -f docker/release/Dockerfile
 #
 # Test the image with
 #

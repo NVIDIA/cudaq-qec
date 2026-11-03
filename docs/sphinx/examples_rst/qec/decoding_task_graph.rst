@@ -268,11 +268,19 @@ the session. A FINAL enqueue waits for all accepted input and the final flush.
 ``clear_corrections`` drains accepted input without flushing guarded tails
 before consuming the result. Each public enqueue remains one queue record, so
 inner streaming decoders observe the same call boundaries as synchronous
-graphs.
+graphs, with one exception: a graph whose one raw-input node meters its own
+chunks, such as a windowed graph, works in records of about one chunk. It
+admits BULK rounds that have queued up behind it together, so that a graph
+that falls behind catches up in batches, and runs a tagged record longer than
+a chunk as several, so that no record holds more than a chunk's windows.
 
-In an asynchronous graph, records overlap: the coordinator admits every
-accepted record at once, up to ``async_queue_capacity``, and a later record
-runs ahead on nodes that have finished the earlier ones. 
+In an asynchronous graph, records overlap: a later record runs ahead on nodes
+that have finished the earlier ones, up to 16 records at once.
+``async_queue_capacity`` (default 32) bounds how many public enqueues may be
+queued or running, which is how far a producer may run ahead before an
+enqueue waits. A graph that falls behind returns FINAL's result only after
+draining what is queued, so a deeper queue raises throughput when behind at
+the cost of that tail.
 
 Decoder-server YAML exposes the same policy as ``task_graph.async_streaming``,
 with optional ``async_queue_capacity``, ``async_coordinator_cpu``,
@@ -286,10 +294,14 @@ and worker affinity masks when using this low-latency policy.
 ``async_num_workers`` sets how many pool threads run node fires in an
 asynchronous graph, not counting the coordinator. Unset, the default, picks
 the graph's parallel width, including every fire pool's copies, capped by
-hardware concurrency; the build warns when the count is below the pooled
-copies. ``async_worker_cpus`` pins those threads round-robin to the listed
-CPUs (Linux only); it is empty by default, so node work inherits the
-process's affinity. Synchronous graphs ignore both.
+hardware concurrency. An indexed node's fires leave one worker for
+ingestion and deliveries when there are several, and records pipeline, so a
+graph with one, such as a windowed graph, defaults to every copy that may
+fire at once, an indexed node's single copy included, plus that worker. The
+build warns when the workers that may fire are fewer than those copies.
+``async_worker_cpus`` pins those threads round-robin to
+the listed CPUs (Linux only); it is empty by default, so node work inherits
+the process's affinity. Synchronous graphs ignore both.
 
 Pools are per graph: each decoder's asynchronous graph has its own coordinator
 and workers, so a configuration with several runs the sum of their threads.
@@ -455,27 +467,134 @@ streaming recipe or a fixed-size window, rather than a full-shot matrix model.
      inner: {type: <streaming-decoder>}   # implements enqueue_syndrome()
      dem_chunks: {...}                    # or inherit the entry-level DEM
 
+Parallel windows
+++++++++++++++++
+
+The ``parallel_window`` pattern decodes a stream of rounds of any length in
+windows that decode concurrently. It is written as one node and lowers into an
+``ingest`` node, two layers of ``decode_window`` nodes, ``<id>.A`` and
+``<id>.B``, and an ``xor`` of their outputs:
+
+* each **A** window commits ``commit_rounds`` rounds, decoding them with
+  ``buffer_rounds`` of context on each side, and needs nothing from any other
+  window;
+* each **B** window commits the ``gap_rounds`` between two A windows, after
+  receiving their corrections at its edges.
+
+Every window decodes a model of fixed size with the inner decoder, and windows
+finish in any order; the output folds their corrections in round order, so it
+is a staged output (see `Staged outputs`_).
+
+.. code-block:: yaml
+
+   decoders:
+     - id: 0
+       dem_chunks: {...}                   # one chunk per round
+       task_graph:
+         async_streaming: true
+         nodes:
+           - id: pw
+             type: parallel_window
+             commit_rounds: 5
+             buffer_rounds: 5
+             gap_rounds: 15
+             output: corrections
+             max_in_flight: 4
+             inner: {type: pymatching}
+         edges:
+           - {from: measurements, to: pw}
+           - {from: pw, to: output}
+   syndrome_mapping:
+     - {id: 1, type: final}
+
+The model is a ``dem_chunks`` template whose chunks each span one round and
+whose faults reach at most the next round. A phase may have no faults: its
+detectors are then never flipped, as a circuit's preparation round's may not
+be. The pattern builds every window variant the shot lengths need at
+configuration time.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Parameter
+     - Meaning
+   * - ``commit_rounds``
+     - Rounds an A window commits. Required.
+   * - ``buffer_rounds``
+     - Rounds of context on each side of an A window's commit zone. Required.
+   * - ``gap_rounds``
+     - Rounds a B window commits, between two A windows. Defaults to
+       ``commit_rounds + 2 * buffer_rounds``.
+   * - ``output``
+     - ``corrected_logical`` (default): the logical readout with the
+       correction applied, which needs ``m2o_sparse`` on the final phase.
+       ``corrections``: the correction alone.
+   * - ``input_boundary``
+     - ``columns`` (default): an A window's open input gets one boundary
+       column per detector of the round before it, with one shared prior.
+       ``truncate``: faults crossing in from that round keep their own priors
+       and are never committed.
+   * - ``boundary_prior``
+     - The shared prior of ``columns``. Defaults, over the detectors that
+       faults cross into from the round before, to the largest chance that
+       an odd number of those faults fire.
+   * - ``merge_identical``
+     - Merge fault columns with identical detectors and observables into one,
+       combining their priors. Default ``false``.
+   * - ``conflicting_parallel``
+     - What to do with identical columns of different observable effect:
+       ``reject`` (default) the configuration, or keep the ``most_likely``.
+   * - ``verify_residual``
+     - Check each window's solution against its detectors: ``none``
+       (default), ``report`` the shot's ``closure`` as ``open`` when one does
+       not hold, or ``fail`` the graph, naming the window and its row.
+
+``max_in_flight`` on the node gives each layer that many copies, which decode
+at once with ``async_streaming``.
+
+**Ending a shot.** A shot ends at its FINAL round, which completes every
+window still open with its terminal variant. Through ``enqueue_syndrome`` the
+last round is passed as ``round_type.FINAL``; through the realtime decoding API
+and the decoding server it names a ``type: final`` row of
+``syndrome_mapping``. Until then a mid-shot read reports the corrections over
+``[0, frontier)``, the rounds whose windows have all committed.
+
+**Serving.** Windows overlap later rounds only with ``async_streaming``. A
+windowed graph is served with ``dispatch: host``: the decoding server refuses
+``device_graph``, since a windowed graph is not one captured decode graph.
+Configuring a windowed decoder that runs synchronously, that has no ``final``
+row, or that names ``device_graph`` logs a warning naming it.
+
+**Results.** Besides the corrections, a streaming result and each of its
+outputs report ``closure``: whether every window's solution was checked and
+held (``closed``), checked and failed (``open``), or not checked
+(``not_checked``). One-shot calls (``run``, ``run_all``, ``run_batch``,
+``run_async``) stream the shot through the same windows, and their
+``logical_outcome`` reports ``converged``: whether every window's decoder
+converged.
+
 Ensembles
 +++++++++
 
 An ensemble races several member subgraphs and keeps one answer. It is written
-as a pattern in place of a node, with the members as node lists of their own:
+as a node of type ``ensemble``, with the members as node lists of their own:
 
 .. code-block:: yaml
 
    nodes:
      - id: ens
-       ensemble:
-         join_strategy: deadline
-         join_params: {deadline_us: 200, soft_stop_before_us: 50}
-         members:
-           - nodes: [{id: a, type: single_window, inner: {type: pymatching}}]
-             edges: [{from: input, to: a}, {from: a, to: output}]
-           - nodes:
-               - {id: b, type: single_window, inner: {type: nv-qldpc-decoder}}
-             edges:
-               - {from: input, to: b}
-               - {from: b, to: output}
+       type: ensemble
+       join_strategy: deadline
+       join_params: {deadline_us: 200, soft_stop_before_us: 50}
+       members:
+         - nodes: [{id: a, type: single_window, inner: {type: pymatching}}]
+           edges: [{from: input, to: a}, {from: a, to: output}]
+         - nodes:
+             - {id: b, type: single_window, inner: {type: nv-qldpc-decoder}}
+           edges:
+             - {from: input, to: b}
+             - {from: b, to: output}
    edges:
      - {from: measurements, to: ens}
      - {from: ens, to: output}

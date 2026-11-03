@@ -576,8 +576,7 @@ void dem_chunk_spec::expand(const std::vector<seam_id> &ids) {
 }
 
 void dem_chunk_spec::validate(const std::string &context) const {
-  if (num_faults == 0)
-    throw std::invalid_argument(context + ".num_faults must be positive");
+  // A phase may have no faults: its detectors are then never flipped.
   if (num_faults > std::numeric_limits<sparse_binary_matrix::index_type>::max())
     throw std::invalid_argument(context + ".num_faults exceeds uint32_t max");
   if (!H_sparse.empty() && !seam_specs.empty())
@@ -653,7 +652,8 @@ extended_dem dem_chunk_from_spec(const dem_chunk_spec &spec,
       result.tags.push_back(static_cast<uint64_t>(k));
     row_cursor += seam_rows;
   }
-  if (result.H.num_cols() == 0)
+  // No seam gave a row; a phase without faults keeps its seams' rows.
+  if (row_cursor == 0)
     result.H = zero_matrix(0, static_cast<uint32_t>(working.num_faults));
 
   result.O = sparse_from_terminated_rows(working.O_sparse, working.num_faults);

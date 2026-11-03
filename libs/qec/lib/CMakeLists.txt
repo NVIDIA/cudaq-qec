@@ -71,7 +71,9 @@ set(DECODERS_SOURCES
   decoding_task/decoding_task_decoding_window.cpp
   decoding_task/decoding_task_commitment.cpp
   decoding_task/decoding_task_data_artifacts.cpp
+  decoding_task/decoding_task_ingest_core.cpp
   decoding_task/decoding_task_ingest_node.cpp
+  decoding_task/decoding_task_decode_window_core.cpp
   decoding_task/decoding_task_decode_window_node.cpp
   decoding_task/decoding_task_parallel_window_pattern.cpp
   decoder_init.cpp
@@ -91,6 +93,7 @@ set(QEC_SOURCES
   decoder_config_payload_provider.cpp
   dem_construction_code.cpp
   experiments.cpp
+  memory_dem_chunks.cpp
   stabilizer_utils.cpp
 )
 
@@ -227,6 +230,7 @@ if(TARGET ${LIBRARY_NAME})
       cudaq::cudaq-operator
     PRIVATE
       cudaq::cudaq-common
+      cudaq::cudaq-em-default
   )
 
   target_link_libraries(${LIBRARY_NAME} PRIVATE

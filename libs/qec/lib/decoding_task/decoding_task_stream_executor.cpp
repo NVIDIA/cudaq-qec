@@ -12,6 +12,7 @@
 #include "cudaq/qec/logger.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <future>
 #include <stdexcept>
@@ -26,6 +27,11 @@ namespace cudaq::qec {
 namespace {
 
 constexpr int kAsyncFinishSpinPauseIters = 4096;
+
+// How long FINAL's caller spins for its result before parking: the decodes
+// left after FINAL take a few hundred microseconds at d = 11 and a wake adds
+// tens more, while 2 ms bounds the CPU a long decode makes it burn.
+constexpr std::chrono::microseconds async_final_spin_budget{2000};
 
 // Release the single-producer publication guard and wake a lifecycle operation
 // that is waiting for an in-progress enqueue to finish.
@@ -538,6 +544,7 @@ bool decoding_task_graph::impl::enqueue_syndrome_async(
   };
 
   try {
+    settle_async_streaming();
     if (finalized)
       CUDA_QEC_WARN("decoding_task_graph: dropping a round after the shot was "
                     "closed by a FINAL round; read the corrections and call "
@@ -634,13 +641,53 @@ void decoding_task_graph::impl::finish_async_streaming() {
     state.finish_requested.store(true, std::memory_order_release);
     g.wake_async_stream();
   }
+  // Return once the result is published; the session ends without changing
+  // it, and settle_async_streaming() makes the next call wait for that. A
+  // failed or cancelled session is waited out here.
   if (state.active.load(std::memory_order_acquire)) {
-    const auto completed = state.completed.load(std::memory_order_acquire);
-    const bool short_tail = completed >= state.finish_target ||
-                            state.finish_target - completed <= 1;
-    wait_until_inactive(state.active, short_tail);
+    // Wait for the result, a failure or a cancel. The latter two mark every
+    // record completed, waking a parked wait.
+    const auto waiting = [&state] {
+      return state.completed.load(std::memory_order_acquire) <
+                 state.finish_target &&
+             !state.failed.load(std::memory_order_acquire) &&
+             !state.cancel_requested.load(std::memory_order_acquire);
+    };
+    // Spin first, since a park adds a wake to the tail; check the clock only
+    // every few pauses.
+    const auto spin_deadline =
+        std::chrono::steady_clock::now() + async_final_spin_budget;
+    for (int spin = 0; waiting(); ++spin) {
+      if ((spin & 255) == 0 &&
+          std::chrono::steady_clock::now() >= spin_deadline)
+        break;
+      CUDAQ_REALTIME_CPU_RELAX();
+    }
+    // Park on the value just checked: a fresh read could see the result
+    // arrive, then wait for a change that never comes.
+    for (auto completed = state.completed.load(std::memory_order_acquire);
+         completed < state.finish_target &&
+         !state.failed.load(std::memory_order_acquire) &&
+         !state.cancel_requested.load(std::memory_order_acquire);
+         completed = state.completed.load(std::memory_order_acquire))
+      wait_for_completion_change(state.completed, state.completion_waiters,
+                                 completed);
+    // Without the result, wait for the session to release the graph.
+    if (state.completed.load(std::memory_order_acquire) < state.finish_target ||
+        state.failed.load(std::memory_order_acquire))
+      wait_until_inactive(state.active);
   }
   g.rethrow_async_stream_error();
+}
+
+// A finished session has published its result but may still be releasing
+// the graph.
+void decoding_task_graph::impl::settle_async_streaming() {
+  auto &state = async_streaming;
+  if (state.enabled && state.active.load(std::memory_order_acquire) &&
+      state.finish_requested.load(std::memory_order_acquire) &&
+      state.completed.load(std::memory_order_acquire) >= state.finish_target)
+    wait_until_inactive(state.active);
 }
 
 // Stop publication and ask the coordinator to discard queued sequences after

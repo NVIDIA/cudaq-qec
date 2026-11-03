@@ -43,6 +43,13 @@ struct compiled_wire {
   int to_slot;   ///< index into that node's inputs vector
   int id = -1;   ///< per-record value buffer for a streaming wire; -1 = none
   std::int64_t index_offset = 0; ///< consumer k reads producer k + offset
+
+  /// Whether the wire runs back to its own node or an earlier one. Its
+  /// negative index_offset keeps the instances acyclic; node-order passes
+  /// skip it.
+  bool loop_carried() const {
+    return from_node >= 0 && to_node >= 0 && from_node >= to_node;
+  }
 };
 
 /// Optional per-round streaming capability. DAG-only nodes do not implement it.
@@ -74,6 +81,29 @@ public:
   /// their deltas in round order behind a frontier, and the output's
   /// coverage is [0, frontier).
   virtual bool exact_interval_coverage() const { return false; }
+  /// The current publication's closure: for a window, whether its solution
+  /// was checked and held. None for a node that decodes no window, which
+  /// leaves an output's closure as its windows make it.
+  virtual std::optional<task_graph_closure> publication_closure() const {
+    return std::nullopt;
+  }
+  /// Whether the current publication's decoder converged; none for a node
+  /// that decodes no window. A one-shot call through the stream reports
+  /// whether every window reaching the output converged.
+  virtual std::optional<bool> publication_converged() const {
+    return std::nullopt;
+  }
+  /// Why the last fire failed, when the node reported a failure rather than
+  /// throw in the fire; null otherwise. The executor fails the graph with
+  /// it, as with an exception the fire throws.
+  virtual const std::string *fire_failure() const { return nullptr; }
+  /// Opt-in: the node's inputs may arrive in any order. Sibling deliveries
+  /// into a branch that reaches it then need not wait for one another, as
+  /// they must when a shared descendant needs ordered delivery. Legal only
+  /// when each firing consumes one value per input slot on aligned
+  /// schedules, arrival order does not change the result, and retained
+  /// inputs own their data. Deliveries to the node stay serialised.
+  virtual bool supports_streaming_rendezvous() const { return false; }
   /// Accumulate one raw chunk.  `type` is FINAL only on the chunk that ends a
   /// FINAL round -- the last piece of it this node receives -- and BULK
   /// otherwise.  flush() follows a FINAL round either way, so a kind that
@@ -118,6 +148,11 @@ public:
       return std::nullopt;
     return streaming_schedule();
   }
+
+  /// The most publications one delivery or flush makes current, counting
+  /// the first; publish_next() hands over the rest. Join tables of the
+  /// node's indexed consumers are preallocated from it.
+  virtual std::size_t max_publications_per_delivery() const { return 1; }
 
   /// Room left in this node's accumulator: the most one enqueue() call can
   /// take.  nullopt for a kind that keeps none, which is handed whole chunks.
@@ -233,6 +268,14 @@ public:
   /// streaming_output() and corrections().
   virtual bool fire(std::int64_t k,
                     const std::vector<const edge_value *> &inputs) = 0;
+  /// Whether input `slot` of instance k always has a producer instance when
+  /// instance k exists, from the layout alone. Such an input still missing
+  /// when the shot ends was lost, and fails the graph rather than firing
+  /// absent. Default: no input is guaranteed.
+  virtual bool input_guaranteed(std::size_t /*slot*/,
+                                std::int64_t /*k*/) const {
+    return false;
+  }
 };
 
 /// Core DAG node contract. Optional execution modes are exposed as capabilities
@@ -250,6 +293,9 @@ public:
   /// is never entered concurrently by two graph operations.
   virtual void execute_indexed(const std::vector<edge_value> &inputs,
                                std::vector<edge_value> &outputs) const = 0;
+  /// Whether execute_indexed() decodes a whole shot. A graph with a node
+  /// that cannot runs one-shot calls through its stream instead.
+  virtual bool has_one_shot_path() const { return true; }
 
   /// Input name declarations — used once at construction by compile_wires().
   virtual std::vector<std::string> inputs() const = 0;

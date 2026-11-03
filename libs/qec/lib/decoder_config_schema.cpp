@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 
 namespace cudaq::qec::decoding::config {
 
@@ -90,7 +91,23 @@ bool value_readable_as(const std::any &value) {
   return readable;
 }
 
-// True when `value` would be readable as `kind`'s canonical storage type.
+// True when `value` holds a negative number of a signed type that
+// get<std::size_t> converts, so would read as a huge size.
+bool holds_negative_size(const std::any &value) {
+  bool negative = false;
+  cudaqx::tuple_for_each(
+      typename cudaqx::RelatedTypesMap<std::size_t>::types(), [&](auto &&el) {
+        using held_type =
+            std::remove_cv_t<std::remove_reference_t<decltype(el)>>;
+        if constexpr (std::is_signed_v<held_type>)
+          if (const auto *held = std::any_cast<held_type>(&value))
+            negative = negative || *held < 0;
+      });
+  return negative;
+}
+
+// True when `value` would be readable as `kind`'s canonical storage type. A
+// negative integer is no uint64, though get<std::size_t> would read one.
 bool value_matches_kind(param_kind kind, const std::any &value) {
   switch (kind) {
   case param_kind::boolean:
@@ -98,7 +115,7 @@ bool value_matches_kind(param_kind kind, const std::any &value) {
   case param_kind::int32:
     return value_readable_as<int>(value);
   case param_kind::uint64:
-    return value_readable_as<std::size_t>(value);
+    return value_readable_as<std::size_t>(value) && !holds_negative_size(value);
   case param_kind::f64:
     return value_readable_as<double>(value);
   case param_kind::string:

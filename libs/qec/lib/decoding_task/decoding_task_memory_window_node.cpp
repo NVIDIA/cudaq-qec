@@ -5,6 +5,7 @@
 #include "decoding_task_memory_window_node.h"
 #include "decoding_task_graph_utils.h"
 #include "decoding_task_node_kind_registry.h"
+#include "sparse_dem_from_chunks.h"
 #include "cudaq/qec/logger.h"
 #include <algorithm>
 #include <limits>
@@ -118,6 +119,7 @@ memory_window_node::compile_model(std::size_t start_phase, bool terminal,
                                   const node_build_context &ctx) {
   model m;
   std::vector<extended_dem> chunks;
+  chunks.reserve(n);
   std::vector<std::vector<uint32_t>> rows;
   const auto previous_width = start_phase == 0 ? 0
                               : start_phase <= prefix_widths_.size()
@@ -195,23 +197,26 @@ memory_window_node::compile_model(std::size_t start_phase, bool terminal,
         "memory window: measurement count exceeds CSR range");
   m.d = sparse_binary_matrix::from_nested_csr(rows.size(), start, rows)
             .canonicalize();
-  const auto closed =
-      dem_close_all(chunks, spec_->seam.from_seam, spec_->seam.to_seam);
-  m.h = sparse_binary_matrix(closed.detector_error_matrix,
-                             sparse_binary_matrix_layout::csr)
-            .canonicalize();
-  m.o = sparse_binary_matrix(closed.observables_flips_matrix,
-                             sparse_binary_matrix_layout::csr)
-            .canonicalize();
+  // Use the sparse closure primitives behind from_dem_chunks_closed(). These
+  // are physical window slices with an extra preceding measurement context,
+  // not an expansion of the original whole-shot recipe.
+  auto closed = details::sparse_dem_from_chunks(chunks, spec_->seam.from_seam,
+                                                spec_->seam.to_seam);
+  m.h = std::move(closed.detector_error_matrix);
+  const auto &observable_rows = closed.observable_rows;
+  m.o =
+      sparse_binary_matrix::from_nested_csr(
+          static_cast<sparse_binary_matrix::index_type>(observable_rows.size()),
+          m.h.num_cols(), observable_rows)
+          .canonicalize();
   if (m.h.num_rows() != rows.size() || m.o.num_rows() != ctx.o->num_rows())
     throw std::invalid_argument(
         "memory window: model and measurement/output layouts disagree");
   m.fault_offsets = dem_chunks_to_fault_offsets(chunks);
-  m.dec = get_decoder(ctx.decoder_type,
-                      decoder_init(m.h, std::nullopt, closed.error_rates, m.d,
-                                   closed.error_ids),
-                      decoder_output_request{decode_result_type::errors},
-                      ctx.decoder_params);
+  m.dec = get_decoder(
+      ctx.decoder_type,
+      decoder_init(m.h, std::nullopt, std::move(closed.error_rates), m.d),
+      decoder_output_request{decode_result_type::errors}, ctx.decoder_params);
   if (m.dec->get_result_type() == decode_result_type::observables ||
       m.dec->get_syndrome_size() != m.h.num_rows() ||
       m.dec->get_block_size() != m.fault_offsets.back() ||
@@ -221,9 +226,7 @@ memory_window_node::compile_model(std::size_t start_phase, bool terminal,
   m.measurements.resize(start);
   m.residual.resize(rows.size());
   if (!terminal) {
-    // decoder_init copied H into the decoder's immutable model. Replace our
-    // row layout rather than retaining a second matrix for the carry path.
-    m.h = m.h.to_csc();
+    // Sparse closure already produced the canonical CSC used by carry updates.
     m.detector_rounds.resize(rows.size());
     for (std::size_t r = 0; r + 1 < m.detector_offsets.size(); ++r)
       std::fill(m.detector_rounds.begin() + m.detector_offsets[r],

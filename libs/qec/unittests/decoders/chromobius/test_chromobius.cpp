@@ -72,6 +72,13 @@ TEST(ChromobiusDecoder, checkKnownObservableFlip) {
   EXPECT_EQ(result.result[0], 1.0);
 }
 
+TEST(ChromobiusDecoder, checkWrongSyndromeLengthThrows) {
+  auto decoder = cudaq::qec::decoder::get(
+      "chromobius", std::string_view{chromobius_dem}, make_params());
+  std::vector<cudaq::qec::float_t> syndrome = {0, 0, 0};
+  EXPECT_THROW((void)decoder->decode(syndrome), std::invalid_argument);
+}
+
 TEST(ChromobiusDecoder, checkPcmInputThrows) {
   EXPECT_THROW(
       (void)cudaq::qec::decoder::get("chromobius", make_H(), make_params()),

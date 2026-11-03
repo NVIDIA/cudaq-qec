@@ -29,7 +29,6 @@
 #include <unistd.h>
 
 #include "cudaq/qec/realtime/ai_decoder_service.h"
-#include "cudaq/realtime/daemon/dispatcher/graph_launch_engine.h"
 
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \
@@ -84,9 +83,10 @@ int main(int argc, char *argv[]) {
       onnx_override = argv[i + 1];
     }
   }
-  // Multi-GPU dispatch is not yet supported: the host dispatcher thread
-  // does not call cudaSetDevice before cudaGraphLaunch/cudaStreamQuery,
-  // causing hangs when workers span multiple devices.
+  // Multi-GPU dispatch is not supported: the pipeline's dispatcher thread
+  // launches every worker graph on the device that is current when start()
+  // is called (no cudaSetDevice per worker), so all predecoders must live on
+  // that one device.
   if (num_gpus > 1) {
     std::cerr << "[WARN] --num-gpus " << num_gpus
               << " requested, but multi-GPU dispatch is not yet supported. "
@@ -355,9 +355,9 @@ int main(int argc, char *argv[]) {
   // Per-slot output buffers (predecoder output copied here before release)
   // =========================================================================
   // Predecoder workers copy GPU output into deferred_outputs[slot], then
-  // PyMatching workers read from it.  No lock is needed because the slot's
-  // tx_flags stays IN_FLIGHT until complete_deferred() is called after
-  // decoding, so the consumer cannot recycle the slot in between.
+  // PyMatching workers read from it.  No lock is needed because the pipeline
+  // keeps the slot in flight (no response published, slot not recyclable)
+  // until complete_deferred() is called after decoding.
 
   std::vector<std::vector<uint8_t>> deferred_outputs(
       NUM_SLOTS, std::vector<uint8_t>(model_output_bytes));
@@ -398,11 +398,11 @@ int main(int argc, char *argv[]) {
   // --- CPU stage callback (poll GPU + copy + enqueue to PyMatch queue) ---
   // Predecoder workers only poll GPU completion, copy the output to a
   // per-slot buffer, release the predecoder, and enqueue a PyMatchJob.
-  // Returns DEFERRED_COMPLETION so the pipeline releases the worker
-  // (idle_mask) without signaling slot completion (tx_flags).
+  // Returns DEFERRED_COMPLETION so the pipeline releases the worker without
+  // publishing a response for the slot.
   pipeline.set_cpu_stage(
-      [&deferred_outputs, &pymatch_queue, out_sz = model_output_bytes](
-          const rt_pipeline::cpu_stage_context &ctx) -> size_t {
+      [&deferred_outputs, &pymatch_queue, out_sz = model_output_bytes, rb_bases,
+       slot_size](const rt_pipeline::cpu_stage_context &ctx) -> size_t {
         auto *wctx = static_cast<WorkerCtx *>(ctx.user_context);
         auto *pd = wctx->predecoder;
         auto *dctx = wctx->decoder_ctx;
@@ -418,10 +418,16 @@ int main(int argc, char *argv[]) {
         std::memcpy(deferred_outputs[origin_slot].data(), job.inference_data,
                     out_sz);
 
+        // Host view of the RX slot that carried this request
+        // (job.ring_buffer_ptr is the device view seen by the pre-launch copy).
+        // Reading it here is fine on the internal ring, whose slot stays
+        // occupied until the response is harvested; the request's identity
+        // still comes from the stage context, as it must on an external ring.
+        const uint8_t *slot_host = rb_bases.rx_data_host +
+                                   static_cast<size_t>(origin_slot) * slot_size;
+
         // Syndrome density: count nonzero in input and output residuals
-        const uint8_t *input_u8 =
-            static_cast<const uint8_t *>(job.ring_buffer_ptr) +
-            CUDAQ_RPC_HEADER_SIZE;
+        const uint8_t *input_u8 = slot_host + CUDAQ_RPC_HEADER_SIZE;
         int input_nz = 0;
         for (int k = 0; k < dctx->num_input_detectors; ++k)
           input_nz += (input_u8[k] != 0);
@@ -436,11 +442,17 @@ int main(int argc, char *argv[]) {
 
         pd->release_job(job.slot_idx);
 
-        auto *rpc_hdr =
-            static_cast<const rt_sdk::RPCHeader *>(job.ring_buffer_ptr);
-        uint32_t rid = rpc_hdr->request_id;
+        const uint32_t rid = static_cast<uint32_t>(ctx.request_id);
 
-        pymatch_queue.push({origin_slot, rid, job.ring_buffer_ptr});
+        // Echo the request identity into the response header now; the
+        // PyMatching thread fills in magic, status, result_len and the
+        // payload later. On the internal ring the TX area is the RX slot
+        // itself, so this rewrites the fields with their own values.
+        auto *resp = static_cast<rt_sdk::RPCResponse *>(ctx.response_buffer);
+        resp->request_id = rid;
+        resp->ptp_timestamp = ctx.ptp_timestamp;
+
+        pymatch_queue.push({origin_slot, rid, ctx.response_buffer});
 
         NVTX_POP(); // PredecoderPoll
         return rt_pipeline::DEFERRED_COMPLETION;
@@ -507,9 +519,15 @@ int main(int argc, char *argv[]) {
                       decoder_ctx.num_residual_detectors);
           auto result = my_decoder->decode(syndrome_tensor);
           all_converged = result.converged;
-          if (!obs_row.empty() && !result.result.empty()) {
-            if (result.result[0] > 0.5)
-              total_corrections++;
+          if (!obs_row.empty() && result.result.size() == obs_row.size()) {
+            // The decoder returns an estimated error per edge. The logical
+            // observable flips when an odd number of the observable's edges
+            // are in that estimate.
+            int32_t flip = 0;
+            for (size_t e = 0; e < obs_row.size(); ++e)
+              if (obs_row[e] != 0 && result.result[e] > 0.5)
+                flip ^= 1;
+            total_corrections += flip;
           } else {
             for (auto v : result.result)
               if (v > 0.5)
@@ -535,13 +553,14 @@ int main(int argc, char *argv[]) {
         auto decode_end = hrclock::now();
         NVTX_POP(); // PyMatchDecode
 
-        // Write RPC response into ring buffer slot
+        // Write the RPC response into the slot's TX area (request_id and
+        // ptp_timestamp were echoed there by the CPU stage).
         DecodeResponse resp{total_corrections, all_converged ? 1 : 0};
-        char *response_payload =
-            (char *)job.ring_buffer_ptr + sizeof(rt_sdk::RPCResponse);
+        char *response_payload = static_cast<char *>(job.response_buffer) +
+                                 sizeof(rt_sdk::RPCResponse);
         std::memcpy(response_payload, &resp, sizeof(resp));
 
-        auto *header = static_cast<rt_sdk::RPCResponse *>(job.ring_buffer_ptr);
+        auto *header = static_cast<rt_sdk::RPCResponse *>(job.response_buffer);
         header->magic = rt_sdk::RPC_MAGIC_RESPONSE;
         header->status = 0;
         header->result_len = sizeof(resp);

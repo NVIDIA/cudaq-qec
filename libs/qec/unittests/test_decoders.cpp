@@ -545,7 +545,7 @@ TEST(ChunkedObservables, StreamingShotMatchesTheClosedModelColumnByColumn) {
   // One measurement per detector, so a shot is `detectors` bits wide.
   std::vector<std::vector<std::uint32_t>> identity(detectors);
   for (std::uint32_t row = 0; row < detectors; ++row)
-    identity[row] = {row};
+    identity[row].assign(1, row);
   const auto D =
       sparse_binary_matrix::from_nested_csr(detectors, detectors, identity);
 
@@ -600,7 +600,7 @@ TEST(DecoderObservableProjection,
   const auto detectors = sized.num_detectors();
   std::vector<std::vector<std::uint32_t>> identity(detectors);
   for (std::uint32_t row = 0; row < detectors; ++row)
-    identity[row] = {row};
+    identity[row].assign(1, row);
   auto D =
       sparse_binary_matrix::from_nested_csr(detectors, detectors, identity);
   decoder_init_probe probe(
@@ -2270,8 +2270,8 @@ TEST(SlidingWindowDecoder, BaseStreamingCopiesFirstRoundDetectors) {
   // first-round layer references measurements, so one round of two bits fills
   // the measurement volume and drives the first streamed layer.
   std::vector<std::vector<std::uint32_t>> m2d(H.num_rows());
-  m2d[0] = {0};
-  m2d[1] = {1};
+  m2d[0].assign(1, 0);
+  m2d[1].assign(1, 1);
   auto decoder = cudaq::qec::decoder::get(
       "sliding_window",
       cudaq::qec::decoder_init(

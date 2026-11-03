@@ -97,6 +97,15 @@ experiment_template::experiment_template(dem_chunks_spec spec)
       throw std::invalid_argument(
           "experiment_template: suffix phase '" + suffix_[i].name() +
           "' precedes FINAL, so it needs the bulk measurement width");
+
+  prefix_rows_.assign(1, 0);
+  for (const auto &id : prefix_)
+    prefix_rows_.push_back(prefix_rows_.back() + phases_.at(id).rows);
+  suffix_rows_.assign(1, 0);
+  for (const auto &id : suffix_)
+    suffix_rows_.push_back(suffix_rows_.back() + phases_.at(id).rows);
+  if (repeats_)
+    bulk_rows_ = phases_.at(bulk_).rows;
 } // end - experiment_template::experiment_template()
 
 // Detector k of a round without D_sparse rows differences measurement k of
@@ -177,10 +186,19 @@ std::size_t experiment_template::sum_before(std::size_t r, std::size_t R,
   return total;
 } // end - experiment_template::sum_before()
 
-// Detector rows before round r.
+// Detector rows before round r: sum_before() over the sums the constructor
+// precomputed.
 std::size_t experiment_template::row_offset(std::size_t r,
                                             std::size_t R) const {
-  return sum_before(r, R, [](const phase_chunks &p) { return p.rows; });
+  const auto tail = R - suffix_.size();
+  std::size_t total = 0;
+  check_round(r, R, R);
+  total = prefix_rows_[std::min(r, prefix_.size())];
+  if (repeats_ && r > prefix_.size())
+    total += (std::min(r, tail) - prefix_.size()) * bulk_rows_;
+  if (r > tail)
+    total += suffix_rows_[r - tail];
+  return total;
 }
 
 // Fault columns before round r.

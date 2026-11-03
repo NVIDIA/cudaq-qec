@@ -39,11 +39,16 @@ struct task_graph_edge {
 struct task_graph_options {
   /// Process streaming records on the graph's persistent coordinator thread.
   /// Records then overlap: a later record runs ahead on nodes that finished
-  /// the earlier ones, with `async_queue_capacity` records in flight at most.
+  /// the earlier ones, up to 16 records in flight, or the queue's capacity if
+  /// smaller.
   bool async_streaming = false;
-  /// Maximum public enqueue operations queued or executing. Must be nonzero
-  /// when asynchronous.
-  std::size_t async_queue_capacity = 8;
+  /// Maximum public enqueue operations queued or executing: how far the
+  /// producer may run ahead of the graph. Must be nonzero when asynchronous.
+  /// A windowed graph admits queued rounds together, so a deeper queue lets
+  /// it catch up in larger batches, but a graph that falls behind returns
+  /// FINAL's result only after draining it. 32 keeps that backlog to tens of
+  /// microseconds while still batching; each slot holds one enqueue.
+  std::size_t async_queue_capacity = 32;
   /// CPU reserved for the asynchronous coordinator, or -1 to inherit the
   /// constructing thread's affinity. This pins only the coordinator; decoder
   /// pool workers retain their separately configured affinity.
@@ -53,7 +58,9 @@ struct task_graph_options {
   std::size_t async_spin_pause_iters = 0;
   /// Pool threads that run node fires in an asynchronous graph, not counting
   /// the coordinator. Unset sizes the pool from the graph: its parallel
-  /// width, including every fire pool's copies, capped by hardware
+  /// width, including every fire pool's copies, or, with an indexed node,
+  /// every copy that may fire at once (an indexed node's single copy too)
+  /// plus the worker its fires leave free, capped by hardware
   /// concurrency. Must be at least one when set. Synchronous graphs ignore
   /// it.
   std::optional<std::size_t> async_num_workers;

@@ -174,6 +174,7 @@ public:
   }
 
   decoder_result decode(const std::vector<float_t> &syndrome) override {
+    check_syndrome_size(syndrome.size());
     // This is a simple decoder with trivial results
     auto t0 = std::chrono::high_resolution_clock::now();
     decoder_result result{.result = std::vector<float_t>(block_size, 0.0)};
@@ -194,7 +195,6 @@ public:
     // Convert syndrome to a string
     std::string syndrome_str(syndrome.size(), '0');
     int syndrome_weight = 0;
-    assert(syndrome_str.length() == syndrome_size);
     bool anyErrors = false;
     for (std::size_t i = 0; i < syndrome_size; i++) {
       if (cudaq::qec::convert_soft_to_hard(syndrome[i])) {

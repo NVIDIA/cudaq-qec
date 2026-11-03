@@ -103,6 +103,12 @@ private:
   std::size_t max_span_ = 0;
   std::size_t num_observables_ = 0;
   std::map<phase_id, phase_chunks> phases_;
+  /// Detector rows before each prefix round and each suffix round, from the
+  /// start of the prefix and of the suffix, and of a bulk round, so
+  /// row_offset(), which a decode_window fire checks against, is O(1).
+  std::vector<std::size_t> prefix_rows_;
+  std::vector<std::size_t> suffix_rows_;
+  std::size_t bulk_rows_ = 0;
 };
 
 } // namespace cudaq::qec

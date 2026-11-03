@@ -20,7 +20,11 @@
 #include "cudaq/qec/realtime/decoding_config.h"
 #include "cudaq/qec/selection_strategy.h"
 #include <algorithm>
+#include <array>
+#include <cassert>
 #include <cctype>
+#include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -31,6 +35,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace cudaq::qec::decoding::config {
@@ -305,6 +310,12 @@ static void finalize_parsed_args(const decoder_schema &schema,
 /// them by node and port name.
 using task_graph_node_spec = decoder_config::task_graph_spec::node_spec;
 
+/// Whether the node is an ensemble pattern, whose members and join are its
+/// own keys.
+static bool is_ensemble_node(const task_graph_node_spec &node) {
+  return node.resolved_kind() == "ensemble";
+}
+
 /// Whether a node needs no entry-level DEM: its kind takes none, it carries
 /// its own, or every member node does.
 static bool task_graph_node_describes_itself(const task_graph_node_spec &node) {
@@ -328,23 +339,24 @@ reject_lowered_only_kind(const cudaq::qec::task_graph_node_kind_spec *kind,
   if (kind && kind->lowered_only)
     throw std::runtime_error(where + " has type '" + type +
                              "', which only the lowering of a pattern "
-                             "produces; write an 'ensemble' entry instead");
+                             "produces; write an 'ensemble' node instead");
 }
 
-/// The checks for an `ensemble` pattern entry. The YAML traits have resolved
+/// The checks for an `ensemble` node. The YAML traits have resolved
 /// join_strategy and its parameters and the builder's lowering checks the
 /// wiring, which leaves the node form; the member nodes join `typed`.
 static void validate_ensemble_node(
     const task_graph_node_spec &node, const std::string &where,
     std::vector<std::pair<const task_graph_node_spec *, std::string>> &typed) {
-  if (!node.type.empty())
-    throw std::runtime_error(where + " is an ensemble and takes no type");
+  if (!node.ensemble.has_value())
+    throw std::runtime_error(where + " is an ensemble and needs members and a "
+                                     "join_strategy");
   const auto &members = node.ensemble->members;
   for (std::size_t i = 0; i < members.size(); ++i)
     for (const auto &n : members[i].nodes) {
       const std::string node_where = where + " ensemble member " +
                                      std::to_string(i) + " node '" + n.id + "'";
-      if (n.ensemble.has_value())
+      if (is_ensemble_node(n))
         throw std::runtime_error(node_where + " nests an ensemble, which is "
                                               "not supported yet");
       typed.emplace_back(&n, node_where);
@@ -418,14 +430,13 @@ static void validate_task_graph(const decoder_config &config) {
       throw std::runtime_error(who + ": duplicate task_graph node id '" +
                                node.id + "'");
     ids.push_back(node.id);
-    if (node.ensemble.has_value() && !node.windows.empty())
+    if (is_ensemble_node(node) && !node.windows.empty())
       throw std::runtime_error(node_context(node.id) +
-                               " is an ensemble entry, which takes no "
-                               "windows; only an ingest node takes windows");
-    if (node.ensemble.has_value())
+                               " is an ensemble, which takes no windows; "
+                               "only an ingest node takes windows");
+    if (is_ensemble_node(node))
       validate_ensemble_node(node, node_context(node.id), typed);
-    else
-      typed.emplace_back(&node, node_context(node.id));
+    typed.emplace_back(&node, node_context(node.id));
   }
   for (const auto &[typed_node, where] : typed) {
     const auto &node = *typed_node;
@@ -589,6 +600,18 @@ static void validate_task_graph(const decoder_config &config) {
 
 } // namespace cudaq::qec::decoding::config
 
+namespace {
+
+// LLVM's default double emitter rounds to six significant digits. Model priors
+// and schema-typed decoder parameters must both survive export unchanged.
+struct exact_yaml_double {
+  double value = 0;
+};
+
+} // namespace
+
+LLVM_YAML_IS_FLOW_SEQUENCE_VECTOR(exact_yaml_double)
+LLVM_YAML_IS_SEQUENCE_VECTOR(std::vector<exact_yaml_double>)
 LLVM_YAML_IS_SEQUENCE_VECTOR(std::vector<double>)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::decoding::config::decoder_config)
 LLVM_YAML_IS_SEQUENCE_VECTOR(cudaq::qec::phase_connection)
@@ -606,16 +629,15 @@ struct config_parse_context {
   const std::vector<data_artifact_t> *artifacts = nullptr;
 };
 
-/// The entry named @p name in a list sorted by name, or nullptr. Names are
-/// looked up only while a configuration is parsed.
+/// The entry named @p name, or nullptr. A list built in code need not be
+/// sorted, as a parsed one is, so the search is linear; names are looked up
+/// only while a configuration is parsed, written or resolved.
 const data_artifact_t *named_artifact(const std::vector<data_artifact_t> &list,
                                       const std::string &name) {
   const auto it =
-      std::lower_bound(list.begin(), list.end(), name,
-                       [](const data_artifact_t &e, const std::string &n) {
-                         return e.name < n;
-                       });
-  return it != list.end() && it->name == name ? &*it : nullptr;
+      std::find_if(list.begin(), list.end(),
+                   [&](const data_artifact_t &e) { return e.name == name; });
+  return it != list.end() ? &*it : nullptr;
 }
 
 /// The entry a reference may be written back as: the document being written
@@ -646,21 +668,20 @@ std::vector<std::string> artifact_kinds(const data_artifact_t &entry) {
   return kinds;
 }
 
-/// The entry @p name names, which must hold one of @p kinds; @p what names
-/// them, and @p where the reference, in messages.
-const data_artifact_t &find_artifact(llvm::yaml::IO &io,
-                                     const std::string &name,
-                                     const std::vector<std::string> &kinds,
-                                     const std::string &what,
-                                     const std::string &where) {
-  const auto *context =
-      static_cast<const config_parse_context *>(io.getContext());
+/// The entry of @p artifacts that @p name names, which must
+/// hold one of @p kinds; @p what names them, and @p where the reference, in
+/// messages. Without @p artifacts, the reference was parsed outside a
+/// document that could hold the entry.
+const data_artifact_t &
+find_artifact(const std::vector<data_artifact_t> *artifacts,
+              const std::string &name, const std::vector<std::string> &kinds,
+              const std::string &what, const std::string &where) {
   const auto prefix = where + " names data_artifacts entry '" + name + "'";
-  if (!context || !context->artifacts)
+  if (!artifacts)
     throw std::runtime_error(
         prefix + ", but it was parsed outside a "
                  "multi_decoder_config, which holds data_artifacts");
-  const auto *entry = named_artifact(*context->artifacts, name);
+  const auto *entry = named_artifact(*artifacts, name);
   if (!entry)
     throw std::runtime_error(prefix + ", which does not exist");
   const auto held = artifact_kinds(*entry);
@@ -672,13 +693,72 @@ const data_artifact_t &find_artifact(llvm::yaml::IO &io,
   return *entry;
 }
 
-/// Checks each entry on its own and against the others: exactly one kind;
-/// edem_path reserved; sha256 only on a file, as 64 hex digits; a window's
-/// request valid and its context a dem_chunks entry; a template valid.
-void validate_data_artifacts(const std::vector<data_artifact_t> &list) {
+/// As above, in the data_artifacts of the document being parsed.
+const data_artifact_t &find_artifact(llvm::yaml::IO &io,
+                                     const std::string &name,
+                                     const std::vector<std::string> &kinds,
+                                     const std::string &what,
+                                     const std::string &where) {
+  const auto *context =
+      static_cast<const config_parse_context *>(io.getContext());
+  return find_artifact(context ? context->artifacts : nullptr, name, kinds,
+                       what, where);
+}
+
+/// Resolves a stim_dem that names an entry of @p artifacts: any value with
+/// none of name_breaks, which Stim model text always holds. The name is kept in
+/// @p artifact, and @p text or @p path becomes a copy of the entry's text or
+/// path.
+void resolve_named_stim_dem(const std::vector<data_artifact_t> *artifacts,
+                            std::string &text, std::string &path,
+                            std::string &artifact, const std::string &where) {
+  if (text.empty() ||
+      text.find_first_of(cudaq::qec::decoding::config::name_breaks) !=
+          std::string::npos)
+    return;
+  artifact = std::move(text);
+  text.clear();
+  const auto &entry =
+      find_artifact(artifacts, artifact, {"stim_dem", "stim_dem_path"},
+                    "Stim DEM", where + " stim_dem");
+  if (!entry.stim_dem_path.empty() && !path.empty())
+    throw cudaq::qec::decoding::config::both_stim_forms(where);
+  text = entry.stim_dem;
+  if (!entry.stim_dem_path.empty())
+    path = entry.stim_dem_path;
+}
+
+} // namespace
+
+// The list a configuration built in code holds, which is never parsed.
+void cudaq::qec::decoding::config::resolve_stim_dem(
+    const std::vector<data_artifact> &artifacts, std::string &text,
+    std::string &path, std::string &artifact, const std::string &where) {
+  resolve_named_stim_dem(&artifacts, text, path, artifact, where);
+}
+
+// Checks each entry on its own and against the others: a name with none of
+// name_breaks, held once; exactly one kind; edem_path reserved; sha256 only
+// on a file, as 64 hex digits; a window's request valid and its context a
+// dem_chunks entry; a template valid. Sorted by name, a repeated name is
+// held by neighbours.
+void cudaq::qec::decoding::config::validate_data_artifacts(
+    const std::vector<data_artifact_t> &list) {
+  for (std::size_t i = 1; i < list.size(); ++i)
+    if (list[i].name == list[i - 1].name)
+      throw std::runtime_error("data_artifacts has two entries named '" +
+                               list[i].name + "'");
   for (const auto &entry : list) {
     const auto where = "data_artifacts entry '" + entry.name + "'";
     const auto kinds = artifact_kinds(entry);
+    // A stim_dem with any of name_breaks is model text, so a name that holds
+    // one could never be named.
+    if (entry.name.empty() ||
+        entry.name.find_first_of(name_breaks) != std::string::npos)
+      throw std::runtime_error(where +
+                               " needs a name without spaces, tabs or line "
+                               "breaks, since a stim_dem with them is model "
+                               "text, not a name");
     if (kinds.empty())
       throw std::runtime_error(where +
                                " has no kind: give one of dem_chunks, "
@@ -733,7 +813,6 @@ void validate_data_artifacts(const std::vector<data_artifact_t> &list) {
   } // end - for(entry)
 } // end - validate_data_artifacts()
 
-} // namespace
 LLVM_YAML_IS_SEQUENCE_VECTOR(
     cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec)
 LLVM_YAML_IS_SEQUENCE_VECTOR(
@@ -745,6 +824,38 @@ LLVM_YAML_IS_SEQUENCE_VECTOR(
     cudaq::qec::decoding::config::syndrome_mapping_config)
 
 namespace llvm::yaml {
+
+template <>
+struct ScalarTraits<exact_yaml_double> {
+  static void output(const exact_yaml_double &probability, void *context,
+                     raw_ostream &stream) {
+    // Preserve LLVM's established spelling for nonfinite parameter values.
+    // Phase-prior validation rejects them independently.
+    if (!std::isfinite(probability.value)) {
+      ScalarTraits<double>::output(probability.value, context, stream);
+      return;
+    }
+    std::array<char, 64> buffer;
+    const auto result = std::to_chars(
+        buffer.data(), buffer.data() + buffer.size(), probability.value);
+    assert(result.ec == std::errc() &&
+           "the buffer must fit the shortest double representation");
+    const StringRef text(buffer.data(), result.ptr - buffer.data());
+    const auto exponent = text.find_first_of("eE");
+    // YAML 1.1 readers such as PyYAML infer an exponent-only spelling (1e-06)
+    // as a string. A decimal point preserves numeric interpretation without
+    // changing the shortest representation's value or significant digits.
+    if (exponent != StringRef::npos && !text.contains('.'))
+      stream << text.take_front(exponent) << ".0" << text.drop_front(exponent);
+    else
+      stream << text;
+  }
+  static StringRef input(StringRef text, void *context,
+                         exact_yaml_double &value) {
+    return ScalarTraits<double>::input(text, context, value.value);
+  }
+  static QuotingType mustQuote(StringRef) { return QuotingType::None; }
+};
 
 // Binds a heterogeneous_map to the decoder_schema that describes it so the
 // generic mapping traits below can convert between the two. The schema drives
@@ -768,8 +879,29 @@ void input_schema_scalar(IO &io, const std::string &key,
 template <typename T>
 void output_schema_scalar(IO &io, const std::string &key,
                           const cudaqx::heterogeneous_map &map) {
-  T value = map.get<T>(key);
-  io.mapRequired(key.c_str(), value);
+  auto value = map.get<T>(key);
+  if constexpr (std::is_same_v<T, double>) {
+    exact_yaml_double exact{value};
+    io.mapRequired(key.c_str(), exact);
+  } else if constexpr (std::is_same_v<T, std::vector<double>>) {
+    std::vector<exact_yaml_double> exact;
+    exact.reserve(value.size());
+    for (const auto element : value)
+      exact.push_back({element});
+    io.mapRequired(key.c_str(), exact);
+  } else if constexpr (std::is_same_v<T, std::vector<std::vector<double>>>) {
+    std::vector<std::vector<exact_yaml_double>> exact;
+    exact.reserve(value.size());
+    for (const auto &row : value) {
+      auto &converted = exact.emplace_back();
+      converted.reserve(row.size());
+      for (const auto element : row)
+        converted.push_back({element});
+    }
+    io.mapRequired(key.c_str(), exact);
+  } else {
+    io.mapRequired(key.c_str(), value);
+  }
 }
 
 } // namespace
@@ -845,7 +977,7 @@ struct CustomMappingTraits<schema_binding> {
                                  spec->discriminator + "' is not set.");
       const auto *nested_schema =
           cudaq::qec::decoding::config::find_decoder_schema(
-              discriminator_value);
+              spec->discriminator_prefix + discriminator_value);
       if (!nested_schema)
         throw std::runtime_error(
             "'" + key_str + "' does not support " + spec->discriminator + " '" +
@@ -930,7 +1062,7 @@ struct CustomMappingTraits<schema_binding> {
             discriminator_value.empty()
                 ? nullptr
                 : cudaq::qec::decoding::config::find_decoder_schema(
-                      discriminator_value);
+                      spec.discriminator_prefix + discriminator_value);
         if (!nested_schema)
           throw std::runtime_error("'" + spec.key +
                                    "' is present but no parameter schema is "
@@ -995,7 +1127,19 @@ struct MappingTraits<cudaq::qec::dem_chunk_spec> {
     io.mapOptional("H_sparse", spec.H_sparse);
     io.mapOptional("seam_specs", spec.seam_specs);
     io.mapOptional("O_sparse", spec.O_sparse, std::vector<std::int64_t>{});
-    io.mapRequired("error_rates", spec.error_rates);
+    std::vector<exact_yaml_double> rates;
+    if (io.outputting()) {
+      rates.reserve(spec.error_rates.size());
+      for (const auto value : spec.error_rates)
+        rates.push_back({value});
+    }
+    io.mapRequired("error_rates", rates);
+    if (!io.outputting()) {
+      spec.error_rates.clear();
+      spec.error_rates.reserve(rates.size());
+      for (const auto value : rates)
+        spec.error_rates.push_back(value.value);
+    }
     io.mapOptional("D_sparse", spec.D_sparse, std::vector<std::int64_t>{});
     io.mapOptional("num_measurements", spec.num_measurements);
     io.mapOptional("m2o_sparse", spec.m2o_sparse, std::vector<std::int64_t>{});
@@ -1226,16 +1370,14 @@ struct CustomMappingTraits<inner_form> {
 // depends on the resolved node kind, so no key list can be written here.
 using ensemble_spec_t = task_graph_spec_t::node_spec::ensemble_spec;
 
-// The ensemble block and the node list refer to each other, so these are
+// The ensemble's keys and the node list refer to each other, so these are
 // declared before the node traits and defined after them.
 template <>
 struct MappingTraits<ensemble_spec_t::member> {
   static void mapping(IO &io, ensemble_spec_t::member &m);
 };
-template <>
-struct MappingTraits<ensemble_spec_t> {
-  static void mapping(IO &io, ensemble_spec_t &e);
-};
+/// An ensemble node's own keys: members, join_strategy and join_params.
+static void map_ensemble_keys(IO &io, ensemble_spec_t &e);
 
 /// A `dem_chunks` value: the block, or the name of a data_artifacts entry.
 /// A list is kept only to be rejected.
@@ -1305,23 +1447,13 @@ static void map_dem_chunks(IO &io,
 
 using cudaq::qec::decoding::config::both_stim_forms;
 
-/// Resolves a stim_dem that names a data_artifacts entry: any value with no
-/// whitespace, which Stim model text always has. The name is kept in @p
-/// artifact, and @p text or
-/// @p path becomes a copy of the entry's text or path.
+/// Resolves a stim_dem that names an entry of the document being parsed.
 static void resolve_stim_dem(IO &io, std::string &text, std::string &path,
                              std::string &artifact, const std::string &where) {
-  if (text.empty() || text.find_first_of(" \t\r\n") != std::string::npos)
-    return;
-  artifact = std::move(text);
-  text.clear();
-  const auto &entry = find_artifact(io, artifact, {"stim_dem", "stim_dem_path"},
-                                    "Stim DEM", where + " stim_dem");
-  if (!entry.stim_dem_path.empty() && !path.empty())
-    throw both_stim_forms(where);
-  text = entry.stim_dem;
-  if (!entry.stim_dem_path.empty())
-    path = entry.stim_dem_path;
+  const auto *context =
+      static_cast<const config_parse_context *>(io.getContext());
+  resolve_named_stim_dem(context ? context->artifacts : nullptr, text, path,
+                         artifact, where);
 }
 
 /// Writes a model that names an entry as the name while its copy still
@@ -1573,7 +1705,12 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
     }
     if (key == "type") {
       io.mapRequired("type", node.type);
+      read_ensemble(io, node);
       return;
+    }
+    if (key == "members" || key == "join_strategy" || key == "join_params") {
+      if (read_ensemble(io, node))
+        return;
     }
     if (key == "dem_chunks") {
       map_dem_chunks(io, node.dem_chunks, node.dem_chunks_artifact,
@@ -1666,14 +1803,6 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
       return;
     }
 
-    if (key == "ensemble") {
-      // A pattern in place of a node; the builder lowers it. Everything the
-      // block holds is parsed by its own traits.
-      node.ensemble.emplace();
-      io.mapRequired("ensemble", *node.ensemble);
-      return;
-    }
-
     // The straddle flags move a window's decode-input column range; guards
     // move which of its rounds commit. Only the latter is expressible here, so
     // say which key replaces which rather than reporting an unknown key.
@@ -1698,15 +1827,15 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
 
   static void output(IO &io, node_spec &node) {
     io.mapRequired("id", node.id);
-    if (node.ensemble.has_value()) {
-      io.mapRequired("ensemble", *node.ensemble);
-      return;
-    }
     // An alias is an accepted spelling on input only, so emission writes the
     // canonical name and a document round-trips to one form.
     const auto *kind = cudaq::qec::find_task_graph_node_kind(node.type);
     std::string type = kind ? kind->name : node.type;
     io.mapRequired("type", type);
+    if (node.ensemble.has_value()) {
+      map_ensemble_keys(io, *node.ensemble);
+      return;
+    }
     map_dem_chunks(io, node.dem_chunks, node.dem_chunks_artifact,
                    "task_graph node '" + node.id + "'");
     if (!node.windows.empty()) {
@@ -1760,6 +1889,20 @@ struct CustomMappingTraits<task_graph_spec_t::node_spec> {
   }
 
 private:
+  /// Whether `type` names an ensemble, whose members and join are read
+  /// together, by whichever of `type` and those keys arrives first.
+  static bool read_ensemble(IO &io, node_spec &node) {
+    std::string type_value;
+    io.mapOptional("type", type_value);
+    if (cudaq::qec::resolved_task_graph_node_kind(type_value) != "ensemble")
+      return false;
+    if (!node.ensemble.has_value()) {
+      node.ensemble.emplace();
+      map_ensemble_keys(io, *node.ensemble);
+    }
+    return true;
+  }
+
   static void store_partition(const partition_form &form, node_spec &node) {
     node.partition_label = form.label;
     node.partition_columns.clear();
@@ -1803,7 +1946,7 @@ void MappingTraits<ensemble_spec_t::member>::mapping(
   io.mapOptional("edges", m.edges);
 }
 
-void MappingTraits<ensemble_spec_t>::mapping(IO &io, ensemble_spec_t &e) {
+static void map_ensemble_keys(IO &io, ensemble_spec_t &e) {
   io.mapRequired("members", e.members);
   io.mapRequired("join_strategy", e.join_strategy);
   // join_params belongs to the strategy, whose schema is registered under its
@@ -1918,8 +2061,15 @@ struct MappingTraits<cudaq::qec::decoding::config::decoder_config> {
     // Continue accepting the PR765 top-level spelling, but registered decoder
     // configurations are emitted with rates under decoder_custom_args so the
     // established researcher-facing wire YAML does not change.
-    if (!io.outputting() || !schema)
+    if (!io.outputting())
       io.mapOptional("error_rate_vec", config.error_rate_vec);
+    else if (!schema) {
+      std::vector<exact_yaml_double> rates;
+      rates.reserve(config.error_rate_vec.size());
+      for (const auto rate : config.error_rate_vec)
+        rates.push_back({rate});
+      io.mapOptional("error_rate_vec", rates);
+    }
     map_dem_chunks(io, config.dem_chunks, config.dem_chunks_artifact,
                    "decoder " + std::to_string(config.id));
     map_stim_dem(io, config.stim_dem, config.stim_dem_path,
@@ -2249,7 +2399,8 @@ struct MappingTraits<cudaq::qec::decoding::config::multi_decoder_config> {
         context->artifacts = &config.data_artifacts;
     } else {
       io.mapOptional("data_artifacts", artifacts);
-      validate_data_artifacts(config.data_artifacts);
+      cudaq::qec::decoding::config::validate_data_artifacts(
+          config.data_artifacts);
       if (auto *context = static_cast<config_parse_context *>(io.getContext()))
         context->artifacts = &config.data_artifacts;
     }
@@ -2527,9 +2678,23 @@ decoder_params_json_schema(const decoder_schema &schema,
 /// parameters appear as node keys, and each kind's clause forbids the keys that
 /// belong only to other kinds. A newly registered kind shows up here without an
 /// edit to this function.
-/// The `ensemble` pattern entry: members of nodes (the node schema itself)
-/// and edges, a registered join_strategy and, per strategy, its join_params.
-llvm::json::Object ensemble_json_schema() {
+/// The `ensemble` kind's keys, added to `node_properties`: members of nodes
+/// (the node schema itself) and edges, a registered join_strategy and, per
+/// strategy, its join_params. Returns the clause requiring them of an
+/// ensemble node, forbidding it every other node key, and forbidding them of
+/// every other node, as the parser does.
+llvm::json::Object ensemble_json_schema(llvm::json::Object &node_properties) {
+  const auto forbid = [](std::vector<std::string> keys) {
+    llvm::json::Array out;
+    for (const auto &key : keys)
+      out.push_back(llvm::json::Object{
+          {"not", llvm::json::Object{{"required", llvm::json::Array{key}}}}});
+    return out;
+  };
+  std::vector<std::string> node_only;
+  for (const auto &[key, value] : node_properties)
+    if (key != "id" && key != "type" && key != "max_in_flight")
+      node_only.push_back(key.str());
   llvm::json::Array names, per_strategy;
   for (const auto &name : cudaq::qec::registered_selection_strategies()) {
     names.push_back(name);
@@ -2578,21 +2743,27 @@ llvm::json::Object ensemble_json_schema() {
                  llvm::json::Object{{"$ref", "#/$defs/task_graph_edge"}}}}}}},
       {"required", llvm::json::Array{"nodes", "edges"}},
       {"additionalProperties", false}};
+  node_properties["members"] = llvm::json::Object{
+      {"type", "array"}, {"minItems", 1}, {"items", std::move(member)}};
+  node_properties["join_strategy"] =
+      llvm::json::Object{{"type", "string"}, {"enum", std::move(names)}};
+  node_properties["join_params"] = llvm::json::Object{{"type", "object"}};
+  llvm::json::Array constraints = forbid(std::move(node_only));
+  for (auto &clause : per_strategy)
+    constraints.push_back(std::move(clause));
   llvm::json::Object ensemble{
-      {"type", "object"},
-      {"properties",
-       llvm::json::Object{
-           {"members", llvm::json::Object{{"type", "array"},
-                                          {"minItems", 1},
-                                          {"items", std::move(member)}}},
-           {"join_strategy",
-            llvm::json::Object{{"type", "string"}, {"enum", std::move(names)}}},
-           {"join_params", llvm::json::Object{{"type", "object"}}}}},
       {"required", llvm::json::Array{"members", "join_strategy"}},
-      {"additionalProperties", false}};
-  if (!per_strategy.empty())
-    ensemble["allOf"] = std::move(per_strategy);
-  return ensemble;
+      {"allOf", std::move(constraints)}};
+  return llvm::json::Object{
+      {"if",
+       llvm::json::Object{
+           {"properties",
+            llvm::json::Object{
+                {"type", llvm::json::Object{{"const", "ensemble"}}}}},
+           {"required", llvm::json::Array{"type"}}}},
+      {"then", std::move(ensemble)},
+      {"else", llvm::json::Object{{"allOf", forbid({"members", "join_strategy",
+                                                    "join_params"})}}}};
 }
 
 llvm::json::Object task_graph_json_schema() {
@@ -2644,9 +2815,9 @@ llvm::json::Object task_graph_json_schema() {
       {"stim_dem_path", llvm::json::Object{{"type", "string"}}},
       {"partition",
        llvm::json::Object{{"$ref", "#/$defs/task_graph_partition"}}},
-      {"ensemble", ensemble_json_schema()},
   };
   llvm::json::Array per_kind;
+  per_kind.push_back(ensemble_json_schema(node_properties));
   for (const auto &kind : kinds) {
     const auto *schema =
         find_decoder_schema(cudaq::qec::task_graph_node_schema_name(kind));
@@ -2689,14 +2860,26 @@ llvm::json::Object task_graph_json_schema() {
           {"not", llvm::json::Object{{"required", llvm::json::Array{key}}}}});
     const auto *spec = cudaq::qec::find_task_graph_node_kind(kind);
     llvm::json::Array spellings{kind};
-    if (spec)
+    // The kind's own bounds, which its parameter validation checks.
+    llvm::json::Object bounds;
+    if (spec) {
       for (const auto &alias : spec->aliases)
         spellings.push_back(alias);
+      for (const auto &[key, least] : spec->parameter_minimums)
+        bounds[key] = llvm::json::Object{{"minimum", least}};
+      for (const auto &[key, most] : spec->parameter_maximums) {
+        if (!bounds.getObject(key))
+          bounds[key] = llvm::json::Object{};
+        (*bounds.getObject(key))["maximum"] = most;
+      }
+    }
     llvm::json::Object then_clause;
     if (!required.empty())
       then_clause["required"] = std::move(required);
     if (!forbidden.empty())
       then_clause["allOf"] = std::move(forbidden);
+    if (!bounds.empty())
+      then_clause["properties"] = std::move(bounds);
     if (then_clause.empty())
       continue;
     per_kind.push_back(llvm::json::Object{
@@ -2709,16 +2892,10 @@ llvm::json::Object task_graph_json_schema() {
         {"then", std::move(then_clause)}});
   }
 
-  // A node names a `type`; a pattern entry names `ensemble` instead.
-  llvm::json::Object node{
-      {"type", "object"},
-      {"properties", std::move(node_properties)},
-      {"required", llvm::json::Array{"id"}},
-      {"oneOf",
-       llvm::json::Array{
-           llvm::json::Object{{"required", llvm::json::Array{"type"}}},
-           llvm::json::Object{{"required", llvm::json::Array{"ensemble"}}}}},
-      {"additionalProperties", false}};
+  llvm::json::Object node{{"type", "object"},
+                          {"properties", std::move(node_properties)},
+                          {"required", llvm::json::Array{"id", "type"}},
+                          {"additionalProperties", false}};
   if (!per_kind.empty())
     node["allOf"] = std::move(per_kind);
 
@@ -2874,7 +3051,7 @@ llvm::json::Object task_graph_json_schema() {
                  llvm::json::Object{{"type", "boolean"}, {"default", false}}},
                 {"async_queue_capacity", llvm::json::Object{{"type", "integer"},
                                                             {"minimum", 1},
-                                                            {"default", 8}}},
+                                                            {"default", 32}}},
                 {"async_coordinator_cpu",
                  llvm::json::Object{
                      {"type", "integer"}, {"minimum", -1}, {"default", -1}}},
@@ -2985,7 +3162,8 @@ std::string decoder_config_json_schema() {
       {"syndrome_size",
        llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
       {"stim_dem_path", llvm::json::Object{{"type", "string"}}},
-      // Model text, or, with no whitespace, a data_artifacts entry's name.
+      // Model text, or, with no spaces, tabs or line breaks, a
+      // data_artifacts entry's name.
       {"stim_dem", llvm::json::Object{{"type", "string"}}},
       {"H_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"O_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
@@ -3086,7 +3264,7 @@ std::string decoder_config_json_schema() {
   // per fault) are not expressible here, so a document that passes this schema
   // may still be rejected when parsed.
   llvm::json::Object dem_chunk_properties{
-      {"num_faults", llvm::json::Object{{"type", "integer"}, {"minimum", 1}}},
+      {"num_faults", llvm::json::Object{{"type", "integer"}, {"minimum", 0}}},
       {"H_sparse", llvm::json::Object{{"$ref", "#/$defs/sparse_matrix"}}},
       {"seam_specs",
        llvm::json::Object{{"type", "array"},
@@ -3254,6 +3432,10 @@ std::string decoder_config_json_schema() {
            {"data_artifacts",
             llvm::json::Object{
                 {"type", "object"},
+                // A name holds none of name_breaks, as the parser checks;
+                // \\S would refuse Unicode whitespace the parser accepts.
+                {"propertyNames",
+                 llvm::json::Object{{"pattern", "^[^ \\t\\r\\n]+$"}}},
                 {"additionalProperties",
                  llvm::json::Object{{"$ref", "#/$defs/data_artifact"}}}}},
            {"decoders",

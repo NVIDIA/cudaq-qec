@@ -4,6 +4,7 @@
  */
 
 #include "cudaq/qec/decoder_init.h"
+#include "sparse_dem_from_chunks.h"
 #include "sparse_dem_from_stim_text.h"
 #include "cudaq/qec/extended_dem.h"
 #include <algorithm>
@@ -178,7 +179,9 @@ decoder_init decoder_init::from_dem_chunks_closed(
   const auto chunked = from_dem_chunks(std::move(spec));
   const auto &kept = *chunked.state_->chunks;
   const auto expanded = dem_chunks_from_spec(kept);
-  auto H = dem_chunks_to_pcm(expanded, kept.seam.from_seam, kept.seam.to_seam);
+  auto closed = details::sparse_dem_from_chunks(expanded, kept.seam.from_seam,
+                                                kept.seam.to_seam);
+  auto &H = closed.detector_error_matrix;
   if (H.num_rows() != chunked.num_detectors() ||
       H.num_cols() != chunked.num_error_mechanisms())
     throw std::logic_error("decoder_init: dem_chunks closed model is " +
@@ -191,16 +194,12 @@ decoder_init decoder_init::from_dem_chunks_closed(
     O = sparse_binary_matrix::from_nested_csr(
         static_cast<std::uint32_t>(chunked.num_observables()),
         static_cast<std::uint32_t>(chunked.num_error_mechanisms()),
-        dem_chunks_to_o_sparse(expanded));
-  std::vector<double> rates;
-  rates.reserve(chunked.num_error_mechanisms());
-  for (const auto &chunk : expanded)
-    rates.insert(rates.end(), chunk.error_rates.begin(),
-                 chunk.error_rates.end());
+        closed.observable_rows);
 
-  auto state = make_matrix_state(decoder_model_source::dem_chunks, std::move(H),
-                                 std::move(O), std::move(rates), std::nullopt,
-                                 std::move(measurement_to_detectors));
+  auto state =
+      make_matrix_state(decoder_model_source::dem_chunks, std::move(H),
+                        std::move(O), std::move(closed.error_rates),
+                        std::nullopt, std::move(measurement_to_detectors));
   state->chunks = chunked.state_->chunks;
   return decoder_init(std::move(state));
 } // end - decoder_init::from_dem_chunks_closed()

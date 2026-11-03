@@ -75,13 +75,15 @@ struct stim_dem_read {
 using pinned_stim_dems = std::map<std::string, stim_dem_read>;
 
 /// Fill a data artifact store from a configuration: every template a window
-/// entry or an ingest layer is built on, named or inline, and no other, since
-/// experiment_template rejects some models a plain decoder's dem_chunks
-/// accepts; every Stim DEM entry, with a file-backed one read and checked
-/// against its pinned sha256; and every window variant a window entry or an
-/// ingest layer needs. A node's layers are built on the template its DEM is
-/// built from: its own dem_chunks, else its decoder's unless the decoder has
-/// flat matrices, which then outrank it, as when expand_dem_chunks() has run.
+/// entry, an ingest layer or a parallel_window pattern is built on, named or
+/// inline, and no other, since experiment_template rejects some models a
+/// plain decoder's dem_chunks accepts; every Stim DEM entry, with a
+/// file-backed one read and checked against its pinned sha256; and every
+/// window variant a window entry, an ingest layer or a pattern needs, the
+/// pattern's layers as its windows <id>.A and <id>.B. A node's layers are
+/// built on the template its DEM is built from: its own dem_chunks, else its
+/// decoder's unless the decoder has flat matrices, which then outrank it, as
+/// when expand_dem_chunks() has run.
 /// A layer builds its own request; while that equals the window entry it
 /// names, as parsing leaves it, the entry must be on the node's template.
 /// Callers include decoding_task_data_artifacts.h to use the store.
@@ -91,7 +93,8 @@ using pinned_stim_dems = std::map<std::string, stim_dem_read>;
 /// @throws std::runtime_error naming the entry, or the decoder and node, if a
 /// file cannot be read or does not match its sha256, an inline Stim DEM is
 /// pinned, a window entry's context or a layer's entry is not of the right
-/// kind or template, a node with layers has no template, or a template or
+/// kind or template, a node with layers or a pattern has no template, a
+/// pattern's parameters are invalid, or a template or
 /// window cannot be built.
 /// @throws std::logic_error naming the same, if the store finds its own
 /// entries inconsistent, which no configuration causes.
@@ -123,15 +126,19 @@ __attribute__((visibility("default"))) pinned_stim_dems read_pinned_stim_dems(
     const cudaq::qec::decoding::config::multi_decoder_config &config,
     const std::filesystem::path &base_dir);
 
-/// A copy of `config` in which each decoder and task-graph node that names a
-/// pinned Stim DEM entry, by an unedited copy of its path, holds the entry's
-/// text in place of the path, so a model built from the copy is the one
-/// checked. Reads the pins with read_pinned_stim_dems().
+/// A copy of `config` in which each decoder's and task-graph node's
+/// `stim_dem` that names a data_artifacts entry is resolved as parsing
+/// resolves it, so a configuration built in code names entries too; and in
+/// which each one that names a pinned Stim DEM entry, by an unedited copy of
+/// its path, holds the entry's text in place of the path, so a model built
+/// from the copy is the one checked. Reads the pins with
+/// read_pinned_stim_dems().
 ///
 /// @param base_dir Directory a relative `stim_dem_path` resolves against, as
 /// for resolve_decoder_init().
 /// @throws std::runtime_error naming the entry if a pinned file cannot be read
-/// or does not match its sha256.
+/// or does not match its sha256, and as parsing does for a bad entry or a
+/// name no Stim DEM entry holds.
 __attribute__((visibility("default")))
 cudaq::qec::decoding::config::multi_decoder_config
 with_pinned_stim_dems(
@@ -175,6 +182,15 @@ std::unique_ptr<cudaq::qec::decoding_task_graph>
 build_task_graph(
     const cudaq::qec::decoding::config::decoder_config &decoder_config,
     const std::filesystem::path &base_dir = std::filesystem::current_path());
+
+/// Warn of each windowed decoder in @p config whose serving settings undo
+/// what its windows are for: a windowed task graph overlaps its decodes with
+/// later rounds only with async_streaming, ends a shot only at a FINAL
+/// round, which only a `final` syndrome_mapping row sends, and is served
+/// with dispatch: host only. A decoder is windowed when a node of its graph
+/// is a decode_window or a pattern that declares windows.
+__attribute__((visibility("default"))) void warn_windowed_serving(
+    const cudaq::qec::decoding::config::multi_decoder_config &config);
 
 __attribute__((visibility("default"))) void
 get_corrections(std::size_t decoder_id, uint8_t *corrections,

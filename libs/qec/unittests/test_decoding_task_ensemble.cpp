@@ -313,7 +313,7 @@ task_graph_node_config ensemble(const std::string &id, const members &ms,
   }
   spec.join_strategy = strategy;
   spec.join_params = std::move(join_params);
-  auto c = node(id, "");
+  auto c = node(id, "ensemble");
   c.ensemble = std::move(spec);
   return c;
 }
@@ -394,7 +394,7 @@ task_graph_ensemble_spec::member probe_member(std::shared_ptr<probe> p,
 task_graph_node_config
 ensemble_of(std::vector<task_graph_ensemble_spec::member> ms,
             const std::string &strategy = "first") {
-  auto c = node("ens", "");
+  auto c = node("ens", "ensemble");
   c.ensemble.emplace();
   c.ensemble->members = std::move(ms);
   c.ensemble->join_strategy = strategy;

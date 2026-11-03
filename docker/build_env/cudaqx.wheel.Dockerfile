@@ -8,9 +8,9 @@ ARG python_version=3.12
 ARG cuda_version=12.6
 
 LABEL org.opencontainers.image.description="Dev tools for building and testing CUDA-QX libraries"
-LABEL org.opencontainers.image.source="https://github.com/NVIDIA/cudaqx"
-LABEL org.opencontainers.image.title="cudaqx-dev"
-LABEL org.opencontainers.image.url="https://github.com/NVIDIA/cudaqx"
+LABEL org.opencontainers.image.source="https://github.com/NVIDIA/cudaq-qec"
+LABEL org.opencontainers.image.title="cudaq-qec-dev"
+LABEL org.opencontainers.image.url="https://github.com/NVIDIA/cudaq-qec"
 
 ENV CUDAQ_INSTALL_PREFIX=/usr/local/cudaq
 
@@ -23,7 +23,7 @@ RUN mkdir /cudaq-wheels
 COPY cudaq-wheels/ /cudaq-wheels/
 
 # Work around nvidia-container-toolkit 1.17.1 rejecting its own IMEX default
-ENV NVIDIA_IMEX_CHANNELS=0
+ENV NVIDIA_IMEX_CHANNELS=""
 
 RUN mkdir -p /workspaces/cudaqx/cudaq && cd /workspaces/cudaqx/cudaq \
   && git init \

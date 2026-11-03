@@ -62,6 +62,7 @@ MODEL_SOURCE=""
 ISING_ARTIFACTS_DIR=""
 TASK_GRAPH=0
 PARALLEL_TASK_GRAPH=0
+PARALLEL_WINDOW=0
 ASYNC_STREAMING=0
 EXTRA_APP_ARGS=()
 
@@ -108,6 +109,12 @@ while [[ $# -gt 0 ]]; do
       # Generation-phase only: make each task graph a width-two fan-out/fan-in
       # topology so the streaming scheduler must execute independent branches.
       PARALLEL_TASK_GRAPH=1
+      shift
+      ;;
+    --parallel_window|--parallel-window)
+      # Generation-phase only: each entry becomes per-round chunks decoded by
+      # a parallel_window node, whose shots phase 2 ends through final row 1.
+      PARALLEL_WINDOW=1
       shift
       ;;
     --async_streaming|--async-streaming)
@@ -296,6 +303,9 @@ fi
 if [[ "$PARALLEL_TASK_GRAPH" -eq 1 ]]; then
   GEN_ARGS+=(--parallel_task_graph)
 fi
+if [[ "$PARALLEL_WINDOW" -eq 1 ]]; then
+  GEN_ARGS+=(--parallel_window)
+fi
 if [[ "$ASYNC_STREAMING" -eq 1 ]]; then
   GEN_ARGS+=(--async_streaming)
 fi
@@ -340,6 +350,17 @@ if [[ "$TASK_GRAPH" -eq 1 ]]; then
       exit 1
     fi
     echo "Config carries $NUM_LOGICAL width-two streaming task graph(s)"
+  fi
+
+  if [[ "$PARALLEL_WINDOW" -eq 1 ]]; then
+    pw_count=$(grep -Ec "type:[[:space:]]+parallel_window" "$CONFIG_FILE" ||
+      true)
+    if [[ "$pw_count" -ne "$NUM_LOGICAL" ]] ||
+      ! grep -Eq "type:[[:space:]]+final" "$CONFIG_FILE"; then
+      echo "FAIL: config needs $NUM_LOGICAL parallel_window nodes and a final syndrome_mapping row; found $pw_count nodes"
+      exit 1
+    fi
+    echo "Config carries $NUM_LOGICAL parallel_window graph(s) and a final row"
   fi
 
   if [[ "$ASYNC_STREAMING" -eq 1 ]]; then
@@ -518,6 +539,9 @@ REALTIME_ARGS=(
 )
 if [[ ${#EXTRA_APP_ARGS[@]} -gt 0 ]]; then
   REALTIME_ARGS+=("${EXTRA_APP_ARGS[@]}")
+fi
+if [[ "$PARALLEL_WINDOW" -eq 1 ]]; then
+  REALTIME_ARGS+=(--final_mapping_id 1)
 fi
 if [[ -n "${VERIFY_SYNC_ASYNC_REPLAY:-}" ]]; then
   REALTIME_ARGS+=(--save_syndrome "$SYNDROME_FILE")

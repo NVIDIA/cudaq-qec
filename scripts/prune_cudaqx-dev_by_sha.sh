@@ -18,13 +18,15 @@ set -euo pipefail
 
 JSON_FILE="versions.json"
 ORG="NVIDIA"
-PKG="cudaqx-dev"
+# Dev images are published to both cudaqx-dev (legacy) and cudaq-qec-dev
+# during the 0.9.0 cycle; run once per package, e.g. PRUNE_PKG=cudaq-qec-dev.
+PKG="${PRUNE_PKG:-cudaqx-dev}"
 FORCE=false
 SKIP_CLEANUP=false
 PRUNE_ORPHANS=false
 DEBUG=false
 NO_CACHE=false
-CACHE_DIR="${PRUNE_CACHE_DIR:-$HOME/.cache/prune-cudaqx-dev}"
+CACHE_DIR="${PRUNE_CACHE_DIR:-$HOME/.cache/prune-$PKG}"
 
 usage() {
   cat <<EOF
@@ -48,7 +50,7 @@ Usage: $0 [--force] [--skip-cleanup] [--prune-orphans] [--debug]
 - --no-cache: disable the manifest/referrers cache; always re-fetch from
   ghcr.io (useful if you suspect the cache is corrupt).
 - --cache-dir DIR: use DIR as the cache directory instead of the default
-  (\$PRUNE_CACHE_DIR if set, otherwise ~/.cache/prune-cudaqx-dev).
+  (\$PRUNE_CACHE_DIR if set, otherwise ~/.cache/prune-\$PKG).
   Manifest + referrer results are keyed by version id + digest and reused on
   subsequent runs so only new/changed versions require a live fetch.
 

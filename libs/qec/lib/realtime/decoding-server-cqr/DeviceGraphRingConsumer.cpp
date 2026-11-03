@@ -58,7 +58,6 @@ bool populate_device_call(cudaq_function_entry_t &entry, const char *symbol,
   }
   fn(&entry);
   entry.function_id = function_id;
-  entry.routing_key = 0;
   if (entry.dispatch_mode != CUDAQ_DISPATCH_DEVICE_CALL ||
       !entry.handler.device_fn_ptr) {
     CUDA_QEC_ERROR("DeviceGraphRingConsumer: {} did not produce a valid "
