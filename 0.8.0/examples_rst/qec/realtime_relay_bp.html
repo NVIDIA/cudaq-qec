@@ -261,7 +261,7 @@
 <li class="toctree-l4"><a class="reference internal" href="#decode-dispatch-architecture">Decode dispatch architecture</a></li>
 <li class="toctree-l4"><a class="reference internal" href="#hardware">Hardware</a></li>
 <li class="toctree-l4"><a class="reference internal" href="#software">Software</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#obtaining-the-proprietary-components">Obtaining the proprietary components</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#obtaining-the-nv-qldpc-decoder-plugin">Obtaining the nv-qldpc-decoder plugin</a></li>
 <li class="toctree-l4"><a class="reference internal" href="#source-repositories">Source Repositories</a></li>
 <li class="toctree-l4"><a class="reference internal" href="#build-the-hsb-bridge-and-playback-tools">Build the HSB bridge and playback tools</a></li>
 <li class="toctree-l4"><a class="reference internal" href="#using-the-orchestration-script">Using the orchestration script</a></li>
@@ -610,7 +610,11 @@
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>The following information is about a C++ demonstration that must be built
-from source and is not part of any distributed CUDA-Q QEC binaries.</p>
+from source and is not part of any distributed CUDA-Q QEC binaries.
+Use the <code class="docutils literal notranslate"><span class="pre">releases/v0.6.0</span></code> branch of cudaq-qec together with the
+<code class="docutils literal notranslate"><span class="pre">releases/v0.14.1</span></code> branch of cuda-quantum for this walkthrough.
+Build in the <code class="docutils literal notranslate"><span class="pre">ghcr.io/nvidia/cudaqx-dev:0.6.0-&lt;arch&gt;-cu13.0</span></code> image (or
+<code class="docutils literal notranslate"><span class="pre">-cu12.6</span></code>), which provides the matching CUDA-Q SDK.</p>
 </div>
 <p>This guide explains how to build, test, and run the nv-qldpc-decoder Relay BP
 decoder using CUDA-Q’s realtime dispatch system.  The decoder is driven by a
@@ -646,8 +650,7 @@ loop.  The tail launch is ordered after the fired decode, so
 <p>This replaces the earlier <code class="docutils literal notranslate"><span class="pre">HOST_LOOP</span></code> design (a CPU thread launching one
 graph per request).  <code class="docutils literal notranslate"><span class="pre">libcudaq-realtime</span></code> provides the scheduler
 (<code class="docutils literal notranslate"><span class="pre">cudaq_create_dispatch_graph_regular</span></code> / <code class="docutils literal notranslate"><span class="pre">cudaq_launch_dispatch_graph</span></code> in
-<code class="docutils literal notranslate"><span class="pre">dispatch_kernel.cu</span></code>); the closed-source proprietary archive provides the
-<code class="docutils literal notranslate"><span class="pre">DEVICE_CALL</span></code> handlers (see <em>Obtaining the proprietary components</em> below).</p>
+<code class="docutils literal notranslate"><span class="pre">dispatch_kernel.cu</span></code>).</p>
 <section id="prerequisites">
 <h3>Prerequisites<a class="headerlink" href="#prerequisites" title="Permalink to this heading"></a></h3>
 </section>
@@ -694,25 +697,12 @@ three configurations – see <em>Obtaining the nv-qldpc-decoder plugin</em> belo
 for how to install it.</p></li>
 </ul>
 </section>
-<section id="obtaining-the-proprietary-components">
-<h2>Obtaining the proprietary components<a class="headerlink" href="#obtaining-the-proprietary-components" title="Permalink to this heading"></a></h2>
-<p>The realtime decode path uses <strong>two</strong> closed-source artifacts that are not
-built from this (cudaq-qec) repository:</p>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">libcudaq-qec-nv-qldpc-decoder.so</span></code> – the Relay BP decoder <strong>plugin</strong>,
-<code class="docutils literal notranslate"><span class="pre">dlopen</span></code>’d at runtime.  It supplies the device-launchable cooperative
-decode graph (<code class="docutils literal notranslate"><span class="pre">capture_decode_graph</span></code>).</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">libcudaq-qec-realtime-cudevice-proprietary.a</span></code> – a static <strong>archive</strong>
-needed at <strong>build</strong> time.  It contains the <code class="docutils literal notranslate"><span class="pre">enqueue_syndromes</span></code> /
-<code class="docutils literal notranslate"><span class="pre">get_corrections</span></code> / <code class="docutils literal notranslate"><span class="pre">reset_decoder</span></code> <code class="docutils literal notranslate"><span class="pre">DEVICE_CALL</span></code> handlers (the device
-functions the scheduler dispatches).  It is linked <code class="docutils literal notranslate"><span class="pre">WHOLE_ARCHIVE</span></code> and
-device-linked into the bridge, and is pointed at via the
-<code class="docutils literal notranslate"><span class="pre">-DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE=&lt;path&gt;</span></code> CMake variable.
-Both artifacts come from the same closed-source decoder package; build the
-<code class="docutils literal notranslate"><span class="pre">cudaq-qec-realtime-cudevice-proprietary</span></code> target from the proprietary
-decoder sources to produce the <code class="docutils literal notranslate"><span class="pre">.a</span></code>.</p></li>
-</ul>
-<p>The plugin must be obtained as a pre-built binary as shown below.</p>
+<section id="obtaining-the-nv-qldpc-decoder-plugin">
+<h2>Obtaining the nv-qldpc-decoder plugin<a class="headerlink" href="#obtaining-the-nv-qldpc-decoder-plugin" title="Permalink to this heading"></a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">libcudaq-qec-nv-qldpc-decoder.so</span></code> plugin is closed-source and is not
+built from this (cudaq-qec) repository.  It is <code class="docutils literal notranslate"><span class="pre">dlopen</span></code>’d at runtime and
+supplies the device-launchable decode graph (<code class="docutils literal notranslate"><span class="pre">capture_decode_graph</span></code>).  It
+must be obtained as a pre-built binary as shown below.</p>
 <div class="admonition important">
 <p class="admonition-title">Important</p>
 <p>The <code class="docutils literal notranslate"><span class="pre">cudaq-qec</span></code> PyPI wheel ships a version of this plugin that does
@@ -727,7 +717,7 @@ causes the bridge tool to abort with:</p>
 shown below.</p>
 </div>
 <p>Extract the plugin from the container without running it:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">IMAGE</span><span class="o">=</span>ghcr.io/nvidia/cudaqx:cu13-latest<span class="w">    </span><span class="c1"># or cu12-latest</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">IMAGE</span><span class="o">=</span>ghcr.io/nvidia/cudaqx:cu13-0.6.0<span class="w">    </span><span class="c1"># or cu12-0.6.0</span>
 
 docker<span class="w"> </span>pull<span class="w"> </span><span class="s2">"</span><span class="nv">$IMAGE</span><span class="s2">"</span>
 <span class="nv">CID</span><span class="o">=</span><span class="k">$(</span>docker<span class="w"> </span>create<span class="w"> </span><span class="s2">"</span><span class="nv">$IMAGE</span><span class="s2">"</span><span class="k">)</span>
@@ -763,11 +753,11 @@ cp<span class="w"> </span>libcudaq-qec-nv-qldpc-decoder.so<span class="w"> </spa
 <tbody>
 <tr class="row-even"><td><p><strong>cudaq-qec</strong></p></td>
 <td><p><a class="reference external" href="https://github.com/NVIDIA/cudaq-qec">https://github.com/NVIDIA/cudaq-qec</a></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">main</span></code> branch (or your feature branch)</p></td>
+<td><p>Branch <code class="docutils literal notranslate"><span class="pre">releases/v0.6.0</span></code></p></td>
 </tr>
 <tr class="row-odd"><td><p><strong>cuda-quantum</strong> (realtime)</p></td>
 <td><p><a class="reference external" href="https://github.com/NVIDIA/cuda-quantum">https://github.com/NVIDIA/cuda-quantum</a></p></td>
-<td><p>Branch <code class="docutils literal notranslate"><span class="pre">releases/v0.16.0</span></code></p></td>
+<td><p>Branch <code class="docutils literal notranslate"><span class="pre">releases/v0.14.1</span></code></p></td>
 </tr>
 <tr class="row-even"><td><p><strong>holoscan-sensor-bridge</strong></p></td>
 <td><p><a class="reference external" href="https://github.com/nvidia-holoscan/holoscan-sensor-bridge">https://github.com/nvidia-holoscan/holoscan-sensor-bridge</a></p></td>
@@ -797,15 +787,15 @@ device-side graph dispatch).</p>
           config_nv_qldpc_relay.yml              # Relay BP decoder config
           syndromes_nv_qldpc_relay.txt           # 100 test syndrome shots
     utils/
-      gpu_roce_qldpc_graph_decoder_bridge.cpp    # Bridge tool (RDMA &lt;-&gt; decoder)
-      gpu_roce_qldpc_graph_decoder_test.sh       # Orchestration script
-      hsb_fpga_syndrome_playback.cpp        # Playback tool (loads syndromes)
+      hololink_qldpc_graph_decoder_bridge.cpp    # Bridge tool (RDMA &lt;-&gt; decoder)
+      hololink_qldpc_graph_decoder_test.sh       # Orchestration script
+      hololink_fpga_syndrome_playback.cpp        # Playback tool (loads syndromes)
 </pre></div>
 </div>
 <p>The FPGA emulator is in the <code class="docutils literal notranslate"><span class="pre">cuda-quantum</span></code> repository:</p>
 <div class="highlight-text notranslate"><div class="highlight"><pre><span></span>cuda-quantum/realtime/
   unittests/utils/
-    hsb_fpga_emulator.cpp                   # Software FPGA emulator
+    hololink_fpga_emulator.cpp                   # Software FPGA emulator
 </pre></div>
 </div>
 </section>
@@ -822,12 +812,14 @@ git<span class="w"> </span>clone<span class="w"> </span>--filter<span class="o">
 <span class="nb">cd</span><span class="w"> </span>cudaq-realtime-src
 git<span class="w"> </span>sparse-checkout<span class="w"> </span>init<span class="w"> </span>--cone
 git<span class="w"> </span>sparse-checkout<span class="w"> </span><span class="nb">set</span><span class="w"> </span>realtime
-git<span class="w"> </span>checkout<span class="w"> </span>releases/v0.16.0
+git<span class="w"> </span>checkout<span class="w"> </span>releases/v0.14.1
 <span class="nb">cd</span><span class="w"> </span>..
 
 <span class="c1"># 2. Build holoscan-sensor-bridge (tag 2.6.0-EA2)</span>
 <span class="c1">#    Requires cmake &gt;= 3.30.4 (HSB -&gt; find_package(holoscan) -&gt; rapids_logger).</span>
-<span class="c1">#    If your system cmake is older: pip install cmake</span>
+<span class="c1">#    The cudaqx-dev image ships cmake 3.28, so install a newer one and put it first on PATH:</span>
+<span class="c1">#      pip install cmake</span>
+<span class="c1">#      export PATH="$(python3 -c 'import cmake,os;print(os.path.join(os.path.dirname(cmake.__file__),"data","bin"))'):$PATH"</span>
 git<span class="w"> </span>clone<span class="w"> </span>--branch<span class="w"> </span><span class="m">2</span>.6.0-EA2<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
 <span class="nb">cd</span><span class="w"> </span>holoscan-sensor-bridge
@@ -853,41 +845,38 @@ cmake<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </s
 cmake<span class="w"> </span>--build<span class="w"> </span>.<span class="w"> </span>--target<span class="w"> </span>gpu_roce_transceiver<span class="w"> </span>hololink_core
 <span class="nb">cd</span><span class="w"> </span>../..
 
-<span class="c1"># 3. Build libcudaq-realtime with HSB tools enabled</span>
-<span class="c1">#    This produces libcudaq-realtime-bridge-gpu-roce.so (needed by the bridge</span>
+<span class="c1"># 3. Build libcudaq-realtime with Hololink tools enabled</span>
+<span class="c1">#    This produces libcudaq-realtime-bridge-hololink.so (needed by the bridge</span>
 <span class="c1">#    tool) as well as the FPGA emulator.</span>
 <span class="nb">cd</span><span class="w"> </span>cudaq-realtime-src/realtime<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>mkdir<span class="w"> </span>-p<span class="w"> </span>build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>build
 cmake<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span>-DCMAKE_INSTALL_PREFIX<span class="o">=</span>/tmp/cudaq-realtime<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DCUDAQ_REALTIME_ENABLE_HSB_TOOLS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span>../../holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span>../../holoscan-sensor-bridge/build<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DCUDAQ_REALTIME_ENABLE_HOLOLINK_TOOLS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge/build<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>..
 ninja<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ninja<span class="w"> </span>install
 <span class="nb">cd</span><span class="w"> </span>../../..
 
-<span class="c1"># 4. Build cudaq-qec with HSB tools enabled.</span>
-<span class="c1">#    CUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE supplies the DEVICE_CALL</span>
-<span class="c1">#    handlers (WHOLE_ARCHIVE-linked into the bridge + test).</span>
+<span class="c1"># 4. Build cudaq-qec with Hololink tools enabled.</span>
 cmake<span class="w"> </span>-S<span class="w"> </span>cudaq-qec<span class="w"> </span>-B<span class="w"> </span>cudaq-qec/build<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Release<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQ_DIR<span class="o">=</span>/path/to/cudaq-install/lib/cmake/cudaq/<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQ_REALTIME_ROOT<span class="o">=</span>/tmp/cudaq-realtime<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DCUDAQ_QEC_REALTIME_CUDEVICE_PROPRIETARY_ARCHIVE<span class="o">=</span>/path/to/libcudaq-qec-realtime-cudevice-proprietary.a<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQX_ENABLE_LIBS<span class="o">=</span><span class="s2">"qec"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQX_INCLUDE_TESTS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DCUDAQX_QEC_ENABLE_HSB_TOOLS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DCUDAQX_QEC_ENABLE_HOLOLINK_TOOLS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge/build
 cmake<span class="w"> </span>--build<span class="w"> </span>cudaq-qec/build<span class="w"> </span>--target<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>gpu_roce_qldpc_graph_decoder_bridge<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>hsb_fpga_syndrome_playback
+<span class="w">  </span>hololink_qldpc_graph_decoder_bridge<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>hololink_fpga_syndrome_playback
 </pre></div>
 </div>
 </section>
 <section id="using-the-orchestration-script">
 <h2>Using the orchestration script<a class="headerlink" href="#using-the-orchestration-script" title="Permalink to this heading"></a></h2>
 <p>The orchestration script can build everything automatically:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh<span class="w"> </span><span class="se">\</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--build<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--hsb-dir<span class="w"> </span>/path/to/holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--cuda-quantum-dir<span class="w"> </span>/path/to/cuda-quantum<span class="w"> </span><span class="se">\</span>
@@ -900,8 +889,7 @@ cmake<span class="w"> </span>--build<span class="w"> </span>cudaq-qec/build<span
 with the nv-qldpc-decoder configured for Relay BP.  It simulates a surface code
 with <code class="docutils literal notranslate"><span class="pre">stim</span></code> and generates syndromes on the fly, so it can run an arbitrary
 number of shots.</p>
-<p>Build the app example (it links the same plugin + proprietary archive as the
-bridge):</p>
+<p>Build the app example (it uses the same plugin as the bridge):</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>--build<span class="w"> </span>cudaq-qec/build<span class="w"> </span>--target<span class="w"> </span>surface_code-1-local
 </pre></div>
 </div>
@@ -961,7 +949,7 @@ sends RDMA traffic out one port and the bridge receives on the other)</p></li>
 </section>
 <section id="running-the-emulated-test">
 <h2>Running the Emulated Test<a class="headerlink" href="#running-the-emulated-test" title="Permalink to this heading"></a></h2>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh<span class="w"> </span><span class="se">\</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--emulate<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--build<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--setup-network<span class="w"> </span><span class="se">\</span>
@@ -971,7 +959,7 @@ sends RDMA traffic out one port and the bridge receives on the other)</p></li>
 <p>The <code class="docutils literal notranslate"><span class="pre">--setup-network</span></code> flag configures the ConnectX interface with the
 appropriate IP addresses and MTU.  It only needs to be run once per boot.</p>
 <p>After the initial build and network setup, subsequent runs are faster:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh<span class="w"> </span>--emulate
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh<span class="w"> </span>--emulate
 </pre></div>
 </div>
 <section id="fpga-end-to-end-test">
@@ -999,7 +987,7 @@ for FPGA setup instructions.</p></li>
 </section>
 <section id="running-the-fpga-test">
 <h2>Running the FPGA Test<a class="headerlink" href="#running-the-fpga-test" title="Permalink to this heading"></a></h2>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./libs/qec/unittests/utils/gpu_roce_qldpc_graph_decoder_test.sh<span class="w"> </span><span class="se">\</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./libs/qec/unittests/utils/hololink_qldpc_graph_decoder_test.sh<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--build<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--setup-network<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--device<span class="w"> </span>mlx5_5<span class="w"> </span><span class="se">\</span>
@@ -1086,7 +1074,7 @@ use <code class="docutils literal notranslate"><span class="pre">--gpu</span> <s
 routing ambiguity that silently drops RDMA packets.</p>
 <section id="orchestration-script-reference">
 <h3>Orchestration Script Reference<a class="headerlink" href="#orchestration-script-reference" title="Permalink to this heading"></a></h3>
-<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>gpu_roce_qldpc_graph_decoder_test.sh [options]
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>hololink_qldpc_graph_decoder_test.sh [options]
 </pre></div>
 </div>
 </section>
