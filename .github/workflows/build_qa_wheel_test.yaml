@@ -83,6 +83,10 @@ jobs:
             # `mv */*.whl .` below moves these into place along with the CUDA-QX
             # wheels.
             gh run download -R ${{ inputs.wheels_repo }} ${{ inputs.wheels_run_id }} -p 'cudaq-wheels-*'
+            # Every artifact carries the CUDA-independent cudaq_core wheel under
+            # the same filename, so keep only the CUDA 13 copy (the one upstream
+            # publishes) or the blanket mv below refuses to overwrite.
+            rm -f cudaq-wheels-*-cu12/cudaq_core-*.whl
           fi
 
           # Fetch the CUDA-QX wheels
