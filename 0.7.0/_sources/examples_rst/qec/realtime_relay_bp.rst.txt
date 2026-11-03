@@ -5,6 +5,10 @@ Relay BP Decoding with CUDA-Q Realtime
 
   The following information is about a C++ demonstration that must be built
   from source and is not part of any distributed CUDA-Q QEC binaries.
+  Use the ``releases/v0.6.0`` branch of cudaq-qec together with the
+  ``releases/v0.14.1`` branch of cuda-quantum for this walkthrough.
+  Build in the ``ghcr.io/nvidia/cudaqx-dev:0.6.0-<arch>-cu13.0`` image (or
+  ``-cu12.6``), which provides the matching CUDA-Q SDK.
 
 This guide explains how to build, test, and run the nv-qldpc-decoder Relay BP
 decoder using CUDA-Q's realtime host dispatch system.  The decoder runs as a
@@ -77,7 +81,7 @@ Extract the plugin from the container without running it:
 
 .. code-block:: bash
 
-   IMAGE=ghcr.io/nvidia/cudaqx:cu13-latest    # or cu12-latest
+   IMAGE=ghcr.io/nvidia/cudaqx:cu13-0.6.0    # or cu12-0.6.0
 
    docker pull "$IMAGE"
    CID=$(docker create "$IMAGE")
@@ -109,10 +113,10 @@ Source Repositories
      - Version
    * - **cudaqx**
      - https://github.com/NVIDIA/cudaqx
-     - Branch ``releases/v0.7.0``
+     - Branch ``releases/v0.6.0``
    * - **cuda-quantum** (realtime)
      - https://github.com/NVIDIA/cuda-quantum
-     - Branch ``releases/v0.15.1``
+     - Branch ``releases/v0.14.1``
    * - **holoscan-sensor-bridge**
      - https://github.com/nvidia-holoscan/holoscan-sensor-bridge
      - Tag ``2.6.0-EA2``
@@ -137,7 +141,7 @@ Key files within ``cudaqx``:
      unittests/
        realtime/
          qec_graph_decode_test/
-           test_realtime_qldpc_graph_decoding_host_loop.cpp  # v0.7 unit test
+           test_realtime_qldpc_graph_decoding.cpp  # unit test
          qec_roce_decode_test/
            data/
              config_nv_qldpc_relay.yml              # Relay BP decoder config
@@ -169,7 +173,7 @@ If you only need to run the unit test, you can build without
    # 1. Build libcudaq-realtime
    git clone https://github.com/NVIDIA/cuda-quantum.git cudaq-realtime-src
    cd cudaq-realtime-src
-   git checkout releases/v0.15.1
+   git checkout releases/v0.14.1
    cd realtime && mkdir -p build && cd build
    cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime ..
    ninja && ninja install
@@ -197,12 +201,14 @@ To also build the bridge and playback tools for emulated or FPGA testing:
    cd cudaq-realtime-src
    git sparse-checkout init --cone
    git sparse-checkout set realtime
-   git checkout releases/v0.15.1
+   git checkout releases/v0.14.1
    cd ..
 
    # 2. Build holoscan-sensor-bridge (tag 2.6.0-EA2)
    #    Requires cmake >= 3.30.4 (HSB -> find_package(holoscan) -> rapids_logger).
-   #    If your system cmake is older: pip install cmake
+   #    The cudaqx-dev image ships cmake 3.28, so install a newer one and put it first on PATH:
+   #      pip install cmake
+   #      export PATH="$(python3 -c 'import cmake,os;print(os.path.join(os.path.dirname(cmake.__file__),"data","bin"))'):$PATH"
    git clone --branch 2.6.0-EA2 \
      https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
    cd holoscan-sensor-bridge
@@ -234,8 +240,8 @@ To also build the bridge and playback tools for emulated or FPGA testing:
    cd cudaq-realtime-src/realtime && mkdir -p build && cd build
    cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/cudaq-realtime \
      -DCUDAQ_REALTIME_ENABLE_HOLOLINK_TOOLS=ON \
-     -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=../../../holoscan-sensor-bridge \
-     -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=../../../holoscan-sensor-bridge/build \
+     -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR=/path/to/holoscan-sensor-bridge \
+     -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR=/path/to/holoscan-sensor-bridge/build \
      ..
    ninja && ninja install
    cd ../../..

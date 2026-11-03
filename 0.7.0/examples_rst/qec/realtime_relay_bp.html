@@ -11,7 +11,7 @@
       <link rel="stylesheet" href="../../_static/copybutton.css" type="text/css" />
       <link rel="stylesheet" href="../../_static/cudaq_override.css" type="text/css" />
       <link rel="stylesheet" href="../../_static/sg_gallery.css" type="text/css" />
-      <link rel="stylesheet" href="/__w/cudaqx/cudaqx/docs/sphinx/_static/cudaq_override.css" type="text/css" />
+      <link rel="stylesheet" href="/__w/cudaq-qec/cudaq-qec/docs/sphinx/_static/cudaq_override.css" type="text/css" />
   <!--[if lt IE 9]>
     <script src="../../_static/js/html5shiv.min.js"></script>
   <![endif]-->
@@ -657,7 +657,11 @@
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>The following information is about a C++ demonstration that must be built
-from source and is not part of any distributed CUDA-Q QEC binaries.</p>
+from source and is not part of any distributed CUDA-Q QEC binaries.
+Use the <code class="docutils literal notranslate"><span class="pre">releases/v0.6.0</span></code> branch of cudaq-qec together with the
+<code class="docutils literal notranslate"><span class="pre">releases/v0.14.1</span></code> branch of cuda-quantum for this walkthrough.
+Build in the <code class="docutils literal notranslate"><span class="pre">ghcr.io/nvidia/cudaqx-dev:0.6.0-&lt;arch&gt;-cu13.0</span></code> image (or
+<code class="docutils literal notranslate"><span class="pre">-cu12.6</span></code>), which provides the matching CUDA-Q SDK.</p>
 </div>
 <p>This guide explains how to build, test, and run the nv-qldpc-decoder Relay BP
 decoder using CUDA-Q’s realtime host dispatch system.  The decoder runs as a
@@ -735,7 +739,7 @@ causes the bridge tool to abort with:</p>
 shown below.</p>
 </div>
 <p>Extract the plugin from the container without running it:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">IMAGE</span><span class="o">=</span>ghcr.io/nvidia/cudaqx:cu13-latest<span class="w">    </span><span class="c1"># or cu12-latest</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">IMAGE</span><span class="o">=</span>ghcr.io/nvidia/cudaqx:cu13-0.6.0<span class="w">    </span><span class="c1"># or cu12-0.6.0</span>
 
 docker<span class="w"> </span>pull<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$IMAGE</span><span class="s2">&quot;</span>
 <span class="nv">CID</span><span class="o">=</span><span class="k">$(</span>docker<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$IMAGE</span><span class="s2">&quot;</span><span class="k">)</span>
@@ -771,11 +775,11 @@ cp<span class="w"> </span>libcudaq-qec-nv-qldpc-decoder.so<span class="w"> </spa
 <tbody>
 <tr class="row-even"><td><p><strong>cudaqx</strong></p></td>
 <td><p><a class="reference external" href="https://github.com/NVIDIA/cudaqx">https://github.com/NVIDIA/cudaqx</a></p></td>
-<td><p>Branch <code class="docutils literal notranslate"><span class="pre">releases/v0.7.0</span></code></p></td>
+<td><p>Branch <code class="docutils literal notranslate"><span class="pre">releases/v0.6.0</span></code></p></td>
 </tr>
 <tr class="row-odd"><td><p><strong>cuda-quantum</strong> (realtime)</p></td>
 <td><p><a class="reference external" href="https://github.com/NVIDIA/cuda-quantum">https://github.com/NVIDIA/cuda-quantum</a></p></td>
-<td><p>Branch <code class="docutils literal notranslate"><span class="pre">releases/v0.15.1</span></code></p></td>
+<td><p>Branch <code class="docutils literal notranslate"><span class="pre">releases/v0.14.1</span></code></p></td>
 </tr>
 <tr class="row-even"><td><p><strong>holoscan-sensor-bridge</strong></p></td>
 <td><p><a class="reference external" href="https://github.com/nvidia-holoscan/holoscan-sensor-bridge">https://github.com/nvidia-holoscan/holoscan-sensor-bridge</a></p></td>
@@ -800,7 +804,7 @@ end-to-end tests.  The unit test requires only <code class="docutils literal not
   unittests/
     realtime/
       qec_graph_decode_test/
-        test_realtime_qldpc_graph_decoding_host_loop.cpp  # v0.7 unit test
+        test_realtime_qldpc_graph_decoding.cpp  # unit test
       qec_roce_decode_test/
         data/
           config_nv_qldpc_relay.yml              # Relay BP decoder config
@@ -827,7 +831,7 @@ end-to-end tests.  The unit test requires only <code class="docutils literal not
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># 1. Build libcudaq-realtime</span>
 git<span class="w"> </span>clone<span class="w"> </span>https://github.com/NVIDIA/cuda-quantum.git<span class="w"> </span>cudaq-realtime-src
 <span class="nb">cd</span><span class="w"> </span>cudaq-realtime-src
-git<span class="w"> </span>checkout<span class="w"> </span>releases/v0.15.1
+git<span class="w"> </span>checkout<span class="w"> </span>releases/v0.14.1
 <span class="nb">cd</span><span class="w"> </span>realtime<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>mkdir<span class="w"> </span>-p<span class="w"> </span>build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>build
 cmake<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span>-DCMAKE_INSTALL_PREFIX<span class="o">=</span>/tmp/cudaq-realtime<span class="w"> </span>..
 ninja<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ninja<span class="w"> </span>install
@@ -853,12 +857,14 @@ git<span class="w"> </span>clone<span class="w"> </span>--filter<span class="o">
 <span class="nb">cd</span><span class="w"> </span>cudaq-realtime-src
 git<span class="w"> </span>sparse-checkout<span class="w"> </span>init<span class="w"> </span>--cone
 git<span class="w"> </span>sparse-checkout<span class="w"> </span><span class="nb">set</span><span class="w"> </span>realtime
-git<span class="w"> </span>checkout<span class="w"> </span>releases/v0.15.1
+git<span class="w"> </span>checkout<span class="w"> </span>releases/v0.14.1
 <span class="nb">cd</span><span class="w"> </span>..
 
 <span class="c1"># 2. Build holoscan-sensor-bridge (tag 2.6.0-EA2)</span>
 <span class="c1">#    Requires cmake &gt;= 3.30.4 (HSB -&gt; find_package(holoscan) -&gt; rapids_logger).</span>
-<span class="c1">#    If your system cmake is older: pip install cmake</span>
+<span class="c1">#    The cudaqx-dev image ships cmake 3.28, so install a newer one and put it first on PATH:</span>
+<span class="c1">#      pip install cmake</span>
+<span class="c1">#      export PATH=&quot;$(python3 -c &#39;import cmake,os;print(os.path.join(os.path.dirname(cmake.__file__),&quot;data&quot;,&quot;bin&quot;))&#39;):$PATH&quot;</span>
 git<span class="w"> </span>clone<span class="w"> </span>--branch<span class="w"> </span><span class="m">2</span>.6.0-EA2<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
 <span class="nb">cd</span><span class="w"> </span>holoscan-sensor-bridge
@@ -890,8 +896,8 @@ cmake<span class="w"> </span>--build<span class="w"> </span>.<span class="w"> </
 <span class="nb">cd</span><span class="w"> </span>cudaq-realtime-src/realtime<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>mkdir<span class="w"> </span>-p<span class="w"> </span>build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>build
 cmake<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span>-DCMAKE_INSTALL_PREFIX<span class="o">=</span>/tmp/cudaq-realtime<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQ_REALTIME_ENABLE_HOLOLINK_TOOLS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span>../../../holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span>../../../holoscan-sensor-bridge/build<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge/build<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>..
 ninja<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ninja<span class="w"> </span>install
 <span class="nb">cd</span><span class="w"> </span>../../..
