@@ -390,44 +390,6 @@ std::optional<decode_result_type> pop_requested_output(nb::kwargs &options) {
   throw std::runtime_error(
       "standalone output must be 'errors' or 'observables'");
 }
-// Interim workaround for cuda-quantum#5804.
-//
-// Since that change, `import cudaq` loads the CUDA-Q runtime with
-// RTLD_LOCAL, and this extension gets CUDA-Q through its own DT_NEEDED
-// chain (libcudaq-qec -> libcudaq-em-default -> libcudaq, libnvqir,
-// libcudaq-common), which is also local to this module. A library that we
-// dlopen() afterwards resolves its undefined symbols only against the
-// global scope plus its own dependency tree, never against the caller's
-// scope.
-//
-// The realtime decoding libraries loaded below contain nvq++-compiled
-// kernels. The compiler emits references into libnvqir, libcudaq-common and
-// libcudaq (QIR runtime calls, kernel-registry hooks that run from static
-// initializers, the hybrid launch entry point and vector<bool> helpers),
-// and the exact set depends on the kernels and the nvq++ version. The
-// libraries deliberately do not link CUDA-Q (see the dependency-closure
-// guardrails in libs/qec/unittests/CMakeLists.txt), so without CUDA-Q in
-// the global scope they fail to load.
-//
-// Re-flag the already-loaded libcudaq-em-default.so and its dependency tree
-// as RTLD_GLOBAL before loading them. This re-exposes CUDA-Q's bundled LLVM
-// process-wide, which is the condition cuda-quantum#5772 / cudaq-qec#883
-// describe, so it is a regression for cudaq_qec users and should be removed
-// once CUDA-Q offers a supported way to load nvq++-compiled libraries
-// (tracked upstream; see the issue linked from cudaq-qec#900).
-void promoteCudaqToGlobalScope() {
-  constexpr const char *emDefault = "libcudaq-em-default.so";
-  dlerror();
-  // RTLD_NOLOAD: only promote; the library is already in our dependency
-  // tree, so this does not search any path or load anything new.
-  if (dlopen(emDefault, RTLD_NOLOAD | RTLD_NOW | RTLD_GLOBAL))
-    return;
-  // Not loaded yet (older CUDA-Q pin without the link above): load it
-  // through the normal search path. Failure is not fatal here; the
-  // subsequent dlopen of the kernel library reports the real error.
-  dlopen(emDefault, RTLD_NOW | RTLD_GLOBAL);
-}
-
 } // namespace
 
 void bindDecoder(nb::module_ &mod) {
@@ -1377,7 +1339,6 @@ void bindDecoder(nb::module_ &mod) {
     if (decoderLibHandle)
       dlclose(decoderLibHandle);
 
-    promoteCudaqToGlobalScope();
     decoderLibHandle = dlopen(path.c_str(), RTLD_GLOBAL | RTLD_NOW);
     if (!decoderLibHandle) {
       // Retrieve the error message
