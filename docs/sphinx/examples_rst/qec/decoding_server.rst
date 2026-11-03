@@ -19,7 +19,7 @@ Workflow at a glance
 
 .. figure:: ../../_static/decoding-server-workflow.svg
    :alt: Load the YAML configuration into the decoding server to initialize the configured decoding pipeline, then exchange measurement requests and logical corrections with a client over the configured transport.
-   :width: 720px
+   :width: 640px
    :align: center
 
    Configuration happens before the run. Measurements and corrections flow
@@ -171,9 +171,8 @@ The main choices are:
 * ``--logical-qubits=N``: N independent patches, assigned decoder IDs
   ``0`` through ``N-1``; this is not a coupled multi-patch experiment.
 
-Keep the default A/B geometry for this first example. For other geometry and
-decoder options, use ``memory-experiment-generator --help`` and
-:doc:`decoding_task_graph`.
+For the A/B parallel-window example and its configuration, see
+:doc:`Decoding Task Graphs <decoding_task_graph>`.
 
 Run the playback example
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -531,6 +530,7 @@ See also
 --------
 
 * :doc:`/components/qec/realtime_decoding`: decoding concepts and configuration.
+* :doc:`decoding_task_graph`: graph construction, A/B windows and asynchronous execution.
 * :doc:`realtime_decoding_demo`: surface-code and real FPGA client examples.
 * :doc:`color_code_demo`: color-code accuracy and performance studies.
 * :doc:`/components/qec/decoders`: decoder capabilities and API references.
