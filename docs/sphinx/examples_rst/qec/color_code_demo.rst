@@ -26,9 +26,9 @@ once per path between the emulator and the decoder (``session``):
    FPGA. Here, the playback emulator replays the pre-sampled shots of the superdense color-code
    memory circuit to each decoder on a fixed timing loop.
 
-   For an end-to-end walkthrough using the prebuilt server package, see
-   :ref:`decoding-server-color-code`. That workflow needs no host CUDA-Q SDK.
-   The prerequisites below apply to the full native benchmark on this page.
+   For starting the prebuilt Docker server and connecting clients, see
+   :ref:`decoding-server-color-code`. The model preparation and benchmark on
+   this page require the software listed below.
 
 Prerequisites
 -------------
@@ -61,16 +61,6 @@ Software
 
 Running
 -------
-
-To prepare artifacts for the prebuilt Docker server without starting a local
-decoder or server, use ``--prepare-only``. This writes a DEM, ONNX model,
-schedule, and separate Chromobius and TensorRT server configurations for each
-distance. It does not build TensorRT engines or produce benchmark results.
-This preparation mode needs the Ising Python dependencies but no ``cudaq_qec``
-installation. Add ``--baseline-only`` to prepare Chromobius inputs without
-downloading AI weights or exporting ONNX.
-See :ref:`decoding-server-color-code` for the preparation command and the
-container launch sequence.
 
 From any scratch directory, with the CUDA-Q QEC Python environment set up:
 
