@@ -7,6 +7,9 @@ a "device" built with different strengths gives the detector data. Only ``H`` re
 the device's rates are used to score the result. The parametric mode uses ``design_map_by_gate`` (one parameter per
 distinct noise instruction), so the hidden parameters are the four stim strengths.
 """
+import shutil
+import subprocess
+
 import numpy as np
 import pytest
 
@@ -18,6 +21,10 @@ except ValueError:
     pass  # library loaded
 except (FileNotFoundError, OSError) as e:
     pytest.skip(f"nv-qldpc-decoder plugin library not available: {e}",
+                allow_module_level=True)
+if shutil.which("nvidia-smi") is None or subprocess.run(
+        ["nvidia-smi"], capture_output=True).returncode != 0:
+    pytest.skip("nv-qldpc TCBP model setup requires a GPU",
                 allow_module_level=True)
 from cudaq_qec.plugins.nv_qldpc import p25, tying  # noqa: E402
 
