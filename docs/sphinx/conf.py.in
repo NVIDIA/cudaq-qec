@@ -261,6 +261,7 @@ nitpick_ignore = [
     ('ref', 'graph__resources_8h'),
     ('ref', 'decoder__config__schema_8h'),
     ('cpp:identifier', 'cudaq::pauli_word'),
+    ('cpp:identifier', 'decoding::config::decoder_schema'),
     ('cpp:identifier', 'cudaGraphExec_t'),
     ('cpp:identifier', 'cudaStream_t'),
     ('cpp:identifier', 'SIZE_MAX'),

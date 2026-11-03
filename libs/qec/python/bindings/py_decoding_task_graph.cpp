@@ -182,7 +182,7 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
             self.members.push_back(std::move(m));
           },
           nb::arg("nodes"), nb::arg("edges"),
-          "Append a member: its node configs (consumed) and the edges among "
+          "Append a member, given its node configs (consumed) and the edges among "
           "them, naming the ensemble's input 'input' and the member's answer "
           "'output'.")
       .def_prop_ro("num_members", [](const task_graph_ensemble_spec &self) {
