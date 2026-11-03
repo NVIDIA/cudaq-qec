@@ -13108,6 +13108,222 @@ TEST(DecodingTaskGraph, QueuedRoundsKeepEveryPublicationValue) {
   }
 }
 
+// A two-byte operation can finish one window and leave one byte buffered.
+// The next operation then finishes another window in the same context. Their
+// publications must retain distinct operation tags across the unfilled chunk.
+TEST(DecodingTaskGraph, CoalescedSlidingWindowsKeepOperationAttribution) {
+  for (const std::size_t workers : {1u, 4u}) {
+    SCOPED_TRACE("workers=" + std::to_string(workers));
+    auto probe = std::make_shared<async_stream_probe>(true);
+    task_graph_node_kind_spec spec;
+    spec.name = "test_coalesced_sliding_window";
+    spec.requires_decoder = false;
+    spec.requires_dem = false;
+    auto registration = register_scoped_node_kind(
+        std::move(spec), {}, [probe](node_build_context &) {
+          auto d = std::make_shared<sparse_binary_matrix>(
+              sparse_binary_matrix::from_nested_csr(1, 5, {{0, 1, 2, 3, 4}}));
+          auto o = std::make_shared<sparse_binary_matrix>(
+              sparse_binary_matrix::from_nested_csr(1, 1, {{0}}));
+          auto h = sparse_binary_matrix::from_nested_csr(1, 1, {{0}});
+          return std::make_unique<window_node>(
+              d, o, std::make_unique<async_stream_probe_decoder>(h, probe), 1,
+              window_spec{5, 3, 0, 0});
+        });
+    task_graph_node_config node;
+    node.id = "W";
+    node.kind = "test_coalesced_sliding_window";
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(node));
+    auto graph =
+        decoding_task_graph::from_topology(std::move(nodes), {},
+                                           {.async_streaming = true,
+                                            .async_queue_capacity = 64,
+                                            .async_num_workers = workers});
+    const uint8_t ones[5] = {1, 1, 1, 1, 1};
+    graph->enqueue_syndrome(ones, 5, round_type::BULK);
+    const bool entered = probe->wait_for_count(1);
+    if (!entered)
+      probe->release();
+    ASSERT_TRUE(entered);
+    for (std::size_t i = 0; i < 38; ++i)
+      graph->enqueue_syndrome(ones, 2, round_type::BULK);
+    probe->release();
+    graph->enqueue_syndrome(ones, 2, round_type::FINAL);
+    // 83 bytes: one five-byte window plus 26 three-byte strides.
+    EXPECT_EQ(probe->syndromes(),
+              std::vector<std::vector<float_t>>(27, {1.0f}));
+    auto result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.generation, 27u);
+    EXPECT_EQ(result.completed_operations, 27u);
+  }
+}
+
+struct coalesced_accumulator_probe {
+  std::shared_ptr<pipeline_probe> values = std::make_shared<pipeline_probe>();
+  parallel_decode_probe first, partial;
+  std::atomic<std::size_t> calls{0}, joined{0};
+  bool pause_partial = false;
+  bool throw_partial = false;
+};
+
+// Publishes the XOR of every three operations. Blocking the first call lets
+// the test queue more operations than there are contexts; the second gate
+// stops inside a coalesced batch on a chunk that will not publish anything.
+class coalesced_accumulator_node : public pipeline_probe_node {
+public:
+  coalesced_accumulator_node(std::string id,
+                             std::shared_ptr<coalesced_accumulator_probe> probe)
+      : pipeline_probe_node(std::move(id), "wide", probe->values),
+        probe_(std::move(probe)) {}
+
+  bool enqueue(const uint8_t *data, std::size_t len, round_type type) override {
+    if (len != 1)
+      throw std::runtime_error("accumulator expects one byte per operation");
+    ++probe_->calls;
+    const bool joined = data == last_end_;
+    probe_->joined += joined;
+    last_end_ = data + len;
+    if (first_) {
+      first_ = false;
+      probe_->first.enter_and_wait();
+    }
+    if (joined && buffered_ == 0 && probe_->pause_partial)
+      probe_->partial.enter_and_wait();
+    if (joined && buffered_ == 1 && probe_->throw_partial)
+      throw std::runtime_error("coalesced partial input failure");
+    parity_ ^= data[0];
+    if (++buffered_ < 3)
+      return false;
+    const auto value = parity_;
+    buffered_ = 0;
+    parity_ = 0;
+    return pipeline_probe_node::enqueue(&value, 1, type);
+  }
+
+  void reset_streaming_state() override {
+    pipeline_probe_node::reset_streaming_state();
+    first_ = true;
+    buffered_ = 0;
+    parity_ = 0;
+    last_end_ = nullptr;
+  }
+
+private:
+  std::shared_ptr<coalesced_accumulator_probe> probe_;
+  bool first_ = true;
+  std::size_t buffered_ = 0;
+  uint8_t parity_ = 0;
+  const uint8_t *last_end_ = nullptr;
+};
+
+// Check publication values and operation accounting after several calls that
+// only fill the accumulator, then cancel or fail inside such a sequence and
+// verify reset starts a clean shot.
+TEST(DecodingTaskGraph, CoalescedPartialInputsPreserveProgressAndRecovery) {
+  constexpr std::size_t rounds = 96;
+  const auto records = pipeline_records(rounds);
+  std::vector<std::size_t> expected;
+  for (std::size_t i = 0; i < rounds; i += 3)
+    expected.push_back(records[i] ^ records[i + 1] ^ records[i + 2]);
+  for (const std::size_t workers : {1u, 4u})
+    for (const auto mode : {"complete", "cancel", "fail"}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "workers=" << workers << " mode=" << mode);
+      auto probe = std::make_shared<coalesced_accumulator_probe>();
+      probe->pause_partial = std::string(mode) == "cancel";
+      probe->throw_partial = std::string(mode) == "fail";
+      task_graph_node_kind_spec spec;
+      spec.name = "test_coalesced_accumulator";
+      spec.requires_decoder = false;
+      spec.requires_dem = false;
+      auto registration = register_scoped_node_kind(
+          std::move(spec), {},
+          [probe](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
+            if (ctx.id == "W")
+              return std::make_unique<coalesced_accumulator_node>(ctx.id,
+                                                                  probe);
+            return std::make_unique<pipeline_probe_node>(ctx.id, "pass",
+                                                         probe->values);
+          });
+      std::vector<task_graph_node_config> nodes(4);
+      const std::vector<std::string> ids{"W", "B", "C", "D"};
+      for (std::size_t i = 0; i < nodes.size(); ++i) {
+        nodes[i].id = ids[i];
+        nodes[i].kind = "test_coalesced_accumulator";
+      }
+      auto graph = decoding_task_graph::from_topology(
+          std::move(nodes),
+          {{"measurements", "output", "W", "input"},
+           {"W", "output", "B", "input"},
+           {"B", "output", "C", "input"},
+           {"W", "output", "D", "input"},
+           {"C", "output", "output", "left"},
+           {"D", "output", "output", "right"}},
+          {.async_streaming = true,
+           .async_queue_capacity = 128,
+           .async_num_workers = workers});
+      graph->enqueue_syndrome(records.data(), 1, round_type::BULK);
+      const bool entered = probe->first.wait_for_entered(1);
+      if (!entered)
+        probe->first.release();
+      ASSERT_TRUE(entered);
+      for (std::size_t i = 1; i + 1 < rounds; ++i)
+        graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+      probe->first.release();
+
+      if (probe->pause_partial) {
+        const bool partial = probe->partial.wait_for_entered(1);
+        if (!partial)
+          probe->partial.release();
+        ASSERT_TRUE(partial);
+        const auto calls = probe->calls.load();
+        auto reset =
+            std::async(std::launch::async, [&] { graph->reset_decoder(); });
+        EXPECT_EQ(reset.wait_for(std::chrono::milliseconds(20)),
+                  std::future_status::timeout);
+        probe->partial.release();
+        EXPECT_NO_THROW(reset.get());
+        EXPECT_EQ(probe->calls.load(), calls)
+            << "cancelled batch continued after the partial input returned";
+      } else if (probe->throw_partial) {
+        EXPECT_THROW(
+            graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL),
+            std::runtime_error);
+        const auto failed = graph->streaming_result();
+        EXPECT_EQ(failed.status, task_graph_streaming_status::failed);
+        EXPECT_NE(failed.error.find("coalesced partial input failure"),
+                  std::string::npos);
+        EXPECT_LT(probe->calls.load(), rounds);
+        EXPECT_NO_THROW(graph->reset_decoder());
+      } else {
+        graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+        const auto result = graph->streaming_result();
+        EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+        EXPECT_EQ(result.generation, rounds / 3);
+        EXPECT_EQ(result.completed_operations, rounds / 3);
+        EXPECT_EQ(result.values, (std::vector<uint8_t>{0, 0}));
+        for (const auto *consumer : {"B", "C", "D"})
+          EXPECT_EQ(probe->values->records(std::string(consumer) + ".value"),
+                    expected);
+        graph->reset_decoder();
+      }
+      EXPECT_GT(probe->joined.load(), 0u) << "no coalesced input exercised";
+      probe->pause_partial = false;
+      probe->throw_partial = false;
+      const uint8_t one = 1;
+      graph->enqueue_syndrome(&one, 1, round_type::BULK);
+      graph->enqueue_syndrome(&one, 1, round_type::BULK);
+      graph->enqueue_syndrome(&one, 1, round_type::FINAL);
+      const auto recovered = graph->streaming_result();
+      EXPECT_EQ(recovered.status, task_graph_streaming_status::complete);
+      EXPECT_EQ(recovered.generation, 1u);
+      EXPECT_EQ(recovered.completed_operations, 1u);
+      EXPECT_EQ(recovered.values, (std::vector<uint8_t>{1, 1}));
+    }
+}
+
 // By default a producer may run 32 rounds ahead of a stalled graph, more
 // than its 16 record contexts, without waiting, and then waits: the queue
 // holds rounds, not contexts, and bounds how far behind a FINAL can be.
