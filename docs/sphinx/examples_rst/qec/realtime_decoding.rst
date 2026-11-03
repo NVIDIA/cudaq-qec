@@ -11,6 +11,7 @@ The examples below cover realtime decoding end to end — start with Getting Sta
    Getting Started with Realtime Decoding <getting_started_realtime_decoding>
    Decoding Server User Guide <decoding_server>
    Realtime Decoding with CUDA-Q Decoding Server <realtime_decoding_demo>
+   Playback Emulator <playback_emulator>
    AI Predecoder with CUDA-Q Realtime <realtime_predecoder_pymatching>
    AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection) <realtime_predecoder_fpga>
    Ising Color-Code Emulator with Decoding Server <color_code_demo>
