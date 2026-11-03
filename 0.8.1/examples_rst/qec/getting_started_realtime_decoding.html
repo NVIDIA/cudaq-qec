@@ -1,0 +1,1375 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+  <meta charset="utf-8" /><meta name="generator" content="Docutils 0.18.1: http://docutils.sourceforge.net/" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Getting Started with Realtime Decoding &mdash; NVIDIA CUDA-Q QEC  documentation</title>
+      <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/css/theme.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/tabs.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/copybutton.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/cudaq_override.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/sg_gallery.css" type="text/css" />
+      <link rel="stylesheet" href="/__w/cudaq-qec/cudaq-qec/docs/sphinx/_static/cudaq_override.css" type="text/css" />
+  <!--[if lt IE 9]>
+    <script src="../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js"></script>
+        <script src="../../_static/jquery.js"></script>
+        <script src="../../_static/underscore.js"></script>
+        <script src="../../_static/_sphinx_javascript_frameworks_compat.js"></script>
+        <script src="../../_static/doctools.js"></script>
+        <script src="../../_static/sphinx_highlight.js"></script>
+        <script src="../../_static/tabs.js"></script>
+        <script src="../../_static/clipboard.min.js"></script>
+        <script src="../../_static/copybutton.js"></script>
+        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+        <script src="../../_static/version-switcher.js"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="AI Predecoder with CUDA-Q Realtime" href="realtime_predecoder_pymatching.html" />
+    <link rel="prev" title="Realtime Decoding" href="realtime_decoding.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #76b900" > 
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            NVIDIA CUDA-Q QEC
+          </a>
+              <div class="version">
+                0.8.1
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+
+  <style>
+    /* Sidebar header (and topbar for mobile) */
+    .wy-side-nav-search, .wy-nav-top {
+      background: #76b900;
+    }
+
+    .wy-side-nav-search a:link, .wy-nav-top a:link {
+      color: #fff;
+    }
+    .wy-side-nav-search a:visited, .wy-nav-top a:visited {
+      color: #fff;
+    }
+    .wy-side-nav-search a:hover, .wy-nav-top a:hover {
+      color: #fff;
+    }
+
+    .wy-menu-vertical a:link, .wy-menu-vertical a:visited {
+      color: #d9d9d9
+    }
+
+    .wy-menu-vertical a:active {
+      background-color: #76b900
+    }
+
+    .wy-side-nav-search>div.version {
+      color: rgba(0, 0, 0, 0.3)
+    }
+
+    /* override table width restrictions */
+    .wy-table-responsive table td, .wy-table-responsive table th {
+        white-space: normal;
+    }
+
+    .wy-table-responsive {
+        margin-bottom: 24px;
+        max-width: 100%;
+        overflow: visible;
+    }
+  </style>
+  
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart/installation.html">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#pip-install">pip install</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#docker-container">Docker Container</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#building-from-source">Building from Source</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installing-pytorch">Installing PyTorch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Libraries</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/index.html">CUDA-Q QEC - Quantum Error Correction Library</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html">QEC Codes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#qec-code-framework-cudaq-qec-code">QEC Code Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::code</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#class-structure">Class Structure</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#implementing-a-new-code">Implementing a New Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#example-steane-code">Example: Steane Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#implementing-a-new-code-in-python">Implementing a New Code in Python</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#key-points">Key Points</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#using-the-code-framework">Using the Code Framework</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#pre-built-qec-codes">Pre-built QEC Codes</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#steane-code">Steane Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#repetition-code">Repetition Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#surface-code">Surface Code</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html">QEC Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#class-structure">Class Structure</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-new-decoder-in-c">Implementing a New Decoder in C++</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#example-lookup-table-decoder">Example: Lookup Table Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-decoder-in-python">Implementing a Decoder in Python</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#key-features">Key Features</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#usage-example">Usage Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#detector-error-model">Detector Error Model</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#decoding-from-stim-dem-text">Decoding from Stim DEM Text</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dem-sampling">DEM Sampling</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#quantum-low-density-parity-check-decoder">Quantum Low-Density Parity-Check Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensor-network-decoder">Tensor Network Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensorrt-decoder">TensorRT Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#pymatching-decoder">PyMatching Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#chromobius-decoder">Chromobius Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#sliding-window-decoder">Sliding Window Decoder</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#workflow">Workflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html">Experiments and Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#memory-circuit-experiments">Memory Circuit Experiments</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/conventions.html">Conventions</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="reference internal" href="examples.html">CUDA-Q QEC by Example</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="creating_qec_codes.html">   Creating New QEC Codes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html">   Experiments and Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#cuda-q-qec-implementation">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#code-explanation">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id1">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id2">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#memory-circuit-experiments">Memory Circuit Experiments</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#function-variants">Function Variants</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#return-values">Return Values</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#example-usage">Example Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#additional-noise-models">Additional Noise Models</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html">   Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#decoding-from-stim-dem-text">Decoding From Stim DEM Text</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#generating-a-multi-round-parity-check-matrix">Generating a Multi-Round Parity Check Matrix</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#dem-sampling-monte-carlo-sampling-from-detector-error-models">DEM Sampling — Monte-Carlo Sampling from Detector Error Models</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#example">Example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#gpu-acceleration">GPU Acceleration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#input-types-and-backend-selection">Input Types and Backend Selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#getting-started-with-the-nvidia-qldpc-decoder">Getting Started with the NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#belief-propagation-methods">Belief Propagation Methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#usage-example">Usage Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#deploying-ai-decoders-with-tensorrt">Deploying AI Decoders with TensorRT</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#overview-of-the-training-to-deployment-pipeline">Overview of the Training-to-Deployment Pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#training-a-neural-network-decoder-with-pytorch-and-stim">Training a Neural Network Decoder with PyTorch and Stim</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#using-the-tensorrt-decoder-in-cuda-q-qec">Using the TensorRT Decoder in CUDA-Q QEC</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#converting-onnx-models-to-tensorrt-engines">Converting ONNX Models to TensorRT Engines</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#dependencies-and-requirements">Dependencies and Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#id2">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#matching-based-decoding-with-pymatching">Matching-Based Decoding with PyMatching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
+</ul>
+</li>
+<li class="toctree-l2 current"><a class="reference internal" href="realtime_decoding.html">   Realtime Decoding</a><ul class="current">
+<li class="toctree-l3 current"><a class="current reference internal" href="#">Getting Started with Realtime Decoding</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#configuration">Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#backend-selection">Backend Selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#compilation-and-execution-examples">Compilation and Execution Examples</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#data-directory-layout">Data Directory Layout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#building">Building</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html">AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#repository-layout">Repository Layout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#data-directory-layout">Data Directory Layout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#building">Building</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#emulated-end-to-end-test">Emulated End-to-End Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#fpga-end-to-end-test">FPGA End-to-End Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#orchestration-script-reference">Orchestration Script Reference</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_relay_bp.html">Relay BP Decoding with CUDA-Q Realtime</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#decode-dispatch-architecture">Decode dispatch architecture</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#software">Software</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#obtaining-the-nv-qldpc-decoder-plugin">Obtaining the nv-qldpc-decoder plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#source-repositories">Source Repositories</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#build-the-hsb-bridge-and-playback-tools">Build the HSB bridge and playback tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#using-the-orchestration-script">Using the orchestration script</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#requirements">Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#running-the-emulated-test">Running the Emulated Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#fpga-requirements">FPGA Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#running-the-fpga-test">Running the FPGA Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#gpu-selection">GPU Selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#network-sanity-check">Network Sanity Check</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#modes">Modes</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#actions">Actions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#build-options">Build Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#network-options">Network Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#run-options">Run Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#ring-buffer-depth-num-pages">Ring buffer depth (<code class="docutils literal notranslate"><span class="pre">num_pages</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Performance Studies</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/index.html">Performance Studies</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html">Improving Relay BP Decoding With Gamma Ensembles</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#performance-comparison">Performance Comparison</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#latency-distribution">Latency Distribution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#logical-error-rate-under-hard-deadlines">Logical Error Rate Under Hard Deadlines</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html">Sweeping Relay BP Stopping Criteria From a Single Run</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#recording-a-run">Recording a run</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#example-relaybp-n-on-the-gross-code">Example: RelayBP-N on the gross code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#practical-notes">Practical notes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html">Improving BP+OSD Decoding With Min-LLR OSD Initialization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#column-ordering-importance-and-sensitivity">Column Ordering Importance and Sensitivity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#experiment">Experiment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#results">Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#controls-ordering-versus-iteration-count">Controls: Ordering Versus Iteration Count</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding Real-Time Decode Latency With NV-Fusion</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../api/core/cpp_api.html">CUDA-Q QEC Namespaces and Core Library C++ API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/core/cpp_api.html#namespaces">Namespaces</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/core/cpp_api.html#core">Core</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/qec/cpp_api.html">CUDA-Q QEC C++ API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#code">Code</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#detector-error-model">Detector Error Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#detector-error-model-dem-sampling">Detector Error Model (DEM) Sampling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#decoder-interfaces">Decoder Interfaces</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#built-in-decoders">Built-in Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#nvidia-qldpc-decoder">NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#nv_qldpc_decoder"><code class="docutils literal notranslate"><span class="pre">nv_qldpc_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#nv_fusion_decoder"><code class="docutils literal notranslate"><span class="pre">nv_fusion_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#sliding-window-decoder">Sliding Window Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#sliding_window"><code class="docutils literal notranslate"><span class="pre">sliding_window</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#tensorrt-decoder">TensorRT Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#trt_decoder"><code class="docutils literal notranslate"><span class="pre">trt_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#pymatching-decoder">PyMatching Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#pymatching"><code class="docutils literal notranslate"><span class="pre">pymatching</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#chromobius-decoder">Chromobius Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#chromobius"><code class="docutils literal notranslate"><span class="pre">chromobius</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#realtime-decoding">Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#core-decoding-functions">Core Decoding Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#configuration-api">Configuration API</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#helper-functions">Helper Functions</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#realtime-pipeline-api">Realtime Pipeline API</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#configuration">Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#gpu-stage">GPU Stage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#cpu-stage">CPU Stage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#completion">Completion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#ring-buffer-injector">Ring Buffer Injector</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#pipeline">Pipeline</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#parity-check-matrix-utilities">Parity Check Matrix Utilities</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#logger">Logger</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#common">Common</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/qec/python_api.html">CUDA-Q QEC Python API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#code">Code</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code"><code class="docutils literal notranslate"><span class="pre">Code</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.contains_operation"><code class="docutils literal notranslate"><span class="pre">Code.contains_operation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_ancilla_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_x_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_ancilla_x_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_z_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_ancilla_z_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_data_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_data_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_x_stabilizers"><code class="docutils literal notranslate"><span class="pre">Code.get_num_x_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_z_stabilizers"><code class="docutils literal notranslate"><span class="pre">Code.get_num_z_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_observables_x"><code class="docutils literal notranslate"><span class="pre">Code.get_observables_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_observables_z"><code class="docutils literal notranslate"><span class="pre">Code.get_observables_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_operation_one_qubit"><code class="docutils literal notranslate"><span class="pre">Code.get_operation_one_qubit</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_operation_two_qubit"><code class="docutils literal notranslate"><span class="pre">Code.get_operation_two_qubit</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_parity"><code class="docutils literal notranslate"><span class="pre">Code.get_parity</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_parity_x"><code class="docutils literal notranslate"><span class="pre">Code.get_parity_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_parity_z"><code class="docutils literal notranslate"><span class="pre">Code.get_parity_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_pauli_observables_matrix"><code class="docutils literal notranslate"><span class="pre">Code.get_pauli_observables_matrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_stabilizer_round"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizer_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_stabilizer_schedule_x"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizer_schedule_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_stabilizer_schedule_z"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizer_schedule_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_stabilizers"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizers</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#surface-code-layout">Surface code layout</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.data_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.data_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.data_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.data_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.distance"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.distance</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_data_grid"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_data_grid</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizer_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_grid"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizer_grid</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizer_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_pairs_x"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_pairs_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_pairs_z"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_pairs_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_x"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_z"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_spin_op_observables"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_spin_op_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_spin_op_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_spin_op_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.grid_length"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.grid_length</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.orientation"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.orientation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.roles"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.roles</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.x_stab_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.x_stab_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.x_stab_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.x_stab_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.x_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.x_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.z_stab_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.z_stab_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.z_stab_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.z_stab_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.z_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.z_stabilizers</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#detector-error-model">Detector Error Model</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.canonicalize_for_rounds"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.canonicalize_for_rounds</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.canonicalize_for_rounds_with_boundary"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.canonicalize_for_rounds_with_boundary</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.detector_error_matrix"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.detector_error_matrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_ids"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.error_ids</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_rates"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.error_rates</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_detectors"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.num_detectors</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_error_mechanisms"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.num_error_mechanisms</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_observables"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.num_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.observables_flips_matrix"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.observables_flips_matrix</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext"><code class="docutils literal notranslate"><span class="pre">DecoderContext</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext.full_component"><code class="docutils literal notranslate"><span class="pre">DecoderContext.full_component</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext.num_measurements"><code class="docutils literal notranslate"><span class="pre">DecoderContext.num_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext.x_component"><code class="docutils literal notranslate"><span class="pre">DecoderContext.x_component</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext.z_component"><code class="docutils literal notranslate"><span class="pre">DecoderContext.z_component</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.dem_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">dem_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.x_dem_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">x_dem_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.z_dem_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">z_dem_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.decoder_context_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">decoder_context_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.dem_from_stim_text"><code class="docutils literal notranslate"><span class="pre">dem_from_stim_text()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.d_sparse"><code class="docutils literal notranslate"><span class="pre">d_sparse()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#decoder-interfaces">Decoder Interfaces</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder"><code class="docutils literal notranslate"><span class="pre">Decoder</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.decode"><code class="docutils literal notranslate"><span class="pre">Decoder.decode</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.decode_async"><code class="docutils literal notranslate"><span class="pre">Decoder.decode_async</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.decode_batch"><code class="docutils literal notranslate"><span class="pre">Decoder.decode_batch</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.get_block_size"><code class="docutils literal notranslate"><span class="pre">Decoder.get_block_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.get_syndrome_size"><code class="docutils literal notranslate"><span class="pre">Decoder.get_syndrome_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.get_version"><code class="docutils literal notranslate"><span class="pre">Decoder.get_version</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult"><code class="docutils literal notranslate"><span class="pre">DecoderResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult.converged"><code class="docutils literal notranslate"><span class="pre">DecoderResult.converged</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult.opt_results"><code class="docutils literal notranslate"><span class="pre">DecoderResult.opt_results</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult.result"><code class="docutils literal notranslate"><span class="pre">DecoderResult.result</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.batch_opt_results"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.batch_opt_results</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.converged"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.converged</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.opt_results"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.opt_results</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.result"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.result</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.AsyncDecoderResult"><code class="docutils literal notranslate"><span class="pre">AsyncDecoderResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.AsyncDecoderResult.get"><code class="docutils literal notranslate"><span class="pre">AsyncDecoderResult.get</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.AsyncDecoderResult.ready"><code class="docutils literal notranslate"><span class="pre">AsyncDecoderResult.ready</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.get_decoder"><code class="docutils literal notranslate"><span class="pre">get_decoder()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#built-in-decoders">Built-in Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#nvidia-qldpc-decoder">NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.nv_qldpc_decoder"><code class="docutils literal notranslate"><span class="pre">nv_qldpc_decoder</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#module-cudaq_qec.relay_solutions">Relay Solutions Post-Processing</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.nv_fusion_decoder"><code class="docutils literal notranslate"><span class="pre">nv_fusion_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#sliding-window-decoder">Sliding Window Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.sliding_window"><code class="docutils literal notranslate"><span class="pre">sliding_window</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#tensorrt-decoder">TensorRT Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.trt_decoder"><code class="docutils literal notranslate"><span class="pre">trt_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#tensor-network-decoder">Tensor Network Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#pymatching-decoder">PyMatching Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.pymatching"><code class="docutils literal notranslate"><span class="pre">pymatching</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#chromobius-decoder">Chromobius Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.chromobius"><code class="docutils literal notranslate"><span class="pre">chromobius</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#realtime-decoding">Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#core-decoding-functions">Core Decoding Functions</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.enqueue_syndromes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_corrections"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.get_corrections()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.reset_decoder"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.reset_decoder()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#configuration-api">Configuration API</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#decoder-parameters">Decoder Parameters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#deprecated-typed-configuration-classes">Deprecated Typed Configuration Classes</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#configuration-functions">Configuration Functions</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#helper-functions">Helper Functions</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.pcm_to_sparse_vec"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.pcm_to_sparse_vec()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.pcm_from_sparse_vec"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.pcm_from_sparse_vec()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.d_sparse"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.d_sparse()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#common">Common</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.sample_memory_circuit"><code class="docutils literal notranslate"><span class="pre">sample_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.x_sample_memory_circuit"><code class="docutils literal notranslate"><span class="pre">x_sample_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.z_sample_memory_circuit"><code class="docutils literal notranslate"><span class="pre">z_sample_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.sample_code_capacity"><code class="docutils literal notranslate"><span class="pre">sample_code_capacity()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#detector-error-model-dem-sampling">Detector Error Model (DEM) Sampling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.dem_sampling"><code class="docutils literal notranslate"><span class="pre">dem_sampling()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#parity-check-matrix-utilities">Parity Check Matrix Utilities</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.generate_random_pcm"><code class="docutils literal notranslate"><span class="pre">generate_random_pcm()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.generate_timelike_sparse_detector_matrix"><code class="docutils literal notranslate"><span class="pre">generate_timelike_sparse_detector_matrix()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.get_pcm_for_rounds"><code class="docutils literal notranslate"><span class="pre">get_pcm_for_rounds()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.get_sorted_pcm_column_indices"><code class="docutils literal notranslate"><span class="pre">get_sorted_pcm_column_indices()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.pcm_extend_to_n_rounds"><code class="docutils literal notranslate"><span class="pre">pcm_extend_to_n_rounds()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.pcm_is_sorted"><code class="docutils literal notranslate"><span class="pre">pcm_is_sorted()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.pcm_to_sparse_vec"><code class="docutils literal notranslate"><span class="pre">pcm_to_sparse_vec()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.reorder_pcm_columns"><code class="docutils literal notranslate"><span class="pre">reorder_pcm_columns()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.shuffle_pcm_columns"><code class="docutils literal notranslate"><span class="pre">shuffle_pcm_columns()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.simplify_pcm"><code class="docutils literal notranslate"><span class="pre">simplify_pcm()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.sort_pcm_columns"><code class="docutils literal notranslate"><span class="pre">sort_pcm_columns()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #76b900" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">NVIDIA CUDA-Q QEC</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="examples.html">CUDA-Q QEC by Example</a></li>
+          <li class="breadcrumb-item"><a href="realtime_decoding.html">Realtime Decoding</a></li>
+      <li class="breadcrumb-item active">Getting Started with Realtime Decoding</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/examples_rst/qec/getting_started_realtime_decoding.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul><div class="rst-breadcrumbs-buttons" role="navigation" aria-label="Sequential page navigation">
+        <a href="realtime_decoding.html" class="btn btn-neutral float-left" title="Realtime Decoding" accesskey="p"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="realtime_predecoder_pymatching.html" class="btn btn-neutral float-right" title="AI Predecoder with CUDA-Q Realtime" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+  </div>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="getting-started-with-realtime-decoding">
+<h1>Getting Started with Realtime Decoding<a class="headerlink" href="#getting-started-with-realtime-decoding" title="Permalink to this heading"></a></h1>
+<p>This walkthrough builds a complete realtime decoding application end to end: decoder configuration, backend selection, compilation, and troubleshooting. Each stage of the underlying <code class="docutils literal notranslate"><span class="pre">real_time_complete</span></code> example is shown in place in the sections below.</p>
+<p>A realtime decoding application has the following main components:</p>
+<ul class="simple">
+<li><p>Decoder configuration file: Initializes and configures the decoders before circuit execution.</p></li>
+<li><p>Quantum kernel: Uses the realtime decoding API to interact with the decoders, primarily through reset_decoder, enqueue_syndromes, and get_corrections.</p></li>
+<li><p>Syndrome extraction: Measures the stabilizers of the logical qubits.</p></li>
+<li><p>Correction application: Applies the corrections to the logical qubits.</p></li>
+<li><p>Logical observable measurement: Measures the logical observables of the logical qubits.</p></li>
+<li><p>Decoder finalization: Frees up resources after circuit execution.</p></li>
+</ul>
+<p>The API is designed to be called from within quantum kernels (marked with <code class="docutils literal notranslate"><span class="pre">&#64;cudaq.kernel</span></code> in Python or <code class="docutils literal notranslate"><span class="pre">__qpu__</span></code>  in C++). The runtime automatically routes these calls to the appropriate backend—whether a simulation environment on the local machine or a low-latency connection to quantum hardware. The API is device-agnostic, so the same kernel code works across different deployment scenarios.</p>
+<p>The user is required to provide a configuration file or generate one if it is not present. The generation process depends on the decoder type and the detector error model studied in other sections of the documentation. Moreover, the user must write an appropriate kernel that describes the correct syndrome extraction and correction application logic.</p>
+<p>The next section provides instructions to generate a configuration file, write a quantum kernel, and compile and run the examples correctly.</p>
+<section id="configuration">
+<h2>Configuration<a class="headerlink" href="#configuration" title="Permalink to this heading"></a></h2>
+<p>The configuration process transforms a quantum circuit’s error characteristics into a format that decoders can efficiently process. This section walks through each step in detail, showing how to go from circuit simulation to a fully configured realtime decoder.</p>
+<section id="step-1-generate-detector-error-model">
+<h3>Step 1: Generate Detector Error Model<a class="headerlink" href="#step-1-generate-detector-error-model" title="Permalink to this heading"></a></h3>
+<p>The first step is to characterize the quantum circuit’s behavior under noise.
+A detector error model (DEM) captures the relationship between physical errors and the syndrome patterns they produce.
+This characterization is circuit-specific and depends on the code structure, noise model, and measurement schedule.</p>
+<p>Under the hood, the CUDA-Q QEC library uses the Memory Syndrome Matrix (MSM) representation to efficiently encode error propagation information. The MSM captures all possible error chains and their syndrome signatures, tracking how errors propagate through the circuit over time. However, this complexity is abstracted away from the user through convenient helper functions.</p>
+<p>The library provides a family of <code class="docutils literal notranslate"><span class="pre">dem_from_memory_circuit</span></code> functions that automatically handle the MSM generation and processing:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">z_dem_from_memory_circuit</span></code>: For circuits measuring Z-basis stabilizers (used in the example below)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">x_dem_from_memory_circuit</span></code>: For circuits measuring X-basis stabilizers</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">dem_from_memory_circuit</span></code>: General-purpose function for arbitrary stabilizer measurements</p></li>
+</ul>
+<p>These functions take a quantum code, an initial state preparation operation, the number of measurement rounds, and a noise model, then return a complete detector error model ready for decoder configuration. The user simply needs to configure the noise model and specify the circuit structure—the library handles all the error tracking and matrix construction automatically.</p>
+<p>Here is how to generate a DEM for a circuit:</p>
+<div class="tab-set docutils">
+<input checked="True" class="tab-input" id="tab-set--0-input--1" name="tab-set--0" type="radio"><label class="tab-label" for="tab-set--0-input--1">Python</label><div class="tab-content docutils">
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span>    <span class="c1"># Step 1: Generate detector error model</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">"Step 1: Generating DEM..."</span><span class="p">)</span>
+    <span class="n">cudaq</span><span class="o">.</span><span class="n">set_target</span><span class="p">(</span><span class="s2">"stim"</span><span class="p">)</span>
+
+    <span class="n">noise</span> <span class="o">=</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">NoiseModel</span><span class="p">()</span>
+    <span class="n">noise</span><span class="o">.</span><span class="n">add_all_qubit_channel</span><span class="p">(</span><span class="s2">"x"</span><span class="p">,</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">Depolarization2</span><span class="p">(</span><span class="mf">0.01</span><span class="p">),</span> <span class="mi">1</span><span class="p">)</span>
+
+    <span class="n">ctx</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">decoder_context_from_memory_circuit</span><span class="p">(</span><span class="n">code</span><span class="p">,</span> <span class="n">qec</span><span class="o">.</span><span class="n">operation</span><span class="o">.</span><span class="n">prep0</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span>
+                                                  <span class="n">noise</span><span class="p">)</span>
+    <span class="n">dem</span><span class="p">,</span> <span class="n">m2d</span><span class="p">,</span> <span class="n">m2o</span> <span class="o">=</span> <span class="n">ctx</span><span class="o">.</span><span class="n">full_component</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+<input class="tab-input" id="tab-set--0-input--2" name="tab-set--0" type="radio"><label class="tab-label" for="tab-set--0-input--2">C++</label><div class="tab-content docutils">
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="w">  </span><span class="c1">// Step 1: Generate detector error model</span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">"Step 1: Generating DEM...</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">noise_model</span><span class="w"> </span><span class="n">noise</span><span class="p">;</span>
+<span class="w">  </span><span class="n">noise</span><span class="p">.</span><span class="n">add_all_qubit_channel</span><span class="p">(</span><span class="s">"x"</span><span class="p">,</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">depolarization2</span><span class="p">(</span><span class="mf">0.01</span><span class="p">),</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">ctx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoder_context_from_memory_circuit</span><span class="p">(</span>
+<span class="w">      </span><span class="o">*</span><span class="n">code</span><span class="p">,</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">operation</span><span class="o">::</span><span class="n">prep0</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="n">noise</span><span class="p">);</span>
+</pre></div>
+</div>
+</div>
+</div>
+</section>
+<section id="step-2-configure-and-save-decoder">
+<h3>Step 2: Configure and Save Decoder<a class="headerlink" href="#step-2-configure-and-save-decoder" title="Permalink to this heading"></a></h3>
+<p>Once a DEM has been generated, the next step is to package this information into a decoder configuration and save it to a YAML file.
+The configuration structure holds all the parameters a decoder needs: the parity check matrix (H_sparse),
+the observable flip matrix (O_sparse), the detector error matrix (D_sparse),
+and decoder-specific tuning parameters.</p>
+<p>These matrices are generated in sparse matrix format, which is crucial for performance.
+They can be large considering error correcting codes with large number of physical qubits, and moreover,
+realtime decoders process thousands of syndrome measurements per second, and make decisions based on these matrices, so compact representations are essential.
+The helper function <code class="docutils literal notranslate"><span class="pre">pcm_to_sparse_vec</span></code> is used to convert the dense binary matrices into a space-efficient format where -1 marks row boundaries and integers represent column indices of non-zero elements.</p>
+<p>Each decoder type has its own configuration structure with specific parameters.
+For lookup table decoders, the user specifies how many simultaneous errors to consider.
+For PyMatching, the user can specify per-error prior probabilities and the edge
+merge strategy. The realtime path configures PyMatching as a standard decoder
+with <code class="docutils literal notranslate"><span class="pre">type:</span> <span class="pre">pymatching</span></code>; <code class="docutils literal notranslate"><span class="pre">O_sparse</span></code> remains the observable matrix used by the
+base decoder to accumulate logical corrections returned by <code class="docutils literal notranslate"><span class="pre">get_corrections</span></code>.
+Vanilla PyMatching requires graphlike detector error models, where every
+<code class="docutils literal notranslate"><span class="pre">H_sparse</span></code> column has one or two detector entries.
+For belief propagation decoders, the user sets iteration limits and convergence criteria.
+Decoder parameters are validated against the parameter schema each decoder registers, ensuring unknown keys are rejected and required parameters are present.</p>
+<p>The configuration is then saved to a YAML file for reuse. The YAML format is human-readable, making it easy to inspect, modify, and share configurations across different execution environments.</p>
+<p>Use <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.decoder_context_from_memory_circuit" title="cudaq_qec.decoder_context_from_memory_circuit"><code class="xref py py-func docutils literal notranslate"><span class="pre">decoder_context_from_memory_circuit()</span></code></a> to obtain the parity-check, observable,
+and measurement-to-detector matrices in one call, then assemble the decoder config:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">ctx</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">decoder_context_from_memory_circuit</span><span class="p">(</span><span class="n">code</span><span class="p">,</span> <span class="n">statePrep</span><span class="p">,</span> <span class="n">num_rounds</span><span class="p">,</span> <span class="n">noise</span><span class="p">)</span>
+<span class="n">dem</span><span class="p">,</span> <span class="n">m2d</span><span class="p">,</span> <span class="n">m2o</span> <span class="o">=</span> <span class="n">ctx</span><span class="o">.</span><span class="n">z_component</span><span class="p">()</span>  <span class="c1"># or x_component() / full_component()</span>
+
+<span class="n">config</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">decoder_config</span><span class="p">()</span>
+<span class="n">config</span><span class="o">.</span><span class="n">id</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">config</span><span class="o">.</span><span class="n">type</span> <span class="o">=</span> <span class="s2">"pymatching"</span>
+<span class="n">config</span><span class="o">.</span><span class="n">block_size</span> <span class="o">=</span> <span class="n">dem</span><span class="o">.</span><span class="n">num_error_mechanisms</span><span class="p">()</span>
+<span class="n">config</span><span class="o">.</span><span class="n">syndrome_size</span> <span class="o">=</span> <span class="n">dem</span><span class="o">.</span><span class="n">num_detectors</span><span class="p">()</span>
+<span class="n">config</span><span class="o">.</span><span class="n">H_sparse</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">pcm_to_sparse_vec</span><span class="p">(</span><span class="n">dem</span><span class="o">.</span><span class="n">detector_error_matrix</span><span class="p">)</span>
+<span class="n">config</span><span class="o">.</span><span class="n">O_sparse</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">pcm_to_sparse_vec</span><span class="p">(</span><span class="n">dem</span><span class="o">.</span><span class="n">observables_flips_matrix</span><span class="p">)</span>
+<span class="n">config</span><span class="o">.</span><span class="n">D_sparse</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">d_sparse</span><span class="p">(</span><span class="n">m2d</span><span class="p">)</span>
+
+<span class="n">config</span><span class="o">.</span><span class="n">decoder_custom_args</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"error_rate_vec"</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">dem</span><span class="o">.</span><span class="n">error_rates</span><span class="p">),</span>
+    <span class="s2">"merge_strategy"</span><span class="p">:</span> <span class="s2">"smallest_weight"</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="n">multi_config</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">multi_decoder_config</span><span class="p">()</span>
+<span class="n">multi_config</span><span class="o">.</span><span class="n">decoders</span> <span class="o">=</span> <span class="p">[</span><span class="n">config</span><span class="p">]</span>
+</pre></div>
+</div>
+<p>This produces YAML with a <code class="docutils literal notranslate"><span class="pre">pymatching</span></code> decoder and PyMatching-specific custom
+arguments:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">decoders</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
+<span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pymatching</span>
+<span class="w">    </span><span class="nt">cuda_device_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span><span class="w">   </span><span class="c1"># optional: pin this decoder to a CUDA device</span>
+<span class="w">    </span><span class="nt">block_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+<span class="w">    </span><span class="nt">syndrome_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+<span class="w">    </span><span class="nt">H_sparse</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="w"> </span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-1</span><span class="w"> </span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">O_sparse</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="w"> </span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-1</span><span class="w"> </span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">D_sparse</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="w"> </span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">-1</span><span class="w"> </span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">decoder_custom_args</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">error_rate_vec</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="w"> </span><span class="nv">0.1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.1</span><span class="w"> </span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">merge_strategy</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">smallest_weight</span>
+</pre></div>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">decoder_custom_args</span></code> section is converted between YAML and the
+parameter map a decoder’s constructor receives using a <em>parameter schema</em>
+registered under the decoder’s name. All built-in decoders ship with a
+schema, and custom (out-of-tree) decoder plugins can register their own so
+their parameters become configurable through the same YAML – no changes to
+the CUDA-Q QEC libraries are required. A plugin registers its schema from a
+static initializer in the same shared library that registers the decoder
+itself (see <code class="docutils literal notranslate"><span class="pre">cudaq/qec/decoder_config_schema.h</span></code> and the in-tree example
+plugin <code class="docutils literal notranslate"><span class="pre">single_error_lut_example</span></code>):</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"cudaq/qec/decoder_config_schema.h"</span>
+
+<span class="k">namespace</span><span class="w"> </span><span class="p">{</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">schema_registrar</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">schema_registrar</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">using</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">config</span><span class="o">::</span><span class="n">param_kind</span><span class="p">;</span>
+<span class="w">    </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">config</span><span class="o">::</span><span class="n">decoder_schema</span><span class="w"> </span><span class="n">schema</span><span class="p">{</span>
+<span class="w">        </span><span class="s">"my_decoder"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="p">{</span><span class="s">"strength"</span><span class="p">,</span><span class="w"> </span><span class="n">k</span><span class="o">::</span><span class="n">f64</span><span class="p">},</span>
+<span class="w">            </span><span class="p">{</span><span class="s">"passes"</span><span class="p">,</span><span class="w"> </span><span class="n">k</span><span class="o">::</span><span class="n">int32</span><span class="p">},</span>
+<span class="w">            </span><span class="p">{</span><span class="s">"mode"</span><span class="p">,</span><span class="w"> </span><span class="n">k</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="cm">/*required=*/</span><span class="nb">true</span><span class="p">},</span>
+<span class="w">        </span><span class="p">}};</span>
+<span class="w">    </span><span class="c1">// Optional: cross-field constraints the per-key specs can't express.</span>
+<span class="w">    </span><span class="c1">// Unknown keys and missing required keys are already rejected by the</span>
+<span class="w">    </span><span class="c1">// framework; a decoder never implements those checks itself.</span>
+<span class="w">    </span><span class="n">schema</span><span class="p">.</span><span class="n">validate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[](</span><span class="k">const</span><span class="w"> </span><span class="n">cudaqx</span><span class="o">::</span><span class="n">heterogeneous_map</span><span class="w"> </span><span class="o">&amp;</span><span class="n">args</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">args</span><span class="p">.</span><span class="n">contains</span><span class="p">(</span><span class="s">"strength"</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">args</span><span class="p">.</span><span class="n">get</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="p">(</span><span class="s">"strength"</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mf">0.0</span><span class="p">)</span>
+<span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">runtime_error</span><span class="p">(</span><span class="s">"my_decoder: strength must be positive"</span><span class="p">);</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">config</span><span class="o">::</span><span class="n">register_decoder_schema</span><span class="p">(</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">schema</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+<span class="n">schema_registrar</span><span class="w"> </span><span class="n">register_schema</span><span class="p">;</span>
+<span class="p">}</span><span class="w"> </span><span class="c1">// namespace</span>
+</pre></div>
+</div>
+<p>With the schema in place, a <code class="docutils literal notranslate"><span class="pre">decoder_custom_args</span></code> section for
+<code class="docutils literal notranslate"><span class="pre">type:</span> <span class="pre">my_decoder</span></code> is validated (unknown keys and missing required keys are
+rejected, then the schema’s <code class="docutils literal notranslate"><span class="pre">validate</span></code> hook runs) and delivered to the
+decoder’s constructor as a <code class="docutils literal notranslate"><span class="pre">cudaqx::heterogeneous_map</span></code>. The same checks can
+be applied to a configuration built programmatically – before it is
+serialized or used – by calling <code class="docutils literal notranslate"><span class="pre">decoder_config::validate_custom_args()</span></code>
+(<code class="docutils literal notranslate"><span class="pre">config.validate_custom_args()</span></code> in Python, also available on
+<code class="docutils literal notranslate"><span class="pre">multi_decoder_config</span></code>). The registered schemas can be inspected from
+Python via <code class="docutils literal notranslate"><span class="pre">qec.decoder_param_schema(&quot;my_decoder&quot;)</span></code> and
+<code class="docutils literal notranslate"><span class="pre">qec.registered_decoder_schemas()</span></code>.</p>
+<p>The registered schemas can also be exported as a standard JSON Schema
+(draft 2020-12) document via <code class="docutils literal notranslate"><span class="pre">qec.decoder_config_json_schema()</span></code>, so
+configuration YAML files can be validated by third-party tooling – editors,
+CI checks, or the <a class="reference external" href="https://check-jsonschema.readthedocs.io/">check-jsonschema</a> command line tool – without
+loading the CUDA-Q QEC libraries:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s2">"import cudaq_qec; print(cudaq_qec.decoder_config_json_schema())"</span><span class="w"> </span>&gt;<span class="w"> </span>decoder_config_schema.json
+check-jsonschema<span class="w"> </span>--schemafile<span class="w"> </span>decoder_config_schema.json<span class="w"> </span>my_config.yaml
+</pre></div>
+</div>
+<p>The export is generated from the schemas registered at call time, so decoder
+plugins loaded in the process (including out-of-tree ones) appear in it
+automatically. Schema <code class="docutils literal notranslate"><span class="pre">validate</span></code> hooks are arbitrary code and cannot be
+represented in JSON Schema, so a file that passes the exported schema may
+still be rejected by a hook when the configuration is parsed.</p>
+<p><code class="docutils literal notranslate"><span class="pre">cuda_device_id</span></code> pins a GPU-accelerated decoder (e.g. <code class="docutils literal notranslate"><span class="pre">nv-qldpc-decoder</span></code>
+or <code class="docutils literal notranslate"><span class="pre">trt_decoder</span></code>) to a specific CUDA device. The same knob is available as
+a construction parameter in C++ and Python
+(<code class="docutils literal notranslate"><span class="pre">qec.get_decoder(&quot;trt_decoder&quot;,</span> <span class="pre">H,</span> <span class="pre">cuda_device_id=1)</span></code>). The thread that
+creates a decoder is pinned to that device and is expected to drive its
+decode calls; create each pinned decoder on its own thread to place several
+decoders on different GPUs.</p>
+<p>Here is how to create and save a decoder configuration:</p>
+<div class="tab-set docutils">
+<input checked="True" class="tab-input" id="tab-set--1-input--1" name="tab-set--1" type="radio"><label class="tab-label" for="tab-set--1-input--1">Python</label><div class="tab-content docutils">
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span>    <span class="c1"># Save decoder config</span>
+    <span class="n">config</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">decoder_config</span><span class="p">()</span>
+    <span class="n">config</span><span class="o">.</span><span class="n">id</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">config</span><span class="o">.</span><span class="n">type</span> <span class="o">=</span> <span class="s2">"multi_error_lut"</span>
+    <span class="n">config</span><span class="o">.</span><span class="n">block_size</span> <span class="o">=</span> <span class="n">dem</span><span class="o">.</span><span class="n">detector_error_matrix</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">config</span><span class="o">.</span><span class="n">syndrome_size</span> <span class="o">=</span> <span class="n">dem</span><span class="o">.</span><span class="n">detector_error_matrix</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="n">config</span><span class="o">.</span><span class="n">H_sparse</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">pcm_to_sparse_vec</span><span class="p">(</span><span class="n">dem</span><span class="o">.</span><span class="n">detector_error_matrix</span><span class="p">)</span>
+    <span class="n">config</span><span class="o">.</span><span class="n">O_sparse</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">pcm_to_sparse_vec</span><span class="p">(</span><span class="n">dem</span><span class="o">.</span><span class="n">observables_flips_matrix</span><span class="p">)</span>
+
+    <span class="n">config</span><span class="o">.</span><span class="n">D_sparse</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">d_sparse</span><span class="p">(</span><span class="n">m2d</span><span class="p">)</span>
+    <span class="c1"># Decoder parameters are a plain dict; keys are governed by the parameter</span>
+    <span class="c1"># schema the decoder registered (see qec.decoder_param_schema).</span>
+    <span class="n">config</span><span class="o">.</span><span class="n">decoder_custom_args</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"lut_error_depth"</span><span class="p">:</span> <span class="mi">2</span><span class="p">}</span>
+    <span class="c1"># Check the dict against the decoder's schema (unknown keys, missing</span>
+    <span class="c1"># required keys, decoder-specific constraints) before using the config.</span>
+    <span class="n">config</span><span class="o">.</span><span class="n">validate_custom_args</span><span class="p">()</span>
+
+    <span class="n">multi_config</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">multi_decoder_config</span><span class="p">()</span>
+    <span class="n">multi_config</span><span class="o">.</span><span class="n">decoders</span> <span class="o">=</span> <span class="p">[</span><span class="n">config</span><span class="p">]</span>
+
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"config.yaml"</span><span class="p">,</span> <span class="s1">'w'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">multi_config</span><span class="o">.</span><span class="n">to_yaml_str</span><span class="p">(</span><span class="mi">200</span><span class="p">))</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">"Saved config to config.yaml"</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<input class="tab-input" id="tab-set--1-input--2" name="tab-set--1" type="radio"><label class="tab-label" for="tab-set--1-input--2">C++</label><div class="tab-content docutils">
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Save decoder configuration to YAML file</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">save_dem</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoder_inputs</span><span class="w"> </span><span class="o">&amp;</span><span class="n">inputs</span><span class="p">,</span>
+<span class="w">              </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="o">&amp;</span><span class="n">filename</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="o">&amp;</span><span class="n">dem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">inputs</span><span class="p">.</span><span class="n">dem</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Create decoder config</span>
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">config</span><span class="o">::</span><span class="n">decoder_config</span><span class="w"> </span><span class="n">config</span><span class="p">;</span>
+<span class="w">  </span><span class="n">config</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="n">config</span><span class="p">.</span><span class="n">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"multi_error_lut"</span><span class="p">;</span>
+<span class="w">  </span><span class="n">config</span><span class="p">.</span><span class="n">block_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dem</span><span class="p">.</span><span class="n">num_error_mechanisms</span><span class="p">();</span>
+<span class="w">  </span><span class="n">config</span><span class="p">.</span><span class="n">syndrome_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dem</span><span class="p">.</span><span class="n">num_detectors</span><span class="p">();</span>
+<span class="w">  </span><span class="n">config</span><span class="p">.</span><span class="n">H_sparse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">pcm_to_sparse_vec</span><span class="p">(</span><span class="n">dem</span><span class="p">.</span><span class="n">detector_error_matrix</span><span class="p">);</span>
+<span class="w">  </span><span class="n">config</span><span class="p">.</span><span class="n">O_sparse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">pcm_to_sparse_vec</span><span class="p">(</span><span class="n">dem</span><span class="p">.</span><span class="n">observables_flips_matrix</span><span class="p">);</span>
+<span class="w">  </span><span class="n">config</span><span class="p">.</span><span class="n">D_sparse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">d_sparse</span><span class="p">(</span><span class="n">inputs</span><span class="p">.</span><span class="n">m2d</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Decoder parameters are a plain heterogeneous_map; keys are governed by</span>
+<span class="w">  </span><span class="c1">// the parameter schema the decoder registered.</span>
+<span class="w">  </span><span class="n">cudaqx</span><span class="o">::</span><span class="n">heterogeneous_map</span><span class="w"> </span><span class="n">lut_args</span><span class="p">;</span>
+<span class="w">  </span><span class="n">lut_args</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="s">"lut_error_depth"</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">);</span>
+<span class="w">  </span><span class="n">config</span><span class="p">.</span><span class="n">decoder_custom_args</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lut_args</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Check the map against the decoder's schema (unknown keys, missing</span>
+<span class="w">  </span><span class="c1">// required keys, decoder-specific constraints) before using the config.</span>
+<span class="w">  </span><span class="n">config</span><span class="p">.</span><span class="n">validate_custom_args</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">config</span><span class="o">::</span><span class="n">multi_decoder_config</span><span class="w"> </span><span class="n">multi_config</span><span class="p">;</span>
+<span class="w">  </span><span class="n">multi_config</span><span class="p">.</span><span class="n">decoders</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">config</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">ofstream</span><span class="w"> </span><span class="n">file</span><span class="p">(</span><span class="n">filename</span><span class="p">);</span>
+<span class="w">  </span><span class="n">file</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">multi_config</span><span class="p">.</span><span class="n">to_yaml_str</span><span class="p">(</span><span class="mi">200</span><span class="p">);</span>
+<span class="w">  </span><span class="n">file</span><span class="p">.</span><span class="n">close</span><span class="p">();</span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">"Saved config to %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">filename</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</div>
+</div>
+</section>
+<section id="step-3-load-configuration">
+<h3>Step 3: Load Configuration<a class="headerlink" href="#step-3-load-configuration" title="Permalink to this heading"></a></h3>
+<p>Before running quantum circuits with realtime decoding, the saved decoder configuration must be loaded and initialized.
+This step bridges the gap between the offline characterization phase (Steps 1-2) and the online execution phase (Step 4),
+preparing the decoder instances for realtime operation.</p>
+<p>The configuration loading process performs several important operations:</p>
+<ol class="arabic simple">
+<li><p><strong>YAML Parsing</strong>: The configuration file is parsed and validated to ensure all required fields are present and properly formatted. This includes checking matrix dimensions, decoder parameters, and metadata.</p></li>
+<li><p><strong>Decoder Instantiation</strong>: Based on the decoder type specified in the configuration (e.g., <code class="docutils literal notranslate"><span class="pre">multi_error_lut</span></code>, <code class="docutils literal notranslate"><span class="pre">pymatching</span></code>, <code class="docutils literal notranslate"><span class="pre">nv-qldpc-decoder</span></code>), the appropriate decoder implementation is instantiated and allocated resources on the GPU or CPU.</p></li>
+<li><p><strong>Matrix Initialization</strong>: The sparse matrices (H_sparse, O_sparse, D_sparse) are loaded into the decoder’s internal data structures. For GPU-based decoders, this includes transferring data to device memory.</p></li>
+<li><p><strong>Decoder-Specific Initialization</strong>: Each decoder type performs its own preparation: lookup table decoders build syndrome-to-correction mappings, belief propagation decoders initialize message-passing structures, and sliding window decoders configure their buffering mechanisms.</p></li>
+<li><p><strong>Backend Registration</strong>: The decoder instances are registered with the CUDA-Q runtime so they can be accessed from quantum kernels using their unique IDs.</p></li>
+</ol>
+<p>This initialization happens quickly, typically only a few milliseconds for small codes and up to a few seconds for large distance codes with complex decoders. Since it occurs before quantum circuit execution, it does not impact the latency-critical decoding operations.</p>
+<p>The separation of configuration from execution provides significant benefits: users can maintain a library of configurations for different code distances, noise levels, and decoder types, then simply load the appropriate one when running experiments. Configurations can be version-controlled alongside code, shared across research teams, and validated offline before deployment to quantum hardware.</p>
+<p>Here is how to load a decoder configuration:</p>
+<div class="tab-set docutils">
+<input checked="True" class="tab-input" id="tab-set--2-input--1" name="tab-set--2" type="radio"><label class="tab-label" for="tab-set--2-input--1">Python</label><div class="tab-content docutils">
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span>    <span class="n">qec</span><span class="o">.</span><span class="n">configure_decoders_from_file</span><span class="p">(</span><span class="s2">"config.yaml"</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<input class="tab-input" id="tab-set--2-input--2" name="tab-set--2" type="radio"><label class="tab-label" for="tab-set--2-input--2">C++</label><div class="tab-content docutils">
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Load decoder configuration from YAML file</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">load_dem</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="o">&amp;</span><span class="n">filename</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">ifstream</span><span class="w"> </span><span class="n">file</span><span class="p">(</span><span class="n">filename</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">yaml</span><span class="p">((</span><span class="n">std</span><span class="o">::</span><span class="n">istreambuf_iterator</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">&gt;</span><span class="p">(</span><span class="n">file</span><span class="p">)),</span>
+<span class="w">                   </span><span class="n">std</span><span class="o">::</span><span class="n">istreambuf_iterator</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">&gt;</span><span class="p">());</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">config</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">config</span><span class="o">::</span><span class="n">multi_decoder_config</span><span class="o">::</span><span class="n">from_yaml_str</span><span class="p">(</span><span class="n">yaml</span><span class="p">);</span>
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">config</span><span class="o">::</span><span class="n">configure_decoders</span><span class="p">(</span><span class="n">config</span><span class="p">);</span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">"Loaded config from %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">filename</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</div>
+</div>
+</section>
+<section id="step-4-use-in-quantum-kernels">
+<h3>Step 4: Use in Quantum Kernels<a class="headerlink" href="#step-4-use-in-quantum-kernels" title="Permalink to this heading"></a></h3>
+<p>With decoders configured and initialized, they can be used within quantum kernels. The realtime decoding API provides three key functions that integrate seamlessly with CUDA-Q’s quantum programming model: <code class="docutils literal notranslate"><span class="pre">reset_decoder</span></code> prepares a decoder for a new shot, <code class="docutils literal notranslate"><span class="pre">enqueue_syndromes</span></code> sends syndrome measurements to the decoder for processing, and <code class="docutils literal notranslate"><span class="pre">get_corrections</span></code> retrieves the decoder’s recommended corrections.</p>
+<p>These functions are designed to be called from within quantum kernels (marked with <code class="docutils literal notranslate"><span class="pre">&#64;cudaq.kernel</span></code> in Python or <code class="docutils literal notranslate"><span class="pre">__qpu__</span></code> in C++). The runtime automatically routes these calls to the appropriate backend - whether that is a simulation environment on the local machine or a low-latency connection to quantum hardware. The API is device-agnostic, so the same kernel code works across different deployment scenarios.</p>
+<p>The typical usage pattern is: reset the decoder at the start of each shot, enqueue
+syndromes after each stabilizer measurement round, then get corrections before
+measuring the logical observables. Decoders process syndromes asynchronously, so
+by the time <code class="docutils literal notranslate"><span class="pre">get_corrections</span></code> is called, the decoder has usually finished its
+analysis. If decoding takes longer than expected, <code class="docutils literal notranslate"><span class="pre">get_corrections</span></code> will block
+until results are available.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>While resetting the decoder at the beginning of each shot isn’t strictly
+required, it is <strong>strongly</strong> recommended to ensure that when running on a
+remote QPU, any potential errors encountered in one shot do not affect future
+shot results.</p>
+</div>
+<p>Here is how to use the realtime decoding API in quantum kernels:</p>
+<div class="tab-set docutils">
+<input checked="True" class="tab-input" id="tab-set--3-input--1" name="tab-set--3" type="radio"><label class="tab-label" for="tab-set--3-input--1">Python</label><div class="tab-content docutils">
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># QEC circuit with real-time decoding</span>
+<span class="nd">@cudaq</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">qec_circuit</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+    <span class="n">qec</span><span class="o">.</span><span class="n">reset_decoder</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">data</span> <span class="o">=</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">qvector</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+    <span class="n">ancz</span> <span class="o">=</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">qvector</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+    <span class="n">ancx</span> <span class="o">=</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">qvector</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">logical</span> <span class="o">=</span> <span class="n">patch</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">ancx</span><span class="p">,</span> <span class="n">ancz</span><span class="p">)</span>
+
+    <span class="n">prep0</span><span class="p">(</span><span class="n">logical</span><span class="p">)</span>
+
+    <span class="c1"># 3 rounds of syndrome measurement</span>
+    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">):</span>
+        <span class="n">syndromes</span> <span class="o">=</span> <span class="n">measure_stabilizers</span><span class="p">(</span><span class="n">logical</span><span class="p">)</span>
+        <span class="n">qec</span><span class="o">.</span><span class="n">enqueue_syndromes</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">syndromes</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="c1"># Final data readout</span>
+    <span class="n">data_meas</span> <span class="o">=</span> <span class="p">[</span><span class="n">mz</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="n">mz</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span> <span class="n">mz</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">2</span><span class="p">])]</span>
+    <span class="n">qec</span><span class="o">.</span><span class="n">enqueue_syndromes</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">data_meas</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">to_bools</span><span class="p">(</span><span class="n">data_meas</span><span class="p">)</span>
+
+    <span class="c1"># Get corrections and apply them (single logical observable)</span>
+    <span class="n">corrections</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">get_corrections</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
+    <span class="n">result</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">^=</span> <span class="n">corrections</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">corrections</span><span class="p">[</span><span class="mi">0</span><span class="p">]:</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">):</span>
+            <span class="n">x</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+
+    <span class="k">return</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">to_integer</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+
+
+</pre></div>
+</div>
+</div>
+<input class="tab-input" id="tab-set--3-input--2" name="tab-set--3" type="radio"><label class="tab-label" for="tab-set--3-input--2">C++</label><div class="tab-content docutils">
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// QEC circuit with real-time decoding</span>
+<span class="n">__qpu__</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">qec_circuit</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">reset_decoder</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qvector</span><span class="w"> </span><span class="nf">data</span><span class="p">(</span><span class="mi">3</span><span class="p">);</span>
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qvector</span><span class="w"> </span><span class="nf">ancz</span><span class="p">(</span><span class="mi">2</span><span class="p">);</span>
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qvector</span><span class="w"> </span><span class="n">ancx</span><span class="p">;</span><span class="w"> </span><span class="c1">// Empty for repetition code</span>
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">patch</span><span class="w"> </span><span class="nf">logical</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">ancx</span><span class="p">,</span><span class="w"> </span><span class="n">ancz</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">prep0</span><span class="p">(</span><span class="n">logical</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 3 rounds of syndrome measurement</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">round</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">round</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">round</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">syndromes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">measure_stabilizers</span><span class="p">(</span><span class="n">logical</span><span class="p">);</span>
+<span class="w">    </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">enqueue_syndromes</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">syndromes</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Final data readout</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">cudaq</span><span class="o">::</span><span class="n">measure_result</span><span class="o">&gt;</span><span class="w"> </span><span class="n">data_meas</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="n">mz</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span><span class="w"> </span><span class="n">mz</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span>
+<span class="w">                                                  </span><span class="n">mz</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">2</span><span class="p">])};</span>
+<span class="w">  </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">enqueue_syndromes</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">data_meas</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">to_bools</span><span class="p">(</span><span class="n">data_meas</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Get corrections and apply them (single logical observable)</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="w"> </span><span class="n">corrections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">decoding</span><span class="o">::</span><span class="n">get_corrections</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">  </span><span class="n">result</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span><span class="w"> </span><span class="o">^</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="p">(</span><span class="n">corrections</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">corrections</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">      </span><span class="n">cudaq</span><span class="o">::</span><span class="n">x</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">to_integer</span><span class="p">(</span><span class="n">result</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</div>
+</div>
+</section>
+</section>
+<section id="backend-selection">
+<h2>Backend Selection<a class="headerlink" href="#backend-selection" title="Permalink to this heading"></a></h2>
+<p>CUDA-Q QEC’s realtime decoding system is designed to work seamlessly across different execution environments. The backend selection determines where quantum circuits run and how decoders communicate with the quantum processor. Understanding the differences between simulation and hardware backends helps the user develop efficiently and deploy confidently.</p>
+<section id="simulation-backend">
+<h3>Simulation Backend<a class="headerlink" href="#simulation-backend" title="Permalink to this heading"></a></h3>
+<p>The simulation backend is the primary tool during development, testing, and
+algorithm validation. It runs entirely on the local machine, using quantum
+simulators like Stim to execute circuits while decoders process syndromes and
+calculation corrections. This setup is ideal for rapid iteration: the user can
+test decoder configurations, validate circuit logic, and debug syndrome
+processing without waiting for hardware access or paying for compute time.</p>
+<p>The simulation backend mimics realtime decoding’s concurrent operation by
+running the decoder(s) within the same process as the simulator. This means that
+other than GPU hardware differences between the local environment and the remote
+NVQLink decoders, the decoders behave the same way whether testing locally or
+running on a quantum computer. The main difference is that simulation does not
+have the same strict latency constraints, making it easier to experiment with
+complex decoder configurations.</p>
+<p>Use the simulation backend for local development and testing:</p>
+<div class="tab-set docutils">
+<input checked="True" class="tab-input" id="tab-set--4-input--1" name="tab-set--4" type="radio"><label class="tab-label" for="tab-set--4-input--1">Python</label><div class="tab-content docutils">
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">cudaq</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">cudaq_qec</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">qec</span>
+
+<span class="n">cudaq</span><span class="o">.</span><span class="n">set_target</span><span class="p">(</span><span class="s2">"stim"</span><span class="p">)</span>  <span class="c1"># Or other simulator</span>
+<span class="n">qec</span><span class="o">.</span><span class="n">configure_decoders_from_file</span><span class="p">(</span><span class="s2">"config.yaml"</span><span class="p">)</span>
+
+<span class="c1"># Create an empty noise model; add noise channels as needed</span>
+<span class="n">noise_model</span> <span class="o">=</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">NoiseModel</span><span class="p">()</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">my_circuit</span><span class="p">,</span> <span class="n">shots_count</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+                   <span class="n">noise_model</span><span class="o">=</span><span class="n">noise_model</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<input class="tab-input" id="tab-set--4-input--2" name="tab-set--4" type="radio"><label class="tab-label" for="tab-set--4-input--2">C++</label><div class="tab-content docutils">
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Compile with simulation support</span>
+nvq++<span class="w"> </span>-std<span class="o">=</span>c++20<span class="w"> </span>my_circuit.cpp<span class="w"> </span>-lcudaq-qec<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-decoders<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding-simulation
+
+./a.out
+</pre></div>
+</div>
+</div>
+</div>
+</section>
+<section id="quantinuum-hardware-backend">
+<h3>Quantinuum Hardware Backend<a class="headerlink" href="#quantinuum-hardware-backend" title="Permalink to this heading"></a></h3>
+<p>The Quantinuum hardware backend connects quantum circuits to real ion-trap quantum computers. Unlike the simulation backend where decoders run on the local machine, <strong>the Quantinuum backend uploads the decoder configuration to Quantinuum’s infrastructure</strong>, where decoders run on GPU-equipped servers co-located with the quantum hardware. This architecture minimizes latency between syndrome measurements and correction application.</p>
+<p><strong>Important Setup Requirements:</strong></p>
+<ol class="arabic simple">
+<li><p><strong>Configuration Upload</strong>: When <code class="docutils literal notranslate"><span class="pre">configure_decoders_from_file()</span></code> or <code class="docutils literal notranslate"><span class="pre">configure_decoders()</span></code> is called, the decoder configuration is automatically base64-encoded and uploaded to Quantinuum’s REST API (<code class="docutils literal notranslate"><span class="pre">api/gpu_decoder_configs/v1beta/</span></code>). This happens before job submission. The configuration includes all decoder parameters, error models, and sparse matrices.</p></li>
+<li><p><strong>Extra Payload Provider</strong>: The user <strong>must</strong> specify <code class="docutils literal notranslate"><span class="pre">extra_payload_provider=&quot;decoder&quot;</span></code> when setting the target. This registers a payload provider that injects the decoder configuration UUID into each job request, telling Quantinuum which decoder configuration to use for the circuit.</p></li>
+<li><p><strong>Backend Compilation</strong>: For C++, the user must link against <code class="docutils literal notranslate"><span class="pre">-lcudaq-qec-realtime-decoding-quantinuum</span></code> instead of the simulation library. This library implements the Quantinuum-specific communication protocol for syndrome transmission.</p></li>
+<li><p><strong>Configuration Lifetime</strong>: Decoder configurations persist on Quantinuum’s servers and are referenced by UUID. If the configuration is modified, it must be uploaded again - the system will generate a new UUID and use the new configuration for subsequent jobs.</p></li>
+</ol>
+<p>Note: The realtime decoding interfaces are experimental, and subject to change. Realtime decoding on Quantinuum’s Helios-1 device is currently only available to partners and collaborators. Please email <a class="reference external" href="mailto:QCSupport&#37;&#52;&#48;quantinuum&#46;com">QCSupport<span>&#64;</span>quantinuum<span>&#46;</span>com</a> for more information.</p>
+<p><strong>Emulation vs. Hardware Modes:</strong></p>
+<p>Emulation mode (<code class="docutils literal notranslate"><span class="pre">emulate=True</span></code>) is particularly valuable for testing the deployment setup without consuming hardware credits. Running with this flag performs a local, noise-free simulation without any actual submission to Quantinuum’s servers.</p>
+<p>Use the Quantinuum backend for hardware or emulation:</p>
+<div class="tab-set docutils">
+<input checked="True" class="tab-input" id="tab-set--5-input--1" name="tab-set--5" type="radio"><label class="tab-label" for="tab-set--5-input--1">Python</label><div class="tab-content docutils">
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">cudaq</span><span class="o">.</span><span class="n">set_target</span><span class="p">(</span><span class="s2">"quantinuum"</span><span class="p">,</span>
+                 <span class="n">emulate</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>  <span class="c1"># True for emulation</span>
+                 <span class="n">machine</span><span class="o">=</span><span class="s2">"Helios-1"</span><span class="p">,</span>
+                 <span class="n">extra_payload_provider</span><span class="o">=</span><span class="s2">"decoder"</span><span class="p">)</span>
+
+<span class="n">qec</span><span class="o">.</span><span class="n">configure_decoders_from_file</span><span class="p">(</span><span class="s2">"config.yaml"</span><span class="p">)</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">my_circuit</span><span class="p">,</span> <span class="n">shots_count</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<input class="tab-input" id="tab-set--5-input--2" name="tab-set--5" type="radio"><label class="tab-label" for="tab-set--5-input--2">C++</label><div class="tab-content docutils">
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Compile for Quantinuum</span>
+nvq++<span class="w"> </span>--target<span class="w"> </span>quantinuum<span class="w"> </span>--quantinuum-machine<span class="w"> </span>Helios-1<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>--quantinuum-extra-payload-provider<span class="w"> </span>decoder<span class="w">      </span><span class="se">\</span>
+<span class="w">      </span>my_circuit.cpp<span class="w"> </span>-lcudaq-qec<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-decoders<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding-quantinuum<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>-Wl,--export-dynamic
+
+./a.out
+</pre></div>
+</div>
+</div>
+</div>
+</section>
+</section>
+<section id="compilation-and-execution-examples">
+<h2>Compilation and Execution Examples<a class="headerlink" href="#compilation-and-execution-examples" title="Permalink to this heading"></a></h2>
+<p>This section provides <strong>complete, tested compilation and execution commands</strong> for both simulation and hardware backends, extracted from the CUDA-Q QEC test infrastructure. The section begins with common usage patterns that guide decoder and compilation choices, then provides the specific commands needed for each backend.</p>
+<section id="common-use-cases">
+<h3>Common Use Cases<a class="headerlink" href="#common-use-cases" title="Permalink to this heading"></a></h3>
+<p>Before diving into compilation details, it is helpful to understand the typical scenarios and how they map to decoder choices and workflow parameters.
+A full set of common examples is provided to guide development.
+These examples describe the complete workflow for developing an application that uses realtime decoding in a single file.
+The relevant C++ and Python examples can be found at the following path:
+<a class="reference external" href="https://github.com/NVIDIA/cudaq-qec/tree/main/libs/qec/unittests/realtime/app_examples">libs/qec/unittests/realtime/app_examples</a>.
+The files have names like <code class="docutils literal notranslate"><span class="pre">surface_code-1.cpp</span></code> and <code class="docutils literal notranslate"><span class="pre">surface_code_1.py</span></code>. The rest of this section shows how to compile and run these 2 examples.</p>
+<p>These examples provide comprehensive support for application development with realtime decoding.
+The subsequent step, once the user has chosen the appropriate decoder and the appropriate backend, is to compile and execute the application.
+Instructions are provided below for both the simulation and the hardware backends.</p>
+</section>
+<section id="c-compilation">
+<h3>C++ Compilation<a class="headerlink" href="#c-compilation" title="Permalink to this heading"></a></h3>
+<p><strong>Simulation Backend (Stim)</strong></p>
+<p>Compile with the simulation backend for local testing:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>nvq++<span class="w"> </span>--target<span class="w"> </span>stim<span class="w"> </span>surface_code-1.cpp<span class="w">         </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec<span class="w">                              </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-decoders<span class="w">                     </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding<span class="w">            </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding-simulation<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>-o<span class="w"> </span>surface_code-1
+
+<span class="c1"># Execute</span>
+./surface_code-1<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--num_shots<span class="w"> </span><span class="m">1000</span><span class="w"> </span>--save_dem<span class="w"> </span>config.yaml
+</pre></div>
+</div>
+<p><strong>Key Points:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--target</span> <span class="pre">stim</span></code>: Use the Stim quantum simulator</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-lcudaq-qec</span></code>: Core QEC library with codes and experiments</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-lcudaq-qec-decoders</span></code>: Decoder core API (decoders, <code class="docutils literal notranslate"><span class="pre">sparse_binary_matrix</span></code>, and PCM utilities such as <code class="docutils literal notranslate"><span class="pre">pcm_to_sparse_vec</span></code>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-lcudaq-qec-realtime-decoding</span></code>: Realtime decoding core API</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-lcudaq-qec-realtime-decoding-simulation</span></code>: Simulation-specific decoder backend</p></li>
+</ul>
+<p><strong>Quantinuum Backend (Hardware)</strong></p>
+<p>Compile for actual Quantinuum hardware:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>nvq++<span class="w"> </span>--target<span class="w"> </span>quantinuum<span class="w">                         </span><span class="se">\</span>
+<span class="w">      </span>--quantinuum-machine<span class="w"> </span>Helios-1<span class="w">               </span><span class="se">\</span>
+<span class="w">      </span>--quantinuum-extra-payload-provider<span class="w"> </span>decoder<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>surface_code-1.cpp<span class="w">                          </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec<span class="w">                                 </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-decoders<span class="w">                        </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding<span class="w">               </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding-quantinuum<span class="w">    </span><span class="se">\</span>
+<span class="w">      </span>-Wl,--export-dynamic<span class="w">                        </span><span class="se">\</span>
+<span class="w">      </span>-o<span class="w"> </span>surface_code-1-quantinuum-hardware
+
+<span class="c1"># Execute</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">CUDAQ_QUANTINUUM_CREDENTIALS</span><span class="o">=</span>&lt;credentials_file_path&gt;
+./surface_code-1-quantinuum-hardware<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--num_shots<span class="w"> </span><span class="m">100</span><span class="w"> </span>--load_dem<span class="w"> </span>config.yaml
+</pre></div>
+</div>
+<p><strong>Key Points:</strong></p>
+<ul class="simple">
+<li><p>Use Quantinuum target names: <code class="docutils literal notranslate"><span class="pre">Helios-1</span></code>, <code class="docutils literal notranslate"><span class="pre">Helios-1E</span></code>, <code class="docutils literal notranslate"><span class="pre">Helios-1SC</span></code>, etc.</p></li>
+<li><p>Currently only <code class="docutils literal notranslate"><span class="pre">Helios-1</span></code> will run the GPU decoders. The <code class="docutils literal notranslate"><span class="pre">Helios-1E</span></code> emulator will not run the GPU decoders.</p></li>
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">CUDAQ_QUANTINUUM_CREDENTIALS</span></code> environment variable with the user’s credentials.
+Check out the <a class="reference external" href="https://nvidia.github.io/cuda-quantum/latest/using/backends/hardware/iontrap.html#quantinuum">Quantinuum hardware backend documentation</a> for more information.</p></li>
+</ul>
+<p><strong>Emulated Quantinuum Compilation Workflow</strong></p>
+<p>Compile for Quantinuum emulation mode:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>nvq++<span class="w"> </span>--target<span class="w"> </span>quantinuum<span class="w"> </span>--emulate<span class="w">            </span><span class="se">\</span>
+<span class="w">      </span>--quantinuum-machine<span class="w"> </span>Helios-Fake<span class="w">         </span><span class="se">\</span>
+<span class="w">      </span>surface_code-1.cpp<span class="w">                       </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec<span class="w">                              </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-decoders<span class="w">                     </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding<span class="w">            </span><span class="se">\</span>
+<span class="w">      </span>-lcudaq-qec-realtime-decoding-quantinuum<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>-Wl,--export-dynamic<span class="w">                     </span><span class="se">\</span>
+<span class="w">      </span>-o<span class="w"> </span>surface_code-1-quantinuum-emulate
+
+<span class="c1"># Execute</span>
+./surface_code-1-quantinuum-emulate<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--num_shots<span class="w"> </span><span class="m">1000</span><span class="w"> </span>--load_dem<span class="w"> </span>config.yaml
+</pre></div>
+</div>
+<p><strong>Key Points:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--target</span> <span class="pre">quantinuum</span> <span class="pre">--emulate</span></code>: Emulate Quantinuum compilation path</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--quantinuum-machine</span> <span class="pre">Helios-Fake</span></code>: Specify machine (<code class="docutils literal notranslate"><span class="pre">Helios-Fake</span></code> for emulation)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-lcudaq-qec-realtime-decoding-quantinuum</span></code>: Quantinuum-specific decoder backend (replaces <code class="docutils literal notranslate"><span class="pre">-simulation</span></code>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-Wl,--export-dynamic</span></code>: <strong>Required</strong> linker flag for dynamic symbol resolution</p></li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>When running with <code class="code docutils literal notranslate"><span class="pre">--emulate</span></code>, there is no noise being applied because there
+is currently no way to express noise in target-specific QIR. Therefore, when
+running with emulation, users will see noise-free sample data.</p>
+</div>
+</section>
+<section id="python-execution">
+<h3>Python Execution<a class="headerlink" href="#python-execution" title="Permalink to this heading"></a></h3>
+<p><strong>Simulation Backend (Stim)</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Generate a decoder configuration file</span>
+python3<span class="w"> </span>surface_code_1.py<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--save_dem<span class="w"> </span>config.yaml
+<span class="c1"># Run the circuit with the decoder configuration</span>
+python3<span class="w"> </span>surface_code_1.py<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--load_dem<span class="w"> </span>config.yaml<span class="w"> </span>--num_shots<span class="w"> </span><span class="m">1000</span>
+</pre></div>
+</div>
+<p><strong>Quantinuum Backend (Hardware)</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python3<span class="w"> </span>surface_code_1.py<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--load_dem<span class="w"> </span>config.yaml<span class="w"> </span>--num_shots<span class="w"> </span><span class="m">1000</span><span class="w"> </span>--target<span class="w"> </span>quantinuum<span class="w"> </span>--machine_name<span class="w"> </span>Helios-1<span class="w"> </span>--project_id<span class="w"> </span>&lt;project-id&gt;
+</pre></div>
+</div>
+<p><strong>Key Points:</strong></p>
+<ul class="simple">
+<li><p>Use real machine names (check Quantinuum portal for available machines)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--project_id</span></code>: Specify the Quantinuum project ID used for the hardware submission.</p></li>
+<li><p>Reduce shot count for hardware experiments (hardware time is expensive)</p></li>
+</ul>
+<p><strong>Emulated Quantinuum Compilation Workflow</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python3<span class="w"> </span>surface_code_1.py<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--load_dem<span class="w"> </span>config.yaml<span class="w"> </span>--num_shots<span class="w"> </span><span class="m">1000</span><span class="w"> </span>--target<span class="w"> </span>quantinuum<span class="w"> </span>--emulate
+</pre></div>
+</div>
+<p><strong>Key Points:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--emulate</span></code>: Emulate the Quantinuum execution path</p></li>
+<li><p>Decoder config is automatically uploaded to Quantinuum’s servers when
+<code class="docutils literal notranslate"><span class="pre">cudaq_qec.configure_decoders_from_file</span></code> (Python) or
+<a class="reference internal" href="../../api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config28configure_decoders_from_fileEPKc" title="cudaq::qec::decoding::config::configure_decoders_from_file"><code class="xref cpp cpp-func docutils literal notranslate"><span class="pre">cudaq::qec::decoding::config::configure_decoders_from_file()</span></code></a> (C++) is called</p></li>
+</ul>
+</section>
+<section id="complete-workflow-example">
+<h3>Complete Workflow Example<a class="headerlink" href="#complete-workflow-example" title="Permalink to this heading"></a></h3>
+<p>Given that the user follows the structure of the examples provided, where each executable takes terminal arguments to configure the application, the following workflow can be used to compile and execute the application.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Phase 1: Generate Detector Error Model (DEM)</span>
+<span class="c1"># This is done once per code/distance/noise configuration</span>
+
+<span class="c1">## C++</span>
+./surface_code-1<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--num_shots<span class="w"> </span><span class="m">1000</span><span class="w"> </span>--p_cnot<span class="w"> </span><span class="m">0</span>.001<span class="w"> </span><span class="se">\</span>
+<span class="w">                 </span>--save_dem<span class="w"> </span>config_d3.yaml<span class="w"> </span>--num_rounds<span class="w"> </span><span class="m">12</span>
+
+<span class="c1">## Python</span>
+python3<span class="w"> </span>surface_code_1.py<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--num_shots<span class="w"> </span><span class="m">1000</span><span class="w"> </span>--p_cnot<span class="w"> </span><span class="m">0</span>.001<span class="w"> </span><span class="se">\</span>
+<span class="w">                         </span>--save_dem<span class="w"> </span>config_d3.yaml<span class="w"> </span>--num_rounds<span class="w"> </span><span class="m">12</span>
+
+<span class="c1"># Phase 2: Run with Realtime Decoding</span>
+<span class="c1"># Use the saved DEM configuration</span>
+
+<span class="c1">## Simulation</span>
+./surface_code-1<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--num_shots<span class="w"> </span><span class="m">1000</span><span class="w"> </span>--load_dem<span class="w"> </span>config_d3.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">                 </span>--num_rounds<span class="w"> </span><span class="m">12</span>
+
+<span class="c1">## Quantinuum Emulation</span>
+./surface_code-1-quantinuum-emulate<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--num_shots<span class="w"> </span><span class="m">1000</span><span class="w"> </span>--load_dem<span class="w"> </span>config_d3.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">                        </span>--num_rounds<span class="w"> </span><span class="m">12</span>
+
+<span class="c1">## Quantinuum Hardware</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">CUDAQ_QUANTINUUM_CREDENTIALS</span><span class="o">=</span>credentials.json
+./surface_code-1-quantinuum-hardware<span class="w"> </span>--distance<span class="w"> </span><span class="m">3</span><span class="w"> </span>--num_shots<span class="w"> </span><span class="m">100</span><span class="w"> </span>--load_dem<span class="w"> </span>config_d3.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">                      </span>--num_rounds<span class="w"> </span><span class="m">12</span>
+</pre></div>
+</div>
+<p><strong>Application Parameters:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--distance</span></code>: Code distance (3, 5, 7, etc.)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--num_shots</span></code>: Number of circuit repetitions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--p_cnot</span></code>: Two-qubit depolarizing rate on CNOT gates for DEM generation</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--save_dem</span></code>: Generate and save DEM configuration to file</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--load_dem</span></code>: Load existing DEM configuration from file</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--num_rounds</span></code>: Total number of syndrome measurement rounds</p></li>
+</ul>
+</section>
+<section id="debugging-and-environment-variables">
+<h3>Debugging and Environment Variables<a class="headerlink" href="#debugging-and-environment-variables" title="Permalink to this heading"></a></h3>
+<p><strong>Useful Environment Variables:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Enable decoder configuration debugging</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">CUDAQ_QEC_DEBUG_DECODER</span><span class="o">=</span><span class="m">1</span>
+
+<span class="c1"># Set default simulator</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">CUDAQ_DEFAULT_SIMULATOR</span><span class="o">=</span>stim
+
+<span class="c1"># Dump JIT IR for debugging compilation issues</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">CUDAQ_DUMP_JIT_IR</span><span class="o">=</span><span class="m">1</span>
+
+<span class="c1"># Set Quantinuum credentials file</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">CUDAQ_QUANTINUUM_CREDENTIALS</span><span class="o">=</span>/path/to/credentials.json
+</pre></div>
+</div>
+<p>The variables can be set in the user’s environment or in a script.
+They are valid both for python and C++ applications, however, they must be set before importing the cudaq or cudaq_qec libraries.</p>
+<p><strong>Common Compilation Issues:</strong></p>
+<ol class="arabic simple">
+<li><p><strong>Missing libraries</strong>: Ensure all <code class="docutils literal notranslate"><span class="pre">-lcudaq-qec-*</span></code> libraries are linked</p></li>
+<li><p><strong>Wrong backend library</strong>: Use <code class="docutils literal notranslate"><span class="pre">-simulation</span></code> for Stim, <code class="docutils literal notranslate"><span class="pre">-quantinuum</span></code> for Quantinuum</p></li>
+<li><p><strong>Missing</strong> <code class="docutils literal notranslate"><span class="pre">-Wl,--export-dynamic</span></code> <strong>flag</strong>: Required for Quantinuum targets</p></li>
+<li><p><strong>Wrong target flags</strong>: Use <code class="docutils literal notranslate"><span class="pre">--emulate</span></code> for emulation. Omit it and provide <code class="docutils literal notranslate"><span class="pre">--project_id</span></code> for hardware</p></li>
+</ol>
+<p><strong>Common Runtime Issues:</strong></p>
+<ol class="arabic simple">
+<li><p><strong>“Decoder X not found”</strong>: Call <code class="docutils literal notranslate"><span class="pre">configure_decoders_from_file()</span></code> before circuit execution</p></li>
+<li><p><strong>“Configuration upload failed”</strong>: Check network connectivity and Quantinuum credentials</p></li>
+<li><p><strong>Dimension mismatch errors</strong>: Verify DEM dimensions match the circuit’s syndrome count</p></li>
+<li><p><strong>High error rates</strong>: Check decoder window size matches DEM generation window</p></li>
+</ol>
+</section>
+<section id="decoder-selection">
+<h3>Decoder Selection<a class="headerlink" href="#decoder-selection" title="Permalink to this heading"></a></h3>
+<p>The <a class="reference internal" href="../../components/qec/decoders.html#prebuilt-qec-decoders"><span class="std std-ref">Pre-built QEC Decoders</span></a> section provides information about which decoders are compatible with realtime decoding.</p>
+<p>The TRT decoder (<code class="docutils literal notranslate"><span class="pre">trt_decoder</span></code>) can be configured for realtime decoding by specifying
+its <code class="docutils literal notranslate"><span class="pre">decoder_custom_args</span></code> parameters. This is useful for neural network-based
+decoders trained for specific codes and noise models. Note that TRT models
+must be trained with the appropriate input/output dimensions matching the
+syndrome and error spaces. See <a class="reference internal" href="../../api/qec/python_api.html#trt-decoder-api-python"><span class="std std-ref">TensorRT Decoder</span></a> for detailed configuration options.</p>
+</section>
+</section>
+<section id="troubleshooting">
+<h2>Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permalink to this heading"></a></h2>
+<p>Even with careful configuration, issues may be encountered during realtime decoding. This section covers the most common problems and their solutions, organized by symptom. When troubleshooting, start by isolating whether the issue is in DEM generation, decoder configuration, or runtime execution.</p>
+<section id="configuration-upload-failures-quantinuum-backend">
+<h3>Configuration Upload Failures (Quantinuum Backend)<a class="headerlink" href="#configuration-upload-failures-quantinuum-backend" title="Permalink to this heading"></a></h3>
+<p>When using the Quantinuum backend, the decoder configuration must be uploaded to their REST API before job submission. Upload failures prevent the quantum program from running and can be difficult to diagnose without knowing what to look for.</p>
+<p><strong>Possible Issues:</strong></p>
+<ul class="simple">
+<li><p><strong>Network connectivity problems</strong>: Connection to Quantinuum’s servers is interrupted or unstable</p></li>
+<li><p><strong>Configuration too large</strong>: Decoder configuration exceeds Quantinuum’s upload size limits (typically happens with large distance codes and lookup tables)</p></li>
+<li><p><strong>Invalid credentials</strong>: API authentication fails due to expired or incorrect credentials</p></li>
+<li><p><strong>Malformed configuration</strong>: YAML structure is invalid or contains unsupported parameters</p></li>
+</ul>
+<p><strong>Solutions</strong>:</p>
+<ul class="simple">
+<li><p><strong>Enable debug logging</strong>: Set <code class="docutils literal notranslate"><span class="pre">CUDAQ_QEC_DEBUG_DECODER=1</span></code> environment variable to see the exact configuration being uploaded and any error messages from the REST API</p></li>
+<li><p><strong>Check network</strong>: Verify that Quantinuum’s API endpoints can be reached before running the program. Test with a simple job submission first.</p></li>
+<li><p><strong>Reduce configuration size</strong>: If uploads fail due to size, switch from lookup table decoders to QLDPC (much more compact), or use sliding window with smaller windows</p></li>
+<li><p><strong>Validate YAML locally</strong>: Before uploading, test that <code class="docutils literal notranslate"><span class="pre">multi_decoder_config::from_yaml_str()</span></code> can parse the configuration file without errors</p></li>
+<li><p><strong>Check credentials</strong>: Ensure the Quantinuum API credentials are valid and have not expired. Refresh tokens if necessary.</p></li>
+<li><p><strong>Test with emulation</strong>: Try <code class="docutils literal notranslate"><span class="pre">emulate=True</span></code> first - emulation uses the same upload infrastructure but provides faster feedback if there are configuration issues</p></li>
+</ul>
+<p><strong>Verification</strong>:</p>
+<p>After fixing configuration issues, the following log messages should appear:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>[info] Initializing realtime decoding library with config file: config.yaml
+[info] Initializing decoders...
+[info] Creating decoder 0 of type multi_error_lut
+[info] Done initializing decoder 0 in 0.234 seconds
+</pre></div>
+</div>
+<p>If errors appear instead, check the full error message - it often contains specific details about what failed (network timeout, size limit, parsing error, etc.).</p>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="realtime_decoding.html" class="btn btn-neutral float-left" title="Realtime Decoding" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="realtime_predecoder_pymatching.html" class="btn btn-neutral float-right" title="AI Predecoder with CUDA-Q Realtime" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA Corporation &amp; Affiliates.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(false);
+      });
+  </script>  
+
+  <style>
+  a:link, a:visited {
+    color: #76b900;
+  }
+
+  a:hover {
+    color: #8c0;
+  }
+
+  .rst-content dl:not(.docutils) dt {
+    background: rgba(118, 185, 0, 0.1);
+    color: rgba(59,93,0,1);
+    border-top: solid 3px rgba(59,93,0,1);
+  }
+  </style>
+  
+
+</body>
+</html>

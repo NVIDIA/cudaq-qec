@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+  <meta charset="utf-8" /><meta name="generator" content="Docutils 0.18.1: http://docutils.sourceforge.net/" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bounding Real-Time Decode Latency With NV-Fusion &mdash; NVIDIA CUDA-Q QEC  documentation</title>
+      <link rel="stylesheet" href="../_static/pygments.css" type="text/css" />
+      <link rel="stylesheet" href="../_static/css/theme.css" type="text/css" />
+      <link rel="stylesheet" href="../_static/tabs.css" type="text/css" />
+      <link rel="stylesheet" href="../_static/copybutton.css" type="text/css" />
+      <link rel="stylesheet" href="../_static/cudaq_override.css" type="text/css" />
+      <link rel="stylesheet" href="../_static/sg_gallery.css" type="text/css" />
+      <link rel="stylesheet" href="/__w/cudaq-qec/cudaq-qec/docs/sphinx/_static/cudaq_override.css" type="text/css" />
+  <!--[if lt IE 9]>
+    <script src="../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js"></script>
+        <script src="../_static/jquery.js"></script>
+        <script src="../_static/underscore.js"></script>
+        <script src="../_static/_sphinx_javascript_frameworks_compat.js"></script>
+        <script src="../_static/doctools.js"></script>
+        <script src="../_static/sphinx_highlight.js"></script>
+        <script src="../_static/tabs.js"></script>
+        <script src="../_static/clipboard.min.js"></script>
+        <script src="../_static/copybutton.js"></script>
+        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+        <script src="../_static/version-switcher.js"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="CUDA-Q QEC Namespaces and Core Library C++ API" href="../api/core/cpp_api.html" />
+    <link rel="prev" title="Using Min-LLR OSD Initialization with BP+OSD" href="nv_qldpc_minllr_osd_user_guide.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #76b900" > 
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            NVIDIA CUDA-Q QEC
+          </a>
+              <div class="version">
+                0.8.1
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+
+  <style>
+    /* Sidebar header (and topbar for mobile) */
+    .wy-side-nav-search, .wy-nav-top {
+      background: #76b900;
+    }
+
+    .wy-side-nav-search a:link, .wy-nav-top a:link {
+      color: #fff;
+    }
+    .wy-side-nav-search a:visited, .wy-nav-top a:visited {
+      color: #fff;
+    }
+    .wy-side-nav-search a:hover, .wy-nav-top a:hover {
+      color: #fff;
+    }
+
+    .wy-menu-vertical a:link, .wy-menu-vertical a:visited {
+      color: #d9d9d9
+    }
+
+    .wy-menu-vertical a:active {
+      background-color: #76b900
+    }
+
+    .wy-side-nav-search>div.version {
+      color: rgba(0, 0, 0, 0.3)
+    }
+
+    /* override table width restrictions */
+    .wy-table-responsive table td, .wy-table-responsive table th {
+        white-space: normal;
+    }
+
+    .wy-table-responsive {
+        margin-bottom: 24px;
+        max-width: 100%;
+        overflow: visible;
+    }
+  </style>
+  
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart/installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../quickstart/installation.html#pip-install">pip install</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../quickstart/installation.html#docker-container">Docker Container</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../quickstart/installation.html#building-from-source">Building from Source</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart/installation.html#installing-pytorch">Installing PyTorch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Libraries</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../components/qec/index.html">CUDA-Q QEC - Quantum Error Correction Library</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../components/qec/codes.html">QEC Codes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/codes.html#qec-code-framework-cudaq-qec-code">QEC Code Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::code</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/codes.html#class-structure">Class Structure</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/codes.html#implementing-a-new-code">Implementing a New Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/codes.html#example-steane-code">Example: Steane Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/codes.html#implementing-a-new-code-in-python">Implementing a New Code in Python</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/codes.html#key-points">Key Points</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/codes.html#using-the-code-framework">Using the Code Framework</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/codes.html#pre-built-qec-codes">Pre-built QEC Codes</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/codes.html#steane-code">Steane Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/codes.html#repetition-code">Repetition Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/codes.html#surface-code">Surface Code</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../components/qec/decoders.html">QEC Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#class-structure">Class Structure</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#implementing-a-new-decoder-in-c">Implementing a New Decoder in C++</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#example-lookup-table-decoder">Example: Lookup Table Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#implementing-a-decoder-in-python">Implementing a Decoder in Python</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#key-features">Key Features</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#usage-example">Usage Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/decoders.html#detector-error-model">Detector Error Model</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#decoding-from-stim-dem-text">Decoding from Stim DEM Text</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#dem-sampling">DEM Sampling</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#quantum-low-density-parity-check-decoder">Quantum Low-Density Parity-Check Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#tensor-network-decoder">Tensor Network Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#tensorrt-decoder">TensorRT Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#pymatching-decoder">PyMatching Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#chromobius-decoder">Chromobius Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../components/qec/decoders.html#sliding-window-decoder">Sliding Window Decoder</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/realtime_decoding.html#workflow">Workflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/realtime_decoding.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/realtime_decoding.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../components/qec/numerical_experiments.html">Experiments and Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/numerical_experiments.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/numerical_experiments.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../components/qec/numerical_experiments.html#memory-circuit-experiments">Memory Circuit Experiments</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../components/qec/conventions.html">Conventions</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples_rst/qec/examples.html">CUDA-Q QEC by Example</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../examples_rst/qec/creating_qec_codes.html">   Creating New QEC Codes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html">   Experiments and Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#cuda-q-qec-implementation">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#code-explanation">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#id1">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#id2">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#memory-circuit-experiments">Memory Circuit Experiments</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#function-variants">Function Variants</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#return-values">Return Values</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#example-usage">Example Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/modeling_noise.html#additional-noise-models">Additional Noise Models</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../examples_rst/qec/decoders.html">   Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/decoders.html#decoding-from-stim-dem-text">Decoding From Stim DEM Text</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/decoders.html#generating-a-multi-round-parity-check-matrix">Generating a Multi-Round Parity Check Matrix</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/decoders.html#dem-sampling-monte-carlo-sampling-from-detector-error-models">DEM Sampling — Monte-Carlo Sampling from Detector Error Models</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#example">Example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#gpu-acceleration">GPU Acceleration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#input-types-and-backend-selection">Input Types and Backend Selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/decoders.html#getting-started-with-the-nvidia-qldpc-decoder">Getting Started with the NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#belief-propagation-methods">Belief Propagation Methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#usage-example">Usage Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/decoders.html#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/decoders.html#deploying-ai-decoders-with-tensorrt">Deploying AI Decoders with TensorRT</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#overview-of-the-training-to-deployment-pipeline">Overview of the Training-to-Deployment Pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#training-a-neural-network-decoder-with-pytorch-and-stim">Training a Neural Network Decoder with PyTorch and Stim</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#using-the-tensorrt-decoder-in-cuda-q-qec">Using the TensorRT Decoder in CUDA-Q QEC</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#converting-onnx-models-to-tensorrt-engines">Converting ONNX Models to TensorRT Engines</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#dependencies-and-requirements">Dependencies and Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/decoders.html#id2">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/decoders.html#matching-based-decoding-with-pymatching">Matching-Based Decoding with PyMatching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/decoders.html#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../examples_rst/qec/realtime_decoding.html">   Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/getting_started_realtime_decoding.html">Getting Started with Realtime Decoding</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/getting_started_realtime_decoding.html#configuration">Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/getting_started_realtime_decoding.html#backend-selection">Backend Selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/getting_started_realtime_decoding.html#compilation-and-execution-examples">Compilation and Execution Examples</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/getting_started_realtime_decoding.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_pymatching.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_pymatching.html#data-directory-layout">Data Directory Layout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_pymatching.html#building">Building</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_pymatching.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_pymatching.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_pymatching.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_pymatching.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html">AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html#repository-layout">Repository Layout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html#data-directory-layout">Data Directory Layout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html#building">Building</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html#emulated-end-to-end-test">Emulated End-to-End Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html#fpga-end-to-end-test">FPGA End-to-End Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html#orchestration-script-reference">Orchestration Script Reference</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_predecoder_fpga.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html">Relay BP Decoding with CUDA-Q Realtime</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#decode-dispatch-architecture">Decode dispatch architecture</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#software">Software</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#obtaining-the-nv-qldpc-decoder-plugin">Obtaining the nv-qldpc-decoder plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#source-repositories">Source Repositories</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#build-the-hsb-bridge-and-playback-tools">Build the HSB bridge and playback tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#using-the-orchestration-script">Using the orchestration script</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#requirements">Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#running-the-emulated-test">Running the Emulated Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#fpga-requirements">FPGA Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#running-the-fpga-test">Running the FPGA Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#gpu-selection">GPU Selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#network-sanity-check">Network Sanity Check</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#modes">Modes</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#actions">Actions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#build-options">Build Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#network-options">Network Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#run-options">Run Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../examples_rst/qec/realtime_relay_bp.html#ring-buffer-depth-num-pages">Ring buffer depth (<code class="docutils literal notranslate"><span class="pre">num_pages</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../examples_rst/qec/realtime_decoding.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Performance Studies</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Performance Studies</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="nv_qldpc_gamma_ensemble_user_guide.html">Improving Relay BP Decoding With Gamma Ensembles</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_gamma_ensemble_user_guide.html#performance-comparison">Performance Comparison</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_gamma_ensemble_user_guide.html#latency-distribution">Latency Distribution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_gamma_ensemble_user_guide.html#logical-error-rate-under-hard-deadlines">Logical Error Rate Under Hard Deadlines</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_gamma_ensemble_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="nv_qldpc_relay_solutions_user_guide.html">Sweeping Relay BP Stopping Criteria From a Single Run</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_relay_solutions_user_guide.html#recording-a-run">Recording a run</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_relay_solutions_user_guide.html#example-relaybp-n-on-the-gross-code">Example: RelayBP-N on the gross code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_relay_solutions_user_guide.html#practical-notes">Practical notes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_relay_solutions_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="nv_qldpc_minllr_osd_user_guide.html">Improving BP+OSD Decoding With Min-LLR OSD Initialization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_minllr_osd_user_guide.html#column-ordering-importance-and-sensitivity">Column Ordering Importance and Sensitivity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_minllr_osd_user_guide.html#experiment">Experiment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_minllr_osd_user_guide.html#results">Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_minllr_osd_user_guide.html#controls-ordering-versus-iteration-count">Controls: Ordering Versus Iteration Count</a></li>
+<li class="toctree-l3"><a class="reference internal" href="nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Bounding Real-Time Decode Latency With NV-Fusion</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#experiment-configuration">Experiment Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#streaming-tail-latency">Streaming Tail Latency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/core/cpp_api.html">CUDA-Q QEC Namespaces and Core Library C++ API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../api/core/cpp_api.html#namespaces">Namespaces</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/core/cpp_api.html#core">Core</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../api/qec/cpp_api.html">CUDA-Q QEC C++ API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#code">Code</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#detector-error-model">Detector Error Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#detector-error-model-dem-sampling">Detector Error Model (DEM) Sampling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#decoder-interfaces">Decoder Interfaces</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#built-in-decoders">Built-in Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#nvidia-qldpc-decoder">NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/cpp_api.html#nv_qldpc_decoder"><code class="docutils literal notranslate"><span class="pre">nv_qldpc_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/cpp_api.html#nv_fusion_decoder"><code class="docutils literal notranslate"><span class="pre">nv_fusion_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#sliding-window-decoder">Sliding Window Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/cpp_api.html#sliding_window"><code class="docutils literal notranslate"><span class="pre">sliding_window</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#tensorrt-decoder">TensorRT Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/cpp_api.html#trt_decoder"><code class="docutils literal notranslate"><span class="pre">trt_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#pymatching-decoder">PyMatching Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/cpp_api.html#pymatching"><code class="docutils literal notranslate"><span class="pre">pymatching</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#chromobius-decoder">Chromobius Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/cpp_api.html#chromobius"><code class="docutils literal notranslate"><span class="pre">chromobius</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#realtime-decoding">Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#core-decoding-functions">Core Decoding Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#configuration-api">Configuration API</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#helper-functions">Helper Functions</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#realtime-pipeline-api">Realtime Pipeline API</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#configuration">Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#gpu-stage">GPU Stage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#cpu-stage">CPU Stage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#completion">Completion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#ring-buffer-injector">Ring Buffer Injector</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/cpp_api.html#pipeline">Pipeline</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#parity-check-matrix-utilities">Parity Check Matrix Utilities</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#logger">Logger</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/cpp_api.html#common">Common</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../api/qec/python_api.html">CUDA-Q QEC Python API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/python_api.html#code">Code</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code"><code class="docutils literal notranslate"><span class="pre">Code</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.contains_operation"><code class="docutils literal notranslate"><span class="pre">Code.contains_operation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_ancilla_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_x_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_ancilla_x_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_z_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_ancilla_z_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_num_data_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_data_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_num_x_stabilizers"><code class="docutils literal notranslate"><span class="pre">Code.get_num_x_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_num_z_stabilizers"><code class="docutils literal notranslate"><span class="pre">Code.get_num_z_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_observables_x"><code class="docutils literal notranslate"><span class="pre">Code.get_observables_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_observables_z"><code class="docutils literal notranslate"><span class="pre">Code.get_observables_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_operation_one_qubit"><code class="docutils literal notranslate"><span class="pre">Code.get_operation_one_qubit</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_operation_two_qubit"><code class="docutils literal notranslate"><span class="pre">Code.get_operation_two_qubit</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_parity"><code class="docutils literal notranslate"><span class="pre">Code.get_parity</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_parity_x"><code class="docutils literal notranslate"><span class="pre">Code.get_parity_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_parity_z"><code class="docutils literal notranslate"><span class="pre">Code.get_parity_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_pauli_observables_matrix"><code class="docutils literal notranslate"><span class="pre">Code.get_pauli_observables_matrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_stabilizer_round"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizer_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_stabilizer_schedule_x"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizer_schedule_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_stabilizer_schedule_z"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizer_schedule_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Code.get_stabilizers"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizers</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/python_api.html#surface-code-layout">Surface code layout</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.data_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.data_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.data_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.data_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.distance"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.distance</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_data_grid"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_data_grid</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizer_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_grid"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizer_grid</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizer_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_pairs_x"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_pairs_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_pairs_z"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_pairs_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_x"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_z"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_spin_op_observables"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_spin_op_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_spin_op_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_spin_op_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.grid_length"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.grid_length</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.orientation"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.orientation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.roles"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.roles</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.x_stab_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.x_stab_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.x_stab_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.x_stab_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.x_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.x_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.z_stab_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.z_stab_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.z_stab_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.z_stab_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.stabilizer_grid.z_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.z_stabilizers</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/python_api.html#detector-error-model">Detector Error Model</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.canonicalize_for_rounds"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.canonicalize_for_rounds</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.canonicalize_for_rounds_with_boundary"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.canonicalize_for_rounds_with_boundary</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.detector_error_matrix"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.detector_error_matrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_ids"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.error_ids</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_rates"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.error_rates</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_detectors"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.num_detectors</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_error_mechanisms"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.num_error_mechanisms</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_observables"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.num_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.observables_flips_matrix"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.observables_flips_matrix</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DecoderContext"><code class="docutils literal notranslate"><span class="pre">DecoderContext</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DecoderContext.full_component"><code class="docutils literal notranslate"><span class="pre">DecoderContext.full_component</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DecoderContext.num_measurements"><code class="docutils literal notranslate"><span class="pre">DecoderContext.num_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DecoderContext.x_component"><code class="docutils literal notranslate"><span class="pre">DecoderContext.x_component</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DecoderContext.z_component"><code class="docutils literal notranslate"><span class="pre">DecoderContext.z_component</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.dem_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">dem_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.x_dem_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">x_dem_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.z_dem_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">z_dem_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.decoder_context_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">decoder_context_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.dem_from_stim_text"><code class="docutils literal notranslate"><span class="pre">dem_from_stim_text()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.d_sparse"><code class="docutils literal notranslate"><span class="pre">d_sparse()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/python_api.html#decoder-interfaces">Decoder Interfaces</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Decoder"><code class="docutils literal notranslate"><span class="pre">Decoder</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Decoder.decode"><code class="docutils literal notranslate"><span class="pre">Decoder.decode</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Decoder.decode_async"><code class="docutils literal notranslate"><span class="pre">Decoder.decode_async</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Decoder.decode_batch"><code class="docutils literal notranslate"><span class="pre">Decoder.decode_batch</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Decoder.get_block_size"><code class="docutils literal notranslate"><span class="pre">Decoder.get_block_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Decoder.get_syndrome_size"><code class="docutils literal notranslate"><span class="pre">Decoder.get_syndrome_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.Decoder.get_version"><code class="docutils literal notranslate"><span class="pre">Decoder.get_version</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DecoderResult"><code class="docutils literal notranslate"><span class="pre">DecoderResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DecoderResult.converged"><code class="docutils literal notranslate"><span class="pre">DecoderResult.converged</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DecoderResult.opt_results"><code class="docutils literal notranslate"><span class="pre">DecoderResult.opt_results</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.DecoderResult.result"><code class="docutils literal notranslate"><span class="pre">DecoderResult.result</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.BatchDecoderResult"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.batch_opt_results"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.batch_opt_results</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.converged"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.converged</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.opt_results"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.opt_results</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.result"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.result</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.AsyncDecoderResult"><code class="docutils literal notranslate"><span class="pre">AsyncDecoderResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.AsyncDecoderResult.get"><code class="docutils literal notranslate"><span class="pre">AsyncDecoderResult.get</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.AsyncDecoderResult.ready"><code class="docutils literal notranslate"><span class="pre">AsyncDecoderResult.ready</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.get_decoder"><code class="docutils literal notranslate"><span class="pre">get_decoder()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/python_api.html#built-in-decoders">Built-in Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#nvidia-qldpc-decoder">NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.nv_qldpc_decoder"><code class="docutils literal notranslate"><span class="pre">nv_qldpc_decoder</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#module-cudaq_qec.relay_solutions">Relay Solutions Post-Processing</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.nv_fusion_decoder"><code class="docutils literal notranslate"><span class="pre">nv_fusion_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#sliding-window-decoder">Sliding Window Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.sliding_window"><code class="docutils literal notranslate"><span class="pre">sliding_window</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#tensorrt-decoder">TensorRT Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.trt_decoder"><code class="docutils literal notranslate"><span class="pre">trt_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#tensor-network-decoder">Tensor Network Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#pymatching-decoder">PyMatching Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.pymatching"><code class="docutils literal notranslate"><span class="pre">pymatching</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#chromobius-decoder">Chromobius Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.chromobius"><code class="docutils literal notranslate"><span class="pre">chromobius</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/python_api.html#realtime-decoding">Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#core-decoding-functions">Core Decoding Functions</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.enqueue_syndromes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_corrections"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.get_corrections()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.reset_decoder"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.reset_decoder()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#configuration-api">Configuration API</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#decoder-parameters">Decoder Parameters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#deprecated-typed-configuration-classes">Deprecated Typed Configuration Classes</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#configuration-functions">Configuration Functions</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#helper-functions">Helper Functions</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.pcm_to_sparse_vec"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.pcm_to_sparse_vec()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.pcm_from_sparse_vec"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.pcm_from_sparse_vec()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.d_sparse"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.d_sparse()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/python_api.html#common">Common</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.sample_memory_circuit"><code class="docutils literal notranslate"><span class="pre">sample_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.x_sample_memory_circuit"><code class="docutils literal notranslate"><span class="pre">x_sample_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.z_sample_memory_circuit"><code class="docutils literal notranslate"><span class="pre">z_sample_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.sample_code_capacity"><code class="docutils literal notranslate"><span class="pre">sample_code_capacity()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/python_api.html#detector-error-model-dem-sampling">Detector Error Model (DEM) Sampling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.dem_sampling"><code class="docutils literal notranslate"><span class="pre">dem_sampling()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/qec/python_api.html#parity-check-matrix-utilities">Parity Check Matrix Utilities</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.generate_random_pcm"><code class="docutils literal notranslate"><span class="pre">generate_random_pcm()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.generate_timelike_sparse_detector_matrix"><code class="docutils literal notranslate"><span class="pre">generate_timelike_sparse_detector_matrix()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.get_pcm_for_rounds"><code class="docutils literal notranslate"><span class="pre">get_pcm_for_rounds()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.get_sorted_pcm_column_indices"><code class="docutils literal notranslate"><span class="pre">get_sorted_pcm_column_indices()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.pcm_extend_to_n_rounds"><code class="docutils literal notranslate"><span class="pre">pcm_extend_to_n_rounds()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.pcm_is_sorted"><code class="docutils literal notranslate"><span class="pre">pcm_is_sorted()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.pcm_to_sparse_vec"><code class="docutils literal notranslate"><span class="pre">pcm_to_sparse_vec()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.reorder_pcm_columns"><code class="docutils literal notranslate"><span class="pre">reorder_pcm_columns()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.shuffle_pcm_columns"><code class="docutils literal notranslate"><span class="pre">shuffle_pcm_columns()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.simplify_pcm"><code class="docutils literal notranslate"><span class="pre">simplify_pcm()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/qec/python_api.html#cudaq_qec.sort_pcm_columns"><code class="docutils literal notranslate"><span class="pre">sort_pcm_columns()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #76b900" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">NVIDIA CUDA-Q QEC</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="index.html">Performance Studies</a></li>
+      <li class="breadcrumb-item active">Bounding Real-Time Decode Latency With NV-Fusion</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/performance/nv_fusion_latency_user_guide.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul><div class="rst-breadcrumbs-buttons" role="navigation" aria-label="Sequential page navigation">
+        <a href="nv_qldpc_minllr_osd_user_guide.html" class="btn btn-neutral float-left" title="Using Min-LLR OSD Initialization with BP+OSD" accesskey="p"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../api/core/cpp_api.html" class="btn btn-neutral float-right" title="CUDA-Q QEC Namespaces and Core Library C++ API" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+  </div>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="bounding-real-time-decode-latency-with-nv-fusion">
+<span id="nv-fusion-latency-user-guide"></span><h1>Bounding Real-Time Decode Latency With NV-Fusion<a class="headerlink" href="#bounding-real-time-decode-latency-with-nv-fusion" title="Permalink to this heading"></a></h1>
+<p>The NVIDIA Fusion decoder (<code class="docutils literal notranslate"><span class="pre">nv-fusion-decoder</span></code>) is a multi-threaded
+minimum-weight perfect matching (MWPM) decoder designed for long-running,
+real-time quantum error correction. It divides the detector matching graph
+into temporal leaf blocks, solves independent leaves as syndrome data arrives,
+and fuses their matchings through a dependency graph. This moves most decoding
+work ahead of the final syndrome round and limits how much work remains before
+the observable correction is available. Its implementation combines the
+<a class="reference external" href="https://arxiv.org/abs/2303.15933">Sparse Blossom</a> and
+<a class="reference external" href="https://arxiv.org/abs/2305.08307">Fusion Blossom</a> algorithms. The algorithm is
+motivated by the experimental description in
+<a class="reference external" href="https://arxiv.org/abs/2408.13687">Quantum error correction below the surface code threshold</a> (Google Quantum AI).</p>
+<p>This study measures that final response time, called the <em>streaming tail
+latency</em>, on rotated surface-code Z-memory circuits. For 10,000-round
+experiments at code distances 5, 7, and 13, NV-Fusion lowered median
+streaming tail latency by 27–41x and p99 latency by 22–32x relative to
+monolithic PyMatching.</p>
+<section id="what-is-streaming-tail-latency">
+<h2>What Is Streaming Tail Latency?<a class="headerlink" href="#what-is-streaming-tail-latency" title="Permalink to this heading"></a></h2>
+<p><strong>Streaming tail latency</strong> starts immediately before the final
+<code class="docutils literal notranslate"><span class="pre">enqueue_syndrome()</span></code> call and ends after <code class="docutils literal notranslate"><span class="pre">get_obs_corrections()</span></code> returns.
+It therefore measures the time from receiving the final detector round to
+obtaining the correction needed by a real-time controller.</p>
+<p>The benchmark also records the sum of time spent in every streaming enqueue
+call. That sum excludes the configured wait between rounds and is useful for
+measuring decoder work, but it is not the final-round response time reported
+on this page.</p>
+<p>For long shots, the default NV-Fusion schedule uses leaves of <code class="docutils literal notranslate"><span class="pre">2</span> <span class="pre">*</span> <span class="pre">d</span></code> rounds,
+where <code class="docutils literal notranslate"><span class="pre">d</span></code> is the measured code distance. Leaves are solved while later
+syndrome rounds are still arriving, so only the last leaf and the remaining
+fusions lie on the final-round critical path. PyMatching instead solves the
+complete matching graph after the final round, causing its tail latency to
+grow with the full experiment length.</p>
+<img alt="A repeating schedule of temporal leaf blocks feeding adjacent-pair fuses and overlapping four-block fuses" class="align-center" src="../_images/nv_fusion_block_schedule.png" />
+<p>Each layer-1 fuse waits for two adjacent leaf solutions. The staggered
+layer-2 fuses then combine neighboring layer-1 results, creating overlapping
+four-block windows while keeping each fusion local.</p>
+</section>
+<section id="experiment-configuration">
+<h2>Experiment Configuration<a class="headerlink" href="#experiment-configuration" title="Permalink to this heading"></a></h2>
+<p>All measurements were collected on one NVIDIA Vera CPU system. NV-Fusion and
+PyMatching are CPU decoders; the benchmark was bound to a single NUMA node.
+Each point contains 1,000 timed shots after 20 warm-up shots. The
+physical noise model applies the same probability to Clifford
+depolarization, reset flips, measurement flips, and inter-round data
+depolarization.</p>
+<p>The result logs record the CPU allocation, but do not capture the exact CPU
+SKU, OS, compiler, CUDA-Q version, container digest, or decoder dependency
+revisions. The source revision above identifies the benchmark implementation
+used to interpret the data, not a complete reproducibility manifest.</p>
+<table class="docutils align-default" id="id1">
+<caption><span class="caption-text">Decoder and experiment parameters</span><a class="headerlink" href="#id1" title="Permalink to this table"></a></caption>
+<colgroup>
+<col style="width: 34%" />
+<col style="width: 66%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Parameter</p></th>
+<th class="head"><p>Value</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Platform</p></td>
+<td><p>NVIDIA Vera CPU, one NUMA node</p></td>
+</tr>
+<tr class="row-odd"><td><p>Available CPUs</p></td>
+<td><p>88 CPUs (CPUs 0–87); 352 reported by
+<code class="docutils literal notranslate"><span class="pre">hardware_concurrency</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>Circuit</p></td>
+<td><p>Stim rotated surface-code Z memory</p></td>
+</tr>
+<tr class="row-odd"><td><p>Code distances</p></td>
+<td><p>5, 7, 13</p></td>
+</tr>
+<tr class="row-even"><td><p>Stabilizer rounds</p></td>
+<td><p>10, 100, 500, 1,000, 2,000, 5,000, 10,000</p></td>
+</tr>
+<tr class="row-odd"><td><p>Physical noise probability</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">p</span> <span class="pre">=</span> <span class="pre">0.001</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>Timed and warm-up shots</p></td>
+<td><p>1,000 timed shots and 20 warm-up shots per instance</p></td>
+</tr>
+<tr class="row-odd"><td><p>Streaming round interval</p></td>
+<td><p>1 microsecond</p></td>
+</tr>
+<tr class="row-even"><td><p>Decoder threads</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">num_threads=0</span></code>; resolved to 84 threads for one instance and
+reduced when instances share the CPU</p></td>
+</tr>
+<tr class="row-odd"><td><p>CPU placement</p></td>
+<td><p>Instances pinned to disjoint CPU sets with <code class="docutils literal notranslate"><span class="pre">--pin-instances</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>NV-Fusion schedule</p></td>
+<td><p>Automatic</p></td>
+</tr>
+<tr class="row-odd"><td><p>Comparison decoder</p></td>
+<td><p>PyMatching, using the same decomposed detector error model and sampled
+syndromes</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="streaming-tail-latency">
+<h2>Streaming Tail Latency<a class="headerlink" href="#streaming-tail-latency" title="Permalink to this heading"></a></h2>
+<p>The following figure shows median and p99 streaming tail latency for one
+decoder instance. Up to 100 rounds, the automatic schedule uses one exact
+leaf, and NV-Fusion broadly follows PyMatching. Above the 192-round automatic
+schedule threshold, NV-Fusion switches to fused leaves and its tail latency
+becomes only weakly dependent on the total number of rounds.</p>
+<img alt="Streaming tail p50 and p99 latency versus rounds for NV-Fusion and PyMatching at code distances 5, 7, and 13" class="align-center" src="../_images/nv_fusion_streaming_tail_latency.png" />
+<p>Between 500 and 10,000 rounds, a 20x increase in experiment length, NV-Fusion
+p99 tail latency increased by only 1.0–1.7x across the three distances, while
+PyMatching p99 latency increased by 26–37x. At 10,000 rounds, NV-Fusion p99
+tail latency ranged from 67 microseconds to 1.28 milliseconds; the
+corresponding PyMatching values were 2.13 and 28.00 milliseconds.</p>
+<p>Median speedup increased from 1.00–1.51x at 500 rounds to 26.6–41.4x at
+10,000 rounds. At 10,000 rounds, p99 speedup was 21.8–32.0x.</p>
+<p>Lower latency is useful only when decoding quality is preserved. Across these
+1,000-shot measurements, the observed logical error rates for NV-Fusion and
+PyMatching differed by no more than 0.001 in absolute terms. This sample is
+not sufficient to establish equivalent logical error rates, particularly for
+points with no observed failures; a production schedule must also be
+validated with enough shots to resolve its target logical error rate.</p>
+<p>These percentiles describe the measured distribution of 1,000 shots. In
+particular, p99 is determined by roughly the ten slowest samples and should
+not be interpreted as a worst-case latency guarantee.</p>
+</section>
+<section id="latency-with-concurrent-decoders">
+<h2>Latency With Concurrent Decoders<a class="headerlink" href="#latency-with-concurrent-decoders" title="Permalink to this heading"></a></h2>
+<p>A real-time system may decode several logical qubits concurrently. The
+benchmark therefore runs independent decoder instances in parallel, pins each
+instance to a disjoint share of the NUMA node, and pools their latency samples.
+The automatic thread allocation decreases from 84 threads for one instance to
+40, 19, and 10 threads per instance for two, four, and eight instances,
+respectively.</p>
+<img alt="NV-Fusion streaming tail p99 latency versus concurrent decoder instances at distances 5, 7, and 13" class="align-center" src="../_images/nv_fusion_streaming_instance_latency.png" />
+<p>At 10,000 rounds, increasing from one to eight instances raised p99 tail
+latency by 1.23x at distance 5, 1.58x at distance 7, and 1.35x at distance 13.
+These results include both reduced per-instance thread pools and contention
+for the shared CPU memory system.</p>
+</section>
+<section id="see-also">
+<h2>See Also<a class="headerlink" href="#see-also" title="Permalink to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="../api/qec/python_api.html#nv-fusion-decoder-api-python"><span class="std std-ref">NVIDIA Fusion Decoder API</span></a> – decoder
+behavior, schedule selection, parameters, and Python API</p></li>
+<li><p><a class="reference internal" href="../api/qec/cpp_api.html#nv-fusion-decoder-api-cpp"><span class="std std-ref">NVIDIA Fusion Decoder C++ API</span></a></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">benchmarks/qec/nv_fusion_latency/README.md</span></code> – commands and plotting
+instructions used for this study</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="nv_qldpc_minllr_osd_user_guide.html" class="btn btn-neutral float-left" title="Using Min-LLR OSD Initialization with BP+OSD" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../api/core/cpp_api.html" class="btn btn-neutral float-right" title="CUDA-Q QEC Namespaces and Core Library C++ API" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA Corporation &amp; Affiliates.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(false);
+      });
+  </script>  
+
+  <style>
+  a:link, a:visited {
+    color: #76b900;
+  }
+
+  a:hover {
+    color: #8c0;
+  }
+
+  .rst-content dl:not(.docutils) dt {
+    background: rgba(118, 185, 0, 0.1);
+    color: rgba(59,93,0,1);
+    border-top: solid 3px rgba(59,93,0,1);
+  }
+  </style>
+  
+
+</body>
+</html>
