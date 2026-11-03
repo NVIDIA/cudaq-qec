@@ -3,10 +3,15 @@
 Deploying the Decoding Server with Docker
 =========================================
 
-The CUDA-Q QEC decoding server runs classical decoders independently of the
-program controlling a quantum processor (QPU). A runtime sends measurements to
-the server and receives predicted logical corrections. The runtime can be
-CUDA-Q or a third-party control system that implements the server protocol.
+The CUDA-Q QEC decoding server runs the decoding pipeline defined by a YAML
+configuration independently of the program controlling a quantum processor
+(QPU). A runtime sends measurements to the server and receives predicted logical
+corrections. The runtime can be CUDA-Q or a third-party control system that
+implements the server protocol.
+
+The configuration selects a decoder or a task graph of processing nodes.
+Decoder plugins add decoding algorithms; task-graph node plugins add node types.
+A task graph can use both built-in nodes and plugin-provided nodes and decoders.
 
 This page shows how to use the **prebuilt Docker package**. You never build the
 server. The playback examples run without a QPU. The CUDA-Q examples compile
@@ -16,11 +21,12 @@ Workflow at a glance
 --------------------
 
 .. figure:: ../../_static/decoding-server-workflow.svg
-   :alt: Prepare decoder YAML, load it into the server, then exchange measurement requests and logical correction bits with an application or playback client.
+   :alt: Load the YAML configuration into the decoding server to initialize the configured decoding pipeline, then exchange measurement requests and logical corrections with a client over the configured transport.
    :width: 100%
 
    Configuration happens before the run. Measurements and corrections flow
-   between the client and server during each shot.
+   between the client and server during each shot. Available transports depend
+   on the installed package and dispatch mode.
 
 1. **Prepare the configuration.** For supported surface-code A/B experiments,
    use `Generate a memory-experiment configuration`_. Otherwise, prepare a model
@@ -318,7 +324,7 @@ preparation basis and stabilizer circuit, not just these widths; do not submit
 already-formed detector bits in place of measurements.
 
 In a CUDA-Q kernel, use ``enqueue_syndromes_mapped`` to select the mapping ID;
-see :doc:`/api/qec/cpp_realtime_decoding_api`. For third-party clients, see the
+see :ref:`C++ realtime decoding API <cpp_realtime_decoding_api>`. For third-party clients, see the
 current `Decoding Server Message Format <https://github.com/NVIDIA/cudaq-qec/blob/main/libs/qec/tools/decoding-server/MESSAGE_FORMAT.md>`__.
 Match those interfaces to your server package's version; the older pinned
 references below describe its fixed-shot clients.
