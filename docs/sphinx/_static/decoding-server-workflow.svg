@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600" role="img" aria-labelledby="title description">
   <title id="title">Prepare a configuration, then run decoding shots</title>
-  <desc id="description">Before an experiment, use the memory-experiment generator for supported surface-code A/B graphs, or prepare circuit-specific YAML for other experiments. Load that YAML into the decoding server and wait for READY. During each shot, an application or playback client sends reset, measurements and correction requests over the configured transport: UDP, CPU RoCE or GPU RoCE, subject to package and dispatch support. The server runs the configured decoding pipeline and returns logical correction bits; the application interprets or applies them. For generated A/B graphs, send BULK measurement rounds followed by FINAL readout before requesting corrections.</desc>
+  <desc id="description">Before an experiment, use the memory-experiment generator for supported surface-code memory experiments, or prepare circuit-specific YAML for other experiments. Load that YAML into the decoding server and wait for READY. During each shot, an application or playback client sends reset, measurements and correction requests over the configured transport: UDP, CPU RoCE or GPU RoCE, subject to package and dispatch support. The server runs the configured decoding pipeline and returns logical correction bits; the application interprets or applies them. For the generated memory example, send BULK measurement rounds followed by FINAL readout before requesting corrections.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#687580"/>
@@ -35,7 +35,7 @@
 
   <text class="heading prepare-heading" x="24" y="31">1. Prepare before the experiment</text>
   <rect class="preparation" x="24" y="56" width="348" height="92" rx="8"/>
-  <text class="node-title" x="198" y="86">Surface-code memory / A/B</text>
+  <text class="node-title" x="198" y="86">Surface-code memory</text>
   <text class="label" x="198" y="118">memory-experiment-generator</text>
   <rect class="preparation" x="428" y="56" width="348" height="92" rx="8"/>
   <text class="node-title" x="602" y="86">Other supported experiments</text>
@@ -67,5 +67,5 @@
   <text class="label" x="174" y="572">QPU / simulator / recorded data</text>
   <path class="edge" d="M 174 548 V 501"/>
   <text class="label" x="626" y="549">reset → measurements → read</text>
-  <text class="label" x="626" y="578">A/B: BULK rounds → FINAL readout</text>
+  <text class="label" x="626" y="578">Mapped inputs: BULK → FINAL</text>
 </svg>

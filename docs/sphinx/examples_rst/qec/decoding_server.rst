@@ -26,14 +26,15 @@ Workflow at a glance
    between the client and server during each shot. Available transports depend
    on the installed package and dispatch mode.
 
-1. **Prepare the configuration.** For supported surface-code A/B experiments,
+1. **Prepare the configuration.** For supported surface-code memory experiments,
    use `Generate a memory-experiment configuration`_. Otherwise, prepare a model
    for the exact circuit. The YAML identifies the decoder, measurement mapping
    and observables.
 2. **Start the server.** Load that YAML and wait for
    ``QEC_DECODING_SERVER_READY`` before sending requests.
-3. **Send measurements and read the correction.** Reset the decoder, send measurements in order
-   (including FINAL readout for generated A/B graphs), then request corrections.
+3. **Send measurements and read the correction.** Reset the decoder, send
+   measurements in the configured order, including any required final readout,
+   then request corrections.
    An enqueue acknowledgement is not a completed decode. Apply the returned
    logical flip bits to the raw logical readout once, and check the result.
 
@@ -84,8 +85,8 @@ Create the shared run directory and its memory-experiment subdirectory
    cd "$QEC_RUN_DIR"
 
 All configurations, schedules, compiled clients and models are stored under
-``QEC_RUN_DIR``. The small configuration and schedule files are shown inline
-in each example. A source checkout is not required.
+``QEC_RUN_DIR``. The playback schedule is shown inline below. A source checkout
+is not required.
 
 Open the decoding-server container
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -123,7 +124,8 @@ Generate a memory-experiment configuration
 ------------------------------------------
 
 ``memory-experiment-generator`` prepares YAML for **surface-code memory
-experiments using the A/B parallel-window task graph**. It is not a general
+experiments using a parallel-window task graph**. This graph uses two
+interleaved window families, A and B. It is not a general
 configuration generator for every code, circuit or decoder. Its model profiles
 are:
 
@@ -181,6 +183,8 @@ This example uses the software playback emulator as the client, so no QPU is
 required. Real QPU and CUDA-Q clients send measurements and correction requests
 directly; they do not need a playback schedule. See
 `Send the experiment's measurements`_ for that workflow.
+For schedule syntax, CLI and Python entry points, and source and session
+configuration, see :doc:`Playback Emulator <playback_emulator>`.
 
 In this container terminal, start the CPU PyMatching server using the generated
 file. Leave it running in the foreground:
@@ -257,75 +261,10 @@ For FPGA or third-party producers, use `Integrate a third-party runtime`_ and
 :doc:`realtime_decoding_demo` for transport setup. The YAML does not set up the
 NIC, load FPGA firmware or adapt a producer's measurement layout.
 
-Playback emulator
------------------
-
-The playback emulator replaces the runtime and QPU with a schedule of decoder
-calls. It still sends those calls to the **separate packaged decoding server**.
-Schedule files are emulator inputs, not a requirement for other server clients.
-The following examples select the UDP backend. Selecting ``inproc`` would run
-the decoder inside the emulator and would not test the server.
-
-A schedule line contains a trigger (when to send), an operation, and optional
-``key=value`` arguments. In this page's schedules, ``0 reset`` resets at tick zero;
-``1 stream source=0b00000000 rounds=26 every=1`` starts at tick one and sends
-26 rounds one tick apart. ``-`` sends immediately after the previous event
-finishes sending its requests; it does not wait for their replies.
-``get_corrections 0 return_size=1`` also supplies an expected correction bit,
-``0``. These walkthroughs demonstrate the CLI; they are not a complete schedule
-grammar or Python API reference.
-
-Check connectivity first
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-Run this CPU-only check before preparing a model. It uses a synthetic three-bit
-identity mapping with ``multi_error_lut``, not a quantum-code experiment.
-
-Save this configuration as ``$QEC_RUN_DIR/config.yaml``:
-
-.. literalinclude:: ../../examples/qec/decoding_server/config.yaml
-   :language: yaml
-   :caption: config.yaml
-
-Save this schedule as ``$QEC_RUN_DIR/schedule.txt``. It resets decoder 0, sends
-``010``, then reads three correction bits:
-
-.. literalinclude:: ../../examples/qec/decoding_server/schedule.txt
-   :language: text
-   :caption: schedule.txt
-
-In a container shell at the shared run directory, start the server:
-
-.. code-block:: bash
-
-   cd "$QEC_RUN_DIR"
-   decoding_server \
-     --config=config.yaml --transport=udp --port=50000 --timeout=3600
-
-Wait for ``QEC_DECODING_SERVER_READY`` and ``ring0=50000``. In a second
-container shell at the same directory, run the packaged playback emulator:
-
-.. code-block:: bash
-
-   cd "$QEC_RUN_DIR"
-   playback-emulator \
-     --config=config.yaml --schedule=schedule.txt \
-     --backend=udp --udp-endpoint=0:127.0.0.1:50000 --tick=1ms \
-     --out=connectivity.csv
-
-The correction row in ``connectivity.csv`` must contain ``status=0``,
-``read_completed=1``, ``correction_bits=010`` and ``correction_mismatch=0``.
-Stop the server with Ctrl+C before starting another example.
-The CSV remains in the shared run directory. Use a new output filename for
-each run to preserve earlier results.
-
-For the packaged emulator's schedule, source, and session options, run
-``playback-emulator --help`` inside the container.
-
 .. _decoding-server-color-code:
 
 Color-code-enabled AI decoder
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+-----------------------------
 
 The server supports color-code AI predecoding through ``trt_decoder`` using
 a matching exported ONNX model and circuit-specific YAML configuration.
@@ -447,7 +386,7 @@ line ``QEC_DECODING_SERVER_DECODER_STATS id=0`` for ``decodes=100`` and
 The client counter alone is not proof of server routing; check both logs.
 
 These compiled-client examples cover fixed-duration shots. For generated
-streaming A/B graphs, use `Generate a memory-experiment configuration`_ rather
+memory experiments, use `Generate a memory-experiment configuration`_ rather
 than substituting a new YAML into these fixed-model clients. NVIDIA qLDPC and
 NV-Fusion require their corresponding plugins in the release image.
 Surface-code Ising requires its own model and measurement contract. See
@@ -473,8 +412,8 @@ The client workflow is:
 2. Wait for server readiness, then call ``reset_decoder`` before each independent
    experiment.
 3. Send the configured measurements through ``enqueue_syndromes`` or the mapped
-   enqueue API. Generated A/B configurations use BULK mapping ``0`` followed by
-   FINAL readout mapping ``1``.
+   enqueue API. Use the mapping IDs declared in the YAML; a mapping marked
+   ``type: final`` closes the shot.
 4. Call ``get_corrections`` and use the returned logical flip bits to correct the
    raw logical readout once. An enqueue acknowledgement is not the correction;
    ``NOT_READY`` means the correction is not available yet.
@@ -521,7 +460,7 @@ Troubleshooting
        development image, an SDK archive or a decoders-only installation.
    * - Generated configuration is rejected by the server
      - Use the same image for generation and serving. Check the selected
-       plugin, its required arguments and its support for the A/B windows.
+       plugin, its required arguments and its support for the generated model.
    * - No final correction or incorrect logical result
      - Check the decoder ID, raw measurement order and FINAL mapping. Send
        the data readout, then apply the returned correction exactly once.
@@ -530,7 +469,8 @@ See also
 --------
 
 * :doc:`/components/qec/realtime_decoding`: decoding concepts and configuration.
-* :doc:`decoding_task_graph`: graph construction, A/B windows and asynchronous execution.
+* :doc:`decoding_task_graph`: graph construction and execution.
+* :doc:`playback_emulator`: schedule syntax, CLI and Python interfaces, sources and sessions.
 * :doc:`realtime_decoding_demo`: surface-code and real FPGA client examples.
 * :doc:`color_code_demo`: color-code accuracy and performance studies.
 * :doc:`/components/qec/decoders`: decoder capabilities and API references.
