@@ -60,6 +60,16 @@ that do not need it simply do not wait.
 Kernel API: `void enqueue_syndromes(uint64_t decoder_id, const std::vector<measure_result>& syndromes, uint64_t tag)`.
 The wrapper emits the on-wire order `(decoder_id, counter = tag, syndrome_mapping_id = 0, syndrome_bits)`.
 
+To select another configured mapping, use
+`enqueue_syndromes_mapped(decoder_id, syndromes, tag, syndrome_mapping_id)`.
+It uses the same RPC function ID and payload layout; the mapping ID selects a
+row in the server configuration's `syndrome_mapping` table. A row with
+`type: final` marks the terminal readout and ends the shot. The memory-experiment
+generator emits mapping ID `0` for BULK and `1` for FINAL; other configurations
+may assign different IDs. The `counter`/`tag` does not select a mapping or end
+a shot. A configuration without explicit mappings accepts the default
+pass-through BULK mapping, ID `0`.
+
 Schema: `args = { INT64, INT64, INT64, BIT_PACKED }`, no results.
 
 `N` = syndrome bits, `B = ceil(N/8)`:
@@ -69,7 +79,7 @@ Offset       | Size | Field
 -------------+------+---------------------------------------------------
 24 .. 31     | 8    | decoder_id
 32 .. 39     | 8    | counter             application breadcrumb (`tag`)
-40 .. 47     | 8    | syndrome_mapping_id must be 0
+40 .. 47     | 8    | syndrome_mapping_id configured mapping row ID
 48 .. 55     | 8    | element count == N  (the vector's own prefix)
 56 .. 56+B-1 | B    | syndrome bits       LSB-first
 ```
@@ -79,7 +89,7 @@ Status:
 | Condition | `status` |
 |---|---|
 | Accepted (not necessarily decoded) | `OK` |
-| `arg_len < 32 + B`, `N == 0`, `N > 2^20`, or `syndrome_mapping_id != 0` | `BAD_REQUEST`, session latched `failed` |
+| `arg_len < 32 + B`, `N == 0`, `N > 2^20`, or mapping ID not configured | `BAD_REQUEST`, session latched `failed` |
 
 A decoder-side failure after acceptance cannot be reported here. The session
 latches `failed` and the next `get_corrections` returns `INTERNAL_ERROR`; only
