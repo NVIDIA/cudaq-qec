@@ -155,16 +155,18 @@ public:
 
   /// Physical rounds covered by a successfully finalized frame, when known.
   /// Unknown-length consumers cannot infer this from a template's byte width.
-  /// Return no value before finalization or after resetting the shot.
+  /// Return no value before finalization or after resetting the shot. A peek
+  /// that ends a complete shot finalizes it, and a streaming task graph then
+  /// ends the shot there.
   virtual std::optional<std::uint64_t> finalized_round_count() const {
     return std::nullopt;
   }
 
   /// Rounds of the active shot, from its first, whose corrections are
-  /// committed, when known. peek_obs_corrections() then holds exactly those
-  /// rounds' corrections, none of a later round's. The count never
-  /// decreases within a shot, and is 0 once the shot ends or is reset. A
-  /// streaming task graph publishes a provisional frame only when it grows;
+  /// committed, when known. peek_obs_corrections() then holds those rounds'
+  /// corrections in full, and may hold some of a later round's. The count
+  /// never decreases within a shot, and is 0 once the shot ends or is reset.
+  /// A streaming task graph publishes a provisional frame whenever it grows;
   /// without it, it claims no rounds before the shot ends.
   virtual std::optional<std::uint64_t> committed_round_count() const {
     return std::nullopt;

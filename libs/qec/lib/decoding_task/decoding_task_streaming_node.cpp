@@ -123,22 +123,37 @@ streaming_decoder_node::streaming_decoder_node(
 // a round, and may be handed a null buffer.
 bool streaming_decoder_node::enqueue(const uint8_t *msyn, std::size_t len,
                                      round_type type) {
+  bool fired = false;                  // whether the decoder reports a decode
+  std::optional<std::uint64_t> sealed; // rounds of a shot a peek ended
   if (len == 0)
     return false;
   // A tagged shot ends where the decoder says, not where it is metered.
   untagged_fill_ = 0;
-  if (!dec_->enqueue_syndrome(msyn, len, type) ||
-      (type != round_type::FINAL && !commits_more())) {
+  fired = dec_->enqueue_syndrome(msyn, len, type);
+  // A provider's provisional frame publishes when it commits more rounds.
+  if (!(type == round_type::FINAL || !correction_provider_ ? fired
+                                                           : commits_more())) {
     pending_inner_input_ = true;
     return false;
   }
+  if (type == round_type::FINAL || !correction_provider_) {
+    capture_inner_corrections(type == round_type::FINAL);
+    pending_inner_input_ = false;
+    return true;
+  }
 
-  capture_inner_corrections(type == round_type::FINAL);
-  // A provisional publication is not the end of the shot. Keep a final flush
-  // pending, for a session that closes without FINAL.
-  pending_inner_input_ = correction_provider_ && type != round_type::FINAL;
+  publish_inner_frame(correction_provider_->peek_obs_corrections());
+  // A shot complete without FINAL may end at the peek, and the stream
+  // continues after it.
+  sealed = correction_provider_->finalized_round_count();
+  record_coverage(sealed.has_value(), sealed);
+  if (sealed)
+    completed_rounds_ += *sealed;
+  // Otherwise keep a final flush pending, for a session that closes without
+  // FINAL.
+  pending_inner_input_ = !sealed;
   return true;
-}
+} // end - enqueue()
 
 // Forward an untagged chunk as one, keeping the decoder's legacy contract: it
 // alone ends its fixed-length shot, and the legacy read seals a completed one,
@@ -149,13 +164,15 @@ bool streaming_decoder_node::enqueue(const uint8_t *msyn, std::size_t len,
 bool streaming_decoder_node::enqueue_untagged(const uint8_t *msyn,
                                               std::size_t len) {
   bool shot_end = false;
+  bool fired = false; // whether the decoder reports a decode
   if (len == 0)
     return false;
   untagged_fill_ += len;
   shot_end = untagged_fill_ >= num_msyn_per_decode();
   if (shot_end)
     untagged_fill_ = 0;
-  if (!dec_->enqueue_syndrome(msyn, len) || (!shot_end && !commits_more())) {
+  fired = dec_->enqueue_syndrome(msyn, len);
+  if (!(shot_end || !correction_provider_ ? fired : commits_more())) {
     // A shot that ends unpublished leaves the next shot's commits its own.
     if (shot_end)
       shot_committed_ = 0;
@@ -183,11 +200,10 @@ bool streaming_decoder_node::enqueue_untagged(const uint8_t *msyn,
   return true;
 } // end - enqueue_untagged()
 
-// A provider's provisional frame publishes only once it commits more rounds
-// of the shot than its node has covered; without commit progress, never
-// before the shot ends. Any other decoder's publishes whenever it fires.
+// Whether a provider commits more rounds of the shot than its node has
+// covered; without commit progress, never.
 bool streaming_decoder_node::commits_more() const {
-  return !correction_provider_ ||
+  return correction_provider_ &&
          correction_provider_->committed_round_count().value_or(0) >
              shot_committed_;
 }

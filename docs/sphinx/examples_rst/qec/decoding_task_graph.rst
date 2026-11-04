@@ -462,13 +462,14 @@ streaming recipe or a fixed-size window, rather than a full-shot matrix model.
 
 A decoder that ends its own shots (``streaming_correction_provider``) reports
 what it has committed rather than following the node's schedule. Its
-provisional frames publish only when ``committed_round_count()`` grows, and
+provisional frames publish whenever ``committed_round_count()`` grows, and
 each covers the shot's rounds committed so far, from where the value was last
 consumed. A decoder that does not report the count publishes nothing before
 FINAL. FINAL covers the rounds ``finalized_round_count()`` reports; without
 it, only the rounds already committed, so coverage never claims a round past
-the shot. Nodes combined into one output cover the rounds all of them have
-committed.
+the shot. A shot complete without FINAL, which a peek ends, covers the rounds
+``finalized_round_count()`` then reports, and the stream continues. Nodes
+combined into one output cover the rounds all of them have committed.
 
 .. code-block:: yaml
 

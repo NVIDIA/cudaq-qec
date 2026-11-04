@@ -1451,18 +1451,96 @@ private:
 
 // The probe above, reporting its committed rounds: every round taken but the
 // last, whose parity commits with the next, less @p lag more, so that it
-// reports fewer than it has committed.
+// reports fewer than it has committed. Unless @p fires, a tagged round
+// reports a decode only at FINAL.
 class committing_round_probe_decoder final
     : public unequal_round_probe_decoder {
 public:
-  committing_round_probe_decoder(std::size_t width, std::uint64_t lag = 0)
-      : unequal_round_probe_decoder(width, /*count_final=*/true), lag_(lag) {}
+  committing_round_probe_decoder(std::size_t width, std::uint64_t lag = 0,
+                                 bool fires = true)
+      : unequal_round_probe_decoder(width, /*count_final=*/true), lag_(lag),
+        fires_(fires) {}
+  using unequal_round_probe_decoder::enqueue_syndrome;
+  bool enqueue_syndrome(const uint8_t *input, std::size_t length,
+                        round_type type) override {
+    const bool fired =
+        unequal_round_probe_decoder::enqueue_syndrome(input, length, type);
+    return fired && (fires_ || type == round_type::FINAL);
+  }
   std::optional<std::uint64_t> committed_round_count() const override {
     return rounds_ > lag_ + 1 ? rounds_ - lag_ - 1 : 0;
   }
 
 private:
   std::uint64_t lag_ = 0;
+  bool fires_ = true;
+};
+
+// A decoder whose tagged shot is complete at the template's 4 rounds without
+// FINAL, as one of fixed length is: it reports a decode and commits them all,
+// and a peek then ends the shot, which finalized_round_count() reports.
+class fixed_shot_probe_decoder final : public decoder,
+                                       public streaming_correction_provider {
+public:
+  explicit fixed_shot_probe_decoder(std::size_t width)
+      : decoder(decoder_init(sparse_binary_matrix::from_nested_csr(
+                                 4, 1, {{0}, {0}, {0}, {0}}),
+                             sparse_binary_matrix::from_nested_csr(1, 1, {{0}}),
+                             {},
+                             sparse_binary_matrix::from_nested_csr(
+                                 4, width, {{0}, {1}, {2}, {3}})),
+                decode_result_type::observables) {}
+
+  decoder_result decode(const std::vector<float_t> &) override {
+    return decoder_result{true, {0}};
+  }
+  bool enqueue_syndrome(const uint8_t *, std::size_t) override { return false; }
+  bool enqueue_syndrome(const uint8_t *input, std::size_t length,
+                        round_type type) override {
+    sealed_.reset();
+    for (std::size_t i = 0; i < length; ++i)
+      pending_ ^= input[i];
+    ++rounds_;
+    if (type == round_type::FINAL)
+      seal();
+    return type == round_type::FINAL || rounds_ == shot_rounds;
+  }
+  const uint8_t *get_obs_corrections() const override { return frame_.data(); }
+  const uint8_t *peek_obs_corrections() const override {
+    if (rounds_ == shot_rounds)
+      seal();
+    return frame_.data();
+  }
+  const uint8_t *finalize_obs_corrections() override {
+    if (rounds_)
+      seal();
+    return frame_.data();
+  }
+  std::optional<std::uint64_t> finalized_round_count() const override {
+    return sealed_;
+  }
+  std::optional<std::uint64_t> committed_round_count() const override {
+    return rounds_ == shot_rounds ? rounds_ : 0;
+  }
+  void clear_corrections() override { frame_[0] = 0; }
+  void reset_decoder() override {
+    frame_[0] = pending_ = 0;
+    rounds_ = 0;
+    sealed_.reset();
+  }
+
+private:
+  static constexpr std::uint64_t shot_rounds = 4; // the template's
+  void seal() const {
+    frame_[0] ^= pending_;
+    pending_ = 0;
+    sealed_ = rounds_;
+    rounds_ = 0;
+  }
+  mutable std::array<uint8_t, 1> frame_{0};
+  mutable uint8_t pending_ = 0;
+  mutable std::uint64_t rounds_ = 0;
+  mutable std::optional<std::uint64_t> sealed_;
 };
 
 // Rounds 1, 3, 3 and 4 measurements wide: 11 measurements, which rounds of
@@ -1652,41 +1730,70 @@ static uint8_t enqueue_probe_round(decoding_task_graph &graph, std::size_t r,
 
 // A decoder reporting its commit progress has each provisional publication
 // cover the rounds committed so far, and its corrections are theirs: on its
-// schedule (widths 1, 3, 3, 5) as without one (1, 3, 3, 4). FINAL covers the
-// rounds the decoder reports.
+// schedule (widths 1, 3, 3, 5) as without one (1, 3, 3, 4), whether or not
+// its rounds report a decode. FINAL covers the rounds the decoder reports.
 TEST(DecodingTaskGraph, StreamingNodeCoversOnlyItsCommittedRounds) {
   constexpr std::size_t rounds = 6; // longer than the template's 4
+  for (const auto widths :
+       {std::array<uint64_t, 4>{1, 3, 3, 5}, unequal_widths})
+    for (const bool async : {false, true})
+      for (const bool fires : {true, false}) {
+        const auto width = widths[0] + widths[1] + widths[2] + widths[3];
+        auto graph = make_unequal_round_graph(
+            widths, async, true,
+            std::make_unique<committing_round_probe_decoder>(width, 0, fires));
+        std::vector<uint8_t> parity(rounds + 1, 0); // of the rounds before r
+        SCOPED_TRACE(::testing::Message() << "width=" << width << " async="
+                                          << async << " fires=" << fires);
+        for (std::size_t r = 0; r < rounds; ++r) {
+          const bool last = r + 1 == rounds;
+          parity[r + 1] = parity[r] ^ enqueue_probe_round(*graph, r, last);
+          if (last)
+            break;
+          const auto &result = graph->streaming_result();
+          SCOPED_TRACE(r);
+          // Round r commits with round r + 1, which publishes then alone.
+          EXPECT_EQ(result.outputs[0].generation, r);
+          EXPECT_EQ(result.outputs[0].coverage_begin_round, 0u);
+          EXPECT_EQ(result.outputs[0].coverage_end_round, r);
+          EXPECT_EQ(graph->get_obs_corrections()[0], parity[r]);
+          EXPECT_NE(result.status, task_graph_streaming_status::complete);
+        } // end - for(r)
+        const auto &result = graph->streaming_result();
+        EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+        EXPECT_EQ(result.outputs[0].coverage_begin_round, 0u);
+        EXPECT_EQ(result.outputs[0].coverage_end_round, rounds);
+        EXPECT_EQ(graph->get_obs_corrections()[0], parity[rounds]);
+      } // end - for(fires)
+} // end - TEST(DecodingTaskGraph, StreamingNodeCoversOnlyItsCommittedRounds)
+
+// A tagged shot complete without FINAL ends at the peek that publishes it,
+// covering its rounds, and the stream continues: each shot covers the next
+// four rounds, its corrections its own.
+TEST(DecodingTaskGraph, StreamingNodeEndsAShotItsPeekEnds) {
+  constexpr std::size_t shot_rounds = 4; // the template's
   for (const auto widths :
        {std::array<uint64_t, 4>{1, 3, 3, 5}, unequal_widths})
     for (const bool async : {false, true}) {
       const auto width = widths[0] + widths[1] + widths[2] + widths[3];
       auto graph = make_unequal_round_graph(
           widths, async, true,
-          std::make_unique<committing_round_probe_decoder>(width));
-      std::vector<uint8_t> parity(rounds + 1, 0); // of the rounds before r
+          std::make_unique<fixed_shot_probe_decoder>(width));
       SCOPED_TRACE(::testing::Message()
                    << "width=" << width << " async=" << async);
-      for (std::size_t r = 0; r < rounds; ++r) {
-        const bool last = r + 1 == rounds;
-        parity[r + 1] = parity[r] ^ enqueue_probe_round(*graph, r, last);
-        if (last)
-          break;
-        const auto &result = graph->streaming_result();
-        SCOPED_TRACE(r);
-        // Round r commits with round r + 1, which publishes then alone.
-        EXPECT_EQ(result.outputs[0].generation, r);
-        EXPECT_EQ(result.outputs[0].coverage_begin_round, 0u);
-        EXPECT_EQ(result.outputs[0].coverage_end_round, r);
-        EXPECT_EQ(graph->get_obs_corrections()[0], parity[r]);
-        EXPECT_NE(result.status, task_graph_streaming_status::complete);
-      } // end - for(r)
-      const auto &result = graph->streaming_result();
-      EXPECT_EQ(result.status, task_graph_streaming_status::complete);
-      EXPECT_EQ(result.outputs[0].coverage_begin_round, 0u);
-      EXPECT_EQ(result.outputs[0].coverage_end_round, rounds);
-      EXPECT_EQ(graph->get_obs_corrections()[0], parity[rounds]);
+      for (std::size_t shot = 0; shot < 3; ++shot) {
+        uint8_t parity = 0;
+        SCOPED_TRACE(shot);
+        for (std::size_t r = 0; r < shot_rounds; ++r)
+          parity ^= enqueue_probe_round(*graph, r, false);
+        const auto &output = graph->streaming_result().outputs[0];
+        EXPECT_EQ(graph->get_obs_corrections()[0], parity);
+        EXPECT_EQ(output.coverage_begin_round, shot_rounds * shot);
+        EXPECT_EQ(output.coverage_end_round, shot_rounds * (shot + 1));
+        graph->clear_corrections();
+      }
     } // end - for(async)
-} // end - TEST(DecodingTaskGraph, StreamingNodeCoversOnlyItsCommittedRounds)
+} // end - TEST(DecodingTaskGraph, StreamingNodeEndsAShotItsPeekEnds)
 
 // Clearing the corrections mid-shot consumes the rounds they covered, so the
 // next publication covers only the rounds committed since, as the value
