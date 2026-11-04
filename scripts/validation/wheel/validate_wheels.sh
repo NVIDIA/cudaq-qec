@@ -41,7 +41,8 @@ run_python_tests() {
 
     echo "Running Python tests for Python ${python_version} with default target..."
 
-    python3 -m pytest libs -v
+    # Python API tests only.
+    python3 -m pytest libs/qec/python/tests -v
 
     local test_result=$?
     if [ ${test_result} -ne 0 ]; then

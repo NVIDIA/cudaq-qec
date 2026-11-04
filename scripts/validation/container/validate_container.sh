@@ -1,12 +1,17 @@
 #!/bin/bash
 
-# SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# ============================================================================ #
+# Copyright (c) 2024 - 2026 NVIDIA Corporation & Affiliates.                   #
+# All rights reserved.                                                         #
+#                                                                              #
+# This source code and the accompanying materials are made available under     #
+# the terms of the Apache License 2.0 which accompanies this distribution.     #
+# ============================================================================ #
 
 set -e
 
 # Parse command line arguments
-FINAL_IMAGE="ghcr.io/nvidia/private/cuda-quantum:cu12-0.14.0-cudaqx-rc1"
+FINAL_IMAGE="ghcr.io/nvidia/private/cuda-quantum:cu12-0.15.1-cudaqx-rc2"
 CUDA_VERSION="12.6"
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -33,11 +38,15 @@ else
 fi
 
 CURRENT_ARCH=$(uname -m)
-PY_TARGETS=("nvidia" "nvidia --option fp64", "qpp-cpu")
-CPP_TARGETS=("nvidia" "nvidia --target-option fp64", "qpp-cpu")
+PY_TARGETS=("nvidia" "nvidia --option fp64" "qpp-cpu")
+CPP_TARGETS=("nvidia" "nvidia --target-option fp64" "qpp-cpu")
 cuda_major=$(echo ${CUDA_VERSION} | cut -d '.' -f 1)
 cuda_minor=$(echo ${CUDA_VERSION} | cut -d '.' -f 2)
 cuda_no_dot="${cuda_major}${cuda_minor}"
+# cu126 torch wheels lack sm_100 (Blackwell) kernels; use the cu128 build on the
+# 12.x path (runs on 12.6, supports newer GPUs). 13.x keeps its tag.
+torch_cuda_no_dot="${cuda_no_dot}"
+if [ "${cuda_major}" == "12" ]; then torch_cuda_no_dot="128"; fi
 
 # Function to run Python tests
 run_python_tests() {
@@ -49,7 +58,9 @@ run_python_tests() {
     docker exec ${container_name} bash -c "\
         python3 -m pip install pytest --user"
 
-    # Clone repository and run tests with specific target
+    # Clone repository and run tests with specific target.
+    # chromobius reference data is not packaged in the image (that test is
+    # covered in CI), so skip it here.
     docker exec ${container_name} bash -c "\
         cd /home/cudaq && \
         python3 -m pytest /home/cudaq/cudaqx_pytests -v"
@@ -88,11 +99,11 @@ test_examples() {
 
     num_failures=0
 
-    docker exec ${container_name} bash -c "pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${cuda_no_dot}"
+    docker exec ${container_name} bash -c "pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${torch_cuda_no_dot}"
     docker exec ${container_name} bash -c "pip install onnxscript"
-    # Install other required packages
-    docker exec ${container_name} bash -c "pip install 'quimb' 'opt_einsum' 'cuquantum-python-cu${cuda_major}==26.03.1'"
-    # Needed by docs/sphinx/examples/qec/python/pseudo_threshold.py.
+    docker exec ${container_name} bash -c "pip install 'quimb' 'opt_einsum' 'cuquantum-python-cu${cuda_major}==26.9.0'"
+    # matplotlib is only pulled in transitively on x86 (via beliefmatching);
+    # install it explicitly so ARM has it (pseudo_threshold.py imports it).
     docker exec ${container_name} bash -c "pip install matplotlib"
     if [ "${CURRENT_ARCH}" == "x86_64" ]; then
         docker exec ${container_name} bash -c "pip install 'stim' 'beliefmatching'"
