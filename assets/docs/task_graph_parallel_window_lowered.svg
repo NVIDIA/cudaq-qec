@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300" font-family="Lato, 'Helvetica Neue', Arial, sans-serif">
-  <title>The nodes a parallel_window node builds: ingest feeds layers A and B, A hands corrections to B, and an xor sums both layers</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1070 390" width="1070" height="390" font-family="Lato, 'Helvetica Neue', Arial, sans-serif">
+  <title>The nodes a parallel_window node builds: ingest feeds layers A and B, A hands corrections to B, an xor sums both layers into the corrections, and a logical_readout node and an xor give the logical measurements</title>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
     </marker>
   </defs>
-  <rect width="900" height="300" fill="#ffffff"/>
+  <rect width="1070" height="390" fill="#ffffff"/>
 
   <!-- What the pattern builds -->
-  <rect x="182" y="14" width="566" height="272" rx="10" fill="none" stroke="#999" stroke-dasharray="6 4"/>
-  <text x="196" y="36" font-size="12" fill="#555">pw  (type: parallel_window)</text>
+  <rect x="182" y="14" width="706" height="362" rx="10" fill="none" stroke="#999" stroke-dasharray="6 4"/>
+  <text x="196" y="36" font-size="12" fill="#555">pw  (type: parallel_window, output: corrections_and_logical)</text>
 
   <g fill="none" stroke="#555" stroke-width="1.6" marker-end="url(#arrow)">
     <path d="M150,150 L198,150"/>
@@ -19,7 +19,12 @@
     <path d="M510,102 L510,196"/>
     <path d="M550,72 C590,72 585,138 618,138"/>
     <path d="M550,228 C590,228 585,162 618,162"/>
-    <path d="M720,150 L778,150"/>
+    <path d="M720,150 L898,150"/>
+    <!-- readout branch -->
+    <path d="M85,173 L85,328 L398,328"/>
+    <path d="M670,178 C670,250 700,288 738,290"/>
+    <path d="M550,328 C640,328 690,312 738,312"/>
+    <path d="M860,301 L898,301"/>
   </g>
   <g font-size="12" fill="#555">
     <text x="328" y="128">A</text>
@@ -30,6 +35,8 @@
     <text x="516" y="161">A[k] → B[k]</text>
     <text x="608" y="128">a</text>
     <text x="608" y="180">b</text>
+    <text x="726" y="282">a</text>
+    <text x="726" y="330">b</text>
   </g>
 
   <rect x="20" y="127" width="130" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
@@ -39,6 +46,8 @@
     <rect x="200" y="122" width="120" height="56" rx="6"/>
     <rect x="400" y="44" width="150" height="58" rx="6"/>
     <rect x="620" y="122" width="100" height="56" rx="6"/>
+    <rect x="400" y="300" width="150" height="56" rx="6"/>
+    <rect x="740" y="273" width="120" height="56" rx="6"/>
   </g>
   <rect x="400" y="198" width="150" height="58" rx="6" fill="#e8f0fa" stroke="#4f8fd6" stroke-width="1.6"/>
   <g text-anchor="middle" fill="#1a1a1a">
@@ -50,8 +59,14 @@
     <text x="475" y="240" font-size="12" fill="#555">decode_window</text>
     <text x="670" y="146" font-size="14" font-weight="bold">sum</text>
     <text x="670" y="164" font-size="12" fill="#555">xor</text>
+    <text x="475" y="324" font-size="14" font-weight="bold">readout</text>
+    <text x="475" y="342" font-size="12" fill="#555">logical_readout</text>
+    <text x="800" y="297" font-size="14" font-weight="bold">logical</text>
+    <text x="800" y="315" font-size="12" fill="#555">xor</text>
   </g>
 
-  <rect x="780" y="127" width="100" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
-  <text x="830" y="155" font-size="14" text-anchor="middle" fill="#1a1a1a">output</text>
+  <rect x="900" y="127" width="150" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
+  <text x="975" y="155" font-size="14" text-anchor="middle" fill="#1a1a1a">output.corrections</text>
+  <rect x="900" y="278" width="150" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
+  <text x="975" y="306" font-size="14" text-anchor="middle" fill="#1a1a1a">output.logical</text>
 </svg>

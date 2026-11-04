@@ -53,7 +53,8 @@ the model and a ``parallel_window`` configuration for you; see
 Configuration
 +++++++++++++
 
-This configuration decodes a distance-5 repetition-code memory experiment:
+This configuration decodes a distance-5 repetition-code memory experiment
+and returns both results, its corrections and its logical measurement:
 
 .. literalinclude:: ../../examples/qec/yaml/task_graph_parallel_window.yaml
    :language: yaml
@@ -73,8 +74,11 @@ This configuration decodes a distance-5 repetition-code memory experiment:
      - Rounds each B window corrects. Default:
        ``commit_rounds + 2 * buffer_rounds``.
    * - ``output``
-     - ``corrections``: the correction to each logical observable. Set it;
-       the default needs a logical readout in the model.
+     - ``corrections_and_logical``: the corrections and the logical
+       measurements (see :ref:`task_graph_logical_measurements`).
+       ``corrections``: the corrections only, which a client may consume
+       mid-shot. Required when the model has ``m2o_sparse``; without it, the
+       default is ``corrections``.
    * - ``inner``
      - The decoder every window uses, with its parameters. It must report the
        faults it finds, not only observable flips. Windows have parallel
@@ -143,7 +147,8 @@ The same graph, built with
 Decoding a shot
 +++++++++++++++
 
-Stream the shot one round at a time and tag the last round ``FINAL``:
+Stream the shot one round at a time and tag the last round, the data-qubit
+readout, ``FINAL``:
 
 .. tab:: Python
 
@@ -164,6 +169,11 @@ Stream the shot one round at a time and tag the last round ``FINAL``:
 
    after round 30: rounds [0, 15) committed
    corrections: [1]
+   logical measurements: [0]
+
+Data qubit 0 flipped, so the readout reads 1 and the correction flips it
+back: the logical measurement is 0. It is ready only after ``FINAL``, which
+also lets ``clear_corrections()`` start the next shot.
 
 * With ``async_streaming``, windows decode while later rounds arrive. Without
   it, each ``enqueue_syndrome`` call finishes its windows before it returns.
@@ -178,8 +188,9 @@ Serving with the decoding server
 
 .. image:: ../../../../assets/docs/task_graph_parallel_window_serving.svg
    :alt: A quantum kernel enqueues each round with syndrome_mapping row 0
-         (bulk) and the last round with row 1 (final), then reads corrections
-         back from the decoding server.
+         (bulk) and the last round with row 1 (final), then reads the
+         logical measurements or the corrections back from the decoding
+         server.
 
 The decoding server serves the configuration above as written. Three settings
 matter:
@@ -193,9 +204,14 @@ matter:
   ``device_graph``.
 
 The server logs a warning for a parallel-window decoder that breaks any of
-these. ``get_corrections`` returns the corrections committed since the last
-reset: up to the frontier mid-shot, and to the end of the shot after the
-``final`` round. See
+these.
+
+The kernel reads the results back with ``get_logical_measurements`` and
+``get_corrections``. A read with ``reset`` consumes the shot. With
+``corrections_and_logical``, that is possible only after the ``final`` round;
+before it, such a read is not ready. With ``output: corrections``, a client
+may reset mid-shot, and each read returns the corrections committed since the
+last. See
 :doc:`/components/qec/realtime_decoding` and the
 :ref:`realtime decoding API <python_realtime_decoding_api>`.
 
@@ -208,7 +224,9 @@ configuration above.
 .. image:: ../../../../assets/docs/task_graph_parallel_window_lowered.svg
    :alt: ingest feeds layer A and layer B. A hands corrections to B through
          its forward and backward ports, and an xor node, sum, adds both
-         layers' corrections for the output.
+         layers' corrections for the corrections output. A logical_readout
+         node, readout, reads the raw logical value, and an xor node,
+         logical, applies the corrections to it for the logical output.
 
 Written out node by node, the same graph is below. The keys of ``ingest``'s
 ``windows`` block are provisional.
@@ -229,6 +247,9 @@ windows themselves.
 * ``index_offset`` maps window indices: window ``k`` of the edge's
   destination reads window ``k + index_offset`` of its source. Here, B[k]
   receives A[k-1]'s ``forward`` corrections and A[k]'s ``backward`` ones.
+* ``readout`` and ``logical`` form the logical output; with
+  ``output: corrections`` the pattern leaves them out. See
+  :ref:`task_graph_logical_output`.
 
 Sharing data across decoders
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

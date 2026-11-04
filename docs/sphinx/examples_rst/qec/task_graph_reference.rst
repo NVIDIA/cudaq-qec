@@ -78,13 +78,12 @@ Streaming results in detail
 ``streaming_result()`` returns the values of every output with their
 progress:
 
-* ``status`` and ``closure``, per output and for the graph. With
-  ``async_streaming``, read ``closure`` per output: the graph's own
-  ``closure`` stays ``NOT_CHECKED``.
+* ``status`` and ``closure``, per output and for the graph.
 * ``coverage_begin_round`` and ``coverage_end_round`` per output: the rounds
   its latest update committed.
 * ``generation``: a counter that advances each time an output publishes. The
-  graph's generation advances once every output has. ``clear_corrections()``
+  graph's generation advances once every output but the logical one has.
+  ``clear_corrections()``
   keeps it, so use ``status``, not ``generation``, to decide whether a value
   can be read.
 * ``result_revision``: advances on any change of value or status.
@@ -107,7 +106,9 @@ output fed only by such nodes is *staged*: the graph holds each result until
 every earlier round is done, folds them in round order, and reports coverage
 from the frontier at the last ``clear_corrections()`` (round 0 in a new shot)
 to the current frontier. An output that mixes both kinds of node cannot
-stream; wire them to separate outputs.
+stream; wire them to separate outputs. Nodes that commit the same rounds,
+such as two ``parallel_window`` patterns, cannot share an output either;
+building the graph refuses them.
 
 Edge values
 +++++++++++
@@ -130,6 +131,37 @@ adds both answers:
      - {from: pre.residual, to: global}
      - {from: global, to: combine.b}
      - {from: combine, to: output}
+
+.. _task_graph_logical_output:
+
+Logical outputs
++++++++++++++++
+
+A ``logical_readout`` node reads the raw logical value through the model's
+``m2o_sparse``, and an ``xor`` applies the corrections to it. The output that
+the node reaches, whatever its name, is the graph's logical output:
+
+.. code-block:: yaml
+
+   nodes:
+     - {id: sw, type: sliding_window, inner: {type: pymatching}}
+     - {id: R, type: logical_readout}
+     - {id: L, type: xor}
+   edges:
+     - {from: measurements, to: sw}
+     - {from: measurements, to: R}
+     - {from: sw, to: output.corrections}
+     - {from: sw, to: L.a}
+     - {from: R, to: L.b}
+     - {from: L, to: output.logical}
+
+* A graph has at most one logical output, and needs a corrections output
+  beside it.
+* One ``logical_readout`` node reaches the logical output, and it reaches no
+  other output.
+* The node joins any stream, whatever the other nodes' schedules. Here the
+  corrections publish on the window's schedule, so the logical measurements
+  are released at ``FINAL``; see :ref:`task_graph_logical_measurements`.
 
 Native streaming nodes
 ++++++++++++++++++++++

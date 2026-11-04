@@ -4,9 +4,10 @@ Decoding Task Graphs
 --------------------
 
 A decoding task graph is a decoder pipeline. Measurements enter the graph,
-flow through its nodes, and leave as corrections to the logical observables.
-A node decodes, often by wrapping a decoder plugin such as PyMatching, or
-combines results; edges carry values between nodes.
+flow through its nodes, and leave as corrections to the logical observables,
+and, if the model reads them, as corrected logical measurements. A node
+decodes, often by wrapping a decoder plugin such as PyMatching, or combines
+results; edges carry values between nodes.
 
 .. image:: ../../../../assets/docs/task_graph_basics.svg
    :alt: Measurements feed two sliding-window decoder nodes, x and z, whose
@@ -182,6 +183,41 @@ A zero correction with status ``AVAILABLE`` is a real result. Synchronously,
 ``enqueue_syndrome`` also returns whether any node decoded; with
 ``async_streaming`` it returns ``False``, so read ``status`` instead.
 
+.. _task_graph_logical_measurements:
+
+Logical measurements
+++++++++++++++++++++
+
+A graph can return two results:
+
+* **Corrections**, the flips of the logical observables:
+  ``get_obs_corrections()``, ``run()`` and the decoding server's
+  ``get_corrections``.
+* **Logical measurements**, the raw logical readout with the corrections
+  applied: ``get_logical_measurements()`` and the server's
+  ``get_logical_measurements``.
+
+Logical measurements need a model that reads the observables, through
+``m2o_sparse`` (see :ref:`dyn_dem_example`), and a graph with a logical
+output. ``parallel_window`` wires one with
+``output: corrections_and_logical`` (see :doc:`task_graph_parallel_window`);
+other graphs wire a ``logical_readout`` node (see
+:ref:`task_graph_logical_output`).
+
+* A logical measurement is *released* once its readout has arrived and every
+  correction that can flip it is committed. A final readout is released at
+  ``FINAL``. A mid-circuit readout is released mid-shot when the corrections
+  are staged, as ``parallel_window``'s are; otherwise at ``FINAL``.
+* ``get_logical_measurements(first, count)`` returns ``None`` (C++:
+  ``nullptr``) until every measurement in the range is released.
+* The logical output is the last of ``streaming_result().outputs``, with a
+  ``released`` flag per measurement. It is not in ``output_names()``, and
+  ``get_num_logical_measurements()`` gives its width.
+* The logical measurements apply every correction of the shot, so the shot
+  can be consumed only after ``FINAL``: ``clear_corrections()`` raises before
+  then. ``reset_decoder()`` still abandons a shot.
+* ``run`` and ``run_batch`` return corrections only.
+
 Graphs of several nodes
 +++++++++++++++++++++++
 
@@ -270,6 +306,9 @@ Node kinds
    * - ``xor``
      - XORs its inputs: ports ``a`` and ``b``, or ``in_0`` to ``in_{N-1}``
        with ``num_inputs: N``.
+   * - ``logical_readout``
+     - Reads the raw logical value through the model's ``m2o_sparse``. See
+       :ref:`task_graph_logical_output`.
    * - ``predecoder``
      - Runs a predecoder and passes its residual detectors on through its
        ``residual`` port.

@@ -90,8 +90,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_ro("status", &task_graph_output_progress::status)
       .def_ro("closure", &task_graph_output_progress::closure)
       .def_ro("released", &task_graph_output_progress::released,
-              "Logical output only: 1 per bit once that logical measurement "
-              "is final; empty for a correction output.");
+              "For the logical output, 1 per bit once that logical "
+              "measurement is final; empty for a correction output.");
 
   nb::class_<task_graph_streaming_result>(mod, "TaskGraphStreamingResult")
       .def_ro("shot_epoch", &task_graph_streaming_result::shot_epoch)

@@ -19,11 +19,12 @@
 
 using namespace cudaq::qec;
 
-// A phase whose faults flip the rows each seam lists; observable 0 reads data
-// qubit 0.
+// A phase whose faults flip the rows each seam lists, and whose detectors
+// read the measurements D_sparse lists; observable 0 reads data qubit 0.
 static phase_spec_entry
 phase(const char *name, std::uint64_t num_faults,
-      std::vector<std::pair<seam_id, std::vector<std::int64_t>>> seams) {
+      std::vector<std::pair<seam_id, std::vector<std::int64_t>>> seams,
+      std::vector<std::int64_t> D_sparse) {
   phase_spec_entry entry;
   dem_chunk_spec spec;
   spec.num_faults = num_faults;
@@ -33,6 +34,7 @@ phase(const char *name, std::uint64_t num_faults,
     seam_entry.spec.H_sparse = std::move(rows);
     spec.seam_specs.push_back(std::move(seam_entry));
   }
+  spec.D_sparse = std::move(D_sparse);
   spec.O_sparse = {0, -1};
   spec.error_rates.assign(num_faults, 0.02);
   entry.id = seam_id{name};
@@ -42,19 +44,26 @@ phase(const char *name, std::uint64_t num_faults,
 
 int main() {
   // Faults 0-4 flip data qubits 0-4; faults 5-8 are errors in measuring checks
-  // 0-3. Check i reads data qubits i and i + 1.
+  // 0-3. Check i reads data qubits i and i + 1. The final round reads the
+  // data qubits.
+  const std::vector<std::pair<seam_id, std::vector<std::int64_t>>> checks{
+      {seam_name::prev_round,
+       {0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1, 3, 4, 8, -1}},
+      {seam_name::next_round, {5, -1, 6, -1, 7, -1, 8, -1}}};
   dem_chunks_spec model;
   model.seam = {seam_name::next_round, seam_name::prev_round};
+  model.measurements_per_round = 4; // one per check
   model.phases = {
-      phase("bulk", 9,
-            {{seam_name::prev_round,
-              {0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1, 3, 4, 8, -1}},
-             {seam_name::next_round, {5, -1, 6, -1, 7, -1, 8, -1}}}),
-      phase(
-          "final", 5,
-          {{seam_name::prev_round, {0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1}}}),
+      phase("init", 9, checks, {0, -1, 1, -1, 2, -1, 3, -1}),
+      phase("bulk", 9, checks, {0, 4, -1, 1, 5, -1, 2, 6, -1, 3, 7, -1}),
+      phase("final", 5,
+            {{seam_name::prev_round, {0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1}}},
+            {0, 4, 5, -1, 1, 5, 6, -1, 2, 6, 7, -1, 3, 7, 8, -1}),
   };
-  model.connections = {{seam_id{"bulk"}, seam_id{"bulk"}},
+  model.phases[2].spec.num_measurements = 5; // data qubits 0-4
+  model.phases[2].spec.m2o_sparse = {0, -1}; // observable 0 reads qubit 0
+  model.connections = {{seam_id{"init"}, seam_id{"bulk"}},
+                       {seam_id{"bulk"}, seam_id{"bulk"}},
                        {seam_id{"bulk"}, seam_id{"final"}}};
 
   // [Begin parallel_window]
@@ -65,7 +74,7 @@ int main() {
   nodes[0].node_params.insert("commit_rounds", std::size_t{3});
   nodes[0].node_params.insert("buffer_rounds", std::size_t{3});
   nodes[0].node_params.insert("gap_rounds", std::size_t{9});
-  nodes[0].node_params.insert("output", std::string{"corrections"});
+  nodes[0].node_params.insert("output", std::string{"corrections_and_logical"});
   nodes[0].max_in_flight = 4;
   nodes[0].decoder_type = "pymatching";
   nodes[0].params.insert("merge_strategy", std::string{"smallest_weight"});
@@ -79,15 +88,15 @@ int main() {
 
   // [Begin stream]
   // A 40-round shot in which data qubit 0 flips in round 10: from then on,
-  // check 0 reads 1. Stream one round per call and end the shot with FINAL.
+  // check 0 reads 1. Stream one round per call; the last, FINAL, reads the
+  // data qubits.
   const std::size_t rounds = 40;
   std::vector<std::uint8_t> syndrome(graph->get_num_msyn_per_round(), 0);
+  const std::vector<std::uint8_t> readout{1, 0, 0, 0, 0};
   graph->reset_decoder();
-  for (std::size_t r = 0; r < rounds; ++r) {
+  for (std::size_t r = 0; r + 1 < rounds; ++r) {
     syndrome[0] = r >= 10;
-    graph->enqueue_syndrome(syndrome.data(), syndrome.size(),
-                            r + 1 == rounds ? round_type::FINAL
-                                            : round_type::BULK);
+    graph->enqueue_syndrome(syndrome.data(), syndrome.size());
     if (r == 30) {
       // Mid-shot: the corrections cover rounds [0, frontier).
       const auto progress = graph->streaming_result().outputs.at(0);
@@ -96,8 +105,13 @@ int main() {
                 << progress.coverage_end_round << ") committed\n";
     }
   }
+  graph->enqueue_syndrome(readout.data(), readout.size(), round_type::FINAL);
+
   const std::uint8_t correction = graph->get_obs_corrections()[0];
+  const std::uint8_t logical = graph->get_logical_measurements()[0];
   std::cout << "corrections: [" << int(correction) << "]\n";
+  std::cout << "logical measurements: [" << int(logical) << "]\n";
+  graph->clear_corrections(); // start the next shot
   // [End stream]
-  return correction == 1 ? 0 : 1;
+  return correction == 1 && logical == 0 ? 0 : 1;
 }

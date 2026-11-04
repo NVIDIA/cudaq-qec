@@ -6687,24 +6687,34 @@ std::string docs_yaml(const std::string &name) {
 }
 
 // Streams a shot of @p rounds rounds of the docs' distance-5 repetition code
-// into @p graph, a round per call and the last FINAL, with data qubit
-// @p qubit flipped from round @p from on; returns its corrections.
-std::vector<std::uint8_t>
+// into @p graph, a round of checks per call and the last FINAL, with data
+// qubit @p qubit flipped from round @p from on; the last round reads the data
+// qubits. Returns its corrections and logical measurements.
+std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>>
 stream_rep5_shot(cudaq::qec::decoding_task_graph &graph, std::size_t rounds,
                  std::size_t qubit, std::size_t from) {
+  constexpr std::size_t data_qubits = 5; // the code's distance
   const std::size_t checks = graph.get_num_msyn_per_round();
   std::vector<std::uint8_t> round(checks, 0);
+  std::vector<std::uint8_t> readout(data_qubits, 0);
+  const std::uint8_t *corrections = nullptr;
+  const std::uint8_t *logical = nullptr;
   graph.reset_decoder();
-  for (std::size_t r = 0; r < rounds; ++r) {
+  for (std::size_t r = 0; r + 1 < rounds; ++r) {
     // Check i reads data qubits i and i + 1.
     for (std::size_t i = 0; i < checks; ++i)
       round[i] = r >= from && (qubit == i || qubit == i + 1);
-    graph.enqueue_syndrome(round.data(), round.size(),
-                           r + 1 == rounds ? cudaq::qec::round_type::FINAL
-                                           : cudaq::qec::round_type::BULK);
+    graph.enqueue_syndrome(round.data(), round.size());
   }
-  const auto *corrections = graph.get_obs_corrections();
-  return {corrections, corrections + graph.get_num_observables()};
+  readout[qubit] = 1;
+  graph.enqueue_syndrome(readout.data(), readout.size(),
+                         cudaq::qec::round_type::FINAL);
+  corrections = graph.get_obs_corrections();
+  logical = graph.get_logical_measurements();
+  if (!logical)
+    return {{corrections, corrections + graph.get_num_observables()}, {}};
+  return {{corrections, corrections + graph.get_num_observables()},
+          {logical, logical + graph.get_num_logical_measurements()}};
 } // end - stream_rep5_shot()
 
 } // namespace
@@ -6712,8 +6722,8 @@ stream_rep5_shot(cudaq::qec::decoding_task_graph &graph, std::size_t rounds,
 // The docs' parallel_window example and the same graph written out node by
 // node build the same windows and decode alike: every single data-qubit flip,
 // at the start, middle and end of shots of every length up to 40 rounds, gives
-// the correction the repetition code's observable needs. Both end shots
-// through a final syndrome_mapping row.
+// the correction the repetition code's observable needs, and the logical
+// measurement reads 0. Both end shots through a final syndrome_mapping row.
 TEST(DocsExamples, ParallelWindowYamlMatchesItsLowering) {
   namespace cfg = cudaq::qec::decoding::config;
   using cudaq::qec::decoding::host::build_task_graph;
@@ -6736,12 +6746,13 @@ TEST(DocsExamples, ParallelWindowYamlMatchesItsLowering) {
   auto by_hand = build_task_graph(lowered.decoders.at(0));
   ASSERT_TRUE(by_pattern->supports_streaming())
       << by_pattern->streaming_incompatibility_reason();
-  for (std::size_t rounds = 2; rounds <= 40; ++rounds)
+  for (std::size_t rounds = 3; rounds <= 40; ++rounds)
     for (const std::size_t from : {std::size_t{0}, rounds / 2, rounds - 1})
       for (std::size_t qubit = 0; qubit < 5; ++qubit) {
         SCOPED_TRACE("rounds " + std::to_string(rounds) + ", qubit " +
                      std::to_string(qubit) + " from " + std::to_string(from));
-        const std::vector<std::uint8_t> want{qubit == 0};
+        const std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>>
+            want{{qubit == 0}, {0}};
         EXPECT_EQ(stream_rep5_shot(*by_pattern, rounds, qubit, from), want);
         EXPECT_EQ(stream_rep5_shot(*by_hand, rounds, qubit, from), want);
       }

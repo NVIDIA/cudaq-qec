@@ -27,8 +27,8 @@ measurement errors:
 * ``phases`` lists each kind of round. ``num_faults`` and ``error_rates``
   give its faults and their probabilities, and ``O_sparse`` lists, for each
   logical observable, the faults that flip it.
-* ``connections`` order the phases. ``bulk`` follows itself, so it repeats;
-  ``final`` ends the shot.
+* ``connections`` order the phases. ``init`` starts the shot, ``bulk``
+  follows itself, so it repeats, and ``final`` ends the shot.
 * ``num_rounds`` sets the shot length for decoders that decode complete
   shots. Leave it out, as here, to stream shots of any length.
 
@@ -58,14 +58,21 @@ Measurements and readout
 
 By default, each round measures one value per detector, and a detector
 compares its measurement with the round before; in the first round, with
-zero. These optional fields change that:
+zero. The model above instead ends with a readout of the data qubits, which
+takes these optional fields:
 
-* ``D_sparse`` on every phase gives each detector's measurements explicitly,
-  from this round and the one before. Set ``measurements_per_round``, and
-  ``num_measurements`` on a phase whose round differs, such as a final
-  data-qubit readout.
-* ``m2o_sparse`` on the last phase lists, for each observable, the
-  measurements of that round whose parity is its raw value.
+* ``D_sparse`` on every phase lists each detector's measurements. Indices
+  count the previous round's measurements first, then this round's. The
+  first round has no previous round, so the model starts with an ``init``
+  phase.
+* ``measurements_per_round`` sets each round's measurement count, and
+  ``num_measurements`` a phase's own, such as ``final``'s five data qubits.
+* ``m2o_sparse`` lists, for each observable, the measurements of the phase's
+  round that it reads; a logical value is the parity of all its readouts.
+  Any phase but a repeating one may read observables, so a mid-circuit
+  readout can, too. No later phase may flip an observable it has read. Task
+  graphs use it to return logical measurements (see
+  :ref:`task_graph_logical_measurements`).
 * ``observable_names`` names the observables.
 
 Building a model in code
