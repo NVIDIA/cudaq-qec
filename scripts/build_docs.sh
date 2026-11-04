@@ -137,12 +137,14 @@ rm -rf sphinx/_mdgen/
 #                                  the documenting module; applies in all build modes
 #   _pycudaqx_qec_the_suffix_*   — internal pybind11 module name that doc_replacements
 #                                  in conf.py.in should have stripped from all output
+#   _qec_core.qecrt              — same, for the CUDA-Q-free extension module
 #
 # Exit codes: 13 = MagicMock, 14 = "alias of", 15 = internal pybind11 module name.
 invalid_html_checks=(
     "13|MagicMock|MagicMock references"
     "14|alias of|'alias of' references"
     "15|_pycudaqx_qec_the_suffix_matters|internal pybind11 module name"
+    "15|_qec_core.qecrt|internal nanobind module name"
 )
 
 for check in "${invalid_html_checks[@]}"; do

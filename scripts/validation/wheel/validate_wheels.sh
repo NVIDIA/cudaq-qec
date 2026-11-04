@@ -83,7 +83,8 @@ test_examples() {
         if [ "${cuda_major}" == "12" ]; then torch_cuda_no_dot="128"; fi
         pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu${torch_cuda_no_dot}
         # TensorRT supports CUDA 12+ on x86 and CUDA 13+ on ARM.
-        qec_extras="tensor_network_decoder"
+        # cudaq: CUDA-Q is an optional extra of the wheel and the tests need it.
+        qec_extras="cudaq,tensor_network_decoder"
         if [[ "$(uname -m)" == "x86_64" || "${cuda_major}" == "13" ]]; then
             qec_extras+=",trt_decoder"
             if [ "${cuda_major}" == "12" ]; then

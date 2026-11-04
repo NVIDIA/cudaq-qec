@@ -145,6 +145,7 @@ target_link_options(${DECODERS_LIBRARY_NAME} PRIVATE
   # cudaqx-core is linked into this DSO only; keep its symbols local so they
   # do not preempt libcudaq-xxx' tensor_impl registry in combined builds.
   $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-Wl,--exclude-libs,libcudaqx-core.a>
+  $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-Wl,--exclude-libs,libcudart_static.a>
 )
 
 add_subdirectory(decoders/plugins/example)
@@ -207,7 +208,10 @@ target_link_libraries(${DECODERS_LIBRARY_NAME}
     $<LINK_LIBRARY:WHOLE_ARCHIVE,${DEM_LIBRARY_NAME}>
     # decoder::get() consumes the "cuda_device_id" construction parameter
     # (validation via cudaGetDeviceCount + persistent cudaSetDevice pin).
-    CUDA::cudart
+    # Static so the python wheel's CUDA-Q-free half needs no CUDA runtime
+    # wheel; the symbols are kept local (see --exclude-libs above) so they
+    # never interpose on a shared libcudart loaded by CUDA-Q or TensorRT.
+    CUDA::cudart_static
     Threads::Threads
 )
 

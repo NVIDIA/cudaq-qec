@@ -157,6 +157,7 @@ htmlhelp_basename = 'cudaqxDoc'
 # implementation details that add noise to the documentation.
 doc_replacements = (
     ('_pycudaqx_qec_the_suffix_matters_cudaq_qec.qecrt.', ''),
+    ('_qec_core.qecrt.', ''),
     ('mlir._mlir_libs._quakeDialects.cudaq_runtime.', ''),
 )
 
@@ -185,7 +186,9 @@ def _fixup_class_modules():
     # both autoclass and autofunction produce clean output automatically.
     try:
         import cudaq_qec
-        _internal_prefix = 'cudaq_qec._pycudaqx'
+        # The shared qecrt submodule lives in the CUDA-Q-free _qec_core
+        # extension; the CUDA-Q extension binds into it as well.
+        _internal_prefix = ('cudaq_qec._pycudaqx', 'cudaq_qec._qec_core')
         for _name in dir(cudaq_qec):
             if _name.startswith('_'):
                 continue
@@ -307,6 +310,7 @@ nitpick_ignore = [
 # prefix via doc_replacements.
 nitpick_ignore_regex = [
     ('py:class', r'cudaq_qec\._pycudaqx_qec_the_suffix_matters_cudaq_qec\..*'),
+    ('py:class', r'cudaq_qec\._qec_core\..*'),
 ]
 
 napoleon_google_docstring = True

@@ -14,9 +14,11 @@ maintainers = [{name = "NVIDIA Corporation & Affiliates"}]
 requires-python = ">=3.11"
 readme = "README.md"
 license = "LicenseRef-NVIDIA-Proprietary"
+# The base wheel is CUDA-Q-free: decoders (incl. nv-qldpc), decoding config,
+# DEM construction, task graphs. CUDA-Q is the `cudaq` extra; see
+# [project.optional-dependencies].
 dependencies = [
-  'cuda-quantum-cu13 >= 0.16.0, < 0.17',
-  'cuquantum-python-cu13>=26.03.0',
+  'numpy',
 ]
 classifiers = [
     'Intended Audience :: Science/Research',
@@ -61,6 +63,12 @@ CUDAQX_QEC_BINDINGS_PYTHON = true
 write_to = "_version.py"
 
 [project.optional-dependencies]
+# Codes, experiments (sample_memory_circuit, dem_from_memory_circuit, ...),
+# device calls, GPU DEM sampling: `pip install cudaq-qec-cu13[cudaq]`.
+cudaq = [
+  'cuda-quantum-cu13 >= 0.16.0, < 0.17',
+  'cuquantum-python-cu13>=26.03.0',
+]
 tensor_network_decoder = [
   "quimb",
   "opt_einsum",
@@ -71,6 +79,7 @@ trt_decoder = [
   "tensorrt-cu13"
 ]
 all = [
+  'cuda-quantum-cu13 >= 0.16.0, < 0.17',
   "quimb",
   "opt_einsum",
   "torch>=2.9.0",
