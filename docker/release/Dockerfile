@@ -42,6 +42,9 @@ RUN apt-get update && apt-get install -y unzip && \
 # Copy CUDA-QX examples and tests
 COPY docs/sphinx/examples /home/cudaq/cudaqx-examples
 COPY libs/qec/python/tests /home/cudaq/cudaqx_pytests/qec
+# Reference data the Python tests resolve relative to their own location
+# (tests/../../test_data), e.g. test_chromobius.py.
+COPY libs/qec/test_data /home/cudaq/cudaqx_pytests/test_data
 
 # Bake in CUDA-Q import check helper (used by QA validation scripts)
 RUN mkdir -p /home/cudaq/cudaqx-scripts/validation
