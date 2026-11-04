@@ -1497,7 +1497,7 @@ _PATTERN_YAML = """decoders:
           commit_rounds: 3
           buffer_rounds: 3
           gap_rounds: 9
-          output: corrected_logical
+          output: corrections
           max_in_flight: 4
           inner: {type: single_error_lut}
       edges:
@@ -1527,7 +1527,7 @@ def test_parallel_window_pattern_round_trips_through_yaml():
     assert node.type == "parallel_window"
     assert node.node_params["commit_rounds"] == 3
     assert node.node_params["gap_rounds"] == 9
-    assert node.node_params["output"] == "corrected_logical"
+    assert node.node_params["output"] == "corrections"
     assert node.max_in_flight == 4
 
 
@@ -2373,3 +2373,84 @@ def test_negative_cuda_device_id_is_rejected_when_parsed():
     parsed = qec.multi_decoder_config.from_yaml_str(
         text.replace("cuda_device_id: -1", "cuda_device_id: 0"))
     assert parsed.decoders[0].cuda_device_id == 0
+
+
+# A windowed decoder over a two-detector chain whose readout round's first
+# measurement is the raw logical value, and a plain decoder beside it.
+_LOGICAL_YAML = """decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], m2o_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+          output: corrections_and_logical
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+  - id: 1
+    type: single_error_lut
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0,-1,1,-1,2,-1]
+    O_sparse: [0,-1,1,-1,2,-1]
+    D_sparse: [0,-1,1,-1,2,-1]
+syndrome_mapping:
+  - {id: 1, type: final}
+"""
+
+
+def test_a_kernel_reads_logical_measurements_once_the_shot_ends():
+    # A device kernel reads a windowed graph's logical measurements after a
+    # `type: final` row ends the shot; XORed with the corrections they give
+    # back the raw readout the kernel set. A plain decoder has none.
+    import cudaq
+
+    @cudaq.kernel
+    def shot_kernel(decoder_id: int, rounds: int, readout: int) -> int:
+        q = cudaq.qvector(2)
+        qec.reset_decoder(decoder_id)
+        for r in range(rounds - 1):
+            syndromes = mz(q)
+            qec.enqueue_syndromes(decoder_id, syndromes, r)
+        if readout:
+            x(q[0])
+        last = mz(q)
+        qec.enqueue_syndromes_mapped(decoder_id, last, rounds - 1, 1)
+        correction = qec.get_corrections(decoder_id, 1, False)
+        logical = qec.get_logical_measurements(decoder_id, 0, 1, False)
+        result = 0
+        if logical[0] != correction[0]:
+            result = 1
+        return result
+
+    @cudaq.kernel
+    def plain_kernel() -> int:
+        q = cudaq.qvector(1)
+        mz(q)
+        qec.get_logical_measurements(1, 0, 1, False)
+        return 0
+
+    cudaq.reset_target()
+    assert qec.configure_decoders_from_str(_LOGICAL_YAML) == 0
+    try:
+        assert cudaq.run(shot_kernel, 0, 30, 0, shots_count=1) == [0]
+        assert cudaq.run(shot_kernel, 0, 30, 1, shots_count=1) == [1]
+        with pytest.raises(ValueError, match="has no logical measurements"):
+            cudaq.run(plain_kernel, shots_count=1)
+    finally:
+        qec.finalize_decoders()

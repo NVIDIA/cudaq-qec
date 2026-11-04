@@ -197,7 +197,6 @@ arguments, but are validated against the linked framework's registered
 build/bin/memory-experiment-generator \
   --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
   --output=pattern-memory.yaml \
-  --pattern-arg=output=corrected_logical \
   --pattern-arg=boundary_prior=0.01 \
   --pattern-arg=verify_residual=report \
   --pattern-arg=gap_rounds=9 \
@@ -222,11 +221,9 @@ that compatibility or execute the generated graph.
 The YAML embeds one compact model in `data_artifacts`; artifact names are
 references within that document, not file paths. Each patch has a distinct
 decoder ID and one `parallel_window` pattern, with the same recipe and
-geometry. Output defaults to `corrections`, which existing consumers may XOR
-with their own raw readout. `--pattern-arg=output=corrected_logical` instead
-requests that the framework combine the raw logical readout with its correction
-frame. The model already embeds the terminal `m2o_sparse` readout map; this
-selection does not require a separate readout file or change the experiment.
+geometry.
+
+The model embeds the terminal `m2o_sparse` readout map, so a pattern must set `output`. The generator writes `output: corrections`: a client reads the corrections with `get_corrections`, which existing consumers XOR with their own raw readout, and may consume a shot before it ends. `--pattern-arg=output=corrections_and_logical` also wires the graph's `logical` output, the raw logical readout with the correction frame applied, which a client reads with `get_logical_measurements` once the shot's final round is decoded; such a graph consumes a shot only after it ends. Neither needs a separate readout file or changes the experiment.
 
 The mappings remain distinct:
 

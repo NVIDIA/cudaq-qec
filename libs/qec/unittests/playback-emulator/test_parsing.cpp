@@ -304,6 +304,42 @@ TEST(ParserAdversarial, MalformedOperandsAreAllRejectedNamingTheLine) {
   });
 }
 
+// get_logical_measurements takes get_corrections' operands plus first=, and
+// both reads take reset=, which defaults to 1 for get_corrections and 0 for a
+// logical read. A width that disagrees with the bits, a reset other than 0 or
+// 1, and first= on get_corrections are refused.
+TEST(Parser, ALogicalMeasurementsReadTakesACorrectionsReadsOperands) {
+  auto sched = parse("0 get_logical_measurements 01 first=1 return_size=2\n"
+                     "1 get_corrections 1\n"
+                     "2 get_logical_measurements 1 reset=1\n",
+                     kTwoDecoders, 1000);
+  ASSERT_EQ(sched.events.size(), 3u);
+  const auto &read = sched.events[0];
+  EXPECT_EQ(read.op, operation::get_logical_measurements);
+  EXPECT_STREQ(to_string(read.op), "get_logical_measurements");
+  EXPECT_EQ(read.first, 1u);
+  EXPECT_FALSE(read.reset);
+  EXPECT_EQ(read.return_size, 2u);
+  ASSERT_EQ(read.expected_count, 2u);
+  EXPECT_EQ(sched.expected_arena[read.expected_offset], 0u);
+  EXPECT_EQ(sched.expected_arena[read.expected_offset + 1], 1u);
+  EXPECT_TRUE(sched.events[1].reset);
+  EXPECT_TRUE(sched.events[2].reset);
+  for (const auto *text : {"0 get_logical_measurements 01 return_size=3\n",
+                           "0 get_logical_measurements reset=2\n",
+                           "0 get_corrections 1 first=1\n"})
+    EXPECT_THROW(parse(text, kTwoDecoders, 1000), std::invalid_argument)
+        << text;
+  try {
+    parse("0 get_logical_measurements 01 return_size=3\n", kTwoDecoders, 1000);
+  } catch (const std::invalid_argument &e) {
+    EXPECT_NE(
+        std::string(e.what()).find("'get_logical_measurements' return_size=3"),
+        std::string::npos)
+        << e.what();
+  }
+}
+
 TEST(ParserAdversarial, OperandsOutOfOrderAreAccepted) {
   const std::string text = "0 stream max_rounds=7 every=3 source=2 until=c0\n";
   auto sched = parse(text, kTwoDecoders, 1000);

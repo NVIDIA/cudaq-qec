@@ -192,9 +192,25 @@ build_task_graph(
 __attribute__((visibility("default"))) void warn_windowed_serving(
     const cudaq::qec::decoding::config::multi_decoder_config &config);
 
+/// Copy decoder @p decoder_id's corrections into @p corrections; with
+/// @p reset, then reset them.
+/// @throws std::runtime_error if @p reset is set before the shot of a task
+/// graph with a logical output has ended (see decode_target::may_consume()).
 __attribute__((visibility("default"))) void
 get_corrections(std::size_t decoder_id, uint8_t *corrections,
                 std::uint64_t correction_length, bool reset);
+
+/// Copy decoder @p decoder_id's logical measurements [@p first,
+/// @p first + @p logical_length) into @p logical; with @p reset, then reset
+/// its corrections.
+/// @throws std::invalid_argument if the decoder has no logical measurements
+/// or the range is out of bounds.
+/// @throws std::runtime_error if the range is not released yet, or @p reset
+/// is set before the shot has ended (see decode_target::may_consume()).
+__attribute__((visibility("default"))) void
+get_logical_measurements(std::size_t decoder_id, std::uint64_t first,
+                         uint8_t *logical, std::uint64_t logical_length,
+                         bool reset);
 
 __attribute__((visibility("default"))) void
 reset_decoder(std::size_t decoder_id);

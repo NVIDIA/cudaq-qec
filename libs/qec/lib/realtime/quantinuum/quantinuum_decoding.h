@@ -74,6 +74,25 @@ __attribute__((visibility("default"))) std::uint64_t
 get_corrections_ui64_private(uint64_t decoder_id, uint64_t return_size,
                              uint64_t reset);
 
+/// @brief Get the logical measurements for a given decoder: the raw logical
+/// readout with its corrections applied.
+/// @param decoder_id The ID of the decoder to use.
+/// @param first The first logical measurement to return.
+/// @param return_size The number of bits to return. This must be <= 64. The
+/// least significant bit (i.e. return_value & 1) is logical measurement
+/// @p first.
+/// @param reset Whether to reset the decoder corrections after retrieving
+/// them. Allowed only after the FINAL round.
+/// @return Logical measurements [first, first + return_size).
+__attribute__((visibility("default"))) std::uint64_t
+get_logical_measurements_ui64(uint64_t decoder_id, uint64_t first,
+                              uint64_t return_size, uint64_t reset);
+
+// Private variant for alternative testing (closer to in-system).
+__attribute__((visibility("default"))) std::uint64_t
+get_logical_measurements_ui64_private(uint64_t decoder_id, uint64_t first,
+                                      uint64_t return_size, uint64_t reset);
+
 /// @brief Reset the decoder. This clears any queued syndromes and resets any
 /// corrections back to 0.
 /// @param decoder_id The ID of the decoder to reset.

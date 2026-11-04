@@ -22,6 +22,8 @@ constexpr std::uint32_t kGetCorrectionsFunctionId =
     cudaq::realtime::fnv1a_hash("get_corrections");
 constexpr std::uint32_t kResetDecoderFunctionId =
     cudaq::realtime::fnv1a_hash("reset_decoder");
+constexpr std::uint32_t kGetLogicalMeasurementsFunctionId =
+    cudaq::realtime::fnv1a_hash("get_logical_measurements");
 
 static_assert(kEnqueueSyndromesFunctionId == 0x7ED8BE82u,
               "enqueue_syndromes function_id must match "
@@ -31,6 +33,9 @@ static_assert(kGetCorrectionsFunctionId == 0x882D5BA1u,
               "decoder_server_runtime.md");
 static_assert(kResetDecoderFunctionId == 0x977A59CFu,
               "reset_decoder function_id must match "
+              "decoder_server_runtime.md");
+static_assert(kGetLogicalMeasurementsFunctionId == 0x3056A149u,
+              "get_logical_measurements function_id must match "
               "decoder_server_runtime.md");
 
 // Wire framing is cudaq::realtime::RPCHeader / RPCResponse (24 bytes each,
@@ -74,6 +79,19 @@ struct __attribute__((packed)) GetCorrectionsRequestPayload {
 static_assert(sizeof(GetCorrectionsRequestPayload) == 17,
               "GetCorrectionsRequestPayload must be exactly 17 bytes per "
               "decoder_server_runtime.md#get_corrections");
+
+struct __attribute__((packed)) GetLogicalMeasurementsRequestPayload {
+  std::int64_t decoder_id;  ///< arg0
+  std::int64_t first;       ///< arg1 (first logical measurement to read)
+  std::int64_t return_size; ///< arg2 (# bits to read from `first`; the
+                            ///<       cc.device_call lowering serializes the
+                            ///<       OUT std::vector<bool> length here)
+  std::uint8_t reset;       ///< arg3 (0 = keep state, 1 = reset after read;
+                            ///<       trailing bool, no padding)
+};
+static_assert(sizeof(GetLogicalMeasurementsRequestPayload) == 25,
+              "GetLogicalMeasurementsRequestPayload must be exactly 25 bytes "
+              "per decoder_server_runtime.md#get_logical_measurements");
 
 struct __attribute__((packed)) ResetRequestPayload {
   std::int64_t decoder_id; ///< arg0
