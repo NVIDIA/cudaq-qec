@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "decoding_task_decode_window_node.h"
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "../hardware_guards.h"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <future>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -76,6 +78,59 @@ logical_outcome xor_logical(const logical_outcome &a,
 }
 
 namespace {
+
+bool window_commits_overlap(const decode_window_node &a,
+                            const decode_window_node &b) {
+  const auto &ar = a.request();
+  const auto &br = b.request();
+  // Request coordinates are bounded by window_round_limit (2^31), so these
+  // sums, differences and widths fit in int64_t.
+  const auto a_start = ar.offset + ar.commit->begin;
+  const auto b_start = br.offset + br.commit->begin;
+  if (a.context().repeats() && b.context().repeats()) {
+    // The relative starts of any two instances differ by a multiple of the
+    // periods' gcd. Touching half-open intervals do not overlap. Clipping at
+    // the shot boundaries cannot introduce an overlap; any periodic overlap
+    // occurs in some sufficiently long admitted shot.
+    const auto period = std::gcd(ar.period, br.period);
+    auto distance = (b_start - a_start) % period;
+    if (distance < 0)
+      distance += period;
+    return distance < ar.commit->end - ar.commit->begin ||
+           period - distance < br.commit->end - br.commit->begin;
+  }
+
+  // A finite template admits only its explicit phase-chain length, not an
+  // arbitrary declared horizon. Check its clipped instances, including prefix
+  // and terminal windows, rather than rejecting an overlap beyond the shot.
+  const auto rounds = !a.context().repeats() ? a.context().min_rounds()
+                                             : b.context().min_rounds();
+  const auto ai = window_instances(ar, rounds);
+  const auto bi = window_instances(br, rounds);
+  if (ai.begin == ai.end || bi.begin == bi.end)
+    return false;
+  // Such a layer covers every round. Otherwise each layer has at most one
+  // instance per explicit phase, plus a clipped boundary instance.
+  if (ar.commit->end - ar.commit->begin >= ar.period ||
+      br.commit->end - br.commit->begin >= br.period)
+    return true;
+  auto ak = ai.begin;
+  auto bk = bi.begin;
+  while (ak < ai.end && bk < bi.end) {
+    const auto ab = a_start + ak * ar.period;
+    const auto bb = b_start + bk * br.period;
+    const auto ae = ar.offset + ak * ar.period + ar.commit->end;
+    const auto be = br.offset + bk * br.period + br.commit->end;
+    if (std::max({std::int64_t{0}, ab, bb}) <
+        std::min({static_cast<std::int64_t>(rounds), ae, be}))
+      return true;
+    if (ae <= be)
+      ++ak;
+    else
+      ++bk;
+  }
+  return false;
+}
 
 void validate_core_edge(
     const std::vector<std::unique_ptr<task_graph_node>> &nodes,
@@ -864,6 +919,29 @@ void decoding_task_graph::impl::compile_wires() {
       // every round of its stream, which another would commit again. A
       // reads_logical() node is never staged; its value joins at compose.
       if (staged != 0) {
+        // One stager advances a single coverage frontier. Independent window
+        // contributors must partition those rounds: once one has advanced the
+        // frontier, another cannot contribute to the same committed interval.
+        std::vector<int> windows;
+        for (const auto si : output_streaming_nodes[k]) {
+          const auto idx = streaming_nodes[si].node_index;
+          const auto *window =
+              dynamic_cast<const decode_window_node *>(nodes[idx].get());
+          if (!window || !reach[idx][k].parity)
+            continue;
+          for (const auto prior : windows)
+            if (window_commits_overlap(*static_cast<const decode_window_node *>(
+                                           nodes[prior].get()),
+                                       *window))
+              throw std::invalid_argument(
+                  "compile_wires: graph output '" + output_names[k] +
+                  "' has overlapping commit intervals from decode_window "
+                  "nodes '" +
+                  node_ids[prior] + "' and '" + node_ids[idx] +
+                  "'; staged window contributors must commit disjoint rounds; "
+                  "wire independent decodes to separate outputs");
+          windows.push_back(idx);
+        }
         auto &stager = output_stagers[k];
         stager.enabled = true;
         stager.bits.assign(streaming_result_state.outputs[k].value_width, 0);

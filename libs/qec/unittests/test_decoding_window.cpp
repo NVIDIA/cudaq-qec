@@ -7182,10 +7182,14 @@ TEST(WindowedGraph, DescribesItsSchedule) {
 // solution satisfies its window, as a lookup table's single faults do; and
 // open when one does not, as a blind decoder's on a shot with flips, which
 // still completes. Graph and output agree.
-TEST(WindowedGraph, ReportsTheShotsClosure) {
+class WindowedGraphClosure : public testing::TestWithParam<bool> {};
+
+TEST_P(WindowedGraphClosure, ReportsTheShotsClosure) {
   const auto spec = wide_readout_spec();
   const experiment_template tmpl(spec);
   constexpr std::size_t R = 20;
+  task_graph_options options;
+  options.async_streaming = GetParam();
   const auto closure_of = [&](const std::string &verify,
                               const std::string &decoder,
                               const std::vector<std::uint8_t> &detectors) {
@@ -7197,8 +7201,8 @@ TEST(WindowedGraph, ReportsTheShotsClosure) {
       params.insert("verify_residual", verify);
     std::vector<task_graph_node_config> nodes;
     nodes.push_back(pattern_node(spec, params, 1, decoder));
-    auto graph =
-        decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+    auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                    pattern_edges(), options);
     stream_shot(*graph, memory_measurements(tmpl, R, detectors),
                 graph->get_num_msyn_per_round());
     const auto &result = graph->streaming_result();
@@ -7231,8 +7235,8 @@ TEST(WindowedGraph, ReportsTheShotsClosure) {
                                    {"verify_residual", std::string("report")}};
   std::vector<task_graph_node_config> nodes;
   nodes.push_back(pattern_node(spec, params, 1, "blind_decoder"));
-  auto graph =
-      decoding_task_graph::from_topology(std::move(nodes), pattern_edges());
+  auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                  pattern_edges(), options);
   const auto record = graph->get_num_msyn_per_round();
   const std::vector<std::uint8_t> quiet(flips.size(), 0);
   for (const auto &[detectors, want] :
@@ -7248,7 +7252,9 @@ TEST(WindowedGraph, ReportsTheShotsClosure) {
     EXPECT_EQ(graph->streaming_result().closure, want);
     graph->clear_corrections();
   }
-} // end - TEST(WindowedGraph, ReportsTheShotsClosure)
+} // end - TEST_P(WindowedGraphClosure, ReportsTheShotsClosure)
+
+INSTANTIATE_TEST_SUITE_P(Executors, WindowedGraphClosure, testing::Bool());
 
 // The one-shot paths run a windowed graph's shot through its stream: run,
 // run_all, run_batch and run_async give the reference's frame for single

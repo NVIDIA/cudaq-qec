@@ -1286,48 +1286,51 @@ struct decoding_task_graph::impl::record_scheduler {
 
   void execute_raw(context &c, std::size_t id, const graph_event &event) {
     auto &node = *owner.streaming_nodes[event.node].capability;
-    if (c.operations > 1) {
-      execute_raw_operations(c, id, event);
+    const auto node_index = owner.streaming_nodes[event.node].node_index;
+    const bool no_deliveries = owner.streaming_wires_from[node_index].empty() &&
+                               owner.completion_wires_from[node_index].empty();
+    auto offset = event.offset;
+    auto operation = event.operation;
+    while (true) {
+      const auto end = c.operations > 1
+                           ? c.operation_ends[operation - c.first_operation]
+                           : c.len;
+      const auto limit =
+          c.type ? node.raw_chunk_limit() : node.untagged_chunk_limit();
+      const auto take = limit ? std::min(*limit, end - offset) : end - offset;
+      const auto *chunk = c.syndrome ? c.syndrome + offset : nullptr;
+      const auto next = offset + take;
+      const auto chunk_type = c.type == round_type::FINAL && next == c.len
+                                  ? round_type::FINAL
+                                  : round_type::BULK;
+      const bool fired = c.type ? node.enqueue(chunk, take, chunk_type)
+                                : node.enqueue_untagged(chunk, take);
+      if (fired)
+        c.fired.store(publish_all(c, id, event.root, event.node),
+                      std::memory_order_relaxed);
+      else if (chunk_type == round_type::FINAL && !staged(event.node))
+        snapshot_node(c, event.node); // a FINAL round may commit coverage
+      if (next < c.len && take != 0) {
+        // Recheck capacity after each chunk and let its causal deliveries
+        // finish before another operation can reuse this context's publication
+        // values.
+        if (next == end)
+          ++operation;
+        if (c.operations > 1 && (!fired || no_deliveries)) {
+          if (stop.load(std::memory_order_acquire))
+            return;
+          // No deliveries means no children can read this running event's
+          // operation tag. Captured results remain owned by this context.
+          offset = next;
+          c.slots[id].event.operation = operation;
+          continue;
+        }
+        auto continuation = event;
+        continuation.offset = next;
+        continuation.operation = operation;
+        set_continuation(c, id, continuation);
+      }
       return;
-    }
-    const auto limit =
-        c.type ? node.raw_chunk_limit() : node.untagged_chunk_limit();
-    const auto take =
-        limit ? std::min(*limit, c.len - event.offset) : c.len - event.offset;
-    const auto *chunk = c.syndrome ? c.syndrome + event.offset : nullptr;
-    const auto next = event.offset + take;
-    const auto chunk_type = c.type == round_type::FINAL && next == c.len
-                                ? round_type::FINAL
-                                : round_type::BULK;
-    const bool fired = c.type ? node.enqueue(chunk, take, chunk_type)
-                              : node.enqueue_untagged(chunk, take);
-    if (fired)
-      c.fired.store(publish_all(c, id, event.root, event.node),
-                    std::memory_order_relaxed);
-    else if (chunk_type == round_type::FINAL && !staged(event.node))
-      snapshot_node(c, event.node); // a FINAL round may commit coverage
-    if (next < c.len && take != 0)
-      set_continuation(
-          c, id,
-          {graph_event_kind::streaming_raw, event.node, {}, next, event.root});
-  }
-
-  // BULK operations admitted together, one chunk in all, reach the node one
-  // call each, as synchronously. The event's tag follows the operation, so
-  // what each call publishes follows from it; only this worker reads the
-  // tag while the event runs.
-  void execute_raw_operations(context &c, std::size_t id,
-                              const graph_event &event) {
-    auto &node = *owner.streaming_nodes[event.node].capability;
-    const auto root = event.root;
-    const auto si = event.node;
-    std::size_t offset = 0;
-    for (std::size_t k = 0; k < c.operations; ++k) {
-      const auto end = c.operation_ends[k];
-      c.slots[id].event.operation = c.first_operation + k;
-      if (node.enqueue(c.syndrome + offset, end - offset, round_type::BULK))
-        c.fired.store(publish_all(c, id, root, si), std::memory_order_relaxed);
-      offset = end;
     }
   }
 
