@@ -6928,10 +6928,10 @@ TEST(WindowedGraph, StreamsAHandWiredLogicalOutput) {
 } // end - TEST(WindowedGraph, StreamsAHandWiredLogicalOutput)
 
 // Building checks the logical output, the one a logical_readout node
-// reaches: one readout, reaching one output, beside a correction output that
-// carries the corrections it applies; an output reached by no readout carries
-// corrections, whatever its name; a readout reaching no output warns; and a
-// logical_readout node needs dem_chunks.
+// reaches: one readout, reaching one output, beside a correction output (to
+// stream, one carrying the corrections it applies); an output reached by no
+// readout carries corrections, whatever its name; a readout reaching no
+// output warns; and a logical_readout node needs dem_chunks.
 TEST(WindowedGraph, ChecksTheLogicalOutputWhenBuilt) {
   namespace logging = cudaq::qec::detail;
   std::mutex mutex;
@@ -7011,39 +7011,63 @@ TEST(WindowedGraph, ChecksTheLogicalOutputWhenBuilt) {
       "node 'R' reads the logical value into output 'logical' by two edges; "
       "a graph has one logical output");
   // The corrections the logical output applies must also reach a correction
-  // output, here P's, which only reaches the logical one through L.
-  expect_error(
-      [&] {
-        std::vector<task_graph_node_config> nodes;
-        nodes.push_back(pattern_node(spec, params, 1));
-        nodes.push_back(pattern_node(spec, params, 1));
-        nodes.back().id = "Q";
-        auto &readout = nodes.emplace_back();
-        readout.id = "R";
-        readout.kind = "logical_readout";
-        readout.dem = spec;
-        auto &combine = nodes.emplace_back();
-        combine.id = "L";
-        combine.kind = "xor";
-        decoding_task_graph::from_topology(
-            std::move(nodes),
-            {{"measurements", "output", "P", "input"},
-             {"measurements", "output", "Q", "input"},
-             {"measurements", "output", "R", "input"},
-             {"P", "output", "L", "a"},
-             {"R", "output", "L", "b"},
-             {"L", "output", "output", "logical"},
-             {"Q", "output", "output", "corrections"}},
-            {});
-      },
-      "graph output 'logical' applies the corrections of node 'P.",
-      "which reach no correction output");
+  // output, here P's, which only reaches the logical one through L. Only
+  // streaming serves the logical output, so the graph builds but cannot
+  // stream.
+  {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pattern_node(spec, params, 1));
+    nodes.push_back(pattern_node(spec, params, 1));
+    nodes.back().id = "Q";
+    auto &readout = nodes.emplace_back();
+    readout.id = "R";
+    readout.kind = "logical_readout";
+    readout.dem = spec;
+    auto &combine = nodes.emplace_back();
+    combine.id = "L";
+    combine.kind = "xor";
+    const auto unreturned = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "P", "input"},
+         {"measurements", "output", "Q", "input"},
+         {"measurements", "output", "R", "input"},
+         {"P", "output", "L", "a"},
+         {"R", "output", "L", "b"},
+         {"L", "output", "output", "logical"},
+         {"Q", "output", "output", "corrections"}},
+        {});
+    EXPECT_FALSE(unreturned->supports_streaming());
+    EXPECT_NE(unreturned->streaming_incompatibility_reason().find(
+                  "graph output 'logical' applies the corrections of node "
+                  "'P."),
+              std::string::npos)
+        << unreturned->streaming_incompatibility_reason();
+  }
   expect_error(
       [&] {
         build({{"R", "output", "output", "logical"},
                {"S", "output", "output", "raw"}});
       },
       "nodes 'R' and 'S' both read the logical value");
+  // A pattern wiring its own readout beside a hand-wired one, whatever the
+  // latter's output is called.
+  expect_error(
+      [&] {
+        std::vector<task_graph_node_config> nodes;
+        nodes.push_back(pattern_node(spec, {{"commit_rounds", std::size_t{2}},
+                                            {"buffer_rounds", std::size_t{1}},
+                                            {"gap_rounds", std::size_t{3}}}));
+        auto &readout = nodes.emplace_back();
+        readout.id = "R";
+        readout.kind = "logical_readout";
+        readout.dem = spec;
+        auto edges = pattern_edges();
+        edges.push_back({"measurements", "output", "R", "input"});
+        edges.push_back({"R", "output", "output", "measured"});
+        decoding_task_graph::from_topology(std::move(nodes), edges, {});
+      },
+      "nodes 'P.readout' and 'R' both read the logical value",
+      "a parallel_window with output: corrections_and_logical wires its own");
   expect_error(
       [&] {
         std::vector<task_graph_node_config> nodes;

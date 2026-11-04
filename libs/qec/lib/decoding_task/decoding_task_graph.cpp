@@ -282,7 +282,8 @@ void decoding_task_graph::impl::order_logical_output() {
             "compile_wires: nodes '" + node_ids[logical_readout] + "' and '" +
             node_ids[i] +
             "' both read the logical value; one logical_readout node reads "
-            "every observable");
+            "every observable, and a parallel_window with output: "
+            "corrections_and_logical wires its own");
       logical_readout = static_cast<int>(i);
       logical = k;
     }
@@ -707,6 +708,8 @@ void decoding_task_graph::impl::compile_wires() {
         }
       }
     // What the logical output applies, get_obs_corrections() must return.
+    // Only streaming serves the logical output, so this is a streaming
+    // conflict, as below, not a build error.
     if (!obs_conflict && has_logical_output)
       for (const auto si : output_streaming_nodes.back()) {
         bool reported = false;
@@ -716,8 +719,8 @@ void decoding_task_graph::impl::compile_wires() {
                      contributors.end();
         }
         if (!reported)
-          throw std::invalid_argument(
-              "compile_wires: graph output '" + output_names.back() +
+          record_streaming_conflict(
+              "graph output '" + output_names.back() +
               "' applies the corrections of node '" +
               node_ids[streaming_nodes[si].node_index] +
               "', which reach no correction output; wire them to one, as "
