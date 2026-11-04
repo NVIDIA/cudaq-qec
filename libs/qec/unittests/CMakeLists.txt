@@ -30,6 +30,11 @@ include(GoogleTest)
 # shared library, which can make dlopen fail with SIGBUS. Defer discovery until
 # CTest runs, after the build has completed.
 set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
+# That same plugin loading makes `--gtest_list_tests` slow on a loaded CI
+# runner (TensorRT on cu13 especially), and CMake's default 5 s discovery
+# timeout then kills the run before any test executes. CMake has no global
+# knob for the timeout, so every gtest_discover_tests call passes this.
+set(CUDAQX_GTEST_DISCOVERY_TIMEOUT 30)
 
 find_package(CUDAToolkit REQUIRED)
 
@@ -41,7 +46,7 @@ add_executable(test_decoders test_decoders.cpp test_decoder_syndrome_size.cpp
 target_include_directories(test_decoders PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
 target_link_libraries(test_decoders PRIVATE GTest::gtest_main cudaq-qec-decoders libstim CUDA::cudart)
 add_dependencies(CUDAQXQECUnitTests test_decoders)
-gtest_discover_tests(test_decoders)
+gtest_discover_tests(test_decoders DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 # These two tests need cudaq-qec-decoding-server, which is only built when a
 # realtime-enabled CUDA-Q install is found (see
@@ -66,7 +71,7 @@ if(TARGET cudaq-qec-decoding-server)
     target_compile_definitions(test_decoders_yaml PRIVATE CUDAQX_QEC_HAS_CHROMOBIUS)
   endif()
   add_dependencies(CUDAQXQECUnitTests test_decoders_yaml)
-  gtest_discover_tests(test_decoders_yaml)
+  gtest_discover_tests(test_decoders_yaml DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
   add_executable(test_decoding_server_core test_decoding_server_core.cpp)
   target_link_libraries(test_decoding_server_core PRIVATE
@@ -75,7 +80,7 @@ if(TARGET cudaq-qec-decoding-server)
     cudaq::cudaq
     CUDA::cudart)
   add_dependencies(CUDAQXQECUnitTests test_decoding_server_core)
-  gtest_discover_tests(test_decoding_server_core)
+  gtest_discover_tests(test_decoding_server_core DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 else()
   message(STATUS "Skipping test_decoders_yaml / test_decoding_server_core "
                  "(cudaq-qec-decoding-server not built)")
@@ -86,31 +91,31 @@ target_include_directories(test_qec PRIVATE ${CUDAQX_QEC_SOURCE_DIR}/lib)
 target_link_libraries(test_qec PRIVATE GTest::gtest_main cudaq-qec
   cudaq::cudaq cudaq::cudaq-stim-target)
 add_dependencies(CUDAQXQECUnitTests test_qec)
-gtest_discover_tests(test_qec)
+gtest_discover_tests(test_qec DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_dem_sampling test_dem_sampling.cpp)
 target_link_libraries(test_dem_sampling PRIVATE GTest::gtest_main cudaq-qec cudaq::cudaq)
 target_link_libraries(test_dem_sampling PRIVATE CUDA::cudart)
 target_include_directories(test_dem_sampling PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 add_dependencies(CUDAQXQECUnitTests test_dem_sampling)
-gtest_discover_tests(test_dem_sampling)
+gtest_discover_tests(test_dem_sampling DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_sparse_binary_matrix test_sparse_binary_matrix.cpp)
 target_link_libraries(test_sparse_binary_matrix PRIVATE GTest::gtest_main
                                                cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_sparse_binary_matrix)
-gtest_discover_tests(test_sparse_binary_matrix)
+gtest_discover_tests(test_sparse_binary_matrix DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_thread_pool test_thread_pool.cpp)
 target_link_libraries(test_thread_pool PRIVATE GTest::gtest_main
                                                cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_thread_pool)
-gtest_discover_tests(test_thread_pool)
+gtest_discover_tests(test_thread_pool DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_hsb_playback_loop utils/test_hsb_playback_loop.cpp)
 target_link_libraries(test_hsb_playback_loop PRIVATE GTest::gtest_main)
 add_dependencies(CUDAQXQECUnitTests test_hsb_playback_loop)
-gtest_discover_tests(test_hsb_playback_loop)
+gtest_discover_tests(test_hsb_playback_loop DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 if(UNIX)
   find_package(Python COMPONENTS Interpreter QUIET)
@@ -127,7 +132,7 @@ add_executable(test_extended_dem test_extended_dem.cpp)
 target_link_libraries(test_extended_dem PRIVATE GTest::gtest_main
                                         cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_extended_dem)
-gtest_discover_tests(test_extended_dem)
+gtest_discover_tests(test_extended_dem DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_library(parallel_window_reference STATIC parallel_window_reference.cpp)
 target_link_libraries(parallel_window_reference PUBLIC cudaq-qec-decoders)
@@ -142,7 +147,7 @@ set_target_properties(test_decoding_window PROPERTIES
     "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
 add_dependencies(test_decoding_window cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_decoding_window)
-gtest_discover_tests(test_decoding_window)
+gtest_discover_tests(test_decoding_window DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_decoding_task_graph test_decoding_task_graph.cpp)
 target_link_libraries(test_decoding_task_graph PRIVATE GTest::gtest_main
@@ -157,13 +162,13 @@ set_target_properties(test_decoding_task_graph PROPERTIES
     "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
 add_dependencies(test_decoding_task_graph cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_decoding_task_graph)
-gtest_discover_tests(test_decoding_task_graph)
+gtest_discover_tests(test_decoding_task_graph DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_decoding_task_ensemble test_decoding_task_ensemble.cpp)
 target_link_libraries(test_decoding_task_ensemble PRIVATE GTest::gtest_main
                                                  cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_decoding_task_ensemble)
-gtest_discover_tests(test_decoding_task_ensemble)
+gtest_discover_tests(test_decoding_task_ensemble DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_library(node_kind_dlclose_plugin SHARED node_kind_dlclose_plugin.cpp)
 target_include_directories(node_kind_dlclose_plugin PRIVATE
@@ -194,36 +199,36 @@ set_target_properties(test_node_kind_dlclose PROPERTIES
   BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
 add_dependencies(test_node_kind_dlclose node_kind_dlclose_plugin)
 add_dependencies(CUDAQXQECUnitTests test_node_kind_dlclose)
-gtest_discover_tests(test_node_kind_dlclose)
+gtest_discover_tests(test_node_kind_dlclose DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_dem_construction test_dem_construction.cpp)
 target_link_libraries(test_dem_construction PRIVATE GTest::gtest_main
                                             cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_dem_construction)
-gtest_discover_tests(test_dem_construction)
+gtest_discover_tests(test_dem_construction DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_dem_construction_code test_dem_construction_code.cpp)
 target_link_libraries(test_dem_construction_code PRIVATE GTest::gtest_main
                                                   cudaq-qec
                                                   cudaq::cudaq-stim-target)
 add_dependencies(CUDAQXQECUnitTests test_dem_construction_code)
-gtest_discover_tests(test_dem_construction_code)
+gtest_discover_tests(test_dem_construction_code DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_memory_dem_chunks test_memory_dem_chunks.cpp)
 target_link_libraries(test_memory_dem_chunks PRIVATE
   GTest::gtest_main cudaq-qec cudaq::cudaq-stim-target)
 add_dependencies(CUDAQXQECUnitTests test_memory_dem_chunks)
-gtest_discover_tests(test_memory_dem_chunks PROPERTIES LABELS "qec")
+gtest_discover_tests(test_memory_dem_chunks PROPERTIES LABELS "qec" DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_cancellation test_cancellation.cpp)
 target_link_libraries(test_cancellation PRIVATE GTest::gtest_main cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_cancellation)
-gtest_discover_tests(test_cancellation)
+gtest_discover_tests(test_cancellation DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_logger test_logger.cpp)
 target_link_libraries(test_logger PRIVATE GTest::gtest_main cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_logger)
-gtest_discover_tests(test_logger)
+gtest_discover_tests(test_logger DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 # TensorRT decoder test is only built for x86 architectures
 if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(AMD64|amd64)|(^i.86$)")
@@ -314,7 +319,7 @@ if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(A
   target_compile_definitions(test_trt_decoder PRIVATE
     TRT_TEST_ONNX_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../../assets/tests/surface_code_decoder.onnx")
   add_dependencies(CUDAQXQECUnitTests test_trt_decoder)
-  gtest_discover_tests(test_trt_decoder)
+  gtest_discover_tests(test_trt_decoder DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 endif()
 
 # ==============================================================================
@@ -350,7 +355,7 @@ if(CUDAQ_REALTIME_ROOT AND CMAKE_CUDA_COMPILER)
   )
   
   add_dependencies(CUDAQXQECUnitTests test_gpu_kernels)
-  gtest_discover_tests(test_gpu_kernels)
+  gtest_discover_tests(test_gpu_kernels DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
   
   # Realtime decoding end-to-end test with mock decoder
   # This test integrates with cuda-quantum's host API (libcudaq-realtime.so)
@@ -562,6 +567,7 @@ if(CUDAQ_REALTIME_ROOT AND CMAKE_CUDA_COMPILER)
         add_dependencies(CUDAQXQECUnitTests test_realtime_pipeline)
         gtest_discover_tests(test_realtime_pipeline
           TEST_PREFIX "test_realtime_pipeline."
+          DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
         )
       else()
         message(STATUS "test_realtime_pipeline skipped: cudaq-realtime-pipeline not built")
@@ -612,7 +618,8 @@ if(CUDAQ_REALTIME_ROOT AND CMAKE_CUDA_COMPILER)
       )
       add_dependencies(CUDAQXQECUnitTests test_ai_decoder_quantized_onnx)
       gtest_discover_tests(test_ai_decoder_quantized_onnx
-        TEST_PREFIX "test_ai_decoder_quantized_onnx.")
+        TEST_PREFIX "test_ai_decoder_quantized_onnx."
+        DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
     else()
       message(WARNING "TensorRT not found. Skipping test_realtime_pipeline and test_ai_decoder_quantized_onnx (need NvInfer.h + TRT libs for compile/link).")
     endif()

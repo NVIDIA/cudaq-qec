@@ -134,8 +134,14 @@ def _load():
 
 
 def _check(rc: int) -> None:
-    if rc != 0:
-        raise ValueError(_load().nvqldpc_last_error().decode())
+    """ValueError for a rejected argument (rc -1), RuntimeError for a failure
+    while running (rc -2, e.g. a CUDA 'out of memory')."""
+    if rc == 0:
+        return
+    msg = _load().nvqldpc_last_error().decode()
+    if rc == -1:
+        raise ValueError(msg)
+    raise RuntimeError(msg)
 
 
 def _take_json(cp) -> Dict:

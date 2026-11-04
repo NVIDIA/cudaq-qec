@@ -312,5 +312,6 @@ if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET decoding_server)
   add_dependencies(test_decoding_server qec-test-bridge-no-dataplane)
   add_dependencies(CUDAQXQECUnitTests test_decoding_server)
   gtest_discover_tests(test_decoding_server
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 endif()

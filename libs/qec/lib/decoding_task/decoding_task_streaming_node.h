@@ -23,10 +23,15 @@ class streaming_decoder_node : public task_graph_node,
                                public streaming_task_graph_node,
                                public decoder_backed_task_graph_node {
 public:
+  /// @param equal_rounds Whether every round is @p spr measurements wide.
+  /// @param num_rounds Rounds of a shot of D's width; needed when rounds of
+  /// different widths leave D no schedule.
+  /// @throws std::invalid_argument if the decoder, D and O disagree, or the
+  /// node needs @p num_rounds and has none.
   streaming_decoder_node(std::shared_ptr<const sparse_binary_matrix> d,
                          std::shared_ptr<const sparse_binary_matrix> o,
                          std::unique_ptr<decoder> dec, uint32_t spr,
-                         bool equal_rounds = true);
+                         bool equal_rounds = true, uint32_t num_rounds = 0);
 
   streaming_task_graph_node *streaming() override { return this; }
   /// Windows and carry span deliveries, so copies would each see a part.
@@ -54,6 +59,9 @@ public:
   }
   const edge_value *streaming_output(std::size_t slot) const override;
   std::optional<committed_coverage> streaming_coverage() const override;
+  /// When rounds of different widths leave the node no schedule and its
+  /// decoder ends its own shots, each publication reports its interval.
+  bool exact_interval_coverage() const override { return exact_; }
 
   void execute_indexed(const std::vector<edge_value> &inputs,
                        std::vector<edge_value> &outputs) const override;
@@ -81,6 +89,10 @@ private:
   std::unique_ptr<decoder> dec_;
   streaming_correction_provider *correction_provider_ = nullptr;
   uint32_t spr_;
+  // Rounds of a shot of D's width, which an untagged shot is.
+  uint32_t num_rounds_ = 0;
+  // Every publication reports its interval (see exact_interval_coverage()).
+  bool exact_ = false;
   mutable std::vector<float_t> dets_;
   mutable edge_value last_output_;
   std::vector<uint8_t> correction_frame_;
@@ -91,8 +103,9 @@ private:
   std::size_t untagged_fill_ = 0;
   // Rounds of the stream's completed shots, where the next one begins.
   std::uint64_t completed_rounds_ = 0;
-  // The last FINAL shot's rounds, when the decoder reports them.
-  std::optional<committed_coverage> final_coverage_;
+  // The current publication's interval when exact_; otherwise the last
+  // FINAL shot's rounds, when the decoder reports them.
+  std::optional<committed_coverage> coverage_;
 };
 
 } // namespace cudaq::qec
