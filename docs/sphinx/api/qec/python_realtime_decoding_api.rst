@@ -97,7 +97,11 @@ These functions can be called from within CUDA-Q quantum kernels (``@cudaq.kerne
    :ref:`task_graph_logical_measurements`). Each is released once its readout
    has arrived and every correction that can flip it is committed; a
    mid-circuit readout can be released mid-shot, and all are by the
-   ``type: final`` syndrome_mapping row that ends the shot.
+   ``type: final`` syndrome_mapping row that ends the shot. A read of
+   measurements not yet released fails: the decoding server answers
+   ``NOT_READY``. A read with ``reset`` consumes the shot for this call and
+   ``get_corrections`` alike, so read the logical measurements before a
+   ``get_corrections`` that resets.
 
    :param decoder_id: Unique identifier for the decoder instance
    :param first: The first logical measurement to return

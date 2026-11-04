@@ -63,8 +63,8 @@ can decode on it at once. Results equal one-at-a-time decoding: each record
 uses one copy, and corrections fold in record order.
 
 * Only kinds that keep no state between decodes take ``max_in_flight`` above
-  one. ``sliding_window``, ``single_window``, ``streaming``, ``predecoder``
-  and ``ingest`` do not.
+  one. ``sliding_window``, ``single_window``, ``streaming``, ``predecoder``,
+  ``ingest`` and ``logical_readout`` do not.
 * While streaming, a fire pool cannot take raw measurements, so it must be
   fed by another node, as ``decode_window`` is fed by ``ingest``.
 * Each copy builds its own inner decoder, so the node needs a decoder type,
@@ -117,7 +117,8 @@ Each port declares the type of value it produces or accepts, and building a
 graph rejects an edge whose types do not match. The types you wire most are
 ``measurement_results``, ``detection_events`` and ``logical_outcome``; others
 carry values between built-in nodes, such as the corrections one window sends
-another. ``registered_edge_value_types()`` lists an installation's types.
+another. ``registered_edge_value_types()`` (C++) lists an installation's
+types.
 
 A node fed by another node decodes that node's output. For example, a
 predecoder passes its residual detectors to a global decoder, and an ``xor``
@@ -139,7 +140,8 @@ Logical outputs
 
 A ``logical_readout`` node reads the raw logical value through the model's
 ``m2o_sparse``, and an ``xor`` applies the corrections to it. The output that
-the node reaches, whatever its name, is the graph's logical output:
+the node reaches, whatever its name, is the graph's logical output. On a
+model whose rounds all have the same width:
 
 .. code-block:: yaml
 
@@ -245,4 +247,4 @@ answer:
   corrections.
 
 ``decoder_param_schema("selection_strategy.<name>")`` describes a strategy's
-parameters, and ``register_selection_strategy()`` adds a strategy.
+parameters, and ``register_selection_strategy()`` (C++) adds a strategy.

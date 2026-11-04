@@ -181,7 +181,8 @@ cover. For each graph output it reports:
 
 A zero correction with status ``AVAILABLE`` is a real result. Synchronously,
 ``enqueue_syndrome`` also returns whether any node decoded; with
-``async_streaming`` it returns ``False``, so read ``status`` instead.
+``async_streaming``, an untagged call returns ``False``, so read ``status``
+instead.
 
 .. _task_graph_logical_measurements:
 
@@ -209,7 +210,8 @@ other graphs wire a ``logical_readout`` node (see
   ``FINAL``. A mid-circuit readout is released mid-shot when the corrections
   are staged, as ``parallel_window``'s are; otherwise at ``FINAL``.
 * ``get_logical_measurements(first, count)`` returns ``None`` (C++:
-  ``nullptr``) until every measurement in the range is released.
+  ``nullptr``) until every measurement in the range is released, and again
+  once the shot is consumed.
 * The logical output is the last of ``streaming_result().outputs``, with a
   ``released`` flag per measurement. It is not in ``output_names()``, and
   ``get_num_logical_measurements()`` gives its width.
@@ -278,8 +280,8 @@ For any other topology, use
 :meth:`~cudaq_qec.DecodingTaskGraph.from_topology` with a list of
 :class:`~cudaq_qec.TaskGraphNodeConfig` nodes and their edges. In code, a
 node's ``kind``, ``decoder_type``, ``params`` and ``node_params`` hold what
-YAML writes as ``type``, ``inner``, ``inner``'s keys and the inline
-parameters.
+YAML writes as ``type``, ``inner.type``, ``inner``'s other keys and the
+inline parameters.
 
 Node kinds
 ++++++++++
