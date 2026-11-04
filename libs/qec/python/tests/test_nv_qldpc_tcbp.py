@@ -10,6 +10,8 @@ agreement, repeatability, converged-shot semantics and OSD ordering validity.
 """
 
 import os
+import shutil
+import subprocess
 import urllib.parse
 import urllib.request
 
@@ -25,6 +27,10 @@ except ValueError:
     pass  # library loaded
 except (FileNotFoundError, OSError) as e:
     pytest.skip(f"nv-qldpc-decoder plugin library not available: {e}",
+                allow_module_level=True)
+if shutil.which("nvidia-smi") is None or subprocess.run(
+    ["nvidia-smi"], capture_output=True).returncode != 0:
+    pytest.skip("nv-qldpc TCBP model setup requires a GPU",
                 allow_module_level=True)
 from cudaq_qec.plugins.nv_qldpc import tying  # noqa: E402
 
