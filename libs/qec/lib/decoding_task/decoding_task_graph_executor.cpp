@@ -1282,6 +1282,9 @@ struct decoding_task_graph::impl::record_scheduler {
 
   void execute_raw(context &c, std::size_t id, const graph_event &event) {
     auto &node = *owner.streaming_nodes[event.node].capability;
+    const auto node_index = owner.streaming_nodes[event.node].node_index;
+    const bool no_deliveries = owner.streaming_wires_from[node_index].empty() &&
+                               owner.completion_wires_from[node_index].empty();
     auto offset = event.offset;
     auto operation = event.operation;
     while (true) {
@@ -1309,11 +1312,11 @@ struct decoding_task_graph::impl::record_scheduler {
         // values.
         if (next == end)
           ++operation;
-        if (c.operations > 1 && !fired) {
+        if (c.operations > 1 && (!fired || no_deliveries)) {
           if (stop.load(std::memory_order_acquire))
             return;
-          // No publication means no children can read this running event's
-          // operation tag. Keep filling the node without redispatching it.
+          // No deliveries means no children can read this running event's
+          // operation tag. Captured results remain owned by this context.
           offset = next;
           c.slots[id].event.operation = operation;
           continue;
