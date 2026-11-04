@@ -13038,6 +13038,7 @@ public:
   }
   bool enqueue_edge_value(const edge_value &value, std::size_t slot) override {
     const uint8_t bit = value.get<logical_outcome>().bits[0];
+    probe_->log(id_ + ".value", bit);
     if (mode_ == "skip" && (skipped_++ % 2) == 0)
       return false; // publishes on every other record only
     if (joins()) {
@@ -13341,6 +13342,310 @@ TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether) {
   }
   EXPECT_GT(joined, 0u) << "no shot admitted queued rounds together";
 } // end - TEST(DecodingTaskGraph, QueuedRoundsAreAdmittedTogether)
+
+// A queued operation can cross a window boundary even when all operations
+// admitted together fit the window's initial capacity. Recheck its remaining
+// capacity after every chunk so every byte reaches the decoder.
+TEST(DecodingTaskGraph, QueuedRoundsRespectTheRemainingWindowCapacity) {
+  for (const std::size_t capacity : {1u, 32u})
+    for (const std::size_t workers : {1u, 4u}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "queue=" << capacity << " workers=" << workers);
+      auto probe = std::make_shared<async_stream_probe>(/*blocked=*/true);
+      auto h = sparse_binary_matrix::from_nested_csr(1, 1, {{0}});
+      decoding_task_graph graph(
+          std::make_unique<async_stream_probe_decoder>(h, probe),
+          {{0, 1, 2, 3, 4}}, {{0}},
+          {.async_streaming = true,
+           .async_queue_capacity = capacity,
+           .async_num_workers = workers});
+      const uint8_t ones[5] = {1, 1, 1, 1, 1};
+      graph.enqueue_syndrome(ones, 5, round_type::BULK);
+      ASSERT_TRUE(probe->wait_for_count(1));
+      // Keep the first decode blocked while filling the bounded queue. The
+      // rest is submitted after release so the queue-one control cannot hang.
+      const auto burst = std::min<std::size_t>(39, capacity - 1);
+      for (std::size_t i = 0; i < burst; ++i)
+        graph.enqueue_syndrome(ones, 2, round_type::BULK);
+      probe->release();
+      for (std::size_t i = burst; i < 39; ++i)
+        graph.enqueue_syndrome(ones, 2, round_type::BULK);
+      graph.enqueue_syndrome(ones, 2, round_type::FINAL);
+
+      // 5 + 39 * 2 + 2 = 85 bytes: exactly 17 complete five-byte windows,
+      // each with parity one, regardless of packet or admitted-record cuts.
+      EXPECT_EQ(probe->syndromes(),
+                std::vector<std::vector<float_t>>(17, {1.0f}));
+      const auto result = graph.streaming_result();
+      EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+      EXPECT_EQ(result.generation, 17u);
+      EXPECT_EQ(result.completed_operations, 17u);
+    }
+}
+
+// Coalescing must preserve each publication until all its deliveries have
+// consumed it. Counts or final XOR parity alone can hide overwritten values.
+TEST(DecodingTaskGraph, QueuedRoundsKeepEveryPublicationValue) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  constexpr std::size_t rounds = 40;
+  const auto records = pipeline_records(rounds);
+  const std::vector<std::size_t> expected(records.begin(), records.end());
+  for (const std::size_t workers : {1u, 4u}) {
+    SCOPED_TRACE(::testing::Message() << "workers=" << workers);
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("W", "wide"));
+    nodes.push_back(pipeline_node("B", "pass"));
+    nodes.push_back(pipeline_node("C", "pass"));
+    nodes.push_back(pipeline_node("D", "pass"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "W", "input"},
+         {"W", "output", "B", "input"},
+         {"B", "output", "C", "input"},
+         {"W", "output", "D", "input"},
+         {"C", "output", "output", "left"},
+         {"D", "output", "output", "right"}},
+        {.async_streaming = true,
+         .async_queue_capacity = 64,
+         .async_num_workers = workers});
+    probe->block_on("B", 0);
+    graph->enqueue_syndrome(records.data(), 1, round_type::BULK);
+    ASSERT_TRUE(probe->wait_until_blocking());
+    for (std::size_t i = 1; i + 1 < rounds; ++i)
+      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+    probe->release();
+    graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+
+    const auto result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.completed_operations, rounds);
+    EXPECT_EQ(result.values, (std::vector<uint8_t>{0, 0}));
+    for (const auto *node : {"B", "C", "D"})
+      EXPECT_EQ(probe->records(std::string(node) + ".value"), expected)
+          << "consumer " << node;
+    const auto joined = probe->records("W.joined");
+    EXPECT_NE(std::find(joined.begin(), joined.end(), 1u), joined.end())
+        << "no queued rounds were admitted together";
+  }
+}
+
+// A two-byte operation can finish one window and leave one byte buffered.
+// The next operation then finishes another window in the same context. Their
+// publications must retain distinct operation tags across the unfilled chunk.
+TEST(DecodingTaskGraph, CoalescedSlidingWindowsKeepOperationAttribution) {
+  for (const std::size_t workers : {1u, 4u}) {
+    SCOPED_TRACE("workers=" + std::to_string(workers));
+    auto probe = std::make_shared<async_stream_probe>(true);
+    task_graph_node_kind_spec spec;
+    spec.name = "test_coalesced_sliding_window";
+    spec.requires_decoder = false;
+    spec.requires_dem = false;
+    auto registration = register_scoped_node_kind(
+        std::move(spec), {}, [probe](node_build_context &) {
+          auto d = std::make_shared<sparse_binary_matrix>(
+              sparse_binary_matrix::from_nested_csr(1, 5, {{0, 1, 2, 3, 4}}));
+          auto o = std::make_shared<sparse_binary_matrix>(
+              sparse_binary_matrix::from_nested_csr(1, 1, {{0}}));
+          auto h = sparse_binary_matrix::from_nested_csr(1, 1, {{0}});
+          return std::make_unique<window_node>(
+              d, o, std::make_unique<async_stream_probe_decoder>(h, probe), 1,
+              window_spec{5, 3, 0, 0});
+        });
+    task_graph_node_config node;
+    node.id = "W";
+    node.kind = "test_coalesced_sliding_window";
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(std::move(node));
+    auto graph =
+        decoding_task_graph::from_topology(std::move(nodes), {},
+                                           {.async_streaming = true,
+                                            .async_queue_capacity = 64,
+                                            .async_num_workers = workers});
+    const uint8_t ones[5] = {1, 1, 1, 1, 1};
+    graph->enqueue_syndrome(ones, 5, round_type::BULK);
+    const bool entered = probe->wait_for_count(1);
+    if (!entered)
+      probe->release();
+    ASSERT_TRUE(entered);
+    for (std::size_t i = 0; i < 38; ++i)
+      graph->enqueue_syndrome(ones, 2, round_type::BULK);
+    probe->release();
+    graph->enqueue_syndrome(ones, 2, round_type::FINAL);
+    // 83 bytes: one five-byte window plus 26 three-byte strides.
+    EXPECT_EQ(probe->syndromes(),
+              std::vector<std::vector<float_t>>(27, {1.0f}));
+    auto result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.generation, 27u);
+    EXPECT_EQ(result.completed_operations, 27u);
+  }
+}
+
+struct coalesced_accumulator_probe {
+  std::shared_ptr<pipeline_probe> values = std::make_shared<pipeline_probe>();
+  parallel_decode_probe first, partial;
+  std::atomic<std::size_t> calls{0}, joined{0};
+  bool pause_partial = false;
+  bool throw_partial = false;
+};
+
+// Publishes the XOR of every three operations. Blocking the first call lets
+// the test queue more operations than there are contexts; the second gate
+// stops inside a coalesced batch on a chunk that will not publish anything.
+class coalesced_accumulator_node : public pipeline_probe_node {
+public:
+  coalesced_accumulator_node(std::string id,
+                             std::shared_ptr<coalesced_accumulator_probe> probe)
+      : pipeline_probe_node(std::move(id), "wide", probe->values),
+        probe_(std::move(probe)) {}
+
+  bool enqueue(const uint8_t *data, std::size_t len, round_type type) override {
+    if (len != 1)
+      throw std::runtime_error("accumulator expects one byte per operation");
+    ++probe_->calls;
+    const bool joined = data == last_end_;
+    probe_->joined += joined;
+    last_end_ = data + len;
+    if (first_) {
+      first_ = false;
+      probe_->first.enter_and_wait();
+    }
+    if (joined && buffered_ == 0 && probe_->pause_partial)
+      probe_->partial.enter_and_wait();
+    if (joined && buffered_ == 1 && probe_->throw_partial)
+      throw std::runtime_error("coalesced partial input failure");
+    parity_ ^= data[0];
+    if (++buffered_ < 3)
+      return false;
+    const auto value = parity_;
+    buffered_ = 0;
+    parity_ = 0;
+    return pipeline_probe_node::enqueue(&value, 1, type);
+  }
+
+  void reset_streaming_state() override {
+    pipeline_probe_node::reset_streaming_state();
+    first_ = true;
+    buffered_ = 0;
+    parity_ = 0;
+    last_end_ = nullptr;
+  }
+
+private:
+  std::shared_ptr<coalesced_accumulator_probe> probe_;
+  bool first_ = true;
+  std::size_t buffered_ = 0;
+  uint8_t parity_ = 0;
+  const uint8_t *last_end_ = nullptr;
+};
+
+// Check publication values and operation accounting after several calls that
+// only fill the accumulator, then cancel or fail inside such a sequence and
+// verify reset starts a clean shot.
+TEST(DecodingTaskGraph, CoalescedPartialInputsPreserveProgressAndRecovery) {
+  constexpr std::size_t rounds = 96;
+  const auto records = pipeline_records(rounds);
+  std::vector<std::size_t> expected;
+  for (std::size_t i = 0; i < rounds; i += 3)
+    expected.push_back(records[i] ^ records[i + 1] ^ records[i + 2]);
+  for (const std::size_t workers : {1u, 4u})
+    for (const auto mode : {"complete", "cancel", "fail"}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "workers=" << workers << " mode=" << mode);
+      auto probe = std::make_shared<coalesced_accumulator_probe>();
+      probe->pause_partial = std::string(mode) == "cancel";
+      probe->throw_partial = std::string(mode) == "fail";
+      task_graph_node_kind_spec spec;
+      spec.name = "test_coalesced_accumulator";
+      spec.requires_decoder = false;
+      spec.requires_dem = false;
+      auto registration = register_scoped_node_kind(
+          std::move(spec), {},
+          [probe](node_build_context &ctx) -> std::unique_ptr<task_graph_node> {
+            if (ctx.id == "W")
+              return std::make_unique<coalesced_accumulator_node>(ctx.id,
+                                                                  probe);
+            return std::make_unique<pipeline_probe_node>(ctx.id, "pass",
+                                                         probe->values);
+          });
+      std::vector<task_graph_node_config> nodes(4);
+      const std::vector<std::string> ids{"W", "B", "C", "D"};
+      for (std::size_t i = 0; i < nodes.size(); ++i) {
+        nodes[i].id = ids[i];
+        nodes[i].kind = "test_coalesced_accumulator";
+      }
+      auto graph = decoding_task_graph::from_topology(
+          std::move(nodes),
+          {{"measurements", "output", "W", "input"},
+           {"W", "output", "B", "input"},
+           {"B", "output", "C", "input"},
+           {"W", "output", "D", "input"},
+           {"C", "output", "output", "left"},
+           {"D", "output", "output", "right"}},
+          {.async_streaming = true,
+           .async_queue_capacity = 128,
+           .async_num_workers = workers});
+      graph->enqueue_syndrome(records.data(), 1, round_type::BULK);
+      const bool entered = probe->first.wait_for_entered(1);
+      if (!entered)
+        probe->first.release();
+      ASSERT_TRUE(entered);
+      for (std::size_t i = 1; i + 1 < rounds; ++i)
+        graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+      probe->first.release();
+
+      if (probe->pause_partial) {
+        const bool partial = probe->partial.wait_for_entered(1);
+        if (!partial)
+          probe->partial.release();
+        ASSERT_TRUE(partial);
+        const auto calls = probe->calls.load();
+        auto reset =
+            std::async(std::launch::async, [&] { graph->reset_decoder(); });
+        EXPECT_EQ(reset.wait_for(std::chrono::milliseconds(20)),
+                  std::future_status::timeout);
+        probe->partial.release();
+        EXPECT_NO_THROW(reset.get());
+        EXPECT_EQ(probe->calls.load(), calls)
+            << "cancelled batch continued after the partial input returned";
+      } else if (probe->throw_partial) {
+        EXPECT_THROW(
+            graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL),
+            std::runtime_error);
+        const auto failed = graph->streaming_result();
+        EXPECT_EQ(failed.status, task_graph_streaming_status::failed);
+        EXPECT_NE(failed.error.find("coalesced partial input failure"),
+                  std::string::npos);
+        EXPECT_LT(probe->calls.load(), rounds);
+        EXPECT_NO_THROW(graph->reset_decoder());
+      } else {
+        graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+        const auto result = graph->streaming_result();
+        EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+        EXPECT_EQ(result.generation, rounds / 3);
+        EXPECT_EQ(result.completed_operations, rounds / 3);
+        EXPECT_EQ(result.values, (std::vector<uint8_t>{0, 0}));
+        for (const auto *consumer : {"B", "C", "D"})
+          EXPECT_EQ(probe->values->records(std::string(consumer) + ".value"),
+                    expected);
+        graph->reset_decoder();
+      }
+      EXPECT_GT(probe->joined.load(), 0u) << "no coalesced input exercised";
+      probe->pause_partial = false;
+      probe->throw_partial = false;
+      const uint8_t one = 1;
+      graph->enqueue_syndrome(&one, 1, round_type::BULK);
+      graph->enqueue_syndrome(&one, 1, round_type::BULK);
+      graph->enqueue_syndrome(&one, 1, round_type::FINAL);
+      const auto recovered = graph->streaming_result();
+      EXPECT_EQ(recovered.status, task_graph_streaming_status::complete);
+      EXPECT_EQ(recovered.generation, 1u);
+      EXPECT_EQ(recovered.completed_operations, 1u);
+      EXPECT_EQ(recovered.values, (std::vector<uint8_t>{1, 1}));
+    }
+}
 
 // By default a producer may run 32 rounds ahead of a stalled graph, more
 // than its 16 record contexts, without waiting, and then waits: the queue
@@ -15642,6 +15947,190 @@ TEST(WindowKinds, BuildingAWindowedGraphStreams) {
       },
       "no_such_decoder");
 } // end - TEST(WindowKinds, BuildingAWindowedGraphStreams)
+
+TEST(WindowKinds, RejectsOverlappingPatternOutputs) {
+  const auto pattern = [](const std::string &id) {
+    task_graph_node_config p;
+    p.id = id;
+    p.kind = "parallel_window";
+    p.dem = arbitrary_memory_spec(30, true);
+    p.decoder_type = "single_error_lut";
+    p.node_params = {{"commit_rounds", std::size_t{2}},
+                     {"buffer_rounds", std::size_t{1}},
+                     {"gap_rounds", std::size_t{3}},
+                     {"output", std::string("corrections")}};
+    return p;
+  };
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    for (const bool same_template : {false, true})
+      expect_lowering_error(
+          [&] {
+            std::vector<task_graph_node_config> nodes;
+            nodes.push_back(pattern("P"));
+            nodes.push_back(pattern("Q"));
+            if (!same_template)
+              nodes.back().dem->phases.front().spec.error_rates[0] = 0.03;
+            task_graph_node_config sum;
+            sum.id = "sum";
+            sum.kind = "xor";
+            nodes.push_back(std::move(sum));
+            decoding_task_graph::from_topology(
+                std::move(nodes),
+                {{"measurements", "output", "P", "input"},
+                 {"measurements", "output", "Q", "input"},
+                 {"P", "output", "sum", "a"},
+                 {"Q", "output", "sum", "b"},
+                 {"sum", "output", "output", "logical"}},
+                {.async_streaming = async});
+          },
+          same_template
+              ? "graph output 'logical' has overlapping commit intervals"
+              : "have different templates but both reach");
+
+    // A single pattern's A/B partition and independent outputs still stream,
+    // including a short shot containing only boundary windows.
+    for (const bool separate : {false, true}) {
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pattern("P"));
+      std::vector<task_graph_edge> edges{
+          {"measurements", "output", "P", "input"},
+          {"P", "output", "output", "p"}};
+      if (separate) {
+        nodes.push_back(pattern("Q"));
+        edges.push_back({"measurements", "output", "Q", "input"});
+        edges.push_back({"Q", "output", "output", "q"});
+      }
+      const auto graph = decoding_task_graph::from_topology(
+          std::move(nodes), std::move(edges), {.async_streaming = async});
+      ASSERT_TRUE(graph->supports_streaming());
+      for (const std::size_t rounds : {3, 7, 30}) {
+        graph->reset_decoder();
+        const std::uint8_t zeros[4]{};
+        for (std::size_t r = 0; r < rounds; ++r)
+          graph->enqueue_syndrome(
+              zeros, 4, r + 1 == rounds ? round_type::FINAL : round_type::BULK);
+        const auto result = graph->streaming_result();
+        EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+        for (const auto &output : result.outputs)
+          EXPECT_EQ(output.coverage_end_round, rounds);
+        EXPECT_EQ(result.values,
+                  std::vector<std::uint8_t>(separate ? 2 : 1, 0));
+      }
+    }
+  }
+}
+
+namespace {
+
+// Each ingest owns a complete partition, but only the selected layers feed
+// the shared output. This permits testing composition independently of the
+// per-ingest commitment checks, with faults confined to their own round.
+struct composed_window_partitions {
+  std::vector<task_graph_node_config> nodes;
+  std::vector<task_graph_edge> edges;
+  std::size_t contributors = 0;
+
+  void add(const std::string &id, const dem_chunks_spec &spec,
+           std::int64_t period, std::int64_t offset,
+           const std::vector<experimental::round_range> &commits,
+           const std::vector<std::size_t> &selected) {
+    const auto ingest_index = nodes.size();
+    nodes.emplace_back();
+    task_graph_node_config ingest;
+    ingest.id = id;
+    ingest.kind = "ingest";
+    ingest.dem = spec;
+    edges.push_back({"measurements", "output", id, "input"});
+    for (std::size_t i = 0; i < commits.size(); ++i) {
+      const auto name = "layer" + std::to_string(i);
+      experimental::window_request request;
+      request.period = period;
+      request.offset = offset;
+      request.commit = commits[i];
+      request.input.disposition = experimental::port_disposition::closed;
+      request.output.disposition = experimental::port_disposition::closed;
+      ingest.windows.push_back({name, request, ""});
+      task_graph_node_config window;
+      window.id = id + "." + name;
+      window.kind = "decode_window";
+      window.decoder_type = "single_error_lut";
+      edges.push_back({id, name, window.id, "input"});
+      if (std::find(selected.begin(), selected.end(), i) != selected.end())
+        edges.push_back({window.id, "output", "sum",
+                         "in_" + std::to_string(contributors++)});
+      nodes.push_back(std::move(window));
+    }
+    nodes[ingest_index] = std::move(ingest);
+  }
+
+  std::unique_ptr<decoding_task_graph> build(bool async = false) {
+    task_graph_node_config sum;
+    sum.id = "sum";
+    sum.kind = "xor";
+    sum.node_params.insert("num_inputs", contributors);
+    nodes.push_back(std::move(sum));
+    edges.push_back({"sum", "output", "output", "logical"});
+    return decoding_task_graph::from_topology(
+        std::move(nodes), std::move(edges), {.async_streaming = async});
+  }
+};
+
+} // namespace
+
+TEST(WindowKinds, ComposesDisjointWindowSchedules) {
+  auto spec = single_round_spec();
+  // A declared horizon does not cause enumeration: this template repeats.
+  spec.num_rounds = std::uint64_t{1} << 40;
+  for (const bool async : {false, true}) {
+    composed_window_partitions p;
+    p.add("A", spec, 2, 0, {{0, 1}, {1, 2}}, {0});
+    p.add("B", spec, 4, -4, {{0, 1}, {1, 2}, {2, 3}, {3, 4}}, {1, 3});
+    const auto graph = p.build(async);
+    ASSERT_TRUE(graph->supports_streaming());
+    const std::uint8_t zeros[4]{};
+    for (std::size_t r = 0; r < 7; ++r)
+      graph->enqueue_syndrome(zeros, 4,
+                              r == 6 ? round_type::FINAL : round_type::BULK);
+    const auto result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.outputs[0].coverage_end_round, 7u);
+    EXPECT_EQ(result.values, (std::vector<std::uint8_t>{0}));
+  }
+}
+
+TEST(WindowKinds, ChecksFiniteWindowCommitIntervals) {
+  auto spec = single_round_spec();
+  spec.connections.erase(spec.connections.begin() + 1); // No repeating phase.
+  spec.num_rounds = 3;
+  for (const bool terminal : {false, true}) {
+    composed_window_partitions p;
+    p.add("A", spec, 8, -1, {{0, 2}, {2, 8}}, {terminal ? 1u : 0u});
+    p.add("B", spec, 8, 0, {{0, 2}, {2, 8}}, {terminal ? 1u : 0u});
+    expect_lowering_error([&] { p.build(); }, "overlapping commit intervals");
+  }
+  // These schedules first overlap at round 8, outside the finite shot.
+  composed_window_partitions p;
+  p.add("A", spec, 4, 0, {{0, 1}, {1, 4}}, {0});
+  p.add("B", spec, 6, 0, {{0, 1}, {1, 3}, {3, 6}}, {1});
+  const auto graph = p.build();
+  ASSERT_TRUE(graph->supports_streaming());
+  const std::uint8_t zeros[4]{};
+  for (std::size_t r = 0; r < 3; ++r)
+    graph->enqueue_syndrome(zeros, 4,
+                            r == 2 ? round_type::FINAL : round_type::BULK);
+  EXPECT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::complete);
+  EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 3u);
+
+  // Repeating the same template exposes that later overlap.
+  spec = single_round_spec();
+  composed_window_partitions repeating;
+  repeating.add("A", spec, 4, 0, {{0, 1}, {1, 4}}, {0});
+  repeating.add("B", spec, 6, 0, {{0, 1}, {1, 3}, {3, 6}}, {1});
+  expect_lowering_error([&] { repeating.build(); },
+                        "overlapping commit intervals");
+}
 
 // An ingest node keeps a shot's partial rounds and publications across
 // deliveries, so copies of it would split one stream: max_in_flight on it is
