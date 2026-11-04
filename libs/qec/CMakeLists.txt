@@ -273,9 +273,9 @@ if(CMAKE_CUDA_COMPILER)
   # Import CUDA targets in the common parent scope even when architectures
   # are supplied explicitly, so sibling library and tool directories see them.
   find_package(CUDAToolkit REQUIRED)
-  if (NOT CUDA_TARGET_ARCHS)
-    message(STATUS "Found CUDA Toolkit version: ${CUDAToolkit_VERSION}")
+  message(STATUS "Found CUDA Toolkit version: ${CUDAToolkit_VERSION}")
 
+  if (NOT CUDA_TARGET_ARCHS)
     if (CUDAToolkit_VERSION VERSION_LESS 13.0)
       # Ampere, Hopper
       set(CUDA_TARGET_ARCHS  "75;80;90")
