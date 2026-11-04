@@ -2233,6 +2233,7 @@ decoding_task_graph::impl::apply_record_context(record_context &c) {
     return std::pair{delta.operation, delta.coverage.begin_round};
   };
   auto &pending = c.staged_nodes;
+  const std::vector<uint8_t> no_flips; // a cancelled path's delta
   std::uint64_t advanced = 0;
   std::uint64_t before = streaming_result_state.generation;
   pending.clear();
@@ -2265,6 +2266,8 @@ decoding_task_graph::impl::apply_record_context(record_context &c) {
       const auto &delta = c.staged[si][--c.staged_count[si]];
       for (const auto k : streaming_node_outputs[si])
         stage_delta(k, delta.coverage, delta.bits);
+      for (const auto k : streaming_node_cancelled_outputs[si])
+        stage_delta(k, delta.coverage, no_flips);
       if (c.staged_count[si] != 0)
         std::push_heap(pending.begin(), pending.end(), later);
       else
