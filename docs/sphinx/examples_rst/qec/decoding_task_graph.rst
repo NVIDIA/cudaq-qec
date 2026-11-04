@@ -340,11 +340,12 @@ schedule, and the output's coverage follows that schedule. A node whose fires
 commit arbitrary round intervals, possibly out of order, instead reports each
 publication's exact commit interval. An output fed only by such nodes is
 *staged*: the graph holds each delta until every earlier round is committed,
-folds them in round order, and reports coverage ``[0, frontier)`` with the
-value at that frontier. A publication covering the whole shot, such as a raw
-logical readout, is folded only at FINAL, after the frontier reaches the last
-committed round. An output that mixes staged and scheduled contributors is a
-streaming conflict; wire them to separate outputs.
+folds them in round order, and reports coverage from the round where its
+value was last consumed to the frontier, with the value at that frontier. A
+publication covering the whole shot, such as a raw logical readout, is folded
+only at FINAL, after the frontier reaches the last committed round. An output
+that mixes staged and scheduled contributors is a streaming conflict; wire
+them to separate outputs.
 
 Multi-node graphs (combine)
 ++++++++++++++++++++++++++++
@@ -458,6 +459,16 @@ graph allocation is independent of the configured template length.
 Matrix-backed and guarded-window kinds still prepare their
 finite window models. A bounded-DEM deployment must use a compatible native
 streaming recipe or a fixed-size window, rather than a full-shot matrix model.
+
+A decoder that ends its own shots (``streaming_correction_provider``) reports
+what it has committed rather than following the node's schedule. Its
+provisional frames publish only when ``committed_round_count()`` grows, and
+each covers the shot's rounds committed so far, from where the value was last
+consumed. A decoder that does not report the count publishes nothing before
+FINAL. FINAL covers the rounds ``finalized_round_count()`` reports; without
+it, only the rounds already committed, so coverage never claims a round past
+the shot. Nodes combined into one output cover the rounds all of them have
+committed.
 
 .. code-block:: yaml
 

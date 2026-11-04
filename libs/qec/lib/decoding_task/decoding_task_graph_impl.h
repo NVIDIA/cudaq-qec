@@ -216,6 +216,9 @@ struct decoding_task_graph::impl {
   // pre-sized during compilation; streaming operations perform no allocation.
   std::vector<std::uint64_t> streaming_node_generations;
   std::vector<std::uint64_t> streaming_output_fire_ordinals;
+  // By output: where a value whose contributors report their coverage was
+  // last consumed, within its stream; the next value covers the rounds after.
+  std::vector<std::uint64_t> streaming_output_consumed_rounds;
   mutable task_graph_streaming_result streaming_result_state;
   // Node state as of the latest retired record, indexed by streaming node.
   // The progress model reads these rather than the nodes, which may already

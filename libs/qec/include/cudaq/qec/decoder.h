@@ -159,6 +159,16 @@ public:
   virtual std::optional<std::uint64_t> finalized_round_count() const {
     return std::nullopt;
   }
+
+  /// Rounds of the active shot, from its first, whose corrections are
+  /// committed, when known. peek_obs_corrections() then holds exactly those
+  /// rounds' corrections, none of a later round's. The count never
+  /// decreases within a shot, and is 0 once the shot ends or is reset. A
+  /// streaming task graph publishes a provisional frame only when it grows;
+  /// without it, it claims no rounds before the shot ends.
+  virtual std::optional<std::uint64_t> committed_round_count() const {
+    return std::nullopt;
+  }
 };
 
 /// @brief Decoder results

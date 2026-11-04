@@ -988,6 +988,7 @@ void decoding_task_graph::impl::compile_wires() {
 
     streaming_node_generations.assign(M, 0);
     streaming_output_fire_ordinals.assign(num_sinks, 0);
+    streaming_output_consumed_rounds.assign(num_sinks, 0);
     latest_node_corrections.resize(M);
     for (std::size_t si = 0; si < M; ++si)
       latest_node_corrections[si].assign(
@@ -1153,26 +1154,54 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
       const auto &schedule = output_streaming_schedules[k];
       std::optional<streaming_task_graph_node::committed_coverage> exact;
       std::size_t exact_count = 0;
+      bool agree = true;              // on where the shot begins
+      std::uint64_t latest_begin = 0; // of the shot, over contributors
+      // Contributors that commit at different rates cover the rounds all of
+      // them have committed, from where the output was last consumed. Each
+      // reports its shot from the shot's first round, on which they agree;
+      // an output keeps its schedule when a contributor reports no coverage
+      // (a native decoder on a schedule beside another node) or they
+      // disagree on that round (a decoder miscounting a shot).
       for (const auto si : contributors) {
         const auto coverage = latest_node_coverage[si];
         if (!coverage)
           continue;
         ++exact_count;
-        if (exact && (exact->begin_round != coverage->begin_round ||
-                      exact->end_round != coverage->end_round))
-          throw std::logic_error(
-              "task graph: contributors disagree on committed coverage");
-        exact = coverage;
-      }
-      if (exact_count && exact_count != contributors.size())
-        throw std::logic_error(
-            "task graph: contributors mix exact and scheduled coverage");
+        latest_begin = std::max(latest_begin, coverage->begin_round);
+        if (!exact) {
+          exact = coverage;
+          continue;
+        }
+        agree = agree && exact->begin_round == coverage->begin_round;
+        exact->end_round = std::min(exact->end_round, coverage->end_round);
+      } // end - for(si)
+      if (exact_count != contributors.size() || !agree)
+        exact.reset();
       if (exact) {
-        output.coverage_begin_round = exact->begin_round;
-        output.coverage_end_round = exact->end_round;
-        // A native shot reports exact coverage once FINAL ends its stream, so
-        // scheduled fires after it number a new one from round 0.
-        streaming_output_fire_ordinals[k] = 0;
+        auto &consumed = streaming_output_consumed_rounds[k];
+        output.coverage_begin_round = std::max(exact->begin_round, consumed);
+        output.coverage_end_round =
+            std::max(exact->end_round, output.coverage_begin_round);
+        // A fall back to the schedule resumes at the window after the rounds
+        // covered; FINAL ends the stream, and the next numbers from round 0.
+        streaming_output_fire_ordinals[k] =
+            final || schedule.stride == 0
+                ? 0
+                : (exact->end_round + schedule.stride - 1) / schedule.stride;
+        if (final)
+          consumed = 0;
+      } else if (exact_count == contributors.size() && schedule.stride > 0) {
+        // Every contributor reports its shot, but they disagree on where it
+        // begins: the window holding the latest begin, so publications of
+        // one shot stay in its window. FINAL ends the stream.
+        const std::uint64_t ordinal = latest_begin / schedule.stride;
+        streaming_output_fire_ordinals[k] = final ? 0 : ordinal + 1;
+        if (final)
+          streaming_output_consumed_rounds[k] = 0;
+        output.coverage_begin_round =
+            ordinal == 0 ? 0 : ordinal * schedule.stride + schedule.start_guard;
+        output.coverage_end_round =
+            ordinal * schedule.stride + schedule.size - schedule.end_guard;
       } else if (final && schedule.end_guard > 0) {
         const std::uint64_t fire_ordinal =
             streaming_output_fire_ordinals[k] == 0
@@ -1267,6 +1296,12 @@ void decoding_task_graph::impl::consume_streaming_result() {
   result.status = task_graph_streaming_status::pending;
   for (std::size_t k = 0; k < result.outputs.size(); ++k) {
     auto &output = result.outputs[k];
+    // The next value covers the rounds after this one's; a complete shot's
+    // next starts from round 0.
+    streaming_output_consumed_rounds[k] =
+        output.status == task_graph_streaming_status::complete
+            ? 0
+            : output.coverage_end_round;
     if (k < output_stagers.size()) {
       auto &stager = output_stagers[k];
       std::fill(stager.bits.begin(), stager.bits.end(), uint8_t{0});
@@ -1302,6 +1337,8 @@ void decoding_task_graph::impl::reset_streaming_progress() {
             streaming_node_generations.end(), 0);
   std::fill(streaming_output_fire_ordinals.begin(),
             streaming_output_fire_ordinals.end(), 0);
+  std::fill(streaming_output_consumed_rounds.begin(),
+            streaming_output_consumed_rounds.end(), 0);
   std::fill(result.values.begin(), result.values.end(), uint8_t{0});
   clear_latest_node_corrections();
   std::fill(latest_node_coverage.begin(), latest_node_coverage.end(),

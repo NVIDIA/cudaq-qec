@@ -82,8 +82,9 @@ const bool registered = [] {
 
 // Validate the decoder-facing matrices and allocate persistent streaming state.
 // When rounds of different widths divide D into no fixed windows, a decoder
-// that ends its own shots has the node report exact intervals instead; an
-// untagged shot's are then its template's rounds.
+// that ends its own shots has the node report exact intervals instead. Such a
+// decoder's node knows an untagged shot's rounds: its template's, or else
+// its schedule's.
 streaming_decoder_node::streaming_decoder_node(
     std::shared_ptr<const sparse_binary_matrix> d,
     std::shared_ptr<const sparse_binary_matrix> o, std::unique_ptr<decoder> dec,
@@ -98,6 +99,9 @@ streaming_decoder_node::streaming_decoder_node(
     throw std::invalid_argument(
         "streaming node syndrome count must be divisible by its round size");
   exact_ = !equal_rounds && correction_provider_ && !streaming_schedule();
+  if (const auto schedule = streaming_schedule();
+      correction_provider_ && num_rounds_ == 0 && schedule)
+    num_rounds_ = schedule->size;
   if (exact_ && num_rounds_ == 0)
     throw std::invalid_argument("streaming node over rounds of different "
                                 "widths needs its shot's round count");
@@ -123,7 +127,8 @@ bool streaming_decoder_node::enqueue(const uint8_t *msyn, std::size_t len,
     return false;
   // A tagged shot ends where the decoder says, not where it is metered.
   untagged_fill_ = 0;
-  if (!dec_->enqueue_syndrome(msyn, len, type)) {
+  if (!dec_->enqueue_syndrome(msyn, len, type) ||
+      (type != round_type::FINAL && !commits_more())) {
     pending_inner_input_ = true;
     return false;
   }
@@ -139,60 +144,98 @@ bool streaming_decoder_node::enqueue(const uint8_t *msyn, std::size_t len,
 // alone ends its fixed-length shot, and the legacy read seals a completed one,
 // so the shot publishes whole and nothing of it is left for a flush. The graph
 // meters the chunk to the shot's end (untagged_chunk_limit), which the decoder
-// would otherwise overrun and drop.
+// would otherwise overrun and drop. A publication before the shot's end is
+// provisional, as a tagged one is.
 bool streaming_decoder_node::enqueue_untagged(const uint8_t *msyn,
                                               std::size_t len) {
+  bool shot_end = false;
   if (len == 0)
     return false;
   untagged_fill_ += len;
-  if (untagged_fill_ >= num_msyn_per_decode())
+  shot_end = untagged_fill_ >= num_msyn_per_decode();
+  if (shot_end)
     untagged_fill_ = 0;
-  if (!dec_->enqueue_syndrome(msyn, len)) {
+  if (!dec_->enqueue_syndrome(msyn, len) || (!shot_end && !commits_more())) {
+    // A shot that ends unpublished leaves the next shot's commits its own.
+    if (shot_end)
+      shot_committed_ = 0;
     pending_inner_input_ = true;
     return false;
   }
-  publish_inner_frame(dec_->get_obs_corrections(), /*final=*/false);
+  if (!shot_end && correction_provider_) {
+    publish_inner_frame(correction_provider_->peek_obs_corrections());
+    record_coverage(/*ends_shot=*/false, std::nullopt);
+    // As for a tagged one: keep a flush pending, for a session that closes
+    // before the shot ends.
+    pending_inner_input_ = true;
+    return true;
+  }
+  publish_inner_frame(dec_->get_obs_corrections());
   if (correction_provider_) {
-    // The shot is D's width, so an exact node knows its rounds even when the
+    // The shot is D's width, so the node knows its rounds even when the
     // decoder does not report them.
-    const auto rounds = correction_provider_->finalized_round_count().value_or(
-        exact_ ? num_rounds_ : 0);
-    if (exact_)
-      coverage_ =
-          committed_coverage{completed_rounds_, completed_rounds_ + rounds};
+    const auto rounds =
+        correction_provider_->finalized_round_count().value_or(num_rounds_);
+    record_coverage(/*ends_shot=*/true, rounds);
     completed_rounds_ += rounds;
   }
   pending_inner_input_ = false;
   return true;
 } // end - enqueue_untagged()
 
+// A provider's provisional frame publishes only once it commits more rounds
+// of the shot than its node has covered; without commit progress, never
+// before the shot ends. Any other decoder's publishes whenever it fires.
+bool streaming_decoder_node::commits_more() const {
+  return !correction_provider_ ||
+         correction_provider_->committed_round_count().value_or(0) >
+             shot_committed_;
+}
+
 // Snapshot the inner decoder and expose its correction delta for edge routing.
 // A FINAL shot's rounds follow those of the shots before it in its stream, and
-// end the stream. An exact publication whose rounds are unknown, a
-// provisional one or a FINAL one the decoder does not count, joins the output
-// whole at FINAL.
+// end the stream.
 void streaming_decoder_node::capture_inner_corrections(bool final) {
-  const bool ends_shot = final && correction_provider_;
-  const committed_coverage whole{completed_rounds_, whole_shot};
-  std::optional<committed_coverage> counted;
   publish_inner_frame(
       correction_provider_
           ? (final ? correction_provider_->finalize_obs_corrections()
                    : correction_provider_->peek_obs_corrections())
-          : dec_->get_obs_corrections(),
-      final);
-  if (ends_shot)
-    if (const auto rounds = correction_provider_->finalized_round_count())
-      counted =
-          committed_coverage{completed_rounds_, completed_rounds_ + *rounds};
-  coverage_ = exact_ ? counted.value_or(whole) : counted;
-  if (ends_shot)
+          : dec_->get_obs_corrections());
+  if (!correction_provider_)
+    return;
+  record_coverage(final, final ? correction_provider_->finalized_round_count()
+                               : std::nullopt);
+  if (final)
     completed_rounds_ = 0;
 } // end - capture_inner_corrections()
 
+// A provider's publication covers the shot's rounds committed so far: those
+// the decoder reports, or at the shot's end its @p rounds, when known. An
+// exact node's covers those committed since its last, or, at an end whose
+// rounds are unknown, joins the output whole at FINAL; a scheduled node's
+// covers the shot from its first round, the graph starting the output where
+// it was last consumed.
+void streaming_decoder_node::record_coverage(
+    bool ends_shot, std::optional<std::uint64_t> rounds) {
+  const auto before = shot_committed_;
+  const auto begin = completed_rounds_;
+  if (ends_shot)
+    shot_committed_ = std::max(before, rounds.value_or(before));
+  else
+    shot_committed_ = std::max(
+        before, correction_provider_->committed_round_count().value_or(0));
+  if (!exact_)
+    coverage_ = committed_coverage{begin, begin + shot_committed_};
+  else if (ends_shot && !rounds)
+    coverage_ = committed_coverage{begin + before, whole_shot};
+  else
+    coverage_ = committed_coverage{begin + before, begin + shot_committed_};
+  if (ends_shot)
+    shot_committed_ = 0;
+} // end - record_coverage()
+
 // Publish the change in the inner frame since the last publication.
-void streaming_decoder_node::publish_inner_frame(const uint8_t *current,
-                                                 bool final) {
+void streaming_decoder_node::publish_inner_frame(const uint8_t *current) {
   auto &outcome = last_output_.get<logical_outcome>();
   outcome.converged = true;
   for (std::size_t i = 0; i < outcome.bits.size(); ++i) {
@@ -200,7 +243,6 @@ void streaming_decoder_node::publish_inner_frame(const uint8_t *current,
     correction_frame_[i] = current[i];
   }
   output_valid_ = true;
-  published_final_ = final;
 }
 
 // Publish a decoder correction withheld after its final incomplete enqueue.
@@ -229,9 +271,9 @@ void streaming_decoder_node::reset_streaming_state() {
   std::fill(correction_frame_.begin(), correction_frame_.end(), uint8_t{0});
   pending_inner_input_ = false;
   output_valid_ = false;
-  published_final_ = false;
   untagged_fill_ = 0;
   completed_rounds_ = 0;
+  shot_committed_ = 0;
   coverage_.reset();
 }
 
@@ -254,15 +296,13 @@ streaming_decoder_node::streaming_output(std::size_t slot) const {
   return slot == 0 && output_valid_ ? &last_output_ : nullptr;
 }
 
-// Native frames accumulate from the start of the stream. Once FINAL finalizes
-// the shot, use its physical length, after the shots before it, rather than
-// the configured template fire schedule. A shot sealed at its configured
-// length keeps the schedule, which also numbers back-to-back shots that never
-// see FINAL; the shot after a FINAL one begins a new stream. Without a
-// schedule, every publication reports its own interval.
+// A decoder that ends its own shots has every publication report the rounds
+// it commits (see record_coverage()), rather than the configured template
+// fire schedule: after the shots before it in its stream, the shot after a
+// FINAL one beginning a new stream. Any other node keeps its schedule.
 std::optional<streaming_task_graph_node::committed_coverage>
 streaming_decoder_node::streaming_coverage() const {
-  return exact_ || published_final_ ? coverage_ : std::nullopt;
+  return coverage_;
 }
 
 // Project a one-shot decoder result through O when it is fault-valued.
