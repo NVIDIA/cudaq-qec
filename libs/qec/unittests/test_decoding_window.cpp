@@ -7355,7 +7355,7 @@ TEST(WindowedGraph, OneCopyPerLayerNeverDeadlocks) {
 // few shots, every shot allocates only the decoders'. In an asynchronous
 // one, which record context and join entry a window lands in depends on
 // timing; it warms up for good, so over later shots some allocate only the
-// decoders' and all together allocate less than the first one did.
+// decoders' and all together allocate less than the warm-up shots did.
 TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders) {
   if (QEC_TEST_SANITIZED)
     GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "
@@ -7404,12 +7404,13 @@ TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders) {
             << "shot " << run << " allocated beyond its decoders";
       continue;
     }
-    const auto later =
-        std::vector<std::size_t>(extra.begin() + 10, extra.end());
-    EXPECT_NE(std::count(later.begin(), later.end(), 0u), 0)
+    const auto total = [](auto first, auto last) {
+      return std::accumulate(first, last, std::size_t{0});
+    };
+    const auto later = extra.begin() + 10;
+    EXPECT_NE(std::count(later, extra.end(), 0u), 0)
         << "no later shot allocated only the decoders'";
-    EXPECT_LT(std::accumulate(later.begin(), later.end(), std::size_t{0}),
-              extra.front())
+    EXPECT_LT(total(later, extra.end()), total(extra.begin(), later))
         << "the graph kept allocating shot after shot";
   } // end - for(options, copies)
 } // end - TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders)

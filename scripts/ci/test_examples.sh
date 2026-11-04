@@ -9,8 +9,9 @@ export PYTHONPATH="/cudaq-install:$HOME/.cudaqx"
 echo "Setting PYTHONPATH=$PYTHONPATH"
 
 # Set CUDA-QX paths for nvq++
-CUDAQX_INCLUDE="$HOME/.cudaqx/include"
-CUDAQX_LIB="$HOME/.cudaqx/lib"
+CUDAQX_INSTALL_DIR="${CUDAQX_INSTALL_DIR:-$HOME/.cudaqx}"
+CUDAQX_INCLUDE="$CUDAQX_INSTALL_DIR/include"
+CUDAQX_LIB="$CUDAQX_INSTALL_DIR/lib"
 
 LIB=$1  # Accepts "qec" or "all"
 
