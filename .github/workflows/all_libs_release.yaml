@@ -228,6 +228,7 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ env.MPI_PATH }}/lib:${{ env.LD_LIBRARY_PATH }}
           OMPI_MCA_pml: ob1
+          CUDAQX_INSTALL_DIR: /usr/local/cudaq
         run: |
           ln -s /usr/local/cudaq /cudaq-install
           bash scripts/ci/test_examples.sh all 
