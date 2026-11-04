@@ -15948,6 +15948,190 @@ TEST(WindowKinds, BuildingAWindowedGraphStreams) {
       "no_such_decoder");
 } // end - TEST(WindowKinds, BuildingAWindowedGraphStreams)
 
+TEST(WindowKinds, RejectsOverlappingPatternOutputs) {
+  const auto pattern = [](const std::string &id) {
+    task_graph_node_config p;
+    p.id = id;
+    p.kind = "parallel_window";
+    p.dem = arbitrary_memory_spec(30, true);
+    p.decoder_type = "single_error_lut";
+    p.node_params = {{"commit_rounds", std::size_t{2}},
+                     {"buffer_rounds", std::size_t{1}},
+                     {"gap_rounds", std::size_t{3}},
+                     {"output", std::string("corrections")}};
+    return p;
+  };
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    for (const bool same_template : {false, true})
+      expect_lowering_error(
+          [&] {
+            std::vector<task_graph_node_config> nodes;
+            nodes.push_back(pattern("P"));
+            nodes.push_back(pattern("Q"));
+            if (!same_template)
+              nodes.back().dem->phases.front().spec.error_rates[0] = 0.03;
+            task_graph_node_config sum;
+            sum.id = "sum";
+            sum.kind = "xor";
+            nodes.push_back(std::move(sum));
+            decoding_task_graph::from_topology(
+                std::move(nodes),
+                {{"measurements", "output", "P", "input"},
+                 {"measurements", "output", "Q", "input"},
+                 {"P", "output", "sum", "a"},
+                 {"Q", "output", "sum", "b"},
+                 {"sum", "output", "output", "logical"}},
+                {.async_streaming = async});
+          },
+          same_template
+              ? "graph output 'logical' has overlapping commit intervals"
+              : "have different templates but both reach");
+
+    // A single pattern's A/B partition and independent outputs still stream,
+    // including a short shot containing only boundary windows.
+    for (const bool separate : {false, true}) {
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pattern("P"));
+      std::vector<task_graph_edge> edges{
+          {"measurements", "output", "P", "input"},
+          {"P", "output", "output", "p"}};
+      if (separate) {
+        nodes.push_back(pattern("Q"));
+        edges.push_back({"measurements", "output", "Q", "input"});
+        edges.push_back({"Q", "output", "output", "q"});
+      }
+      const auto graph = decoding_task_graph::from_topology(
+          std::move(nodes), std::move(edges), {.async_streaming = async});
+      ASSERT_TRUE(graph->supports_streaming());
+      for (const std::size_t rounds : {3, 7, 30}) {
+        graph->reset_decoder();
+        const std::uint8_t zeros[4]{};
+        for (std::size_t r = 0; r < rounds; ++r)
+          graph->enqueue_syndrome(
+              zeros, 4, r + 1 == rounds ? round_type::FINAL : round_type::BULK);
+        const auto result = graph->streaming_result();
+        EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+        for (const auto &output : result.outputs)
+          EXPECT_EQ(output.coverage_end_round, rounds);
+        EXPECT_EQ(result.values,
+                  std::vector<std::uint8_t>(separate ? 2 : 1, 0));
+      }
+    }
+  }
+}
+
+namespace {
+
+// Each ingest owns a complete partition, but only the selected layers feed
+// the shared output. This permits testing composition independently of the
+// per-ingest commitment checks, with faults confined to their own round.
+struct composed_window_partitions {
+  std::vector<task_graph_node_config> nodes;
+  std::vector<task_graph_edge> edges;
+  std::size_t contributors = 0;
+
+  void add(const std::string &id, const dem_chunks_spec &spec,
+           std::int64_t period, std::int64_t offset,
+           const std::vector<experimental::round_range> &commits,
+           const std::vector<std::size_t> &selected) {
+    const auto ingest_index = nodes.size();
+    nodes.emplace_back();
+    task_graph_node_config ingest;
+    ingest.id = id;
+    ingest.kind = "ingest";
+    ingest.dem = spec;
+    edges.push_back({"measurements", "output", id, "input"});
+    for (std::size_t i = 0; i < commits.size(); ++i) {
+      const auto name = "layer" + std::to_string(i);
+      experimental::window_request request;
+      request.period = period;
+      request.offset = offset;
+      request.commit = commits[i];
+      request.input.disposition = experimental::port_disposition::closed;
+      request.output.disposition = experimental::port_disposition::closed;
+      ingest.windows.push_back({name, request, ""});
+      task_graph_node_config window;
+      window.id = id + "." + name;
+      window.kind = "decode_window";
+      window.decoder_type = "single_error_lut";
+      edges.push_back({id, name, window.id, "input"});
+      if (std::find(selected.begin(), selected.end(), i) != selected.end())
+        edges.push_back({window.id, "output", "sum",
+                         "in_" + std::to_string(contributors++)});
+      nodes.push_back(std::move(window));
+    }
+    nodes[ingest_index] = std::move(ingest);
+  }
+
+  std::unique_ptr<decoding_task_graph> build(bool async = false) {
+    task_graph_node_config sum;
+    sum.id = "sum";
+    sum.kind = "xor";
+    sum.node_params.insert("num_inputs", contributors);
+    nodes.push_back(std::move(sum));
+    edges.push_back({"sum", "output", "output", "logical"});
+    return decoding_task_graph::from_topology(
+        std::move(nodes), std::move(edges), {.async_streaming = async});
+  }
+};
+
+} // namespace
+
+TEST(WindowKinds, ComposesDisjointWindowSchedules) {
+  auto spec = single_round_spec();
+  // A declared horizon does not cause enumeration: this template repeats.
+  spec.num_rounds = std::uint64_t{1} << 40;
+  for (const bool async : {false, true}) {
+    composed_window_partitions p;
+    p.add("A", spec, 2, 0, {{0, 1}, {1, 2}}, {0});
+    p.add("B", spec, 4, -4, {{0, 1}, {1, 2}, {2, 3}, {3, 4}}, {1, 3});
+    const auto graph = p.build(async);
+    ASSERT_TRUE(graph->supports_streaming());
+    const std::uint8_t zeros[4]{};
+    for (std::size_t r = 0; r < 7; ++r)
+      graph->enqueue_syndrome(zeros, 4,
+                              r == 6 ? round_type::FINAL : round_type::BULK);
+    const auto result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete);
+    EXPECT_EQ(result.outputs[0].coverage_end_round, 7u);
+    EXPECT_EQ(result.values, (std::vector<std::uint8_t>{0}));
+  }
+}
+
+TEST(WindowKinds, ChecksFiniteWindowCommitIntervals) {
+  auto spec = single_round_spec();
+  spec.connections.erase(spec.connections.begin() + 1); // No repeating phase.
+  spec.num_rounds = 3;
+  for (const bool terminal : {false, true}) {
+    composed_window_partitions p;
+    p.add("A", spec, 8, -1, {{0, 2}, {2, 8}}, {terminal ? 1u : 0u});
+    p.add("B", spec, 8, 0, {{0, 2}, {2, 8}}, {terminal ? 1u : 0u});
+    expect_lowering_error([&] { p.build(); }, "overlapping commit intervals");
+  }
+  // These schedules first overlap at round 8, outside the finite shot.
+  composed_window_partitions p;
+  p.add("A", spec, 4, 0, {{0, 1}, {1, 4}}, {0});
+  p.add("B", spec, 6, 0, {{0, 1}, {1, 3}, {3, 6}}, {1});
+  const auto graph = p.build();
+  ASSERT_TRUE(graph->supports_streaming());
+  const std::uint8_t zeros[4]{};
+  for (std::size_t r = 0; r < 3; ++r)
+    graph->enqueue_syndrome(zeros, 4,
+                            r == 2 ? round_type::FINAL : round_type::BULK);
+  EXPECT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::complete);
+  EXPECT_EQ(graph->streaming_result().outputs[0].coverage_end_round, 3u);
+
+  // Repeating the same template exposes that later overlap.
+  spec = single_round_spec();
+  composed_window_partitions repeating;
+  repeating.add("A", spec, 4, 0, {{0, 1}, {1, 4}}, {0});
+  repeating.add("B", spec, 6, 0, {{0, 1}, {1, 3}, {3, 6}}, {1});
+  expect_lowering_error([&] { repeating.build(); },
+                        "overlapping commit intervals");
+}
+
 // An ingest node keeps a shot's partial rounds and publications across
 // deliveries, so copies of it would split one stream: max_in_flight on it is
 // rejected, while the pattern's layers may still set it.
