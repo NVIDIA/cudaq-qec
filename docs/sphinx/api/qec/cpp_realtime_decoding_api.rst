@@ -12,6 +12,7 @@ These functions can be called from within CUDA-Q quantum kernels (``__qpu__`` fu
 .. doxygenfunction:: cudaq::qec::decoding::enqueue_syndromes
 .. doxygenfunction:: cudaq::qec::decoding::enqueue_syndromes_mapped
 .. doxygenfunction:: cudaq::qec::decoding::get_corrections
+.. doxygenfunction:: cudaq::qec::decoding::get_logical_measurements
 .. doxygenfunction:: cudaq::qec::decoding::reset_decoder
 
 

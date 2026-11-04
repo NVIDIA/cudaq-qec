@@ -32,8 +32,8 @@
 /// dispatcher object (HOST path, HOST_CALL table) over the provider's rings.
 ///
 /// The function table comes from the decoding-server-cqr service plugin
-/// (enqueue_syndromes / get_corrections / reset_decoder) regardless of
-/// transport or decoder.
+/// (enqueue_syndromes / get_corrections / reset_decoder /
+/// get_logical_measurements) regardless of transport or decoder.
 ///
 /// Prints `QEC_DECODING_SERVER_READY port=<P0> ...` on stdout once the caller
 /// can start connecting. The rest of the line is the provider's endpoint

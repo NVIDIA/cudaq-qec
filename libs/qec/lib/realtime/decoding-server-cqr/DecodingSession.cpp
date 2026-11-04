@@ -303,15 +303,36 @@ void DecodingSession::enqueue_core(const slot::EnqueueView &req,
   }
 }
 
-RpcStatus DecodingSession::get_corrections_core(int64_t return_size_arg,
-                                                bool reset, uint8_t *out,
+RpcStatus DecodingSession::get_corrections_core(int64_t return_size, bool reset,
+                                                uint8_t *out,
                                                 std::size_t out_capacity,
                                                 std::size_t &out_len) {
+  return read_result_core(false, 0, return_size, reset, out, out_capacity,
+                          out_len);
+}
+
+RpcStatus DecodingSession::get_logical_measurements_core(
+    int64_t first, int64_t return_size, bool reset, uint8_t *out,
+    std::size_t out_capacity, std::size_t &out_len) {
+  return read_result_core(true, first, return_size, reset, out, out_capacity,
+                          out_len);
+}
+
+// The corrections are read from the result frozen when an operation
+// completes (its first num_observables() values); the logical measurements
+// through the graph's release gate. A reset read before a logical graph's
+// shot ends is NOT_READY, so a client polling with reset waits for FINAL.
+RpcStatus DecodingSession::read_result_core(bool logical, int64_t first_arg,
+                                            int64_t return_size_arg, bool reset,
+                                            uint8_t *out,
+                                            std::size_t out_capacity,
+                                            std::size_t &out_len) {
+  const char *who = logical ? "get_logical_measurements" : "get_corrections";
   out_len = 0;
 
   // Spec validation: return_size (the OUT std::vector<bool> length) must be
-  // positive.
-  if (return_size_arg <= 0) {
+  // positive and first non-negative.
+  if (return_size_arg <= 0 || first_arg < 0) {
     ++error_count;
     return RpcStatus::BAD_REQUEST;
   }
@@ -323,16 +344,33 @@ RpcStatus DecodingSession::get_corrections_core(int64_t return_size_arg,
 
   try {
     const auto target = target_of(*this);
+    const auto first = static_cast<size_t>(first_arg);
     const auto return_size = static_cast<size_t>(return_size_arg);
-    if (return_size != target.num_observables()) {
+    const std::size_t width =
+        logical ? target.num_logical_measurements() : target.num_observables();
+    const uint8_t *bits = nullptr;
+    if (logical && width == 0) {
+      cudaq::qec::error(
+          "DecodingSession::get_logical_measurements: this {} has no logical "
+          "measurements; only a task graph with a logical output does",
+          target.is_graph() ? "task graph" : "decoder");
+      ++error_count;
+      return RpcStatus::BAD_REQUEST;
+    }
+    if (logical ? first > width || return_size > width - first
+                : return_size != width) {
       ++error_count;
       return RpcStatus::BAD_REQUEST;
     }
     // Only an aggregate completed since the last snapshot makes a graph ready:
     // once enqueue has started a new volume, the snapshot is the previous
     // shot's result, which a decoder session would report as NOT_READY.
+    // The live result it read serves the rest of this call, so an async graph
+    // waits once.
+    const task_graph_streaming_result *live = nullptr;
     if (target.is_graph()) {
       const auto update = target.capture_result_update(false, graph_result_);
+      live = update.live;
       if (update.operation_completed) {
         shot_state = ShotState::result_ready;
         decode_count.fetch_add(update.completed_results,
@@ -340,14 +378,26 @@ RpcStatus DecodingSession::get_corrections_core(int64_t return_size_arg,
         accepted_syndromes = 0;
       }
     }
-    if (shot_state != ShotState::result_ready)
-      return RpcStatus::NOT_READY;
-    const uint8_t *corrections =
-        target.published_corrections(graph_result_.values.data());
-    if (!corrections) {
-      shot_state = ShotState::failed;
-      return RpcStatus::INTERNAL_ERROR;
+    if (logical) {
+      // The live result's release check, as the host read uses: a released
+      // logical measurement is final, and its release need not complete an
+      // operation, so the frozen snapshot could lag it. Only a graph has
+      // logical measurements, so live is set.
+      bits = live->logical_measurements(first, return_size);
+      if (!bits)
+        return RpcStatus::NOT_READY;
+    } else {
+      if (shot_state != ShotState::result_ready)
+        return RpcStatus::NOT_READY;
+      bits = target.published_corrections(graph_result_.values.data());
+      if (!bits) {
+        shot_state = ShotState::failed;
+        return RpcStatus::INTERNAL_ERROR;
+      }
     }
+    // A reset read is ready only once the shot may be consumed.
+    if (reset && !target.may_consume(live))
+      return RpcStatus::NOT_READY;
     // result_len = ceil(R/8) exactly per decoder_server_runtime.md spec.
     // The spec forbids trailing padding in the wire result_len; if a transport
     // layer needs 8-byte alignment, it must add padding in its own framing.
@@ -357,10 +407,10 @@ RpcStatus DecodingSession::get_corrections_core(int64_t return_size_arg,
     // (the pre-decoding-server code returned result-buffer-too-small here).
     if (!out || result_len > out_capacity)
       return RpcStatus::INTERNAL_ERROR;
-    // get_obs_corrections() returns byte-per-bit; pack into the wire format.
+    // The result is byte-per-bit; pack it into the wire format.
     std::memset(out, 0, result_len);
     for (size_t i = 0; i < return_size; ++i) {
-      if (corrections[i] & 1u)
+      if (bits[i] & 1u)
         out[i / 8] |= static_cast<uint8_t>(1u << (i % 8));
     }
     if (reset) {
@@ -377,12 +427,12 @@ RpcStatus DecodingSession::get_corrections_core(int64_t return_size_arg,
     out_len = result_len;
     return RpcStatus::OK;
   } catch (const std::exception &e) {
-    cudaq::qec::error("DecodingSession::get_corrections_core: {}", e.what());
+    cudaq::qec::error("DecodingSession::{}_core: {}", who, e.what());
     ++error_count;
     shot_state = ShotState::failed;
     return RpcStatus::INTERNAL_ERROR;
   }
-}
+} // end - read_result_core()
 
 RpcStatus DecodingSession::reset_core() {
   try {
@@ -488,13 +538,42 @@ void DecodingSession::handle_enqueue(const void *rx_slot, void *tx_slot,
 
 void DecodingSession::handle_get_corrections(const void *rx_slot, void *tx_slot,
                                              std::size_t slot_size) noexcept {
-  SingleCallerGuard serial_guard(*this);
-  ++get_corrections_count;
-  hopstats::StageScope stats(
-      cudaq::qec::decoding::rpc::kGetCorrectionsFunctionId);
+  handle_result_request(false, rx_slot, tx_slot, slot_size);
+}
 
-  slot::GetCorrectionsView req;
-  if (!slot::parse_get_corrections(rx_slot, slot_size, req)) {
+void DecodingSession::handle_get_logical_measurements(
+    const void *rx_slot, void *tx_slot, std::size_t slot_size) noexcept {
+  handle_result_request(true, rx_slot, tx_slot, slot_size);
+}
+
+// Parses either result request into one view; get_corrections reads from 0.
+static bool parse_result_request(bool logical, const void *rx_slot,
+                                 std::size_t slot_size,
+                                 slot::GetLogicalMeasurementsView &out) {
+  slot::GetCorrectionsView corrections;
+  if (logical)
+    return slot::parse_get_logical_measurements(rx_slot, slot_size, out);
+  if (!slot::parse_get_corrections(rx_slot, slot_size, corrections))
+    return false;
+  out = {corrections.header, corrections.decoder_id, 0, corrections.return_size,
+         corrections.reset};
+  return true;
+}
+
+// Shared body of both result requests.
+void DecodingSession::handle_result_request(bool logical, const void *rx_slot,
+                                            void *tx_slot,
+                                            std::size_t slot_size) noexcept {
+  const char *who =
+      logical ? "handle_get_logical_measurements" : "handle_get_corrections";
+  SingleCallerGuard serial_guard(*this);
+  ++(logical ? get_logical_measurements_count : get_corrections_count);
+  hopstats::StageScope stats(
+      logical ? cudaq::qec::decoding::rpc::kGetLogicalMeasurementsFunctionId
+              : cudaq::qec::decoding::rpc::kGetCorrectionsFunctionId);
+
+  slot::GetLogicalMeasurementsView req;
+  if (!parse_result_request(logical, rx_slot, slot_size, req)) {
     const auto *hdr = static_cast<const RPCHeader *>(rx_slot);
     ++error_count;
     slot::write_response(tx_slot, hdr->request_id, hdr->ptp_timestamp,
@@ -511,28 +590,27 @@ void DecodingSession::handle_get_corrections(const void *rx_slot, void *tx_slot,
   RpcStatus status;
   try {
     target_of(*this).pin_device_cached();
-    // The corrections pack straight into the tx slot's payload area; the
+    // The result packs straight into the tx slot's payload area; the
     // header (and the magic, last) follow in commit().  result-too-large is
     // detected by the core against the slot capacity — no truncation.
-    status = get_corrections_core(req.return_size, req.reset,
-                                  static_cast<uint8_t *>(tx_slot) +
-                                      sizeof(RPCResponse),
-                                  slot_size - sizeof(RPCResponse), out_len);
+    status =
+        read_result_core(logical, req.first, req.return_size, req.reset,
+                         static_cast<uint8_t *>(tx_slot) + sizeof(RPCResponse),
+                         slot_size - sizeof(RPCResponse), out_len);
   } catch (const std::exception &e) {
-    cudaq::qec::error("DecodingSession::handle_get_corrections: {}", e.what());
+    cudaq::qec::error("DecodingSession::{}: {}", who, e.what());
     ++error_count;
     shot_state = ShotState::failed;
     status = RpcStatus::INTERNAL_ERROR;
   } catch (...) {
-    cudaq::qec::error(
-        "DecodingSession::handle_get_corrections: non-std exception");
+    cudaq::qec::error("DecodingSession::{}: non-std exception", who);
     ++error_count;
     shot_state = ShotState::failed;
     status = RpcStatus::INTERNAL_ERROR;
   }
   stats.decoded();
   writer.commit(status, rid, ptp, status == RpcStatus::OK ? out_len : 0);
-}
+} // end - handle_result_request()
 
 void DecodingSession::handle_reset(const void *rx_slot, void *tx_slot,
                                    std::size_t slot_size) noexcept {

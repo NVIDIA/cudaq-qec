@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "decoding_task_decode_window_node.h"
 #include "decoding_task_graph_impl.h"
 #include "decoding_task_graph_utils.h"
 #include "../hardware_guards.h"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <future>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -76,6 +78,59 @@ logical_outcome xor_logical(const logical_outcome &a,
 }
 
 namespace {
+
+bool window_commits_overlap(const decode_window_node &a,
+                            const decode_window_node &b) {
+  const auto &ar = a.request();
+  const auto &br = b.request();
+  // Request coordinates are bounded by window_round_limit (2^31), so these
+  // sums, differences and widths fit in int64_t.
+  const auto a_start = ar.offset + ar.commit->begin;
+  const auto b_start = br.offset + br.commit->begin;
+  if (a.context().repeats() && b.context().repeats()) {
+    // The relative starts of any two instances differ by a multiple of the
+    // periods' gcd. Touching half-open intervals do not overlap. Clipping at
+    // the shot boundaries cannot introduce an overlap; any periodic overlap
+    // occurs in some sufficiently long admitted shot.
+    const auto period = std::gcd(ar.period, br.period);
+    auto distance = (b_start - a_start) % period;
+    if (distance < 0)
+      distance += period;
+    return distance < ar.commit->end - ar.commit->begin ||
+           period - distance < br.commit->end - br.commit->begin;
+  }
+
+  // A finite template admits only its explicit phase-chain length, not an
+  // arbitrary declared horizon. Check its clipped instances, including prefix
+  // and terminal windows, rather than rejecting an overlap beyond the shot.
+  const auto rounds = !a.context().repeats() ? a.context().min_rounds()
+                                             : b.context().min_rounds();
+  const auto ai = window_instances(ar, rounds);
+  const auto bi = window_instances(br, rounds);
+  if (ai.begin == ai.end || bi.begin == bi.end)
+    return false;
+  // Such a layer covers every round. Otherwise each layer has at most one
+  // instance per explicit phase, plus a clipped boundary instance.
+  if (ar.commit->end - ar.commit->begin >= ar.period ||
+      br.commit->end - br.commit->begin >= br.period)
+    return true;
+  auto ak = ai.begin;
+  auto bk = bi.begin;
+  while (ak < ai.end && bk < bi.end) {
+    const auto ab = a_start + ak * ar.period;
+    const auto bb = b_start + bk * br.period;
+    const auto ae = ar.offset + ak * ar.period + ar.commit->end;
+    const auto be = br.offset + bk * br.period + br.commit->end;
+    if (std::max({std::int64_t{0}, ab, bb}) <
+        std::min({static_cast<std::int64_t>(rounds), ae, be}))
+      return true;
+    if (ae <= be)
+      ++ak;
+    else
+      ++bk;
+  }
+  return false;
+}
 
 void validate_core_edge(
     const std::vector<std::unique_ptr<task_graph_node>> &nodes,
@@ -182,6 +237,86 @@ void decoding_task_graph::impl::require_streaming_support(
                            "; this graph decodes only in batch, via "
                            "run() or run_all()");
 }
+
+// The logical output is the one a reads_logical() node reaches, whatever its
+// name. It goes last so the corrections stay a prefix of the values. Reach
+// follows every edge but loop-carried ones (through an xor too); nodes are in
+// topological order.
+void decoding_task_graph::impl::order_logical_output() {
+  const auto N = nodes.size();
+  auto &sinks = wires_to.back();
+  std::optional<std::size_t> logical;
+  std::vector<std::vector<uint8_t>> reaches(
+      N, std::vector<uint8_t>(sinks.size(), 0));
+
+  for (std::size_t k = 0; k < sinks.size(); ++k)
+    if (sinks[k].from_node >= 0)
+      reaches[sinks[k].from_node][k] = 1;
+  for (std::size_t j = N; j-- > 0;)
+    for (const auto &w : wires_to[j])
+      if (w.from_node >= 0 && !w.loop_carried())
+        for (std::size_t k = 0; k < sinks.size(); ++k)
+          reaches[w.from_node][k] |= reaches[j][k];
+  for (std::size_t i = 0; i < N; ++i) {
+    if (!nodes[i]->reads_logical())
+      continue;
+    if (std::none_of(reaches[i].begin(), reaches[i].end(),
+                     [](uint8_t r) { return r != 0; }))
+      CUDA_QEC_WARN("decoding_task_graph: node '{}' reads the logical value "
+                    "but reaches no output, so it runs for nothing",
+                    node_ids[i]);
+    for (std::size_t k = 0; k < sinks.size(); ++k) {
+      if (!reaches[i][k])
+        continue;
+      if (logical_readout == static_cast<int>(i))
+        throw std::invalid_argument(
+            "compile_wires: node '" + node_ids[i] +
+            "' reads the logical value into " +
+            (output_names[*logical] == output_names[k]
+                 ? "output '" + output_names[k] + "' by two edges"
+                 : "outputs '" + output_names[*logical] + "' and '" +
+                       output_names[k] + "'") +
+            "; a graph has one logical output");
+      if (logical_readout >= 0)
+        throw std::invalid_argument(
+            "compile_wires: nodes '" + node_ids[logical_readout] + "' and '" +
+            node_ids[i] +
+            "' both read the logical value; one logical_readout node reads "
+            "every observable, and a parallel_window with output: "
+            "corrections_and_logical wires its own");
+      logical_readout = static_cast<int>(i);
+      logical = k;
+    }
+  } // end - for(i)
+
+  if (logical) {
+    std::rotate(sinks.begin() + *logical, sinks.begin() + *logical + 1,
+                sinks.end());
+    std::rotate(output_names.begin() + *logical,
+                output_names.begin() + *logical + 1, output_names.end());
+    for (auto &row : reaches)
+      std::rotate(row.begin() + *logical, row.begin() + *logical + 1,
+                  row.end());
+  }
+  has_logical_output = logical.has_value();
+  num_correction_outputs = sinks.size() - (logical ? 1 : 0);
+  correction_output_names.assign(output_names.begin(),
+                                 output_names.begin() + num_correction_outputs);
+  if (logical && num_correction_outputs == 0)
+    throw std::invalid_argument(
+        "compile_wires: output '" + output_names.back() +
+        "' is the graph's only output; the corrections it applies need an "
+        "output of their own");
+  if (logical)
+    logical_completion = nodes[logical_readout]->logical_completion_rounds();
+  one_shot_skips.assign(N, 0);
+  for (std::size_t i = 0; logical && i < N; ++i)
+    one_shot_skips[i] =
+        reaches[i].back() &&
+        std::none_of(reaches[i].begin(),
+                     reaches[i].begin() + num_correction_outputs,
+                     [](uint8_t r) { return r != 0; });
+} // end - order_logical_output()
 
 void decoding_task_graph::impl::compile_wires() {
   const auto N = nodes.size();
@@ -315,6 +450,7 @@ void decoding_task_graph::impl::compile_wires() {
   if (wires_to.back().empty())
     throw std::invalid_argument(
         "compile_wires: graph must have at least one output connection");
+  order_logical_output();
 
   for (std::size_t i = 0; i < N; ++i) {
     const auto &inputs = node_input_names[i];
@@ -500,7 +636,9 @@ void decoding_task_graph::impl::compile_wires() {
       obs_conflict = true;
     };
 
-    n_obs = 0;
+    // The correction outputs' widths sum to n_obs; the logical output's, last,
+    // is n_logical.
+    std::size_t total = 0;
     for (std::size_t k = 0; k < num_sinks; ++k) {
       // Nodes feeding one output must agree on its width; nodes feeding
       // different outputs need not agree on anything.
@@ -524,12 +662,16 @@ void decoding_task_graph::impl::compile_wires() {
       if (!fed)
         obs_conflicted("output '" + output_names[k] +
                        "' is fed by no streaming node");
-      output_offset[k] = n_obs;
+      output_offset[k] = total;
       output_width[k] = width;
-      n_obs += width;
+      total += width;
     }
-    if (obs_conflict)
-      n_obs = 0;
+    // There is a correction output: compile_wires() requires an output, and
+    // order_logical_output() refuses a logical output standing alone.
+    n_obs = obs_conflict ? 0
+                         : output_offset[num_correction_outputs - 1] +
+                               output_width[num_correction_outputs - 1];
+    n_logical = obs_conflict ? 0 : total - n_obs;
     if (!xor_fold_conflict.empty())
       record_streaming_conflict(std::move(xor_fold_conflict));
 
@@ -540,29 +682,60 @@ void decoding_task_graph::impl::compile_wires() {
         CUDA_QEC_INFO("decoding_task_graph: output '{}' occupies corrections "
                       "bytes [{}, {}) of {}",
                       output_names[k], output_offset[k],
-                      output_offset[k] + output_width[k], n_obs);
+                      output_offset[k] + output_width[k], total);
 
     streaming_node_output_offsets.assign(streaming_nodes.size(), {});
     streaming_node_outputs.assign(streaming_nodes.size(), {});
     streaming_node_cancelled_outputs.assign(streaming_nodes.size(), {});
     output_streaming_nodes.assign(num_sinks, {});
+    // A reads_logical() node adds to its output's value, not its progress.
     if (!obs_conflict)
       for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
+        const auto node = streaming_nodes[si].node_index;
         for (std::size_t k = 0; k < num_sinks; ++k) {
-          if (reach[streaming_nodes[si].node_index][k].parity) {
+          if (reach[node][k].parity) {
             streaming_node_output_offsets[si].push_back(output_offset[k]);
             streaming_node_outputs[si].push_back(k);
           }
-          const auto &path = reach[streaming_nodes[si].node_index][k];
-          if (output_has_parity_contributor[k] ? path.parity : path.reachable) {
+          const auto &path = reach[node][k];
+          if ((output_has_parity_contributor[k] ? path.parity
+                                                : path.reachable) &&
+              !nodes[node]->reads_logical()) {
             output_streaming_nodes[k].push_back(si);
           }
           if (!output_has_parity_contributor[k] && path.reachable)
             streaming_node_cancelled_outputs[si].push_back(k);
         }
       }
+    // What the logical output applies, get_obs_corrections() must return.
+    // Only streaming serves the logical output, so this is a streaming
+    // conflict, as below, not a build error.
+    if (!obs_conflict && has_logical_output)
+      for (const auto si : output_streaming_nodes.back()) {
+        bool reported = false;
+        for (std::size_t k = 0; k < num_correction_outputs && !reported; ++k) {
+          const auto &contributors = output_streaming_nodes[k];
+          reported = std::find(contributors.begin(), contributors.end(), si) !=
+                     contributors.end();
+        }
+        if (!reported)
+          record_streaming_conflict(
+              "graph output '" + output_names.back() +
+              "' applies the corrections of node '" +
+              node_ids[streaming_nodes[si].node_index] +
+              "', which reach no correction output; wire them to one, as "
+              "get_corrections() returns them");
+      } // end - for(si)
+    if (!obs_conflict && has_logical_output &&
+        output_streaming_nodes.back().empty())
+      record_streaming_conflict(
+          "graph output '" + output_names.back() +
+          "' is reached by no streaming node but its logical_readout node, so "
+          "it would never carry corrections");
     streaming_result_state.outputs.resize(num_sinks);
-    streaming_result_state.values.assign(n_obs, 0);
+    streaming_result_state.values.assign(n_obs + n_logical, 0);
+    if (has_logical_output)
+      streaming_result_state.outputs.back().released.assign(n_logical, 0);
     for (std::size_t k = 0; k < num_sinks; ++k) {
       auto &output = streaming_result_state.outputs[k];
       output.name = output_names[k];
@@ -763,8 +936,32 @@ void decoding_task_graph::impl::compile_wires() {
       // A staged output folds exact intervals, so its contributors need not
       // agree on a schedule, but each of several must declare one: one
       // without, a streaming node over rounds of different widths, commits
-      // every round of its stream, which another would commit again.
+      // every round of its stream, which another would commit again. A
+      // reads_logical() node is never staged; its value joins at compose.
       if (staged != 0) {
+        // One stager advances a single coverage frontier. Independent window
+        // contributors must partition those rounds: once one has advanced the
+        // frontier, another cannot contribute to the same committed interval.
+        std::vector<int> windows;
+        for (const auto si : output_streaming_nodes[k]) {
+          const auto idx = streaming_nodes[si].node_index;
+          const auto *window =
+              dynamic_cast<const decode_window_node *>(nodes[idx].get());
+          if (!window || !reach[idx][k].parity)
+            continue;
+          for (const auto prior : windows)
+            if (window_commits_overlap(*static_cast<const decode_window_node *>(
+                                           nodes[prior].get()),
+                                       *window))
+              throw std::invalid_argument(
+                  "compile_wires: graph output '" + output_names[k] +
+                  "' has overlapping commit intervals from decode_window "
+                  "nodes '" +
+                  node_ids[prior] + "' and '" + node_ids[idx] +
+                  "'; staged window contributors must commit disjoint rounds; "
+                  "wire independent decodes to separate outputs");
+          windows.push_back(idx);
+        }
         auto &stager = output_stagers[k];
         stager.enabled = true;
         stager.bits.assign(streaming_result_state.outputs[k].value_width, 0);
@@ -779,6 +976,9 @@ void decoding_task_graph::impl::compile_wires() {
       for (std::size_t si = 0; si < M; ++si) {
         const auto &entry = streaming_nodes[si];
         const int idx = entry.node_index;
+        // It publishes on no schedule.
+        if (nodes[idx]->reads_logical())
+          continue;
         for (std::size_t slot = 0; slot < output_reach[idx].size(); ++slot) {
           const auto &path = output_reach[idx][slot][k];
           if (output_has_parity_contributor[k] ? !path.parity : !path.reachable)
@@ -1038,7 +1238,9 @@ struct pending_async_run {
 
 // Count publications per streaming node; output barriers consume these counts.
 // Publish each output through the slowest contributor, then derive the exact
-// round range represented by that generation from its compiled schedule.
+// round range represented by that generation from its compiled schedule. The
+// logical output's observables are released as their completion rounds are
+// covered, all at FINAL; the aggregate covers the corrections alone.
 void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
   auto &result = streaming_result_state;
   const auto previous_graph_generation = result.generation;
@@ -1056,6 +1258,7 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
     const auto previous_end = output.coverage_end_round;
     const auto previous_status = output.status;
     const auto &contributors = output_streaming_nodes[k];
+    const bool logical = k >= num_correction_outputs;
     std::uint64_t generation =
         contributors.empty() ? 0 : std::numeric_limits<std::uint64_t>::max();
     for (const auto si : contributors)
@@ -1135,19 +1338,33 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
     }
     if (final && output.generation > 0)
       output.status = task_graph_streaming_status::complete;
-    all_outputs_available =
-        all_outputs_available &&
-        (output.status == task_graph_streaming_status::available ||
-         output.status == task_graph_streaming_status::complete) &&
-        output.generation > 0;
-    graph_generation = std::min(graph_generation, output.generation);
+    // Readable once anything is released.
+    if (logical) {
+      changed = release_logical(output.coverage_end_round, output.generation,
+                                final) ||
+                changed;
+      output.status = final && logical_released == output.released.size()
+                          ? task_graph_streaming_status::complete
+                      : logical_released != 0
+                          ? task_graph_streaming_status::available
+                          : task_graph_streaming_status::pending;
+    }
+    if (!logical) {
+      all_outputs_available =
+          all_outputs_available &&
+          (output.status == task_graph_streaming_status::available ||
+           output.status == task_graph_streaming_status::complete) &&
+          output.generation > 0;
+      graph_generation = std::min(graph_generation, output.generation);
+    }
     // The output's closure: its windows' so far, not_checked without one.
     const auto previous_closure = output.closure;
     std::optional<task_graph_closure> closure;
     for (const auto si : contributors)
       closure = combine_closure(closure, latest_node_closure[si]);
     output.closure = closure.value_or(task_graph_closure::not_checked);
-    graph_closure = combine_closure(graph_closure, output.closure);
+    if (!logical)
+      graph_closure = combine_closure(graph_closure, output.closure);
     changed = changed || output.generation != previous_generation ||
               output.coverage_begin_round != previous_begin ||
               output.coverage_end_round != previous_end ||
@@ -1178,11 +1395,18 @@ void decoding_task_graph::impl::consume_streaming_result() {
     ++result.result_revision;
     return;
   }
-  // Consuming a complete shot starts the next one, whose closure is its own.
-  if (result.status == task_graph_streaming_status::complete) {
+  // Consuming a complete shot starts the next one, whose closure and
+  // coverage are its own: no node or output carries the consumed shot's
+  // rounds into it, or a logical observable would be released early. A
+  // scheduled output's fire ordinals keep counting, as its nodes resume.
+  const bool shot_ended =
+      result.status == task_graph_streaming_status::complete;
+  if (shot_ended) {
     std::fill(latest_node_closure.begin(), latest_node_closure.end(),
               std::nullopt);
     std::fill(latest_node_converged.begin(), latest_node_converged.end(),
+              std::nullopt);
+    std::fill(latest_node_coverage.begin(), latest_node_coverage.end(),
               std::nullopt);
     shot_open = false;
   }
@@ -1201,6 +1425,12 @@ void decoding_task_graph::impl::consume_streaming_result() {
       }
     }
     output.status = task_graph_streaming_status::pending;
+    if (shot_ended) {
+      output.coverage_begin_round = 0;
+      output.coverage_end_round = 0;
+    }
+    if (k >= num_correction_outputs)
+      unrelease_logical();
     // A zero-value guarded tail is an output publication without a node fire.
     // Keep contributor barriers caught up before streaming resumes.
     for (const auto si : output_streaming_nodes[k])
@@ -1241,6 +1471,7 @@ void decoding_task_graph::impl::reset_streaming_progress() {
     output.status = task_graph_streaming_status::pending;
     output.closure = task_graph_closure::not_checked;
   }
+  unrelease_logical();
   for (auto &stager : output_stagers) {
     stager.frontier = stager.begin = 0;
     stager.generation = 0;
@@ -1339,6 +1570,9 @@ void decoding_task_graph::impl::fail_streaming_progress(
   result.error = message;
   for (auto &output : result.outputs)
     output.status = task_graph_streaming_status::failed;
+  // A failed shot's logical measurements are not final, nor are any it
+  // released before failing.
+  unrelease_logical();
   if (changed)
     ++result.result_revision;
   // A failed shot holds nothing a one-shot call's reset would discard.
@@ -1363,7 +1597,46 @@ void decoding_task_graph::impl::hide_streaming_result() {
     output.coverage_begin_round = 0;
     output.coverage_end_round = 0;
   }
+  unrelease_logical();
   ++result.result_revision;
+}
+
+// Release once the frontier is past the completion round and the readout is
+// read. The readout reports whole_shot coverage only from its flush after a
+// FINAL record, so a shot finished without one releases no suffix readout.
+// Only a staged output's frontier restarts with each shot; a scheduled one
+// resumes its numbering after a consumed shot, so it releases at FINAL only.
+bool decoding_task_graph::impl::release_logical(std::uint64_t frontier,
+                                                std::uint64_t generation,
+                                                bool final) {
+  const auto k = streaming_result_state.outputs.size() - 1;
+  auto &released = streaming_result_state.outputs.back().released;
+  const auto &read = latest_node_coverage[streaming_by_node[logical_readout]];
+  const bool staged = k < output_stagers.size() && output_stagers[k].enabled;
+  const auto bound =
+      staged ? std::min<std::uint64_t>(frontier, read ? read->end_round : 0)
+             : 0;
+  const bool whole = final && generation > 0 && read &&
+                     read->end_round == streaming_task_graph_node::whole_shot;
+  const auto before = logical_released;
+  for (std::size_t i = 0; i < released.size(); ++i) {
+    if (released[i])
+      continue;
+    if (whole || (i < logical_completion.size() && logical_completion[i] &&
+                  *logical_completion[i] < bound)) {
+      released[i] = 1;
+      ++logical_released;
+    }
+  }
+  return logical_released != before;
+}
+
+void decoding_task_graph::impl::unrelease_logical() {
+  if (!has_logical_output || streaming_result_state.outputs.empty())
+    return;
+  auto &released = streaming_result_state.outputs.back().released;
+  std::fill(released.begin(), released.end(), uint8_t{0});
+  logical_released = 0;
 }
 
 void decoding_task_graph::impl::clear_latest_node_corrections() {
@@ -1372,20 +1645,22 @@ void decoding_task_graph::impl::clear_latest_node_corrections() {
 }
 
 // Materialize the current parity-folded values beside their progress metadata.
+// A staged output's frame is copied first, then a logical readout's value is
+// XORed onto it.
 void decoding_task_graph::impl::compose_streaming_values() const {
   auto &values = streaming_result_state.values;
   std::fill(values.begin(), values.end(), uint8_t{0});
+  for (std::size_t k = 0; k < output_stagers.size(); ++k)
+    if (output_stagers[k].enabled)
+      std::copy(output_stagers[k].bits.begin(), output_stagers[k].bits.end(),
+                values.begin() +
+                    streaming_result_state.outputs[k].value_offset);
   for (std::size_t si = 0; si < streaming_nodes.size(); ++si) {
     const auto &corrections = latest_node_corrections[si];
     for (const auto offset : streaming_node_output_offsets[si])
       for (std::size_t i = 0; i < corrections.size(); ++i)
         values[offset + i] ^= corrections[i];
   }
-  for (std::size_t k = 0; k < output_stagers.size(); ++k)
-    if (output_stagers[k].enabled)
-      std::copy(output_stagers[k].bits.begin(), output_stagers[k].bits.end(),
-                values.begin() +
-                    streaming_result_state.outputs[k].value_offset);
 }
 
 namespace {
@@ -1547,6 +1822,58 @@ const uint8_t *decoding_task_graph::get_obs_corrections() const {
   return g.streaming_result_state.values.data();
 }
 
+// Bounds come from the released flags, which only a logical output has, and
+// from values, so a result of any shape is read safely.
+const uint8_t *
+task_graph_streaming_result::logical_measurements(std::size_t first,
+                                                  std::size_t count) const {
+  if (outputs.empty() || count == 0)
+    return nullptr;
+  const auto &output = outputs.back();
+  const auto &flags = output.released;
+  if (first > flags.size() || count > flags.size() - first ||
+      output.value_offset > values.size() ||
+      first + count > values.size() - output.value_offset)
+    return nullptr;
+  for (std::size_t i = first; i < first + count; ++i)
+    if (!flags[i])
+      return nullptr;
+  return values.data() + output.value_offset + first;
+}
+
+const uint8_t *decoding_task_graph::get_logical_measurements() const {
+  return get_logical_measurements(0, get_num_logical_measurements());
+}
+
+// Reads the composed values as get_obs_corrections() does.
+const uint8_t *
+decoding_task_graph::get_logical_measurements(std::size_t first,
+                                              std::size_t count) const {
+  if (!impl_->has_logical_output)
+    throw std::logic_error(
+        "decoding_task_graph::get_logical_measurements: the graph has no "
+        "logical output; wire a logical_readout node into one");
+  // Before the range: a graph that cannot stream has no logical width.
+  impl_->require_streaming_support("get_logical_measurements");
+  if (count == 0 || first + count < first || first + count > impl_->n_logical)
+    throw std::out_of_range(
+        "decoding_task_graph::get_logical_measurements: logical measurements "
+        "[" +
+        std::to_string(first) + ", " + std::to_string(first + count) + ") of " +
+        std::to_string(impl_->n_logical));
+  if (impl_->async_streaming.enabled) {
+    impl_->synchronize_async_streaming();
+    return impl_->async_streaming_result().logical_measurements(first, count);
+  }
+  const in_flight_guard guard(impl_->in_flight, "get_logical_measurements");
+  impl_->compose_streaming_values();
+  return impl_->streaming_result_state.logical_measurements(first, count);
+} // end - get_logical_measurements()
+
+std::size_t decoding_task_graph::get_num_logical_measurements() const {
+  return impl_->n_logical;
+}
+
 // Refresh preallocated values; enqueue owns all metadata changes.
 const task_graph_streaming_result &
 decoding_task_graph::streaming_result() const {
@@ -1566,6 +1893,12 @@ void decoding_task_graph::clear_corrections() {
       impl_->async_streaming.active.load(std::memory_order_acquire))
     impl_->drain_async_streaming();
   const in_flight_guard guard(impl_->in_flight, "clear_corrections");
+  // The logical output needs every correction of the shot.
+  if (impl_->has_logical_output && impl_->shot_open && !impl_->finalized)
+    throw std::logic_error(
+        "decoding_task_graph::clear_corrections: the shot has not ended, and "
+        "the graph's logical measurements apply every correction it commits; "
+        "consume the shot once a FINAL round ends it, or reset_decoder()");
   impl_->shot_resets.fetch_add(1, std::memory_order_acq_rel);
   impl_->invalidate_async_stream_snapshot();
   // This consumes the published accumulator mid-stream. Keep each node's
@@ -1782,7 +2115,7 @@ decoding_task_graph::run_streamed(const measurement_results &m,
     if (reset_elsewhere() ||
         result.status != task_graph_streaming_status::complete)
       throw ended_elsewhere();
-    for (std::size_t k = 0; k < result.outputs.size(); ++k) {
+    for (std::size_t k = 0; k < impl_->num_correction_outputs; ++k) {
       const auto &output = result.outputs[k];
       auto &outcome = outcomes.emplace_back();
       const auto first = result.values.begin() + output.value_offset;
@@ -1838,19 +2171,21 @@ void decoding_task_graph::impl::walk_dag(const measurement_results &m) {
 
   for (std::size_t i = 0; i < g.nodes.size(); ++i) {
     auto &inputs = g.parallel_node_inputs[i];
+    if (g.one_shot_skips[i])
+      continue;
     for (const auto &w : g.wires_to[i])
       inputs[w.to_slot] = get_val(w);
     g.nodes[i]->execute_indexed(inputs, g.node_outputs[i]);
   }
 }
 
+// Counts correction outputs only.
 void decoding_task_graph::impl::require_single_output(const char *who) const {
-  const auto &sink_wires = wires_to.back();
-  if (sink_wires.empty())
+  if (num_correction_outputs == 0)
     throw std::logic_error("decoding_task_graph: no edge reaches output");
-  if (sink_wires.size() > 1)
+  if (num_correction_outputs > 1)
     throw std::logic_error(
-        "decoding_task_graph: " + std::to_string(sink_wires.size()) +
+        "decoding_task_graph: " + std::to_string(num_correction_outputs) +
         " edges reach output; " + who +
         "() returns a single outcome. Call run_all() instead, once per shot");
 }
@@ -1878,15 +2213,16 @@ decoding_task_graph::run_all(const measurement_results &m) const {
     throw std::logic_error("decoding_task_graph: no edge reaches output");
   g.walk_dag(m);
   std::vector<logical_outcome> outcomes;
-  outcomes.reserve(sink_wires.size());
-  for (const auto &sw : sink_wires)
+  outcomes.reserve(g.num_correction_outputs);
+  for (std::size_t k = 0; k < g.num_correction_outputs; ++k)
     outcomes.push_back(
-        g.node_outputs[sw.from_node][sw.from_slot].get<logical_outcome>());
+        g.node_outputs[sink_wires[k].from_node][sink_wires[k].from_slot]
+            .get<logical_outcome>());
   return outcomes;
 }
 
 const std::vector<std::string> &decoding_task_graph::output_names() const {
-  return impl_->output_names;
+  return impl_->correction_output_names;
 }
 
 std::future<logical_outcome>

@@ -8,6 +8,7 @@
 #include "cudaq/qec/decoding_task_graph.h"
 #include "cudaq/qec/decoding_task_types.h"
 
+#include <algorithm>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
@@ -87,7 +88,10 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_ro("coverage_end_round",
               &task_graph_output_progress::coverage_end_round)
       .def_ro("status", &task_graph_output_progress::status)
-      .def_ro("closure", &task_graph_output_progress::closure);
+      .def_ro("closure", &task_graph_output_progress::closure)
+      .def_ro("released", &task_graph_output_progress::released,
+              "Logical output only: 1 per bit once that logical measurement "
+              "is final; empty for a correction output.");
 
   nb::class_<task_graph_streaming_result>(mod, "TaskGraphStreamingResult")
       .def_ro("shot_epoch", &task_graph_streaming_result::shot_epoch)
@@ -219,13 +223,14 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       "configure_decoders build it.\n\n"
       "One-shot graph execution:\n"
       "  run(m)         -> LogicalOutcome\n"
-      "  run_all(m)     -> [LogicalOutcome]  # one per output\n\n"
+      "  run_all(m)     -> [LogicalOutcome]  # one per correction output\n\n"
       "Batch graph execution:\n"
       "  run_batch([m]) -> [LogicalOutcome]\n\n"
       "Streaming interface (per-round accumulation):\n"
       "  enqueue_syndrome(syndrome)       -> bool  # True when window fired\n"
       "  enqueue_syndrome(syndrome, type) -> bool  # fired, or tail committed\n"
       "  get_obs_corrections()            -> bytes # corrections buffer\n"
+      "  get_logical_measurements(first, count) -> bytes | None  # released\n"
       "  clear_corrections()\n"
       "  reset_decoder()\n\n"
       "With TaskGraphOptions.async_streaming enabled, BULK enqueue calls\n"
@@ -281,12 +286,12 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
            "Does not touch the streaming accumulation buffer.\n"
            "Raises on a graph with more than one output; use run_all().")
       .def("run_all", &decoding_task_graph::run_all, nb::arg("m"),
-           "Walk the DAG for one shot → one LogicalOutcome per output,\n"
-           "in output_names() order.")
+           "Walk the DAG for one shot → one LogicalOutcome per correction\n"
+           "output, in output_names() order.")
       .def("output_names", &decoding_task_graph::output_names,
            nb::rv_policy::reference_internal,
-           "One name per graph output, indexing run_all() and naming the\n"
-           "segments get_obs_corrections() concatenates.")
+           "One name per correction output, indexing run_all() and naming\n"
+           "the segments get_obs_corrections() concatenates.")
       .def("run_batch", &decoding_task_graph::run_batch, nb::arg("shots"),
            "run() for each MeasurementResults in shots.\n"
            "Single-output graphs only; loop run_all() for the rest.")
@@ -341,6 +346,34 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
           "For an async-streaming graph, waits for records accepted before\n"
           "this call without closing or flushing the session.")
       .def(
+          "get_logical_measurements",
+          [](const decoding_task_graph &g, std::size_t first,
+             std::optional<std::size_t> count) -> std::optional<nb::bytes> {
+            std::vector<uint8_t> logical;
+            bool ready = false;
+            {
+              nb::gil_scoped_release release;
+              const auto n = count.value_or(
+                  g.get_num_logical_measurements() -
+                  std::min(first, g.get_num_logical_measurements()));
+              const uint8_t *data = g.get_logical_measurements(first, n);
+              ready = data != nullptr;
+              if (ready)
+                logical.assign(data, data + n);
+            }
+            if (!ready)
+              return std::nullopt;
+            return nb::bytes(reinterpret_cast<const char *>(logical.data()),
+                             logical.size());
+          },
+          nb::arg("first") = 0, nb::arg("count") = nb::none(),
+          "Return logical measurements [first, first + count) (default:\n"
+          "all from first): the raw logical readout with the corrections\n"
+          "applied. None until all of them are released, and after the\n"
+          "shot is consumed.\n"
+          "Raises RuntimeError when the graph has no logical output, and\n"
+          "IndexError for a range past get_num_logical_measurements().")
+      .def(
           "streaming_result",
           [](const decoding_task_graph &g) {
             task_graph_streaming_result result;
@@ -369,6 +402,9 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
            "expects.")
       .def("get_num_observables", &decoding_task_graph::get_num_observables,
            "Number of observable correction bytes.")
+      .def("get_num_logical_measurements",
+           &decoding_task_graph::get_num_logical_measurements,
+           "Number of logical measurement bytes; 0 without a logical output.")
       .def("supports_streaming", &decoding_task_graph::supports_streaming,
            "Whether incremental streaming execution is supported.")
       .def("streaming_incompatibility_reason",

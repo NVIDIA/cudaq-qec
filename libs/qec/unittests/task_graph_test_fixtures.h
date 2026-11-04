@@ -104,6 +104,37 @@ inline dem_chunks_spec multi_terminal_memory_spec(std::size_t rounds,
   return spec;
 } // end - multi_terminal_memory_spec()
 
+/// arbitrary_memory_spec with explicit D, two observables and three prefix
+/// rounds. Observable 0 is flipped only in rounds 0-2 (fault 1) and read
+/// mid-circuit by measurement 1 of round 2. Observable 1, flipped in every
+/// round (fault 0), is read at the end by measurements 0 and 2.
+inline dem_chunks_spec mid_readout_spec(std::size_t rounds) {
+  auto spec = arbitrary_memory_spec(rounds, true);
+  const auto ramp = phase_id::from_name("ramp");
+  const auto mid = phase_id::from_name("mid_readout");
+  dem_chunk_spec bulk;
+  for (auto &phase : spec.phases) {
+    // Both observables flip before the mid-circuit readout, only 1 after.
+    phase.spec.O_sparse = phase.id == phase_name::dem_init
+                              ? std::vector<std::int64_t>{1, -1, 0, -1}
+                              : std::vector<std::int64_t>{-1, 0, -1};
+    if (phase.id == phase_name::dem_bulk)
+      bulk = phase.spec;
+    if (phase.id == phase_name::dem_final)
+      phase.spec.m2o_sparse = {-1, 0, 2, -1};
+  }
+  bulk.O_sparse = {1, -1, 0, -1};
+  spec.phases.push_back({ramp, bulk});
+  bulk.m2o_sparse = {1, -1, -1};
+  spec.phases.push_back({mid, bulk});
+  spec.connections = {{phase_name::dem_init, ramp},
+                      {ramp, mid},
+                      {mid, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_final}};
+  return spec;
+} // end - mid_readout_spec()
+
 /// Phenomenological memory over a CSS code's Z checks @p hz, with logicals
 /// @p lz. Each round, every data qubit may flip (rate @p p_data), touching its
 /// checks in that round, and every check measurement may fail (rate

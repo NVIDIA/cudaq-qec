@@ -62,6 +62,7 @@ jobs:
               - '.github/workflows/all_libs.yaml'
               - 'cmake/Modules/**'
               - '**/CMakeLists.txt'
+              - 'docs/sphinx/examples/**'
             build-qec:
               - '.github/actions/build-lib/action.yaml'
               - 'scripts/ci/test_examples.sh'
@@ -96,6 +97,7 @@ jobs:
               - 'libs/qec/python/metapackages/pyproject.toml'
               - 'libs/qec/python/metapackages/setup.py'
               - '.cudaq_version'
+              - 'docs/sphinx/examples/qec/python/**'
 
   build-cudaq:
     name: Build CUDAQ
