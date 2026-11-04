@@ -133,6 +133,8 @@ basis; composition infrastructure uses ``decoder_output_request`` to request
 standardized auxiliary outputs from a compatible decoder. See the PyMatching
 API for the migration from its former ``O``-implies-observables behavior.
 
+.. _qec-custom-decoder:
+
 Implementing a New Decoder in C++
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

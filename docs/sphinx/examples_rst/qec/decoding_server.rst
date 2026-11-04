@@ -70,7 +70,8 @@ The image includes surface-code example sources under ``/root/examples``.
 Available decoders depend on the plugins shipped with the release; a generator
 profile does not install its decoder.
 Keep the server, generator, playback emulator and compiled clients on the same
-image version. Do not copy plugins from other image versions into it.
+image version. Additional plugins must be built against a compatible SDK; see
+`Use a custom decoder plugin`_.
 
 Prepare the example directory
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -392,6 +393,81 @@ NV-Fusion require their corresponding plugins in the release image.
 Surface-code Ising requires its own model and measurement contract. See
 :doc:`realtime_decoding_demo` for the surface-code Ising application and
 :ref:`the Fusion API <nv_fusion_decoder_api_cpp>` for Fusion configuration.
+
+Use a custom decoder plugin
+---------------------------
+
+The server can load an additional C++ decoder from a shared library (``.so``)
+without rebuilding the server. Build the plugin on a development host or in a
+separate build container, then deploy the library to the server container.
+The workflow does not require a compiler in the decoding-server image.
+
+Implement and build the plugin
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Follow :ref:`Implementing a New Decoder in C++ <qec-custom-decoder>` for the
+``cudaq::qec::decoder`` interface and decoder registration. Choose a registered
+name that does not conflict with an installed decoder. Register a parameter
+schema if the decoder accepts YAML custom arguments; see
+:ref:`Custom decoder parameters <qec-custom-decoder-schema>`. No schema is
+required when ``decoder_custom_args`` is absent or empty.
+
+For a decoder used directly by the server, support
+``decode_result_type::observables`` and return logical flip bits. An algorithm
+that predicts error frames can use ``project_errors_to_observables`` with the
+model's observable matrix before returning its result.
+
+Use the C++ SDK matching the server's CUDA-Q QEC release, CPU architecture and
+C++ ABI. CUDA plugins also need compatible CUDA libraries and a supported GPU.
+Rebuild plugins after an incompatible SDK change.
+
+In the **development environment**, set ``QEC_SDK_PREFIX`` to that SDK's install
+directory. For a decoder implemented in ``my_decoder.cpp``, build:
+
+.. code-block:: bash
+
+   export QEC_SDK_PREFIX=/path/to/matching/cudaq-qec
+   c++ -std=c++20 -O3 -fPIC -shared my_decoder.cpp \
+     -I "$QEC_SDK_PREFIX/include" -L "$QEC_SDK_PREFIX/lib" \
+     -lcudaq-qec-decoders -Wl,-rpath,'$ORIGIN/..' \
+     -o libmy_decoder.so
+
+Add any libraries required by the decoder's implementation to the build and
+make their runtime dependencies available in the server container. The RPATH
+above locates the server's decoder library one directory above the plugin.
+
+Deploy and select the plugin
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Transfer ``libmy_decoder.so`` to ``$QEC_RUN_DIR`` on the **server host**.
+Stop the server process before installing the plugin. For the reusable
+``qec-decoding`` container created above, run **on the host**:
+
+.. code-block:: bash
+
+   docker cp "$QEC_RUN_DIR/libmy_decoder.so" \
+     qec-decoding:/opt/nvidia/cudaq-qec/lib/decoder-plugins/libmy_decoder.so
+
+Copy only the additional plugin, not a replacement directory that hides the
+bundled plugins. The file remains in this container across stop/start; a newly
+created container needs the plugin deployed again.
+
+In the experiment's YAML, set the decoder entry's ``type`` to its **registered
+decoder name**, such as ``my_decoder``, not the library filename. Supply the
+model, measurement mapping and ``decoder_custom_args`` required by that decoder;
+changing ``type`` alone does not make an unrelated model compatible.
+
+Start a new server process **inside the container**:
+
+.. code-block:: bash
+
+   CUDAQ_LOG_LEVEL=info decoding_server \
+     --config=custom.yaml --transport=udp --port=50000 --timeout=3600
+
+Check the startup log for ``Successfully loaded plugin`` with the deployed
+filename, then wait for ``QEC_DECODING_SERVER_READY``. Run a small client or
+playback case with a known expected correction before using the plugin for an
+experiment. A loaded library alone does not establish decoding correctness.
 
 Integrate a third-party runtime
 -------------------------------
