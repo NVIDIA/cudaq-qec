@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -49,6 +50,23 @@ T parse_uint(const std::string &s, const std::string &what) {
     throw std::runtime_error(what + " must be a whole number that fits in " +
                              std::to_string(8 * sizeof(T)) + " bits, got '" +
                              s + "'");
+  return value;
+}
+
+double parse_probability(const std::string &s, const std::string &what) {
+  const auto error =
+      what + " must be a finite probability in [0,1], got '" + s + "'";
+  double value{};
+  std::size_t end = 0;
+  try {
+    value = std::stod(s, &end);
+  } catch (const std::invalid_argument &) {
+    throw std::runtime_error(error);
+  } catch (const std::out_of_range &) {
+    throw std::runtime_error(error);
+  }
+  if (end != s.size() || !std::isfinite(value) || value < 0 || value > 1)
+    throw std::runtime_error(error);
   return value;
 }
 
@@ -188,7 +206,7 @@ parse_stim_source(const std::string &v) {
                key == "after_clifford_depolarization" ||
                key == "before_round_data_depolarization" ||
                key == "after_reset_flip_probability") {
-      spec.params.insert(key, std::stod(val));
+      spec.params.insert(key, parse_probability(val, "--stim-source " + key));
     } else {
       throw std::runtime_error("--stim-source: unknown key '" + key + "'");
     }
@@ -376,7 +394,6 @@ int main(int argc, char **argv) {
 
     auto sched = parse(read_file(schedule_path), decoder_ids, tick_ns);
 
-    run_params params;
     for (const auto &row : config.syndrome_mapping)
       if (row.type == "final")
         params.final_mapping_id = static_cast<std::int64_t>(row.id);
@@ -385,9 +402,18 @@ int main(int argc, char **argv) {
 
     if (out_path.empty()) {
       write_csv(result, std::cout);
+      std::cout.flush();
+      if (!std::cout)
+        throw std::runtime_error("cannot write CSV to stdout");
     } else {
       std::ofstream out(out_path);
+      if (!out)
+        throw std::runtime_error("cannot open CSV file: " + out_path);
       write_csv(result, out);
+      out.flush();
+      out.close();
+      if (!out)
+        throw std::runtime_error("cannot write CSV file: " + out_path);
     }
   } catch (const std::exception &e) {
     std::cerr << "playback-emulator: " << e.what() << "\n";
