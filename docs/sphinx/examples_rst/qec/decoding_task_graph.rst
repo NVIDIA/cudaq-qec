@@ -174,7 +174,7 @@ cover. For each graph output it reports:
   ``FINAL``, or ``FAILED``. (In C++, lowercase.)
 * ``coverage_begin_round`` and ``coverage_end_round``: the rounds the latest
   update committed, as a half-open range. For a parallel window, this is every
-  round committed so far.
+  round committed since the last ``clear_corrections()``.
 * ``closure``: whether decoded windows were checked against their detectors
   (see :doc:`task_graph_parallel_window`).
 

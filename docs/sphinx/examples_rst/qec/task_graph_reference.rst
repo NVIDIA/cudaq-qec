@@ -105,8 +105,9 @@ output's coverage follows that schedule. Window nodes such as
 ``decode_window`` instead finish arbitrary round intervals in any order. An
 output fed only by such nodes is *staged*: the graph holds each result until
 every earlier round is done, folds them in round order, and reports coverage
-``[0, frontier)``. An output that mixes both kinds of node cannot stream;
-wire them to separate outputs.
+from the frontier at the last ``clear_corrections()`` (round 0 in a new shot)
+to the current frontier. An output that mixes both kinds of node cannot
+stream; wire them to separate outputs.
 
 Edge values
 +++++++++++
@@ -136,6 +137,12 @@ Native streaming nodes
 A ``streaming`` node passes each ``enqueue_syndrome`` call to its inner
 decoder's own ``enqueue_syndrome``, for decoders that process rounds
 incrementally. Its complete-shot path decodes the whole shot at once.
+
+Rounds may differ in width, such as a narrower readout round, if the inner
+decoder implements ``streaming_correction_provider`` and so ends its own
+shots. The node then reports the rounds each update covers, its output is
+staged, and a shot may end at any ``FINAL`` round. Two such nodes cannot
+share an output.
 
 .. code-block:: yaml
 

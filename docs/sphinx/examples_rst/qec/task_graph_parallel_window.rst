@@ -29,8 +29,10 @@ The windows form two layers:
 
 Every round is corrected by exactly one window. Windows finish in any order,
 but the graph releases corrections in round order: mid-shot, a read covers
-rounds ``[0, frontier)``, the rounds whose windows have all finished. The
-``FINAL`` round ends the shot and decodes the last windows.
+rounds up to the frontier, the first round whose window has not finished.
+Coverage starts at round 0, or where ``clear_corrections()`` last consumed
+the corrections. The ``FINAL`` round ends the shot and decodes the last
+windows.
 
 The model
 +++++++++
@@ -191,8 +193,9 @@ matter:
   ``device_graph``.
 
 The server logs a warning for a parallel-window decoder that breaks any of
-these. ``get_corrections`` returns the corrections over ``[0, frontier)``
-mid-shot, and over the whole shot after the ``final`` round. See
+these. ``get_corrections`` returns the corrections committed since the last
+reset: up to the frontier mid-shot, and to the end of the shot after the
+``final`` round. See
 :doc:`/components/qec/realtime_decoding` and the
 :ref:`realtime decoding API <python_realtime_decoding_api>`.
 
