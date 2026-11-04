@@ -5,6 +5,8 @@ non-zero rc a failure while running, e.g. a CUDA 'out of memory' (``RuntimeError
 the loader is stubbed."""
 import pytest
 
+# Python-only import (numpy): the plugin library is loaded lazily by ``_load()``,
+# which the test replaces below, so no plugin library and no GPU are needed.
 nv_qldpc = pytest.importorskip("cudaq_qec.plugins.nv_qldpc")
 
 
