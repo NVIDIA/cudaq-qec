@@ -238,40 +238,16 @@ void decoding_task_graph::impl::require_streaming_support(
                            "run() or run_all()");
 }
 
-// The logical output goes last so the corrections stay a prefix of the
-// values. Reach follows every edge but loop-carried ones (through an xor
-// too); nodes are in topological order.
-void decoding_task_graph::impl::order_logical_output(
-    const std::vector<std::uint8_t> &named_logical) {
+// The logical output is the one a reads_logical() node reaches, whatever its
+// name. It goes last so the corrections stay a prefix of the values. Reach
+// follows every edge but loop-carried ones (through an xor too); nodes are in
+// topological order.
+void decoding_task_graph::impl::order_logical_output() {
   const auto N = nodes.size();
   auto &sinks = wires_to.back();
   std::optional<std::size_t> logical;
   std::vector<std::vector<uint8_t>> reaches(
       N, std::vector<uint8_t>(sinks.size(), 0));
-
-  for (std::size_t k = 0; k < sinks.size(); ++k) {
-    if (!named_logical[k])
-      continue;
-    if (logical)
-      throw std::invalid_argument(
-          "compile_wires: two edges reach output 'logical'; a graph has one "
-          "logical output");
-    logical = k;
-  }
-  if (logical) {
-    std::rotate(sinks.begin() + *logical, sinks.begin() + *logical + 1,
-                sinks.end());
-    std::rotate(output_names.begin() + *logical,
-                output_names.begin() + *logical + 1, output_names.end());
-  }
-  has_logical_output = logical.has_value();
-  num_correction_outputs = sinks.size() - (logical ? 1 : 0);
-  correction_output_names.assign(output_names.begin(),
-                                 output_names.begin() + num_correction_outputs);
-  if (logical && num_correction_outputs == 0)
-    throw std::invalid_argument(
-        "compile_wires: output 'logical' is the graph's only output; the "
-        "corrections it applies need an output of their own");
 
   for (std::size_t k = 0; k < sinks.size(); ++k)
     if (sinks[k].from_node >= 0)
@@ -284,27 +260,52 @@ void decoding_task_graph::impl::order_logical_output(
   for (std::size_t i = 0; i < N; ++i) {
     if (!nodes[i]->reads_logical())
       continue;
-    for (std::size_t k = 0; k < num_correction_outputs; ++k)
-      if (reaches[i][k])
+    if (std::none_of(reaches[i].begin(), reaches[i].end(),
+                     [](uint8_t r) { return r != 0; }))
+      CUDA_QEC_WARN("decoding_task_graph: node '{}' reads the logical value "
+                    "but reaches no output, so it runs for nothing",
+                    node_ids[i]);
+    for (std::size_t k = 0; k < sinks.size(); ++k) {
+      if (!reaches[i][k])
+        continue;
+      if (logical_readout == static_cast<int>(i))
         throw std::invalid_argument(
             "compile_wires: node '" + node_ids[i] +
-            "' reads the logical value, which only the output named "
-            "'logical' carries, but it reaches output '" +
-            output_names[k] + "'");
-    if (!logical || !reaches[i].back())
-      continue;
-    if (logical_readout >= 0)
-      throw std::invalid_argument(
-          "compile_wires: nodes '" + node_ids[logical_readout] + "' and '" +
-          node_ids[i] +
-          "' both read the logical value into output 'logical'; one "
-          "logical_readout node reads every observable");
-    logical_readout = static_cast<int>(i);
+            "' reads the logical value into " +
+            (output_names[*logical] == output_names[k]
+                 ? "output '" + output_names[k] + "' by two edges"
+                 : "outputs '" + output_names[*logical] + "' and '" +
+                       output_names[k] + "'") +
+            "; a graph has one logical output");
+      if (logical_readout >= 0)
+        throw std::invalid_argument(
+            "compile_wires: nodes '" + node_ids[logical_readout] + "' and '" +
+            node_ids[i] +
+            "' both read the logical value; one logical_readout node reads "
+            "every observable");
+      logical_readout = static_cast<int>(i);
+      logical = k;
+    }
   } // end - for(i)
-  if (logical && logical_readout < 0)
+
+  if (logical) {
+    std::rotate(sinks.begin() + *logical, sinks.begin() + *logical + 1,
+                sinks.end());
+    std::rotate(output_names.begin() + *logical,
+                output_names.begin() + *logical + 1, output_names.end());
+    for (auto &row : reaches)
+      std::rotate(row.begin() + *logical, row.begin() + *logical + 1,
+                  row.end());
+  }
+  has_logical_output = logical.has_value();
+  num_correction_outputs = sinks.size() - (logical ? 1 : 0);
+  correction_output_names.assign(output_names.begin(),
+                                 output_names.begin() + num_correction_outputs);
+  if (logical && num_correction_outputs == 0)
     throw std::invalid_argument(
-        "compile_wires: output 'logical' is the corrected logical "
-        "measurement, but no logical_readout node reaches it");
+        "compile_wires: output '" + output_names.back() +
+        "' is the graph's only output; the corrections it applies need an "
+        "output of their own");
   if (logical)
     logical_completion = nodes[logical_readout]->logical_completion_rounds();
   one_shot_skips.assign(N, 0);
@@ -326,7 +327,6 @@ void decoding_task_graph::impl::compile_wires() {
   node_outputs.resize(N);
   std::vector<std::vector<std::string>> node_input_names(N);
   std::vector<std::vector<std::string>> node_output_names(N);
-  std::vector<std::uint8_t> named_logical; // by output: its edge names it
   for (std::size_t i = 0; i < N; ++i) {
     node_input_names[i] = nodes[i]->inputs();
     node_output_names[i] = nodes[i]->outputs();
@@ -395,7 +395,6 @@ void decoding_task_graph::impl::compile_wires() {
                              : e.from_output != "output"
                                  ? e.from_node + "." + e.from_output
                                  : e.from_node);
-      named_logical.push_back(e.to_input == logical_output_name);
     } else {
       auto it = id_map.find(e.to_node);
       if (it == id_map.end())
@@ -450,7 +449,7 @@ void decoding_task_graph::impl::compile_wires() {
   if (wires_to.back().empty())
     throw std::invalid_argument(
         "compile_wires: graph must have at least one output connection");
-  order_logical_output(named_logical);
+  order_logical_output();
 
   for (std::size_t i = 0; i < N; ++i) {
     const auto &inputs = node_input_names[i];
@@ -707,11 +706,29 @@ void decoding_task_graph::impl::compile_wires() {
             streaming_node_cancelled_outputs[si].push_back(k);
         }
       }
+    // What the logical output applies, get_obs_corrections() must return.
+    if (!obs_conflict && has_logical_output)
+      for (const auto si : output_streaming_nodes.back()) {
+        bool reported = false;
+        for (std::size_t k = 0; k < num_correction_outputs && !reported; ++k) {
+          const auto &contributors = output_streaming_nodes[k];
+          reported = std::find(contributors.begin(), contributors.end(), si) !=
+                     contributors.end();
+        }
+        if (!reported)
+          throw std::invalid_argument(
+              "compile_wires: graph output '" + output_names.back() +
+              "' applies the corrections of node '" +
+              node_ids[streaming_nodes[si].node_index] +
+              "', which reach no correction output; wire them to one, as "
+              "get_corrections() returns them");
+      } // end - for(si)
     if (!obs_conflict && has_logical_output &&
         output_streaming_nodes.back().empty())
       record_streaming_conflict(
-          "graph output 'logical' is reached by no streaming node but its "
-          "logical_readout node, so it would never carry corrections");
+          "graph output '" + output_names.back() +
+          "' is reached by no streaming node but its logical_readout node, so "
+          "it would never carry corrections");
     streaming_result_state.outputs.resize(num_sinks);
     streaming_result_state.values.assign(n_obs + n_logical, 0);
     if (has_logical_output)
@@ -1832,7 +1849,7 @@ decoding_task_graph::get_logical_measurements(std::size_t first,
   if (!impl_->has_logical_output)
     throw std::logic_error(
         "decoding_task_graph::get_logical_measurements: the graph has no "
-        "output named 'logical'; wire a logical_readout node into one");
+        "logical output; wire a logical_readout node into one");
   // Before the range: a graph that cannot stream has no logical width.
   impl_->require_streaming_support("get_logical_measurements");
   if (count == 0 || first + count < first || first + count > impl_->n_logical)

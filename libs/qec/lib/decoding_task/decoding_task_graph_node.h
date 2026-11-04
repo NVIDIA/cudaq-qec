@@ -20,8 +20,9 @@ namespace cudaq::qec {
 
 class decoder;
 
-/// The name of a graph's logical output, which get_logical_measurements()
-/// returns. Every other output carries corrections.
+/// The name the parallel_window pattern gives the logical output it wires.
+/// A graph's logical output is the one a logical_readout node reaches,
+/// whatever its name; every other output carries corrections.
 inline constexpr char logical_output_name[] = "logical";
 
 struct window_spec {

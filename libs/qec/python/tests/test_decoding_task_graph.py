@@ -867,5 +867,5 @@ def test_parallel_window_returns_logical_measurements_apart():
         graph.clear_corrections()
         assert graph.get_logical_measurements() is None
     assert plain.get_num_logical_measurements() == 0
-    with pytest.raises(RuntimeError, match="no output named 'logical'"):
+    with pytest.raises(RuntimeError, match="the graph has no logical output"):
         plain.get_logical_measurements()

@@ -352,8 +352,7 @@ RpcStatus DecodingSession::read_result_core(bool logical, int64_t first_arg,
     if (logical && width == 0) {
       cudaq::qec::error(
           "DecodingSession::get_logical_measurements: this {} has no logical "
-          "measurements; only a task graph with an output named logical "
-          "does",
+          "measurements; only a task graph with a logical output does",
           target.is_graph() ? "task graph" : "decoder");
       ++error_count;
       return RpcStatus::BAD_REQUEST;

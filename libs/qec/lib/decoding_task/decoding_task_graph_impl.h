@@ -128,13 +128,11 @@ struct decoding_task_graph::impl {
   // By node: 1 when it reaches only the logical output, so a one-shot call,
   // which returns the correction outputs alone, need not run it.
   std::vector<std::uint8_t> one_shot_skips;
-  /// Move the logical output last and check that exactly one reads_logical()
-  /// node reaches it, and no other output. The logical output is the one
-  /// whose sink edge names it, flagged in @p named_logical by output; an
-  /// output named after a producer called `logical` is a correction output.
-  /// @throws std::invalid_argument if that wiring is wrong or it is the only
-  /// output.
-  void order_logical_output(const std::vector<std::uint8_t> &named_logical);
+  /// Find the logical output, the one a reads_logical() node reaches, and
+  /// move it last. At most one such node reaches at most one output.
+  /// @throws std::invalid_argument if that wiring is wrong or the logical
+  /// output is the only output.
+  void order_logical_output();
   /// Release the logical observables whose completion round is covered by
   /// both @p frontier and the readout, when the logical output is staged.
   /// With @p final, release the rest too,

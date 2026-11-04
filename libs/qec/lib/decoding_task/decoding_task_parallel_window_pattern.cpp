@@ -63,8 +63,8 @@ decoding::config::decoder_schema parallel_window_params() {
         p.get<std::string>("output") == "corrected_logical")
       throw std::runtime_error(
           "parallel_window: output: corrected_logical is replaced by output: "
-          "corrections_and_logical, which also wires the graph's output named "
-          "logical; read it with get_logical_measurements()");
+          "corrections_and_logical, which also wires the graph's logical "
+          "output; read it with get_logical_measurements()");
     check_choice(p, "output", {"corrections", "corrections_and_logical"});
     check_choice(p, "input_boundary", {"columns", "truncate"});
     check_choice(p, "conflicting_parallel", {"reject", "most_likely"});

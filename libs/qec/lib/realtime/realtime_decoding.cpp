@@ -1036,7 +1036,7 @@ void get_logical_measurements(std::size_t decoder_id, std::uint64_t first,
   if (count == 0)
     throw std::invalid_argument(fmt::format(
         "get_logical_measurements: decoder {} has no logical measurements; "
-        "only a task graph with an output named logical has them",
+        "only a task graph with a logical output has them",
         decoder_id));
   if (!logical)
     throw std::invalid_argument("logical measurements buffer is null");

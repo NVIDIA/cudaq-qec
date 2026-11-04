@@ -140,10 +140,10 @@ resp: 53 51 55 43  00 00 00 00  01 00 00 00  07 00 00 00  00×8
 
 Kernel API: `std::vector<bool> get_logical_measurements(uint64_t decoder_id, uint64_t first, uint64_t return_size, bool reset)`.
 Reads logical measurements `[first, first + R)`: the raw logical readout with
-the decoder's corrections applied. Only a task graph with an output named
-`logical` has them. Each is released once its readout has arrived and every
-correction that can flip it is committed; all are released by the FINAL
-round.
+the decoder's corrections applied. Only a task graph with a logical output,
+one a `logical_readout` node feeds, has them. Each is released once its
+readout has arrived and every correction that can flip it is committed; all
+are released by the FINAL round.
 
 Schema: `args = { INT64, INT64, INT64, UINT8 }`, `results = { BIT_PACKED }`.
 

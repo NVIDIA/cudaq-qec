@@ -73,10 +73,10 @@ __qpu__ std::vector<bool> get_corrections(std::uint64_t decoder_id,
                                           bool reset = false);
 
 /// @brief Get logical measurements for a given decoder: the raw logical
-/// readout with the decoder's corrections applied. Only a task graph with an
-/// output named `logical` has them. Each is ready once its readout has
-/// arrived and every correction that can flip it is committed; all are by
-/// the FINAL round.
+/// readout with the decoder's corrections applied. Only a task graph with a
+/// logical output, one a `logical_readout` node feeds, has them. Each is
+/// ready once its readout has arrived and every correction that can flip it
+/// is committed; all are by the FINAL round.
 /// @param decoder_id The ID of the decoder to use.
 /// @param first The first logical measurement to return.
 /// @param return_size The number of logical measurements to return.

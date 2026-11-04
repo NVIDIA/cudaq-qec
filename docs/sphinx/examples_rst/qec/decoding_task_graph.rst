@@ -612,9 +612,9 @@ the template's prefix, the phases before the repeating one, is read as it
 arrives; one after it is placed only by the shot's length, so it is read at
 FINAL.
 
-The logical measurements are the graph output named ``logical``. A
-``logical_readout`` node reads the raw logical value and an ``xor`` applies
-the corrections to it:
+The logical measurements are the graph output a ``logical_readout`` node
+reaches, whatever its name. The node reads the raw logical value and an
+``xor`` applies the corrections to it:
 
 .. code-block:: yaml
 

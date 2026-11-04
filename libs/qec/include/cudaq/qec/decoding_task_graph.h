@@ -505,7 +505,7 @@ public:
 
   /// Host-accessible logical measurements buffer
   /// (get_num_logical_measurements() bytes): the raw logical readout with the
-  /// corrections applied, from the graph's output named `logical`. Null until
+  /// corrections applied, from the graph's logical output. Null until
   /// all are released (by FINAL at the latest) and after the shot is
   /// consumed; otherwise as get_obs_corrections().
   ///
