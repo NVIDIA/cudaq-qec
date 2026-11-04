@@ -79,7 +79,8 @@ public:
   /// when it carries no delta; publications may arrive in any round order.
   /// An output whose contributors all opt in is staged: the graph folds
   /// their deltas in round order behind a frontier, and the output's
-  /// coverage is [0, frontier).
+  /// coverage runs from the frontier where its value was last consumed to
+  /// the frontier.
   virtual bool exact_interval_coverage() const { return false; }
   /// The current publication's closure: for a window, whether its solution
   /// was checked and held. None for a node that decodes no window, which
