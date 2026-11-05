@@ -421,12 +421,25 @@ Use the C++ SDK matching the server's CUDA-Q QEC release, CPU architecture and
 C++ ABI. CUDA plugins also need compatible CUDA libraries and a supported GPU.
 Rebuild plugins after an incompatible SDK change.
 
-In the **development environment**, set ``QEC_SDK_PREFIX`` to that SDK's install
-directory. For a decoder implemented in ``my_decoder.cpp``, build:
+Copy the SDK headers and libraries from the existing ``qec-decoding`` container
+to the **server host**:
 
 .. code-block:: bash
 
-   export QEC_SDK_PREFIX=/path/to/matching/cudaq-qec
+   docker cp qec-decoding:/opt/nvidia/cudaq-qec "$QEC_RUN_DIR/cudaq-qec-sdk"
+   export QEC_SDK_PREFIX="$QEC_RUN_DIR/cudaq-qec-sdk"
+
+Use a new destination directory for the copy. If compilation runs on another
+host or in a separate build container, transfer this SDK directory there and
+set ``QEC_SDK_PREFIX`` to its location in that environment. The copied files
+match the server package; a compatible compiler and any decoder-specific
+development dependencies are still required.
+
+In the **development environment**, build a decoder implemented in
+``my_decoder.cpp`` with:
+
+.. code-block:: bash
+
    c++ -std=c++20 -O3 -fPIC -shared my_decoder.cpp \
      -I "$QEC_SDK_PREFIX/include" -L "$QEC_SDK_PREFIX/lib" \
      -lcudaq-qec-decoders -Wl,-rpath,'$ORIGIN/..' \
@@ -452,8 +465,9 @@ Copy only the additional plugin, not a replacement directory that hides the
 bundled plugins. The file remains in this container across stop/start; a newly
 created container needs the plugin deployed again.
 
-In the experiment's YAML, set the decoder entry's ``type`` to its **registered
-decoder name**, such as ``my_decoder``, not the library filename. Supply the
+Save the experiment's YAML as ``custom.yaml`` in ``$QEC_RUN_DIR`` and set the
+decoder entry's ``type`` to its **registered decoder name**, such as
+``my_decoder``, not the library filename. Supply the
 model, measurement mapping and ``decoder_custom_args`` required by that decoder;
 changing ``type`` alone does not make an unrelated model compatible.
 
