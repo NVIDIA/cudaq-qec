@@ -59,10 +59,13 @@ RUN set -e; \
 
 # Copy CUDA-QX examples and tests
 COPY docs/sphinx/examples /home/cudaq/cudaqx-examples
-COPY libs/qec/python/tests /home/cudaq/cudaqx_pytests/qec
-# Reference data the Python tests resolve relative to their own location
-# (tests/../../test_data), e.g. test_chromobius.py.
-COPY libs/qec/test_data /home/cudaq/cudaqx_pytests/test_data
+# Preserve the source layout: tests resolve tools and reference data relative
+# to libs/qec, and the TensorRT model relative to the repository root.
+COPY libs/qec/python/tests /home/cudaq/cudaqx_pytests/libs/qec/python/tests
+COPY libs/qec/test_data /home/cudaq/cudaqx_pytests/libs/qec/test_data
+COPY libs/qec/tools/config-validator /home/cudaq/cudaqx_pytests/libs/qec/tools/config-validator
+COPY libs/qec/tools/decoding-server/*.yaml /home/cudaq/cudaqx_pytests/libs/qec/tools/decoding-server/
+COPY assets/tests/surface_code_decoder.onnx /home/cudaq/cudaqx_pytests/assets/tests/surface_code_decoder.onnx
 
 # Bake in CUDA-Q import check helper (used by QA validation scripts)
 RUN mkdir -p /home/cudaq/cudaqx-scripts/validation

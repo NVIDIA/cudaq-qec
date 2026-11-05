@@ -33,6 +33,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true # Package the ONNX model used by the Python TensorRT tests.
 
       - name: Set up context for buildx
         run: |

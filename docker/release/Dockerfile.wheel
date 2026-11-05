@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY wheels /root/wheels
 COPY scripts/validation/wheel/validate_wheels.sh /root
 COPY libs /root/libs
+COPY assets/tests/surface_code_decoder.onnx /root/assets/tests/surface_code_decoder.onnx
 COPY docs/sphinx/examples /root/examples
 
 RUN mkdir -p /root/.miniconda3 \

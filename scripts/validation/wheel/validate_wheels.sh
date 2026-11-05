@@ -105,7 +105,7 @@ test_examples() {
         export OMPI_MCA_opal_cuda_support=true OMPI_MCA_btl='^openib'
 
         # Needed for tests:
-        pip install pytest
+        pip install pytest jsonschema PyYAML
         # matplotlib is only pulled in transitively on x86 (via beliefmatching);
         # install it explicitly so ARM has it (pseudo_threshold.py imports it).
         pip install matplotlib
