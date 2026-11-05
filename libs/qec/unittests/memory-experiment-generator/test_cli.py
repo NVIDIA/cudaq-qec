@@ -491,7 +491,7 @@ class GeneratorCliTest(unittest.TestCase):
             "merge_identical": True,
             "conflicting_parallel": "most_likely",
             "verify_residual": "report",
-            "output": "corrected_logical",
+            "output": "corrections",
         }
         pattern_arguments = (
             "--pattern-arg=commit_rounds=2",
@@ -502,7 +502,7 @@ class GeneratorCliTest(unittest.TestCase):
             "--pattern-arg=merge_identical=true",
             "--pattern-arg=conflicting_parallel=most_likely",
             "--pattern-arg=verify_residual=report",
-            "--pattern-arg=output=corrected_logical",
+            "--pattern-arg=output=corrections",
             "--decoder-arg=lut_error_depth=2",
         )
         for patches in (1, 3):
@@ -515,7 +515,7 @@ class GeneratorCliTest(unittest.TestCase):
                                    commit=2,
                                    buffer=4,
                                    gap=7,
-                                   output="corrected_logical")
+                                   output="corrections")
                 for decoder in document["decoders"]:
                     node = decoder["task_graph"]["nodes"][0]
                     for name, expected in parameters.items():
@@ -587,6 +587,7 @@ class GeneratorCliTest(unittest.TestCase):
             ("gap_rounds=-1",),
             ("gap_rounds=1.5",),
             ("output=unsupported",),
+            ("output=corrected_logical",),
             ("input_boundary=unsupported",),
             ("conflicting_parallel=unsupported",),
             ("verify_residual=unsupported",),

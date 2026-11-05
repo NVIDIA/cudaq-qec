@@ -26,6 +26,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -668,6 +669,11 @@ bool dem_chunks_spec::is_empty() const {
   return phases.empty() && connections.empty();
 }
 
+bool dem_chunks_spec::has_readout() const {
+  return std::any_of(phases.begin(), phases.end(),
+                     [](const auto &e) { return !e.spec.m2o_sparse.empty(); });
+}
+
 bool dem_chunks_spec::has_repeating_phase() const {
   for (const auto &c : connections)
     if (c.is_self())
@@ -846,14 +852,62 @@ const dem_chunk_spec &dem_chunks_spec::get_phase(phase_id id) const {
                               " not found");
 }
 
-// Checks observable_names and m2o_sparse against the observable count. The
-// readout phase is the last of the chain phase_sequence() walks, which
-// rejects branches and cycles; the shortest chain is enough to find it, and
-// it must not be the repeating phase.
+// Sets rows[k] for every -1-terminated row k of @p sparse that has an entry;
+// rows past rows.size() are ignored.
+static void mark_rows(const std::vector<std::int64_t> &sparse,
+                      std::vector<std::uint8_t> &rows) {
+  std::size_t row = 0;
+
+  for (const auto v : sparse) {
+    if (v == -1)
+      ++row;
+    else if (row < rows.size())
+      rows[row] = 1;
+  }
+}
+
+// A fault touches only its own round and the next, so no phase after an
+// observable's last reading phase in @p sequence may flip it; the graph
+// releases an observable once that phase's round is committed. Each phase's
+// rows are scanned once: first its readout map, then its fault rows.
+static void validate_readout_order(const dem_chunks_spec &spec,
+                                   const std::vector<phase_id> &sequence) {
+  const auto observables = spec.num_observables();
+  std::vector<std::optional<std::size_t>> last(observables); // by observable
+  std::vector<std::uint8_t> marks(observables, 0);
+
+  for (std::size_t i = 0; i < sequence.size(); ++i) {
+    std::fill(marks.begin(), marks.end(), 0);
+    mark_rows(spec.get_phase(sequence[i]).m2o_sparse, marks);
+    for (std::size_t k = 0; k < observables; ++k)
+      if (marks[k])
+        last[k] = i;
+  }
+  for (std::size_t i = 0; i < sequence.size(); ++i) {
+    const auto &phase = spec.get_phase(sequence[i]);
+    std::fill(marks.begin(), marks.end(), 0);
+    mark_rows(phase.O_sparse, marks);
+    for (const auto &seam : phase.seam_specs)
+      mark_rows(seam.spec.O_sparse, marks);
+    for (std::size_t k = 0; k < observables; ++k)
+      if (marks[k] && last[k] && i > *last[k])
+        throw std::invalid_argument(
+            "dem_chunks_spec: phase '" + sequence[i].name() +
+            "' flips observable " + std::to_string(k) +
+            " after its last readout, in phase '" + sequence[*last[k]].name() +
+            "'; a fault cannot change a record already read");
+  } // end - for(i)
+} // end - validate_readout_order()
+
+// Checks observable_names and m2o_sparse against the observable count. Only
+// non-repeating phases may carry m2o_sparse, and a spec that has any must be
+// a linear chain (phase_sequence() rejects branches and cycles) in which no
+// phase flips an observable after its last readout.
 static void validate_observables(const dem_chunks_spec &spec) {
   const uint64_t observables = spec.num_observables();
   std::unordered_set<std::string> names;
-  std::optional<phase_id> last_phase;
+  std::vector<phase_id> sequence; // the shortest chain, when any phase reads
+  const bool reads = spec.has_readout();
   if (!spec.observable_names.empty() &&
       spec.observable_names.size() != observables)
     throw std::invalid_argument(
@@ -865,6 +919,11 @@ static void validate_observables(const dem_chunks_spec &spec) {
       throw std::invalid_argument(
           "dem_chunks_spec: observable_names repeats '" + name + "'");
 
+  if (reads) {
+    auto shortest = spec;
+    shortest.num_rounds = std::max<uint64_t>(2, spec.minimum_rounds());
+    sequence = shortest.phase_sequence();
+  }
   for (const auto &e : spec.phases) {
     const auto &m2o = e.spec.m2o_sparse;
     const auto fail = [&](const std::string &what) {
@@ -873,18 +932,14 @@ static void validate_observables(const dem_chunks_spec &spec) {
     };
     if (m2o.empty())
       continue;
-    if (!last_phase) {
-      auto shortest = spec;
-      shortest.num_rounds = std::max<uint64_t>(2, spec.minimum_rounds());
-      last_phase = shortest.phase_sequence().back();
-    }
     const bool repeats =
         std::any_of(spec.connections.begin(), spec.connections.end(),
                     [&](const phase_connection &c) {
-                      return c.is_self() && c.from_phase == *last_phase;
+                      return c.is_self() && c.from_phase == e.id;
                     });
-    if (e.id != *last_phase || repeats)
-      fail("carries m2o_sparse, which only the last phase may carry");
+    if (repeats)
+      fail("carries m2o_sparse, which a repeating phase may not: a readout "
+           "belongs to a round the shot has once");
     const auto rows = static_cast<uint64_t>(
         std::count(m2o.begin(), m2o.end(), std::int64_t{-1}));
     if (rows != observables)
@@ -912,6 +967,7 @@ static void validate_observables(const dem_chunks_spec &spec) {
                    : "; without D_sparse a round measures one bit per "
                      "detector, so num_measurements cannot widen it"));
   } // end - for(e)
+  validate_readout_order(spec, sequence);
 } // end - validate_observables()
 
 void dem_chunks_spec::validate() const {

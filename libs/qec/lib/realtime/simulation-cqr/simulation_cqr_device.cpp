@@ -8,7 +8,8 @@
 // These mirror the simulation backend's __qpu__ wrappers, but the cudaq::
 // device_call targets use the *generic* callee names defined by
 // cudaq-spec/proposals/decoder_server_runtime.md -- enqueue_syndromes /
-// get_corrections / reset_decoder -- rather than the simulation backend's
+// get_corrections / reset_decoder / get_logical_measurements -- rather than
+// the simulation backend's
 // simulation_* / C++-mangled symbols. The realtime function_id is
 // fnv1a_32(<callee name>), so these names are what the host-dispatch service
 // (decoding_server_cqr.cpp) registers.
@@ -45,6 +46,9 @@ void enqueue_syndromes(std::uint64_t decoder_id, std::uint64_t counter,
 
 void get_corrections(std::uint64_t decoder_id, std::vector<bool> &corrections,
                      bool reset);
+
+void get_logical_measurements(std::uint64_t decoder_id, std::uint64_t first,
+                              std::vector<bool> &logical, bool reset);
 
 void reset_decoder(std::uint64_t decoder_id);
 }
@@ -99,6 +103,17 @@ __qpu__ std::vector<bool> get_corrections(std::uint64_t decoder_id,
   // is 17 bytes with no trailing padding.
   std::vector<bool> result(return_size);
   cudaq::device_call(decoder_id, ::get_corrections, decoder_id, result, reset);
+  return result;
+}
+
+// As get_corrections, with `first` before the OUT vector (25-byte request).
+__qpu__ std::vector<bool> get_logical_measurements(std::uint64_t decoder_id,
+                                                   std::uint64_t first,
+                                                   std::uint64_t return_size,
+                                                   bool reset) {
+  std::vector<bool> result(return_size);
+  cudaq::device_call(decoder_id, ::get_logical_measurements, decoder_id, first,
+                     result, reset);
   return result;
 }
 

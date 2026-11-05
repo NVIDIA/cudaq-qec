@@ -270,11 +270,12 @@ function(CUDA_get_gencode_args out_args_string arch_values)
 endfunction()
 
 if(CMAKE_CUDA_COMPILER)
+  # Import CUDA targets in the common parent scope even when architectures
+  # are supplied explicitly, so sibling library and tool directories see them.
+  find_package(CUDAToolkit REQUIRED)
+  message(STATUS "Found CUDA Toolkit version: ${CUDAToolkit_VERSION}")
+
   if (NOT CUDA_TARGET_ARCHS)
-    find_package(CUDAToolkit REQUIRED)
-
-    message(STATUS "Found CUDA Toolkit version: ${CUDAToolkit_VERSION}")
-
     if (CUDAToolkit_VERSION VERSION_LESS 13.0)
       # Ampere, Hopper
       set(CUDA_TARGET_ARCHS  "75;80;90")

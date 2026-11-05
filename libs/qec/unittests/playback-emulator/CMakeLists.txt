@@ -83,5 +83,14 @@ if(TARGET playback-emulator)
       PROPERTIES LABELS "qec"
       PASS_REGULAR_EXPRESSION "duration '1\\.5ms' must be a whole number")
   endforeach()
+  find_package(Python COMPONENTS Interpreter QUIET)
+  if(Python_Interpreter_FOUND)
+    add_test(NAME playback_emulator_cli
+      COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py" -v
+        --emulator=$<TARGET_FILE:playback-emulator>)
+    set_tests_properties(playback_emulator_cli PROPERTIES
+      LABELS "qec"
+      TIMEOUT 120)
+  endif()
   add_dependencies(CUDAQXQECUnitTests playback-emulator)
 endif()

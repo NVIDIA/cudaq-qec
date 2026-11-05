@@ -73,7 +73,7 @@ const bool registered = [] {
               "task graph streaming node requires a nonzero syndrome round");
         return std::make_unique<streaming_decoder_node>(
             std::move(ctx.d), std::move(ctx.o), std::move(ctx.dec), spr,
-            ctx.num_measurements == 0);
+            ctx.num_measurements == 0, ctx.dem_rounds);
       });
   return true;
 }();
@@ -81,11 +81,15 @@ const bool registered = [] {
 } // namespace
 
 // Validate the decoder-facing matrices and allocate persistent streaming state.
+// When rounds of different widths divide D into no fixed windows, a decoder
+// that ends its own shots has the node report exact intervals instead; an
+// untagged shot's are then its template's rounds.
 streaming_decoder_node::streaming_decoder_node(
     std::shared_ptr<const sparse_binary_matrix> d,
     std::shared_ptr<const sparse_binary_matrix> o, std::unique_ptr<decoder> dec,
-    uint32_t spr, bool equal_rounds)
-    : d_(std::move(d)), o_(std::move(o)), dec_(std::move(dec)), spr_(spr) {
+    uint32_t spr, bool equal_rounds, uint32_t num_rounds)
+    : d_(std::move(d)), o_(std::move(o)), dec_(std::move(dec)), spr_(spr),
+      num_rounds_(num_rounds) {
   if (!d_ || !o_ || !dec_)
     throw std::invalid_argument("streaming node requires D, O, and a decoder");
   correction_provider_ =
@@ -93,6 +97,10 @@ streaming_decoder_node::streaming_decoder_node(
   if (spr_ == 0 || (equal_rounds && d_->num_cols() % spr_ != 0))
     throw std::invalid_argument(
         "streaming node syndrome count must be divisible by its round size");
+  exact_ = !equal_rounds && correction_provider_ && !streaming_schedule();
+  if (exact_ && num_rounds_ == 0)
+    throw std::invalid_argument("streaming node over rounds of different "
+                                "widths needs its shot's round count");
   if (dec_->get_num_observables() != o_->num_rows())
     throw std::invalid_argument(
         "streaming node decoder and O must declare the same observable count");
@@ -103,7 +111,7 @@ streaming_decoder_node::streaming_decoder_node(
   correction_frame_.assign(o_->num_rows(), 0);
   last_output_ = logical_outcome{};
   last_output_.get<logical_outcome>().bits.assign(o_->num_rows(), 0);
-}
+} // end - streaming_decoder_node()
 
 // Forward one caller-preserved raw chunk, with its round type, and publish any
 // completed correction.  An empty chunk is not forwarded: a decoder that
@@ -144,31 +152,43 @@ bool streaming_decoder_node::enqueue_untagged(const uint8_t *msyn,
     return false;
   }
   publish_inner_frame(dec_->get_obs_corrections(), /*final=*/false);
-  if (correction_provider_)
-    if (const auto rounds = correction_provider_->finalized_round_count())
-      completed_rounds_ += *rounds;
+  if (correction_provider_) {
+    // The shot is D's width, so an exact node knows its rounds even when the
+    // decoder does not report them.
+    const auto rounds = correction_provider_->finalized_round_count().value_or(
+        exact_ ? num_rounds_ : 0);
+    if (exact_)
+      coverage_ =
+          committed_coverage{completed_rounds_, completed_rounds_ + rounds};
+    completed_rounds_ += rounds;
+  }
   pending_inner_input_ = false;
   return true;
-}
+} // end - enqueue_untagged()
 
 // Snapshot the inner decoder and expose its correction delta for edge routing.
 // A FINAL shot's rounds follow those of the shots before it in its stream, and
-// end the stream.
+// end the stream. An exact publication whose rounds are unknown, a
+// provisional one or a FINAL one the decoder does not count, joins the output
+// whole at FINAL.
 void streaming_decoder_node::capture_inner_corrections(bool final) {
+  const bool ends_shot = final && correction_provider_;
+  const committed_coverage whole{completed_rounds_, whole_shot};
+  std::optional<committed_coverage> counted;
   publish_inner_frame(
       correction_provider_
           ? (final ? correction_provider_->finalize_obs_corrections()
                    : correction_provider_->peek_obs_corrections())
           : dec_->get_obs_corrections(),
       final);
-  if (!final || !correction_provider_)
-    return;
-  final_coverage_.reset();
-  if (const auto rounds = correction_provider_->finalized_round_count())
-    final_coverage_ =
-        committed_coverage{completed_rounds_, completed_rounds_ + *rounds};
-  completed_rounds_ = 0;
-}
+  if (ends_shot)
+    if (const auto rounds = correction_provider_->finalized_round_count())
+      counted =
+          committed_coverage{completed_rounds_, completed_rounds_ + *rounds};
+  coverage_ = exact_ ? counted.value_or(whole) : counted;
+  if (ends_shot)
+    completed_rounds_ = 0;
+} // end - capture_inner_corrections()
 
 // Publish the change in the inner frame since the last publication.
 void streaming_decoder_node::publish_inner_frame(const uint8_t *current,
@@ -212,7 +232,7 @@ void streaming_decoder_node::reset_streaming_state() {
   published_final_ = false;
   untagged_fill_ = 0;
   completed_rounds_ = 0;
-  final_coverage_.reset();
+  coverage_.reset();
 }
 
 // Report the validated raw measurement width shared by the decoder and D.
@@ -238,10 +258,11 @@ streaming_decoder_node::streaming_output(std::size_t slot) const {
 // the shot, use its physical length, after the shots before it, rather than
 // the configured template fire schedule. A shot sealed at its configured
 // length keeps the schedule, which also numbers back-to-back shots that never
-// see FINAL; the shot after a FINAL one begins a new stream.
+// see FINAL; the shot after a FINAL one begins a new stream. Without a
+// schedule, every publication reports its own interval.
 std::optional<streaming_task_graph_node::committed_coverage>
 streaming_decoder_node::streaming_coverage() const {
-  return published_final_ ? final_coverage_ : std::nullopt;
+  return exact_ || published_final_ ? coverage_ : std::nullopt;
 }
 
 // Project a one-shot decoder result through O when it is fault-valued.
