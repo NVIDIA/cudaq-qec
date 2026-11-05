@@ -41,8 +41,12 @@ model is a ``dem_chunks`` description of the experiment's rounds (see
    decoders:
      - id: 0
        task_graph:
-         type: sliding_window
-         inner_type: single_error_lut # the inner decoder
+         nodes:
+           - id: sw
+             type: sliding_window
+             window_size: 3                 # rounds per decode
+             step_size: 1                   # rounds to advance per decode
+             inner: {type: single_error_lut}
        dem_chunks:
          seam: {from: next_round, to: prev_round}
          connections:
@@ -69,12 +73,16 @@ model is a ``dem_chunks`` description of the experiment's rounds (see
                O_sparse: [0,-1]
                error_rates: [0.02,0.02,0.02,0.02,0.02]
 
-* Without ``num_rounds``, the graph streams: the window decodes once per round.
-* With ``num_rounds``, the graph decodes each complete shot once. Write
-  ``type: single_window`` to require that.
-* ``decoder_custom_args`` configure the inner decoder.
+* The graph streams: it first decodes once it holds three rounds, then on
+  every round after. ``window_size`` must be at least the fewest rounds the
+  phases allow, three here.
+* For shots of a fixed length, set ``dem_chunks.num_rounds`` and write
+  ``type: single_window``: the graph decodes each complete shot once.
+* ``inner``'s other keys configure the inner decoder.
 
-The same graph built in code:
+The same graph built in code. ``from_spec`` picks the window itself: the
+fewest rounds the phases allow, advancing one round at a time, or the whole
+shot when ``num_rounds`` is set:
 
 .. tab:: Python
 

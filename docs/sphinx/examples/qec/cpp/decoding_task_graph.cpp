@@ -61,8 +61,8 @@ static dem_chunks_spec rep5_spec(uint64_t num_rounds = 5) {
 // Build a single-decoder task graph from a dem_chunks_spec.
 //
 // When num_rounds is set the graph uses a fixed-T window (one call to run()
-// per shot).  When num_rounds is absent the graph uses a streaming window
-// that fires once per round (stride = 1).
+// per shot).  When num_rounds is absent the graph uses a streaming window of
+// the fewest rounds the phases allow, moving one round at a time.
 // ---------------------------------------------------------------------------
 
 static void example_from_spec() {
@@ -76,7 +76,8 @@ static void example_from_spec() {
   std::cout << "fixed-T  observables: " << fixed_graph->get_num_observables()
             << "\n";
 
-  // Streaming graph: num_rounds absent — window fires once per round.
+  // Streaming graph: num_rounds absent — a 3-round window that moves one
+  // round at a time.
   auto streaming_spec = rep5_spec();
   streaming_spec.num_rounds = std::nullopt;
   auto streaming_graph =

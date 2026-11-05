@@ -69,7 +69,8 @@ fixed_graph = qec.DecodingTaskGraph.from_spec(fixed_spec, "single_error_lut")
 print(f"fixed-T  msyn/decode: {fixed_graph.get_num_msyn_per_decode()}")
 print(f"fixed-T  observables: {fixed_graph.get_num_observables()}")
 
-# Streaming graph: num_rounds absent — window fires once per round.
+# Streaming graph: num_rounds absent — a 3-round window that moves one round
+# at a time.
 streaming_spec = rep5_spec()
 streaming_spec.num_rounds = None  # remove fixed round count
 streaming_graph = qec.DecodingTaskGraph.from_spec(streaming_spec,
