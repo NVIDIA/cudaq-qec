@@ -105,7 +105,8 @@ TEST(DecodingServerCqr, DispatchRpcFailureModesAndShutdown) {
   std::uint32_t count = 0;
   const auto *entries = enqueue_entry(&count);
   ASSERT_NE(entries, nullptr);
-  ASSERT_EQ(count, 3u);
+  // enqueue, get_corrections, reset, and get_logical_measurements.
+  ASSERT_EQ(count, 4u);
 
   auto host_fn = entries[0].handler.host_fn;
   ASSERT_NE(host_fn, nullptr);
