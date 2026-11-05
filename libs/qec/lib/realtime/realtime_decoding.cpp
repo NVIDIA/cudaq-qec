@@ -998,6 +998,20 @@ void get_corrections(std::size_t decoder_id, uint8_t *corrections,
 
   const auto target = resolve_target(decoder_id);
   target.validate_corrections(corrections, correction_length);
+  // As the server's NOT_READY: a reset read waits for the shot's end, which
+  // a failed shot never reaches. Only a graph with a logical output waits.
+  if (reset && !target.may_consume()) {
+    const auto &live = target.streaming_result();
+    if (live.status == task_graph_streaming_status::failed)
+      throw std::runtime_error(
+          fmt::format("get_corrections: decoder {}'s shot failed: {}; "
+                      "reset_decoder() starts the next shot",
+                      decoder_id, live.error));
+    throw std::runtime_error(fmt::format(
+        "get_corrections: decoder {}'s shot has not ended; a reset read is "
+        "ready only after its FINAL round",
+        decoder_id));
+  }
 
   // clear_corrections may touch device memory in some plugins.
   target.pin_device();
@@ -1007,6 +1021,55 @@ void get_corrections(std::size_t decoder_id, uint8_t *corrections,
   if (reset)
     target.clear_corrections();
 }
+
+// Like get_corrections(), but reads the graph's logical output.
+void get_logical_measurements(std::size_t decoder_id, std::uint64_t first,
+                              uint8_t *logical, std::uint64_t logical_length,
+                              bool reset) {
+  CUDA_QEC_INFO("Entered get_logical_measurements function decoder_id={}, "
+                "first={}, logical_length={}, reset={}",
+                decoder_id, first, logical_length, reset);
+
+  const auto target = resolve_target(decoder_id);
+  const auto count = target.num_logical_measurements();
+  const uint8_t *ret = nullptr;
+  if (count == 0)
+    throw std::invalid_argument(fmt::format(
+        "get_logical_measurements: decoder {} has no logical measurements; "
+        "only a task graph with a logical output has them",
+        decoder_id));
+  if (!logical)
+    throw std::invalid_argument("logical measurements buffer is null");
+  if (logical_length == 0 || first >= count || logical_length > count - first)
+    throw std::invalid_argument(
+        fmt::format("logical measurements [{}, {}) run past the decoder's {}",
+                    first, first + logical_length, count));
+
+  // clear_corrections may touch device memory in some plugins.
+  target.pin_device();
+  const auto &live = target.streaming_result();
+  if (live.status == task_graph_streaming_status::failed)
+    throw std::runtime_error(
+        fmt::format("get_logical_measurements: decoder {}'s shot failed: {}; "
+                    "reset_decoder() starts the next shot",
+                    decoder_id, live.error));
+  ret = live.logical_measurements(first, logical_length);
+  if (!ret)
+    throw std::runtime_error(fmt::format(
+        "get_logical_measurements: decoder {}'s logical measurements [{}, {}) "
+        "are not released yet: one is once its readout has arrived and every "
+        "correction that can flip it is committed, every one by FINAL",
+        decoder_id, first, first + logical_length));
+  if (reset && !target.may_consume(&live))
+    throw std::runtime_error(fmt::format(
+        "get_logical_measurements: decoder {}'s shot has not ended; a reset "
+        "read is ready only after its FINAL round",
+        decoder_id));
+  for (std::size_t i = 0; i < logical_length; ++i)
+    logical[i] = ret[i];
+  if (reset)
+    target.clear_corrections();
+} // end - get_logical_measurements()
 
 void reset_decoder(std::size_t decoder_id) {
   CUDA_QEC_INFO("Entered reset_decoder for decoder_id={}", decoder_id);

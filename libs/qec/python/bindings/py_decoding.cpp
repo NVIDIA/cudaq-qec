@@ -85,6 +85,18 @@ void bindDecoding(nb::module_ &mod) {
                 - return_size: The number of corrections to return.
                 - reset: Whether to reset the decoder after getting corrections.
                         )pbdoc");
+  qecSubMod.def(
+      "get_logical_measurements",
+      [](std::uint64_t, std::uint64_t, std::uint64_t, bool) {},
+      R"pbdoc(Get the logical measurements from the decoder: the raw logical
+              readout with its corrections applied.
+                Parameters
+                - decoder_id: The ID of the decoder.
+                - first: The first logical measurement to return.
+                - return_size: The number of logical measurements to return.
+                - reset: Whether to reset the decoder after getting them;
+                  allowed only after the FINAL round.
+                        )pbdoc");
 
   qecmod.def("load_device_kernels", [qecModName]() {
     cudaq::python::registerDeviceKernel(
@@ -108,6 +120,10 @@ void bindDecoding(nb::module_ &mod) {
         qecModName, "get_corrections",
         cudaq::python::getMangledArgsString<std::uint64_t, std::uint64_t,
                                             bool>());
+    cudaq::python::registerDeviceKernel(
+        qecModName, "get_logical_measurements",
+        cudaq::python::getMangledArgsString<std::uint64_t, std::uint64_t,
+                                            std::uint64_t, bool>());
   });
 
   qecmod.def("__repr__", [qecmod]() {

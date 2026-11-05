@@ -23,11 +23,13 @@ if (CMAKE_COMPILER_IS_GNUCXX
     $<$<COMPILE_LANGUAGE:CXX>:--param=evrp-mode=legacy>)
 endif()
 include(GoogleTest)
+# See libs/qec/unittests/CMakeLists.txt for why the discovery timeout is raised.
+set(CUDAQX_GTEST_DISCOVERY_TIMEOUT 30)
 
 # ==============================================================================
 
 add_executable(test_core test_core.cpp)
 target_link_libraries(test_core PRIVATE GTest::gtest_main cudaqx-core)
 add_dependencies(CUDAQXCoreUnitTests test_core)
-gtest_discover_tests(test_core)
+gtest_discover_tests(test_core DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 

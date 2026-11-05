@@ -201,6 +201,7 @@ void decoding_task_graph::impl::publish_async_stream_snapshot() {
   snapshot.completed_operations = source.completed_operations;
   snapshot.generation = source.generation;
   snapshot.status = source.status;
+  snapshot.closure = source.closure;
   snapshot.operation_completed = source.operation_completed;
   snapshot.error = source.error;
   std::copy(source.outputs.begin(), source.outputs.end(),

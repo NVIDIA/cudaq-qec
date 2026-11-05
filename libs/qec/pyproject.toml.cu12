@@ -15,7 +15,7 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = "LicenseRef-NVIDIA-Proprietary"
 dependencies = [
-  'cuda-quantum-cu12 >= 0.16.0, < 0.17',
+  'cuda-quantum-cu12 >= 0.17.0, < 0.18',
   'cuquantum-python-cu12>=26.03.0',
 ]
 classifiers = [

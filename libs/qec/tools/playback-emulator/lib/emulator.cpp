@@ -159,14 +159,21 @@ build_enqueue_frame(const event &e, const run_params &params, std::uint32_t rid,
                      bits, n_bits);
 }
 
-std::vector<std::uint8_t> build_get_corrections_frame(std::uint64_t decoder_id,
-                                                      std::int64_t return_size,
-                                                      std::uint32_t rid) {
-  // reset=1 always: a playback read consumes the shot it reports on.
-  wire::GetCorrectionsRequestPayload p{static_cast<std::int64_t>(decoder_id),
-                                       return_size,
-                                       /*reset=*/1};
-  return build_frame(wire::kGetCorrectionsFunctionId, rid, &p, sizeof(p));
+// The request frame for read event @p e: get_corrections, or
+// get_logical_measurements from its `first`.
+std::vector<std::uint8_t>
+build_read_frame(const event &e, std::int64_t return_size, std::uint32_t rid) {
+  const auto decoder_id = static_cast<std::int64_t>(e.decoder_id);
+  const auto reset = static_cast<std::uint8_t>(e.reset);
+  wire::GetCorrectionsRequestPayload corrections{decoder_id, return_size,
+                                                 reset};
+  wire::GetLogicalMeasurementsRequestPayload logical{
+      decoder_id, static_cast<std::int64_t>(e.first), return_size, reset};
+  if (e.op == operation::get_corrections)
+    return build_frame(wire::kGetCorrectionsFunctionId, rid, &corrections,
+                       sizeof(corrections));
+  return build_frame(wire::kGetLogicalMeasurementsFunctionId, rid, &logical,
+                     sizeof(logical));
 }
 
 /// The width a returning RPC requests
@@ -284,7 +291,8 @@ plan(const schedule &sched_in,
     case operation::reset:
       place(build_reset_frame(e.decoder_id, /*rid=*/0), 0, 0);
       break;
-    case operation::get_corrections: {
+    case operation::get_corrections:
+    case operation::get_logical_measurements: {
       // The reply rides the same transport as the request, so it is bounded
       // too (a 256-byte RDMA slot cannot carry a 4096-bit read).
       const std::size_t reply_bytes =
@@ -293,13 +301,10 @@ plan(const schedule &sched_in,
       if (max_frame_bytes != 0 && reply_bytes > max_frame_bytes)
         throw std::invalid_argument(
             "event " + std::to_string(i) + ": a " +
-            std::to_string(reply_bytes) +
-            "-byte get_corrections reply exceeds the session's "
-            "max_frame_bytes=" +
+            std::to_string(reply_bytes) + "-byte " + to_string(e.op) +
+            " reply exceeds the session's max_frame_bytes=" +
             std::to_string(max_frame_bytes));
-      place(build_get_corrections_frame(e.decoder_id, return_size_for(e),
-                                        /*rid=*/0),
-            0, 0);
+      place(build_read_frame(e, return_size_for(e), /*rid=*/0), 0, 0);
       break;
     }
     case operation::stream:
@@ -368,8 +373,8 @@ plan(const schedule &sched_in,
   }
 
   // -- Upper bound on how many requests run() can issue, so it can size its
-  // per-request logs once and append to them without a lock. reset/
-  // get_corrections issue exactly one; a pre-built stream issues exactly as
+  // per-request logs once and append to them without a lock. reset and the
+  // reads issue exactly one; a pre-built stream issues exactly as
   // many as it was given; anything else is bounded by stream_max_rounds
   // (the parser always sets this, defaulting an unbounded `until=` stream to
   // kDefaultUntilMaxRounds).
@@ -379,6 +384,7 @@ plan(const schedule &sched_in,
     switch (e.op) {
     case operation::reset:
     case operation::get_corrections:
+    case operation::get_logical_measurements:
       total_requests += 1;
       break;
     case operation::stream:
@@ -558,7 +564,7 @@ void settle(const run_ctx &c, std::uint32_t event_index, collector_entry &e) {
 
 /// Declared in session.h; called directly by whichever thread the owning
 /// session completes replies on. Stamps the per-request log, folds the
-/// reply into the event's record (unpacking a get_corrections payload), and
+/// reply into the event's record (unpacking a read's payload), and
 /// settles the event once every reply it is owed has arrived.
 void handle_reply(run_ctx &c, tag t, RpcStatus status,
                   const std::uint8_t *reply, std::size_t reply_len,
@@ -567,7 +573,7 @@ void handle_reply(run_ctx &c, tag t, RpcStatus status,
   const event &e = c.ev(i);
   RpcStatus final_status = status;
 
-  if (e.op == operation::get_corrections) {
+  if (reads_result(e.op)) {
     const std::uint32_t return_size = return_size_for(e);
     final_status = reject_truncated_reply(status, reply_len, return_size);
     if (final_status == RpcStatus::OK) {
@@ -599,6 +605,7 @@ void handle_reply(run_ctx &c, tag t, RpcStatus status,
   switch (e.op) {
   case operation::reset:
   case operation::get_corrections:
+  case operation::get_logical_measurements:
     abort_on_hard_error(c, final_status, i);
     break;
   case operation::stream:
@@ -776,7 +783,8 @@ void dispatch_event(const run_ctx &c, std::uint32_t i, session &s,
 
   switch (e.op) {
   case operation::reset:
-  case operation::get_corrections: {
+  case operation::get_corrections:
+  case operation::get_logical_measurements: {
     const auto &rp = ep[0];
     const auto [rid, log_index] = begin_request(c, rec);
     set_request_id(plan.frame_arena.data() + rp.frame_offset, rid);
