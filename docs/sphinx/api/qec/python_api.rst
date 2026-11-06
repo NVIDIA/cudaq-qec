@@ -104,6 +104,9 @@ edges. See :doc:`/examples_rst/qec/decoding_task_graph` and
 .. autoclass:: cudaq_qec.TaskGraphNodeConfig
     :members:
 
+.. autoclass:: cudaq_qec.TaskGraphEnsembleSpec
+    :members:
+
 .. autoclass:: cudaq_qec.TaskGraphOptions
     :members:
 
