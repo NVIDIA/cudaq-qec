@@ -398,7 +398,7 @@ RpcStatus DecodingSession::read_result_core(bool logical, int64_t first_arg,
     // A reset read is ready only once the shot may be consumed.
     if (reset && !target.may_consume(live))
       return RpcStatus::NOT_READY;
-    // result_len = ceil(R/8) exactly per decoder_server_runtime.md spec.
+    // result_len = ceil(R/8) exactly per decoding-server.md spec.
     // The spec forbids trailing padding in the wire result_len; if a transport
     // layer needs 8-byte alignment, it must add padding in its own framing.
     const size_t result_len = bit_packed_bytes(return_size);
