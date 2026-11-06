@@ -1,0 +1,71 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600" role="img" aria-labelledby="title description">
+  <title id="title">Prepare a configuration, then run decoding shots</title>
+  <desc id="description">Before an experiment, use the memory-experiment generator for supported surface-code memory experiments, or prepare circuit-specific YAML for other experiments. Load that YAML into the decoding server and wait for READY. During each shot, an application or playback client sends reset, measurements and correction requests over the configured transport: UDP, CPU RoCE or GPU RoCE, subject to package and dispatch support. The server runs the configured decoding pipeline and returns logical correction bits; the application interprets or applies them. For the generated memory example, send BULK measurement rounds followed by FINAL readout before requesting corrections.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#687580"/>
+    </marker>
+    <marker id="prepare-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5a8f00"/>
+    </marker>
+    <marker id="runtime-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#356ca8"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: Lato, 'Helvetica Neue', Arial, sans-serif; fill: #1a1a1a; text-anchor: middle; font-size: 20px; }
+    .heading { font-size: 23px; font-weight: bold; text-anchor: start; }
+    .prepare-heading { fill: #355c10; }
+    .runtime-heading { fill: #244c78; }
+    .node-title { font-weight: bold; }
+    .label { font-size: 17px; fill: #46525f; }
+    .edge-label { font-size: 17px; fill: #46525f; text-anchor: start; }
+    .node { fill: #f3f4f6; stroke: #929ca6; stroke-width: 1.5; }
+    .preparation { fill: #f1f8e4; stroke: #5a8f00; stroke-width: 1.5; }
+    .runtime { fill: #eaf2fc; stroke: #4f8fd6; stroke-width: 1.5; }
+    .edge { fill: none; stroke: #687580; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow); }
+    .prepare-edge { stroke: #5a8f00; marker-end: url(#prepare-arrow); }
+    .runtime-edge { stroke: #356ca8; marker-end: url(#runtime-arrow); }
+    .join { marker-end: none; }
+    .divider { stroke: #d9dfe5; stroke-width: 1; }
+  </style>
+  <rect width="800" height="600" rx="8" fill="#ffffff"/>
+
+  <text class="heading prepare-heading" x="24" y="31">1. Prepare before the experiment</text>
+  <rect class="preparation" x="24" y="56" width="348" height="92" rx="8"/>
+  <text class="node-title" x="198" y="86">Surface-code memory</text>
+  <text class="label" x="198" y="118">memory-experiment-generator</text>
+  <rect class="preparation" x="428" y="56" width="348" height="92" rx="8"/>
+  <text class="node-title" x="602" y="86">Other supported experiments</text>
+  <text class="label" x="602" y="118">Prepare circuit-specific configuration</text>
+  <path class="edge prepare-edge join" d="M 198 148 V 176 H 602 V 148"/>
+  <path class="edge prepare-edge" d="M 400 176 V 199"/>
+  <rect class="preparation" x="268" y="200" width="264" height="64" rx="8"/>
+  <text class="node-title" x="400" y="239">Decoder YAML</text>
+  <path class="edge prepare-edge" d="M 532 232 H 626 V 389"/>
+  <text class="edge-label" x="646" y="294">--config</text>
+  <text class="edge-label" x="646" y="318">Wait for READY</text>
+
+  <line class="divider" x1="24" y1="335" x2="776" y2="335"/>
+  <text class="heading runtime-heading" x="24" y="369">2. Run each shot</text>
+  <rect class="runtime" x="24" y="390" width="300" height="110" rx="8"/>
+  <text class="node-title" x="174" y="422">Application / playback</text>
+  <text class="label" x="174" y="453">Sends measurements</text>
+  <text class="label" x="174" y="480">Uses returned corrections</text>
+  <rect class="runtime" x="476" y="390" width="300" height="110" rx="8"/>
+  <text class="node-title" x="626" y="422">Decoding server</text>
+  <text class="label" x="626" y="453">Configured</text>
+  <text class="label" x="626" y="480">decoding pipeline</text>
+  <path class="edge runtime-edge" d="M 324 428 H 475"/>
+  <text class="label" x="400" y="418">Requests</text>
+  <path class="edge runtime-edge" d="M 476 478 H 325"/>
+  <text class="label" x="400" y="467">Corrections</text>
+  <text class="label" x="400" y="524">Transport: UDP / CPU RoCE / GPU RoCE</text>
+  <rect class="node" x="24" y="548" width="300" height="36" rx="6"/>
+  <text class="label" x="174" y="572">QPU / simulator / recorded data</text>
+  <path class="edge" d="M 174 548 V 501"/>
+  <text class="label" x="626" y="549">reset → measurements → read</text>
+  <text class="label" x="626" y="578">Mapped inputs: BULK → FINAL</text>
+</svg>

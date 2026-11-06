@@ -120,6 +120,7 @@ partial output file, which must be removed before retrying.
 See Also
 ^^^^^^^^
 
+* :doc:`Decoding Server User Guide </examples_rst/qec/decoding_server>`: configuration, playback and client integration
 * :ref:`Pre-built QEC Decoders <prebuilt_qec_decoders>` — decoders available for realtime use
 * :doc:`Realtime Decoding examples </examples_rst/qec/realtime_decoding>` — runnable end-to-end examples
 * :doc:`Playback Emulator </examples_rst/qec/playback_emulator>` — replay timed decoder calls without a QPU
