@@ -24,8 +24,9 @@ class streaming_decoder_node : public task_graph_node,
                                public decoder_backed_task_graph_node {
 public:
   /// @param equal_rounds Whether every round is @p spr measurements wide.
-  /// @param num_rounds Rounds of a shot of D's width; needed when rounds of
-  /// different widths leave D no schedule.
+  /// @param num_rounds Rounds of a shot of D's width; needed when the decoder
+  /// is a streaming_correction_provider and rounds of different widths leave
+  /// the node no schedule.
   /// @throws std::invalid_argument if the decoder, D and O disagree, or the
   /// node needs @p num_rounds and has none.
   streaming_decoder_node(std::shared_ptr<const sparse_binary_matrix> d,
@@ -79,8 +80,13 @@ public:
   decoder *inner_decoder() const override { return dec_.get(); }
 
 private:
+  /// Whether a provisional frame commits rounds not yet covered.
+  bool commits_more() const;
   void capture_inner_corrections(bool final);
-  void publish_inner_frame(const uint8_t *current, bool final);
+  /// Set the coverage of a provider's publication, which ends the shot when
+  /// @p ends_shot, of @p rounds rounds when known.
+  void record_coverage(bool ends_shot, std::optional<std::uint64_t> rounds);
+  void publish_inner_frame(const uint8_t *current);
   logical_outcome decode_one_shot(const measurement_results &m) const;
   logical_outcome project_result(decoder_result result) const;
 
@@ -89,7 +95,8 @@ private:
   std::unique_ptr<decoder> dec_;
   streaming_correction_provider *correction_provider_ = nullptr;
   uint32_t spr_;
-  // Rounds of a shot of D's width, which an untagged shot is.
+  // Rounds of a shot of D's width, which an untagged shot is; set for a
+  // provider.
   uint32_t num_rounds_ = 0;
   // Every publication reports its interval (see exact_interval_coverage()).
   bool exact_ = false;
@@ -98,13 +105,13 @@ private:
   std::vector<uint8_t> correction_frame_;
   bool pending_inner_input_ = false;
   bool output_valid_ = false;
-  bool published_final_ = false;
   // Measurements of the untagged shot taken so far.
   std::size_t untagged_fill_ = 0;
   // Rounds of the stream's completed shots, where the next one begins.
   std::uint64_t completed_rounds_ = 0;
-  // The current publication's interval when exact_; otherwise the last
-  // FINAL shot's rounds, when the decoder reports them.
+  // Rounds of the active shot its publications have covered.
+  std::uint64_t shot_committed_ = 0;
+  // A provider's current publication's coverage (see record_coverage()).
   std::optional<committed_coverage> coverage_;
 };
 
