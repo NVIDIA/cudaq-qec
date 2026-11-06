@@ -1451,15 +1451,16 @@ private:
 
 // The probe above, reporting its committed rounds: every round taken but the
 // last, whose parity commits with the next, less @p lag more, so that it
-// reports fewer than it has committed. Unless @p fires, a tagged round
-// reports a decode only at FINAL.
+// reports fewer than it has committed, rounded down to a multiple of
+// @p step, so that it commits that many at once. Unless @p fires, a tagged
+// round reports a decode only at FINAL.
 class committing_round_probe_decoder final
     : public unequal_round_probe_decoder {
 public:
   committing_round_probe_decoder(std::size_t width, std::uint64_t lag = 0,
-                                 bool fires = true)
+                                 bool fires = true, std::uint64_t step = 1)
       : unequal_round_probe_decoder(width, /*count_final=*/true), lag_(lag),
-        fires_(fires) {}
+        fires_(fires), step_(step) {}
   using unequal_round_probe_decoder::enqueue_syndrome;
   bool enqueue_syndrome(const uint8_t *input, std::size_t length,
                         round_type type) override {
@@ -1468,22 +1469,26 @@ public:
     return fired && (fires_ || type == round_type::FINAL);
   }
   std::optional<std::uint64_t> committed_round_count() const override {
-    return rounds_ > lag_ + 1 ? rounds_ - lag_ - 1 : 0;
+    const std::uint64_t count = rounds_ > lag_ + 1 ? rounds_ - lag_ - 1 : 0;
+    return count - count % step_;
   }
 
 private:
   std::uint64_t lag_ = 0;
   bool fires_ = true;
+  std::uint64_t step_ = 1;
 };
 
 // A decoder whose tagged shot is complete at the template's 4 rounds without
 // FINAL, as one of fixed length is: it reports a decode and commits them all,
 // and a peek then ends the shot, which finalized_round_count() reports.
+// Before then it commits the rounds taken in multiples of @p step, if any.
 class fixed_shot_probe_decoder final : public decoder,
                                        public streaming_correction_provider {
 public:
-  explicit fixed_shot_probe_decoder(std::size_t width)
-      : decoder(decoder_init(sparse_binary_matrix::from_nested_csr(
+  explicit fixed_shot_probe_decoder(std::size_t width, std::uint64_t step = 0)
+      : step_(step),
+        decoder(decoder_init(sparse_binary_matrix::from_nested_csr(
                                  4, 1, {{0}, {0}, {0}, {0}}),
                              sparse_binary_matrix::from_nested_csr(1, 1, {{0}}),
                              {},
@@ -1520,7 +1525,9 @@ public:
     return sealed_;
   }
   std::optional<std::uint64_t> committed_round_count() const override {
-    return rounds_ == shot_rounds ? rounds_ : 0;
+    return rounds_ == shot_rounds ? rounds_
+           : step_ != 0           ? rounds_ - rounds_ % step_
+                                  : 0;
   }
   void clear_corrections() override { frame_[0] = 0; }
   void reset_decoder() override {
@@ -1537,6 +1544,7 @@ private:
     sealed_ = rounds_;
     rounds_ = 0;
   }
+  std::uint64_t step_ = 0;
   mutable std::array<uint8_t, 1> frame_{0};
   mutable uint8_t pending_ = 0;
   mutable std::uint64_t rounds_ = 0;
@@ -1889,6 +1897,76 @@ TEST(DecodingTaskGraph, CombinedStreamingNodesCoverWhatBothCommitted) {
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph, CombinedStreamingNodesCoverWhatBothCommitted)
 
+// Coverage follows what both nodes have committed, not how often each has
+// published, and the output publishes only when it covers more. One node
+// commits two rounds at once; beside it, the other commits a round at a
+// time, either a round behind, so that the output covers [0, 2) after its
+// second publication but the first's only one, or level, so that its
+// publications between the first's cover nothing more.
+TEST(DecodingTaskGraph, CombinedStreamingNodesCoverWhatBothCommittedAtAnyRate) {
+  constexpr std::size_t rounds = 6; // longer than the template's 4
+  const std::array<uint64_t, 4> widths{1, 3, 3, 5};
+  for (const std::uint64_t lag : {1, 0})
+    for (const bool async : {false, true}) {
+      // Covered after round r: what both have committed, all at FINAL.
+      const auto end = [&](std::size_t r) -> std::uint64_t {
+        return r + 1 == rounds ? rounds
+                               : std::min(r - r % 2, r > lag ? r - lag : 0);
+      };
+      auto graph = decoding_task_graph::combine(
+          make_unequal_round_graph(
+              widths, async, true,
+              std::make_unique<committing_round_probe_decoder>(12, 0, true, 2)),
+          make_unequal_round_graph(
+              widths, async, true,
+              std::make_unique<committing_round_probe_decoder>(12, lag)));
+      std::uint64_t generation = 0; // of the output's last publication
+      SCOPED_TRACE(::testing::Message() << "lag=" << lag << " async=" << async);
+      ASSERT_TRUE(graph->supports_streaming())
+          << graph->streaming_incompatibility_reason();
+      for (std::size_t r = 0; r < rounds; ++r) {
+        (void)enqueue_probe_round(*graph, r, r + 1 == rounds);
+        const auto &output = graph->streaming_result().outputs[0];
+        SCOPED_TRACE(r);
+        EXPECT_EQ(output.coverage_begin_round, 0u);
+        EXPECT_EQ(output.coverage_end_round, end(r));
+        // A publication is a round that covers more.
+        if (r > 0 && end(r) > end(r - 1))
+          EXPECT_GT(output.generation, generation);
+        else
+          EXPECT_EQ(output.generation, generation);
+        generation = output.generation;
+      } // end - for(r)
+    } // end - for(async)
+} // end - TEST(DecodingTaskGraph,
+  // CombinedStreamingNodesCoverWhatBothCommittedAtAnyRate)
+
+// Rounds queued faster than the graph takes them reach the same result as
+// rounds taken one at a time: each publication counted, the same coverage.
+TEST(DecodingTaskGraph, CombinedStreamingNodesCountQueuedRoundsAlike) {
+  constexpr std::size_t rounds = 6; // longer than the template's 4
+  const std::array<uint64_t, 4> widths{1, 3, 3, 5};
+  std::array<task_graph_streaming_result, 2> results; // sync, async
+  for (const bool async : {false, true}) {
+    auto graph = decoding_task_graph::combine(
+        make_unequal_round_graph(
+            widths, async, true,
+            std::make_unique<committing_round_probe_decoder>(12, 0, true, 2)),
+        make_unequal_round_graph(
+            widths, async, true,
+            std::make_unique<committing_round_probe_decoder>(12)));
+    // No read between rounds, so an async graph may take several at once.
+    for (std::size_t r = 0; r + 1 < rounds; ++r)
+      (void)enqueue_probe_round(*graph, r, false);
+    results[async] = graph->streaming_result();
+  }
+  EXPECT_EQ(results[1].generation, results[0].generation);
+  EXPECT_EQ(results[1].completed_operations, results[0].completed_operations);
+  EXPECT_EQ(results[1].outputs[0].generation, results[0].outputs[0].generation);
+  EXPECT_EQ(results[1].outputs[0].coverage_end_round,
+            results[0].outputs[0].coverage_end_round);
+} // end - TEST(DecodingTaskGraph, CombinedStreamingNodesCountQueuedRoundsAlike)
+
 // A native decoder reporting its coverage beside a node that reports none, in
 // one output, leaves the output its schedule rather than failing to stream.
 TEST(DecodingTaskGraph, NativeDecoderBesideAScheduledNodeKeepsTheSchedule) {
@@ -1967,6 +2045,41 @@ TEST(DecodingTaskGraph, CombinedStreamingNodesThatDriftApartKeepTheSchedule) {
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph,
   // CombinedStreamingNodesThatDriftApartKeepTheSchedule)
+
+// Combined nodes that drift apart after publishing unevenly keep the
+// schedule from the first publication after. One commits two rounds at a
+// time and ends its own 4-round shots; the other commits a round at a time
+// and never does. Their shots begin at different rounds from round 5, when
+// the output takes the window holding the later: rounds 4 to 8, then, once
+// the first's third shot publishes, 8 to 12.
+TEST(DecodingTaskGraph,
+     CombinedStreamingNodesDriftApartAfterUnevenPublication) {
+  constexpr std::size_t rounds = 10;
+  const std::array<uint64_t, 4> widths{1, 3, 3, 5};
+  for (const bool async : {false, true}) {
+    auto graph = decoding_task_graph::combine(
+        make_unequal_round_graph(
+            widths, async, true,
+            std::make_unique<fixed_shot_probe_decoder>(12, 2)),
+        make_unequal_round_graph(
+            widths, async, true,
+            std::make_unique<committing_round_probe_decoder>(12, 0, false)));
+    SCOPED_TRACE(async ? "async" : "sync");
+    ASSERT_TRUE(graph->supports_streaming())
+        << graph->streaming_incompatibility_reason();
+    for (std::size_t r = 0; r < rounds; ++r) {
+      (void)enqueue_probe_round(*graph, r % 4, false);
+      if (r < 5)
+        continue;
+      const auto &output = graph->streaming_result().outputs[0];
+      const std::uint64_t window = r < 9 ? 4 : 8; // its first round
+      SCOPED_TRACE(r);
+      EXPECT_EQ(output.coverage_begin_round, window);
+      EXPECT_EQ(output.coverage_end_round, window + 4);
+    }
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph,
+  // CombinedStreamingNodesDriftApartAfterUnevenPublication)
 
 // The round probe, publishing each untagged chunk of a shot as one more
 // committed round, and reporting each shot @p shot_rounds rounds long when

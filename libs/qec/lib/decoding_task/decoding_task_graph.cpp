@@ -989,6 +989,8 @@ void decoding_task_graph::impl::compile_wires() {
     streaming_node_generations.assign(M, 0);
     streaming_output_fire_ordinals.assign(num_sinks, 0);
     streaming_output_consumed_rounds.assign(num_sinks, 0);
+    streaming_output_publications.assign(num_sinks, 0);
+    streaming_output_slowest.assign(num_sinks, 0);
     latest_node_corrections.resize(M);
     for (std::size_t si = 0; si < M; ++si)
       latest_node_corrections[si].assign(
@@ -1137,8 +1139,21 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
     const auto &contributors = output_streaming_nodes[k];
     std::uint64_t generation =
         contributors.empty() ? 0 : std::numeric_limits<std::uint64_t>::max();
-    for (const auto si : contributors)
+    std::uint64_t publications = 0;        // by contributors, summed
+    bool reported = !contributors.empty(); // every contributor's coverage
+    for (const auto si : contributors) {
       generation = std::min(generation, streaming_node_generations[si]);
+      publications += streaming_node_generations[si];
+      reported = reported && latest_node_coverage[si].has_value();
+    }
+    // Coverage every contributor reports moves when any of them publishes,
+    // not only the slowest.
+    const bool published =
+        reported && publications != streaming_output_publications[k];
+    // A schedule moves with the slowest, from where it last moved.
+    const auto slowest = streaming_output_slowest[k];
+    streaming_output_publications[k] = publications;
+    streaming_output_slowest[k] = generation;
 
     if (k < output_stagers.size() && output_stagers[k].enabled) {
       auto &stager = output_stagers[k];
@@ -1150,12 +1165,13 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
         output.generation = stager.generation;
         output.status = task_graph_streaming_status::available;
       }
-    } else if (generation > output.generation) {
+    } else if (generation > slowest || published) {
       const auto &schedule = output_streaming_schedules[k];
       std::optional<streaming_task_graph_node::committed_coverage> exact;
       std::size_t exact_count = 0;
       bool agree = true;              // on where the shot begins
       std::uint64_t latest_begin = 0; // of the shot, over contributors
+      bool covers = false;            // more rounds than it last published
       // Contributors that commit at different rates cover the rounds all of
       // them have committed, from where the output was last consumed. Each
       // reports its shot from the shot's first round, on which they agree;
@@ -1179,9 +1195,19 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
         exact.reset();
       if (exact) {
         auto &consumed = streaming_output_consumed_rounds[k];
-        output.coverage_begin_round = std::max(exact->begin_round, consumed);
-        output.coverage_end_round =
-            std::max(exact->end_round, output.coverage_begin_round);
+        const auto begin = std::max(exact->begin_round, consumed);
+        const auto end = std::max(exact->end_round, begin);
+        // Only rounds the output has not published make it publish, so a
+        // contributor ahead of the others publishing alone does not. FINAL
+        // publishes if it reaches here, and completes the output either way.
+        covers =
+            final || (end > begin &&
+                      (end != output.coverage_end_round ||
+                       output.status == task_graph_streaming_status::pending));
+        if (covers) {
+          output.coverage_begin_round = begin;
+          output.coverage_end_round = end;
+        }
         // A fall back to the schedule resumes at the window after the rounds
         // covered; FINAL ends the stream, and the next numbers from round 0.
         streaming_output_fire_ordinals[k] =
@@ -1190,6 +1216,8 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
                 : (exact->end_round + schedule.stride - 1) / schedule.stride;
         if (final)
           consumed = 0;
+      } else if (generation <= slowest) {
+        // Only a contributor ahead of the slowest published.
       } else if (exact_count == contributors.size() && schedule.stride > 0) {
         // Every contributor reports its shot, but they disagree on where it
         // begins: the window holding the latest begin, so publications of
@@ -1212,15 +1240,19 @@ void decoding_task_graph::impl::refresh_streaming_progress(bool final) {
         output.coverage_end_round =
             fire_ordinal * schedule.stride + schedule.size;
       } else {
-        streaming_output_fire_ordinals[k] += generation - output.generation;
+        streaming_output_fire_ordinals[k] += generation - slowest;
         const std::uint64_t ordinal = streaming_output_fire_ordinals[k] - 1;
         output.coverage_begin_round =
             ordinal == 0 ? 0 : ordinal * schedule.stride + schedule.start_guard;
         output.coverage_end_round =
             ordinal * schedule.stride + schedule.size - schedule.end_guard;
       }
-      output.generation = generation;
-      output.status = task_graph_streaming_status::available;
+      // The output's next generation: more rounds every contributor has
+      // committed, whichever made it, or its schedule's next window.
+      if (covers || (!exact && generation > slowest)) {
+        output.generation = std::max(generation, output.generation + 1);
+        output.status = task_graph_streaming_status::available;
+      }
     } else if (final && output.generation > 0 &&
                output_streaming_schedules[k].end_guard > 0 &&
                std::none_of(contributors.begin(), contributors.end(),
@@ -1316,9 +1348,18 @@ void decoding_task_graph::impl::consume_streaming_result() {
     output.status = task_graph_streaming_status::pending;
     // A zero-value guarded tail is an output publication without a node fire.
     // Keep contributor barriers caught up before streaming resumes.
-    for (const auto si : output_streaming_nodes[k])
+    auto &publications = streaming_output_publications[k];
+    auto &slowest = streaming_output_slowest[k];
+    publications = 0;
+    slowest = output_streaming_nodes[k].empty()
+                  ? 0
+                  : std::numeric_limits<std::uint64_t>::max();
+    for (const auto si : output_streaming_nodes[k]) {
       streaming_node_generations[si] =
           std::max(streaming_node_generations[si], output.generation);
+      publications += streaming_node_generations[si];
+      slowest = std::min(slowest, streaming_node_generations[si]);
+    }
   }
   ++result.result_revision;
 }
@@ -1339,6 +1380,10 @@ void decoding_task_graph::impl::reset_streaming_progress() {
             streaming_output_fire_ordinals.end(), 0);
   std::fill(streaming_output_consumed_rounds.begin(),
             streaming_output_consumed_rounds.end(), 0);
+  std::fill(streaming_output_publications.begin(),
+            streaming_output_publications.end(), 0);
+  std::fill(streaming_output_slowest.begin(), streaming_output_slowest.end(),
+            0);
   std::fill(result.values.begin(), result.values.end(), uint8_t{0});
   clear_latest_node_corrections();
   std::fill(latest_node_coverage.begin(), latest_node_coverage.end(),

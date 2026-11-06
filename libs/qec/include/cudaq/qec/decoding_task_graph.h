@@ -267,10 +267,12 @@ struct task_graph_node_config {
 enum class task_graph_streaming_status { pending, available, complete, failed };
 
 /// Progress of one named graph output. `generation` is a monotonic publication
-/// watermark and advances only when every contributor to this output has
-/// published the corresponding update. Consuming corrections preserves this
-/// watermark but changes `status` to `pending`; generation alone never implies
-/// that a value is currently readable.
+/// watermark. It advances when every contributor to this output has published
+/// its next update. When every contributor reports the rounds it has
+/// committed, it advances instead whenever the output's coverage grows.
+/// Consuming corrections preserves this watermark but changes `status` to
+/// `pending`; generation alone never implies that a value is currently
+/// readable.
 struct task_graph_output_progress {
   std::string name;
   std::size_t value_offset = 0;
