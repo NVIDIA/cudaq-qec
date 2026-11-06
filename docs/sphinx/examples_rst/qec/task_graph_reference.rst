@@ -120,18 +120,9 @@ carry values between built-in nodes, such as the corrections one window sends
 another. ``registered_edge_value_types()`` (C++) lists an installation's
 types.
 
-A node fed by another node decodes that node's output. For example, a
-predecoder passes its residual detectors to a global decoder, and an ``xor``
-adds both answers:
-
-.. code-block:: yaml
-
-   edges:
-     - {from: measurements, to: pre}
-     - {from: pre.pre_L, to: combine.a}
-     - {from: pre.residual, to: global}
-     - {from: global, to: combine.b}
-     - {from: combine, to: output}
+A node fed by another node decodes that node's output, as the global decoder
+in :doc:`decoding_task_graph`'s first figure decodes the predecoder's
+``residual``.
 
 .. _task_graph_logical_output:
 

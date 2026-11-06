@@ -2894,8 +2894,8 @@ TEST(DecodingTaskGraph, NodesFormMultiNodeGraphConfiguresAndStreams) {
   namespace cfg = cudaq::qec::decoding::config;
   namespace h = cudaq::qec::decoding::host;
 
-  // The X/Z split the user docs show: two windows fed the same shot, their
-  // outcomes XORed. This is combine()'s topology written as YAML.
+  // Two windows fed the same shot, their outcomes XORed: combine()'s
+  // topology written as YAML.
   const std::string yaml = R"(
 decoders:
   - id: 0

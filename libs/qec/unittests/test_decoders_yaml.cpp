@@ -6757,3 +6757,36 @@ TEST(DocsExamples, ParallelWindowYamlMatchesItsLowering) {
         EXPECT_EQ(stream_rep5_shot(*by_hand, rounds, qubit, from), want);
       }
 } // end - TEST(DocsExamples, ParallelWindowYamlMatchesItsLowering)
+
+// The docs' predecoder graph streams, and its corrections add the
+// predecoder's and the global decoder's: a data-qubit flip in a shot's last
+// round is corrected only when it flips the observable.
+TEST(DocsExamples, PredecoderYamlStreamsAndCorrects) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::build_task_graph;
+  constexpr std::size_t rounds = 5; // the nodes' window_size
+  const auto config = cfg::multi_decoder_config::from_yaml_str(
+      docs_yaml("task_graph_predecoder.yaml"));
+  auto graph = build_task_graph(config.decoders.at(0));
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const std::size_t checks = graph->get_num_msyn_per_round();
+  // Data qubit q flipped in the last round fires the checks beside it; -1
+  // flips nothing. Observable 0 reads data qubit 0.
+  for (const int qubit : {-1, 0, 2}) {
+    SCOPED_TRACE("qubit " + std::to_string(qubit));
+    std::vector<std::uint8_t> round(checks, 0);
+    graph->reset_decoder();
+    for (std::size_t r = 0; r < rounds; ++r) {
+      const bool last = r + 1 == rounds;
+      for (std::size_t i = 0; i < checks; ++i)
+        round[i] = last && qubit >= 0 &&
+                   (static_cast<std::size_t>(qubit) == i ||
+                    static_cast<std::size_t>(qubit) == i + 1);
+      graph->enqueue_syndrome(round.data(), round.size(),
+                              last ? cudaq::qec::round_type::FINAL
+                                   : cudaq::qec::round_type::BULK);
+    }
+    EXPECT_EQ(graph->get_obs_corrections()[0], qubit == 0 ? 1 : 0);
+  }
+} // end - TEST(DocsExamples, PredecoderYamlStreamsAndCorrects)

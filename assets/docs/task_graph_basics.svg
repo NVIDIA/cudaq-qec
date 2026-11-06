@@ -1,37 +1,38 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" width="760" height="210" font-family="Lato, 'Helvetica Neue', Arial, sans-serif">
-  <title>A task graph: measurements feed two decoder nodes whose outputs an xor node combines</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 910 210" width="910" height="210" font-family="Lato, 'Helvetica Neue', Arial, sans-serif">
+  <title>A task graph: a predecoder passes the detectors it cannot explain to a global decoder, and an xor node adds both nodes' corrections</title>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
     </marker>
   </defs>
-  <rect width="760" height="210" fill="#ffffff"/>
+  <rect width="910" height="210" fill="#ffffff"/>
   <g fill="none" stroke="#555" stroke-width="1.6" marker-end="url(#arrow)">
-    <path d="M150,105 C185,105 185,50 218,50"/>
-    <path d="M150,105 C185,105 185,160 218,160"/>
-    <path d="M370,50 C410,50 405,95 438,95"/>
-    <path d="M370,160 C410,160 405,115 438,115"/>
-    <path d="M560,105 L608,105"/>
+    <path d="M150,105 L198,105"/>
+    <path d="M330,95 C365,95 365,40 400,40 L555,40 C590,40 585,95 608,95"/>
+    <path d="M330,115 C365,115 365,160 398,160"/>
+    <path d="M550,160 C585,160 585,115 608,115"/>
+    <path d="M710,105 L758,105"/>
   </g>
   <g font-size="12" fill="#555">
-    <text x="428" y="85">a</text>
-    <text x="428" y="131">b</text>
+    <text x="478" y="32" text-anchor="middle">pre_L: the predecoder's corrections</text>
+    <text x="392" y="182" text-anchor="end">residual: detectors left</text>
+    <text x="558" y="180">its corrections</text>
   </g>
   <rect x="20" y="82" width="130" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
   <text x="85" y="110" font-size="14" text-anchor="middle" fill="#1a1a1a">measurements</text>
   <g fill="#f1f8e4" stroke="#76b900" stroke-width="1.6">
-    <rect x="220" y="25" width="150" height="50" rx="6"/>
-    <rect x="220" y="135" width="150" height="50" rx="6"/>
-    <rect x="440" y="80" width="120" height="50" rx="6"/>
+    <rect x="200" y="80" width="130" height="50" rx="6"/>
+    <rect x="400" y="135" width="150" height="50" rx="6"/>
+    <rect x="610" y="80" width="100" height="50" rx="6"/>
   </g>
   <g text-anchor="middle" fill="#1a1a1a">
-    <text x="295" y="46" font-size="14" font-weight="bold">x</text>
-    <text x="295" y="64" font-size="12" fill="#555">sliding_window</text>
-    <text x="295" y="156" font-size="14" font-weight="bold">z</text>
-    <text x="295" y="174" font-size="12" fill="#555">sliding_window</text>
-    <text x="500" y="101" font-size="14" font-weight="bold">combine</text>
-    <text x="500" y="119" font-size="12" fill="#555">xor</text>
+    <text x="265" y="101" font-size="14" font-weight="bold">pre</text>
+    <text x="265" y="119" font-size="12" fill="#555">predecoder</text>
+    <text x="475" y="156" font-size="14" font-weight="bold">global</text>
+    <text x="475" y="174" font-size="12" fill="#555">single_window</text>
+    <text x="660" y="101" font-size="14" font-weight="bold">sum</text>
+    <text x="660" y="119" font-size="12" fill="#555">xor</text>
   </g>
-  <rect x="610" y="82" width="130" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
-  <text x="675" y="110" font-size="14" text-anchor="middle" fill="#1a1a1a">output</text>
+  <rect x="760" y="82" width="130" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
+  <text x="825" y="110" font-size="14" text-anchor="middle" fill="#1a1a1a">output</text>
 </svg>

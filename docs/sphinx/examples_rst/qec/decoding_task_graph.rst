@@ -10,8 +10,13 @@ decodes, often by wrapping a decoder plugin such as PyMatching, or combines
 results; edges carry values between nodes.
 
 .. image:: ../../../../assets/docs/task_graph_basics.svg
-   :alt: Measurements feed two sliding-window decoder nodes, x and z, whose
-         corrections an xor node combines into the graph's output.
+   :alt: Measurements feed a predecoder node, pre. Its residual port passes
+         the detectors it did not explain to a global decoder node, and an xor
+         node, sum, adds the corrections of both into the graph's output.
+
+In this graph, a fast predecoder corrects the errors it is sure of and passes
+the detectors it did not explain to a global decoder. Both correct the same
+observables, so an ``xor`` adds their corrections.
 
 A graph runs in two ways:
 
@@ -233,42 +238,27 @@ Graphs of several nodes
 
 ``task_graph.nodes`` lists the nodes and ``task_graph.edges`` wires them. A
 node names its kind in ``type``, its inner decoder in ``inner``, and the kind's
-parameters inline. This is the graph in the figure above:
+parameters inline. This is the graph in the figure above, on the quick
+start's model:
 
-.. code-block:: yaml
-
-   task_graph:
-     nodes:
-       - id: x
-         type: sliding_window
-         window_size: 3               # rounds per decode
-         step_size: 1                 # rounds to advance per decode
-         inner: {type: single_error_lut}
-       - id: z
-         type: sliding_window
-         window_size: 3
-         step_size: 1
-         inner: {type: single_error_lut}
-         dem_chunks: {...}            # optional: this node's own model
-       - id: combine
-         type: xor
-     edges:
-       - {from: measurements, to: x}
-       - {from: measurements, to: z}
-       - {from: x, to: combine.a}
-       - {from: z, to: combine.b}
-       - {from: combine, to: output}
+.. literalinclude:: ../../examples/qec/yaml/task_graph_predecoder.yaml
+   :language: yaml
+   :start-at: task_graph:
+   :dedent: 4
 
 * ``measurements`` is the incoming shot and ``output`` the graph's result.
 * An edge endpoint is a node id, with ``.port`` for a node that has named ports,
-  such as ``xor``'s ``a`` and ``b``.
+  such as ``xor``'s ``a`` and ``b`` and ``predecoder``'s ``pre_L`` (its
+  corrections) and ``residual``.
+* A node fed by another decodes that node's output, so ``pre`` and
+  ``global`` decode the same rounds: their ``window_size`` must match.
 * A single node needs no edges: it is wired
   ``measurements → node → output``.
 * List nodes in the order data flows. A node without its own ``dem_chunks``
   uses the decoder's.
 
-:meth:`~cudaq_qec.DecodingTaskGraph.combine` builds the same two-branch graph
-in code:
+:meth:`~cudaq_qec.DecodingTaskGraph.combine` joins two single-node graphs
+with an ``xor``, for two decoders whose corrections add:
 
 .. tab:: Python
 
