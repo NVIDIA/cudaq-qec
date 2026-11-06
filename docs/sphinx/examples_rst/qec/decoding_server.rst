@@ -57,13 +57,12 @@ page. The same image includes the server, ``memory-experiment-generator``,
 ``playback-emulator``, and the compiler and headers for the CUDA-Q client examples.
 The general CUDA-Q QEC library and development images are different packages.
 
-Replace ``<decoding-server-registry>`` with the registry path published for
-the release. Set ``DECODING_SERVER_IMAGE`` once for all examples. Run these commands
+Set ``DECODING_SERVER_IMAGE`` once for all examples. Run these commands
 **on the host**:
 
 .. code-block:: bash
 
-   export DECODING_SERVER_IMAGE='<decoding-server-registry>/cudaq-decoding:cu13-0.9.0'
+   export DECODING_SERVER_IMAGE='nvcr.io/nvidia/quantum/cudaq-decoding:cu13-0.9.0'
    docker pull "$DECODING_SERVER_IMAGE"
 
 The image includes surface-code example sources under ``/root/examples``.
