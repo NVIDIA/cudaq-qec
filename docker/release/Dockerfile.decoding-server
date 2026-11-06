@@ -80,11 +80,25 @@ RUN set -e; \
 # DOCA/HSB dependencies for building cudaq-realtime with HSB tools,
 # installed by cuda-quantum's script. HSB lands at $HSB_ROOT with 
 # its build tree at $HSB_ROOT/build.
+# The script keeps the devcontainer's rdma-core, which is DOCA-OFED 3.1.0:
+# too old for the DOCA 3.4.0 libdoca_common it installs (MLX5_1.27 needed,
+# 1.25 present), so RoCE targets fail to link. Install rdma-core from the
+# DOCA repo the script registered, and check libmlx5 covers libdoca_common's
+# MLX5 symbol versions.
 ENV HSB_ROOT=/opt/holoscan-sensor-bridge
 RUN set -e; \
     bash /opt/cudaq-src/realtime/scripts/install_devdeps.sh; \
+    apt-get install -y --no-install-recommends \
+        libibverbs1 libibverbs-dev ibverbs-providers librdmacm1 librdmacm-dev; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
-    test -d "$HSB_ROOT/build"
+    test -d "$HSB_ROOT/build"; \
+    libmlx5=$(ldconfig -p | awk '/libmlx5\.so\.1 /{print $NF; exit}'); \
+    libdoca=$(ls /opt/mellanox/doca/lib/*/libdoca_common.so | head -1); \
+    for v in $(objdump -p "$libdoca" | grep -o 'MLX5_1\.[0-9]*' | sort -u); do \
+        objdump -T "$libmlx5" | grep -q "$v" \
+            || { echo "ERROR: $libmlx5 lacks $v, required by $libdoca"; exit 1; }; \
+    done; \
+    echo "== libmlx5 satisfies libdoca_common ($libmlx5)"
 
 # TensorRT dev, pinned to the toolkit's CUDA flavor, so the qec build
 # detects it and builds trt_decoder. No arm64 packages exist for CUDA
@@ -220,11 +234,13 @@ ARG CUDA_VERSION
 # The DOCA version is the one cuda-quantum's deps_common.sh pins, so the
 # runtime matches what the builder stage compiled against.
 # curl is installed only to fetch the DOCA repo key and purged afterwards.
+# The base image's packages are upgraded first to pick up security fixes
+# published since it was built.
 RUN --mount=type=bind,from=toolchain,source=/opt/cudaq-src/realtime/scripts/deps_common.sh,target=/tmp/deps_common.sh \
     set -e; \
     DOCA_VERSION=$(sed -n 's/^DOCA_VERSION=\${DOCA_VERSION:-\(.*\)}/\1/p' /tmp/deps_common.sh); \
     test -n "$DOCA_VERSION"; echo "== DOCA version: $DOCA_VERSION (from deps_common.sh)"; \
-    apt-get update && apt-get install -y --no-install-recommends \
+    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
         ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*; \
     DOCA_ARCH=$(uname -m); case "$DOCA_ARCH" in aarch64|arm64) DOCA_ARCH="arm64-sbsa" ;; esac; \
