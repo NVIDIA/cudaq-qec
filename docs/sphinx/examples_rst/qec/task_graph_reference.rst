@@ -81,11 +81,12 @@ progress:
 * ``status`` and ``closure``, per output and for the graph.
 * ``coverage_begin_round`` and ``coverage_end_round`` per output: the rounds
   its latest update committed.
-* ``generation``: a counter that advances each time an output publishes. The
-  graph's generation advances once every output but the logical one has.
-  ``clear_corrections()``
-  keeps it, so use ``status``, not ``generation``, to decide whether a value
-  can be read.
+* ``generation``: a counter that advances each time an output publishes,
+  once every node that feeds it has updated. Fed only by native streaming
+  nodes, it advances whenever coverage grows. The graph's generation advances
+  once every output but the logical one has.
+  ``clear_corrections()`` keeps it, so use ``status``, not ``generation``, to
+  decide whether a value can be read.
 * ``result_revision``: advances on any change of value or status.
 * ``shot_epoch``: advances on ``reset_decoder()``.
 * ``error``: why the graph failed, when ``status`` is ``failed``. Reset to
@@ -165,9 +166,20 @@ incrementally. Its complete-shot path decodes the whole shot at once.
 
 Rounds may differ in width, such as a narrower readout round, if the inner
 decoder implements ``streaming_correction_provider`` and so ends its own
-shots. The node then reports the rounds each update covers, its output is
-staged, and a shot may end at any ``FINAL`` round. Two such nodes cannot
-share an output.
+shots; a shot may then end at any ``FINAL`` round. Coverage is the rounds
+the decoder has committed, not the node's schedule:
+
+* Mid-shot, the node publishes whenever ``committed_round_count()`` grows.
+  Coverage starts where ``clear_corrections()`` last consumed the
+  corrections. A decoder without the count publishes nothing before
+  ``FINAL``.
+* ``FINAL`` covers the rounds ``finalized_round_count()`` reports, or else
+  the committed ones.
+* A shot the decoder ends without ``FINAL`` covers the rounds
+  ``finalized_round_count()`` reports, and the stream continues.
+* Several such nodes may feed one output, which covers the rounds all of them
+  have committed. If one reports no count, or they disagree on where the shot
+  begins, the output follows the nodes' schedule.
 
 .. code-block:: yaml
 
