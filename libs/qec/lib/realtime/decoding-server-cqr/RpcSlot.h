@@ -7,7 +7,7 @@
 
 /// In-place views over decoder-server RPC slots, and in-place response
 /// writers.  The single point of truth for interpreting the wire layouts
-/// pinned in decoder_rpc_wire_format.h (per decoder_server_runtime.md).
+/// pinned in decoder_rpc_wire_format.h (per decoding-server.md).
 ///
 /// Every helper here is DELIBERATELY device-portable: no allocation, no
 /// exceptions, no STL containers -- plain pointer/length views and stores --
@@ -188,7 +188,7 @@ inline bool parse_reset(const void *rx_slot, std::size_t slot_size,
 }
 
 /// Routing peek: every decoder-server request payload carries decoder_id as
-/// its first u64 (per decoder_server_runtime.md), so the shim can resolve the
+/// its first u64 (per decoding-server.md), so the shim can resolve the
 /// session before parsing the full request.  A negative wire value maps to a
 /// huge uint64 that no registry contains, so it resolves to INVALID_DECODER
 /// exactly like today's int64 -> uint64 registry lookup.
