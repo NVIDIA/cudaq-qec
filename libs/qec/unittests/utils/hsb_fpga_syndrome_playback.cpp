@@ -335,7 +335,7 @@ build_rpc_payload(const std::vector<std::uint8_t> &measurements,
 }
 
 /// Build a per-round `enqueue_syndromes` RPC frame for the device-graph
-/// scheduler (decoder_server_runtime.md#enqueue_syndromes):
+/// scheduler (decoding-server.md#enqueue_syndromes):
 ///   [RPCHeader (fid=enqueue, arg_len)][EnqueueRequestPayload (32B)]
 ///   [ceil(n/8) LSB-first bit-packed syndrome bytes, no pad].
 /// One input byte (0/1) per syndrome bit.  ptp_timestamp left 0 (FPGA fills
@@ -372,7 +372,7 @@ build_enqueue_frame(const std::vector<std::uint8_t> &round_bits,
   return payload;
 }
 
-/// Build a `get_corrections` RPC frame (decoder_server_runtime.md):
+/// Build a `get_corrections` RPC frame (decoding-server.md):
 ///   [RPCHeader (fid=get_corrections, arg_len=17)]
 ///   [GetCorrectionsRequestPayload{decoder_id, return_size, reset}].
 std::vector<std::uint8_t> build_get_corrections_frame(std::uint32_t request_id,

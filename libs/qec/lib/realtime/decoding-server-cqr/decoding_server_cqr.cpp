@@ -227,7 +227,7 @@ constexpr uint8_t kSingleResult = 1;
 constexpr uint8_t kScalarU8Size = sizeof(uint8_t);
 constexpr uint8_t kScalarU64Size = sizeof(uint64_t);
 
-// Wire argument order per decoder_server_runtime.md: fixed-size scalars
+// Wire argument order per decoding-server.md: fixed-size scalars
 // first, the variable-length bit-packed byte array last.
 constexpr std::uint8_t kEnqueueDecoderIdArg = 0;
 constexpr std::uint8_t kEnqueueCounterArg = 1;
@@ -300,7 +300,7 @@ static std::array<cudaq_function_entry_t, kDeviceCallEntryCount>
 make_entries() {
   std::array<cudaq_function_entry_t, kDeviceCallEntryCount> entries{};
 
-  // enqueue_syndromes: 4-arg spec format per decoder_server_runtime.md.
+  // enqueue_syndromes: 4-arg spec format per decoding-server.md.
   // decoder_id, counter, syndrome_mapping_id (scalars) + syndrome_bits
   // (bit_packed: element-count prefix == num_syndromes, then LSB-first bits).
   auto &eq = entries[kEnqueueSyndromesEntry];
@@ -311,7 +311,7 @@ make_entries() {
   set_u64(eq.schema.args[kEnqueueMappingIdArg]);
   set_bit_packed(eq.schema.args[kEnqueueSyndromeBitsArg]);
 
-  // get_corrections: 3-arg spec format per decoder_server_runtime.md.
+  // get_corrections: 3-arg spec format per decoding-server.md.
   // decoder_id (scalar) + corrections (OUT std::vector<bool>: the request
   // carries its length as return_size) + reset (scalar).
   auto &gc = entries[kGetCorrectionsEntry];

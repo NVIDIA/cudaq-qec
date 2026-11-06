@@ -27,8 +27,8 @@ How it works
   it arrives and decides which one to keep. Once it decides, the other members
   are asked to stop. The ``done`` edges only order the join after every
   member has finished; candidates travel through the shared sink.
-* The ensemble's ``output`` is the ``logical_outcome`` selected by the strategy. 
-  Every member must answer with a ``logical_outcome`` of the same size. If no 
+* The ensemble's ``output`` is the ``logical_outcome`` selected by the strategy.
+  Every member must answer with a ``logical_outcome`` of the same size. If no
   candidate is kept, the run throws.
 
 Configuration
@@ -85,7 +85,7 @@ cheapest answer available 200 microseconds after each shot arrives:
        instead of through an edge to ``output``. Default ``false``.
 
 Cancellation is cooperative. A decoder that never checks its token runs to
-completion and delays the result; a decoder that honors a stop may 
+completion and delays the result; a decoder that honors a stop may
 return ``std::nullopt`` if a result is not ready before the stop is requested.
 
 Building a graph in code
@@ -178,8 +178,8 @@ Honoring cancellation
 ~~~~~~~~~~~~~~~~~~~~~
 
 A C++ decoder overrides ``decode(syndrome, cancellation_token)`` and may return
-``std::nullopt`` if a stop is requested before a result is ready. The token 
-has two levels, *soft* and *hard*, and only ever escalates; a decoder chooses 
+``std::nullopt`` if a stop is requested before a result is ready. The token
+has two levels, *soft* and *hard*, and only ever escalates; a decoder chooses
 which level it reacts to where it polls.
 
 .. code-block:: cpp

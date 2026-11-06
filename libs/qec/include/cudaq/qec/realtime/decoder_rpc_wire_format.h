@@ -14,8 +14,8 @@
 namespace cudaq::qec::decoding::rpc {
 
 // The QEC multi-handler accumulator pattern is fixed by
-// proposals/decoder_server_runtime.md.  All producers and consumers must use
-// these canonical function IDs and payload shapes.
+// docs/architecture/components/decoding-server.md.  All producers and consumers
+// must use these canonical function IDs and payload shapes.
 constexpr std::uint32_t kEnqueueSyndromesFunctionId =
     cudaq::realtime::fnv1a_hash("enqueue_syndromes");
 constexpr std::uint32_t kGetCorrectionsFunctionId =
@@ -27,20 +27,20 @@ constexpr std::uint32_t kGetLogicalMeasurementsFunctionId =
 
 static_assert(kEnqueueSyndromesFunctionId == 0x7ED8BE82u,
               "enqueue_syndromes function_id must match "
-              "decoder_server_runtime.md");
+              "decoding-server.md");
 static_assert(kGetCorrectionsFunctionId == 0x882D5BA1u,
               "get_corrections function_id must match "
-              "decoder_server_runtime.md");
+              "decoding-server.md");
 static_assert(kResetDecoderFunctionId == 0x977A59CFu,
               "reset_decoder function_id must match "
-              "decoder_server_runtime.md");
+              "decoding-server.md");
 static_assert(kGetLogicalMeasurementsFunctionId == 0x3056A149u,
               "get_logical_measurements function_id must match "
-              "decoder_server_runtime.md");
+              "decoding-server.md");
 
 // Wire framing is cudaq::realtime::RPCHeader / RPCResponse (24 bytes each,
 // packed).  Pin the sizes here so a cudaq-side layout change cannot silently
-// desynchronize the decoder wire format from decoder_server_runtime.md.
+// desynchronize the decoder wire format from decoding-server.md.
 static_assert(sizeof(cudaq::realtime::RPCHeader) == 24,
               "cudaq::realtime::RPCHeader must be 24 bytes");
 static_assert(sizeof(cudaq::realtime::RPCResponse) == 24,
@@ -66,7 +66,7 @@ struct __attribute__((packed)) EnqueueRequestPayload {
 };
 static_assert(sizeof(EnqueueRequestPayload) == 32,
               "EnqueueRequestPayload must be exactly 32 bytes per "
-              "decoder_server_runtime.md#enqueue_syndromes");
+              "decoding-server.md#enqueue_syndromes");
 
 struct __attribute__((packed)) GetCorrectionsRequestPayload {
   std::int64_t decoder_id;  ///< arg0
@@ -78,7 +78,7 @@ struct __attribute__((packed)) GetCorrectionsRequestPayload {
 };
 static_assert(sizeof(GetCorrectionsRequestPayload) == 17,
               "GetCorrectionsRequestPayload must be exactly 17 bytes per "
-              "decoder_server_runtime.md#get_corrections");
+              "decoding-server.md#get_corrections");
 
 struct __attribute__((packed)) GetLogicalMeasurementsRequestPayload {
   std::int64_t decoder_id;  ///< arg0
@@ -91,14 +91,14 @@ struct __attribute__((packed)) GetLogicalMeasurementsRequestPayload {
 };
 static_assert(sizeof(GetLogicalMeasurementsRequestPayload) == 25,
               "GetLogicalMeasurementsRequestPayload must be exactly 25 bytes "
-              "per decoder_server_runtime.md#get_logical_measurements");
+              "per decoding-server.md#get_logical_measurements");
 
 struct __attribute__((packed)) ResetRequestPayload {
   std::int64_t decoder_id; ///< arg0
 };
 static_assert(sizeof(ResetRequestPayload) == 8,
               "ResetRequestPayload must be exactly 8 bytes per "
-              "decoder_server_runtime.md#reset_decoder");
+              "decoding-server.md#reset_decoder");
 
 #ifdef __CUDACC__
 #define CUDAQX_RPC_HD __host__ __device__
