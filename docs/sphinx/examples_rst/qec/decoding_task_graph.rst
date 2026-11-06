@@ -3,106 +3,61 @@
 Decoding Task Graphs
 --------------------
 
-A :class:`~cudaq_qec.DecodingTaskGraph` is a composable decode pipeline that
-owns its decoders and D/O matrices.  Internally it is a directed acyclic graph
-(DAG) of nodes connected by typed edges, but from the outside it exposes two
-interfaces:
+A decoding task graph is a decoder pipeline. Measurements enter the graph,
+flow through its nodes, and leave as corrections to the logical observables,
+and, if the model reads them, as corrected logical measurements. A node
+decodes, often by wrapping a decoder plugin such as PyMatching, or combines
+results; edges carry values between nodes.
 
-* **One-shot** — :meth:`~cudaq_qec.DecodingTaskGraph.run` processes one
-  complete shot.
-* **Batch** — :meth:`~cudaq_qec.DecodingTaskGraph.run_batch` processes a
-  collection of shots.
-* **Streaming** — :meth:`~cudaq_qec.DecodingTaskGraph.enqueue_syndrome` /
-  :meth:`~cudaq_qec.DecodingTaskGraph.get_obs_corrections` accumulate
-  per-round syndrome bytes and fire when a window is full.  This is the path
-  used during real-time quantum error correction.
+.. image:: ../../../../assets/docs/task_graph_basics.svg
+   :alt: Measurements feed a predecoder node, pre. Its residual port passes
+         the detectors it did not explain to a global decoder node, and an xor
+         node, sum, adds the corrections of both into the graph's output.
 
-Task graphs are constructed either **programmatically** (via factory methods)
-or **declaratively** (via the ``task_graph:`` block in a decoder YAML config).
+In this graph, a fast predecoder corrects the errors it is sure of and passes
+the detectors it did not explain to a global decoder. Both correct the same
+observables, so an ``xor`` adds their corrections.
 
-.. note::
+A graph runs in two ways:
 
-   The streaming interface is the primary use case for real-time QEC. One-shot
-   execution is also useful for offline analysis and unit testing.
+* **Complete shots**: :meth:`~cudaq_qec.DecodingTaskGraph.run` decodes one
+  shot and :meth:`~cudaq_qec.DecodingTaskGraph.run_batch` many, for offline
+  analysis and testing.
+* **Streaming**: :meth:`~cudaq_qec.DecodingTaskGraph.enqueue_syndrome` takes
+  rounds as they arrive, and windows decode as soon as they hold enough
+  rounds. This is the real-time QEC path.
 
-Arbitrary-length fixed-width memory streams
-+++++++++++++++++++++++++++++++++++++++++++
+Build a graph in Python or C++, or declare it in the ``task_graph`` block of a
+decoder's YAML configuration, which the realtime decoding server reads.
 
-For a DEM-backed ``sliding_window`` node, set ``arbitrary_length: true`` in
-its node parameters to allow FINAL between regular firings. Middle deliveries
-can use a fixed predefined chunk size; the total round count need not be a
-multiple of that size or the window stride. FINAL decodes the actual physical
-tail and publishes its exact committed coverage, without zero-padding.
+To decode streams of any length with windows that decode at the same time, see
+:doc:`task_graph_parallel_window`. For execution details, ensembles and other
+advanced topics, see :doc:`task_graph_reference`.
 
-This mode requires equal measurement counts per round, an initial prefix,
-one repeating phase, one or more terminal phases, and a named fault-output
-decoder that can be rebuilt from the DEM recipe. Explicit per-phase D maps or
-the existing memory-experiment D convention are supported. A positive trailing guard and
-``step_size = window_size - start_guard - end_guard`` preserve fault ownership.
-Shots must contain the recipe's minimum number of physical rounds. FINAL
-carries the shot's final measurements: a partial or empty FINAL round is an
-error. Byte-fragmented ordinary input is supported. Detection-event edges,
-flat matrices and prebuilt decoder instances do not supply the required recipe.
-The finite-shot ``run()`` still uses the configured closed W-round model.
-Enable this mode consistently for branches combined into one streaming output;
-their firing/commit schedules and exact committed coverage must agree.
-A native ``streaming`` node and an ``arbitrary_length`` guarded-window node
-cannot share a streaming output: their schedules differ, so streaming is
-rejected before input is delivered. They can run in one graph through separate
-named outputs. At FINAL, native coverage describes the whole shot, after any
-untagged shots before it, while window coverage describes its last committed
-interval; both end at the physical round count since the stream began. Joining
-those publication policies is not supported. Failures mark the result failed
-and require reset before resuming; values in that state are diagnostic, not a
-completed shot.
+Quick start: a sliding window
++++++++++++++++++++++++++++++
 
-Models are prepared eagerly: ``floor(p / s) + p + 4 + W + lookahead - m`` plus
-the base decoder, where p is the prefix length, s the stride, W the window and
-m the minimum shot length. Lookahead is zero for one terminal phase and t for
-t > 1 terminal phases. Short-shot models can occupy quadratic storage in W.
-Nonterminal models store H by fault column and a detector-to-round lookup,
-prepared at construction. Carry updates scan the committed fault range and
-visit only the detector edges of active faults; guard ownership and decoder
-thresholding are unchanged. The lookup adds one index per window detector,
-and the column layout replaces, rather than duplicates, the node's row layout.
-The raw ring has W+1 rounds for a single terminal phase. With t > 1 terminal
-phases, regular inference waits for t further records so it never treats an
-unidentified terminal phase as bulk. The ring
-then has W+t+1 rounds and the leading guard must be at least t. Initial FINAL
-models cover up to W+t rounds if FINAL preempts the first regular fire. The
-reported delivery schedule includes this lookahead; regular inference still
-uses W-round models.
-This delays regular publications by t input rounds, not work proportional to
-shot length. FINAL is processed without waiting for additional input records.
-The lookahead prevents unresolved terminal records from being decoded as bulk;
-it must not be removed just to reduce reported latency.
-Model and buffer storage do not grow with shot duration. Inner-decoder
-allocations are backend-dependent. Legacy mode is
-unchanged. Production LER, tail latency and hardware qualification must be
-measured for the deployed decoder and window configuration.
-
-Single-node graphs (sliding window)
-++++++++++++++++++++++++++++++++++++
-
-The most common topology is a single sliding-window node wrapping an inner
-decoder.  The ``task_graph:`` YAML block expresses this explicitly.
-
-**YAML configuration**
+The simplest graph is one sliding-window node around an inner decoder. Its
+model is a ``dem_chunks`` description of the experiment's rounds (see
+:ref:`dyn_dem_example`).
 
 .. code-block:: yaml
 
    decoders:
      - id: 0
        task_graph:
-         type: sliding_window
-         inner_type: pymatching      # inner decoder registry name
+         nodes:
+           - id: sw
+             type: sliding_window
+             window_size: 3                 # rounds per decode
+             step_size: 1                   # rounds to advance per decode
+             inner: {type: single_error_lut}
        dem_chunks:
          seam: {from: next_round, to: prev_round}
          connections:
            - {from: init, to: bulk}
-           - {from: bulk, to: bulk}  # self-loop = repeating round
+           - {from: bulk, to: bulk}   # bulk repeats
            - {from: bulk, to: final}
-         # num_rounds absent → streaming: window sized to minimum valid rounds
          phases:
            - name: init
              spec:
@@ -123,22 +78,16 @@ decoder.  The ``task_graph:`` YAML block expresses this explicitly.
                O_sparse: [0,-1]
                error_rates: [0.02,0.02,0.02,0.02,0.02]
 
-Key points:
+* The graph streams: it first decodes once it holds three rounds, then on
+  every round after. ``window_size`` must be at least the fewest rounds the
+  phases allow, three here.
+* For shots of a fixed length, set ``dem_chunks.num_rounds`` and write
+  ``type: single_window``: the graph decodes each complete shot once.
+* ``inner``'s other keys configure the inner decoder.
 
-* ``type: sliding_window`` names the node kind; ``inner_type`` names the
-  inner decoder plugin.  ``decoder_custom_args`` apply to the inner decoder.
-* When ``num_rounds`` is absent and a self-loop connection exists, the graph
-  is built in **streaming mode**: the window fires once per round (stride = 1).
-* When ``num_rounds`` is present, the graph uses a **fixed-T window** that
-  fires once per full shot.  Write ``type: single_window`` to say so
-  explicitly; that spelling then requires the fixed round count, so a spec
-  that would stream is rejected rather than quietly given a sliding window.
-* Error rates are derived automatically from the phase ``error_rates`` fields.
-* This two-key form covers one node.  Write ``nodes:`` instead to size the
-  window yourself, add guard rounds, or build a multi-node topology; see
-  `Declarative topologies`_ below.
-
-**Programmatic construction**
+The same graph built in code. ``from_spec`` picks the window itself: the
+fewest rounds the phases allow, advancing one round at a time, or the whole
+shot when ``num_rounds`` is set:
 
 .. tab:: Python
 
@@ -161,11 +110,10 @@ Key points:
       nvq++ -lcudaq-qec -lcudaq-qec-decoders decoding_task_graph.cpp
       ./a.out
 
-One-shot graph execution
-++++++++++++++++++++++++
+Decoding complete shots
++++++++++++++++++++++++
 
-:meth:`~cudaq_qec.DecodingTaskGraph.run` processes one complete shot without
-touching the streaming accumulation buffer.
+:meth:`~cudaq_qec.DecodingTaskGraph.run` decodes one shot:
 
 .. tab:: Python
 
@@ -181,555 +129,205 @@ touching the streaming accumulation buffer.
       :start-after: [Begin one-shot]
       :end-before: [End one-shot]
 
-Batch execution
+:meth:`~cudaq_qec.DecodingTaskGraph.run_batch` decodes many:
+
+.. tab:: Python
+
+   .. literalinclude:: ../../examples/qec/python/decoding_task_graph.py
+      :language: python
+      :start-after: [Begin batch]
+      :end-before: [End batch]
+
+.. tab:: C++
+
+   .. literalinclude:: ../../examples/qec/cpp/decoding_task_graph.cpp
+      :language: cpp
+      :start-after: [Begin batch]
+      :end-before: [End batch]
+
+A graph with more than one output returns one result per output from
+``run_all``, in ``output_names()`` order.
+
+Streaming
++++++++++
+
+.. tab:: Python
+
+   .. literalinclude:: ../../examples/qec/python/decoding_task_graph.py
+      :language: python
+      :start-after: [Begin streaming]
+      :end-before: [End streaming]
+
+.. tab:: C++
+
+   .. literalinclude:: ../../examples/qec/cpp/decoding_task_graph.cpp
+      :language: cpp
+      :start-after: [Begin streaming]
+      :end-before: [End streaming]
+
+* Send one round per call: ``get_num_msyn_per_round()`` measurements. Larger
+  chunks also work; the graph splits them.
+* Tag the shot's last round ``FINAL``, as in
+  ``enqueue_syndrome(syndrome, round_type.FINAL)``. It decodes whatever
+  windows still hold, so the end of the shot is corrected. Untagged rounds
+  never end a shot.
+* Corrections accumulate across the shot. After ``FINAL``, the graph drops
+  further rounds until ``clear_corrections()``, which consumes the
+  corrections and starts the next shot. ``reset_decoder()`` also starts a
+  new shot, discarding rounds not yet decoded.
+
+Reading results
 +++++++++++++++
 
-:meth:`~cudaq_qec.DecodingTaskGraph.run_batch` processes a collection of
-complete shots.
+``get_obs_corrections()`` returns the corrections, one byte per observable.
+``streaming_result()`` also says whether they are ready and which rounds they
+cover. For each graph output it reports:
+
+* ``status``: ``PENDING`` before the output has published or after
+  ``clear_corrections()``, ``AVAILABLE`` mid-shot, ``COMPLETE`` after
+  ``FINAL``, or ``FAILED``. (In C++, lowercase.)
+* ``coverage_begin_round`` and ``coverage_end_round``: the rounds the latest
+  update committed, as a half-open range. For a parallel window, this is every
+  round committed since the last ``clear_corrections()``.
+* ``closure``: whether decoded windows were checked against their detectors
+  (see :doc:`task_graph_parallel_window`).
+
+A zero correction with status ``AVAILABLE`` is a real result. Synchronously,
+``enqueue_syndrome`` also returns whether any node decoded; with
+``async_streaming``, an untagged call returns ``False``, so read ``status``
+instead.
+
+.. _task_graph_logical_measurements:
+
+Logical measurements
+++++++++++++++++++++
+
+A graph can return two results:
+
+* **Corrections**, the flips of the logical observables:
+  ``get_obs_corrections()``, ``run()`` and the decoding server's
+  ``get_corrections``.
+* **Logical measurements**, the raw logical readout with the corrections
+  applied: ``get_logical_measurements()`` and the server's
+  ``get_logical_measurements``.
+
+Logical measurements need a model that reads the observables, through
+``m2o_sparse`` (see :ref:`dyn_dem_example`), and a graph with a logical
+output. ``parallel_window`` wires one with
+``output: corrections_and_logical`` (see :doc:`task_graph_parallel_window`);
+other graphs wire a ``logical_readout`` node (see
+:ref:`task_graph_logical_output`).
+
+* A logical measurement is *released* once its readout has arrived and every
+  correction that can flip it is committed. A final readout is released at
+  ``FINAL``. A mid-circuit readout is released mid-shot when the corrections
+  are staged, as ``parallel_window``'s are; otherwise at ``FINAL``.
+* ``get_logical_measurements(first, count)`` returns ``None`` (C++:
+  ``nullptr``) until every measurement in the range is released, and again
+  once the shot is consumed.
+* The logical output is the last of ``streaming_result().outputs``, with a
+  ``released`` flag per measurement. It is not in ``output_names()``, and
+  ``get_num_logical_measurements()`` gives its width.
+* The logical measurements apply every correction of the shot, so the shot
+  can be consumed only after ``FINAL``: ``clear_corrections()`` raises before
+  then. ``reset_decoder()`` still abandons a shot.
+* ``run`` and ``run_batch`` return corrections only.
+
+Graphs of several nodes
++++++++++++++++++++++++
+
+``task_graph.nodes`` lists the nodes and ``task_graph.edges`` wires them. A
+node names its kind in ``type``, its inner decoder in ``inner``, and the kind's
+parameters inline. This is the graph in the figure above, on the quick
+start's model:
+
+.. literalinclude:: ../../examples/qec/yaml/task_graph_predecoder.yaml
+   :language: yaml
+   :start-at: task_graph:
+   :dedent: 4
+
+* ``measurements`` is the incoming shot and ``output`` the graph's result.
+* An edge endpoint is a node id, with ``.port`` for a node that has named ports,
+  such as ``xor``'s ``a`` and ``b`` and ``predecoder``'s ``pre_L`` (its
+  corrections) and ``residual``.
+* A node fed by another decodes that node's output, so ``pre`` and
+  ``global`` decode the same rounds: their ``window_size`` must match.
+* A single node needs no edges: it is wired
+  ``measurements → node → output``.
+* List nodes in the order data flows. A node without its own ``dem_chunks``
+  uses the decoder's.
+
+:meth:`~cudaq_qec.DecodingTaskGraph.combine` joins two single-node graphs
+with an ``xor``, for two decoders whose corrections add:
 
 .. tab:: Python
 
    .. literalinclude:: ../../examples/qec/python/decoding_task_graph.py
       :language: python
-      :start-after: [Begin batch]
-      :end-before: [End batch]
+      :start-after: [Begin combine]
+      :end-before: [End combine]
 
 .. tab:: C++
 
    .. literalinclude:: ../../examples/qec/cpp/decoding_task_graph.cpp
       :language: cpp
-      :start-after: [Begin batch]
-      :end-before: [End batch]
+      :start-after: [Begin combine]
+      :end-before: [End combine]
 
-Streaming interface
-+++++++++++++++++++
+For any other topology, use
+:meth:`~cudaq_qec.DecodingTaskGraph.from_topology` with a list of
+:class:`~cudaq_qec.TaskGraphNodeConfig` nodes and their edges. In code, a
+node's ``kind``, ``decoder_type``, ``params`` and ``node_params`` hold what
+YAML writes as ``type``, ``inner.type``, ``inner``'s other keys and the
+inline parameters.
 
-In real-time QEC, syndrome measurements arrive one round at a time.
-:meth:`~cudaq_qec.DecodingTaskGraph.enqueue_syndrome` accumulates bytes into
-the window buffer and returns ``True`` / ``true`` when a decode fires.
-
-.. tab:: Python
-
-   .. literalinclude:: ../../examples/qec/python/decoding_task_graph.py
-      :language: python
-      :start-after: [Begin streaming]
-      :end-before: [End streaming]
-
-.. tab:: C++
-
-   .. literalinclude:: ../../examples/qec/cpp/decoding_task_graph.cpp
-      :language: cpp
-      :start-after: [Begin streaming]
-      :end-before: [End streaming]
-
-Streaming contract:
-
-* Deliver ``get_num_msyn_per_round()`` bytes per call.  A window that slides
-  has only that much room once it is full, so a larger chunk no longer fits.
-* The window fires when it first holds ``get_num_msyn_per_decode()`` bytes,
-  then every ``stride`` rounds after that.  A fixed-T window empties on each
-  fire, so it also accepts a full window per call.
-* Task graphs meter arbitrary chunks to each node's available room; input is
-  not dropped when one call spans multiple window fires.
-* Corrections XOR-accumulate across windows within a shot.
-  ``clear_corrections()`` consumes the published accumulator while preserving
-  sliding-window overlap and publication generations. It marks statuses
-  ``pending`` and zeros values, so a preserved nonzero generation is only a
-  watermark and does not mean that a result remains readable.
-* ``reset_decoder()`` starts a clean experiment epoch and resets inner decoder
-  state.
-
-For a graph with independently progressing outputs, the enqueue return value
-only means that some node fired.  Use ``streaming_result()`` for result
-readiness.  It returns the named output values together with each output's
-status, generation, value range, and half-open round coverage.  This makes an
-available all-zero correction distinguishable from an output that has not
-fired.  The graph-level generation advances only after every correction output
-passes the corresponding publication barrier; a logical output (see
-`Logical measurements`_) is no part of it.  ``result_revision`` advances
-on any output or graph-status change, including progress before that aggregate
-barrier.  A ``FINAL`` round marks published outputs complete; outputs that
-never published and the aggregate graph remain pending.  Reset starts a new
-shot epoch and restarts its revision at zero.  C++ returns a coherent live
-graph-owned reference, so copy it before later graph mutations when historical
-state is needed.  Python returns a detached result snapshot.  In either API,
-readability is determined by ``available`` or ``complete`` status, never by
-generation alone.
-
-Opt-in asynchronous streaming
-++++++++++++++++++++++++++++++
-
-Callers select asynchronous streaming when constructing a graph with
-``task_graph_options::async_streaming`` in C++ or
-``TaskGraphOptions.async_streaming`` in Python. The existing streaming calls
-remain the interface: ``enqueue_syndrome`` copies BULK input into a bounded
-queue, ``streaming_result`` and ``get_obs_corrections`` wait for records
-accepted before their call, and both return coherent snapshots without closing
-the session. A FINAL enqueue waits for all accepted input and the final flush.
-``clear_corrections`` drains accepted input without flushing guarded tails
-before consuming the result. Each public enqueue remains one queue record, so
-inner streaming decoders observe the same call boundaries as synchronous
-graphs, with one exception: a graph whose one raw-input node meters its own
-chunks, such as a windowed graph, works in records of about one chunk. It
-admits BULK rounds that have queued up behind it together, so that a graph
-that falls behind catches up in batches, and runs a tagged record longer than
-a chunk as several, so that no record holds more than a chunk's windows.
-
-In an asynchronous graph, records overlap: a later record runs ahead on nodes
-that have finished the earlier ones, up to 16 records at once.
-``async_queue_capacity`` (default 32) bounds how many public enqueues may be
-queued or running, which is how far a producer may run ahead before an
-enqueue waits. A graph that falls behind returns FINAL's result only after
-draining what is queued, so a deeper queue raises throughput when behind at
-the cost of that tail.
-
-Decoder-server YAML exposes the same policy as ``task_graph.async_streaming``,
-with optional ``async_queue_capacity``, ``async_coordinator_cpu``,
-``async_spin_pause_iters``, ``async_num_workers``, and ``async_worker_cpus``
-fields. A nonnegative coordinator CPU requests Linux thread affinity and fails
-graph construction if it cannot be honored. It pins the coordinator thread
-only. The spin count keeps an active coordinator polling briefly before it
-parks; zero, the default, disables spinning. Reserve that CPU from producer
-and worker affinity masks when using this low-latency policy.
-
-``async_num_workers`` sets how many pool threads run node fires in an
-asynchronous graph, not counting the coordinator. Unset, the default, picks
-the graph's parallel width, including every fire pool's copies, capped by
-hardware concurrency. An indexed node's fires leave one worker for
-ingestion and deliveries when there are several, and records pipeline, so a
-graph with one, such as a windowed graph, defaults to every copy that may
-fire at once, an indexed node's single copy included, plus that worker. The
-build warns when the workers that may fire are fewer than those copies.
-``async_worker_cpus`` pins those threads round-robin to
-the listed CPUs (Linux only); it is empty by default, so node work inherits
-the process's affinity. Synchronous graphs ignore both.
-
-Pools are per graph: each decoder's asynchronous graph has its own coordinator
-and workers, so a configuration with several runs the sum of their threads.
-The coordinator spins, so an ``async_worker_cpus`` list that includes
-``async_coordinator_cpu`` is rejected when parsed and when built. Sharing a
-core between workers can be deliberate, so a CPU listed twice only warns, as
-does contention across graphs: configuring the decoders warns when two
-asynchronous graphs pin the same CPU, naming both decoders, or when together
-they need more threads than the machine has, naming each graph's count.
-
-Fire pools
+Node kinds
 ++++++++++
-
-Any node whose result depends only on the current delivery can run as a
-*fire pool*: set ``max_in_flight`` on its entry and the graph builds that many
-copies of the node, and lets records fire on different copies at once instead 
-of holding the node to one record at a time.
-A record leases one copy for all of its deliveries, outputs are copied out of
-the copy before anything downstream runs, and each fire's correction delta is
-folded into the node's accumulated corrections when its record retires, so
-results equal serial execution. Kinds that carry state across deliveries
-(``sliding_window``, ``memory_window``, ``predecoder``, ``streaming``) reject
-``max_in_flight`` above one at build, as does a node given a prebuilt decoder
-instance, since every copy needs its own. A pooled node wired to raw
-``measurements`` is a streaming conflict.
-
-Overlap needs ``async_streaming``; a synchronous graph warns and builds one
-copy. The default pool grows by ``max_in_flight - 1`` workers per pooled node,
-so ``async_num_workers`` is only needed to cap or widen that.
-
-Staged outputs
-++++++++++++++
-
-Nodes that fold into one graph output normally share one firing and commit
-schedule, and the output's coverage follows that schedule. A node whose fires
-commit arbitrary round intervals, possibly out of order, instead reports each
-publication's exact commit interval. An output fed only by such nodes is
-*staged*: the graph holds each delta until every earlier round is committed,
-folds them in round order, and reports coverage from the round where its
-value was last consumed to the frontier, with the value at that frontier. A
-publication covering the whole shot, such as a raw logical readout, is folded
-only at FINAL, after the frontier reaches the last committed round. An output
-that mixes staged and scheduled contributors is a streaming conflict; wire
-them to separate outputs.
-
-Multi-node graphs (combine)
-++++++++++++++++++++++++++++
-
-:meth:`~cudaq_qec.DecodingTaskGraph.combine` runs two independent decoders and
-XORs their logical outcomes.  Each branch applies its own D matrix.  In
-streaming mode, ``enqueue_syndrome`` routes the syndrome to both branches
-simultaneously.
-
-.. tab:: Python
-
-   .. literalinclude:: ../../examples/qec/python/decoding_task_graph.py
-      :language: python
-      :start-after: [Begin combine]
-      :end-before: [End combine]
-
-.. tab:: C++
-
-   .. literalinclude:: ../../examples/qec/cpp/decoding_task_graph.cpp
-      :language: cpp
-      :start-after: [Begin combine]
-      :end-before: [End combine]
-
-.. _Declarative topologies:
-
-Declarative topologies
-++++++++++++++++++++++
-
-``task_graph.nodes`` describes the graph node by node, and ``task_graph.edges``
-wires them.  A node names its kind in ``type``, its inner decoder in ``inner:``,
-and the kind's own parameters inline:
-
-.. code-block:: yaml
-
-   decoders:
-     - id: 0
-       task_graph:
-         nodes:
-           - id: sw
-             type: sliding_window
-             window_size: 3               # rounds per decode
-             step_size: 1                 # advance one round per decode
-             num_syndromes_per_round: 4    # checked against the DEM
-             inner:
-               type: pymatching           # inner decoder args go here too
-         # edges omitted: a single node is wired measurements → sw → output
-       dem_chunks: {...}
-
-An edge endpoint is a node id, optionally with a port: ``{from: pre.residual,
-to: global}``. ``measurements`` is the incoming shot and ``output`` is the
-graph's result; the legacy source spelling ``dets`` is also accepted. An
-omitted port means ``output`` on the source and ``input`` on the destination,
-which is what a single-port node declares, so most edges name only the nodes; a
-node with named ports, such as an ``xor`` node's ``a`` and ``b``, has to be
-named explicitly. This is the X/Z split that
-:meth:`~cudaq_qec.DecodingTaskGraph.combine` builds in C++:
-
-.. code-block:: yaml
-
-   task_graph:
-     nodes:
-       - id: x
-         type: sliding_window
-         window_size: 3
-         step_size: 1
-         inner: {type: pymatching}
-       - id: z
-         type: sliding_window
-         window_size: 3
-         step_size: 1
-         inner: {type: pymatching}
-         dem_chunks: {...}          # optional: this node's own DEM
-       - id: combine
-         type: xor
-     edges:
-       - {from: measurements, to: x}
-       - {from: measurements, to: z}
-       - {from: x, to: combine.a}
-       - {from: z, to: combine.b}
-       - {from: combine, to: output}
-
-Nodes are listed in topological order, and a node without its own
-``dem_chunks`` uses the entry-level one. Every node fed from ``measurements``
-receives the same bytes. Nodes contributing to one output must use the same
-streaming schedule; nodes feeding separate outputs may progress independently.
-A node fed by an edge consumes detection events instead.
-
-Available node kinds are a registry, not a fixed list.  Query an installation
-with ``registered_task_graph_node_kinds()`` and inspect one kind's
-parameters with ``decoder_param_schema("task_graph_node.sliding_window")``.
-``decoder_config_json_schema()`` includes the whole ``task_graph`` block, so
-configs can be validated offline with standard JSON Schema tooling.
-
-The ``streaming`` kind transparently forwards raw chunks to its inner decoder's
-native ``enqueue_syndrome()`` implementation. It is useful for decoders that
-incrementally process each round themselves, instead of asking a
-``single_window`` node to buffer the complete shot and call ``decode()`` at the
-end. Its one-shot graph path still applies D, calls ``decode()``, and projects
-through O normally:
-
-When the inner decoder declares native DEM-chunk support and produces
-observables, graph preparation keeps that recipe instead of closing the
-configured full-shot H and error-rate model. D and the graph's observable
-projection remain available, including through ``d_matrix()`` and
-``o_matrix()``. These are configured-template metadata, not constant-size
-objects: D has one row per configured detector and O enumerates the configured
-fault columns that flip each observable. Their storage can grow with configured
-round count even though the native decoder does not close a full-shot H or
-error-rate model. Bounded decoder-window storage does not imply that every
-graph allocation is independent of the configured template length.
-Matrix-backed and guarded-window kinds still prepare their
-finite window models. A bounded-DEM deployment must use a compatible native
-streaming recipe or a fixed-size window, rather than a full-shot matrix model.
-
-A decoder that ends its own shots (``streaming_correction_provider``) reports
-what it has committed rather than following the node's schedule. Its
-provisional frames publish whenever ``committed_round_count()`` grows, and
-each covers the shot's rounds committed so far, from where the value was last
-consumed. A decoder that does not report the count publishes nothing before
-FINAL. FINAL covers the rounds ``finalized_round_count()`` reports; without
-it, only the rounds already committed, so coverage never claims a round past
-the shot. A shot complete without FINAL, which a peek ends, covers the rounds
-``finalized_round_count()`` then reports, and the stream continues. Nodes
-combined into one output cover the rounds all of them have committed.
-
-.. code-block:: yaml
-
-   - id: native
-     type: streaming
-     num_syndromes_per_round: 24
-     inner: {type: <streaming-decoder>}   # implements enqueue_syndrome()
-     dem_chunks: {...}                    # or inherit the entry-level DEM
-
-Parallel windows
-++++++++++++++++
-
-The ``parallel_window`` pattern decodes a stream of rounds of any length in
-windows that decode concurrently. It is written as one node and lowers into an
-``ingest`` node, two layers of ``decode_window`` nodes, ``<id>.A`` and
-``<id>.B``, and an ``xor`` of their outputs:
-
-* each **A** window commits ``commit_rounds`` rounds, decoding them with
-  ``buffer_rounds`` of context on each side, and needs nothing from any other
-  window;
-* each **B** window commits the ``gap_rounds`` between two A windows, after
-  receiving their corrections at its edges.
-
-Every window decodes a model of fixed size with the inner decoder, and windows
-finish in any order; the output folds their corrections in round order, so it
-is a staged output (see `Staged outputs`_). When a phase of the template has
-``m2o_sparse``, ``output`` must say whether the pattern also wires the graph's
-``logical`` output, the corrected logical measurements (see `Logical
-measurements`_).
-
-.. code-block:: yaml
-
-   decoders:
-     - id: 0
-       dem_chunks: {...}                   # one chunk per round
-       task_graph:
-         async_streaming: true
-         nodes:
-           - id: pw
-             type: parallel_window
-             commit_rounds: 5
-             buffer_rounds: 5
-             gap_rounds: 15
-             max_in_flight: 4
-             inner: {type: pymatching}
-         edges:
-           - {from: measurements, to: pw}
-           - {from: pw, to: output}
-   syndrome_mapping:
-     - {id: 1, type: final}
-
-The model is a ``dem_chunks`` template whose chunks each span one round and
-whose faults reach at most the next round. A phase may have no faults: its
-detectors are then never flipped, as a circuit's preparation round's may not
-be. The pattern builds every window variant the shot lengths need at
-configuration time.
 
 .. list-table::
    :header-rows: 1
    :widths: 25 75
 
-   * - Parameter
-     - Meaning
-   * - ``commit_rounds``
-     - Rounds an A window commits. Required.
-   * - ``buffer_rounds``
-     - Rounds of context on each side of an A window's commit zone. Required.
-   * - ``gap_rounds``
-     - Rounds a B window commits, between two A windows. Defaults to
-       ``commit_rounds + 2 * buffer_rounds``.
-   * - ``output``
-     - Required when a phase of the template has ``m2o_sparse``.
-       ``corrections_and_logical``: the pattern also wires the graph's
-       ``logical`` output. ``corrections``: corrections only, so a shot may
-       be consumed mid-shot, as configurations written before the logical
-       output expect. Without a readout map, unset means ``corrections``.
-       ``corrected_logical`` is refused.
-   * - ``input_boundary``
-     - ``columns`` (default): an A window's open input gets one boundary
-       column per detector of the round before it, with one shared prior.
-       ``truncate``: faults crossing in from that round keep their own priors
-       and are never committed.
-   * - ``boundary_prior``
-     - The shared prior of ``columns``. Defaults, over the detectors that
-       faults cross into from the round before, to the largest chance that
-       an odd number of those faults fire.
-   * - ``merge_identical``
-     - Merge fault columns with identical detectors and observables into one,
-       combining their priors. Default ``false``.
-   * - ``conflicting_parallel``
-     - What to do with identical columns of different observable effect:
-       ``reject`` (default) the configuration, or keep the ``most_likely``.
-   * - ``verify_residual``
-     - Check each window's solution against its detectors: ``none``
-       (default), ``report`` the shot's ``closure`` as ``open`` when one does
-       not hold, or ``fail`` the graph, naming the window and its row.
+   * - Kind
+     - What it does
+   * - ``sliding_window``
+     - Decodes ``window_size`` rounds and advances ``step_size`` rounds. The
+       default ``kind`` in code; YAML nodes always name a ``type``.
+   * - ``single_window``
+     - Decodes a complete fixed-length shot.
+   * - ``streaming``
+     - Passes each round to an inner decoder that streams natively.
+   * - ``parallel_window``
+     - Decodes streams of any length in windows that decode at the same time.
+       See :doc:`task_graph_parallel_window`.
+   * - ``ingest``, ``decode_window``
+     - The nodes ``parallel_window`` builds: ``ingest`` cuts rounds into
+       windows and ``decode_window`` decodes them.
+   * - ``xor``
+     - XORs its inputs: ports ``a`` and ``b``, or ``in_0`` to ``in_{N-1}``
+       with ``num_inputs: N``.
+   * - ``logical_readout``
+     - Reads the raw logical value through the model's ``m2o_sparse``. See
+       :ref:`task_graph_logical_output`.
+   * - ``predecoder``
+     - Runs a predecoder and passes its residual detectors on through its
+       ``residual`` port.
+   * - ``ensemble``
+     - Runs several member graphs and keeps one answer. See
+       :doc:`task_graph_reference`.
 
-``max_in_flight`` on the node gives each layer that many copies, which decode
-at once with ``async_streaming``.
+Kinds are a registry, so plugins can add more.
+``registered_task_graph_node_kinds()`` lists an installation's kinds,
+``decoder_param_schema("task_graph_node.<kind>")`` describes a kind's
+parameters, and ``decoder_config_json_schema()`` returns a JSON Schema for
+checking configurations with your own tools.
 
-**Ending a shot.** A shot ends at its FINAL round, which completes every
-window still open with its terminal variant. Through ``enqueue_syndrome`` the
-last round is passed as ``round_type.FINAL``; through the realtime decoding API
-and the decoding server it names a ``type: final`` row of
-``syndrome_mapping``. Until then a mid-shot read reports the corrections over
-``[0, frontier)``, the rounds whose windows have all committed.
+Guarded sliding windows
++++++++++++++++++++++++
 
-**Serving.** Windows overlap later rounds only with ``async_streaming``. A
-windowed graph is served with ``dispatch: host``: the decoding server refuses
-``device_graph``, since a windowed graph is not one captured decode graph.
-Configuring a windowed decoder that runs synchronously, that has no ``final``
-row, or that names ``device_graph`` logs a warning naming it.
-
-**Results.** Besides the corrections, a streaming result and each of its
-outputs report ``closure``: whether every window's solution was checked and
-held (``closed``), checked and failed (``open``), or not checked
-(``not_checked``). One-shot calls (``run``, ``run_all``, ``run_batch``,
-``run_async``) stream the shot through the same windows, and their
-``logical_outcome`` reports ``converged``: whether every window's decoder
-converged.
-
-.. _Logical measurements:
-
-Logical measurements
-++++++++++++++++++++
-
-A graph returns two results. Its **corrections** are the committed flips of
-the logical observables: ``get_obs_corrections()``, ``run()`` and a decoding
-server's ``get_corrections`` return them, mid-shot as the committed prefix and
-at the end of the shot in full. Its **logical measurements** are the raw
-logical readout with those corrections applied: ``get_logical_measurements()``
-and a decoding server's ``get_logical_measurements`` return them.
-
-A logical measurement is *released*, final for the shot, once its readout has
-arrived and every correction that can flip it is committed. An observable read
-at the end of the shot is released at FINAL; one read mid-circuit is released
-mid-shot, as soon as the corrections cover the round that reads it, when the
-corrections are a staged output (see `Staged outputs`_), as the
-``parallel_window`` pattern's are. With scheduled contributors, every logical
-measurement is released at FINAL.
-``get_logical_measurements(first, count)`` returns a range once each in it is
-released, and ``streaming_result()`` gives the logical output's ``released``
-flags.
-
-The raw logical value comes from the template's readout maps: each phase's
-``m2o_sparse`` lists, per observable, the measurements of its round that the
-observable's value XORs in, and an empty row adds nothing. Any phase but a
-repeating one may carry one, so the final readout and a mid-circuit readout
-can define different observables, or contribute to the same one. A readout in
-the template's prefix, the phases before the repeating one, is read as it
-arrives; one after it is placed only by the shot's length, so it is read at
-FINAL.
-
-The logical measurements are the graph output a ``logical_readout`` node
-reaches, whatever its name. The node reads the raw logical value and an
-``xor`` applies the corrections to it:
-
-.. code-block:: yaml
-
-   nodes:
-     - {id: ingest, type: ingest, windows: {...}}
-     - {id: W, type: decode_window, num_receives: 1, inner: {type: pymatching}}
-     - {id: R, type: logical_readout}     # reads the entry's dem_chunks
-     - {id: L, type: xor}
-   edges:
-     - {from: measurements, to: ingest}
-     - {from: measurements, to: R}
-     - {from: ingest.W, to: W}
-     - {from: W.forward, to: W.receive_0, index_offset: -1}
-     - {from: W, to: output.corrections}
-     - {from: W, to: L.a}
-     - {from: R, to: L.b}
-     - {from: L, to: output.logical}
-
-A ``parallel_window`` pattern wires the same itself with
-``output: corrections_and_logical``, which needs a phase of its template with
-a readout map, an edge from it to the graph's output, and no ``logical``
-output the graph names itself.
-
-The logical output is kept apart from the corrections:
-
-* it is last in ``streaming_result()``, ``pending`` until one of its logical
-  measurements is released, and ``complete`` at FINAL;
-* it is not among ``output_names()``, ``get_num_observables()`` counts only
-  the corrections, and ``get_num_logical_measurements()`` its own width;
-* one-shot calls (``run``, ``run_all``, ``run_batch``, ``run_async``) return
-  the corrections alone.
-
-The logical measurements apply every correction of the shot, so a graph with
-a logical output consumes a shot only once it has ended: ``clear_corrections()``
-before FINAL is refused, and a read with ``reset``, ``get_corrections``'
-included, is not ready until then: the decoding server answers ``NOT_READY``,
-and the realtime decoding API raises.
-
-Building checks it: a graph has at most one ``logical`` output, and a
-correction output beside it; one ``logical_readout`` node must reach it, and
-none may reach another output. A ``logical_readout`` node reads only the
-rounds its template reads, so it joins any stream, whatever the other nodes'
-schedules.
-
-Ensembles
-+++++++++
-
-An ensemble races several member subgraphs and keeps one answer. It is written
-as a node of type ``ensemble``, with the members as node lists of their own:
-
-.. code-block:: yaml
-
-   nodes:
-     - id: ens
-       type: ensemble
-       join_strategy: deadline
-       join_params: {deadline_us: 200, soft_stop_before_us: 50}
-       members:
-         - nodes: [{id: a, type: single_window, inner: {type: pymatching}}]
-           edges: [{from: input, to: a}, {from: a, to: output}]
-         - nodes:
-             - {id: b, type: single_window, inner: {type: nv-qldpc-decoder}}
-           edges:
-             - {from: input, to: b}
-             - {from: b, to: output}
-   edges:
-     - {from: measurements, to: ens}
-     - {from: ens, to: output}
-
-Members name the ensemble's input edge as
-``input`` and the answer as ``output``; every member lists its edges.
-Every member node that accepts a ``candidate_sink`` as an input is wired to the
-run's shared candidate sink and every one that accepts a ``cancellation_token`` to
-the run's shared cancellation token. Cancellation is cooperative: a member that does
-not poll its token delays the result until it finishes. Members can push candidate solutions either by
-accepting the ``candidate_sink`` as an input, or by pushing a ``logical_outcome`` to
-``output``.
-
-The decision to commit to a specific logical outcome is made by the run's ``selection_strategy``.
-Every candidate push is shown, on the pushing member's thread, to the run's ``selection_strategy``:
-
-- ``first`` commits to the first candidate
-- ``deadline`` optionally requests a soft stop ``soft_stop_before_us`` before ``deadline_us``
-  and a hard stop at the deadline, then picks the cheapest costed candidate seen
-  before the deadline, falling back to the first one if candidates do not have costs available.
-
-A strategy's parameters
-are described by ``decoder_param_schema("selection_strategy.<name>")``; a module adds one with
-``register_selection_strategy()`` and holds the returned registration while its code is loaded. A commit hard-stops
-the other members through their token. If a strategy fails to commit to solution, the run throws.
-When streaming, the fan-out runs one ensemble per window its producer delivers and the join XORs
-each window's winner into the corrections, sized from the first member answer
-or member node ``output`` of known width.
-
-Guarded windows
-+++++++++++++++
-
-Overlapping windows see each round more than once.  ``start_guard`` and
-``end_guard`` (or ``guard_rounds`` for both) declare how many rounds at each
-edge of the window are **context only**: the decode still uses them, but they
-contribute nothing to that window's corrections, because a neighboring window
-commits them.  Without guards, every round of every window commits and an
-overlapped round is counted twice.
+Overlapping windows see each round more than once. Guard rounds are context
+only: the window decodes with them but does not correct them, because a
+neighboring window does.
 
 .. code-block:: yaml
 
@@ -737,56 +335,34 @@ overlapped round is counted twice.
      type: sliding_window
      window_size: 5
      step_size: 4
-     end_guard: 1            # the last round is context for this decode only
-     inner: {type: pymatching}
+     end_guard: 1            # the last round is context only
+     inner: {type: single_error_lut}
 
-Guards must leave at least one round to commit and tile the stream exactly
-once: ``step_size`` must equal ``window_size - start_guard - end_guard``.
-The first decode of a shot commits its leading guard, since no earlier window
-covered those rounds; ``reset_decoder()`` starts a new shot and restores that
-behavior.
+* ``start_guard`` and ``end_guard`` (or ``guard_rounds`` for both) set the
+  guards.
+* With a guard, ``step_size`` must equal
+  ``window_size - start_guard - end_guard``, so each round is corrected
+  exactly once.
+* The ``FINAL`` round corrects the last window's ``end_guard``.
 
-.. note::
-
-   Mark the shot's last round ``FINAL`` to flush and commit the final window's
-   ``end_guard``. Without that marker, resetting the graph discards the
-   withheld tail.
-
-Streaming edge routing
+Asynchronous streaming
 ++++++++++++++++++++++
 
-The graph's streaming path supports typed edges between streaming nodes.  When
-node A fires, its outputs are routed to downstream nodes according to the graph
-edges, and those nodes accumulate the routed values rather than raw syndrome
-bytes.
-
-Each node declares the path-independent type it produces on each output slot
-(``output_type``) and which types each input slot accepts
-(``accepts_input_type``). ``compile_wires`` validates every one-shot and
-streaming edge and rejects mismatches before the graph goes live. Nodes
-separately declare whether an input supports edge-fed streaming.
-
-Edge-value types are a registry, like node kinds. The built-in types are
-``measurement_results``, ``detection_events`` and ``logical_outcome``, plus
-those built by plugins and lowering operations.
-``registered_edge_value_types()`` lists what an installation provides.
-
-A pre-decoder + global decoder topology illustrates this: the ``predecoder``
-kind fires once per configured window, emits its pre-logical outcome on one
-output port and a residual ``detection_events`` vector on another. The residual
-flows into a downstream ``window_node`` (e.g. PyMatching) via a streaming edge:
+By default, ``enqueue_syndrome`` returns after the decodes it starts. With
+``async_streaming``, it copies the round and returns, and the graph decodes on
+its own worker threads; it waits only when the graph's queue is full. Reads
+(``get_obs_corrections``, ``streaming_result``) wait for rounds already sent,
+and a ``FINAL`` round returns once the whole shot is decoded.
 
 .. code-block:: yaml
 
-   edges:
-     - {from: measurements, to: pre}
-     - {from: pre.pre_L, to: combine.a}
-     - {from: pre.residual, to: global}
-     - {from: global, to: combine.b}
-     - {from: combine, to: output}
+   task_graph:
+     async_streaming: true
+     async_num_workers: 4          # worker threads; default: sized to the graph
+     async_worker_cpus: [4, 5, 6, 7]
+     nodes: [...]
 
-.. note::
-
-   ``predecoder`` is a registered node kind. It produces both a
-   ``logical_outcome`` and a ``detection_events`` residual on each fire through
-   its ``pre_L`` and ``residual`` ports.
+In Python and C++, set the same fields on :class:`~cudaq_qec.TaskGraphOptions`
+and pass it when building the graph. ``max_in_flight`` on a node
+such as ``decode_window`` lets that many of its decodes run at once. The
+reference lists every option: :ref:`task_graph_async_options`.

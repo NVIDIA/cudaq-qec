@@ -401,14 +401,10 @@ For a complete, runnable walkthrough — including GPU acceleration and input-ty
 
 .. _dynamic_dem_construction:
 
-Dynamic DEM Construction
-^^^^^^^^^^^^^^^^^^^^^^^^^
+Dynamic DEM
+^^^^^^^^^^^
 
-When a Stim circuit is not available — or when the round count must stay flexible until decoder construction — CUDA-Q QEC can build a detector error model directly from CSS generator matrices instead. ``dem_from_css_matrices`` produces a :math:`T`-round code-capacity or phenomenological DEM from ``css_code_matrices`` (Python ``CssCodes``) and ``css_noise_params`` (Python ``CssNoise``).
-
-For decoders whose round count is chosen at run time, the same model is expressed as composable per-round chunks: ``extended_dem_from_css_matrices`` builds a one-round :math:`\text{ExtendedDem}` chunk, and ``dem_stitch`` / ``dem_close_all`` stitch and close chunks into the same flat DEM. Real-time decoder configs accept this as a YAML ``dem_chunks`` block with ``init`` / ``bulk`` / ``final`` phases, expanded during decoder construction by ``expand_dem_chunks``; omit ``num_rounds`` for streaming decoders.
-
-For a complete, runnable walkthrough — matrix construction, chunk stitching, the YAML ``dem_chunks`` layout, and closing rules — see the :ref:`Dynamic DEM Construction example <dyn_dem_example>`.
+A ``dem_chunks`` model describes a DEM one round at a time, so the same model fits shots of any length. Task graphs and streaming decoders read their models in this form, and real-time decoder configurations accept it as a YAML ``dem_chunks`` block. See :ref:`Dynamic DEM <dyn_dem_example>`.
 
 
 .. _prebuilt_qec_decoders:
