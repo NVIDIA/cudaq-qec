@@ -25,7 +25,8 @@ How it works
   being better.
 * The *selection strategy*, specified by ``join_strategy``, sees every candidate as
   it arrives and decides which one to keep. Once it decides, the other members
-  are asked to stop.
+  are asked to stop. The ``done`` edges only order the join after every
+  member has finished; candidates travel through the shared sink.
 * The ensemble's ``output`` is the ``logical_outcome`` selected by the strategy. 
   Every member must answer with a ``logical_outcome`` of the same size. If no 
   candidate is kept, the run throws.
