@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 320" width="1000" height="320" font-family="Lato, 'Helvetica Neue', Arial, sans-serif">
+  <title>An ensemble: a fan-out passes the input to every member and a join applies the selection strategy once the members are done; all of them share the run's state</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+    <marker id="arrow-ref" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d9962b"/>
+    </marker>
+  </defs>
+  <rect width="1000" height="320" fill="#ffffff"/>
+  <rect x="182" y="14" width="696" height="292" rx="10" fill="none" stroke="#999" stroke-dasharray="6 4"/>
+  <text x="196" y="34" font-size="12" fill="#555">ensemble</text>
+  <g fill="none" stroke="#555" stroke-width="1.6" marker-end="url(#arrow)">
+    <path d="M150,160 L218,160"/>
+    <path d="M320,160 C360,160 360,70 398,70"/>
+    <path d="M320,160 C360,160 360,250 398,250"/>
+    <path d="M520,70 L810,70 L810,133"/>
+    <path d="M520,250 L810,250 L810,187"/>
+    <path d="M860,160 L888,160"/>
+  </g>
+  <g fill="none" stroke="#d9962b" stroke-width="1.4" stroke-dasharray="3 3" marker-end="url(#arrow-ref)">
+    <path d="M320,160 L393,160"/>
+    <path d="M460,125 L460,97"/>
+    <path d="M460,200 L460,223"/>
+    <path d="M697,160 L758,160"/>
+  </g>
+  <g font-size="12" fill="#555">
+    <text x="650" y="62">done</text>
+    <text x="650" y="266">done</text>
+  </g>
+  <g font-size="12" fill="#a86f12">
+    <text x="468" y="114">token · sink</text>
+    <text x="468" y="214">token · sink</text>
+    <text x="700" y="154">selection</text>
+  </g>
+  <rect x="20" y="137" width="130" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
+  <text x="85" y="165" font-size="14" text-anchor="middle" fill="#1a1a1a">measurements</text>
+  <g fill="#f1f8e4" stroke="#76b900" stroke-width="1.6">
+    <rect x="400" y="45" width="120" height="50" rx="6"/>
+    <rect x="400" y="225" width="120" height="50" rx="6"/>
+  </g>
+  <g fill="#fff4e0" stroke="#d9962b" stroke-width="1.6">
+    <path d="M395,135 L395,190 A150,10 0 0 0 695,190 L695,135"/>
+    <ellipse cx="545" cy="135" rx="150" ry="10"/>
+  </g>
+  <g fill="#e8f0fa" stroke="#4f8fd6" stroke-width="1.6">
+    <rect x="220" y="135" width="100" height="50" rx="6"/>
+    <rect x="760" y="135" width="100" height="50" rx="6"/>
+  </g>
+  <g text-anchor="middle" fill="#1a1a1a">
+    <text x="270" y="164" font-size="14" font-weight="bold">fan-out</text>
+    <text x="460" y="74" font-size="14" font-weight="bold">member A</text>
+    <text x="460" y="254" font-size="14" font-weight="bold">member B</text>
+    <text x="545" y="162" font-size="14" font-weight="bold">shared state</text>
+    <text x="545" y="180" font-size="12" fill="#555">candidate sink · cancellation token · selection strategy</text>
+    <text x="810" y="156" font-size="14" font-weight="bold">join</text>
+    <text x="810" y="174" font-size="12" fill="#555">selection strategy</text>
+  </g>
+  <rect x="890" y="137" width="100" height="46" rx="23" fill="#eeeeee" stroke="#888"/>
+  <text x="940" y="165" font-size="14" text-anchor="middle" fill="#1a1a1a">output</text>
+</svg>

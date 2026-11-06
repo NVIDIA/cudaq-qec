@@ -12,6 +12,13 @@ This page builds on :doc:`decoding_task_graph`.
 How it works
 ++++++++++++
 
+.. image:: ../../../../assets/docs/task_graph_ensemble.svg
+   :alt: Inside the ensemble, a fan-out passes the measurements to members A
+         and B. A join applies the selection strategy once the members are
+         done and emits the output. The fan-out, the members and the join
+         share one state, the candidate sink, the cancellation token and the
+         selection strategy, drawn as a store between them.
+
 * Every member receives the ensemble's input and decodes it concurrently.
 * A member's answer is a *candidate*: a ``logical_outcome``, the id of the
   node that produced it and, when the decoder reports one, a *cost*, lower
@@ -77,7 +84,8 @@ cheapest answer available 200 microseconds after each shot arrives:
        instead of through an edge to ``output``. Default ``false``.
 
 Cancellation is cooperative. A decoder that never checks its token runs to
-completion and delays the result; a decoder that honors a stop returns ``std::nullopt``.
+completion and delays the result; a decoder that honors a stop may 
+return ``std::nullopt`` if a result is not ready before the stop is requested.
 
 Building a graph in code
 ++++++++++++++++++++++++
@@ -168,10 +176,10 @@ A window node reads the cost from the ``cost`` key of its decoder's
 Honoring cancellation
 ~~~~~~~~~~~~~~~~~~~~~
 
-A C++ decoder overrides ``decode(syndrome, cancellation_token)`` and returns
-``std::nullopt`` once a stop is requested. The token has two levels, *soft*
-and *hard*, and only ever escalates; a decoder chooses which level it reacts
-to where it polls.
+A C++ decoder overrides ``decode(syndrome, cancellation_token)`` and may return
+``std::nullopt`` if a stop is requested before a result is ready. The token 
+has two levels, *soft* and *hard*, and only ever escalates; a decoder chooses 
+which level it reacts to where it polls.
 
 .. code-block:: cpp
 
