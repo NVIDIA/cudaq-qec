@@ -113,8 +113,36 @@ struct decoding_task_graph::impl {
   mutable edge_value meas_val;
 
   // One name per output, parallel to wires_to.back(): the sink edge's
-  // to_input, or its producer's name when left at the default.
+  // to_input, or its producer's name when left at the default. A logical
+  // output is last.
   std::vector<std::string> output_names;
+  // The first num_correction_outputs outputs carry corrections.
+  std::vector<std::string> correction_output_names;
+  std::size_t num_correction_outputs = 0;
+  bool has_logical_output = false;
+  // The logical_readout node (-1 without a logical output), each
+  // observable's completion round, and how many are released this shot.
+  int logical_readout = -1;
+  std::vector<std::optional<std::uint64_t>> logical_completion;
+  std::size_t logical_released = 0;
+  // By node: 1 when it reaches only the logical output, so a one-shot call,
+  // which returns the correction outputs alone, need not run it.
+  std::vector<std::uint8_t> one_shot_skips;
+  /// Find the logical output, the one a reads_logical() node reaches, and
+  /// move it last. At most one such node reaches at most one output.
+  /// @throws std::invalid_argument if that wiring is wrong or the logical
+  /// output is the only output.
+  void order_logical_output();
+  /// Release the logical observables whose completion round is covered by
+  /// both @p frontier and the readout, when the logical output is staged.
+  /// With @p final, release the rest too,
+  /// but only once the readout has read the whole shot, which a FINAL record
+  /// gives it, and the corrections have published (@p generation). True when
+  /// one was released.
+  bool release_logical(std::uint64_t frontier, std::uint64_t generation,
+                       bool final);
+  /// Forget the observables released this shot.
+  void unrelease_logical();
 
   // Nodes that opted into per-round streaming, with capability lookup cached
   // once at graph compilation.
@@ -160,9 +188,9 @@ struct decoding_task_graph::impl {
 
   // Sizes cached by compile_wires() so the accessors do not have to nominate a
   // representative node.  n_msyn is the largest window among the raw-input
-  // streaming nodes, n_round the round size they all agreed on, and n_obs the
-  // outputs' total width.
-  std::size_t n_msyn = 0, n_round = 0, n_obs = 0;
+  // streaming nodes, n_round the round size they all agreed on, n_obs the
+  // correction outputs' total width, n_logical the logical output's.
+  std::size_t n_msyn = 0, n_round = 0, n_obs = 0, n_logical = 0;
 
   // Offsets into streaming_result_state.values, parallel to streaming_nodes:
   // one per output the node XOR-accumulates into. Empty when

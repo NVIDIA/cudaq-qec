@@ -66,7 +66,7 @@ public:
   /// Builds every variant of @p request on the store's template with
   /// @p context's content not held yet: one window per variant key, over
   /// the shot lengths that hold every key. A window holding the readout
-  /// round carries m2o when the template has a readout map.
+  /// round carries m2o when the last phase holds every readout map.
   /// @throws std::invalid_argument as window_from_dem_chunks() does.
   /// @throws std::logic_error if no template with @p context's content was
   /// added.

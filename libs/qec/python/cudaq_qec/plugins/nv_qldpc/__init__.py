@@ -50,7 +50,7 @@ def __dir__():
 
 __all__ = [
     "init_tcbp_model", "inspect", "learn_noise", "plugin_path", "tying", "p25",
-    "io"
+    "io", "presets", "PRESETS", "preset"
 ]
 
 _LIB_NAME = "libcudaq-qec-nv-qldpc-decoder.so"
@@ -308,3 +308,8 @@ def learn_noise(H,
     if design is not None:
         report["q_hat"] = q.tolist()
     return rates, report
+
+
+# Named option bundles for the decoder (see presets.py); numpy-only.
+from . import presets  # noqa: E402
+from .presets import PRESETS, preset  # noqa: E402

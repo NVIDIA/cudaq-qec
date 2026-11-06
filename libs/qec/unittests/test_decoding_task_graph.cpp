@@ -9,6 +9,7 @@
 #include "../lib/decoding_task/decoding_task_edge_value.h"
 #include "../lib/decoding_task/decoding_task_graph_utils.h"
 #include "../lib/decoding_task/decoding_task_ingest_node.h"
+#include "../lib/decoding_task/decoding_task_logical_readout_node.h"
 #include "../lib/decoding_task/decoding_task_memory_window_node.h"
 #include "../lib/decoding_task/decoding_task_node_kind_registry.h"
 #include "../lib/decoding_task/decoding_task_parallel_window_pattern.h"
@@ -482,6 +483,341 @@ TEST(DecodingTaskGraph, HostDispatchRoutesToTaskGraph) {
 
   cudaq::qec::decoding::config::finalize_decoders();
 }
+
+// A streaming result's logical read is the one release check every reader
+// shares: the last output's bits from first, once each is released. It is
+// null without a logical output, for a range past it or empty, for a bit not
+// yet released, or for values too short to hold the flagged bits.
+TEST(DecodingTaskGraph, StreamingResultGatesLogicalReadsOnRelease) {
+  cudaq::qec::task_graph_streaming_result result;
+  cudaq::qec::task_graph_output_progress corrections;
+  cudaq::qec::task_graph_output_progress logical;
+
+  EXPECT_EQ(result.logical_measurements(0, 1), nullptr);
+  corrections.value_width = 2;
+  result.outputs = {corrections};
+  result.values = {1, 0};
+  EXPECT_EQ(result.logical_measurements(0, 1), nullptr);
+
+  logical.value_offset = 2;
+  logical.value_width = 3;
+  logical.released = {1, 0, 1};
+  result.outputs.push_back(logical);
+  result.values = {1, 0, 1, 1, 0};
+  ASSERT_NE(result.logical_measurements(0, 1), nullptr);
+  EXPECT_EQ(*result.logical_measurements(0, 1), 1);
+  ASSERT_NE(result.logical_measurements(2, 1), nullptr);
+  EXPECT_EQ(*result.logical_measurements(2, 1), 0);
+  EXPECT_EQ(result.logical_measurements(1, 1), nullptr);
+  EXPECT_EQ(result.logical_measurements(0, 3), nullptr);
+  EXPECT_EQ(result.logical_measurements(2, 2), nullptr);
+  EXPECT_EQ(result.logical_measurements(3, 1), nullptr);
+  EXPECT_EQ(result.logical_measurements(0, 0), nullptr);
+  result.values.resize(4);
+  EXPECT_EQ(result.logical_measurements(2, 1), nullptr);
+}
+
+// host::get_logical_measurements refuses a plain decoder and a task graph
+// without a logical output.
+TEST(DecodingTaskGraph, HostRefusesLogicalMeasurementsADecoderLacks) {
+  namespace host = cudaq::qec::decoding::host;
+  const std::string yaml = R"(decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+  - id: 1
+    type: single_error_lut
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0,-1,1,-1,2,-1]
+    O_sparse: [0,-1,1,-1,2,-1]
+    D_sparse: [0,-1,1,-1,2,-1]
+)";
+  std::vector<uint8_t> logical(1, 0);
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(cudaq::qec::decoding::config::configure_decoders(config), 0);
+
+  EXPECT_THROW(host::get_logical_measurements(0, 0, logical.data(), 1, false),
+               std::invalid_argument);
+  EXPECT_THROW(host::get_logical_measurements(1, 0, logical.data(), 1, false),
+               std::invalid_argument);
+  cudaq::qec::decoding::config::finalize_decoders();
+} // end - TEST(DecodingTaskGraph, HostRefusesLogicalMeasurementsADecoderLacks)
+
+// A logical_readout node also joins an output fed by a scheduled contributor
+// (a sliding window): the logical measurements appear at FINAL, not before.
+TEST(DecodingTaskGraph, LogicalOutputJoinsAScheduledContributor) {
+  auto spec = rep5_spec(5);
+  std::vector<task_graph_node_config> nodes(3);
+  std::mt19937 rng(59);
+  std::size_t ones = 0; // shots whose logical measurement is 1
+
+  spec.phases.back().spec.m2o_sparse = {0, -1};
+  nodes[0].id = "sw";
+  nodes[0].kind = "sliding_window";
+  nodes[0].dem = spec;
+  nodes[0].decoder_type = "single_error_lut";
+  nodes[0].node_params = {{"window_size", std::size_t{3}},
+                          {"step_size", std::size_t{1}}};
+  nodes[1].id = "R";
+  nodes[1].kind = "logical_readout";
+  nodes[1].dem = spec;
+  nodes[2].id = "L";
+  nodes[2].kind = "xor";
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"measurements", "output", "sw", "input"},
+                         {"measurements", "output", "R", "input"},
+                         {"sw", "output", "output", "corrections"},
+                         {"sw", "output", "L", "a"},
+                         {"R", "output", "L", "b"},
+                         {"L", "output", "output", "logical"}});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  ASSERT_EQ(graph->get_num_logical_measurements(), 1u);
+  const auto per_round = graph->get_num_msyn_per_round();
+  for (int shot = 0; shot < 20; ++shot) {
+    std::vector<uint8_t> m(5 * per_round);
+    for (auto &bit : m)
+      bit = (rng() & 7) == 0;
+    graph->reset_decoder();
+    for (std::size_t r = 0; r < 5; ++r) {
+      graph->enqueue_syndrome(m.data() + r * per_round, per_round,
+                              r == 4 ? round_type::FINAL : round_type::BULK);
+      if (r < 4)
+        EXPECT_EQ(graph->get_logical_measurements(), nullptr);
+    }
+    const uint8_t correction = graph->get_obs_corrections()[0];
+    const uint8_t *logical = graph->get_logical_measurements();
+    ASSERT_NE(logical, nullptr);
+    EXPECT_EQ(logical[0], correction ^ m[4 * per_round]) << "shot " << shot;
+    ones += logical[0];
+  }
+  EXPECT_GT(ones, 0u);
+} // end - TEST(DecodingTaskGraph, LogicalOutputJoinsAScheduledContributor)
+
+// A scheduled contributor resumes its numbering after a consumed shot, so its
+// frontier does not count a shot's own rounds: a logical output fed by one
+// releases nothing mid-shot, not even a mid-circuit readout, whether the shot
+// starts with reset_decoder() or clear_corrections(). FINAL releases all.
+TEST(DecodingTaskGraph, AScheduledLogicalOutputReleasesOnlyAtFinal) {
+  const auto spec = mid_readout_spec(8);
+  std::vector<task_graph_node_config> nodes(3);
+  constexpr std::size_t R = 8;
+
+  nodes[0].id = "sw";
+  nodes[0].kind = "sliding_window";
+  nodes[0].dem = spec;
+  nodes[0].decoder_type = "single_error_lut";
+  nodes[0].node_params = {{"window_size", std::size_t{5}},
+                          {"step_size", std::size_t{1}}};
+  nodes[1].id = "R";
+  nodes[1].kind = "logical_readout";
+  nodes[1].dem = spec;
+  nodes[2].id = "L";
+  nodes[2].kind = "xor";
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"measurements", "output", "sw", "input"},
+                         {"measurements", "output", "R", "input"},
+                         {"sw", "output", "output", "corrections"},
+                         {"sw", "output", "L", "a"},
+                         {"R", "output", "L", "b"},
+                         {"L", "output", "output", "logical"}});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  ASSERT_EQ(graph->get_num_logical_measurements(), 2u);
+  const std::vector<uint8_t> round(graph->get_num_msyn_per_round(), 0);
+  graph->reset_decoder();
+  for (int shot = 0; shot < 3; ++shot) {
+    SCOPED_TRACE(::testing::Message() << "shot " << shot);
+    for (std::size_t r = 0; r < R; ++r) {
+      graph->enqueue_syndrome(round.data(), round.size(),
+                              r + 1 == R ? round_type::FINAL
+                                         : round_type::BULK);
+      if (r + 1 < R)
+        EXPECT_EQ(graph->get_logical_measurements(0, 1), nullptr)
+            << "round " << r;
+    }
+    ASSERT_NE(graph->get_logical_measurements(), nullptr);
+    graph->clear_corrections();
+  }
+} // end - TEST(DecodingTaskGraph, AScheduledLogicalOutputReleasesOnlyAtFinal)
+
+// host::get_logical_measurements reads a configured graph's logical output
+// after FINAL. A reset read of either result consumes the shot for both, so
+// after get_corrections with reset the logical read waits for the next shot.
+// Mid-shot, a reset read of either is not ready. A plain decoder and a range
+// past the count are refused.
+TEST(DecodingTaskGraph, HostReadsLogicalMeasurementsOnceTheShotEnds) {
+  namespace host = cudaq::qec::decoding::host;
+  const std::string yaml = R"(decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], m2o_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+          output: corrections_and_logical
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+  - id: 1
+    type: single_error_lut
+    block_size: 3
+    syndrome_size: 3
+    H_sparse: [0,-1,1,-1,2,-1]
+    O_sparse: [0,-1,1,-1,2,-1]
+    D_sparse: [0,-1,1,-1,2,-1]
+syndrome_mapping:
+  - {id: 1, type: final}
+)";
+  constexpr std::size_t rounds = 30;
+  constexpr std::size_t width = 2; // measurements a round
+  std::vector<uint8_t> round(width, 0);
+  std::vector<uint8_t> corrections(1, 0xff);
+  std::vector<uint8_t> logical(1, 0xff);
+  std::vector<uint8_t> wide(2, 0);
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(cudaq::qec::decoding::config::configure_decoders(config), 0);
+
+  for (int shot = 0; shot < 2; ++shot) {
+    for (std::size_t r = 0; r + 1 < rounds; ++r)
+      host::enqueue_syndromes(0, round.data(), width, r);
+    EXPECT_THROW(host::get_logical_measurements(0, 0, logical.data(), 1, false),
+                 std::runtime_error);
+    EXPECT_THROW(host::get_logical_measurements(0, 0, logical.data(), 1, true),
+                 std::runtime_error);
+    EXPECT_THROW(host::get_corrections(0, corrections.data(), 1, true),
+                 std::runtime_error);
+    // The readout round's first measurement is the raw logical value.
+    round[0] = 1;
+    host::enqueue_syndromes(0, round.data(), width, rounds - 1,
+                            /*syndrome_mapping_id=*/1);
+    round[0] = 0;
+    host::get_corrections(0, corrections.data(), 1, false);
+    host::get_logical_measurements(0, 0, logical.data(), 1, shot == 0);
+    EXPECT_EQ(logical[0], 1 ^ corrections[0]) << "shot " << shot;
+    if (shot == 1)
+      host::get_corrections(0, corrections.data(), 1, true);
+    EXPECT_THROW(host::get_logical_measurements(0, 0, logical.data(), 1, false),
+                 std::runtime_error);
+  }
+  EXPECT_THROW(host::get_logical_measurements(0, 0, wide.data(), 2, false),
+               std::invalid_argument);
+  EXPECT_THROW(host::get_logical_measurements(0, 1, logical.data(), 1, false),
+               std::invalid_argument);
+  EXPECT_THROW(host::get_logical_measurements(1, 0, logical.data(), 1, false),
+               std::invalid_argument);
+  cudaq::qec::decoding::config::finalize_decoders();
+} // end - TEST(DecodingTaskGraph, HostReadsLogicalMeasurementsOnceTheShotEnds)
+
+// On a graph with a logical output, a reset read of a failed shot says the
+// shot failed and that reset_decoder() starts the next, not that the shot
+// has not ended. The next shot then ends as usual.
+TEST(DecodingTaskGraph, HostReportsAFailedShotToAResetRead) {
+  namespace host = cudaq::qec::decoding::host;
+  const std::string yaml = R"(decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}
+        - {from: bulk, to: final}
+      phases:
+        - {name: init, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: bulk, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+        - {name: final, spec: {num_faults: 2, H_sparse: [0, -1, 1, -1], O_sparse: [0, -1], m2o_sparse: [0, -1], error_rates: [0.01, 0.01]}}
+    task_graph:
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          boundary_prior: 0.01
+          inner: {type: single_error_lut}
+          output: corrections_and_logical
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+syndrome_mapping:
+  - {id: 1, type: final}
+)";
+  constexpr std::size_t rounds = 30;
+  constexpr std::size_t width = 2; // measurements a round
+  std::vector<uint8_t> round(width, 0);
+  std::vector<uint8_t> corrections(1, 0);
+  std::vector<uint8_t> logical(1, 0);
+  std::string error;
+  const auto message_of = [](auto &&read) -> std::string {
+    try {
+      read();
+    } catch (const std::runtime_error &e) {
+      return e.what();
+    }
+    return "no runtime_error";
+  };
+  auto config =
+      cudaq::qec::decoding::config::multi_decoder_config::from_yaml_str(yaml);
+  ASSERT_EQ(cudaq::qec::decoding::config::configure_decoders(config), 0);
+
+  // FINAL on the first round, shorter than the model's shortest shot.
+  EXPECT_ANY_THROW(host::enqueue_syndromes(0, round.data(), width, 0,
+                                           /*syndrome_mapping_id=*/1));
+  error = message_of(
+      [&] { host::get_corrections(0, corrections.data(), 1, true); });
+  EXPECT_NE(error.find("shot failed"), std::string::npos) << error;
+  EXPECT_NE(error.find("reset_decoder"), std::string::npos) << error;
+  error = message_of(
+      [&] { host::get_logical_measurements(0, 0, logical.data(), 1, true); });
+  EXPECT_NE(error.find("shot failed"), std::string::npos) << error;
+  EXPECT_NE(error.find("reset_decoder"), std::string::npos) << error;
+
+  host::reset_decoder(0);
+  for (std::size_t r = 0; r + 1 < rounds; ++r)
+    host::enqueue_syndromes(0, round.data(), width, r);
+  host::enqueue_syndromes(0, round.data(), width, rounds - 1,
+                          /*syndrome_mapping_id=*/1);
+  EXPECT_NO_THROW(
+      host::get_logical_measurements(0, 0, logical.data(), 1, true));
+  cudaq::qec::decoding::config::finalize_decoders();
+} // end - TEST(DecodingTaskGraph, HostReportsAFailedShotToAResetRead)
 
 TEST(DecodingTaskGraph, ConfigureDecodersAcceptsAFinalRowAndServesBothShapes) {
   // The YAML half: a document with a `final` row configures, and both shapes
@@ -16166,11 +16502,12 @@ void expect_lowering_error(Check &&check, const std::string &text) {
 
 } // namespace
 
-// The pattern lowers into the hand-written parallel-window graph: P.ingest
-// with layers A and B reading the logical value, P.A and P.B with the
-// pattern's inner decoder and layer parameters, and P.sum over both layers
-// and the logical, with the edges between them and the outer edges moved
-// onto P.ingest and P.sum.
+// Over a template with a readout map, the pattern lowers into the
+// hand-written parallel-window graph: P.ingest with layers A and B, P.A and
+// P.B with the pattern's inner decoder and layer parameters, and P.sum over
+// both layers, with the edges between them and the outer edges moved onto
+// P.ingest and P.sum; plus P.readout and P.logical (P.sum xor P.readout),
+// which feeds the graph's `logical` output.
 TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
   auto spec = arbitrary_memory_spec(5, true);
   spec.phases.back().spec.m2o_sparse = {0, -1};
@@ -16181,16 +16518,16 @@ TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
                            {"buffer_rounds", std::size_t{3}},
                            {"gap_rounds", std::size_t{9}},
                            {"boundary_prior", 0.04},
-                           {"verify_residual", std::string("report")}},
+                           {"verify_residual", std::string("report")},
+                           {"output", std::string("corrections_and_logical")}},
                           /*max_in_flight=*/4);
-  ASSERT_EQ(p.nodes.size(), 4u);
+  ASSERT_EQ(p.nodes.size(), 6u);
   const auto &ingest = p.nodes[0];
   EXPECT_EQ(ingest.id, "P.ingest");
   EXPECT_EQ(ingest.kind, "ingest");
   EXPECT_EQ(ingest.dem, spec);
   EXPECT_EQ(ingest.windows, (std::vector<experimental::ingest_window>{
                                 {"A", layers.a, ""}, {"B", layers.b, ""}}));
-  EXPECT_TRUE(ingest.node_params.get<bool>("read_logical"));
   for (std::size_t i : {1, 2}) {
     const auto &layer = p.nodes[i];
     EXPECT_EQ(layer.id, i == 1 ? "P.A" : "P.B");
@@ -16203,12 +16540,18 @@ TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
     EXPECT_EQ(layer.node_params.contains("num_receives"), i == 2);
   }
   EXPECT_EQ(p.nodes[2].node_params.get<std::size_t>("num_receives"), 2u);
-  // Only the layers fire as pools; ingest and the sum keep one copy.
-  EXPECT_EQ(p.nodes[0].max_in_flight, 1u);
-  EXPECT_EQ(p.nodes[3].max_in_flight, 1u);
+  // Only the layers fire as pools; the other nodes keep one copy.
+  for (std::size_t i : {0, 3, 4, 5})
+    EXPECT_EQ(p.nodes[i].max_in_flight, 1u) << p.nodes[i].id;
   EXPECT_EQ(p.nodes[3].id, "P.sum");
   EXPECT_EQ(p.nodes[3].kind, "xor");
-  EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 3u);
+  EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 2u);
+  EXPECT_EQ(p.nodes[4].id, "P.readout");
+  EXPECT_EQ(p.nodes[4].kind, "logical_readout");
+  EXPECT_EQ(p.nodes[4].dem, spec);
+  EXPECT_EQ(p.nodes[5].id, "P.logical");
+  EXPECT_EQ(p.nodes[5].kind, "xor");
+  EXPECT_EQ(p.nodes[5].node_params.get<std::size_t>("num_inputs"), 2u);
   EXPECT_EQ(p.edges, (std::vector<task_graph_edge>{
                          {"measurements", "output", "P.ingest", "input"},
                          {"P.sum", "output", "output", "input"},
@@ -16218,12 +16561,56 @@ TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph) {
                          {"P.A", "backward", "P.B", "receive_1"},
                          {"P.A", "output", "P.sum", "in_0"},
                          {"P.B", "output", "P.sum", "in_1"},
-                         {"P.ingest", "logical", "P.sum", "in_2"}}));
+                         {"measurements", "output", "P.readout", "input"},
+                         {"P.sum", "output", "P.logical", "in_0"},
+                         {"P.readout", "output", "P.logical", "in_1"},
+                         {"P.logical", "output", "output", "logical"}}));
 } // end - TEST(ParallelWindowLowering, LowersIntoTheHandWrittenGraph)
 
-// With output: corrections the ingest reads no logical value and P.sum takes
-// the two layers alone; gap_rounds defaults to commit_rounds + 2 buffer
-// rounds, and the column options and a truncated input reach the layers.
+// With output: corrections the pattern wires no logical output; with
+// corrections_and_logical it refuses a graph that wires its own, or edges
+// that take its corrections to no graph output.
+TEST(ParallelWindowLowering, LeavesALogicalOutputItDoesNotOwn) {
+  auto spec = arbitrary_memory_spec(5, true);
+  spec.phases.back().spec.m2o_sparse = {0, -1};
+  // The kinds P lowers into with @p edges and @p output.
+  const auto kinds = [&](std::vector<task_graph_edge> edges,
+                         const std::string &output) {
+    task_graph_node_config cfg;
+    std::vector<task_graph_node_config> nodes;
+    std::vector<std::string> out;
+    cfg.id = "P";
+    cfg.kind = "parallel_window";
+    cfg.dem = spec;
+    cfg.node_params = {{"commit_rounds", std::size_t{2}},
+                       {"buffer_rounds", std::size_t{1}},
+                       {"output", output}};
+    lower_parallel_window(std::move(cfg), nodes, edges);
+    for (const auto &node : nodes)
+      out.push_back(node.kind);
+    return out;
+  };
+  const std::vector<std::string> plain{"ingest", "decode_window",
+                                       "decode_window", "xor"};
+  const std::vector<task_graph_edge> owned{
+      {"measurements", "output", "P", "input"},
+      {"P", "output", "output", "input"},
+      {"X", "output", "output", "logical"}};
+  const std::vector<task_graph_edge> inner{
+      {"measurements", "output", "P", "input"}, {"P", "output", "X", "input"}};
+
+  EXPECT_EQ(kinds(owned, "corrections"), plain);
+  EXPECT_EQ(kinds(inner, "corrections"), plain);
+  expect_lowering_error([&] { kinds(owned, "corrections_and_logical"); },
+                        "the graph names its own output 'logical'");
+  expect_lowering_error([&] { kinds(inner, "corrections_and_logical"); },
+                        "no edge takes its corrections to the graph's output");
+}
+
+// Without a readout map P.sum takes the two layers alone and no logical
+// output is wired; `output: corrections` is accepted; gap_rounds defaults to
+// commit_rounds + 2 buffer rounds, and the column options and a truncated
+// input reach the layers.
 TEST(ParallelWindowLowering, PassesTheOptionsOn) {
   const lowered_pattern p(
       arbitrary_memory_spec(5),
@@ -16241,12 +16628,11 @@ TEST(ParallelWindowLowering, PassesTheOptionsOn) {
   ASSERT_EQ(p.nodes.size(), 4u);
   EXPECT_EQ(p.nodes[0].windows, (std::vector<experimental::ingest_window>{
                                     {"A", layers.a, ""}, {"B", layers.b, ""}}));
-  EXPECT_FALSE(p.nodes[0].node_params.contains("read_logical"));
   EXPECT_EQ(p.nodes[1].max_in_flight, 1u);
   EXPECT_EQ(p.nodes[3].node_params.get<std::size_t>("num_inputs"), 2u);
   EXPECT_EQ(std::count_if(p.edges.begin(), p.edges.end(),
                           [](const task_graph_edge &e) {
-                            return e.from_output == "logical";
+                            return e.to_input == "logical";
                           }),
             0);
 } // end - TEST(ParallelWindowLowering, PassesTheOptionsOn)
@@ -16356,7 +16742,7 @@ TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
   unusable([](auto &cfg) { cfg.d_sparse = {{0}}; }, "takes no flat matrices");
   unusable([](auto &cfg) { cfg.windows = {{"A", {}, ""}}; },
            "takes no windows: its layers are A and B");
-  // corrected_logical, the default, reads the template's readout map.
+  // Replaced by the graph's logical output.
   expect_lowering_error(
       [&] {
         lower({{"measurements", "output", "P", "input"}}, spec,
@@ -16364,9 +16750,8 @@ TEST(ParallelWindowLowering, RejectsWhatIsNotThePattern) {
                {"buffer_rounds", std::size_t{1}},
                {"output", std::string("corrected_logical")}});
       },
-      "from_topology: parallel_window 'P' has output: corrected_logical, "
-      "which reads the logical value through the last phase's m2o_sparse, "
-      "and its template has none");
+      "parallel_window: output: corrected_logical is replaced by output: "
+      "corrections_and_logical");
   expect_lowering_error(
       [&] {
         lower({{"measurements", "output", "P", "input"}}, spec,
@@ -16438,18 +16823,18 @@ TEST(ParallelWindowLowering, RejectsAReservedId) {
 // Building the windowed kinds
 // ---------------------------------------------------------------------------
 
-// The ingest and decode_window kinds build their nodes from what a windowed
-// topology resolves: an ingest node from its template and layers, a
+// The ingest, decode_window and logical_readout kinds build their nodes from
+// what a topology resolves: an ingest node from its template and layers, a
 // decode_window node from the store's windows, the template and the layer
 // request of the ingest port it reads, with its receives, inner decoder
-// and verify_residual. Without them neither builds.
+// and verify_residual, and a logical_readout node from its template.
+// Without them none builds.
 TEST(WindowKinds, BuildTheirNodesFromTheContext) {
   const auto layers = layered(2, 1, 3);
   auto spec = arbitrary_memory_spec(5, true);
   spec.phases.back().spec.m2o_sparse = {0, -1};
   data_artifact_store store;
   const auto context = store.add_template(spec);
-  const cudaqx::heterogeneous_map ingest_params{{"read_logical", true}};
   const cudaqx::heterogeneous_map unchecked{};
   const cudaqx::heterogeneous_map failing{
       {"verify_residual", std::string("fail")}};
@@ -16479,12 +16864,16 @@ TEST(WindowKinds, BuildTheirNodesFromTheContext) {
     return (*find_node_factory(kind))(ctx);
   };
 
-  auto ingest_ctx = context_of("ingest", ingest_params, std::nullopt);
+  auto ingest_ctx = context_of("ingest", unchecked, std::nullopt);
   ingest_ctx.windows = {{"A", layers.a, ""}, {"B", layers.b, ""}};
   auto ingest = build("ingest", ingest_ctx);
   auto *in = dynamic_cast<ingest_node *>(ingest.get());
   ASSERT_NE(in, nullptr);
-  EXPECT_EQ(in->outputs(), (std::vector<std::string>{"A", "B", "logical"}));
+  EXPECT_EQ(in->outputs(), (std::vector<std::string>{"A", "B"}));
+  auto readout_ctx = context_of("readout", unchecked, std::nullopt);
+  auto readout = build("logical_readout", readout_ctx);
+  ASSERT_NE(dynamic_cast<logical_readout_node *>(readout.get()), nullptr);
+  EXPECT_EQ(readout->outputs(), std::vector<std::string>{"output"});
   // A's first window, copied while its publication stands.
   for (std::size_t at = 0; !window; at += *in->raw_chunk_limit()) {
     ASSERT_LT(at + *in->raw_chunk_limit(), m.size());
@@ -16522,6 +16911,9 @@ TEST(WindowKinds, BuildTheirNodesFromTheContext) {
   expect_lowering_error([&] { build("decode_window", bare); },
                         "task graph node 'lonely': a decode_window node is "
                         "built only within a windowed topology");
+  expect_lowering_error([&] { build("logical_readout", bare); },
+                        "task graph node 'lonely': a logical_readout node "
+                        "reads its template from dem_chunks");
 } // end - TEST(WindowKinds, BuildTheirNodesFromTheContext)
 
 // from_topology builds a windowed graph's nodes from what it resolves, so a

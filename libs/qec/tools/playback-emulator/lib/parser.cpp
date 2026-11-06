@@ -408,11 +408,26 @@ schedule parse(std::string_view text,
         // same way; all that differs is which end of the source it pulls.
         e.op = operation::enqueue_data;
         read_source(ops, op_name, sched, e);
-      } else if (op_name == "get_corrections") {
-        e.op = operation::get_corrections;
+      } else if (op_name == "get_corrections" ||
+                 op_name == "get_logical_measurements") {
+        e.op = op_name == "get_corrections"
+                   ? operation::get_corrections
+                   : operation::get_logical_measurements;
         e.return_size = ops.u32("return_size", 0);
+        // Only a logical read takes first=; either read takes reset=. A
+        // logical read is most often mid-shot, so it keeps the shot unless
+        // it says reset=1; a corrections read consumes it unless reset=0.
+        if (e.op == operation::get_logical_measurements)
+          e.first = ops.u32("first", 0);
+        {
+          const auto reset =
+              ops.u32("reset", e.op == operation::get_corrections ? 1 : 0);
+          if (reset > 1)
+            throw std::invalid_argument("'reset=' must be 0 or 1");
+          e.reset = reset != 0;
+        }
         read_bits(ops, sched.expected_arena, e.expected_offset,
-                  e.expected_count, "get_corrections expected");
+                  e.expected_count, (op_name + " expected").c_str());
         check_return_width(e, op_name);
       } else if (op_name == "stream") {
         e.op = operation::stream;
