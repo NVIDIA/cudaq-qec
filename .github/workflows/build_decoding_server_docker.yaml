@@ -133,8 +133,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          username: ${{ secrets.PACKAGE_USER || github.actor }}
+          password: ${{ secrets.PACKAGE_TOKEN || github.token }}
 
       - name: Build and push image by digest
         id: docker-build
