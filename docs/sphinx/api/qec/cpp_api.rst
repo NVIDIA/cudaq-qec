@@ -185,6 +185,24 @@ Graph
 .. doxygenstruct:: cudaq::qec::task_graph_ensemble_spec
     :members:
 
+.. doxygenstruct:: cudaq::qec::candidate
+    :members:
+
+.. doxygenclass:: cudaq::qec::candidate_sink
+    :members:
+    :undoc-members:
+
+.. doxygenclass:: cudaq::qec::selection_strategy
+    :members:
+    :undoc-members:
+
+.. doxygentypedef:: cudaq::qec::selection_strategy_factory
+
+.. doxygenclass:: cudaq::qec::selection_strategy_registration
+
+.. doxygenfunction:: cudaq::qec::register_selection_strategy
+.. doxygenfunction:: cudaq::qec::registered_selection_strategies
+
 .. doxygenvariable:: cudaq::qec::default_task_graph_node_kind
 
 .. doxygenfunction:: cudaq::qec::registered_task_graph_node_kinds

@@ -72,6 +72,7 @@ public:
   }
 
   // --- round owner ---------------------------------------------------------
+  ///@cond INTERNAL
 
   /// @brief Start a round: drop queued candidates and the best so far, and
   /// install the observer every push of the round is shown to.
@@ -95,6 +96,7 @@ public:
     free(n);
     return {out.rbegin(), out.rend()};
   }
+  ///@endcond
 
 private:
   struct node {

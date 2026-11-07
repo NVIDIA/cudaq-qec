@@ -31,7 +31,8 @@ Build a graph in Python or C++, or declare it in the ``task_graph`` block of a
 decoder's YAML configuration, which the realtime decoding server reads.
 
 To decode streams of any length with windows that decode at the same time, see
-:doc:`task_graph_parallel_window`. For execution details, ensembles and other
+:doc:`task_graph_parallel_window`. For orchestrating an ensemble of decoders,
+see :doc:`task_graph_ensemble`. For execution details and other
 advanced topics, see :doc:`task_graph_reference`.
 
 Quick start: a sliding window
@@ -314,7 +315,7 @@ Node kinds
        ``residual`` port.
    * - ``ensemble``
      - Runs several member graphs and keeps one answer. See
-       :doc:`task_graph_reference`.
+       :doc:`task_graph_ensemble`.
 
 Kinds are a registry, so plugins can add more.
 ``registered_task_graph_node_kinds()`` lists an installation's kinds,
