@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Parallel-window decoding of a distance-5 repetition-code memory experiment.
+# Shots may have any number of rounds: the model has no num_rounds.
+
+decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      measurements_per_round: 4        # one per check
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}       # bulk repeats
+        - {from: bulk, to: final}
+      phases:
+        # Faults 0-4 flip data qubits 0-4; faults 5-8 are errors in measuring
+        # checks 0-3. Check i reads data qubits i and i + 1. Observable 0 reads
+        # data qubit 0.
+        - name: init                   # first round of checks
+          spec:
+            num_faults: 9
+            seam_specs:
+              - name: prev_round       # detectors of this round
+                spec: {H_sparse: [0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1,
+                                  3, 4, 8, -1]}
+              - name: next_round       # detectors of the next round
+                spec: {H_sparse: [5, -1, 6, -1, 7, -1, 8, -1]}
+            D_sparse: [0, -1, 1, -1, 2, -1, 3, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+        - name: bulk
+          spec:
+            num_faults: 9
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1,
+                                  3, 4, 8, -1]}
+              - name: next_round
+                spec: {H_sparse: [5, -1, 6, -1, 7, -1, 8, -1]}
+            # Detector i: check i in the previous round (index i) and in
+            # this one (index 4 + i).
+            D_sparse: [0, 4, -1, 1, 5, -1, 2, 6, -1, 3, 7, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+        - name: final                  # data-qubit readout
+          spec:
+            num_faults: 5
+            num_measurements: 5        # data qubits 0-4
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1]}
+            # Detector i: check i in the previous round and data qubits i
+            # and i + 1 in this one.
+            D_sparse: [0, 4, 5, -1, 1, 5, 6, -1, 2, 6, 7, -1, 3, 7, 8, -1]
+            m2o_sparse: [0, -1]        # observable 0 reads data qubit 0
+            O_sparse: [0, -1]
+            error_rates: [0.02, 0.02, 0.02, 0.02, 0.02]
+    task_graph:
+      async_streaming: true            # decode windows concurrently
+      nodes:
+        - id: pw
+          type: parallel_window
+          commit_rounds: 3
+          buffer_rounds: 3
+          gap_rounds: 9
+          output: corrections_and_logical
+          max_in_flight: 4             # windows of each layer at once
+          inner: {type: pymatching, merge_strategy: smallest_weight}
+      edges:
+        - {from: measurements, to: pw}
+        - {from: pw, to: output}
+
+syndrome_mapping:
+  - {id: 0, type: bulk}
+  - {id: 1, type: final}               # tag each shot's last round with id 1

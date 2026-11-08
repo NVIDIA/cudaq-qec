@@ -70,6 +70,9 @@ if(TARGET cudaq-qec-decoding-server)
     target_link_libraries(test_decoders_yaml PRIVATE cudaq-qec-chromobius)
     target_compile_definitions(test_decoders_yaml PRIVATE CUDAQX_QEC_HAS_CHROMOBIUS)
   endif()
+  # The documentation's example configurations, which the tests build.
+  target_compile_definitions(test_decoders_yaml PRIVATE
+    CUDAQX_QEC_DOCS_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../docs/sphinx/examples/qec")
   add_dependencies(CUDAQXQECUnitTests test_decoders_yaml)
   gtest_discover_tests(test_decoders_yaml DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
@@ -81,6 +84,43 @@ if(TARGET cudaq-qec-decoding-server)
     CUDA::cudart)
   add_dependencies(CUDAQXQECUnitTests test_decoding_server_core)
   gtest_discover_tests(test_decoding_server_core DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
+
+  # DeviceGraphRingConsumer is compiled into this binary so the CUDA and
+  # dlsym wraps intercept the constructor. The static device-graph archive
+  # stays out of the link, which would hide those wraps.
+  if(TARGET cudaq-qec-decoding-server-device-graph)
+    set(_qec_cc_cqr_dir
+      ${CMAKE_CURRENT_SOURCE_DIR}/../lib/realtime/decoding-server-cqr)
+    add_executable(test_device_graph
+      test_device_graph.cpp
+      ${_qec_cc_cqr_dir}/DeviceGraphRingConsumer.cpp)
+    target_compile_definitions(test_device_graph PRIVATE
+      CUDAQ_QEC_DEVICE_GRAPH_AVAILABLE)
+    target_include_directories(test_device_graph PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${_qec_cc_cqr_dir}
+      ${CUDAQ_REALTIME_INCLUDE_DIR}
+      ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(test_device_graph PRIVATE
+      GTest::gtest_main
+      cudaq-qec-decoding-server
+      CUDA::cudart
+      ${CMAKE_DL_LIBS})
+    target_link_options(test_device_graph PRIVATE
+      "LINKER:--wrap=cudaSetDevice"
+      "LINKER:--wrap=cudaGetDeviceProperties"
+      "LINKER:--wrap=cudaGetDeviceProperties_v2"
+      "LINKER:--wrap=cudaHostAlloc"
+      "LINKER:--wrap=cudaHostGetDevicePointer"
+      "LINKER:--wrap=cudaFreeHost"
+      "LINKER:--wrap=cudaMalloc"
+      "LINKER:--wrap=cudaMemset"
+      "LINKER:--wrap=cudaFree"
+      "LINKER:--wrap=cudaGetErrorString"
+      "LINKER:--wrap=dlsym")
+    add_dependencies(CUDAQXQECUnitTests test_device_graph)
+    gtest_discover_tests(test_device_graph DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
+  endif()
 else()
   message(STATUS "Skipping test_decoders_yaml / test_decoding_server_core "
                  "(cudaq-qec-decoding-server not built)")

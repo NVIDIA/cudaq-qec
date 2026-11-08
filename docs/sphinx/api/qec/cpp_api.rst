@@ -46,32 +46,31 @@ Detector Error Model
 
 .. _dyn_dem_cpp_api:
 
-Dynamic DEM Construction
-========================
+Dynamic DEM
+===========
 
-Build a code-capacity or phenomenological DEM from CSS generator matrices
-(no Stim circuit required), or compose per-round DEM chunks that can be
-stitched and closed into a flat :cpp:struct:`cudaq::qec::detector_error_model`.
-See :doc:`/examples_rst/qec/dyn_dem` for a walkthrough.
+The ``dem_chunks`` model types. See :doc:`/examples_rst/qec/dyn_dem`.
 
-CSS matrices and noise
-----------------------
-
-.. doxygenstruct:: cudaq::qec::css_code_matrices
+.. doxygenstruct:: cudaq::qec::dem_chunks_spec
     :members:
 
-.. doxygenstruct:: cudaq::qec::css_noise_params
+.. doxygenstruct:: cudaq::qec::phase_spec_entry
     :members:
 
-.. doxygenfunction:: cudaq::qec::css_matrices_from_code
-.. doxygenfunction:: cudaq::qec::dem_from_css_matrices(const css_code_matrices &, const css_noise_params &, std::size_t)
-.. doxygenfunction:: cudaq::qec::dem_from_css_matrices(const code &, const css_noise_params &, std::size_t)
+.. doxygenstruct:: cudaq::qec::phase_connection
+    :members:
 
-Extended DEM chunks
--------------------
+.. doxygenstruct:: cudaq::qec::seam_connection
+    :members:
 
-Seam and phase identifiers
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. doxygenstruct:: cudaq::qec::dem_chunk_spec
+    :members:
+
+.. doxygenstruct:: cudaq::qec::seam_spec_entry
+    :members:
+
+.. doxygenstruct:: cudaq::qec::dem_seam_spec
+    :members:
 
 .. doxygenstruct:: cudaq::qec::seam_id
     :members:
@@ -84,79 +83,7 @@ Seam and phase identifiers
 .. doxygennamespace:: cudaq::qec::phase_name
     :members:
 
-Chunk types
-~~~~~~~~~~~
-
-.. doxygenstruct:: cudaq::qec::extended_dem
-    :members:
-
-.. doxygenfunction:: cudaq::qec::extended_dem_from_css_matrices
-
-.. doxygenstruct:: cudaq::qec::dem_seam_spec
-    :members:
-
-.. doxygenstruct:: cudaq::qec::seam_spec_entry
-    :members:
-
-.. doxygenstruct:: cudaq::qec::dem_chunk_spec
-    :members:
-
-.. doxygenstruct:: cudaq::qec::seam_connection
-    :members:
-
-.. doxygenstruct:: cudaq::qec::phase_connection
-    :members:
-
-.. doxygenstruct:: cudaq::qec::phase_spec_entry
-    :members:
-
-.. doxygenstruct:: cudaq::qec::dem_chunks_spec
-    :members:
-
-.. doxygenfunction:: cudaq::qec::dem_chunk_from_spec
-.. doxygenfunction:: cudaq::qec::dem_chunks_from_spec
 .. doxygenfunction:: cudaq::qec::memory_dem_chunks_from_decoder_inputs
-
-Stitch, close, and merge
-------------------------
-
-.. doxygenenum:: cudaq::qec::prior_combine_mode
-
-.. doxygenfunction:: cudaq::qec::dem_stitch
-.. doxygenfunction:: cudaq::qec::dem_stitch_all
-.. doxygenfunction:: cudaq::qec::dem_stitch_merged
-.. doxygenfunction:: cudaq::qec::dem_close
-.. doxygenfunction:: cudaq::qec::dem_close_all
-.. doxygenfunction:: cudaq::qec::dem_merge_duplicate_columns
-.. doxygenfunction:: cudaq::qec::are_dem_columns_unique
-.. doxygenfunction:: cudaq::qec::assert_dem_columns_unique
-
-Streaming decoder maps
-----------------------
-
-.. doxygenfunction:: cudaq::qec::dem_chunk_rounds
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_rounds
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_detector_round
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse(const std::vector<extended_dem> &, seam_id, seam_id)
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_d_sparse(const dem_chunks_spec &)
-.. doxygenfunction:: cudaq::qec::dem_chunks_measurement_count
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_sparse
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_pcm
-
-Compact chunk forms
--------------------
-
-.. doxygenvariable:: cudaq::qec::compact_chain_repeating_visits
-
-.. doxygenstruct:: cudaq::qec::compact_chain
-    :members:
-
-.. doxygenstruct:: cudaq::qec::chunked_observable_map
-    :members:
-
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_compact_chain
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_chunked(const std::vector<extended_dem> &, std::size_t, std::size_t, std::uint64_t)
-.. doxygenfunction:: cudaq::qec::dem_chunks_to_o_chunked(const dem_chunks_spec &)
 
 .. _dem_sampling_cpp_api:
 
@@ -220,26 +147,12 @@ Decoder Interfaces
 Decoding Task Graph
 ===================
 
-A ``decoding_task_graph`` is a composable decode pipeline backed by a
-node/edge DAG. Each node is an instance of a registered node kind; query the
-available kinds with ``registered_task_graph_node_kinds()``. Edges route typed
-values between nodes at construction time.
-
-Built-in factories:
-
-- ``from_spec`` / public constructor — single decoder wrapped in a
-  window-accumulation node.
-- ``from_topology`` — any topology of ``task_graph_node_config`` nodes wired
-  by ``task_graph_edge`` edges.
-- ``combine`` — two independent decoders whose logical outcomes are
-  XOR'd; each branch applies its own D matrix.
-
-The graph exposes both a **streaming interface** (``enqueue_syndrome`` /
-``get_obs_corrections``) that accumulates syndrome rounds per window, and
-**one-shot execution** (``run`` / ``run_async``) that processes one full shot.
-``run_batch`` processes a collection; one-shot execution is commonly used for
-offline analysis.
-
+A ``decoding_task_graph`` is a decoder pipeline of nodes wired by edges. Build
+one with ``from_spec`` (one decoder in a window), ``combine`` (two decoders
+whose corrections are XORed) or ``from_topology`` (any nodes and edges). Run it
+on complete shots with ``run`` and ``run_batch``, or stream rounds with
+``enqueue_syndrome``. See :doc:`/examples_rst/qec/decoding_task_graph` and
+:doc:`/examples_rst/qec/task_graph_parallel_window`.
 
 I/O types
 ---------
@@ -263,20 +176,6 @@ I/O types
 Graph
 -----
 
-.. doxygenstruct:: cudaq::qec::experimental::round_range
-    :members:
-
-.. doxygenenum:: cudaq::qec::experimental::port_disposition
-.. doxygenenum:: cudaq::qec::experimental::send_mode
-.. doxygenenum:: cudaq::qec::experimental::input_boundary
-.. doxygenenum:: cudaq::qec::experimental::parallel_resolution
-
-.. doxygenstruct:: cudaq::qec::experimental::window_request
-    :members:
-
-.. doxygenstruct:: cudaq::qec::experimental::ingest_window
-    :members:
-
 .. doxygenstruct:: cudaq::qec::task_graph_edge
     :members:
 
@@ -285,6 +184,24 @@ Graph
 
 .. doxygenstruct:: cudaq::qec::task_graph_ensemble_spec
     :members:
+
+.. doxygenstruct:: cudaq::qec::candidate
+    :members:
+
+.. doxygenclass:: cudaq::qec::candidate_sink
+    :members:
+    :undoc-members:
+
+.. doxygenclass:: cudaq::qec::selection_strategy
+    :members:
+    :undoc-members:
+
+.. doxygentypedef:: cudaq::qec::selection_strategy_factory
+
+.. doxygenclass:: cudaq::qec::selection_strategy_registration
+
+.. doxygenfunction:: cudaq::qec::register_selection_strategy
+.. doxygenfunction:: cudaq::qec::registered_selection_strategies
 
 .. doxygenvariable:: cudaq::qec::default_task_graph_node_kind
 

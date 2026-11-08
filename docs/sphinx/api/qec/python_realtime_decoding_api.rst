@@ -91,12 +91,17 @@ These functions can be called from within CUDA-Q quantum kernels (``@cudaq.kerne
 .. py:function:: cudaq_qec.qec.get_logical_measurements(decoder_id, first, return_size, reset)
 
    Retrieve logical measurements from the decoder: the raw logical readout
-   with the decoder's corrections applied. Only a task graph with an output
-   named ``logical`` has them; a ``parallel_window`` pattern with
-   ``output: corrections_and_logical`` wires one. Each is released once its
-   readout has arrived and every correction that can flip it is committed; a
+   with the decoder's corrections applied. Only a task graph with a logical
+   output has them; a ``parallel_window`` pattern with
+   ``output: corrections_and_logical`` wires one (see
+   :ref:`task_graph_logical_measurements`). Each is released once its readout
+   has arrived and every correction that can flip it is committed; a
    mid-circuit readout can be released mid-shot, and all are by the
-   ``type: final`` syndrome_mapping row that ends the shot.
+   ``type: final`` syndrome_mapping row that ends the shot. A read of
+   measurements not yet released fails: the decoding server answers
+   ``NOT_READY``. A read with ``reset`` consumes the shot for this call and
+   ``get_corrections`` alike, so read the logical measurements before a
+   ``get_corrections`` that resets.
 
    :param decoder_id: Unique identifier for the decoder instance
    :param first: The first logical measurement to return

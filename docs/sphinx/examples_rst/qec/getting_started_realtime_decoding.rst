@@ -152,6 +152,8 @@ arguments:
 YAML for compatibility with existing researcher configuration files. The
 parser also accepts it at decoder level; specifying both forms is an error.
 
+.. _qec-custom-decoder-schema:
+
 The ``decoder_custom_args`` section is converted between YAML and the
 parameter map a decoder's constructor receives using a *parameter schema*
 registered under the decoder's name. All built-in decoders ship with a

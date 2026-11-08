@@ -41,9 +41,6 @@ The configuration API enables setting up decoders before circuit execution. Deco
 .. doxygenstruct:: cudaq::qec::decoding::config::syndrome_mapping_config
    :members:
 
-.. doxygenstruct:: cudaq::qec::decoding::config::data_artifact
-   :members:
-
 .. doxygenclass:: cudaq::qec::decoding::config::multi_decoder_config
    :members:
 

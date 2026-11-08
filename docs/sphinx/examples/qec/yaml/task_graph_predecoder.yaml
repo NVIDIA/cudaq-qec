@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# A predecoder in front of a global decoder, for a distance-5
+# repetition-code memory experiment decoded 5 rounds at a time.
+
+decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}       # bulk repeats
+        - {from: bulk, to: final}
+      phases:
+        - name: init
+          spec:
+            num_faults: 9
+            H_sparse: [0,1,5,-1, 1,2,6,-1, 2,3,7,-1, 3,4,8,-1]
+            O_sparse: [0,-1]
+            error_rates: [0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02]
+        - name: bulk
+          spec:
+            num_faults: 9
+            H_sparse: [0,1,5,-1, 1,2,6,-1, 2,3,7,-1, 3,4,8,-1]
+            O_sparse: [0,-1]
+            error_rates: [0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02]
+        - name: final
+          spec:
+            num_faults: 5
+            H_sparse: [0,1,-1, 1,2,-1, 2,3,-1, 3,4,-1]
+            O_sparse: [0,-1]
+            error_rates: [0.02,0.02,0.02,0.02,0.02]
+    task_graph:
+      nodes:
+        - id: pre
+          type: predecoder
+          window_size: 5
+          residual_from: parity_check  # inner returns the errors it found
+          inner: {type: single_error_lut}
+        - id: global
+          type: single_window
+          window_size: 5
+          inner: {type: multi_error_lut, lut_error_depth: 2}
+        - id: sum
+          type: xor
+      edges:
+        - {from: measurements, to: pre}
+        - {from: pre.pre_L, to: sum.a}       # the predecoder's corrections
+        - {from: pre.residual, to: global}   # the detectors it left
+        - {from: global, to: sum.b}          # the global decoder's corrections
+        - {from: sum, to: output}

@@ -107,6 +107,7 @@ exclude_patterns = [
     'api/qec/python_realtime_decoding_api.rst',
     'api/qec/cpp_realtime_decoding_api.rst',
     'api/qec/realtime_pipeline_api.rst',
+    'examples_rst/qec/task_graph_provisional.rst',
 ]
 
 # The reST default role (used for this markup: `text`) to use for all documents.
@@ -260,6 +261,7 @@ nitpick_ignore = [
     ('ref', 'graph__resources_8h'),
     ('ref', 'decoder__config__schema_8h'),
     ('cpp:identifier', 'cudaq::pauli_word'),
+    ('cpp:identifier', 'decoding::config::decoder_schema'),
     ('cpp:identifier', 'cudaGraphExec_t'),
     ('cpp:identifier', 'cudaStream_t'),
     ('cpp:identifier', 'SIZE_MAX'),
@@ -277,7 +279,7 @@ nitpick_ignore = [
     ('cpp:identifier', 'cudaq::qkernel<void(patch, patch)>'),
     ('cpp:identifier',
      'cudaq::qkernel<std::vector<cudaq::measure_result>(patch, const std::vector<std::size_t>&, const std::vector<std::size_t>&)>'
-     ),
+    ),
     ('cpp:identifier', 'cudaq::qvector<>'),
     ('cpp:identifier', 'cudaq::qview<>'),
     ('cpp:identifier', 'cudaq::measure_result'),
@@ -288,7 +290,8 @@ nitpick_ignore = [
     ('py:class', 'cudaq.SpinOperator'),
     ('py:class', 'cudaq::sum_op<cudaq::spin_handler>'),
     ('py:class', 'list[cudaq::sum_op<cudaq::spin_handler>]'),
-    ('py:class', 'tuple[float, list[float], list[cudaq::sum_op<cudaq::spin_handler>]]'),
+    ('py:class',
+     'tuple[float, list[float], list[cudaq::sum_op<cudaq::spin_handler>]]'),
     ('py:class', 'pauli_word'),
     ('py:class', 'PauliWord'),
     ('py:class', 'numpy.int32'),
@@ -307,6 +310,15 @@ nitpick_ignore = [
 # prefix via doc_replacements.
 nitpick_ignore_regex = [
     ('py:class', r'cudaq_qec\._pycudaqx_qec_the_suffix_matters_cudaq_qec\..*'),
+    # Provisional types, deliberately left out of the API reference.
+    ('cpp:identifier',
+     r'(cudaq::qec::)?experimental::(window_request|ingest_window)'),
+    ('cpp:identifier', r'data_artifact'),
+    # Doxygen links to the DEM chunk tools, left out of the API reference.
+    ('ref', r'structcudaq_1_1qec_1_1extended__dem(_1a[0-9a-f]+)?'),
+    ('ref', r'namespacecudaq_1_1qec_1a(ab99cd2da5f76b0c854c26cdcbf289f7|'
+     r'3a8adab523d35a6519c67ea92d1f681d|036a1eb8bc5555c933c9ba8a0cc90454|'
+     r'626257cf8e37bd2a2c625b3bce1a6fc3)'),
 ]
 
 napoleon_google_docstring = True

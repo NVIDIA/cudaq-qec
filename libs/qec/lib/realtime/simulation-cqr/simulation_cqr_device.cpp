@@ -7,12 +7,12 @@
 //
 // These mirror the simulation backend's __qpu__ wrappers, but the cudaq::
 // device_call targets use the *generic* callee names defined by
-// cudaq-spec/proposals/decoder_server_runtime.md -- enqueue_syndromes /
-// get_corrections / reset_decoder / get_logical_measurements -- rather than
-// the simulation backend's
-// simulation_* / C++-mangled symbols. The realtime function_id is
-// fnv1a_32(<callee name>), so these names are what the host-dispatch service
-// (decoding_server_cqr.cpp) registers.
+// cudaq-spec/docs/architecture/components/decoding-server.md --
+// enqueue_syndromes / get_corrections / reset_decoder /
+// get_logical_measurements -- rather than the simulation backend's simulation_*
+// / C++-mangled symbols. The realtime function_id is fnv1a_32(<callee name>),
+// so these names are what the host-dispatch service (decoding_server_cqr.cpp)
+// registers.
 //
 // The wrappers also perform the spec's on-wire rewrite themselves (until the
 // device_call lowering can): syndrome/correction bits cross the wire

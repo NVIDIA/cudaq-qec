@@ -53,96 +53,37 @@ Detector Error Model
 
 .. _dyn_dem_python_api:
 
-Dynamic DEM Construction
-========================
+Dynamic DEM
+===========
 
-Build a code-capacity or phenomenological DEM from CSS generator matrices
-(no Stim circuit required), or compose per-round DEM *chunks* that can be
-stitched and closed into a flat :class:`~cudaq_qec.DetectorErrorModel`.
-See :doc:`/examples_rst/qec/dyn_dem` for a walkthrough.
+The ``dem_chunks`` model types. See :doc:`/examples_rst/qec/dyn_dem`.
 
-CSS matrices and noise
-----------------------
-
-.. autoclass:: cudaq_qec.CssCodes
+.. autoclass:: cudaq_qec.DemChunksSpec
     :members:
 
-.. autoclass:: cudaq_qec.CssNoise
+.. autoclass:: cudaq_qec.PhaseSpecEntry
     :members:
 
-.. autofunction:: cudaq_qec.css_matrices_from_code
-.. autofunction:: cudaq_qec.dem_from_css_matrices
+.. autoclass:: cudaq_qec.PhaseConnection
+    :members:
 
-Extended DEM chunks
--------------------
+.. autoclass:: cudaq_qec.SeamConnection
+    :members:
 
-Seam and phase identifiers
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. autoclass:: cudaq_qec.DemChunkSpec
+    :members:
+
+.. autoclass:: cudaq_qec.SeamSpecEntry
+    :members:
+
+.. autoclass:: cudaq_qec.DemSeamSpec
+    :members:
 
 .. autoclass:: cudaq_qec.SeamId
     :members:
 
 .. autodata:: cudaq_qec.seam_name
 .. autodata:: cudaq_qec.phase_name
-
-Chunk types
-^^^^^^^^^^^
-
-.. autoclass:: cudaq_qec.ExtendedDemSeam
-    :members:
-
-.. autoclass:: cudaq_qec.ExtendedDem
-    :members:
-
-.. autofunction:: cudaq_qec.extended_dem_from_css_matrices
-
-.. autoclass:: cudaq_qec.DemSeamSpec
-    :members:
-
-.. autoclass:: cudaq_qec.SeamSpecEntry
-    :members:
-
-.. autoclass:: cudaq_qec.DemChunkSpec
-    :members:
-
-.. autoclass:: cudaq_qec.SeamConnection
-    :members:
-
-.. autoclass:: cudaq_qec.PhaseConnection
-    :members:
-
-.. autoclass:: cudaq_qec.PhaseSpecEntry
-    :members:
-
-.. autoclass:: cudaq_qec.DemChunksSpec
-    :members:
-
-.. autofunction:: cudaq_qec.dem_chunk_from_spec
-.. autofunction:: cudaq_qec.dem_chunks_from_spec
-
-Stitch, close, and merge
-------------------------
-
-.. autoclass:: cudaq_qec.PriorCombineMode
-    :members:
-
-.. autofunction:: cudaq_qec.dem_stitch
-.. autofunction:: cudaq_qec.dem_stitch_all
-.. autofunction:: cudaq_qec.dem_stitch_merged
-.. autofunction:: cudaq_qec.dem_close
-.. autofunction:: cudaq_qec.dem_close_all
-.. autofunction:: cudaq_qec.dem_merge_duplicate_columns
-.. autofunction:: cudaq_qec.are_dem_columns_unique
-.. autofunction:: cudaq_qec.assert_dem_columns_unique
-
-Streaming decoder maps
-----------------------
-
-.. autofunction:: cudaq_qec.dem_chunk_rounds
-.. autofunction:: cudaq_qec.dem_chunks_to_rounds
-.. autofunction:: cudaq_qec.dem_chunks_to_detector_round
-.. autofunction:: cudaq_qec.dem_chunks_to_d_sparse
-.. autofunction:: cudaq_qec.dem_chunks_to_o_sparse
 
 Decoder Interfaces
 ==================
@@ -153,13 +94,32 @@ Decoder Interfaces
 Decoding Task Graph
 ===================
 
-A :class:`cudaq_qec.DecodingTaskGraph` is a composable decode pipeline backed
-by a general node/edge DAG.  Built-in factories:
-:meth:`~cudaq_qec.DecodingTaskGraph.from_spec` for a single-decoder window,
-and :meth:`~cudaq_qec.DecodingTaskGraph.combine` for two independent decoders
-whose logical outcomes are XOR'd.
+A :class:`cudaq_qec.DecodingTaskGraph` is a decoder pipeline of nodes wired by
+edges. See :doc:`/examples_rst/qec/decoding_task_graph` and
+:doc:`/examples_rst/qec/task_graph_parallel_window`.
 
 .. autoclass:: cudaq_qec.DecodingTaskGraph
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphNodeConfig
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphEnsembleSpec
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphOptions
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphStreamingResult
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphOutputProgress
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphStreamingStatus
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphClosure
     :members:
 
 .. autoclass:: cudaq_qec.DecoderResult
