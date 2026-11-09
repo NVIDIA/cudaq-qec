@@ -95,6 +95,7 @@ jobs:
           # Suppress gh's own download progress output (filenames/sizes) --
           # public job logs, same reasoning as not logging `gh release view`.
           # stderr is left alone so auth/network failures are still visible.
+          echo "Downloading draft release ${{ inputs.assets_tag }} from ${{ inputs.assets_repo }}"
           gh release download -R "${{ inputs.assets_repo }}" "${{ inputs.assets_tag }}" > /dev/null
 
           # Expects a docker-files-<run> draft release (assets extracted
