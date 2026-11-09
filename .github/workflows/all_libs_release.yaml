@@ -75,11 +75,8 @@ jobs:
           if [[ -n "${{ inputs.assets_repo }}" ]] && [[ -n "${{ inputs.assets_tag }}" ]]; then
             bash .github/workflows/scripts/install_git_cli.sh
             # Fetch the assets into this directory
+            echo "Downloading draft release ${{ inputs.assets_tag }} from ${{ inputs.assets_repo }}"
             gh release download -R ${{ inputs.assets_repo }} ${{ inputs.assets_tag }}
-            # Show what was downloaded
-            ls
-            # Show release info (and save to summary)
-            gh release view -R ${{ inputs.assets_repo }} ${{ inputs.assets_tag }} >> $GITHUB_STEP_SUMMARY
             # Extract the decoders that need to be embedded in the release.
             # QEC_EXTERNAL_DECODERS is consumed as a CMake list
             # (libs/qec/CMakeLists.txt), so multiple paths are

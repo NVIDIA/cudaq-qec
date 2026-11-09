@@ -99,31 +99,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  fetch-assets:
-    name: Fetch release assets
-    if: ${{ !inputs.artifacts_from_run && inputs.assets_repo != '' && inputs.assets_tag != '' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download -R "${{ inputs.assets_repo }}" "${{ inputs.assets_tag }}"
-
-      - name: Upload release assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets
-          path: '*.tar.gz'
-          if-no-files-found: error
-          retention-days: 1
-
   build-cudaqx-wheels:
     name: Build CUDA-QX wheels
-    needs: fetch-assets
-    if: ${{ !cancelled() && !inputs.artifacts_from_run && (needs.fetch-assets.result == 'success' || needs.fetch-assets.result == 'skipped') }}
+    if: ${{ !inputs.artifacts_from_run }}
     runs-on: linux-${{ matrix.platform }}-cpu8
     # CUDAQ requires a highly specialized environment to build. Thus, it is much
     # easier to rely on their's devdeps images to do the building.
@@ -134,7 +112,7 @@ jobs:
       options: --ulimit nofile=1048576:1048576
     permissions:
       actions: write
-      contents: read
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -203,10 +181,13 @@ jobs:
 
       - name: Download release assets
         if: ${{ inputs.assets_repo != '' && inputs.assets_tag != '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: release-assets
-          path: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash .github/workflows/scripts/install_git_cli.sh
+          echo "Downloading draft release ${{ inputs.assets_tag }} from ${{ inputs.assets_repo }}"
+          gh release download -R "${{ inputs.assets_repo }}" "${{ inputs.assets_tag }}" -p '*.tar.gz'
+          ls *.tar.gz
 
       - name: Get required CUDAQ version
         id: get-cudaq-version
