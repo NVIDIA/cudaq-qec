@@ -56,6 +56,22 @@ inline dem_chunks_spec rep5_spec(uint64_t num_rounds = 5) {
   return spec;
 } // end - rep5_spec()
 
+/// rep5_spec with a mid-circuit readout phase, a copy of bulk: bulk repeats
+/// and may hand over to readout and back any number of times before final.
+/// A phase graph rather than a chain, so it sets no num_rounds.
+inline dem_chunks_spec readout_graph_spec() {
+  const auto readout = phase_id::from_name("readout");
+  auto spec = rep5_spec();
+  spec.num_rounds.reset();
+  spec.phases.push_back({readout, spec.get_phase(phase_name::dem_bulk)});
+  spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, readout},
+                      {readout, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_final}};
+  return spec;
+}
+
 /// Four timelike faults per round, one per detector; fault 0 flips
 /// @p observable. With @p explicit_d, every phase carries D_sparse over 4
 /// measurements a round.

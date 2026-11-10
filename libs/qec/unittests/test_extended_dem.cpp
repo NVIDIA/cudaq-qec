@@ -25,6 +25,7 @@
 #include "cudaq/qec/detector_error_model.h"
 #include "cudaq/qec/extended_dem.h"
 #include <cstdint>
+#include <functional>
 #include <gtest/gtest.h>
 #include <limits>
 #include <stdexcept>
@@ -1976,15 +1977,18 @@ TEST(DemChunkSpec, ReadoutMapIsCheckedPerPhase) {
   expect_rejected(repeated, "m2o_sparse duplicate");
 } // end - TEST(DemChunkSpec, ReadoutMapIsCheckedPerPhase)
 
-// A branch has two sinks, but the chain has no last phase to read out.
-TEST(DemChunkSpec, ReadoutMapNeedsALinearChain) {
+// A branch has two terminal phases, each reading the observable at the end
+// of its own shots: a valid phase graph, which no chain consumer takes yet.
+TEST(DemChunkSpec, ReadoutMapOnABranchIsAPhaseGraph) {
   auto spec = rep5_spec(3);
   spec.measurements_per_round = rep5_checks;
   spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
                       {phase_name::dem_init, phase_name::dem_final}};
   rep5_phase(spec, phase_name::dem_bulk).m2o_sparse = {0, -1};
   rep5_phase(spec, phase_name::dem_final).m2o_sparse = {0, -1};
-  expect_rejected(spec, "multiple non-self outgoing edges");
+  EXPECT_NO_THROW(spec.validate());
+  EXPECT_FALSE(spec.is_linear_chain());
+  EXPECT_THROW(spec.phase_sequence(), std::invalid_argument);
 }
 
 // layout() orders the phases around the repeating one for a shot of any
@@ -2014,6 +2018,303 @@ TEST(DemChunkSpec, LayoutListsThePhasesAroundTheRepeatingOne) {
                       {phase_name::dem_bulk, phase_name::dem_final}};
   EXPECT_THROW(once.layout(), std::invalid_argument);
 } // end - TEST(DemChunkSpec, LayoutListsThePhasesAroundTheRepeatingOne)
+
+// ---------------------------------------------------------------------------
+// Phase graphs: connections are the allowed transitions between phases
+// ---------------------------------------------------------------------------
+
+// rep5_spec with a copy of bulk named @p name, joined by @p connections.
+dem_chunks_spec rep5_graph(const std::vector<phase_connection> &connections,
+                           const std::vector<std::string> &names = {}) {
+  auto spec = rep5_spec();
+  for (const auto &name : names)
+    spec.phases.push_back(
+        {phase_id::from_name(name), rep5_phase(spec, phase_name::dem_bulk)});
+  spec.connections = connections;
+  return spec;
+}
+
+// Expect @p call to refuse a phase graph for @p reason.
+void expect_phase_graph_refused(const std::function<void()> &call,
+                                const std::string &reason) {
+  const std::string text = "dem_chunks_spec: a phase graph (" + reason +
+                           ") needs round tags to place its phases, which "
+                           "are not supported yet";
+  try {
+    call();
+    ADD_FAILURE() << "expected a refusal: " << text;
+  } catch (const std::invalid_argument &e) {
+    EXPECT_EQ(std::string(e.what()), text);
+  }
+}
+
+TEST(DemChunkSpec, PhaseGraphValidates) {
+  auto spec = readout_graph_spec();
+  EXPECT_NO_THROW(spec.validate());
+  EXPECT_FALSE(spec.is_linear_chain());
+  EXPECT_TRUE(spec.has_repeating_phase());
+  spec.num_rounds = 7;
+  EXPECT_NO_THROW(spec.validate());
+}
+
+// Today's chains, whichever phase repeats, and an empty spec are chains.
+TEST(DemChunkSpec, IsLinearChainRecognisesChains) {
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto final = phase_name::dem_final;
+  const std::vector<std::vector<phase_connection>> chains = {
+      {{init, bulk}, {bulk, bulk}, {bulk, final}},
+      {{init, init}, {init, bulk}, {bulk, final}},
+      {{init, bulk}, {bulk, final}, {final, final}},
+      {{bulk, bulk}, {bulk, final}},
+      {{init, bulk}, {bulk, bulk}},
+      {{init, bulk}, {bulk, final}},
+      {{bulk, final}, {init, bulk}},
+      {{bulk, bulk}}};
+  for (const auto &connections : chains) {
+    const auto spec = rep5_graph(connections);
+    EXPECT_TRUE(spec.is_linear_chain());
+    EXPECT_NO_THROW(spec.validate());
+  }
+  EXPECT_TRUE(multi_terminal_memory_spec(5, 3).is_linear_chain());
+  EXPECT_TRUE(dem_chunks_spec{}.is_linear_chain());
+}
+
+// A second repeating phase, a branch, a merge or a cycle makes a graph,
+// whether or not it validates.
+TEST(DemChunkSpec, IsLinearChainRejectsGraphs) {
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto final = phase_name::dem_final;
+  const std::vector<std::vector<phase_connection>> graphs = {
+      {{init, bulk}, {bulk, bulk}, {bulk, final}, {final, final}},
+      {{init, bulk}, {init, final}},
+      {{init, final}, {bulk, final}},
+      {{init, bulk}, {bulk, init}}};
+  EXPECT_FALSE(readout_graph_spec().is_linear_chain());
+  for (const auto &connections : graphs)
+    EXPECT_FALSE(rep5_graph(connections).is_linear_chain());
+}
+
+// The shortest start-to-terminal path, by a search over the connections.
+TEST(DemChunkSpec, MinimumRoundsIsTheShortestPathThroughAPhaseGraph) {
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto final = phase_name::dem_final;
+  const auto readout = phase_id::from_name("readout");
+  // init, bulk, final: the readout cycle is skipped.
+  EXPECT_EQ(readout_graph_spec().minimum_rounds(), 3u);
+  // init, readout, bulk, final: the cycle cannot be skipped.
+  const auto through = rep5_graph(
+      {{init, readout}, {readout, bulk}, {bulk, readout}, {bulk, final}},
+      {"readout"});
+  EXPECT_NO_THROW(through.validate());
+  EXPECT_EQ(through.minimum_rounds(), 4u);
+  // init, final: a shortcut past the longer branch.
+  const auto shortcut = rep5_graph(
+      {{init, bulk}, {bulk, readout}, {readout, final}, {init, final}},
+      {"readout"});
+  EXPECT_NO_THROW(shortcut.validate());
+  EXPECT_EQ(shortcut.minimum_rounds(), 2u);
+
+  // Chains keep today's value.
+  EXPECT_EQ(rep5_spec().minimum_rounds(), 3u);
+  EXPECT_EQ(rep5_graph({{bulk, bulk}, {bulk, final}}).minimum_rounds(), 2u);
+  EXPECT_EQ(rep5_graph({{init, bulk}, {bulk, bulk}}).minimum_rounds(), 2u);
+  EXPECT_EQ(rep5_graph({{bulk, bulk}}).minimum_rounds(), 1u);
+  EXPECT_EQ(multi_terminal_memory_spec(5, 3).minimum_rounds(), 5u);
+}
+
+TEST(DemChunkSpec, PhaseGraphNeedsOneStartPhase) {
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto final = phase_name::dem_final;
+  expect_rejected(rep5_graph({{init, final}, {bulk, final}}),
+                  "dem_chunks_spec: phases 'init' and 'bulk' are both start "
+                  "phases (entered from no other phase); a shot has one");
+  expect_rejected(rep5_graph({{init, bulk}, {bulk, init}}),
+                  "dem_chunks_spec: no start phase; every phase, 'init' "
+                  "included, is entered from another phase");
+}
+
+TEST(DemChunkSpec, PhaseGraphNeedsATerminalPhase) {
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto readout = phase_id::from_name("readout");
+  expect_rejected(
+      rep5_graph({{init, bulk}, {bulk, readout}, {readout, bulk}}, {"readout"}),
+      "dem_chunks_spec: no terminal phase; every phase, 'init' included, "
+      "leads to another phase");
+}
+
+// Every phase lies on some path from the start to a terminal phase.
+TEST(DemChunkSpec, PhaseGraphHasNoUnreachablePhaseOrDeadEnd) {
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto final = phase_name::dem_final;
+  const auto readout = phase_id::from_name("readout");
+  const auto spare = phase_id::from_name("spare");
+  expect_rejected(
+      rep5_graph({{init, final}, {bulk, readout}, {readout, bulk}},
+                 {"readout"}),
+      "dem_chunks_spec: phase 'bulk' is not reachable from start phase "
+      "'init'");
+  expect_rejected(rep5_graph({{init, bulk},
+                              {bulk, final},
+                              {bulk, readout},
+                              {readout, spare},
+                              {spare, readout}},
+                             {"readout", "spare"}),
+                  "dem_chunks_spec: phase 'readout' cannot reach a terminal "
+                  "phase, so a shot that enters it never ends");
+}
+
+TEST(DemChunkSpec, PhaseGraphListsEachConnectionOnce) {
+  auto spec = rep5_spec();
+  spec.connections.push_back({phase_name::dem_init, phase_name::dem_bulk});
+  expect_rejected(spec, "dem_chunks_spec: connection 'init' -> 'bulk' is "
+                        "listed twice");
+}
+
+// Each connection joins its from phase's outgoing seam band to its to
+// phase's incoming one, so the two have one width.
+TEST(DemChunkSpec, SeamWidthsAgreeAcrossEveryConnection) {
+  auto chain = rep5_spec();
+  auto graph = readout_graph_spec();
+  rep5_phase(chain, phase_name::dem_final).H_sparse = {0,  1, -1, 1, 2,
+                                                       -1, 2, 3,  -1};
+  expect_rejected(chain, "dem_chunks_spec: connection 'bulk' -> 'final': "
+                         "seam width mismatch (4 vs 3)");
+  rep5_phase(graph, phase_id::from_name("readout")).H_sparse = {0, 1, 5, -1};
+  expect_rejected(graph, "dem_chunks_spec: connection 'bulk' -> 'readout': "
+                         "seam width mismatch (4 vs 1)");
+}
+
+// A readout belongs to a round a shot has once, so a phase a shot can visit
+// twice, on a self-loop or on a cycle, may not carry m2o_sparse.
+TEST(DemChunkSpec, ReadoutMapIsRefusedOnACycle) {
+  auto cycle = readout_graph_spec();
+  auto loop = readout_graph_spec();
+  auto end = readout_graph_spec();
+  cycle.measurements_per_round = rep5_checks;
+  loop.measurements_per_round = rep5_checks;
+  end.measurements_per_round = rep5_checks;
+  rep5_phase(cycle, phase_id::from_name("readout")).m2o_sparse = {0, -1};
+  expect_rejected(cycle, "dem_chunks_spec: phase 'readout' carries "
+                         "m2o_sparse, which a phase on a cycle may not");
+  rep5_phase(loop, phase_name::dem_bulk).m2o_sparse = {0, -1};
+  expect_rejected(loop, "a repeating phase may not");
+  rep5_phase(end, phase_name::dem_final).m2o_sparse = {0, -1};
+  EXPECT_NO_THROW(end.validate());
+}
+
+// The readout-order rule holds on every path: read on init alone, the
+// observable is flipped again by bulk, whichever way a shot goes from there.
+TEST(DemChunkSpec, PhaseGraphReadoutOrderHoldsOnEveryPath) {
+  auto spec = readout_graph_spec();
+  auto both = readout_graph_spec();
+  spec.measurements_per_round = rep5_checks;
+  rep5_phase(spec, phase_name::dem_init).m2o_sparse = {1, -1};
+  expect_rejected(spec, "dem_chunks_spec: phase 'bulk' flips observable 0 "
+                        "after its last readout, in phase 'init'");
+  rep5_phase(spec, phase_name::dem_final).m2o_sparse = {0, -1};
+  EXPECT_NO_THROW(spec.validate());
+
+  // Read on one branch only: the other branch reaches its end unread.
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto final = phase_name::dem_final;
+  both = rep5_graph({{init, bulk}, {init, final}});
+  both.measurements_per_round = rep5_checks;
+  rep5_phase(both, bulk).m2o_sparse = {0, -1};
+  EXPECT_NO_THROW(both.validate());
+}
+
+// Every consumer that places phases by a shot's length refuses a phase graph
+// with one message naming why the spec is not a chain.
+TEST(DemChunkSpec, ChainConsumersRefuseAPhaseGraph) {
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto final = phase_name::dem_final;
+  const auto streaming = readout_graph_spec();
+  auto fixed = readout_graph_spec();
+  const std::string branch = "phase 'bulk' leads to more than one phase";
+  fixed.num_rounds = 7;
+  expect_phase_graph_refused([&] { streaming.phase_sequence(); }, branch);
+  expect_phase_graph_refused([&] { fixed.phase_sequence(); }, branch);
+  expect_phase_graph_refused([&] { streaming.repeating_phase(); }, branch);
+  expect_phase_graph_refused([&] { fixed.repeating_rounds(); }, branch);
+  expect_phase_graph_refused([&] { streaming.layout(); }, branch);
+  expect_phase_graph_refused([&] { dem_chunks_from_spec(fixed); }, branch);
+  expect_phase_graph_refused([&] { dem_chunks_to_compact_chain(fixed); },
+                             branch);
+  expect_phase_graph_refused([&] { dem_chunks_to_o_chunked(fixed); }, branch);
+  expect_phase_graph_refused([&] { dem_chunks_to_d_sparse(fixed); }, branch);
+
+  // Each way a spec can fail to be a chain is named.
+  expect_phase_graph_refused(
+      [&] {
+        rep5_graph({{init, bulk}, {bulk, bulk}, {bulk, final}, {final, final}})
+            .repeating_phase();
+      },
+      "phase 'final' repeats as well as phase 'bulk'");
+  expect_phase_graph_refused(
+      [&] { rep5_graph({{init, final}, {bulk, final}}).phase_sequence(); },
+      "phase 'final' is entered from more than one phase");
+  expect_phase_graph_refused(
+      [&] { rep5_graph({{init, bulk}, {bulk, init}}).phase_sequence(); },
+      "phase 'init' lies on a cycle");
+} // end - TEST(DemChunkSpec, ChainConsumersRefuseAPhaseGraph)
+
+// A chain keeps today's errors: the refusal is only for phase graphs.
+TEST(DemChunkSpec, ChainsKeepTheirErrors) {
+  auto streaming = rep5_spec();
+  streaming.num_rounds.reset();
+  try {
+    streaming.phase_sequence();
+    ADD_FAILURE() << "expected num_rounds to be required";
+  } catch (const std::invalid_argument &e) {
+    EXPECT_EQ(std::string(e.what()),
+              "dem_chunks_spec::phase_sequence: num_rounds required when a "
+              "self-loop is present");
+  }
+  try {
+    rep5_graph({{phase_name::dem_init, phase_name::dem_final}})
+        .repeating_phase();
+    ADD_FAILURE() << "expected no repeating phase";
+  } catch (const std::invalid_argument &e) {
+    EXPECT_EQ(std::string(e.what()),
+              "dem_chunks_spec: no self-connected (repeating) phase");
+  }
+}
+
+// A chain consumer names a connection listed twice as validate() does.
+TEST(DemChunkSpec, ChainConsumersRefuseARepeatedConnection) {
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto final = phase_name::dem_final;
+  auto loop =
+      rep5_graph({{init, bulk}, {bulk, bulk}, {bulk, bulk}, {bulk, final}});
+  auto edge =
+      rep5_graph({{init, bulk}, {init, bulk}, {bulk, bulk}, {bulk, final}});
+  const auto expect = [](const std::function<void()> &call,
+                         const std::string &text) {
+    try {
+      call();
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_EQ(std::string(e.what()), text);
+    }
+  };
+  loop.num_rounds = 5;
+  edge.num_rounds = 5;
+  expect([&] { loop.repeating_phase(); },
+         "dem_chunks_spec: connection 'bulk' -> 'bulk' is listed twice");
+  expect([&] { loop.phase_sequence(); },
+         "dem_chunks_spec: connection 'bulk' -> 'bulk' is listed twice");
+  expect([&] { edge.phase_sequence(); },
+         "dem_chunks_spec: connection 'init' -> 'bulk' is listed twice");
+}
 
 // detectors_of() counts a phase's incoming seam band in either chunk form.
 TEST(DemChunkSpec, DetectorsOfCountsTheIncomingSeamBand) {
@@ -2671,7 +2972,8 @@ TEST(ExtendedDemValidate, OverlappingSeamBandsThrow) {
 }
 
 // A cyclic connection graph used to walk forever, growing the phase sequence
-// until the process ran out of memory.
+// until the process ran out of memory. With no start phase it is not a valid
+// phase graph either.
 TEST(DemChunkSpec, CyclicConnectionGraphThrows) {
   dem_chunks_spec spec;
   spec.seam = {seam_name::next_round, seam_name::prev_round};
@@ -2685,7 +2987,7 @@ TEST(DemChunkSpec, CyclicConnectionGraphThrows) {
   spec.phases.push_back({a, cs});
   spec.phases.push_back({b, cs});
 
-  ASSERT_NO_THROW(spec.validate());
+  EXPECT_THROW(spec.validate(), std::invalid_argument);
   EXPECT_THROW(spec.phase_sequence(), std::invalid_argument);
   EXPECT_THROW(dem_chunks_from_spec(spec), std::invalid_argument);
 }

@@ -40,6 +40,9 @@ memory_window_node::memory_window_node(node_build_context &ctx,
   const auto sequence = spec_->phase_sequence();
   prefix_phases_.assign(sequence.begin(), sequence.begin() + span.prefix);
   bulk_phase_ = spec_->repeating_phase();
+  // minimum_rounds() builds and searches the phase graph, which allocates;
+  // flush() reads this copy.
+  minimum_rounds_ = spec_->minimum_rounds();
   final_phases_.assign(sequence.end() - span.suffix, sequence.end());
   // Until FINAL arrives, these records are indistinguishable from bulk.
   // Hold every possible terminal record beyond the regular inference window.
@@ -88,7 +91,7 @@ memory_window_node::memory_window_node(node_build_context &ctx,
       add(start, false, schedule_.size);
     add(start, true, schedule_.size);
   }
-  for (std::size_t n = spec_->minimum_rounds();
+  for (std::size_t n = minimum_rounds_;
        n <= static_cast<std::size_t>(schedule_.size) + tail_lookahead_; ++n)
     if (n != schedule_.size)
       add(0, true, n);
@@ -386,7 +389,7 @@ bool memory_window_node::flush() {
     throw std::logic_error("memory window: reset required after failure");
   if (flushed_)
     return false;
-  if (partial_bytes_ || rounds_ < spec_->minimum_rounds()) {
+  if (partial_bytes_ || rounds_ < minimum_rounds_) {
     failed_ = true;
     throw std::invalid_argument(
         "memory window: flush requires a complete init/bulk/final shot");

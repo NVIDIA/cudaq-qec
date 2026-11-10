@@ -547,6 +547,16 @@ _CONNECTIONS = (
     "      connections:\n        - {from: init, to: bulk}\n"
     "        - {from: bulk, to: bulk}\n        - {from: bulk, to: final}\n")
 
+# _CHUNKS as a phase graph: bulk may hand over to a mid-circuit readout
+# phase and back any number of times, so it sets no num_rounds.
+_PHASE_GRAPH = _CHUNKS.replace(
+    _CONNECTIONS + "      num_rounds: 3\n",
+    _CONNECTIONS + "        - {from: bulk, to: readout}\n"
+    "        - {from: readout, to: bulk}\n").replace(
+        _CHUNK_PHASES, _CHUNK_PHASES + "        - name: readout\n"
+        "          spec: {num_faults: 2, H_sparse: [0, 1, -1], "
+        "O_sparse: [0, -1], error_rates: [0.02, 0.02]}\n")
+
 
 def _chunks(old, new):
     assert old in _CHUNKS, old
@@ -737,6 +747,8 @@ def _round6_cases():
         # dem_chunks form
         "chunks baseline":
             _CHUNKS,
+        "chunks phase graph":
+            _PHASE_GRAPH,
         "chunks num_rounds 1":
             _chunks("num_rounds: 3", "num_rounds: 1"),
         "chunks num_rounds absent":
@@ -1386,6 +1398,13 @@ def test_validator_agrees_with_server_parser(tool, live_validator, label, text):
     assert (not problems) == _server_accepts(text), (
         f"{label}: validator says {'OK' if not problems else problems}, "
         f"server says {'OK' if _server_accepts(text) else 'reject'}")
+
+
+def test_phase_graph_passes_the_schema_and_the_parser(tool, live_validator):
+    validator, known = live_validator
+    assert "readout" in _PHASE_GRAPH and "num_rounds" not in _PHASE_GRAPH
+    assert not tool.validate_text(_PHASE_GRAPH, validator, False, known)
+    assert _server_accepts(_PHASE_GRAPH)
 
 
 def test_corpus_has_both_outcomes(live_validator, tool):

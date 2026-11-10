@@ -662,6 +662,260 @@ extended_dem dem_chunk_from_spec(const dem_chunk_spec &spec,
 } // end - dem_chunk_from_spec()
 
 // ---------------------------------------------------------------------------
+// Phase graph: the phases a spec's connections name and the moves between
+// them, searched directly so nothing grows with the number of rounds.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The phases the connections name, by index in order of first mention. A
+// self-loop marks its phase as repeating instead of adding an edge, and a
+// connection listed again adds nothing.
+struct phase_graph {
+  std::vector<phase_id> phases;
+  std::vector<std::vector<std::size_t>> next; // non-self successors
+  std::vector<std::vector<std::size_t>> prev; // non-self predecessors
+  std::vector<std::uint8_t> repeats;          // 1 when on a self-loop
+};
+
+} // namespace
+
+// The index of @p id in @p graph, or graph.phases.size() when it is absent.
+static std::size_t index_of(const phase_graph &graph, phase_id id) {
+  return static_cast<std::size_t>(
+      std::find(graph.phases.begin(), graph.phases.end(), id) -
+      graph.phases.begin());
+}
+
+// The index of @p id in @p graph, adding it first when absent.
+static std::size_t add_phase(phase_graph &graph, phase_id id) {
+  const std::size_t index = index_of(graph, id);
+
+  if (index == graph.phases.size()) {
+    graph.phases.push_back(id);
+    graph.next.emplace_back();
+    graph.prev.emplace_back();
+    graph.repeats.push_back(0);
+  }
+  return index;
+} // end - add_phase()
+
+// The graph @p spec's connections draw.
+static phase_graph graph_of(const dem_chunks_spec &spec) {
+  phase_graph graph;
+
+  for (const auto &c : spec.connections) {
+    const std::size_t from = add_phase(graph, c.from_phase);
+    const std::size_t to = add_phase(graph, c.to_phase);
+    auto &next = graph.next[from];
+    if (from == to) {
+      graph.repeats[from] = 1;
+    } else if (std::find(next.begin(), next.end(), to) == next.end()) {
+      next.push_back(to);
+      graph.prev[to].push_back(from);
+    }
+  }
+  return graph;
+} // end - graph_of()
+
+// The phases reachable from @p seeds along non-self connections, forward or
+// backward, in breadth-first order, so each phase follows every phase nearer
+// the seeds. A phase marked in @p blocked is never entered.
+static std::vector<std::size_t>
+visit(const phase_graph &graph, const std::vector<std::size_t> &seeds,
+      bool forward, const std::vector<std::uint8_t> &blocked = {}) {
+  std::vector<std::uint8_t> seen(graph.phases.size(), 0);
+  std::vector<std::size_t> order;
+  const auto enter = [&](std::size_t i) {
+    if (seen[i] || (!blocked.empty() && blocked[i]))
+      return;
+    seen[i] = 1;
+    order.push_back(i);
+  };
+
+  for (const std::size_t i : seeds)
+    enter(i);
+  for (std::size_t k = 0; k < order.size(); ++k)
+    for (const std::size_t j :
+         forward ? graph.next[order[k]] : graph.prev[order[k]])
+      enter(j);
+  return order;
+} // end - visit()
+
+// 1 for each phase in @p order, over a graph of @p size phases.
+static std::vector<std::uint8_t> marks_of(const std::vector<std::size_t> &order,
+                                          std::size_t size) {
+  std::vector<std::uint8_t> marks(size, 0);
+
+  for (const std::size_t i : order)
+    marks[i] = 1;
+  return marks;
+}
+
+// Phases no connection from another phase enters.
+static std::vector<std::size_t> starts_of(const phase_graph &graph) {
+  std::vector<std::size_t> starts;
+
+  for (std::size_t i = 0; i < graph.phases.size(); ++i)
+    if (graph.prev[i].empty())
+      starts.push_back(i);
+  return starts;
+}
+
+// Phases that lead to no other phase.
+static std::vector<std::size_t> terminals_of(const phase_graph &graph) {
+  std::vector<std::size_t> terminals;
+
+  for (std::size_t i = 0; i < graph.phases.size(); ++i)
+    if (graph.next[i].empty())
+      terminals.push_back(i);
+  return terminals;
+}
+
+// Whether phase @p i can be visited again after leaving it.
+static bool on_cycle(const phase_graph &graph, std::size_t i) {
+  const auto around = visit(graph, graph.next[i], true);
+  return std::find(around.begin(), around.end(), i) != around.end();
+}
+
+// Why @p graph is not a linear chain, or empty when it is: each phase leads
+// to and is entered from at most one other, at most one repeats, and one walk
+// from the start covers them all.
+static std::string chain_violation(const phase_graph &graph) {
+  const std::size_t size = graph.phases.size();
+  const auto quoted = [&](std::size_t i) {
+    return "phase '" + graph.phases[i].name() + "'";
+  };
+  std::optional<std::size_t> repeating;
+
+  for (std::size_t i = 0; i < size; ++i)
+    if (graph.next[i].size() > 1)
+      return quoted(i) + " leads to more than one phase";
+  for (std::size_t i = 0; i < size; ++i)
+    if (graph.prev[i].size() > 1)
+      return quoted(i) + " is entered from more than one phase";
+  for (std::size_t i = 0; i < size; ++i) {
+    if (!graph.repeats[i])
+      continue;
+    if (repeating)
+      return quoted(i) + " repeats as well as " + quoted(*repeating);
+    repeating = i;
+  }
+  // The phases now form simple paths and cycles; a chain is one path.
+  if (size == 0)
+    return {};
+  const auto starts = starts_of(graph);
+  if (starts.empty())
+    return quoted(0) + " lies on a cycle";
+  const auto walked = marks_of(visit(graph, {starts.front()}, true), size);
+  for (std::size_t i = 0; i < size; ++i) {
+    if (walked[i])
+      continue;
+    // Walk back to the start of i's path, or around i's cycle.
+    std::size_t j = i;
+    while (!graph.prev[j].empty() && graph.prev[j].front() != i)
+      j = graph.prev[j].front();
+    return graph.prev[j].empty() ? quoted(j) + " starts a second chain"
+                                 : quoted(i) + " lies on a cycle";
+  }
+  return {};
+} // end - chain_violation()
+
+// Rejects a connection listed twice, which graph_of() would merge silently.
+static void reject_repeated_connection(const dem_chunks_spec &spec) {
+  std::set<std::pair<uint32_t, uint32_t>> listed;
+
+  for (const auto &c : spec.connections)
+    if (!listed.insert({c.from_phase.value, c.to_phase.value}).second)
+      throw std::invalid_argument("dem_chunks_spec: connection '" +
+                                  c.from_phase.name() + "' -> '" +
+                                  c.to_phase.name() + "' is listed twice");
+}
+
+// A shot's length places a chain's phases; only round tags, which are not
+// supported yet, can place a phase graph's. Called where a chain is first
+// assumed: phase_sequence() and repeating_phase().
+static void require_linear_chain(const dem_chunks_spec &spec) {
+  std::string reason;
+
+  reject_repeated_connection(spec);
+  reason = chain_violation(graph_of(spec));
+  if (!reason.empty())
+    throw std::invalid_argument(
+        "dem_chunks_spec: a phase graph (" + reason +
+        ") needs round tags to place its phases, which are not supported yet");
+}
+
+// The rows @p phase's chunk puts in seam @p id: shorthand H_sparse rows fill
+// every seam, else the seam's own rows count; 0 without either.
+static uint64_t seam_rows(const dem_chunk_spec &phase, seam_id id) {
+  const auto rows = [](const std::vector<std::int64_t> &sparse) {
+    return static_cast<uint64_t>(
+        std::count(sparse.begin(), sparse.end(), std::int64_t{-1}));
+  };
+
+  if (phase.seam_specs.empty())
+    return rows(phase.H_sparse);
+  for (const auto &e : phase.seam_specs)
+    if (e.id == id)
+      return rows(e.spec.H_sparse);
+  return 0;
+} // end - seam_rows()
+
+// Checks the connection shape dem_chunks_spec::validate() documents, then
+// each connection's seam bands as validate_dem_chunk_sequence() checks a
+// chunk sequence's: a band without rows is a placeholder, and two with rows
+// agree in width.
+static void validate_connections(const dem_chunks_spec &spec,
+                                 const phase_graph &graph) {
+  const std::size_t size = graph.phases.size();
+  const auto name = [&](std::size_t i) { return graph.phases[i].name(); };
+  const auto starts = starts_of(graph);
+  const auto terminals = terminals_of(graph);
+
+  reject_repeated_connection(spec);
+  if (starts.empty())
+    throw std::invalid_argument("dem_chunks_spec: no start phase; every "
+                                "phase, '" +
+                                name(0) +
+                                "' included, is entered from another phase");
+  if (starts.size() > 1)
+    throw std::invalid_argument(
+        "dem_chunks_spec: phases '" + name(starts[0]) + "' and '" +
+        name(starts[1]) +
+        "' are both start phases (entered from no other phase); a shot has "
+        "one");
+  if (terminals.empty())
+    throw std::invalid_argument("dem_chunks_spec: no terminal phase; every "
+                                "phase, '" +
+                                name(0) + "' included, leads to another phase");
+  const auto reached = marks_of(visit(graph, starts, true), size);
+  const auto ending = marks_of(visit(graph, terminals, false), size);
+  for (std::size_t i = 0; i < size; ++i)
+    if (!reached[i])
+      throw std::invalid_argument("dem_chunks_spec: phase '" + name(i) +
+                                  "' is not reachable from start phase '" +
+                                  name(starts[0]) + "'");
+  for (std::size_t i = 0; i < size; ++i)
+    if (!ending[i])
+      throw std::invalid_argument(
+          "dem_chunks_spec: phase '" + name(i) +
+          "' cannot reach a terminal phase, so a shot that enters it never "
+          "ends");
+  for (const auto &c : spec.connections) {
+    const uint64_t from =
+        seam_rows(spec.get_phase(c.from_phase), spec.seam.from_seam);
+    const uint64_t to =
+        seam_rows(spec.get_phase(c.to_phase), spec.seam.to_seam);
+    if (from != 0 && to != 0 && from != to)
+      throw std::invalid_argument(
+          "dem_chunks_spec: connection '" + c.from_phase.name() + "' -> '" +
+          c.to_phase.name() + "': seam width mismatch (" +
+          std::to_string(from) + " vs " + std::to_string(to) + ")");
+  }
+} // end - validate_connections()
+
+// ---------------------------------------------------------------------------
 // dem_chunks_spec methods
 // ---------------------------------------------------------------------------
 
@@ -681,26 +935,44 @@ bool dem_chunks_spec::has_repeating_phase() const {
   return false;
 }
 
-uint64_t dem_chunks_spec::minimum_rounds() const {
-  uint64_t rounds = 1;
-  for (const auto &c : connections)
-    if (!c.is_self())
-      ++rounds;
-  return rounds;
+bool dem_chunks_spec::is_linear_chain() const {
+  return chain_violation(graph_of(*this)).empty();
 }
+
+// Breadth-first from the start phases, so the first terminal phase taken off
+// the queue ends a shortest path.
+uint64_t dem_chunks_spec::minimum_rounds() const {
+  const auto graph = graph_of(*this);
+  std::vector<uint64_t> rounds(graph.phases.size(), 0); // 0 until reached
+  std::vector<std::size_t> queue = starts_of(graph);
+
+  if (graph.phases.empty())
+    return 1;
+  for (const std::size_t i : queue)
+    rounds[i] = 1;
+  for (std::size_t k = 0; k < queue.size(); ++k) {
+    const std::size_t i = queue[k];
+    if (graph.next[i].empty())
+      return rounds[i];
+    for (const std::size_t j : graph.next[i])
+      if (rounds[j] == 0) {
+        rounds[j] = rounds[i] + 1;
+        queue.push_back(j);
+      }
+  }
+  throw std::invalid_argument("dem_chunks_spec::minimum_rounds: no start "
+                              "phase reaches a terminal phase");
+} // end - dem_chunks_spec::minimum_rounds()
 
 phase_id dem_chunks_spec::repeating_phase() const {
   phase_id result;
   bool found = false;
-  for (const auto &c : connections) {
+  require_linear_chain(*this);
+  for (const auto &c : connections)
     if (c.is_self()) {
-      if (found)
-        throw std::invalid_argument(
-            "dem_chunks_spec: more than one self-connected phase");
       result = c.from_phase;
       found = true;
     }
-  }
   if (!found)
     throw std::invalid_argument(
         "dem_chunks_spec: no self-connected (repeating) phase");
@@ -746,6 +1018,7 @@ std::vector<phase_id> dem_chunks_spec::phase_sequence() const {
   if (connections.empty())
     throw std::invalid_argument(
         "dem_chunks_spec::phase_sequence: no connections defined");
+  require_linear_chain(*this);
 
   // Collect non-self edges and identify the repeating phase.
   std::vector<std::pair<phase_id, phase_id>> chain;
@@ -753,9 +1026,6 @@ std::vector<phase_id> dem_chunks_spec::phase_sequence() const {
   bool has_rep = false;
   for (const auto &c : connections) {
     if (c.is_self()) {
-      if (has_rep)
-        throw std::invalid_argument(
-            "dem_chunks_spec::phase_sequence: multiple self-loops");
       rep_phase = c.from_phase;
       has_rep = true;
     } else {
@@ -804,12 +1074,8 @@ std::vector<phase_id> dem_chunks_spec::phase_sequence() const {
 
   // Build a successor map so that connection order does not matter.
   std::map<uint32_t, phase_id> successor;
-  for (const auto &[f, t] : chain) {
-    if (!successor.emplace(f.value, t).second)
-      throw std::invalid_argument("dem_chunks_spec::phase_sequence: phase " +
-                                  f.name() +
-                                  " has multiple non-self outgoing edges");
-  }
+  for (const auto &[f, t] : chain)
+    successor.emplace(f.value, t);
 
   std::vector<phase_id> seq;
   seq.reserve(rounds);
@@ -866,48 +1132,82 @@ static void mark_rows(const std::vector<std::int64_t> &sparse,
   }
 }
 
-// A fault touches only its own round and the next, so no phase after an
-// observable's last reading phase in @p sequence may flip it; the graph
-// releases an observable once that phase's round is committed. Each phase's
-// rows are scanned once: first its readout map, then its fault rows.
+// No phase after an observable's last readout may flip it: the task graph
+// releases the observable once that round is committed. Phase P flips k too
+// late when a reader of k leads to P and P reaches a terminal phase through
+// no reader of k; on a chain, when P follows the last reader. Phases are
+// checked breadth-first from the start, shot order on a chain.
 static void validate_readout_order(const dem_chunks_spec &spec,
-                                   const std::vector<phase_id> &sequence) {
+                                   const phase_graph &graph) {
   const auto observables = spec.num_observables();
-  std::vector<std::optional<std::size_t>> last(observables); // by observable
-  std::vector<std::uint8_t> marks(observables, 0);
+  const std::size_t size = graph.phases.size();
+  std::vector<std::size_t> terminals;
+  // [phase][observable]: read by its m2o_sparse, flipped by its faults
+  std::vector<std::vector<std::uint8_t>> reads;
+  std::vector<std::vector<std::uint8_t>> flips;
+  // [observable][phase]: past a readout of it, with none ahead on some path
+  std::vector<std::vector<std::uint8_t>> late;
 
-  for (std::size_t i = 0; i < sequence.size(); ++i) {
-    std::fill(marks.begin(), marks.end(), 0);
-    mark_rows(spec.get_phase(sequence[i]).m2o_sparse, marks);
-    for (std::size_t k = 0; k < observables; ++k)
-      if (marks[k])
-        last[k] = i;
-  }
-  for (std::size_t i = 0; i < sequence.size(); ++i) {
-    const auto &phase = spec.get_phase(sequence[i]);
-    std::fill(marks.begin(), marks.end(), 0);
-    mark_rows(phase.O_sparse, marks);
+  if (!spec.has_readout())
+    return;
+  terminals = terminals_of(graph);
+  reads.assign(size, std::vector<std::uint8_t>(observables, 0));
+  flips = reads;
+  late.resize(observables);
+  for (std::size_t i = 0; i < size; ++i) {
+    const auto &phase = spec.get_phase(graph.phases[i]);
+    mark_rows(phase.m2o_sparse, reads[i]);
+    mark_rows(phase.O_sparse, flips[i]);
     for (const auto &seam : phase.seam_specs)
-      mark_rows(seam.spec.O_sparse, marks);
-    for (std::size_t k = 0; k < observables; ++k)
-      if (marks[k] && last[k] && i > *last[k])
-        throw std::invalid_argument(
-            "dem_chunks_spec: phase '" + sequence[i].name() +
-            "' flips observable " + std::to_string(k) +
-            " after its last readout, in phase '" + sequence[*last[k]].name() +
-            "'; a fault cannot change a record already read");
+      mark_rows(seam.spec.O_sparse, flips[i]);
+  }
+  for (std::size_t k = 0; k < observables; ++k) {
+    std::vector<std::uint8_t> readers(size, 0);
+    std::vector<std::size_t> after;  // phases a reader leads to
+    std::vector<std::size_t> unread; // terminal phases reading no k
+    for (std::size_t i = 0; i < size; ++i) {
+      readers[i] = reads[i][k];
+      if (readers[i])
+        after.insert(after.end(), graph.next[i].begin(), graph.next[i].end());
+    }
+    for (const std::size_t t : terminals)
+      if (!readers[t])
+        unread.push_back(t);
+    const auto past = marks_of(visit(graph, after, true), size);
+    const auto open = marks_of(visit(graph, unread, false, readers), size);
+    late[k].resize(size);
+    for (std::size_t i = 0; i < size; ++i)
+      late[k][i] = past[i] && open[i];
+  } // end - for(k)
+  for (const std::size_t i : visit(graph, starts_of(graph), true)) {
+    for (std::size_t k = 0; k < observables; ++k) {
+      if (!flips[i][k] || !late[k][i])
+        continue;
+      // The nearest reader before it. No phase between the two reads k, nor
+      // any on i's way to an unread terminal, so it is the last readout of
+      // the shots on that path: on a chain, of every shot.
+      std::size_t reader = i;
+      for (const std::size_t j : visit(graph, graph.prev[i], false))
+        if (reads[j][k]) {
+          reader = j;
+          break;
+        }
+      throw std::invalid_argument(
+          "dem_chunks_spec: phase '" + graph.phases[i].name() +
+          "' flips observable " + std::to_string(k) +
+          " after its last readout, in phase '" + graph.phases[reader].name() +
+          "'; a fault cannot change a record already read");
+    } // end - for(k)
   } // end - for(i)
 } // end - validate_readout_order()
 
 // Checks observable_names and m2o_sparse against the observable count. Only
-// non-repeating phases may carry m2o_sparse, and a spec that has any must be
-// a linear chain (phase_sequence() rejects branches and cycles) in which no
-// phase flips an observable after its last readout.
-static void validate_observables(const dem_chunks_spec &spec) {
+// a phase a shot visits once may carry m2o_sparse, and no phase may flip an
+// observable after its last readout.
+static void validate_observables(const dem_chunks_spec &spec,
+                                 const phase_graph &graph) {
   const uint64_t observables = spec.num_observables();
   std::unordered_set<std::string> names;
-  std::vector<phase_id> sequence; // the shortest chain, when any phase reads
-  const bool reads = spec.has_readout();
   if (!spec.observable_names.empty() &&
       spec.observable_names.size() != observables)
     throw std::invalid_argument(
@@ -919,11 +1219,6 @@ static void validate_observables(const dem_chunks_spec &spec) {
       throw std::invalid_argument(
           "dem_chunks_spec: observable_names repeats '" + name + "'");
 
-  if (reads) {
-    auto shortest = spec;
-    shortest.num_rounds = std::max<uint64_t>(2, spec.minimum_rounds());
-    sequence = shortest.phase_sequence();
-  }
   for (const auto &e : spec.phases) {
     const auto &m2o = e.spec.m2o_sparse;
     const auto fail = [&](const std::string &what) {
@@ -932,13 +1227,14 @@ static void validate_observables(const dem_chunks_spec &spec) {
     };
     if (m2o.empty())
       continue;
-    const bool repeats =
-        std::any_of(spec.connections.begin(), spec.connections.end(),
-                    [&](const phase_connection &c) {
-                      return c.is_self() && c.from_phase == e.id;
-                    });
-    if (repeats)
+    // A phase no connection names is in no shot.
+    const std::size_t node = index_of(graph, e.id);
+    const bool named = node < graph.phases.size();
+    if (named && graph.repeats[node])
       fail("carries m2o_sparse, which a repeating phase may not: a readout "
+           "belongs to a round the shot has once");
+    if (named && on_cycle(graph, node))
+      fail("carries m2o_sparse, which a phase on a cycle may not: a readout "
            "belongs to a round the shot has once");
     const auto rows = static_cast<uint64_t>(
         std::count(m2o.begin(), m2o.end(), std::int64_t{-1}));
@@ -967,7 +1263,7 @@ static void validate_observables(const dem_chunks_spec &spec) {
                    : "; without D_sparse a round measures one bit per "
                      "detector, so num_measurements cannot widen it"));
   } // end - for(e)
-  validate_readout_order(spec, sequence);
+  validate_readout_order(spec, graph);
 } // end - validate_observables()
 
 void dem_chunks_spec::validate() const {
@@ -990,7 +1286,9 @@ void dem_chunks_spec::validate() const {
         throw std::invalid_argument(
             "dem_chunks_spec: a connection names phase '" + id.name() +
             "', which has no spec");
-  validate_observables(*this);
+  const auto graph = graph_of(*this);
+  validate_connections(*this, graph);
+  validate_observables(*this, graph);
   // Emptiness is only a half-written map when the map is inferred from it. A
   // declared map says which phases are mapped on its own, so a phase that
   // contributes no detector rows is legal under it.
@@ -1012,7 +1310,7 @@ void dem_chunks_spec::validate() const {
             "dem_chunks_spec: phase '" + e.id.name() +
             "' carries D_sparse but neither it nor the spec sets a "
             "measurement count (num_measurements / measurements_per_round)");
-}
+} // end - dem_chunks_spec::validate()
 
 // Inferring from any phase rather than from the first: validate() has already
 // rejected a spec where only some phases carry rows, so any phase answers for

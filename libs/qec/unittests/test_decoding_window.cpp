@@ -306,6 +306,17 @@ TEST(ExperimentTemplate, RejectsSpecsItCannotExpand) {
   expect_error([&] { experiment_template{missing}; }, "'absent'");
 }
 
+// A phase graph does not say which phase each round of a shot is, so the
+// template refuses it, with or without a round count.
+TEST(ExperimentTemplate, RefusesAPhaseGraph) {
+  auto fixed = readout_graph_spec();
+  fixed.num_rounds = 7;
+  for (const auto &spec : {readout_graph_spec(), fixed})
+    expect_error([&] { experiment_template{spec}; },
+                 "dem_chunks_spec: a phase graph (phase 'bulk' leads to more "
+                 "than one phase) needs round tags");
+}
+
 // Measurement offsets follow each phase's width in the stream, the readout
 // map is the last phase's, and only the last suffix phase may differ from
 // bulk in width. Without D_sparse a round measures one bit per detector,
