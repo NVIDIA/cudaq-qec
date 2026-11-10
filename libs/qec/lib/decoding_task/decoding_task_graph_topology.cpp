@@ -934,6 +934,7 @@ window_schedule describe_schedule(std::vector<task_graph_node_config> nodes,
     };
     auto schedule = schedule_windows(context, layers, sends, num_rounds);
     out.templates[ingest] = store.template_sha256(*context);
+    out.unfinalized_rows[ingest] = unfinalized_rows(*context, layers, schedule);
     for (auto &window : schedule.windows) {
       const auto node =
           std::find_if(nodes.begin(), nodes.end(),

@@ -1891,6 +1891,58 @@ TEST(Commitment, SlidingWindowFinalizesEveryRowOnce) {
     expect_sound(arbitrary_memory_spec(5), sliding_graph(step, size));
 }
 
+// A guard window's commit zone starts where the previous window's trailing
+// buffer holds its first round, so no window finalizes that round's rows:
+// rejected as exact, accepted with unchecked seams.
+TEST(Commitment, AGuardLayoutNeedsUncheckedSeams) {
+  for (const auto &[step, lead, trail] :
+       std::vector<std::array<std::int64_t, 3>>{
+           {1, 1, 1}, {2, 1, 2}, {3, 2, 2}, {2, 2, 3}}) {
+    SCOPED_TRACE("step " + std::to_string(step) + ", lead " +
+                 std::to_string(lead) + ", trail " + std::to_string(trail));
+    auto g = guard_graph(step, lead, trail);
+    EXPECT_NO_THROW(validate(arbitrary_memory_spec(5), g));
+    g.layers[0].request.soundness = soundness_class::exact;
+    expect_error([&] { validate(arbitrary_memory_spec(5), g); },
+                 "validate_commitment: F1: row",
+                 "has no finalizer; held by W[");
+  }
+}
+
+// Unchecked seams relax only a row no window finalizes. Two finalizers, a
+// fault committed twice, and a row that an exact layer also holds are
+// rejected as before.
+TEST(Commitment, UncheckedSeamsKeepEveryOtherRule) {
+  auto two = layered(2, 2, 3);
+  two.a.buffers = {{2, 4}};
+  two.a.input = {port_disposition::closed, std::nullopt};
+  two.a.soundness = soundness_class::unchecked_seams;
+  two.b.soundness = soundness_class::unchecked_seams;
+  expect_error([&] { validate(arbitrary_memory_spec(5), parallel_graph(two)); },
+               "validate_commitment: F1: row", "has 2 finalizers: A[1], B[1]");
+
+  auto twice = guard_graph(2, 1, 1);
+  twice.layers[0].request.commit = round_range{0, 3};
+  twice.layers[0].request.buffers = {{-1, 0}, {3, 4}};
+  expect_error([&] { validate(arbitrary_memory_spec(5), twice); },
+               "validate_commitment: F4: fault", "committed by 2 windows");
+
+  // B's open input leaves its first round without a finalizer, held by
+  // A[k-1] and B[k]: still F1 while B is exact. Once both are unchecked,
+  // the row passes and the parallel-column check that follows still runs.
+  auto open_b = layered(2, 2, 3);
+  open_b.b.input = {port_disposition::open, 0.01};
+  open_b.a.soundness = soundness_class::unchecked_seams;
+  expect_error(
+      [&] { validate(arbitrary_memory_spec(5), parallel_graph(open_b)); },
+      "validate_commitment: F1: row", "has no finalizer; held by A[");
+  open_b.b.soundness = soundness_class::unchecked_seams;
+  expect_error(
+      [&] { validate(arbitrary_memory_spec(5), parallel_graph(open_b)); },
+      "validate_commitment: B[", "is parallel to column",
+      "a boundary or truncated column");
+} // end - TEST(Commitment, UncheckedSeamsKeepEveryOtherRule)
+
 // F1: B with an open input has a boundary column on its first round, where
 // A[k-1] has its trailing buffer, so no window finalizes the round.
 TEST(Commitment, RejectsARowWithoutAFinalizer) {
@@ -4755,7 +4807,8 @@ TEST(DataArtifactStore, EveryFieldIsContent) {
       [](auto &r) { r.columns.merge_identical = true; },
       [](auto &r) {
         r.columns.conflicting_parallel = parallel_resolution::most_likely;
-      }};
+      },
+      [](auto &r) { r.soundness = soundness_class::unchecked_seams; }};
   std::set<std::string> seen{canonical_bytes(spec), canonical_bytes(request)};
   for (const auto &change : spec_changes) {
     auto changed = spec;
@@ -7259,6 +7312,9 @@ TEST(WindowedGraph, DescribesItsSchedule) {
       EXPECT_EQ(schedule.templates.at("P.ingest"),
                 store.template_sha256(*context));
       EXPECT_TRUE(recorded("dem_chunks", schedule.templates.at("P.ingest")));
+      EXPECT_EQ(
+          schedule.unfinalized_rows,
+          (std::map<std::string, std::vector<std::size_t>>{{"P.ingest", {}}}));
     } // end - for(R)
   } // end - for(options, copies)
   std::vector<task_graph_node_config> plain(2);
@@ -7275,6 +7331,61 @@ TEST(WindowedGraph, DescribesItsSchedule) {
                                 {}, 10)
                   .windows.empty());
 } // end - TEST(WindowedGraph, DescribesItsSchedule)
+
+// A guard window W over arbitrary_memory_spec(5, true), written by hand:
+// ingest's one layer feeds W, with no edge between W's windows.
+std::vector<task_graph_node_config> guard_nodes(soundness_class soundness) {
+  std::vector<task_graph_node_config> nodes(2);
+  auto request = guard(2, 1, 1);
+  request.soundness = soundness;
+  nodes[0].id = "ingest";
+  nodes[0].kind = "ingest";
+  nodes[0].dem = arbitrary_memory_spec(5, true);
+  nodes[0].windows = {{"W", request, ""}};
+  nodes[1].id = "W";
+  nodes[1].kind = "decode_window";
+  nodes[1].decoder_type = "single_error_lut";
+  return nodes;
+}
+
+std::vector<task_graph_edge> guard_edges() {
+  return {{"measurements", "output", "ingest", "input"},
+          {"ingest", "W", "W", "input"},
+          {"W", "output", "output", "input"}};
+}
+
+// A guard layout builds once its seams are unchecked, and is refused as
+// exact, naming the row without a finalizer.
+TEST(WindowedGraph, BuildsAGuardLayoutOnlyWithUncheckedSeams) {
+  EXPECT_NO_THROW(decoding_task_graph::from_topology(
+      guard_nodes(soundness_class::unchecked_seams), guard_edges()));
+  expect_error(
+      [&] {
+        decoding_task_graph::from_topology(guard_nodes(soundness_class::exact),
+                                           guard_edges());
+      },
+      "F1: row", "has no finalizer; held by W[");
+}
+
+// The schedule lists the rows no window finalizes: every row of the first
+// round of each commit zone but W[0]'s, where W[k-1]'s trailing buffer and
+// W[k]'s lead buffer meet.
+TEST(WindowedGraph, DescribesTheRowsItLeavesUnfinalized) {
+  const experiment_template tmpl(arbitrary_memory_spec(5, true));
+  for (auto R = tmpl.min_rounds(); R <= 20; ++R) {
+    SCOPED_TRACE("R=" + std::to_string(R));
+    std::vector<std::size_t> expected;
+    for (std::size_t q = 2; q < R; q += 2)
+      for (auto row = tmpl.row_offset(q, R); row < tmpl.row_offset(q + 1, R);
+           ++row)
+        expected.push_back(row);
+    const auto schedule = describe_schedule(
+        guard_nodes(soundness_class::unchecked_seams), guard_edges(), {}, R);
+    EXPECT_EQ(schedule.unfinalized_rows,
+              (std::map<std::string, std::vector<std::size_t>>{
+                  {"ingest", expected}}));
+  }
+}
 
 // A shot's closure says whether every window's solution was checked and
 // held: not_checked without verify_residual; closed with report when every

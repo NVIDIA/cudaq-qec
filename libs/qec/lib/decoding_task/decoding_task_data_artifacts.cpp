@@ -325,6 +325,7 @@ std::string canonical_bytes(const window_request &request) {
   put(out, "merge_identical", request.columns.merge_identical ? "1" : "0");
   put(out, "conflicting_parallel",
       enumerator(request.columns.conflicting_parallel));
+  put(out, "soundness", enumerator(request.soundness));
   return out;
 } // end - canonical_bytes()
 

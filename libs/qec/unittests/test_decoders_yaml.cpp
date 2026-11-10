@@ -2935,6 +2935,30 @@ TEST(WindowRequestYAML, ParsesThePlansLayerA) {
             window_a());
 }
 
+// soundness_class is exact unless set, is written only when it is not, and
+// takes exact or unchecked_seams.
+TEST(WindowRequestYAML, ReadsTheSoundnessClass) {
+  using namespace cudaq::qec;
+  auto unchecked = window_a();
+  unchecked.soundness = soundness_class::unchecked_seams;
+  EXPECT_EQ(window_request_from_yaml_str(window_a_yaml()).soundness,
+            soundness_class::exact);
+  EXPECT_EQ(window_request_from_yaml_str(window_a_yaml() +
+                                         "soundness_class: unchecked_seams\n"),
+            unchecked);
+  EXPECT_EQ(window_request_from_yaml_str(window_a_yaml() +
+                                         "soundness_class: exact\n"),
+            window_a());
+  EXPECT_EQ(window_request_to_yaml_str(window_a()).find("soundness_class"),
+            std::string::npos);
+  EXPECT_NE(window_request_to_yaml_str(unchecked).find(
+                "soundness_class: unchecked_seams"),
+            std::string::npos);
+  EXPECT_THROW(window_request_from_yaml_str(window_a_yaml() +
+                                            "soundness_class: strict\n"),
+               std::invalid_argument);
+} // end - TEST(WindowRequestYAML, ReadsTheSoundnessClass)
+
 // Every range may be written [b, e] or {rounds: [b, e]}, and both build the
 // same window.
 TEST(WindowRequestYAML, MapFormRangesEqualListForm) {
@@ -2976,6 +3000,7 @@ TEST(WindowRequestYAML, RoundTrips) {
   full.sends.push_back({"wide", send_mode::delta, {{-3, 6}}});
   full.columns.merge_identical = true;
   full.columns.conflicting_parallel = parallel_resolution::most_likely;
+  full.soundness = soundness_class::unchecked_seams;
   closed.offset = -9;
   closed.input = {port_disposition::closed, std::nullopt};
   closed.output = {port_disposition::closed, round_range{6, 8}};
@@ -3047,8 +3072,6 @@ TEST(WindowRequestYAML, RejectsReservedShapes) {
           "spatial ports are not supported yet");
   rejects("period: 12", "period: 12\nresponsibility: [0]",
           "'responsibility' is reserved");
-  rejects("period: 12", "period: 12\nsoundness_class: strict",
-          "'soundness_class' is reserved");
   rejects("commit: [0, 3]", "commit: [0, 3, 5]",
           "a round range is [begin, end]");
   rejects("period: 12", "period: 12\nperiodd: 5", "unknown key 'periodd'");

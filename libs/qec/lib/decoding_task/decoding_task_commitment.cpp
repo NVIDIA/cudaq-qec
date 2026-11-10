@@ -316,14 +316,38 @@ bool sends_round(const scheduled_window &p, const scheduled_window &c,
   return false;
 }
 
+// The nodes of the unchecked_seams layers among @p layers.
+std::set<std::string>
+unchecked_layers(const std::vector<window_layer> &layers) {
+  std::set<std::string> out;
+  for (const auto &layer : layers)
+    if (layer.request.soundness == soundness_class::unchecked_seams)
+      out.insert(layer.node);
+  return out;
+}
+
+// Whether a row without a finalizer is allowed: some window holds it, and
+// every one that does is in an unchecked_seams layer.
+bool unchecked_seam(const window_schedule &s,
+                    const std::vector<std::size_t> &holders,
+                    const std::set<std::string> &unchecked) {
+  return !holders.empty() &&
+         std::all_of(holders.begin(), holders.end(), [&](std::size_t w) {
+           return unchecked.count(s.windows[w].node) != 0;
+         });
+}
+
 // F1 and F3 on every row that some fault touches, in row order. The faults
 // on a row are round q's and round q - 1's, each named by its first column.
 // F2 needs no check: check_commits() has already found every detectable
 // fault committed once, so each fault on the row is the finalizer's column
-// or committed by another window.
+// or committed by another window. A row only @p unchecked layers hold may
+// have no finalizer; it is appended to @p unfinalized, when given.
 void check_rows(const experiment_template &t, const window_schedule &s,
                 const round_windows &index,
-                const std::vector<const chunk_touch *> &touch) {
+                const std::vector<const chunk_touch *> &touch,
+                const std::set<std::string> &unchecked,
+                std::vector<std::size_t> *unfinalized = nullptr) {
   const auto R = s.num_rounds;
   const std::vector<std::int64_t> none;
   for (std::size_t q = 0; q < R; ++q) {
@@ -345,6 +369,12 @@ void check_rows(const experiment_template &t, const window_schedule &s,
         if (finalizes(s.windows[w], round, faults[0].second >= 0,
                       faults[1].second >= 0))
           finalizers.push_back(w);
+      if (finalizers.empty() &&
+          unchecked_seam(s, index.holders[q], unchecked)) {
+        if (unfinalized)
+          unfinalized->push_back(t.row_offset(q, R) + i);
+        continue;
+      }
       if (finalizers.empty())
         reject("F1: " + row() + " has no finalizer; held by " +
                (index.holders[q].empty() ? "no window"
@@ -560,6 +590,7 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
   std::map<const extended_dem *, chunk_touch> touches;
   std::set<std::pair<std::string, variant_key>> variants;
   std::map<std::string, const window_request *> requests;
+  const auto unchecked = unchecked_layers(layers);
   std::string digest; // the template's sha256 in the store, hashed once
   if (!context)
     reject("no template");
@@ -575,7 +606,7 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
                   touch_rounds(*context, schedule.num_rounds, touches));
   for (const auto &schedule : schedules) {
     check_rows(*context, schedule, index_rounds(schedule),
-               touch_rounds(*context, schedule.num_rounds, touches));
+               touch_rounds(*context, schedule.num_rounds, touches), unchecked);
     check_imports(schedule);
   }
   // The windows are built only once the schedules pass, so a delivery or
@@ -595,6 +626,22 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
                   : nullptr);
       }
 } // end - validate_commitment()
+
+// The rows check_rows() lets pass without a finalizer, from a walk of
+// @p schedule alone: describe_schedule() may ask for any shot length, not
+// only the probed ones. The layers have passed validation, so the walk
+// throws nothing.
+std::vector<std::size_t>
+unfinalized_rows(const experiment_template &context,
+                 const std::vector<window_layer> &layers,
+                 const window_schedule &schedule) {
+  std::vector<std::size_t> out;
+  std::map<const extended_dem *, chunk_touch> touches;
+  check_rows(context, schedule, index_rounds(schedule),
+             touch_rounds(context, schedule.num_rounds, touches),
+             unchecked_layers(layers), &out);
+  return out;
+}
 
 namespace {
 

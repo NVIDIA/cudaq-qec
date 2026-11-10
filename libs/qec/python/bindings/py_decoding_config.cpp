@@ -357,6 +357,9 @@ void bindDecodingConfig(nb::module_ &mod) {
     nb::enum_<exp::parallel_resolution>(mod_exp, "parallel_resolution")
         .value("reject", exp::parallel_resolution::reject)
         .value("most_likely", exp::parallel_resolution::most_likely);
+    nb::enum_<exp::soundness_class>(mod_exp, "soundness_class")
+        .value("exact", exp::soundness_class::exact)
+        .value("unchecked_seams", exp::soundness_class::unchecked_seams);
     nb::class_<exp::round_range>(
         mod_exp, "round_range",
         "Half-open rounds [begin, end), relative to a window's anchor.")
@@ -401,6 +404,7 @@ void bindDecodingConfig(nb::module_ &mod) {
         .def_rw("output", &exp::window_request::output)
         .def_rw("sends", &exp::window_request::sends)
         .def_rw("columns", &exp::window_request::columns)
+        .def_rw("soundness", &exp::window_request::soundness)
         .def("__eq__", [](const exp::window_request &a,
                           const exp::window_request &b) { return a == b; });
     nb::class_<exp::ingest_window>(

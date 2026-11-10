@@ -48,6 +48,12 @@ enum class input_boundary { columns, truncate };
 /// likely.
 enum class parallel_resolution { reject, most_likely };
 
+/// What commitment validation asks of a layer's rows: every row a fault
+/// touches has exactly one finalizer, or a row that only unchecked layers
+/// hold may have none, as at the seams of independent overlapping windows.
+/// Every other rule holds for both.
+enum class soundness_class { exact, unchecked_seams };
+
 /// The windows of one layer: window k is anchored at offset + k * period,
 /// and every round range is relative to that anchor.
 struct window_request {
@@ -92,6 +98,7 @@ struct window_request {
   output_port output;
   std::vector<send_request> sends;
   column_options columns;
+  soundness_class soundness = soundness_class::exact;
   bool operator==(const window_request &) const = default;
 };
 

@@ -1308,12 +1308,15 @@ def test_experimental_window_request_is_writable():
     request.input.disposition = exp.port_disposition.closed
     request.output.disposition = exp.port_disposition.open
     request.columns.conflicting_parallel = exp.parallel_resolution.most_likely
+    assert request.soundness == exp.soundness_class.exact
+    request.soundness = exp.soundness_class.unchecked_seams
     window = exp.ingest_window()
     window.layer = "W"
     window.request = request
     assert window.request.commit.end == 2
     assert window.request.columns.conflicting_parallel == \
         exp.parallel_resolution.most_likely
+    assert window.request.soundness == exp.soundness_class.unchecked_seams
 
 
 def test_parallel_window_graph_validates_against_the_schema():
@@ -1329,6 +1332,13 @@ def test_parallel_window_graph_validates_against_the_schema():
         "responsibility"] = [0]
     with pytest.raises(jsonschema.ValidationError):
         validator.validate(bad)
+    unchecked = yaml.safe_load(_PW_GRAPH_YAML)
+    windows = unchecked["decoders"][0]["task_graph"]["nodes"][0]["windows"]
+    windows["A"]["soundness_class"] = "unchecked_seams"
+    validator.validate(unchecked)
+    windows["A"]["soundness_class"] = "strict"
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(unchecked)
 
 
 _ARTIFACTS_YAML = """data_artifacts:
