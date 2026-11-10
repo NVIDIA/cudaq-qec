@@ -8,6 +8,9 @@ on:
 jobs:
   wheels:
     name: Build and test wheels
+    permissions:
+      actions: write
+      contents: read
     uses: ./.github/workflows/build_wheels.yaml
     with:
       build_type: Release
@@ -107,6 +110,9 @@ jobs:
   cudaq-main-wheels:
     name: Wheels against CUDA-Q main
     needs: [resolve-cudaq-main, build-cudaq-main]
+    permissions:
+      actions: write
+      contents: read
     uses: ./.github/workflows/build_wheels.yaml
     with:
       build_type: Release

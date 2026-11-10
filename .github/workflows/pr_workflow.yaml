@@ -181,6 +181,9 @@ jobs:
     if: |
       !failure() && !cancelled() &&
       needs.check-changes.outputs.build-wheels == 'true'
+    permissions:
+      actions: write
+      contents: read
     uses: ./.github/workflows/build_wheels.yaml
     with:
       build_type: Release
