@@ -229,7 +229,7 @@ void bindExtendedDem(nb::module_ &mod) {
       .def_rw("from_phase", &phase_connection::from_phase)
       .def_rw("to_phase", &phase_connection::to_phase)
       .def("is_self", &phase_connection::is_self,
-           "True when from_phase == to_phase (marks the repeating phase).");
+           "True when from_phase == to_phase (marks a repeating phase).");
 
   nb::class_<phase_spec_entry>(mod, "PhaseSpecEntry",
                                "A (PhaseId, DemChunkSpec) pair.")
@@ -249,7 +249,12 @@ void bindExtendedDem(nb::module_ &mod) {
       "chunk\n"
       "list. num_rounds is required for that call when a self-loop is "
       "present;\n"
-      "for streaming leave it as None and process bulk chunks as they arrive.")
+      "for streaming leave it as None and process bulk chunks as they "
+      "arrive.\n\n"
+      "The connections may instead form a phase graph, with branches and\n"
+      "cycles. validate() accepts one, but the consumers that place phases\n"
+      "by round refuse it until round tags are supported; see\n"
+      "is_linear_chain().")
       .def(nb::init<>())
       .def_rw("phases", &dem_chunks_spec::phases, "List of PhaseSpecEntry.")
       .def_rw("connections", &dem_chunks_spec::connections,
@@ -298,15 +303,24 @@ void bindExtendedDem(nb::module_ &mod) {
            "True when no phases or connections have been set.")
       .def("has_repeating_phase", &dem_chunks_spec::has_repeating_phase,
            "True when any connection is a self-loop.")
+      .def("is_linear_chain", &dem_chunks_spec::is_linear_chain,
+           "True when the connections form a linear chain: the non-self\n"
+           "connections form one simple path and at most one phase repeats.\n"
+           "A phase graph (False) validates, but phase_sequence() and the\n"
+           "other consumers that place phases by round refuse it.")
       .def("minimum_rounds", &dem_chunks_spec::minimum_rounds,
-           "Shortest chain the connections admit, visiting a repeating phase\n"
-           "once. This is what a streaming spec expands to when nothing else\n"
-           "pins the round count, and the smallest window it can supply.")
+           "Shortest shot the connections admit: the rounds on the shortest\n"
+           "path from the start phase to a terminal phase, visiting a\n"
+           "repeating phase once. This is what a streaming spec expands to\n"
+           "when nothing else pins the round count, and the smallest window\n"
+           "it can supply.")
       .def("repeating_phase", &dem_chunks_spec::repeating_phase,
-           "Return the PhaseId of the self-connected phase.")
+           "Return the PhaseId of the self-connected phase.\n"
+           "Raises ValueError for a phase graph.")
       .def("phase_sequence", &dem_chunks_spec::phase_sequence,
            "Expand connections into an ordered list of PhaseIds.\n"
-           "Requires num_rounds when a self-loop is present.")
+           "Requires num_rounds when a self-loop is present.\n"
+           "Raises ValueError for a phase graph.")
       .def("get_phase", &dem_chunks_spec::get_phase, nb::arg("id"),
            "Return the DemChunkSpec for the phase with the given PhaseId.\n"
            "Raises ValueError if no such phase exists.")

@@ -565,6 +565,15 @@ static void validate_task_graph(const decoder_config &config) {
         node.dem_chunks.has_value() ? node.dem_chunks : config.dem_chunks;
     if (!dem.has_value())
       continue;
+    // The DEM is validated only after parsing, and minimum_rounds() below
+    // throws on connections validate() rejects, so validate first for its
+    // clearer error.
+    try {
+      dem->validate();
+    } catch (const std::invalid_argument &e) {
+      throw std::runtime_error("Invalid dem_chunks for " + where + ": " +
+                               e.what());
+    }
     // window_size is the round count the phases expand to, so it has to name a
     // chain the connections can actually describe.
     if (dem->num_rounds.has_value() && window_size > *dem->num_rounds)

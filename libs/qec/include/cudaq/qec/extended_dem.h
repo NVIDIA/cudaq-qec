@@ -377,10 +377,10 @@ struct seam_connection {
   bool operator==(const seam_connection &) const = default;
 };
 
-/// @brief Directed edge in the phase graph.
+/// @brief Directed edge in the phase graph: a shot may move from from_phase
+/// to to_phase between consecutive rounds.
 ///
-/// A self-connection (from_phase == to_phase) marks the repeating phase in a
-/// linear chain.
+/// A self-connection (from_phase == to_phase) marks a repeating phase.
 struct phase_connection {
   phase_id from_phase;
   phase_id to_phase;
@@ -406,6 +406,11 @@ struct phase_spec_entry {
 /// phase_sequence() throws when a self-loop is present and num_rounds is
 /// absent. For a linear chain (no self-loop) phase_sequence() derives the
 /// length from the connections.
+///
+/// The connections may instead form a phase graph, with branches and cycles,
+/// whose rules validate() states. A shot's length does not place a graph's
+/// phases, so phase_sequence() and repeating_phase() refuse one; see
+/// is_linear_chain().
 struct dem_chunks_spec {
   std::vector<phase_spec_entry> phases;
   std::vector<phase_connection> connections;
@@ -467,14 +472,24 @@ struct dem_chunks_spec {
   /// True when any phase carries m2o_sparse, so the spec reads observables.
   bool has_readout() const;
 
-  /// Shortest chain the connections admit: one round per non-self connection,
-  /// plus the round the last one lands on. A repeating phase can be visited
-  /// once, so this is the round count a streaming spec expands to when nothing
-  /// else pins it, and the smallest window a caller may ask that spec for.
+  /// @brief True when the connections form a linear chain, the form
+  /// phase_sequence() and repeating_phase() need: the non-self connections
+  /// form one simple path and at most one phase repeats. True without
+  /// connections. Reads the connections only; validate() checks the rest.
+  bool is_linear_chain() const;
+
+  /// Shortest shot the connections admit: the rounds on the shortest path
+  /// from the start phase to a terminal phase, visiting a repeating phase
+  /// once; 1 without non-self connections. This is the round count a
+  /// streaming spec expands to when nothing else pins it, and the smallest
+  /// window a caller may ask that spec for.
+  /// @throws std::invalid_argument if no start phase reaches a terminal one,
+  ///         which validate() rules out.
   uint64_t minimum_rounds() const;
 
   /// Return the phase_id of the self-connected (repeating) phase.
-  /// @throws std::invalid_argument if there is no or more than one self-loop.
+  /// @throws std::invalid_argument for a phase graph (see is_linear_chain()),
+  ///         a connection listed twice, or if there is no self-loop.
   phase_id repeating_phase() const;
 
   /// @brief Rounds of phase_sequence() before, of, and after the repeating
@@ -510,10 +525,9 @@ struct dem_chunks_spec {
   /// Without a self-loop, the sequence length is derived from the connections
   /// and num_rounds is not consulted.
   ///
-  /// @throws std::invalid_argument if a self-loop is present and num_rounds
-  ///         is absent, or if the connection graph is not a valid linear
-  ///         chain: a phase with more than one non-self outgoing edge, or a
-  ///         cycle among the non-self edges, is rejected.
+  /// @throws std::invalid_argument for a phase graph (see
+  ///         is_linear_chain()), a connection listed twice, or if a self-loop
+  ///         is present and num_rounds is absent.
   std::vector<phase_id> phase_sequence() const;
 
   /// Return the spec for the phase with the given id.
@@ -522,11 +536,20 @@ struct dem_chunks_spec {
 
   /// @brief Validate phase specs, connection graph, and seam widths.
   ///
+  /// The connections, each listed once, form a chain or a phase graph over
+  /// the phases they name, read directly rather than expanded into rounds:
+  /// exactly one start phase, which no connection from another phase enters
+  /// (a self-loop may, so a chain may start on its repeating phase); at
+  /// least one terminal phase, which leads to no other phase (it may repeat);
+  /// and every phase reachable from the start and able to reach a terminal.
+  /// The seam bands each connection joins agree in width where both have
+  /// rows.
+  ///
   /// Also checks that every connection names a phase with a spec, the phases
   /// agree on the observable count, observable_names has one unique name per
-  /// observable, and no repeating phase carries m2o_sparse, which has one row
-  /// per observable inside its round: its measurement count with D_sparse,
-  /// else its detectors.
+  /// observable, and no phase a shot can visit twice (on a self-loop or a
+  /// cycle) carries m2o_sparse, which has one row per observable inside its
+  /// round: its measurement count with D_sparse, else its detectors.
   /// @throws std::invalid_argument on the first violation.
   void validate() const;
 };

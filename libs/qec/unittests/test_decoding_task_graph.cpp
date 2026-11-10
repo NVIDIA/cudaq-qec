@@ -159,6 +159,25 @@ TEST(DecodingTaskGraph, UnequalPhaseWidthsCannotSlideEvenWhenTotalDivides) {
   }
 }
 
+// A phase graph builds neither a streaming nor a fixed-length graph.
+TEST(DecodingTaskGraph, FromSpecRefusesAPhaseGraph) {
+  auto fixed = readout_graph_spec();
+  fixed.num_rounds = 7;
+  for (const auto &spec : {readout_graph_spec(), fixed}) {
+    try {
+      (void)decoding_task_graph::from_spec(spec, "single_error_lut");
+      ADD_FAILURE() << "a phase graph must be refused";
+    } catch (const std::exception &error) {
+      EXPECT_NE(std::string(error.what())
+                    .find("a phase graph (phase 'bulk' "
+                          "leads to more than one "
+                          "phase) needs round tags"),
+                std::string::npos)
+          << error.what();
+    }
+  }
+}
+
 TEST(DecodingTaskGraph, UnequalPhaseWidthsRequireATypicalWidth) {
   EXPECT_THROW(decoding_task_graph::from_spec(phase_width_spec({1, 3, 3, 5}),
                                               "single_error_lut"),

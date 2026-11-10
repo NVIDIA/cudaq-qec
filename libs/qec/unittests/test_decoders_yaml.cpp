@@ -2902,6 +2902,97 @@ TEST(DecoderDemChunksYAMLTest, ReadoutMapAndNamesAreCheckedWhenParsed) {
   rejects(named, "2 observable_names for 1 observables");
 } // end - TEST(..., ReadoutMapAndNamesAreCheckedWhenParsed)
 
+// dem_chunks_yaml as a phase graph: bulk may hand over to a mid-circuit
+// readout phase and back any number of times, so it sets no num_rounds.
+std::string dem_chunks_graph_yaml(const std::string &readout_extra = "") {
+  auto yaml = dem_chunks_yaml(3);
+  const std::string last = "        - {from: bulk, to: final}\n";
+  const std::string rounds = "      num_rounds: 3\n";
+  yaml.replace(yaml.find(last), last.size(),
+               "        - {from: bulk, to: readout}\n"
+               "        - {from: readout, to: bulk}\n" +
+                   last);
+  yaml.erase(yaml.find(rounds), rounds.size());
+  yaml += R"(        - name: readout
+          spec:
+            num_faults: 2
+            H_sparse: [0, 1, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.01, 0.01]
+)" + readout_extra;
+  return yaml;
+}
+
+// A phase graph parses, validates and round-trips; building a decoder from
+// it is refused until round tags place its phases.
+TEST(DecoderDemChunksYAMLTest, PhaseGraphRoundTripsAndIsRefusedWhenBuilt) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const std::string refusal = "a phase graph (phase 'bulk' leads to more "
+                              "than one phase) needs round tags";
+  auto parsed =
+      cfg::multi_decoder_config::from_yaml_str(dem_chunks_graph_yaml());
+  const auto emitted = parsed.to_yaml_str(200);
+  auto round_tripped = cfg::multi_decoder_config::from_yaml_str(emitted);
+  auto config = parsed.decoders.at(0);
+
+  ASSERT_TRUE(config.dem_chunks.has_value());
+  EXPECT_EQ(config.dem_chunks->connections.size(), 5u);
+  EXPECT_FALSE(config.dem_chunks->is_linear_chain());
+  EXPECT_EQ(round_tripped, parsed);
+  EXPECT_EQ(round_tripped.to_yaml_str(200), emitted);
+  try {
+    (void)cfg::expand_dem_chunks(config);
+    ADD_FAILURE() << "expansion must refuse a phase graph";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(refusal), std::string::npos)
+        << e.what();
+  }
+  try {
+    (void)cfg::configure_decoders(parsed);
+    ADD_FAILURE() << "configuration must refuse a phase graph";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find(refusal), std::string::npos)
+        << e.what();
+  }
+  cfg::finalize_decoders();
+} // end - TEST(..., PhaseGraphRoundTripsAndIsRefusedWhenBuilt)
+
+// Parsing checks a phase graph's structure and its readout maps, also when a
+// windowed task-graph node reads the graph's minimum_rounds() while parsing.
+TEST(DecoderDemChunksYAMLTest, PhaseGraphIsCheckedWhenParsed) {
+  namespace cfg = cudaq::qec::decoding::config;
+  auto cycle = dem_chunks_graph_yaml("            m2o_sparse: [0, -1]\n");
+  auto dead_end = dem_chunks_graph_yaml();
+  const std::string exit = "        - {from: bulk, to: final}\n";
+  const std::string type = "    type: sample_decoder\n";
+  cycle.insert(cycle.find("      phases:"),
+               "      measurements_per_round: 1\n");
+  dead_end.erase(dead_end.find(exit), exit.size());
+  auto windowed = dead_end;
+  windowed.replace(windowed.find(type), type.size(), R"(    task_graph:
+      nodes:
+        - id: sw
+          type: SlidingWindow
+          window_size: 3
+          step_size: 1
+          inner:
+            type: single_error_lut
+)");
+  for (const auto &[yaml, text] :
+       {std::pair{cycle, std::string("phase 'readout' carries m2o_sparse, "
+                                     "which a phase on a cycle may not")},
+        std::pair{dead_end, std::string("no terminal phase")},
+        std::pair{windowed, std::string("no terminal phase")}}) {
+    try {
+      (void)cfg::multi_decoder_config::from_yaml_str(yaml);
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Window requests
 // ---------------------------------------------------------------------------

@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import re
+
 import pytest
 import numpy as np
 import cudaq
@@ -1221,6 +1223,58 @@ def test_dem_chunks_from_spec_rejects_a_cyclic_connection_graph():
     with pytest.raises(Exception):
         spec.phase_sequence()
     with pytest.raises(Exception):
+        qec.dem_chunks_from_spec(spec)
+
+
+_PHASE_GRAPH_REFUSAL = ("a phase graph (phase 'bulk' leads to more than one "
+                        "phase) needs round tags")
+
+
+def _readout_graph_spec():
+    """_rep5_spec with a mid-circuit readout phase, a copy of bulk: bulk
+    repeats and may hand over to readout and back any number of times."""
+    spec = _rep5_spec()
+    spec.num_rounds = None
+    phases = spec.phases
+    phases.append(
+        _make_phase_entry("readout", 9,
+                          [0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1, 3, 4, 8, -1],
+                          [0, -1], [0.02] * 9))
+    spec.phases = phases
+    spec.connections = [
+        _make_connection("init", "bulk"),
+        _make_connection("bulk", "bulk"),
+        _make_connection("bulk", "readout"),
+        _make_connection("readout", "bulk"),
+        _make_connection("bulk", "final"),
+    ]
+    return spec
+
+
+def test_dem_chunks_spec_phase_graph_validates():
+    spec = _readout_graph_spec()
+    spec.validate()
+    assert not spec.is_linear_chain()
+    # init, bulk, final: the shortest path skips the readout cycle.
+    assert spec.minimum_rounds() == 3
+    assert _rep5_spec().is_linear_chain()
+    assert _rep5_spec().minimum_rounds() == 3
+
+
+def test_dem_chunks_spec_phase_graph_rejects_a_readout_on_a_cycle():
+    spec = _with_readout(_readout_graph_spec(), "readout", [0, -1])
+    with pytest.raises(ValueError, match="which a phase on a cycle may not"):
+        spec.validate()
+
+
+def test_dem_chunks_spec_phase_graph_is_refused_by_chain_consumers():
+    spec = _readout_graph_spec()
+    with pytest.raises(ValueError, match=re.escape(_PHASE_GRAPH_REFUSAL)):
+        spec.phase_sequence()
+    with pytest.raises(ValueError, match=re.escape(_PHASE_GRAPH_REFUSAL)):
+        spec.repeating_phase()
+    spec.num_rounds = 7
+    with pytest.raises(ValueError, match=re.escape(_PHASE_GRAPH_REFUSAL)):
         qec.dem_chunks_from_spec(spec)
 
 
