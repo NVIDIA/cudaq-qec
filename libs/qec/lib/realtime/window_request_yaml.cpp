@@ -106,6 +106,7 @@ window_request request_from_form(const request_form &form) {
   }
   request.columns = {form.columns.merge_identical,
                      form.columns.conflicting_parallel};
+  request.soundness = form.soundness;
   return request;
 } // end - request_from_form()
 
@@ -134,6 +135,7 @@ request_form form_from_request(const window_request &request) {
   }
   form.columns = {request.columns.merge_identical,
                   request.columns.conflicting_parallel};
+  form.soundness = request.soundness;
   return form;
 } // end - form_from_request()
 

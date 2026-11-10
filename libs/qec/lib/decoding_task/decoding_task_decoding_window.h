@@ -37,6 +37,7 @@ using experimental::parallel_resolution;
 using experimental::port_disposition;
 using experimental::round_range;
 using experimental::send_mode;
+using experimental::soundness_class;
 using experimental::window_request;
 using experimental::window_round_limit;
 

@@ -113,6 +113,7 @@ struct request_form {
   std::optional<ports_form> ports;
   std::vector<send_form> sends;
   columns_form columns;
+  soundness_class soundness = soundness_class::exact;
 };
 
 /// The request a form describes.
@@ -167,6 +168,16 @@ struct ScalarEnumerationTraits<cudaq::qec::experimental::parallel_resolution> {
     using cudaq::qec::experimental::parallel_resolution;
     io.enumCase(value, "reject", parallel_resolution::reject);
     io.enumCase(value, "most_likely", parallel_resolution::most_likely);
+  }
+};
+
+template <>
+struct ScalarEnumerationTraits<cudaq::qec::experimental::soundness_class> {
+  static void enumeration(IO &io,
+                          cudaq::qec::experimental::soundness_class &value) {
+    using cudaq::qec::experimental::soundness_class;
+    io.enumCase(value, "exact", soundness_class::exact);
+    io.enumCase(value, "unchecked_seams", soundness_class::unchecked_seams);
   }
 };
 
@@ -364,7 +375,7 @@ struct MappingTraits<cudaq::qec::window_yaml::columns_form> {
   }
 };
 
-/// The window keys, with responsibility and soundness_class reserved.
+/// The window keys, with responsibility reserved.
 template <>
 struct CustomMappingTraits<cudaq::qec::window_yaml::request_form> {
   static void inputOne(IO &io, StringRef key,
@@ -381,7 +392,9 @@ struct CustomMappingTraits<cudaq::qec::window_yaml::request_form> {
       io.mapRequired("sends", form.sends);
     else if (key == "columns")
       io.mapRequired("columns", form.columns);
-    else if (key == "responsibility" || key == "soundness_class")
+    else if (key == "soundness_class")
+      io.mapRequired("soundness_class", form.soundness);
+    else if (key == "responsibility")
       cudaq::qec::window_yaml::reject(
           "'" + key.str() +
           "' is reserved for spatial windows, which are not supported yet");
@@ -396,6 +409,8 @@ struct CustomMappingTraits<cudaq::qec::window_yaml::request_form> {
     io.mapOptional("sends", form.sends);
     io.mapOptional("columns", form.columns,
                    cudaq::qec::window_yaml::columns_form{});
+    io.mapOptional("soundness_class", form.soundness,
+                   cudaq::qec::experimental::soundness_class::exact);
   }
 };
 

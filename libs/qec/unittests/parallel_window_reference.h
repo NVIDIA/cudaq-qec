@@ -48,6 +48,14 @@ inline window_graph sliding_graph(std::int64_t step, std::int64_t size) {
   return g;
 }
 
+/// A guard sliding window: independent windows, no edges.
+inline window_graph guard_graph(std::int64_t step, std::int64_t lead,
+                                std::int64_t trail) {
+  window_graph g;
+  g.layers = {{"W", "w", guard(step, lead, trail)}};
+  return g;
+}
+
 /// The interior-commit layout for the default sizes, with M = 1: A commits
 /// c_a - 2 rounds between b + 1 buffer rounds, and B's gap grows to c_b + 2.
 inline layered_requests interior_commit(std::int64_t c_a, std::int64_t b,
