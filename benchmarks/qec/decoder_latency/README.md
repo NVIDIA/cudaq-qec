@@ -92,11 +92,14 @@ The sweep is the Cartesian product of:
 - `--noise P` or `--noises P[,P,...]` (default: 0.001)
 - `--decoder_instances N[,N,...]` (default: 1)
 - `--executions E[,E,...]` (`decoder`, `task-graph`, `task-graph-async`,
-  `parallel-window`, or `parallel-window-async`; default: `decoder`)
+  `parallel-window`, `parallel-window-async`, `sliding-window`, or
+  `sliding-window-async`; default: `decoder`)
 
 Option names accept either hyphens or underscores.
 
 `--async_queue_capacity N` controls the bounded queue used by each async instance: how many rounds the producer may run ahead of the graph. Its default is 32, matching `task_graph_options::async_queue_capacity`. A windowed graph that falls behind admits the rounds queued behind it together, up to one first-layer period (3d rounds by default) at a time, so a deep queue lets it catch up in batches; a shallow one caps those batches. A graph that falls behind returns FINAL's result only after draining its queue, so a deeper queue trades tail latency for throughput. Passing zero reserves one slot per detector round in the shot.
+
+`--async_num_workers N` sets how many pool threads run an async graph's fires. The default, 0, lets the graph size its pool: for a windowed graph, every copy that may fire at once plus one.
 
 `--dedicate_async_coordinator` reserves the last CPU in each pinned instance
 block for the task graph's coordinator and removes it from the producer and
@@ -142,6 +145,21 @@ For example, to compare windowed decoding with monolithic pymatching on long sho
 ```
 
 A window decodes to error mechanisms, so pymatching in a window needs a merge strategy for parallel edges; windowed rows default it to `smallest_weight`, as the app examples do, unless `--param merge_strategy=...` is given. A window's decoder is built from that window's model alone. It is given no `detector_round`, and `--source chunks` is refused for windowed rows, since they always build from their own chunks. As with the other graph rows, `--output errors` is refused. The logical error rate should stay close to the monolithic row's at the same point; windows that commit too few rounds or buffer too few lose accuracy at their seams.
+
+## Sliding-window rows
+
+`sliding-window` and `sliding-window-async` decode each shot through a sequential sliding window over the same per-round chunks, written out as an `ingest` node and one `decode_window` node: each window commits `--commit_rounds` rounds (default: the distance), buffers `--buffer_rounds` after them (default: the distance), and receives the previous window's committed flips on its first rounds. The windows therefore decode one after another: to keep up, each must finish within `--commit_rounds` round intervals, which `--round_interval_us` paces. `--gap_rounds` does not apply, and extra `--max_in_flight` copies cannot run two windows of a shot at once. Compare them with the parallel-window rows at the same layout:
+
+```bash
+./benchmarks/qec/decoder_latency/benchmark-qec-decoder \
+  --decoders pymatching \
+  --executions parallel-window-async,sliding-window-async \
+  --distances 5,11 --rounds 1000 \
+  --mode stream --round_interval_us 1 \
+  --shots 1000 --csv
+```
+
+The notes on merge strategy, `--source` and `--output` above apply to these rows too.
 
 ## Decoder options
 
