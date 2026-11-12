@@ -7844,6 +7844,12 @@ bool windows_overlap_round_by_round(const cudaqx::heterogeneous_map &params,
   nodes.push_back(pattern_node(spec, params, 4, "jitter_lut"));
   auto graph = decoding_task_graph::from_topology(std::move(nodes),
                                                   pattern_edges(), options);
+  // A nonzero queue is taken as given; 0 sizes it from the windows, past
+  // the 32 slots a graph without windows gets.
+  if (queue != 0)
+    EXPECT_EQ(graph->async_queue_capacity(), queue);
+  else
+    EXPECT_GT(graph->async_queue_capacity(), 32u);
   jitter_lut::reset();
   jitter_lut::hold();
   auto releaser = jitter_lut::release_when(

@@ -1374,6 +1374,9 @@ struct measurement {
   // its own timed window, summed.
   double throughput = 0.0;
   std::size_t logical_errors = 0;
+  // Rounds an async graph's producer may queue ahead, as the graph sized
+  // it; 0 for a row without an async graph.
+  std::size_t queue_capacity = 0;
 };
 
 uint64_t mask_from_result(const cudaq::qec::decoder_result &r) {
@@ -1459,6 +1462,11 @@ public:
     graph_->enqueue_syndrome(syndrome, size,
                              final ? cudaq::qec::round_type::FINAL
                                    : cudaq::qec::round_type::BULK);
+  }
+
+  // The async queue's capacity as the graph sized it; 0 without one.
+  std::size_t queue_capacity() const {
+    return graph_ ? graph_->async_queue_capacity() : 0;
   }
 
   // Pack the target's current observable corrections for comparison.
@@ -1910,7 +1918,12 @@ measurement run_point(const options &opts, const benchmark_data &data,
   const std::string failure = first_instance_error(pool.instances);
   if (!failure.empty())
     throw std::runtime_error(failure);
-  return pool_measurement(pool, opts, point, round_widths.size());
+  measurement row = pool_measurement(pool, opts, point, round_widths.size());
+  // Every instance's graph is built alike, so the first one's queue is
+  // theirs.
+  row.queue_capacity =
+      targets.empty() || !targets[0] ? 0 : targets[0]->queue_capacity();
+  return row;
 } // end - run_point()
 
 // ── Output
@@ -2058,18 +2071,11 @@ void print_tail_decomposition(const std::vector<measurement> &rows,
 
 void print_csv_row(const options &opts, const std::string &mode,
                    const measurement &row) {
-  // "default" when the graph sized its own queue.
-  const auto queue_capacity = !is_async(row.execution) ? std::string("0")
-                              : !opts.async_queue_capacity
-                                  ? std::string("default")
-                              : *opts.async_queue_capacity == 0
-                                  ? std::to_string(row.rounds_per_shot)
-                                  : std::to_string(*opts.async_queue_capacity);
   const double round_interval_us =
       static_cast<double>(opts.round_interval.count()) / 1e3;
   const bool asynchronous = is_async(row.execution);
   std::cout << "csv," << mode << "," << execution_name(row.execution) << ","
-            << round_interval_us << "," << queue_capacity << ","
+            << round_interval_us << "," << row.queue_capacity << ","
             << (asynchronous ? opts.dedicate_async_coordinator ? "dedicated"
                                                                : "inherited"
                              : "none")
