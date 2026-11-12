@@ -14582,15 +14582,15 @@ TEST(DecodingTaskGraph, CoalescedPartialInputsPreserveProgressAndRecovery) {
     }
 }
 
-// By default a producer may run 32 rounds ahead of a stalled graph, more
-// than its 16 record contexts, without waiting, and then waits: the queue
-// holds rounds, not contexts, and bounds how far behind a FINAL can be.
-// Released, the graph takes every round, in order.
+// By default a producer may run 32 rounds ahead of a stalled graph without
+// windows, more than its 16 record contexts, without waiting, and then
+// waits: the queue holds rounds, not contexts, and bounds how far behind a
+// FINAL can be. Released, the graph takes every round, in order.
 TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue) {
   if (std::thread::hardware_concurrency() < 3)
     GTEST_SKIP() << "pipelining needs at least three CPU threads";
   ASSERT_TRUE(pipeline_probe_registered);
-  constexpr std::size_t ahead = 32; // the default async_queue_capacity
+  constexpr std::size_t ahead = 32; // the queue a graph without windows gets
   constexpr std::size_t rounds = ahead + 2;
   const auto records = pipeline_records(rounds);
   std::size_t received = 0;
@@ -14599,7 +14599,7 @@ TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue) {
   task_graph_options options;
   active_pipeline_probe = probe;
   options.async_streaming = true;
-  ASSERT_EQ(options.async_queue_capacity, ahead);
+  ASSERT_EQ(options.async_queue_capacity, 0u) << "0 sizes it from the graph";
   nodes.push_back(pipeline_node("W", "wide"));
   nodes.push_back(pipeline_node("B", "pass"));
   auto graph = decoding_task_graph::from_topology(

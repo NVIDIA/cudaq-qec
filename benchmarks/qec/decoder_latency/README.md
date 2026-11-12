@@ -97,7 +97,7 @@ The sweep is the Cartesian product of:
 
 Option names accept either hyphens or underscores.
 
-`--async_queue_capacity N` controls the bounded queue used by each async instance: how many rounds the producer may run ahead of the graph. Its default is 32, matching `task_graph_options::async_queue_capacity`. A windowed graph that falls behind admits the rounds queued behind it together, up to one first-layer period (3d rounds by default) at a time, so a deep queue lets it catch up in batches; a shallow one caps those batches. A graph that falls behind returns FINAL's result only after draining its queue, so a deeper queue trades tail latency for throughput. Passing zero reserves one slot per detector round in the shot.
+`--async_queue_capacity N` controls the bounded queue used by each async instance: how many rounds the producer may run ahead of the graph. By default the graph sizes it, as `task_graph_options::async_queue_capacity` of 0 does: 32, or for windowed rows `max_in_flight + 1` window periods of a layer. A windowed graph that falls behind admits the rounds queued behind it together, up to one first-layer period (3d rounds by default) at a time, so a deep queue lets it catch up in batches; a shallow one caps those batches. A graph that falls behind returns FINAL's result only after draining its queue, so a deeper queue trades tail latency for throughput. Passing zero here differs from the library's 0: it reserves one slot per detector round in the shot.
 
 `--async_num_workers N` sets how many pool threads run an async graph's fires. The default, 0, lets the graph size its pool: for a windowed graph, every copy that may fire at once plus one.
 
