@@ -7822,6 +7822,74 @@ TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther) {
   jitter_lut::reset();
 } // end - TEST(WindowedGraph, DecodesOverlapIngestionAndEachOther)
 
+// Streams an R-round shot one round per record, as a client enqueues
+// rounds, through the pattern with @p params, four copies of each layer,
+// eight workers and a queue of @p queue records (the graph's own size for
+// 0), with decodes held until two windows of one layer are in flight.
+// Returns whether they were; the shot decodes as the reference does either
+// way.
+bool windows_overlap_round_by_round(const cudaqx::heterogeneous_map &params,
+                                    std::size_t queue, std::size_t R) {
+  const auto spec = wide_readout_spec();
+  const experiment_template tmpl(spec);
+  parallel_window_reference reference(spec, lowered_graph(spec, params), R,
+                                      "single_error_lut");
+  const auto shot = detectors_of(reference.model(), 5);
+  const auto m = memory_measurements(tmpl, R, shot);
+  task_graph_options options;
+  options.async_streaming = true;
+  options.async_num_workers = 8;
+  options.async_queue_capacity = queue;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pattern_node(spec, params, 4, "jitter_lut"));
+  auto graph = decoding_task_graph::from_topology(std::move(nodes),
+                                                  pattern_edges(), options);
+  // A nonzero queue is taken as given; 0 sizes it from the windows, past
+  // the 32 slots a graph without windows gets.
+  if (queue != 0)
+    EXPECT_EQ(graph->async_queue_capacity(), queue);
+  else
+    EXPECT_GT(graph->async_queue_capacity(), 32u);
+  jitter_lut::reset();
+  jitter_lut::hold();
+  auto releaser = jitter_lut::release_when(
+      [] { return jitter_lut::peak_of_one_size() > 1; });
+  const auto round = graph->get_num_msyn_per_round();
+  for (std::size_t at = 0; at < m.size(); at += round) {
+    const auto len = std::min(round, m.size() - at);
+    graph->enqueue_syndrome(m.data() + at, len,
+                            at + len == m.size() ? round_type::FINAL
+                                                 : round_type::BULK);
+  }
+  const auto &result = graph->streaming_result();
+  releaser.join();
+  EXPECT_EQ(std::vector<std::uint8_t>(result.values.begin(),
+                                      result.values.begin() +
+                                          graph->get_num_observables()),
+            reference.decode(shot).frame);
+  const bool overlapped = jitter_lut::peak_of_one_size() > 1;
+  jitter_lut::reset();
+  return overlapped;
+} // end - windows_overlap_round_by_round()
+
+// A window decoding does not hold back the rounds behind it: with rounds
+// enqueued one at a time, the next window of the layer is ingested and
+// decodes while the first is held.
+TEST(WindowedGraph, WindowsOverlapWhenRoundsArriveOneAtATime) {
+  EXPECT_TRUE(windows_overlap_round_by_round(load_params(), 32, 60))
+      << "no two windows of one layer decoded at once";
+}
+
+// Windows 32 rounds apart need more rounds queued than the 32 a graph
+// without windows gets: left 0, the queue holds one window period more than
+// a layer's copies span, so its windows still overlap.
+TEST(WindowedGraph, WindowsOverlapAcrossLongPeriodsByDefault) {
+  auto params = load_params();
+  params.insert("gap_rounds", std::size_t{30});
+  EXPECT_TRUE(windows_overlap_round_by_round(params, 0, 200))
+      << "no two windows of one layer decoded at once";
+}
+
 // Streamed faster than they decode, so records are admitted together, with
 // four copies per layer finishing in random order, the pattern and a
 // sliding window count completed_operations exactly as synchronously.

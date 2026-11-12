@@ -14582,15 +14582,28 @@ TEST(DecodingTaskGraph, CoalescedPartialInputsPreserveProgressAndRecovery) {
     }
 }
 
-// By default a producer may run 32 rounds ahead of a stalled graph, more
-// than its 16 record contexts, without waiting, and then waits: the queue
-// holds rounds, not contexts, and bounds how far behind a FINAL can be.
-// Released, the graph takes every round, in order.
+// By default a producer may run 32 rounds ahead of a stalled graph without
+// windows, more than its 16 record contexts, without waiting, and then
+// waits: the queue holds rounds, not contexts, and bounds how far behind a
+// FINAL can be. Released, the graph takes every round, in order.
+// A synchronous graph has no queue; a nonzero async_queue_capacity is the
+// queue an asynchronous one gets.
+TEST(DecodingTaskGraph, AsyncQueueCapacityReportsTheQueueInUse) {
+  EXPECT_EQ(decoding_task_graph::from_spec(rep5_spec(5), "single_error_lut")
+                ->async_queue_capacity(),
+            0u);
+  EXPECT_EQ(decoding_task_graph::from_spec(
+                rep5_spec(5), "single_error_lut", {},
+                {.async_streaming = true, .async_queue_capacity = 5})
+                ->async_queue_capacity(),
+            5u);
+}
+
 TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue) {
   if (std::thread::hardware_concurrency() < 3)
     GTEST_SKIP() << "pipelining needs at least three CPU threads";
   ASSERT_TRUE(pipeline_probe_registered);
-  constexpr std::size_t ahead = 32; // the default async_queue_capacity
+  constexpr std::size_t ahead = 32; // the queue a graph without windows gets
   constexpr std::size_t rounds = ahead + 2;
   const auto records = pipeline_records(rounds);
   std::size_t received = 0;
@@ -14599,7 +14612,7 @@ TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue) {
   task_graph_options options;
   active_pipeline_probe = probe;
   options.async_streaming = true;
-  ASSERT_EQ(options.async_queue_capacity, ahead);
+  ASSERT_EQ(options.async_queue_capacity, 0u) << "0 sizes it from the graph";
   nodes.push_back(pipeline_node("W", "wide"));
   nodes.push_back(pipeline_node("B", "pass"));
   auto graph = decoding_task_graph::from_topology(
@@ -14608,6 +14621,7 @@ TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue) {
        {"W", "output", "B", "input"},
        {"B", "output", "output", "input"}},
       options);
+  EXPECT_EQ(graph->async_queue_capacity(), ahead);
   probe->block_on("B", 0);
   auto producer = std::async(std::launch::async, [&] {
     for (std::size_t i = 0; i < ahead; ++i)
@@ -16123,6 +16137,88 @@ TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer) {
     }
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer)
+
+// A flush ends a node's shot only after that node's fires in the flush
+// record finish. J1 joins T[k] with R[k - 1] and R stops at 8, so J1[9]
+// resolves at the flush; its fire completes J2[9], held, whose output J3[9]
+// needs. Were J2's flush to end its shot first, J3's would resolve J3[9]
+// without its required input and drop it.
+TEST(DecodingTaskGraph, IndexedFlushWaitsForFiresItsRecordCompletes) {
+  ASSERT_TRUE(index_probe_registered);
+  constexpr int last_with_b = 8; // R publishes indices 0..7
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "asynchronous" : "synchronous");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    task_graph_options options;
+    options.async_streaming = async;
+    options.async_num_workers = 4;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("R", "tag", last_with_b));
+    nodes.push_back(index_node("J1", "join"));
+    nodes.push_back(index_node("J2", "join", 1 << 30, /*hold_ms=*/50));
+    nodes.push_back(index_node("J3", "join"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"A", "output", "R", "input"},
+         {"T", "output", "J1", "a"},
+         {"R", "output", "J1", "b", /*index_offset=*/-1},
+         {"J1", "output", "J2", "a"},
+         {"T", "output", "J2", "b", /*index_offset=*/-1},
+         {"J2", "output", "J3", "a"},
+         {"T", "output", "J3", "b", /*index_offset=*/-1},
+         {"J3", "output", "output", "input"}},
+        options);
+    const auto records = pipeline_records(10);
+    for (std::size_t i = 0; i < records.size(); ++i)
+      graph->enqueue_syndrome(&records[i], 1,
+                              i + 1 == records.size() ? round_type::FINAL
+                                                      : round_type::BULK);
+    const auto &result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+        << result.error;
+    const std::vector<std::size_t> all{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    for (const auto *node : {"J1", "J2", "J3"}) {
+      auto fired = probe->records(node);
+      std::sort(fired.begin(), fired.end());
+      EXPECT_EQ(fired, all) << node;
+    }
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, IndexedFlushWaitsForFiresItsRecordCompletes)
+
+// One untagged call carries hundreds of one-round chunks in one record.
+// Its ingest steps through them a chunk at a time, waiting for each
+// chunk's fires, so held fires do not pile up past the event store.
+TEST(DecodingTaskGraph, LongUntaggedRecordWaitsForItsFires) {
+  ASSERT_TRUE(index_probe_registered);
+  // Several times the event store, which is sized from the graph.
+  constexpr std::size_t rounds = 400;
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "asynchronous" : "synchronous");
+    auto probe = std::make_shared<pipeline_probe>();
+    task_graph_options options;
+    options.async_streaming = async;
+    options.async_num_workers = 4;
+    auto graph = make_indexed_join_graph(probe, options, 1 << 30,
+                                         /*join_copies=*/2);
+    // Hold every J fire briefly, so ingest would run ahead of them.
+    index_fire_hook = [](std::int64_t) {
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    };
+    const auto records = pipeline_records(rounds);
+    graph->enqueue_syndrome(records.data(), rounds - 1);
+    graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+    const auto &result = graph->streaming_result();
+    index_fire_hook = nullptr;
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+        << result.error;
+    expect_indexed_pairs(records, rounds);
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, LongUntaggedRecordWaitsForItsFires)
 
 // An instance fires once, however its inputs are told absent: J[k] joins
 // T[k] with T[k - 1], so J[0]'s b is absent by its offset. T's first

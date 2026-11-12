@@ -587,6 +587,11 @@ public:
   /// that run fires. Zero for a synchronous graph.
   std::size_t async_thread_count() const noexcept;
 
+  /// Rounds an asynchronous graph's producer may queue ahead: the
+  /// async_queue_capacity it was given, or the size it chose for 0. Zero for
+  /// a synchronous graph.
+  std::size_t async_queue_capacity() const noexcept;
+
   /// Empty when supports_streaming() is true; otherwise the first deterministic
   /// build-time reason streaming execution is unavailable.
   const std::string &streaming_incompatibility_reason() const noexcept;

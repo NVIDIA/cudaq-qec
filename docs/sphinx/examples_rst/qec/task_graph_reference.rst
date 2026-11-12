@@ -41,7 +41,10 @@ with ``async_streaming``, and each graph gets threads of its own.
        no polling.
    * - ``async_queue_capacity``
      - Records that may be queued or decoding before ``enqueue_syndrome``
-       waits. Default ``32`` in code, ``8`` in YAML.
+       waits. Default ``0``: sized from the graph. A windowed graph holds
+       ``max_in_flight + 1`` window periods of its widest layer, so its
+       windows decode at once while rounds arrive one per call; any other
+       graph holds ``32``.
 
 * Each ``enqueue_syndrome`` call is queued as a record; a windowed graph may
   split a long call into several. Records overlap: a later record
