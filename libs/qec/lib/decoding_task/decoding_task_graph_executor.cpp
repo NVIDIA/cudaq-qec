@@ -112,6 +112,9 @@ struct decoding_task_graph::impl::record_context {
   std::vector<int32_t> dependency_remaining;
   std::vector<std::size_t> root_nodes;
   std::vector<uint8_t> root_done;
+  // Per root: its raw or flush event and the fires queued without a parent
+  // on its behalf still to finish; the root is done at zero.
+  std::vector<std::uint32_t> root_open;
   // Edge deliveries a pooled node received in this record.
   std::vector<std::size_t> deliveries_seen;
   // Producer outputs copied at publication, indexed by compiled_wire::id.
@@ -328,6 +331,7 @@ struct decoding_task_graph::impl::record_scheduler {
       c.free_slots.reserve(event_capacity);
       c.root_nodes.reserve(M);
       c.root_done.reserve(M);
+      c.root_open.reserve(M);
       c.deliveries_seen.assign(N, 0);
       c.wire_values.resize(owner.streaming_value_wire_count);
       c.wire_valid.assign(owner.streaming_value_wire_count, 0);
@@ -402,6 +406,7 @@ struct decoding_task_graph::impl::record_scheduler {
     }
     c.root_nodes.clear();
     c.root_done.clear();
+    c.root_open.clear();
     std::fill(c.deliveries_seen.begin(), c.deliveries_seen.end(), 0);
     std::fill(c.wire_valid.begin(), c.wire_valid.end(), 0);
     std::fill(c.node_snapshotted.begin(), c.node_snapshotted.end(), 0);
@@ -508,6 +513,7 @@ struct decoding_task_graph::impl::record_scheduler {
         c.root_nodes.push_back(node);
     c.root_done.resize(c.root_nodes.size());
     std::fill(c.root_done.begin(), c.root_done.end(), uint8_t{0});
+    c.root_open.assign(c.root_nodes.size(), 1);
     for (std::size_t root = 0; root < c.root_nodes.size(); ++root)
       push_locked(
           c,
@@ -527,6 +533,7 @@ struct decoding_task_graph::impl::record_scheduler {
         c.root_nodes.push_back(node);
     c.root_done.resize(c.root_nodes.size());
     std::fill(c.root_done.begin(), c.root_done.end(), uint8_t{0});
+    c.root_open.assign(c.root_nodes.size(), 1);
     for (std::size_t root = 0; root < c.root_nodes.size(); ++root)
       push_locked(
           c,
@@ -997,9 +1004,7 @@ struct decoding_task_graph::impl::record_scheduler {
     }
     if (entry->pending != 0)
       return;
-    // The entry holds its own copies of the inputs, so the fire is not a
-    // child of this delivery: the record goes on ingesting while it decodes.
-    queue_indexed_fire_locked(c, no_event, si, index, event.root);
+    queue_indexed_fire_locked(c, fire_parent(c, id), si, index, event.root);
     notify_workers();
   }
 
@@ -1056,16 +1061,32 @@ struct decoding_task_graph::impl::record_scheduler {
     notify_workers();
   }
 
+  // The parent of a fire that delivery @p id completes in record @p c. The
+  // entry holds its own copies of the inputs, so in an enqueue record of at
+  // most one chunk the fire needs none, and the record goes on ingesting
+  // while it decodes. A longer record would then ingest every chunk at once
+  // and queue all their fires, past its event store. And in a flush record
+  // a node's flush ends its shot once its own descendants finish, so the
+  // fires it leads to downstream must be among them.
+  std::size_t fire_parent(const context &c, std::size_t id) const {
+    const bool one_chunk =
+        owner.record_bytes != 0 && c.len <= owner.record_bytes;
+    return c.kind == phase::enqueue && one_chunk ? no_event : id;
+  }
+
   // Queue the fire of join entry @p entry of node @p si in record @p c, as a
   // child of @p parent, or of none. A flush resolving joins passes itself,
   // so it continues only once the fires it queued have drained the store.
+  // A fire without a parent keeps its root open until it finishes.
   void queue_indexed_fire_locked(context &c, std::size_t parent, std::size_t si,
                                  std::size_t entry, std::size_t root) {
     graph_event fire{graph_event_kind::streaming_indexed_fire, si, {}, 0, root};
     fire.index = joins[si][entry].k;
     fire.entry = entry;
     fire.operation = joins[si][entry].operation;
-    push_locked(c, fire, parent);
+    if (push_locked(c, fire, parent) != no_event && parent == no_event &&
+        root < c.root_open.size())
+      ++c.root_open[root];
   }
 
   // The shot has ended and every producer of the node has finished, so no
@@ -1979,7 +2000,10 @@ private:
     if (c.occupied != 0)
       --c.occupied;
     if (parent == no_event) {
-      if (root != no_event && root < c.root_done.size())
+      // Done once its own event and every fire it queued without a parent
+      // have finished, so later roots stay behind all of its work.
+      if (root != no_event && root < c.root_open.size() &&
+          c.root_open[root] != 0 && --c.root_open[root] == 0)
         c.root_done[root] = 1;
       if (c.occupied == 0)
         mark_complete_locked(c);
