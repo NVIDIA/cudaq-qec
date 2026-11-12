@@ -42,6 +42,26 @@ namespace {
 // so 16 cover several hundred rounds.
 constexpr std::size_t async_record_contexts = 16;
 
+// Queue slots of an asynchronous graph without windows when left 0: enough to
+// batch rounds while keeping a fallen-behind FINAL's backlog to tens of
+// microseconds.
+constexpr std::size_t default_async_queue_capacity = 32;
+
+// The queue a windowed graph gets for an async_queue_capacity of 0 (see
+// task_graph_options), never fewer than default_async_queue_capacity.
+std::size_t windowed_queue_capacity(
+    const std::vector<task_graph_node_config> &nodes,
+    const std::map<std::string, std::pair<std::string, window_request>>
+        &layers) {
+  std::size_t capacity = default_async_queue_capacity;
+  for (const auto &cfg : nodes)
+    if (const auto layer = layers.find(cfg.id); layer != layers.end())
+      capacity = std::max(
+          capacity, (cfg.max_in_flight + 1) *
+                        static_cast<std::size_t>(layer->second.second.period));
+  return capacity;
+}
+
 /// Every type a node's ports name must be registered: a wire into an
 /// unregistered one would fail as a bare type mismatch, and an edge_value
 /// built for it would throw on the first fire.  An input is checked by asking
@@ -812,6 +832,11 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
   for (std::size_t n = 0; n < i->nodes.size(); ++n)
     require_registered_port_types(*i->nodes[n], i->node_ids[n]);
   i->compile_wires();
+  // from_topology() has sized a windowed graph's queue; 0 left here means
+  // the default.
+  const std::size_t queue_capacity = options.async_queue_capacity != 0
+                                         ? options.async_queue_capacity
+                                         : default_async_queue_capacity;
   if (options.async_streaming) {
     std::size_t pooled_fires = 0;
     bool indexed = false;
@@ -823,7 +848,7 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
         pooled_fires += entry.replicas.size();
       indexed = indexed || !entry.indexed.empty();
     }
-    i->prepare_async_streaming(options.async_queue_capacity, i->n_round,
+    i->prepare_async_streaming(queue_capacity, i->n_round,
                                options.async_coordinator_cpu,
                                options.async_spin_pause_iters);
     i->async_streaming.enabled = true;
@@ -884,7 +909,7 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
   if (i->nodes.size() > 1 || !i->streaming_nodes.empty())
     i->prepare_event_runtime(
         options.async_streaming
-            ? std::min(options.async_queue_capacity, async_record_contexts)
+            ? std::min(queue_capacity, async_record_contexts)
             : 1,
         /*dispatcher_thread=*/options.async_streaming);
   return std::unique_ptr<decoding_task_graph>(
@@ -1095,6 +1120,10 @@ decoding_task_graph::from_topology(std::vector<task_graph_node_config> nodes,
       edge.from_node = "measurements";
 
   i->edges = std::move(edges);
+  if (options.async_streaming && options.async_queue_capacity == 0 &&
+      !windows.layers.empty())
+    options.async_queue_capacity =
+        windowed_queue_capacity(nodes, windows.layers);
   return assemble(std::move(i), options);
 }
 

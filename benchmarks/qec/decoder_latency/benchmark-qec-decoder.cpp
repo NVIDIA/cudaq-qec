@@ -162,8 +162,9 @@ struct options {
   bool run_batch = true;
   bool run_stream = true;
   std::vector<execution_kind> executions = {execution_kind::decoder};
-  // Zero selects one complete shot's detector-round count per sweep point.
-  std::size_t async_queue_capacity = 32;
+  // Zero selects one complete shot's detector-round count per sweep point;
+  // unset lets the graph size its queue.
+  std::optional<std::size_t> async_queue_capacity;
   bool dedicate_async_coordinator = false;
   std::size_t async_spin_pause_iters = 0;
   // Pool threads running an async graph's fires. 0 lets the graph size its
@@ -246,7 +247,8 @@ void print_usage(const char *argv0) {
          "decoder)\n"
       << "  --async_queue_capacity N   rounds an async graph's producer may "
          "queue ahead\n"
-      << "                             (default: 32; 0 reserves one shot)\n"
+      << "                             (default: the graph sizes it; 0\n"
+      << "                             reserves one shot)\n"
       << "  --dedicate_async_coordinator\n"
       << "                             reserve the last CPU in each pinned "
          "instance block\n"
@@ -1680,9 +1682,10 @@ graph_options_for(const options &opts, const sweep_point &point,
                   int coordinator_cpu) {
   cudaq::qec::task_graph_options graph_options;
   graph_options.async_streaming = is_async(point.execution);
-  graph_options.async_queue_capacity = opts.async_queue_capacity == 0
-                                           ? round_widths.size()
-                                           : opts.async_queue_capacity;
+  if (opts.async_queue_capacity)
+    graph_options.async_queue_capacity = *opts.async_queue_capacity == 0
+                                             ? round_widths.size()
+                                             : *opts.async_queue_capacity;
   graph_options.async_coordinator_cpu = coordinator_cpu;
   graph_options.async_spin_pause_iters = opts.async_spin_pause_iters;
   if (opts.async_num_workers != 0)
@@ -2055,11 +2058,13 @@ void print_tail_decomposition(const std::vector<measurement> &rows,
 
 void print_csv_row(const options &opts, const std::string &mode,
                    const measurement &row) {
-  const auto queue_capacity = is_async(row.execution)
-                                  ? opts.async_queue_capacity == 0
-                                        ? row.rounds_per_shot
-                                        : opts.async_queue_capacity
-                                  : 0;
+  // "default" when the graph sized its own queue.
+  const auto queue_capacity = !is_async(row.execution) ? std::string("0")
+                              : !opts.async_queue_capacity
+                                  ? std::string("default")
+                              : *opts.async_queue_capacity == 0
+                                  ? std::to_string(row.rounds_per_shot)
+                                  : std::to_string(*opts.async_queue_capacity);
   const double round_interval_us =
       static_cast<double>(opts.round_interval.count()) / 1e3;
   const bool asynchronous = is_async(row.execution);
@@ -2107,9 +2112,10 @@ int main(int argc, char **argv) {
     std::cout << " " << execution_name(execution);
   std::cout
       << "\nasync queue="
-      << (opts.async_queue_capacity == 0
+      << (!opts.async_queue_capacity ? std::string("graph default")
+          : *opts.async_queue_capacity == 0
               ? std::string("one shot")
-              : std::to_string(opts.async_queue_capacity) + " records")
+              : std::to_string(*opts.async_queue_capacity) + " records")
       << "  coordinator="
       << (opts.dedicate_async_coordinator ? "dedicated CPU" : "inherited")
       << "  coordinator spin=" << opts.async_spin_pause_iters << " pauses"

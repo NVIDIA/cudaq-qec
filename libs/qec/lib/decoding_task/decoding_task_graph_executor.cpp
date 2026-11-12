@@ -997,7 +997,9 @@ struct decoding_task_graph::impl::record_scheduler {
     }
     if (entry->pending != 0)
       return;
-    queue_indexed_fire_locked(c, id, si, index, event.root);
+    // The entry holds its own copies of the inputs, so the fire is not a
+    // child of this delivery: the record goes on ingesting while it decodes.
+    queue_indexed_fire_locked(c, no_event, si, index, event.root);
     notify_workers();
   }
 
@@ -1054,6 +1056,9 @@ struct decoding_task_graph::impl::record_scheduler {
     notify_workers();
   }
 
+  // Queue the fire of join entry @p entry of node @p si in record @p c, as a
+  // child of @p parent, or of none. A flush resolving joins passes itself,
+  // so it continues only once the fires it queued have drained the store.
   void queue_indexed_fire_locked(context &c, std::size_t parent, std::size_t si,
                                  std::size_t entry, std::size_t root) {
     graph_event fire{graph_event_kind::streaming_indexed_fire, si, {}, 0, root};
