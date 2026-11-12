@@ -338,6 +338,9 @@ final_enqueue_max,correction_readout_min,correction_readout_p50,
 correction_readout_p99,correction_readout_max,rounds_s,ler
 ```
 
+`async_queue_capacity` is the queue the row's graph used, as it sized it when
+`--async_queue_capacity` is not given; 0 for a row without an async graph.
+
 Minimum and maximum samples are labeled ``min`` and ``max`` rather than p0 and
 p100. This distinguishes observed extrema from percentile estimates and makes
 their sensitivity to sample count explicit.

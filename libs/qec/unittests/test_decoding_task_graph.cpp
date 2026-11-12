@@ -14586,6 +14586,19 @@ TEST(DecodingTaskGraph, CoalescedPartialInputsPreserveProgressAndRecovery) {
 // windows, more than its 16 record contexts, without waiting, and then
 // waits: the queue holds rounds, not contexts, and bounds how far behind a
 // FINAL can be. Released, the graph takes every round, in order.
+// A synchronous graph has no queue; a nonzero async_queue_capacity is the
+// queue an asynchronous one gets.
+TEST(DecodingTaskGraph, AsyncQueueCapacityReportsTheQueueInUse) {
+  EXPECT_EQ(decoding_task_graph::from_spec(rep5_spec(5), "single_error_lut")
+                ->async_queue_capacity(),
+            0u);
+  EXPECT_EQ(decoding_task_graph::from_spec(
+                rep5_spec(5), "single_error_lut", {},
+                {.async_streaming = true, .async_queue_capacity = 5})
+                ->async_queue_capacity(),
+            5u);
+}
+
 TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue) {
   if (std::thread::hardware_concurrency() < 3)
     GTEST_SKIP() << "pipelining needs at least three CPU threads";
@@ -14608,6 +14621,7 @@ TEST(DecodingTaskGraph, ProducerRunsAheadByTheDefaultQueue) {
        {"W", "output", "B", "input"},
        {"B", "output", "output", "input"}},
       options);
+  EXPECT_EQ(graph->async_queue_capacity(), ahead);
   probe->block_on("B", 0);
   auto producer = std::async(std::launch::async, [&] {
     for (std::size_t i = 0; i < ahead; ++i)
