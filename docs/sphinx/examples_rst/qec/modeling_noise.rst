@@ -1,12 +1,12 @@
 Experiments and Noise Modeling
 ==============================
 
-These examples walk through several of the most common numerical error-correction experiments with the CUDA-Q QEC library: modeling noise at the **code-capacity** and **circuit-level**, and running full **memory circuit experiments**. For the background behind each, see :doc:`Experiments and Noise Modeling </components/qec/numerical_experiments>`.
+These examples walk through several of the most common numerical error-correction experiments with the CUDA-Q QEC library: modeling noise at the **code-capacity** and **circuit-level**, and running full **memory circuit experiments**. For the background behind each, see :doc:`Experiments and noise modeling </components/qec/numerical_experiments>`.
 
 Code-Capacity Noise Modeling
 ----------------------------
 
-This example implements a code-capacity noise experiment: random ``X``/``Z`` errors are applied directly to the data qubits and decoded with a single-error look-up table. See :ref:`Code-Capacity Noise Modeling <components/qec/numerical_experiments:Code-Capacity Noise Modeling>` for more details.
+This example implements a code-capacity noise experiment: random ``X``/``Z`` errors are applied directly to the data qubits and decoded with a single-error look-up table. See :ref:`Code-capacity noise modeling <components/qec/numerical_experiments:Code-Capacity Noise Modeling>` for more details.
 
 CUDA-Q QEC Implementation
 +++++++++++++++++++++++++++++
@@ -64,7 +64,7 @@ Code Explanation
 
 Circuit-level Noise Modeling
 ----------------------------
-This example runs a circuit-level memory experiment, generating syndromes by executing the stabilizer-measurement circuits under depolarizing noise. See :ref:`Circuit-level Noise Modeling <components/qec/numerical_experiments:Circuit-level Noise Modeling>` for more details.
+This example runs a circuit-level memory experiment, generating syndromes by executing the stabilizer-measurement circuits under depolarizing noise. See :ref:`Circuit-level noise modeling <components/qec/numerical_experiments:Circuit-level Noise Modeling>` for more details.
 
 
 CUDA-Q QEC Implementation
@@ -135,7 +135,7 @@ The CUDA-Q QEC library also provides tools to speed up the automation of generat
 Memory Circuit Experiments
 --------------------------
 
-The ``sample_memory_circuit`` API runs a memory circuit experiment end to end -- preparing a logical state, running rounds of stabilizer measurement under noise, and measuring the data qubits. See :ref:`Memory Circuit Experiments <components/qec/numerical_experiments:Memory Circuit Experiments>` for more details.
+The ``sample_memory_circuit`` API runs a memory circuit experiment end to end -- preparing a logical state, running rounds of stabilizer measurement under noise, and measuring the data qubits. See :ref:`Memory circuit experiments <components/qec/numerical_experiments:Memory Circuit Experiments>` for more details.
 
 Function Variants
 +++++++++++++++++

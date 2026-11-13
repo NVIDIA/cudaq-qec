@@ -1,13 +1,12 @@
 Installation Guide
 ==================
 
-Installation Methods
---------------------
-
-CUDA-Q QEC provides multiple installation methods to suit your needs:
+Install the Python package with pip, use a Docker container with dependencies
+included, or build CUDA-Q QEC from source. Some features also require PyTorch,
+as described below.
 
 pip install
-^^^^^^^^^^^^
+-----------
 
 The simplest way to install CUDA-Q QEC is via pip. (If you're on Mac, your only
 option is to use the Docker container as described below.)
@@ -40,8 +39,10 @@ CUDA-Q QEC provides optional pip-installable components:
     `NVIDIA/cudaq-algorithms on GitHub
     <https://github.com/NVIDIA/cudaq-algorithms>`__ for the source code.
 
+.. _qec-docker-container:
+
 Docker Container
-^^^^^^^^^^^^^^^^
+----------------
 
 CUDA-Q QEC is available as a Docker container with all dependencies pre-installed:
 
@@ -69,7 +70,7 @@ The container includes:
     * Example notebooks and tutorials
 
 Building from Source
-^^^^^^^^^^^^^^^^^^^^
+--------------------
 
 The instructions for building CUDA-Q QEC from source are maintained on our GitHub
 repository: `Building CUDA-Q QEC from Source <https://github.com/NVIDIA/cudaq-qec/blob/main/Building.md>`__.
@@ -82,7 +83,7 @@ Installing PyTorch
 PyTorch (``torch``) is required for several CUDA-Q QEC features:
 
 * **Tensor Network Decoder**: Used by the QEC library for tensor network-based decoding (CPU version of PyTorch is sufficient)
-* **Training AI Decoders**: Optionally used for training custom neural network decoders (see :ref:`Deploying AI Decoders with TensorRT <deploying-ai-decoders>`)
+* **Training AI decoders**: Optionally used for training custom neural network decoders (see :ref:`Deploying AI decoders with TensorRT <deploying-ai-decoders>`)
 
 PyTorch is automatically installed when you install the optional components:
 
@@ -101,3 +102,6 @@ Alternatively, you can install PyTorch directly. For detailed installation instr
 .. note::
     Users with NVIDIA Blackwell architecture GPUs require PyTorch with CUDA 12.8 or later support. 
     When installing PyTorch, make sure to select the appropriate CUDA version for your system.
+
+Once CUDA-Q QEC is installed, run the :doc:`Quick Start <quick_start>` to check
+your installation with a small offline decoding experiment.

@@ -1,31 +1,70 @@
+:tocdepth: 1
+
 CUDA-Q QEC - Quantum Error Correction Library
 =============================================
 
-The ``cudaq-qec`` library provides a comprehensive framework for quantum
-error correction research and development. It leverages GPU acceleration
-for efficient syndrome decoding and error correction simulations (coming soon).
+CUDA-Q QEC is a Python and C++ library for quantum error correction. It provides
+tools to build and simulate quantum codes, model noise, and decode measurements
+using CPU or GPU decoders. These tools support both offline experiments and
+realtime decoding during quantum circuit execution.
 
-The library supports both offline analysis and realtime error correction on quantum hardware,
-enabling low-latency decoding for practical quantum computing applications.
+.. _qec_v090_highlights:
 
-``cudaq-qec`` is composed of three main interfaces:
+Highlights in 0.9.0
+-------------------
 
-1. **QEC Codes** (:code:`cudaq::qec::code`) - Define quantum error correcting codes with logical operations
-2. **Decoders** (:code:`cudaq::qec::decoder`) - Implement syndrome decoding algorithms
-3. **Realtime Decoding** (:code:`cudaq::qec::decoding`) - Enable online error correction on quantum hardware
+* :doc:`Decoding task graphs <decoding_task_graph>` let you connect
+  decoders and combine their results in a single pipeline. Build pipelines with
+  parallel windows or decoder ensembles to decode complete shots or
+  process measurement rounds as they arrive.
+* :doc:`Dynamic detector error models (DEMs) <dynamic_dem>` now describe how
+  measurements form detectors and how logical observables are read out,
+  alongside the existing fault information. Task graphs use these mappings to
+  return corrected logical measurements as well as correction bits.
+* The :doc:`playback emulator </components/qec/playback_emulator>` lets you test
+  realtime decoders without a live QPU. Replay recorded or simulated measurements
+  on a timed schedule, check the returned corrections, and measure latency,
+  either within one process or through a :ref:`decoding server <decoding-server>`.
 
-These types are meant to be extended by developers to provide new error correcting codes and decoding strategies.
+C++ decoder plugin APIs changed in 0.9.0; see the
+:ref:`migration guide <qec_decoder_plugin_migration>` when updating a plugin.
 
-The pages below document each of these interfaces in depth — the abstraction, how to extend it, and what ships built in. For runnable, copy-pasteable programs, see the :doc:`CUDA-Q QEC examples </examples_rst/qec/examples>`.
+What the Library Provides
+-------------------------
 
-For configuration, client integration and examples, see the
-:doc:`Decoding Server User Guide </examples_rst/qec/decoding_server>`.
+* **Codes and models:** Define :doc:`QEC codes <codes>`, their logical
+  operations, and stabilizer-measurement circuits. Use
+  :ref:`detector error models <detector_error_model>` to describe how faults
+  affect detectors and logical observables.
+* **CPU and GPU decoders:** Choose from built-in :doc:`decoders <decoders>` for
+  different codes and workloads, or integrate your own through the decoder
+  plugin interface.
+* **Decoding task graphs:** Connect decoders into a
+  :doc:`task graph <decoding_task_graph>`, distribute work across
+  :doc:`parallel windows </examples_rst/qec/task_graph_parallel_window>`, or run
+  :doc:`decoder ensembles </examples_rst/qec/task_graph_ensemble>`.
+* **Realtime integration:** Connect your quantum-control application to
+  :doc:`realtime decoding <realtime_decoding>` so it can send measurements and
+  retrieve corrections during circuit execution.
+* **Decoding server and playback:** Deploy a configured decoding pipeline in a
+  standalone :ref:`server <decoding-server>`. Use the
+  :doc:`playback emulator </components/qec/playback_emulator>` to test decoder
+  behavior and timing, either locally or through the server.
+* **Experiments and noise modeling:** Run :doc:`experiments
+  <numerical_experiments>` to simulate code-capacity or circuit-level noise,
+  sample detector error models, and estimate logical error rates.
 
-.. toctree::
-   :maxdepth: 2
+Explore the :doc:`examples </examples_rst/qec/examples>` for working programs
+and the :doc:`performance studies </performance/index>` for benchmark results.
+The :doc:`conventions guide <conventions>` explains syndrome and correction
+formats.
 
-   QEC Codes <codes>
-   QEC Decoders <decoders>
-   Realtime Decoding <realtime_decoding>
-   Experiments and Noise Modeling <numerical_experiments>
-   Conventions <conventions>
+.. rubric:: Library Guides
+
+* :doc:`QEC Decoders <decoders>`
+* :doc:`Detector Error Models <detector_error_models>`
+* :doc:`Decoding Task Graphs <decoding_task_graph>`
+* :doc:`Realtime Decoding <realtime_decoding>`
+* :doc:`Experiments and Noise Modeling <numerical_experiments>`
+* :doc:`QEC Codes <codes>`
+* :doc:`Conventions <conventions>`

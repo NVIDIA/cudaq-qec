@@ -1,4 +1,4 @@
-AI Predecoder with CUDA-Q Realtime
+AI predecoder with CUDA-Q realtime
 ==================================
 
 .. note::
@@ -56,12 +56,12 @@ Additional inputs:
   engine is built from the ONNX file on first run (this can take 1--2 minutes
   for large models).
 - **Syndrome data directory** containing pre-generated detector samples,
-  observables, and matching graph data (see :ref:`Data Directory Layout <sw_data_directory_layout>`).
+  observables, and matching graph data (see :ref:`Data directory layout <sw_data_directory_layout>`).
 
 
 .. _sw_data_directory_layout:
 
-Data Directory Layout
+Data directory layout
 ---------------------
 
 The ``--data-dir`` flag points to a directory with the following files.
@@ -149,7 +149,7 @@ Running
 
    test_realtime_predecoder_w_pymatching <config> [rate_us] [duration_s] [flags]
 
-Positional Arguments
+Positional arguments
 ^^^^^^^^^^^^^^^^^^^^
 
 .. list-table::
@@ -170,7 +170,7 @@ Positional Arguments
      - Test duration in seconds
      - ``5``
 
-Named Flags
+Named flags
 ^^^^^^^^^^^
 
 .. list-table::
@@ -180,13 +180,13 @@ Named Flags
    * - Flag
      - Description
    * - ``--data-dir <path>``
-     - Path to syndrome data directory (see :ref:`Data Directory Layout <sw_data_directory_layout>`). When
+     - Path to syndrome data directory (see :ref:`Data directory layout <sw_data_directory_layout>`). When
        omitted, random syndromes with 1% error rate are generated.
    * - ``--num-gpus <n>``
      - Number of GPUs to use. Currently clamped to 1 (multi-GPU dispatch is
        not yet supported).
 
-Pipeline Configurations
+Pipeline configurations
 ^^^^^^^^^^^^^^^^^^^^^^^
 
 .. list-table::
@@ -221,7 +221,7 @@ data:
        --data-dir /path/to/syndrome_data/p0.003
 
 
-Changing the Predecoder Model
+Changing the predecoder model
 -----------------------------
 
 The ONNX model file for each configuration is set in the ``PipelineConfig``
@@ -250,12 +250,12 @@ as the ONNX file, TensorRT loads it directly. Otherwise, the engine is built
 from the ONNX file on the first run.
 
 
-Reading the Output
+Reading the output
 ------------------
 
 The benchmark prints a structured report after the streaming run completes.
 
-Throughput and Timing
+Throughput and timing
 ^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: text
@@ -269,7 +269,7 @@ Throughput and Timing
 all pipeline slots were occupied. Zero stalls means the pipeline kept up with
 the injection rate.
 
-Latency Distribution
+Latency distribution
 ^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: text
@@ -284,7 +284,7 @@ End-to-end latency measured from ``injector.submit()`` to the completion
 callback. Includes GPU inference, CPU-side PyMatching decode, and all pipeline
 overhead. The first 20 requests are excluded as warmup.
 
-PyMatching Average Time
+PyMatching average time
 ^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: text
@@ -294,7 +294,7 @@ PyMatching Average Time
 Average time for the PyMatching MWPM decoder to process a single residual
 syndrome.
 
-Syndrome Density
+Syndrome density
 ^^^^^^^^^^^^^^^^
 
 .. code-block:: text
@@ -307,7 +307,7 @@ Average nonzero detectors before the predecoder (input) and after (residual
 output). Higher reduction means the predecoder is removing more syndrome
 weight, which reduces PyMatching decode time.
 
-Correctness Verification
+Correctness verification
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 Printed only when ``--data-dir`` is provided:
@@ -327,9 +327,9 @@ Printed only when ``--data-dir`` is provided:
    verification still compares against the correct ground truth for each
    replayed shot.
 
-See Also
+See also
 --------
 
-* :doc:`Realtime Decoding </components/qec/realtime_decoding>` -- concept and workflow
-* :doc:`Getting Started with Realtime Decoding </examples_rst/qec/getting_started_realtime_decoding>`
+* :doc:`Realtime decoding </components/qec/realtime_decoding>` -- concept and workflow
+* :doc:`Getting started with realtime decoding </examples_rst/qec/getting_started_realtime_decoding>`
 * :ref:`C++ <cpp_realtime_decoding_api>` and :ref:`Python <python_realtime_decoding_api>` realtime decoding API

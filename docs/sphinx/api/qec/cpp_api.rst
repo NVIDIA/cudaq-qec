@@ -49,7 +49,9 @@ Detector Error Model
 Dynamic DEM
 ===========
 
-The ``dem_chunks`` model types. See :doc:`/examples_rst/qec/dyn_dem`.
+Types for constructing a dynamic detector error model (DEM). See the
+:doc:`Dynamic Detector Error Models </components/qec/dynamic_dem>` and the
+:doc:`Decoding with a Dynamic DEM example </examples_rst/qec/dyn_dem>`.
 
 .. doxygenstruct:: cudaq::qec::dem_chunks_spec
     :members:
@@ -144,6 +146,8 @@ Decoder Interfaces
 .. doxygenstruct:: cudaq::qec::decoder_result
     :members:
 
+.. _decoding_task_graph_cpp_api:
+
 Decoding Task Graph
 ===================
 
@@ -151,8 +155,9 @@ A ``decoding_task_graph`` is a decoder pipeline of nodes wired by edges. Build
 one with ``from_spec`` (one decoder in a window), ``combine`` (two decoders
 whose corrections are XORed) or ``from_topology`` (any nodes and edges). Run it
 on complete shots with ``run`` and ``run_batch``, or stream rounds with
-``enqueue_syndrome``. See :doc:`/examples_rst/qec/decoding_task_graph` and
-:doc:`/examples_rst/qec/task_graph_parallel_window`.
+``enqueue_syndrome``. See the :doc:`Decoding Task Graphs </components/qec/decoding_task_graph>`, its
+:ref:`Reference section <task_graph_reference>`, and the
+:doc:`Getting Started with a Decoding Task Graph </examples_rst/qec/getting_started_decoding_task_graph>`.
 
 I/O types
 ---------
@@ -244,6 +249,8 @@ NVIDIA Fusion Decoder
 ---------------------
 
 .. include:: nv_fusion_decoder_api.rst
+
+.. _sliding_window_decoder_api_cpp:
 
 Sliding Window Decoder
 ----------------------
@@ -376,6 +383,8 @@ the ``CUDA_QEC_*`` macros exposed in ``cudaq/qec/logger.h``.
 .. doxygenfunction:: cudaq::qec::detail::warn
 .. doxygenfunction:: cudaq::qec::detail::error
 .. doxygenfunction:: cudaq::qec::detail::path_to_file_name
+
+.. _memory_experiments_cpp_api:
 
 Common
 =============

@@ -1,9 +1,13 @@
 Realtime Decoding
 =================
 
-This page covers how realtime decoding works, its workflow, and terminology. For runnable applications — a complete walkthrough, the decoding server, and the AI predecoder — see the :doc:`Realtime Decoding examples </examples_rst/qec/realtime_decoding>`.
+Realtime decoding processes measurements during quantum circuit execution so
+that correction results are available when the circuit or control system
+needs them. CUDA-Q QEC provides interfaces to configure decoders, send
+measurements, and retrieve corrections. You can develop and test the decoding
+pipeline in simulation before connecting it to quantum hardware.
 
-CUDA-Q QEC provides realtime decoding for quantum error correction on real quantum hardware: decoders process syndromes and compute corrections within qubit coherence times, making active error correction practical for real quantum computers. The framework supports two primary deployment scenarios:
+The framework supports two deployment scenarios:
 
 1. **Hardware Integration**: Decoders running on classical computers connected to real quantum processing units (QPUs) — such as `Quantinuum's Helios QPU <https://www.quantinuum.com/products-solutions/quantinuum-systems/helios>`_ — via low-latency networks.
 2. **Simulation Mode**: Decoders operating in simulated environments for testing and development on local systems.
@@ -11,118 +15,52 @@ CUDA-Q QEC provides realtime decoding for quantum error correction on real quant
 .. note::
    The realtime decoding interfaces are experimental and subject to change. Realtime decoding on Quantinuum's Helios-1 device is currently available only to partners and collaborators. Please email QCSupport@quantinuum.com for more information.
 
-Workflow
-^^^^^^^^
+The :doc:`Workflow and Data Flow <realtime_decoding_workflow>` guide explains
+how to prepare a decoder configuration before circuit execution and how
+measurements are converted into detectors, error predictions, and logical
+corrections during a shot.
 
-Realtime decoding integrates into quantum error correction pipelines through a carefully designed four-stage workflow. This workflow separates the computationally intensive characterization phase from the latency-critical runtime phase, ensuring that decoders can operate efficiently during quantum circuit execution.
+When a computation waits for a correction while further measurement rounds
+continue, decoder response time affects how much work arrives next. See
+:doc:`Feedback Latency and Decoder Backlog <feedback_latency>` for this
+dependency and the SIFL experiment used to study it.
 
-1. **Detector Error Model (DEM) Generation**: Before running a quantum program, the user first characterizes how errors propagate through the quantum circuit. The library internally uses Memory Syndrome Matrix (MSM) representations to track error propagation, but this complexity is abstracted through helper functions like ``z_dem_from_memory_circuit``. The user simply provides a quantum code, noise model, and circuit parameters, and receives a complete detector error model that maps error mechanisms to syndrome patterns. This step is performed once during development.
+For pipelines that combine a neural network with a conventional decoder,
+see :doc:`AI Predecoding <ai_predecoding>`. It explains how the two stages
+share the decoding work and links to surface-code and color-code examples.
 
-2. **Decoder Configuration and Saving**: Using the DEM, the user configures decoder instances with the specific error model data. This includes converting parity check matrices to sparse format, setting decoder-specific parameters (like lookup table depth or BP iterations), and assigning unique IDs to each logical qubit's decoder. The configuration is then saved to a YAML file, capturing all the information decoders need to interpret syndrome measurements correctly. This creates a portable, reusable configuration that separates characterization from execution.
+In a local simulation, the decoders can run in the same process as the quantum
+simulator. When the application or control system needs to send measurements
+to decoders in a separate process, use a :doc:`Decoding Server <decoding_server>`.
+The server hosts the configured pipeline and returns corrections to its
+clients. Its guide covers deployment and links to examples using a quantum
+kernel, an FPGA, or the software playback emulator.
 
-3. **Decoder Loading and Initialization**: Just before circuit execution, the user loads the saved YAML configuration file. The library parses the configuration, instantiates the appropriate decoder implementations, initializes internal data structures, and registers the decoders with the CUDA-Q runtime. For GPU-based decoders, matrices are transferred to device memory; for lookup table decoders, syndrome-to-correction mappings are constructed. This initialization takes milliseconds to seconds depending on code size and happens before quantum operations begin.
+To test the realtime path without a QPU, use the
+:doc:`Playback Emulator <playback_emulator>`. It replays measurements and
+correction requests on a schedule, either against decoders in the same process
+or through a server. Its guide explains the inputs, timing records, and session
+types, with examples for both deployment modes.
 
-4. **Realtime Decoding**: During quantum circuit execution, the decoding API is used within quantum kernels to interact with decoders. As the circuit measures stabilizers, syndromes are enqueued to the decoder, which processes them concurrently. When corrections are needed, the decoder is queried and the suggested operations are applied to the logical qubits. This entire process happens within the coherence time constraints of the quantum hardware.
+For surface-code memory experiments, the
+:doc:`Memory Experiment Configuration Generator <memory_experiment_generator>`
+prepares a dynamic detector error model and a parallel-window task graph,
+then saves the YAML configuration for the server.
 
-Terminology and Data Flow
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. toctree::
+   :hidden:
+   :maxdepth: 2
 
-The realtime decoding workflow involves configuring a decoder (or many) before CUDA-Q kernel launch, and communicating to the decoders with special in-kernel functions.
-A decoder is a single software instance of a decoding algorithm, and all its relevant inputs (parity-check matrices, error rates, etc.) which will remain static for the execution of the quantum program.
-A decoder config may contain many decoders, each with different algorithms and input parameters.
+   Workflow and Data Flow <realtime_decoding_workflow>
+   Feedback Latency and Decoder Backlog <feedback_latency>
+   AI Predecoding <ai_predecoding>
+   Decoding Server <decoding_server>
+   Playback Emulator <playback_emulator>
+   Memory Experiment Configuration Generator <memory_experiment_generator>
 
-In a quantum kernel, a user interacts with the decoders via the `enqueue_syndromes` and `get_corrections` interfaces.
-The behavior of these functions depends on their configuration and their usage.
+.. rubric:: Related Guides and Examples
 
-The realtime decoding workflow can be described with respect to the offline decoding workflow.
-The non-realtime decoders require a detector error model which is specified via a detector error matrix which is the parity check matrix `H` of the decoding problem, and a vector of weights (error rates).
-This matrix has dimensions of `[numDetectors, numErrors]`, where each row is a detector, and each column is a possible error.
-For realtime decoding, we first need to convert the circuit measurements into detectors.
-This is specified via the detector matrix `D`, which has dimensions `[numDetectors, numMeasurements]`.
-Each column of the detector matrix defines which detectors a measurement participates in by including an entry of `1`.
-Thus, once all `numMeasurements` measurements are enqueued, a matrix-vector multiply can convert this buffer of raw measurements into detectors which are then passed into the decoding algorithm.
-
-Similarly, an observables flips matrix `O` of size `[numObs, numErrors]` must be provided.
-Each column of the observables flips matrix describes for each error, which observables are flipped by that error by including an entry of `1`.
-Once the decoding algorithm has processed the detectors it provides a vector of predicted errors of length `numErrors`.
-This vector then executes a matrix-vector multiply with the observables flips matrix to yield a new vector of length `numObs` which contains an entry of `1` if the observable is predicted to have flipped.
-
-Thus once a decoder is configured, we can view the realtime decoder as a transformation of data starting from a vector of raw measurements, then transformed into detectors via `D`, then error predictions via `H`, then observable flip predictions via `O`. This last step is what is returned via `get_corrections`. The user configures how many bits of information are returned, and what they represent via the `O` matrix in the decoder config.
-A task graph whose model reads its observables (a phase's `m2o_sparse`) can also return the logical measurements, the raw readout with the corrections applied, via `get_logical_measurements`. A read names the first logical measurement it wants and how many. See :ref:`task_graph_logical_measurements`.
-
-Similarly, the user determines how many measurements are needed for the decoder via the `D` matrix in the decoder config, and they are sent to the decoder via `enqueue_syndromes`.
-For flexibility, the user can choose to send all measurements with a single `enqueue_syndromes` call, or send them over several calls.
-However they are split up, the decoder will not begin decoding until all `numMeasurements` have been enqueued, and will throw an error if too many are sent.
-Thus it is the final `enqueue_syndromes` call which kicks off the decoder, and is an asynchronous function.
-Additional quantum gates can be applied, and only when `get_corrections` is called does the kernel sync and wait for the corrections.
-
-Memory experiment configuration generator
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-``memory-experiment-generator`` prepares the model and writes one YAML file
-for a Surface Code memory experiment with a requested finite horizon using the
-public ``parallel_window`` configuration. It supports X/Z bases and independent
-logical patches. The decoding-server Docker image includes the generator;
-there is no need to clone or build the library to generate a configuration.
-Inside the image, run:
-
-.. code-block:: bash
-
-   memory-experiment-generator \
-     --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
-     --output=memory.yaml
-
-To keep the YAML on the host, mount an existing output directory when starting
-the container. For example, with ``DECODING_IMAGE`` set to the decoding-server
-image tag for your CUDA version:
-
-.. code-block:: bash
-
-   docker run --rm --volume "$PWD:/configs" \
-     --entrypoint memory-experiment-generator "$DECODING_IMAGE" \
-     --distance=3 --rounds=26 --basis=Z --decoder=pymatching \
-     --output=/configs/memory.yaml
-
-``--rounds=T`` records ``dem_chunks.num_rounds=T+1``: T extraction cycles plus
-terminal data-qubit readout. At least four cycles and an odd distance of at least
-three are required. Characterization uses bounded circuits independent of T.
-The parallel-window ingest contract determines actual shot length at FINAL;
-the repeating model accepts valid lengths at or above its minimum rather than
-enforcing the recorded horizon. The generated YAML
-embeds a shared DEM-chunk model, one graph per independent patch and BULK/FINAL
-syndrome mappings. The model embeds the readout map, and the generator writes
-``output: corrections``, so each graph returns its corrections through
-``get_corrections``. ``--pattern-arg=output=corrections_and_logical`` also
-wires the graph's ``logical`` output, whose corrected logical measurements
-``get_logical_measurements`` returns.
-``--help`` lists geometry, decoder, pattern and per-graph worker options.
-See :doc:`/examples_rst/qec/task_graph_parallel_window` for how the
-``parallel_window`` graph decodes and its options.
-
-``--workers-per-graph=N`` sets the graph's worker-pool size and the pattern node's
-``max_in_flight`` field to N, giving each A/B layer the same capacity. The layers
-share the graph's N workers.
-
-The generator is a standalone tool and requires ``--output=PATH``. It has no
-default filename or implicit output location. Generation never overwrites an
-existing file or symlink. Wait for successful completion,
-then pass the file explicitly to ``decoding_server --config=PATH``. The server
-executes the ``parallel_window`` graph and closes each shot through the emitted
-``final`` mapping. Exit status is zero for successful generation or help
-and one for an error. A forced termination may leave a
-partial output file, which must be removed before retrying.
-
-.. important::
-
-   Official release archives omit both the standalone server and generator;
-   use the decoding-server image for this workflow.
-
-See Also
-^^^^^^^^
-
-* :doc:`Decoding Server User Guide </examples_rst/qec/decoding_server>`: configuration, playback and client integration
 * :ref:`Pre-built QEC Decoders <prebuilt_qec_decoders>` — decoders available for realtime use
 * :doc:`Realtime Decoding examples </examples_rst/qec/realtime_decoding>` — runnable end-to-end examples
-* :doc:`Playback Emulator </examples_rst/qec/playback_emulator>` — replay timed decoder calls without a QPU
 * :ref:`realtime_pipeline_api` — Realtime Pipeline C++ API (experimental)
 * :ref:`C++ realtime decoding API <cpp_realtime_decoding_api>` and :ref:`Python realtime decoding API <python_realtime_decoding_api>`

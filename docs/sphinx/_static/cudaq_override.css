@@ -11,12 +11,62 @@ max-width: 1240px !important;
 	font-size: 92%;
 }
 
+/* Keep framework details on the page without a one-item sidebar expansion. */
+.wy-menu-vertical li:has(> a[href$="#build-your-own-code"]) > ul,
+.wy-menu-vertical li:has(> a[href$="#build-your-own-decoder"]) > ul,
+.wy-menu-vertical a[href$="#build-your-own-code"] > .toctree-expand,
+.wy-menu-vertical a[href$="#build-your-own-decoder"] > .toctree-expand {
+    display: none !important;
+}
+
+/* Keep overview summaries on the page without adding navigation entries. */
+.wy-menu-vertical li:has(> a[href$="#highlights-in-0-9-0"]),
+.wy-menu-vertical li:has(> a[href$="#what-the-library-provides"]),
+.toctree-wrapper li:has(> a[href$="#highlights-in-0-9-0"]),
+.toctree-wrapper li:has(> a[href$="#what-the-library-provides"]) {
+    display: none;
+}
+
 .wy-menu-vertical li code, .wy-menu-vertical li .rst-content tt, .rst-content .wy-menu-vertical li tt {
     font-size: 100%;
 }
 
 code.code span.pre, code.cpp span.pre, code.docutils span.pre{
     color: darkgreen;
+}
+
+/* Keep long API signatures within the content column. */
+.rst-content dl dt.sig {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.rst-content dl dt.sig .sig-name,
+.rst-content dl dt.sig .sig-prename,
+.rst-content dl dt.sig .sig-param,
+.rst-content dl dt.sig .pre {
+    white-space: normal;
+}
+
+/* Let API parameter descriptions shrink alongside their field labels. */
+html.writer-html5 .rst-content dl.field-list {
+    grid-template-columns: auto minmax(0, 1fr);
+}
+
+.rst-content dl.field-list > dd {
+    min-width: 0;
+}
+
+/* Generated type names also appear in prose and inline code. */
+.rst-content dl p,
+.rst-content code.xref {
+    overflow-wrap: anywhere;
+}
+
+.rst-content dl.field-list code.literal .pre,
+.rst-content code.xref .pre {
+    white-space: normal;
 }
 
 /* Render the general index in a single column instead of the theme's multi-column layout */

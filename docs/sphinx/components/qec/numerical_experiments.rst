@@ -3,9 +3,25 @@ Experiments and Noise Modeling
 
 The CUDA-Q QEC library lets you run numerical error-correction experiments -- studying how a code and decoder behave under noise. This page introduces several of the most common: modeling noise at the **code-capacity** and **circuit-level**, and running full **memory circuit experiments**.
 
-For a walkthrough of the experiments described below, see the :doc:`Experiments and Noise Modeling </examples_rst/qec/modeling_noise>` example, along with the :doc:`C++ </api/qec/cpp_api>` and :doc:`Python </api/qec/python_api>` API reference.
+For runnable experiments, see :doc:`Experiments and Noise Modeling </examples_rst/qec/modeling_noise>`.
+The :ref:`C++ <memory_experiments_cpp_api>` and
+:ref:`Python <memory_experiments_python_api>` API references describe memory
+circuit sampling; the :ref:`C++ <dem_sampling_cpp_api>` and
+:ref:`Python <dem_sampling_python_api>` DEM sampling references describe sampling
+directly from a detector error model.
 
 The sections below follow the :doc:`Conventions <conventions>` for errors, syndromes, and logical observables.
+
+To test how a realtime pipeline handles measurements as they arrive, use the
+:doc:`Playback Emulator <playback_emulator>`. It can replay recorded or
+simulated measurements without a QPU, either in process or through a decoding
+server, and records corrections and request timing. This exercises the realtime
+path separately from the noise-sampling experiments below.
+
+For a timing experiment in which waiting for a correction changes the next
+shot's length, see :doc:`Measuring Streaming Interleaved Feed-forward Latency
+(SIFL) </examples_rst/qec/sifl_demo>`. Its purpose is to study feedback waiting
+and decoder backlog; it does not measure logical error rates.
 
 Code-Capacity Noise Modeling
 ----------------------------
@@ -36,7 +52,7 @@ Then given a syndrome, it will look up the error string and return that as a res
 
 The last ingredient is a way to generate errors. The code-capacity noise model assumes an independent and identical chance that an `X` or `Z` error happens on each qubit with some probability `p`.
 
-For the runnable code, see :ref:`Code-Capacity Noise Modeling <examples_rst/qec/modeling_noise:Code-Capacity Noise Modeling>`.
+For the runnable code, see :ref:`Code-capacity noise modeling <examples_rst/qec/modeling_noise:Code-Capacity Noise Modeling>`.
 
 Circuit-level Noise Modeling
 ----------------------------
@@ -58,7 +74,7 @@ These experiments model how well QEC cycles, or rounds of stabilizer measurement
 If noise is turned off, then the information is protected indefinitely.
 The circuit-level example models depolarization noise after each CX gate and tracks how many logical errors occur.
 
-For the runnable code, see :ref:`Circuit-level Noise Modeling <examples_rst/qec/modeling_noise:Circuit-level Noise Modeling>`.
+For the runnable code, see :ref:`Circuit-level noise modeling <examples_rst/qec/modeling_noise:Circuit-level Noise Modeling>`.
 
 Memory Circuit Experiments
 --------------------------
@@ -72,4 +88,4 @@ Memory circuit experiments test a QEC code's ability to preserve quantum informa
 
 A memory circuit experiment measures how well a code and decoder preserve a logical qubit through repeated rounds of noisy stabilizer measurement. After a logical state is prepared, each round extracts a syndrome while noise acts on the qubits; the final data-qubit measurement reconstructs the logical observable so the outcome can be compared against the prepared state. Because the same logical information must survive every round, the experiment exercises the full detection-and-correction loop over time rather than a single shot -- it reveals whether the decoder keeps accumulated errors below the code's threshold, and how the logical error rate grows with the number of rounds and the physical error rate. Running many shots yields the statistics used to estimate a code's logical error rate, and ultimately its threshold.
 
-For the runnable code -- the ``sample_memory_circuit`` function variants, a full experiment, and additional noise models -- see :ref:`Memory Circuit Experiments <examples_rst/qec/modeling_noise:Memory Circuit Experiments>`.
+For the runnable code -- the ``sample_memory_circuit`` function variants, a full experiment, and additional noise models -- see :ref:`Memory circuit experiments <examples_rst/qec/modeling_noise:Memory Circuit Experiments>`.

@@ -9,46 +9,53 @@ cases in quantum error correction.
 
 .. note::
 
-   **CUDA-Q QEC is actively developed and fully supported.** The deprecation
-   notice below applies *only* to the CUDA-Q Solvers library; it does not
-   affect CUDA-Q QEC, which continues to receive new features, performance
-   improvements, and releases.
-
-.. attention::
-
-   **CUDA-Q Solvers is deprecated (this does not affect CUDA-Q QEC).**
-   Version 0.6.0 is the final planned
-   release of the CUDA-Q Solvers library. Development continues in **CUDA-Q
-   Algorithms**, which supersedes CUDA-Q Solvers and expands on it. Install it
-   with :code:`pip install cudaq-algorithms`
-   (`cudaq-algorithms on PyPI <https://pypi.org/project/cudaq-algorithms/>`__),
-   read the `CUDA-Q Algorithms documentation
-   <https://nvidia.github.io/cudaq-algorithms/>`__, and find the source code at
-   `NVIDIA/cudaq-algorithms on GitHub <https://github.com/NVIDIA/cudaq-algorithms>`__.
+   If you're looking for CUDA-Q Algorithms (formerly known as CUDA-Q Solvers),
+   see the `CUDA-Q Algorithms documentation
+   <https://nvidia.github.io/cudaq-algorithms/>`__.
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Getting Started
 
    quickstart/installation
+   quickstart/quick_start
 
 .. toctree::
    :maxdepth: 1
-   :caption: Libraries
+   :includehidden:
+   :caption: Library Guide
 
-   components/qec/index
+   Overview <components/qec/index>
+   QEC Decoders <components/qec/decoders>
+   Detector Error Models <components/qec/detector_error_models>
+   Decoding Task Graphs <components/qec/decoding_task_graph>
+   Realtime Decoding <components/qec/realtime_decoding>
+   Experiments and Noise Modeling <components/qec/numerical_experiments>
+   QEC Codes <components/qec/codes>
+   Conventions <components/qec/conventions>
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Examples
 
-   examples_rst/qec/examples
+   Overview <examples_rst/qec/examples>
+   Decoders <examples_rst/qec/decoders>
+   Working with Detector Error Models <examples_rst/qec/detector_error_models>
+   Decoding Task Graph <examples_rst/qec/decoding_task_graph>
+   Realtime Decoding <examples_rst/qec/realtime_decoding>
+   Experiments and Noise Modeling <examples_rst/qec/modeling_noise>
+   Creating New QEC Codes <examples_rst/qec/creating_qec_codes>
 
 .. toctree::
    :maxdepth: 1
+   :includehidden:
    :caption: Performance Studies
 
-   performance/index
+   Overview <performance/index>
+   Improving Relay BP Decoding With Gamma Ensembles <performance/nv_qldpc_gamma_ensemble_user_guide>
+   Sweeping Relay BP Stopping Criteria From a Single Run <performance/nv_qldpc_relay_solutions_user_guide>
+   Improving BP+OSD Decoding With Min-LLR OSD Initialization <performance/nv_qldpc_minllr_osd_user_guide>
+   Bounding realtime decode latency with NV-Fusion <performance/nv_fusion_latency_user_guide>
 
 .. toctree::
    :maxdepth: 1
@@ -58,18 +65,22 @@ cases in quantum error correction.
    api/qec/cpp_api
    api/qec/python_api
 
+.. toctree::
+   :maxdepth: 1
+   :caption: Releases
+
+   Release History <releases>
+
 Key Features
 -------------
 
-CUDA-Q QEC (``cudaq-qec``) is a library enabling performant research workflows for
-quantum error correction, built upon the CUDA-Q programming model.
-
-* **cudaq-qec** (actively developed and supported): Quantum Error Correction Library
-    * Extensible framework describing quantum error correcting codes as a collection of CUDA-Q kernels.
-    * Extensible framework for describing syndrome decoders
-    * State-of-the-art, performant decoder implementations on NVIDIA GPUs
-    * Real-time decoding for active error correction on quantum hardware
-    * Pre-built numerical experiment APIs
+* :doc:`QEC Codes <components/qec/codes>`
+* :doc:`QEC Decoders <components/qec/decoders>`
+* :doc:`Decoding task graphs <components/qec/decoding_task_graph>`
+* :doc:`Realtime decoding <components/qec/realtime_decoding>`
+* :doc:`Decoding server <components/qec/decoding_server>` and
+  :doc:`playback emulator <components/qec/playback_emulator>`
+* :doc:`Experiments and noise modeling <components/qec/numerical_experiments>`
 
 Indices
 -------

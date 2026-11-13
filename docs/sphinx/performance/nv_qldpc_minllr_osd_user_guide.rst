@@ -1,10 +1,3 @@
-.. The data and figures on this page are reproducible with the scripts in
-   benchmarks/qec/nv_qldpc_minllr_osd/ (see the README there for the circuits,
-   parameter table, stopping rule and expected runtime).
-   Tested at:
-     cudaqx  04719bc3dd98540b34976da33f8959061d4f9445
-     stim    v1.16.0
-
 .. _minllr_osd_user_guide:
 
 Using Min-LLR OSD Initialization with BP+OSD
@@ -26,6 +19,9 @@ marginal LLR each column reached over all BP iterations, so a column that was
 confident of an error at *any* point in the trajectory sorts first. The running
 minimum is tracked inside the BP kernel and does not require storing the full LLR
 history.
+
+To run these experiments yourself, see the `min-LLR OSD benchmark README
+<https://github.com/NVIDIA/cudaq-qec/blob/main/benchmarks/qec/nv_qldpc_minllr_osd/README.md>`_.
 
 .. code-block:: python
 
