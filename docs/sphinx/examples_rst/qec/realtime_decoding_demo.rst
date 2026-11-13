@@ -8,11 +8,11 @@ Realtime Decoding with CUDA-Q Decoding Server
    **deliverables** — prebuilt and installed alongside the SDK, not built from
    this example. The SDK, both deliverables and this example ship in the
    CUDA-Q decoding container, published on the NGC catalog at
-   https://catalog.ngc.nvidia.com/orgs/nv-quantum/cudaq-qec/containers/cudaq-decoding:
+   https://catalog.ngc.nvidia.com/orgs/nvidia/quantum/containers/cudaq-decoding:
 
    .. code-block:: bash
 
-      docker run -it --gpus all nvcr.io/nv-quantum/cudaq-qec/cudaq-decoding:cu13-latest
+      docker run -it --gpus all nvcr.io/nvidia/quantum/cudaq-decoding:cu13-latest
       cd ~/examples/realtime_decoding_demo
 
    Alternatively, use the ``cu12-latest`` tag for CUDA 12. The paths and
@@ -24,7 +24,7 @@ Realtime Decoding with CUDA-Q Decoding Server
 
       docker run -it --gpus all --net host --privileged \
           --device /dev/infiniband -v /dev:/dev --shm-size 1g \
-          nvcr.io/nv-quantum/cudaq-qec/cudaq-decoding:cu13-latest
+          nvcr.io/nvidia/quantum/cudaq-decoding:cu13-latest
 
 This example drives the delivered ``decoding_server`` from two different
 syndrome sources, both decoding through the **same prebuilt server**:
