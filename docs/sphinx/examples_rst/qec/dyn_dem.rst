@@ -1,22 +1,31 @@
 .. _dyn_dem_example:
 
-Dynamic DEM
------------
+Decoding with a Dynamic DEM
+----------------------------
 
-A ``dem_chunks`` model describes a detector error model one round at a time.
-Each kind of round is a *phase*, with its own faults; connections say which
-phase follows which. A phase that follows itself repeats, so the same model
-describes shots of any length. Task graphs and streaming decoders read their
-models in this form (see :doc:`decoding_task_graph`).
+.. raw:: html
 
-For surface-code memory experiments, ``memory-experiment-generator`` writes
-the model for you; see :doc:`/components/qec/realtime_decoding`.
+   <span id="dynamic-dem"></span>
 
-A model
-+++++++
+This example constructs a dynamic detector error model (DEM) for a distance-5
+repetition-code memory experiment, then uses PyMatching to decode a complete
+six-round shot of synthetic measurements containing a known data-qubit error.
+It shows the same phase description in YAML, Python,
+and C++. For phases, seams, measurement mappings, and when to use them, start
+with :doc:`Dynamic Detector Error Models </components/qec/dynamic_dem>`.
 
-This model is a distance-5 repetition-code memory experiment with
-measurement errors:
+Use a CUDA-Q QEC installation with the PyMatching decoder available. The C++
+example also requires the ``nvq++`` compiler and CUDA-Q QEC development
+libraries; see the :doc:`Installation Guide </quickstart/installation>`.
+
+.. _a-model:
+
+Describe the Repetition-Code Experiment
++++++++++++++++++++++++++++++++++++++++
+
+The experiment has five data qubits and four stabilizer checks. Its DEM
+includes data-qubit flips and measurement errors, with a probability of 0.02
+for each fault. The final round reads the five data qubits:
 
 .. literalinclude:: ../../examples/qec/yaml/task_graph_parallel_window.yaml
    :language: yaml
@@ -24,61 +33,56 @@ measurement errors:
    :end-before: task_graph:
    :dedent: 4
 
-* ``phases`` lists each kind of round. ``num_faults`` and ``error_rates``
-  give its faults and their probabilities, and ``O_sparse`` lists, for each
-  logical observable, the faults that flip it.
-* ``connections`` order the phases. ``init`` starts the shot, ``bulk``
-  follows itself, so it repeats, and ``final`` ends the shot.
-* ``num_rounds`` sets the shot length for decoders that decode complete
-  shots. Leave it out, as here, to stream shots of any length.
+* ``init`` and ``bulk`` each contain nine faults: five data-qubit flips and
+  four check-measurement errors. ``final`` contains five data-qubit flips.
+* ``init`` starts the shot, ``bulk`` repeats, and ``final`` ends it. The YAML
+  leaves ``num_rounds`` unset for streaming with the
+  :doc:`Parallel Window <task_graph_parallel_window>` example.
+* The Python and C++ programs below set ``num_rounds = 6``: one ``init``
+  round, four ``bulk`` rounds, and one ``final`` round.
 
-``H_sparse`` and ``O_sparse`` hold one row per detector or observable: the
-indices of the faults that flip it, ended by ``-1``.
+.. _detectors-and-seams:
 
-Detectors and seams
-+++++++++++++++++++
+Check the Round Boundaries
+++++++++++++++++++++++++++
 
-A fault can flip detectors of its own round and of the next one, as a
-measurement error does. ``seam_specs`` say which:
+Faults 5 through 8 are check-measurement errors. They affect detectors in
+both their own round and the next, so they appear in both ``prev_round``
+and ``next_round`` seam rows. Faults 0 through 4 are data-qubit flips and
+appear only in the current round's rows in this DEM. The final phase has no
+outgoing ``next_round`` seam.
 
-* ``prev_round`` rows are this round's detectors. Each lists the phase's
-  faults that flip it.
-* ``next_round`` rows are the next round's detectors, listing the faults of
-  this phase that flip them too.
+See :doc:`Dynamic Detector Error Models </components/qec/dynamic_dem>` for
+how seams join these effects across round boundaries.
 
-``seam: {from: next_round, to: prev_round}`` joins each round's
-``next_round`` rows to the next round's ``prev_round`` rows. The last phase
-needs no ``next_round`` rows.
+.. _measurements-and-readout:
 
-When every seam has the same rows, one ``H_sparse`` per phase replaces
-``seam_specs``.
+Follow the Measurements
++++++++++++++++++++++++
 
-Measurements and readout
-++++++++++++++++++++++++
+The DEM's ``D_sparse`` rows form each detector from the measurements:
 
-By default, each round measures one value per detector, and a detector
-compares its measurement with the round before; in the first round, with
-zero. The model above instead ends with a readout of the data qubits, which
-takes these optional fields:
+* ``init`` compares each check measurement with its expected value of zero.
+* ``bulk`` compares each check with the same check in the previous round.
+* ``final`` compares each previous check with the parity of its two adjacent
+  data-qubit readouts. Its five measurements replace the four check
+  measurements of a bulk round.
 
-* ``D_sparse`` on every phase lists each detector's measurements. Indices
-  count the previous round's measurements first, then this round's. The
-  first round has no previous round, so the model starts with an ``init``
-  phase.
-* ``measurements_per_round`` sets each round's measurement count, and
-  ``num_measurements`` a phase's own, such as ``final``'s five data qubits.
-* ``m2o_sparse`` lists, for each observable, the measurements of the phase's
-  round that it reads; a logical value is the parity of all its readouts.
-  Any phase but a repeating one may read observables, so a mid-circuit
-  readout can, too. No later phase may flip an observable it has read. Task
-  graphs use it to return logical measurements (see
-  :ref:`task_graph_logical_measurements`).
-* ``observable_names`` names the observables.
+The final phase's ``m2o_sparse: [0, -1]`` reads data qubit 0 as the raw
+logical observable. Its ``O_sparse: [0, -1]`` identifies fault 0 as a flip
+of that observable. The matching indices refer to different things:
+``m2o_sparse`` indexes measurements, while ``O_sparse`` indexes faults.
+See :ref:`Measurements and Logical Readout <dynamic_dem_measurements>` for
+the field definitions.
 
-Building a model in code
-++++++++++++++++++++++++
+.. _building-a-model-in-code:
 
-The same model, decoding a fixed-length shot:
+Build the DEM and Decode a Shot
++++++++++++++++++++++++++++++++
+
+These programs construct the same detector error model and use PyMatching to
+decode a fixed-length shot. The shot contains a flip of data qubit 0 in round
+2, with rounds counted from zero:
 
 .. tab:: Python
 
@@ -105,11 +109,18 @@ The same model, decoding a fixed-length shot:
 
    corrections: [1]
 
+The result says that the logical observable needs a flip, as expected from
+the injected error. ``run()`` returns the correction; the
+:doc:`Parallel Window <task_graph_parallel_window>` example also configures
+an output for the corrected logical measurement.
+
 In Python, assign whole lists, such as ``spec.seam_specs = [...]``: appending
 to a field changes a copy.
 
-See also
+See Also
 ++++++++
 
-- :ref:`dyn_dem_python_api` and :ref:`dyn_dem_cpp_api`: the model types.
+- :doc:`Dynamic Detector Error Models </components/qec/dynamic_dem>`: concepts
+  and construction choices.
+- :ref:`dyn_dem_python_api` and :ref:`dyn_dem_cpp_api`: the DEM specification types.
 - :doc:`task_graph_parallel_window`: decoding streams of any length.

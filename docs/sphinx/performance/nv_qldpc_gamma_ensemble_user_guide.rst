@@ -1,18 +1,14 @@
-.. The data and figures on this page are reproducible with the scripts in
-   benchmarks/qec/relaybp_gamma_ensemble/ (see the README there for the
-   parameter table, required Relay-BP testdata and expected runtime).
-   Tested at:
-     cudaqx  5140d8930f3e8a5a9a74b63c93dcbd0cda85dc48
-     stim    e2fc1eca7fd21684d433aa5f10f4504ea4860d07  (v1.16.0)
-
 .. _ensemble_gamma_user_guide:
 
 Improving Relay BP Decoding With Gamma Ensembles
 =================================================
 
-The NV-qLDPC Relay BP decoder supports ensembles of independent gamma distribution trajectories (N "lanes"), run in parallel on a single GPU. When any lane has satisfied the stopping criterion, then the decoder may exit early. This can lead to significantly improved decoding performance as increased parallelism allows for faster exploration of decoding solutions, and therefore lower latency for hard-to-decode syndromes which may stall Relay BP. 
+The NV-qLDPC Relay BP decoder supports ensembles of independent gamma distribution trajectories (N "lanes"), run in parallel on a single GPU. When any lane has satisfied the stopping criterion, then the decoder may exit early. This can lead to significantly improved decoding performance as increased parallelism allows for faster exploration of decoding solutions, and therefore lower latency for hard-to-decode syndromes which may stall Relay BP.
 
 While setting multiple lanes of ensembled gammas can reduce the number of Relay BP iterations needed to converge to a solution, it can also lead to increased time per iteration; each leg of Relay BP synchronizes between lanes to check for convergence. Multiple lanes share a fixed GPU allocation, so as the number of edges in the Tanner graph increases, the GPU eventually must serialize the execution of each lane at each iteration, and then block for every lane to complete. These competing effects offset each other to some extent, so the mean latency per iteration may or may not be lower than the un-ensembled mean latency. However, the main benefit of ensembling is that the decoder can accept the fastest converging lane, and terminate slow-converging lanes early. The slow-converging lanes then do not contribute to the overall decoding time, narrowing the distribution of decode latencies. This can in turn lead to substantially improved LER under hard deadline constraints, where decoding failures are dominated by deadline misses on slow decodes. We will see below examples of bivariate-bicycle codes (BB) seeing up to 50-90x improved logical error rate, depending on the code and deadline.
+
+To run these experiments yourself, see the `gamma-ensemble benchmark README
+<https://github.com/NVIDIA/cudaq-qec/blob/main/benchmarks/qec/relaybp_gamma_ensemble/README.md>`_.
 
 The first experiment we perform is to investigate the competing effects of reducing the mean number of iterations to converge versus increasing the time per iteration; we build the Z-component of the circuit-level detector error model (DEM) (i.e. the Z-stabilizer detectors only) for the bivariate-bicycle (BB) codes ``[[72,12,6]]``, ``[[144,12,12]]`` and ``[[288,12,18]]`` and, for each, construct the decoder with ``gamma_ensemble_size`` set to N in {1, 2, 4, 8}. We then decode many sampled syndromes, timing each ``decode()`` call and reading back the number of Relay BP iterations the decoder used to converge:
 
@@ -118,5 +114,5 @@ See Also
 ++++++++
 
 * :ref:`Quantum Low-Density Parity-Check Decoder <qldpc_decoder>` -- the nv-qldpc-decoder overview
-* :ref:`Getting Started with the NVIDIA QLDPC Decoder <examples_rst/qec/decoders:Getting Started with the NVIDIA QLDPC Decoder>` -- runnable example
+* :ref:`Getting started with the NVIDIA QLDPC Decoder <examples_rst/qec/decoders:Getting Started with the NVIDIA QLDPC Decoder>` -- runnable example
 * :ref:`C++ <nv_qldpc_decoder_api_cpp>` and :ref:`Python <nv_qldpc_decoder_api_python>` API reference

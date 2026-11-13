@@ -1,5 +1,21 @@
-Realtime Decoding with CUDA-Q Decoding Server
-=============================================
+Realtime Decoding from a Quantum Kernel or FPGA
+===============================================
+
+This example sends measurements to a standalone decoding server from either
+a running quantum kernel or a real FPGA. The quantum-kernel route executes a
+surface-code circuit in a simulator, streams its measurements, and receives
+corrections during execution. The FPGA route sends pre-generated measurements
+over RoCE and checks the returned corrections.
+
+Start with the software UDP route and a CPU decoder; it needs no QPU, FPGA, or
+RDMA hardware. The later sections cover RDMA and FPGA input, optional Ising
+predecoding, and an additional :ref:`packaged surface-code client
+<decoding-server-packaged-client>`.
+
+For why you would deploy a server and how it is configured, see
+:doc:`Decoding Server </components/qec/decoding_server>`. To test the server
+with scheduled measurements instead of a quantum circuit, see
+:doc:`Realtime Decoding with the Playback Emulator <decoding_server_playback>`.
 
 .. note::
 
@@ -16,7 +32,8 @@ Realtime Decoding with CUDA-Q Decoding Server
       cd ~/examples/realtime_decoding_demo
 
    Alternatively, use the ``cu12-latest`` tag for CUDA 12. The paths and
-   commands on this page are as used inside that container. The ``cpu_roce``
+   commands on this page are as used inside that container. For the CPU-only
+   UDP examples, omit ``--gpus all`` from the container command. The ``cpu_roce``
    and FPGA paths additionally need the host's network and RDMA devices passed
    through, for example:
 
@@ -202,17 +219,8 @@ nv-qldpc on host dispatch over ``cpu_roce`` instead.
    host-dispatch rings. No released decoder uses that path; this example
    derives ``gpu_roce`` only for the device_graph mode described above.
 
-A third knob is host-only: the **loop shape**, chosen with
-``decoding_server --host-loop=threaded|unified`` when the server is launched
-directly (``run_realtime_decoding.sh`` does not expose it and always runs the
-default). ``threaded`` (the default) keeps the provider's RX/TX threads plus
-one dispatcher thread per ring; ``unified`` runs each host ring on a single
-thread that drives the wire and the decoder call together through the
-provider's CPU data plane; the server passes ``--unified`` to each host
-ring's provider to select its CPU data plane (the in-tree ``udp`` provider
-serves one; a provider without one is refused before READY). ``device_graph``
-rings are unaffected, so a mixed configuration may run its host rings
-unified; ``gpu_roce`` host rings are not supported in this mode.
+The script uses the default host loop. See :ref:`decoding-server-host-loops`
+for loop options when launching the server directly.
 
 Both sources apply real pass/fail criteria. The qpu-kernel source uses the
 same checks as the in-tree surface-code tests — no decoder errors, a residual
@@ -222,6 +230,8 @@ floor of ``num_shots * (num_rounds + 3)``. The FPGA source verifies every
 shot's corrections against the expected values computed at
 syndrome-generation time (the playback tool's per-shot verification).
 
+
+.. _decoding-server-ising-example:
 
 Ising decoder (TensorRT predecoder + PyMatching)
 ------------------------------------------------
@@ -331,8 +341,132 @@ container), else ``--nv-qldpc-plugin <path.so>`` — and a GPU; if the plugin
 is unavailable the script exits ``77`` (skip).
 
 
-The example source
-------------------
+.. _decoding-server-packaged-client:
+
+Packaged Surface-Code Client
+----------------------------
+
+This additional example uses the ``surface_code-1`` program packaged under
+``/root/examples``. It demonstrates manual server/client startup and includes
+the sliding-window decoder. Follow :ref:`decoding-server-container-setup` to
+create the shared run directory and open the reusable container. These CPU
+examples need no GPU. Before starting, run ``cd "$QEC_RUN_DIR"`` in each
+container shell; the CMake example's build directory is not used here.
+
+The packaged ``surface_code-1`` program runs a distance-3 surface-code memory
+circuit in Stim. Its ``-cqr`` variant streams measurements to the separate
+server while the circuit executes. The following examples run 100 shots with
+three rounds and CNOT error probability 0.001, using three decoders:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Decoder
+     - Configuration
+   * - ``pymatching``
+     - CPU minimum-weight perfect matching.
+   * - ``multi_error_lut``
+     - CPU lookup table, using the example's lookup depth 2. Keep this small
+       geometry because table size grows with code size and lookup depth.
+   * - ``sliding_window``
+     - CPU sliding window with PyMatching, window size 3, and step size 1.
+       Here the window covers the three-round shot.
+
+The application supplies the measurements and reads the correction through
+CUDA-Q's realtime decoding API. The complete program is already included in
+the image; only the client application is compiled below.
+
+.. _decoding-server-packaged-client-build:
+
+Build the Packaged Client
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Compile only the application using the compiler and matching headers inside
+the image. The server is already built. In a container shell at the shared run
+directory, save the executables alongside the experiment files:
+
+.. code-block:: bash
+
+   BUILD_DIR="$PWD/client-build" bash /root/examples/build.sh surface_code-1
+
+Use the image's example sources and build script together. An arbitrary host
+SDK or a newer source checkout may use a different realtime protocol.
+
+Generate Configurations and Select a Decoder
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Generate one server configuration for each decoder. Run this block in the
+container shell at the shared run directory:
+
+.. code-block:: bash
+
+   (
+     set -e
+     for DECODER in pymatching multi_error_lut sliding_window; do
+       SW_ARGS=()
+       if [ "$DECODER" = sliding_window ]; then
+         SW_ARGS=(--sw_inner_decoder pymatching --sw_window_size 3 --sw_step_size 1)
+       fi
+       ./client-build/surface_code-1-local \
+         --distance 3 --num_rounds 3 --num_shots 100 --p_cnot 0.001 \
+         --decoder_type "$DECODER" \
+         "${SW_ARGS[@]}" \
+         --save_dem "$PWD/surface-$DECODER.yaml"
+     done
+   )
+
+Start one decoder's server:
+
+.. code-block:: bash
+
+   DECODER=pymatching
+   QEC_DECODING_SERVER_STATS=1 decoding_server \
+     --config="surface-$DECODER.yaml" --transport=udp --port=50000 --timeout=3600
+
+Wait for ``QEC_DECODING_SERVER_READY``. In the second container shell at the
+shared run directory, select the same decoder and run its ``-cqr`` client:
+
+.. code-block:: bash
+
+   DECODER=pymatching
+   SW_ARGS=()
+   if [ "$DECODER" = sliding_window ]; then
+     SW_ARGS=(--sw_inner_decoder pymatching --sw_window_size 3 --sw_step_size 1)
+   fi
+   QEC_DECODING_SERVER_PORT=50000 \
+   QEC_DECODING_SERVER_TRANSPORT=udp \
+   CUDAQ_DEVICE_CALL_CHANNEL=host_dispatch \
+     ./client-build/surface_code-1-cqr \
+       --distance 3 --num_rounds 3 --num_shots 100 --p_cnot 0.001 \
+       --decoder_type "$DECODER" "${SW_ARGS[@]}" \
+       --load_dem "$PWD/surface-$DECODER.yaml"
+
+Stop the server with Ctrl+C after the client completes. Repeat with
+``DECODER=multi_error_lut`` and ``DECODER=sliding_window`` in both shells.
+
+Read the Application Results
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The client prints ``Result size: 100``, the measured logical outcomes and the
+number of corrections applied. These are experiment results; a nonzero logical
+error count does not by itself indicate a server or transport failure.
+
+To confirm that the separate server handled the shots, check its shutdown
+line ``QEC_DECODING_SERVER_DECODER_STATS id=0`` for ``decodes=100`` and
+``errors=0``. The client should also print ``CQR service dispatch count: 0``.
+The client counter alone is not proof of server routing; check both logs.
+
+These compiled-client examples cover fixed-duration shots. For generated
+memory experiments, use :ref:`decoding-server-memory-configuration` rather
+than substituting a new YAML into these fixed-model clients. NVIDIA qLDPC and
+NV-Fusion require their corresponding plugins in the release image.
+Surface-code Ising requires its own model and measurement contract. See
+:ref:`decoding-server-ising-example` for the surface-code Ising application and
+:ref:`the Fusion API <nv_fusion_decoder_api_cpp>` for Fusion configuration.
+
+Source for the CMake Example
+----------------------------
 
 The Ising profile builds its own companion source,
 ``surface_code_ising_realtime_decoding.cpp`` (plus the shipped

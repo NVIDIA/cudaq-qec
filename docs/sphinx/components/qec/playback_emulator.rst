@@ -1,21 +1,74 @@
 Playback Emulator
 =================
 
-The playback emulator replays a scripted sequence of decoder calls (a
-*schedule*) against one or more realtime decoders, on a precise timing loop
-that does not need a quantum processor (QPU). Each line of the schedule says
-*when* to call a decoder and *what* to send it. The emulator records when each
-call was made, when its reply arrived, and what came back, so it can be used
-to measure decoder latency or check decoder output.
+Overview
+--------
+
+The playback emulator is a software client for testing realtime decoding
+without a quantum processor (QPU). It sends measurements and correction
+requests according to a text *schedule*, which specifies when each call should
+run and what to send. You can replay recorded measurements or generate them
+from a simulated memory experiment, check the returned corrections, and
+inspect the time taken to receive each reply.
+
+Decoders can run in the same process as the emulator or in a separate
+:doc:`Decoding Server <decoding_server>`. Use the in-process mode to test a
+decoder configuration locally; use a server session to exercise communication
+as well as decoding. Both modes exercise the realtime request interface, even
+when the measurements were produced offline.
+
+A run connects three pieces:
+
+* A **schedule** orders resets, measurement rounds, final readouts, and
+  correction requests, with timing and optional dependencies between events.
+* **Syndrome sources** supply the measurements. A static source replays fixed
+  rounds; memory-circuit sources generate measurements for the experiment.
+* **Sessions** connect each decoder ID in the schedule to an in-process
+  decoder, a server endpoint, or a null backend for measuring emulator overhead.
+
+The emulator records the scheduled deadline, actual dispatch and reply times,
+status, and correction bits. Compare these to distinguish late dispatch from
+time spent waiting for a decoder reply. Timing depends on the host and selected
+transport; software playback alone does not establish a hardware feedback-latency
+guarantee. This tool is separate from the FPGA playback described in
+:doc:`Realtime Decoding from a Quantum Kernel or FPGA
+</examples_rst/qec/realtime_decoding_demo>`.
 
 .. note::
-   The playback emulator is only built when CUDA-Q QEC is built against a 
-   CUDA-Q install with ``cudaq-realtime`` enabled.
+   The playback emulator is only built when CUDA-Q QEC is built against a
+   CUDA-Q install with ``cudaq-realtime`` enabled. The prebuilt decoding-server
+   image includes the command-line tool. The Python interface requires a
+   realtime-enabled CUDA-Q QEC Python installation, such as the combined
+   CUDA-Q/QEC image; it is not included in the 0.9.0 pip wheels.
+
+Start with :ref:`In-Process Repetition-Code Playback <playback-in-process-example>`
+to check ten shots with alternating corrections, or
+:ref:`Playback Against a Decoding Server <playback-server-example>` to generate
+a surface-code configuration and replay a shot over UDP.
+
+For an accuracy and runtime comparison, see
+:doc:`Comparing Ising and Chromobius for Color-Code Decoding
+</examples_rst/qec/color_code_demo>`. It replays the same sampled measurements
+through Chromobius alone and an Ising predecoder followed by Chromobius, using
+both in-process and server sessions.
+
+To make the next shot's length depend on the previous correction's arrival,
+see :doc:`Measuring Streaming Interleaved Feed-forward Latency (SIFL)
+</examples_rst/qec/sifl_demo>`. It uses completion signals and alternating
+in-process decoders to study :doc:`Feedback Latency and Decoder Backlog
+<feedback_latency>` as the measurement cadence changes.
+
+Reference
+---------
+
+Python and Command-Line Interfaces
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 A schedule is a text file, where each line is a single event representing a 
 decoder call, or sequence of decoder calls. For example, the following schedule 
 resets decoder 0, enqueues three rounds of syndromes, and asks for a
-one-bit correction:
+one-bit correction. This illustrates the syntax; the required rounds and any
+final data-qubit readout depend on the decoder configuration:
 
 .. code-block:: text
 
@@ -24,8 +77,9 @@ one-bit correction:
    1 stream session=0 source=0 rounds=3 every=2
    - get_corrections session=0 return_size=1
 
-Save it to a file (e.g. ``schedule.txt``) and run it from the command line or
-from Python:
+The interfaces below assume that you have prepared a matching ``config.yaml``,
+``schedule.txt``, and syndrome source. For complete configurations and inputs,
+use the examples linked above.
 
 .. tab:: Python
 
@@ -117,55 +171,6 @@ to decoder 0 until decoder 1 has replied.
 If a decoder reply reports an error other than ``4`` (not ready), the run
 stops. Lines that never ran have ``status`` ``-1``, and the reason is in
 ``result.warnings``.
-
-Output Format
-^^^^^^^^^^^^^
-
-The output has one CSV row per schedule line, in schedule order. Times are in
-nanoseconds from the start of the run. Columns that list one value per request
-(one per round for ``stream``) are space-separated.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 75
-
-   * - Column
-     - Description
-   * - ``event_index``, ``decoder_id``, ``op``
-     - The schedule line (0-based), the decoder it called, and its operation.
-   * - ``deadline_ns``, ``call_ns``, ``return_ns``
-     - When the line was due, when it started sending, and when its last
-       reply arrived.
-   * - ``status``
-     - ``0`` is OK. Other values below ``100`` are decoder errors
-       (``1`` invalid decoder, ``2`` bad request, ``3`` internal error,
-       ``4`` not ready, ``5`` busy, ``6`` syndromes dropped).
-       ``stream`` and ``enqueue_data`` instead report ``100`` (OK), ``101``
-       (source ran out), ``102`` (reached ``max_rounds`` before ``until=``), or
-       ``103`` (error).
-       ``-1`` means the line never ran.
-   * - ``rounds_streamed``
-     - Rounds actually sent (``stream`` and ``enqueue_data`` only).
-   * - ``read_completed``
-     - ``1`` if a correction was received.
-   * - ``syndrome_bits``, ``correction_bits``
-     - Bits sent and bits received, as ``0``/``1`` strings.
-   * - ``correction_mismatch``
-     - ``1`` if the correction differs from the expected bits.
-   * - ``request_ids``
-     - Each request's ID, for matching against decoder server logs.
-   * - ``dispatched``
-     - ``1`` if the line ran.
-   * - ``request_dispatch_ns``, ``request_return_ns``
-     - When each request was sent, and when its reply arrived (``0`` if
-       never).
-   * - ``request_status``
-     - Each request's status: the decoder status codes above (``0`` to
-       ``6``), or ``-1`` if no reply was recorded. A request with no reply
-       before its timeout is ``3``.
-
-In Python, ``result.records`` holds one dict per CSV row, keyed by the column
-names above.
 
 Syndrome Sources
 ^^^^^^^^^^^^^^^^
@@ -285,23 +290,53 @@ whole number of milliseconds. The tick and every timeout must be positive.
 
 A request with no reply within its timeout is an error, which stops the run.
 
-Example
-^^^^^^^
+.. _playback-output-format:
 
-The example below configures a lookup-table decoder for a distance-3
-repetition code, then plays back ten fixed shots against it, alternating
-between no error and a flipped data qubit. It prints each shot's correction
-(``0``, then ``1``) and decoding latency.
+Output Format
+^^^^^^^^^^^^^
 
-.. literalinclude:: ../../examples/qec/python/playback_emulator.py
-   :language: python
-   :start-after: # [Begin Documentation]
-   :end-before: # [End Documentation]
+The output has one CSV row per schedule line, in schedule order. Times are in
+nanoseconds from the start of the run. Columns that list one value per request
+(one per round for ``stream``) are space-separated.
 
-To play the same schedule against a decoding server instead, save the decoders
-with ``decoders.to_yaml_str()`` to ``config.yaml``, start the server, and pass
-``udp_endpoints={0: "127.0.0.1:50000"}`` to ``run()`` in place of ``decoders=``:
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
 
-.. code-block:: bash
+   * - Column
+     - Description
+   * - ``event_index``, ``decoder_id``, ``op``
+     - The schedule line (0-based), the decoder it called, and its operation.
+   * - ``deadline_ns``, ``call_ns``, ``return_ns``
+     - When the line was due, when it started sending, and when its last
+       reply arrived.
+   * - ``status``
+     - ``0`` is OK. Other values below ``100`` are decoder errors
+       (``1`` invalid decoder, ``2`` bad request, ``3`` internal error,
+       ``4`` not ready, ``5`` busy, ``6`` syndromes dropped).
+       ``stream`` and ``enqueue_data`` instead report ``100`` (OK), ``101``
+       (source ran out), ``102`` (reached ``max_rounds`` before ``until=``), or
+       ``103`` (error).
+       ``-1`` means the line never ran.
+   * - ``rounds_streamed``
+     - Rounds actually sent (``stream`` and ``enqueue_data`` only).
+   * - ``read_completed``
+     - ``1`` if a correction was received.
+   * - ``syndrome_bits``, ``correction_bits``
+     - Bits sent and bits received, as ``0``/``1`` strings.
+   * - ``correction_mismatch``
+     - ``1`` if the correction differs from the expected bits.
+   * - ``request_ids``
+     - Each request's ID, for matching against decoder server logs.
+   * - ``dispatched``
+     - ``1`` if the line ran.
+   * - ``request_dispatch_ns``, ``request_return_ns``
+     - When each request was sent, and when its reply arrived (``0`` if
+       never).
+   * - ``request_status``
+     - Each request's status: the decoder status codes above (``0`` to
+       ``6``), or ``-1`` if no reply was recorded. A request with no reply
+       before its timeout is ``3``.
 
-   decoding_server --config=config.yaml --transport=udp --port=50000
+In Python, ``result.records`` holds one dict per CSV row, keyed by the column
+names above.

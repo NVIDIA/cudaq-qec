@@ -1,13 +1,13 @@
 The Realtime Decoding API enables low-latency error correction on quantum hardware by allowing CUDA-Q quantum kernels to interact with decoders during circuit execution. This API is designed for use cases where corrections must be calculated and applied within qubit coherence times.
 
-The real-time decoding system supports simulation environments for local testing and hardware integration (e.g., on
+The realtime decoding system supports simulation environments for local testing and hardware integration (e.g., on
 `Quantinuum's Helios QPU
 <https://www.quantinuum.com/products-solutions/quantinuum-systems/helios>`_).
 
 Core Decoding Functions
 ------------------------
 
-These functions can be called from within CUDA-Q quantum kernels (``__qpu__`` functions) to interact with real-time decoders.
+These functions can be called from within CUDA-Q quantum kernels (``__qpu__`` functions) to interact with realtime decoders.
 
 .. doxygenfunction:: cudaq::qec::decoding::enqueue_syndromes
 .. doxygenfunction:: cudaq::qec::decoding::enqueue_syndromes_mapped
@@ -62,7 +62,7 @@ Realtime decoding requires converting matrices to sparse format for efficient de
   a :cpp:struct:`cudaq::qec::decoder_inputs` component) into the ``-1``-terminated sparse
   vector a decoder config expects for ``D_sparse``.
 
-   **Usage in real-time decoding:**
+   **Usage in realtime decoding:**
 
    .. code-block:: cpp
 

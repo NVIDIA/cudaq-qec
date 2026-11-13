@@ -36,11 +36,17 @@ This means that for the concatenated syndrome vector `S = S_X | S_Z`, the first 
 stabilizers detecting `X` errors. This is because the `Z` stabilizers like `ZZI` and `IZZ` anti-commute with `X` errors like
 `IXI`.
 
-The decoder prediction as to what error happened is `D = D_X | D_Z`. A successful error decoding does not require that `D = E`,
-but that `D + E` is not a logical operator. There are a couple ways to check this.
-For bitflip errors, we check that the residual error `R = D_X + E_X` is not `L_X`. Since `X` anticommutes
-with `Z`, we can check that `L_Z(D_X + E_X) = 0`. This is because we just need to check if they have mutual support on an even
-or odd number of qubits. We could also check that `R` is not a stabilizer.
+The decoder predicts an error `D = D_X | D_Z`. Successful recovery does not
+require `D = E`: it requires the residual `R = D + E` to belong to the
+stabilizer group, including the identity. Addition here is modulo two, and
+Pauli operators are considered up to an overall phase.
+
+First check that the prediction matches the measured syndrome, `H D = H E`,
+so the residual has zero syndrome. Then check that it has no logical effect.
+For bit-flip errors, this means `L_Z(D_X + E_X) = 0` for every logical Z
+operator; for phase-flip errors, check `L_X(D_Z + E_Z) = 0` for every logical X
+operator. Together, these checks distinguish a stabilizer residual from a
+nontrivial logical operator.
 
 Similar to the parity check matrix, the logical observables are also stored in a matrix as
 

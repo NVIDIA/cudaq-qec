@@ -172,7 +172,7 @@
           first-stage predecoder whose residual output is passed to the named
           global decoder (for example ``"pymatching"`` or ``"chromobius"``).
           It may be omitted for output formats that need no second stage. See
-          :ref:`the real-time decoding API
+          :ref:`the realtime decoding API
           <python_realtime_decoding_api>` for configuring composite decoding
           from YAML. Introduced in 0.7.0.
           A cancellation token passed to :code:`decode` or :code:`decode_batch`

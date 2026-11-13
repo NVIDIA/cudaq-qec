@@ -1,7 +1,7 @@
 .. _task_graph_parallel_window:
 
-Task Graph Parallel Window
---------------------------
+Parallel Window
+---------------
 
 A ``parallel_window`` task graph decodes a stream of any number of rounds in
 fixed-size windows that decode at the same time. Each window is small, so the
@@ -9,7 +9,8 @@ time from a shot's last round to its result depends on the window size, not on
 the shot's length. With ``async_streaming``, windows decode on the graph's
 worker threads, so more threads keep up with faster rounds.
 
-This page builds on :doc:`decoding_task_graph`.
+This page builds on the :doc:`Decoding Task Graphs
+</components/qec/decoding_task_graph>` guide.
 
 How it works
 ++++++++++++
@@ -34,10 +35,13 @@ Coverage starts at round 0, or where ``clear_corrections()`` last consumed
 the corrections. The ``FINAL`` round ends the shot and decodes the last
 windows.
 
-The model
-+++++++++
+.. _the-model:
 
-The graph decodes a ``dem_chunks`` model (see :ref:`dyn_dem_example`) with:
+Detector Error Model
+++++++++++++++++++++
+
+The graph uses a dynamic detector error model (DEM), specified by
+``dem_chunks``, with:
 
 * a repeating phase, so shots may have any length;
 * one round per phase;
@@ -46,8 +50,11 @@ The graph decodes a ``dem_chunks`` model (see :ref:`dyn_dem_example`) with:
 A phase may have no faults, such as a preparation round that no modeled
 fault touches.
 
+See :doc:`Dynamic Detector Error Models </components/qec/dynamic_dem>` for
+phases, connections, and measurement mappings.
+
 For surface-code memory experiments, ``memory-experiment-generator`` writes
-the model and a ``parallel_window`` configuration for you; see
+the DEM and a ``parallel_window`` configuration for you; see
 :doc:`/components/qec/realtime_decoding`.
 
 Configuration
@@ -77,7 +84,7 @@ and returns both results, its corrections and its logical measurement:
      - ``corrections_and_logical``: the corrections and the logical
        measurements (see :ref:`task_graph_logical_measurements`).
        ``corrections``: the corrections only, which a client may consume
-       mid-shot. Required when the model has ``m2o_sparse``; without it, the
+       mid-shot. Required when the DEM has ``m2o_sparse``; without it, the
        default is ``corrections``.
    * - ``inner``
      - The decoder every window uses, with its parameters. It must report the
@@ -256,8 +263,8 @@ Sharing data across decoders
 
 .. include:: task_graph_provisional.rst
 
-A top-level ``data_artifacts`` section declares a model, a window or a Stim
-DEM file once and names it wherever a block is expected:
+A top-level ``data_artifacts`` section declares a detector error model, a
+window, or a Stim DEM file once and names it wherever a block is expected:
 
 .. code-block:: yaml
 

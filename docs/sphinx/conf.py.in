@@ -137,7 +137,7 @@ html_theme_options = {
     "sticky_navigation": False,
     "prev_next_buttons_location": "both",
     "style_nav_header_background":
-    "#76b900"  # Set upper left search bar to NVIDIA green
+        "#76b900"  # Set upper left search bar to NVIDIA green
 }
 
 html_css_files = ['@SPHINX_SOURCE@/_static/cudaq_override.css']
@@ -161,6 +161,7 @@ doc_replacements = (
     ('mlir._mlir_libs._quakeDialects.cudaq_runtime.', ''),
 )
 
+
 def fix_string(input):
     """Fixes a string by applying the replacements in `doc_replacements`"""
     if not isinstance(input, str):
@@ -169,12 +170,16 @@ def fix_string(input):
         input = input.replace(old, new)
     return input
 
-def process_signature(app, what, name, obj, options, signature, return_annotation):
+
+def process_signature(app, what, name, obj, options, signature,
+                      return_annotation):
     return (fix_string(signature), fix_string(return_annotation))
+
 
 def process_docstring(app, what, name, obj, options, lines):
     for i, line in enumerate(lines):
         lines[i] = fix_string(line)
+
 
 def _fixup_class_modules():
     # Types bound in the qecrt nanobind submodule have __module__ set to the
@@ -199,6 +204,7 @@ def _fixup_class_modules():
                     pass
     except ImportError:
         pass
+
 
 _fixup_class_modules()
 del _fixup_class_modules
@@ -229,27 +235,42 @@ intersphinx_mapping = {
 _ALGORITHMS_DOCS = "https://nvidia.github.io/cudaq-algorithms/"
 
 redirects = {
-    "versions": "../latest/releases.html",
-    "components/qec/introduction": "index.html",
-    "examples_rst/qec/code_capacity_noise": "modeling_noise.html",
-    "examples_rst/qec/circuit_level_noise": "modeling_noise.html",
-    "examples_rst/qec/stim_dem_decoder": "decoders.html",
-    "examples_rst/qec/dem_sampling": "decoders.html",
-    "examples_rst/qec/nv_qldpc_gamma_ensemble_user_guide": "../../performance/nv_qldpc_gamma_ensemble_user_guide.html",
+    "versions":
+        "releases.html",
+    "components/qec/introduction":
+        "index.html",
+    "examples_rst/qec/code_capacity_noise":
+        "modeling_noise.html",
+    "examples_rst/qec/circuit_level_noise":
+        "modeling_noise.html",
+    "examples_rst/qec/stim_dem_decoder":
+        "stim_dem.html",
+    "examples_rst/qec/nv_qldpc_gamma_ensemble_user_guide":
+        "../../performance/nv_qldpc_gamma_ensemble_user_guide.html",
     # Removed page: its device-graph walkthrough relied on a non-redistributable archive.
-    "examples_rst/qec/realtime_relay_bp": "realtime_decoding_demo.html",
+    "examples_rst/qec/realtime_relay_bp":
+        "realtime_decoding_demo.html",
     # CUDA-Q Solvers was removed from this repository after the 0.6.0 release. Point the
     # previously published Solvers pages at CUDA-Q Algorithms, which supersedes
     # it, so existing links and search results do not 404.
-    "components/solvers/introduction": _ALGORITHMS_DOCS,
-    "examples_rst/solvers/examples": _ALGORITHMS_DOCS,
-    "examples_rst/solvers/adapt": _ALGORITHMS_DOCS,
-    "examples_rst/solvers/vqe": _ALGORITHMS_DOCS,
-    "examples_rst/solvers/qaoa": _ALGORITHMS_DOCS,
-    "examples_rst/solvers/gqe": _ALGORITHMS_DOCS,
-    "examples_rst/solvers/molecular_hamiltonians": _ALGORITHMS_DOCS,
-    "api/solvers/cpp_api": _ALGORITHMS_DOCS,
-    "api/solvers/python_api": _ALGORITHMS_DOCS,
+    "components/solvers/introduction":
+        _ALGORITHMS_DOCS,
+    "examples_rst/solvers/examples":
+        _ALGORITHMS_DOCS,
+    "examples_rst/solvers/adapt":
+        _ALGORITHMS_DOCS,
+    "examples_rst/solvers/vqe":
+        _ALGORITHMS_DOCS,
+    "examples_rst/solvers/qaoa":
+        _ALGORITHMS_DOCS,
+    "examples_rst/solvers/gqe":
+        _ALGORITHMS_DOCS,
+    "examples_rst/solvers/molecular_hamiltonians":
+        _ALGORITHMS_DOCS,
+    "api/solvers/cpp_api":
+        _ALGORITHMS_DOCS,
+    "api/solvers/python_api":
+        _ALGORITHMS_DOCS,
 }
 
 nitpick_ignore = [
