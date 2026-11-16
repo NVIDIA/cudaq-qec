@@ -55,8 +55,8 @@ both in-process and server sessions.
 To make the next shot's length depend on the previous correction's arrival,
 see :doc:`Measuring Streaming Interleaved Feed-forward Latency (SIFL)
 </examples_rst/qec/sifl_demo>`. It uses completion signals and alternating
-in-process decoders to study :doc:`Feedback Latency and Decoder Backlog
-<feedback_latency>` as the measurement cadence changes.
+in-process decoders to study feedback latency and decoder backlog as the
+measurement cadence changes.
 
 Reference
 ---------

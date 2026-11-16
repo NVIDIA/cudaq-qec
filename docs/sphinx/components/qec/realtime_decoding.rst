@@ -20,11 +20,6 @@ how to prepare a decoder configuration before circuit execution and how
 measurements are converted into detectors, error predictions, and logical
 corrections during a shot.
 
-When a computation waits for a correction while further measurement rounds
-continue, decoder response time affects how much work arrives next. See
-:doc:`Feedback Latency and Decoder Backlog <feedback_latency>` for this
-dependency and the SIFL experiment used to study it.
-
 For pipelines that combine a neural network with a conventional decoder,
 see :doc:`AI Predecoding <ai_predecoding>`. It explains how the two stages
 share the decoding work and links to surface-code and color-code examples.
@@ -42,6 +37,12 @@ correction requests on a schedule, either against decoders in the same process
 or through a server. Its guide explains the inputs, timing records, and session
 types, with examples for both deployment modes.
 
+When measurement rounds continue while a computation waits for a correction,
+a longer decoding delay can increase the work that follows. The
+:doc:`Measuring Streaming Interleaved Feed-forward Latency (SIFL)
+</examples_rst/qec/sifl_demo>` example uses the playback emulator to demonstrate
+this dependency and explore how measurement cadence affects shot length.
+
 For surface-code memory experiments, the
 :doc:`Memory Experiment Configuration Generator <memory_experiment_generator>`
 prepares a dynamic detector error model and a parallel-window task graph,
@@ -52,7 +53,6 @@ then saves the YAML configuration for the server.
    :maxdepth: 2
 
    Workflow and Data Flow <realtime_decoding_workflow>
-   Feedback Latency and Decoder Backlog <feedback_latency>
    AI Predecoding <ai_predecoding>
    Decoding Server <decoding_server>
    Playback Emulator <playback_emulator>
