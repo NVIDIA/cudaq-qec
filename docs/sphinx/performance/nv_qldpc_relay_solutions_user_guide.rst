@@ -1,12 +1,3 @@
-.. The data on this page is reproducible with the parameter table below and
-   the code snippets on this page, using the vendored Z-only gross-code
-   circuit assets/benchmarks/bb144_memory_Z.stim (from the Relay-BP
-   reference implementation, https://github.com/trmue/relay; run
-   `git lfs pull` if it appears as a pointer stub). Syndromes sampled with
-   stim's compile_detector_sampler(seed=13).
-   Tested at:
-     cudaqx  73b8fcec
-
 .. _relay_solutions_user_guide:
 
 Sweeping Relay BP Stopping Criteria From a Single Run
@@ -15,6 +6,10 @@ Sweeping Relay BP Stopping Criteria From a Single Run
 The NV-qLDPC Relay BP decoder walks through a schedule of gamma sets ("legs") and can converge to a valid solution multiple times along the way; the ``stopping_criterion`` and ``stop_nconv`` parameters decide how many of those convergences to collect before returning the minimum-weight one (the RelayBP-N algorithm). ``stop_nconv`` is a genuine tuning knob: a larger N can lower the logical error rate (more candidate solutions to pick the minimum-weight answer from) but costs more BP iterations per shot, so choosing it means measuring the whole accuracy/latency trade-off curve.
 
 Measured directly, that curve is expensive: every candidate N requires re-decoding the same syndromes in a separate full GPU run, and each run discards everything about the convergences except the single winning solution. The ``relay_solutions`` option removes this waste. When the decoder is constructed with ``opt_results={"relay_solutions": True}``, one run records *every* relay convergence — the cumulative iteration count at which it happened, the LLR weight of its hard decision, and the hard decision itself — and the :mod:`cudaq_qec.relay_solutions` post-processing helper replays the entire ``stop_nconv`` sweep offline from that recording. One GPU run, plus milliseconds of NumPy, answers every N at once. The reconstruction is exact, not approximate: with ``repeatable=True`` the reconstructed logical error rate and iteration statistics match a real ``stop_nconv=N`` run bit-for-bit, for every N.
+
+To try this experiment yourself, follow `Recording a run`_ below using the
+`Z-only gross-code circuit
+<https://github.com/NVIDIA/cudaq-qec/blob/main/assets/benchmarks/bb144_memory_Z.stim>`_.
 
 Recording a run
 +++++++++++++++

@@ -40,7 +40,7 @@
 
     **Streaming Syndrome Interface**
     
-    For real-time applications, the decoder provides an ``enqueue_syndrome()``
+    For realtime applications, the decoder provides an ``enqueue_syndrome()``
     method that accepts syndrome data one round at a time. This allows the host
     to feed syndrome measurements as they arrive without waiting for all rounds
     to complete. The decoder automatically manages internal buffering and triggers

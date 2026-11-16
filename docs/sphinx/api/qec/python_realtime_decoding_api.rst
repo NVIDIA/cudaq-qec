@@ -1,13 +1,13 @@
 The Realtime Decoding API enables low-latency error correction on quantum hardware by allowing CUDA-Q quantum kernels to interact with decoders during circuit execution. This API is designed for use cases where corrections must be calculated and applied within qubit coherence times.
 
-The real-time decoding system supports simulation environments for local testing and hardware integration (e.g., on
+The realtime decoding system supports simulation environments for local testing and hardware integration (e.g., on
 `Quantinuum's Helios QPU
 <https://www.quantinuum.com/products-solutions/quantinuum-systems/helios>`_).
 
 Core Decoding Functions
 ------------------------
 
-These functions can be called from within CUDA-Q quantum kernels (``@cudaq.kernel`` decorated functions) to interact with real-time decoders.
+These functions can be called from within CUDA-Q quantum kernels (``@cudaq.kernel`` decorated functions) to interact with realtime decoders.
 
 .. py:function:: cudaq_qec.qec.enqueue_syndromes(decoder_id, syndromes, tag)
 
@@ -272,7 +272,7 @@ Realtime decoding requires converting matrices to sparse format for efficient de
    :param pcm: Dense binary matrix as numpy array (e.g., ``dem.detector_error_matrix`` or ``dem.observables_flips_matrix``)
    :returns: Sparse vector (list of integers) where -1 separates rows
 
-   **Usage in real-time decoding:**
+   **Usage in realtime decoding:**
 
    .. code-block:: python
 
@@ -299,7 +299,7 @@ Realtime decoding requires converting matrices to sparse format for efficient de
                :meth:`DecoderContext.z_component`, or :meth:`DecoderContext.full_component`.
    :returns: ``-1``-terminated sparse vector suitable for ``decoder_config.D_sparse``
 
-   **Usage in real-time decoding:**
+   **Usage in realtime decoding:**
 
    .. code-block:: python
 
