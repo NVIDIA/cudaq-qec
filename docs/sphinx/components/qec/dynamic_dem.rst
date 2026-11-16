@@ -9,7 +9,8 @@ experiment in reusable pieces, one measurement round at a time. Each piece
 records the faults that can occur, the detectors and logical observables they
 affect, and how it connects to neighboring rounds. CUDA-Q QEC represents this
 description as ``dem_chunks`` in YAML, ``DemChunksSpec`` in Python, and
-``dem_chunks_spec`` in C++.
+``dem_chunks_spec`` in C++. Dynamic DEM is experimental, and its APIs may
+change in later releases.
 
 This is useful when an experiment repeats the same error-correction cycle
 many times. You can describe its first round, repeating rounds, and final
