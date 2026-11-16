@@ -55,7 +55,9 @@ cases in quantum error correction.
    Improving Relay BP Decoding With Gamma Ensembles <performance/nv_qldpc_gamma_ensemble_user_guide>
    Sweeping Relay BP Stopping Criteria From a Single Run <performance/nv_qldpc_relay_solutions_user_guide>
    Improving BP+OSD Decoding With Min-LLR OSD Initialization <performance/nv_qldpc_minllr_osd_user_guide>
+   Trajectory-Calibrated BP and Jittered OSD Beam Search <performance/nv_qldpc_tcbp_jobs_user_guide>
    Bounding realtime decode latency with NV-Fusion <performance/nv_fusion_latency_user_guide>
+   Learning Noise From Detector Data and Decoding With the Learned Rates <performance/nv_qldpc_noise_learning_user_guide>
 
 .. toctree::
    :maxdepth: 1
