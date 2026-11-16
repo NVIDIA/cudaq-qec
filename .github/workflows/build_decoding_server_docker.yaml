@@ -41,8 +41,7 @@ on:
 
 env:
   NGC_STAGING_IMAGE_NAME: nvcr.io/nvstaging/cudaq-qec/cudaq-decoding
-  # TODO: point at the live NGC location once one exists
-  NGC_PROD_IMAGE_NAME: nvcr.io/nvstaging/cudaq-qec/cudaq-decoding
+  NGC_PROD_IMAGE_NAME: nvcr.io/nvidia/quantum/cudaq-decoding
 
 jobs:
   build:
@@ -396,13 +395,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Promoted tag is cu<major>-<version>, with the version taken
-          # from the releases/v<version> branch name this run is gated to.
+          # Publish versioned and latest tags for each CUDA major.
+          # Take the release version from the releases/v<version> branch.
           cuda_version="${{ matrix.cuda_version }}"
           cuda_major="${cuda_version%%.*}"
           release_version=$(echo "$GITHUB_REF_NAME" | grep -Eo '([0-9]+\.)+[0-9]+')
           test -n "$release_version"
           release_tag="cu${cuda_major}-${release_version}"
+          latest_tag="cu${cuda_major}-latest"
 
           if [ -s /tmp/publish-info/staging_ref ]; then
             refs=("$(cat /tmp/publish-info/staging_ref)")
@@ -410,5 +410,9 @@ jobs:
             read -ra refs <<< "$(cat /tmp/publish-info/refs)"
           fi
 
-          docker buildx imagetools create --tag "${NGC_PROD_IMAGE_NAME}:${release_tag}" "${refs[@]}"
+          docker buildx imagetools create \
+            --tag "${NGC_PROD_IMAGE_NAME}:${release_tag}" \
+            --tag "${NGC_PROD_IMAGE_NAME}:${latest_tag}" \
+            "${refs[@]}"
           docker buildx imagetools inspect "${NGC_PROD_IMAGE_NAME}:${release_tag}"
+          docker buildx imagetools inspect "${NGC_PROD_IMAGE_NAME}:${latest_tag}"
