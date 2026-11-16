@@ -239,6 +239,8 @@ redirects = {
         "releases.html",
     "components/qec/introduction":
         "index.html",
+    "examples_rst/qec/decoding_server":
+        "../../components/qec/decoding_server.html",
     "examples_rst/qec/code_capacity_noise":
         "modeling_noise.html",
     "examples_rst/qec/circuit_level_noise":

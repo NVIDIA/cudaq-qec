@@ -4,10 +4,14 @@ Parallel Window
 ---------------
 
 A ``parallel_window`` task graph decodes a stream of any number of rounds in
-fixed-size windows that decode at the same time. Each window is small, so the
-time from a shot's last round to its result depends on the window size, not on
-the shot's length. With ``async_streaming``, windows decode on the graph's
-worker threads, so more threads keep up with faster rounds.
+fixed-size windows that can decode concurrently. With ``async_streaming``,
+windows decode on the graph's worker threads while later rounds arrive.
+
+When decoding keeps up with the incoming measurement rate, the work remaining
+after the final round depends on the window sizes rather than the shot's
+length. This requires enough processing capacity to avoid an accumulating
+backlog. If decoding falls behind, the final result must also wait for queued
+work to finish.
 
 This page builds on the :doc:`Decoding Task Graphs
 </components/qec/decoding_task_graph>` guide.
