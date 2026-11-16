@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Version selector for the docs sidebar, rendered as the Read the Docs
 // style flyout panel. sphinx_rtd_theme ships the CSS (.rst-versions et al.)
 // and the expand/collapse handling for it even when not hosted on

@@ -32,7 +32,7 @@ The recording run must not itself stop early — it uses ``stopping_criterion="A
         use_sparsity=True, bp_method=3, composition=1, max_iterations=60,
         gamma0=0.125, gamma_dist=[-0.24, 0.66], clip_value=200.0,
         repeatable=True, proc_float="fp32",
-        O=O,                                      # records become obs flips
+        O=O, output="observables",                # records become obs flips
         srelay_config={"pre_iter": 80, "num_sets": 60,
                        "stopping_criterion": "All"},   # observe every leg
         opt_results={"relay_solutions": True,          # record all solutions
@@ -147,7 +147,7 @@ The sweep shows the trade-off directly: the logical error rate falls roughly 5x 
 Practical notes
 +++++++++++++++
 
-* **Record observables, not corrections.** Constructing the decoder with the observables matrix ``O`` makes each record ``O @ correction (mod 2)`` — for the gross-code DEM above this is 12 bits per record instead of 8,784, shrinking readback and post-processing cost by orders of magnitude. Without ``O``, pass the matrix to ``stop_nconv_sweep(..., observables=O)`` instead so it can score the logical error rate.
+* **Record observables, not corrections.** Supply the observables matrix ``O`` and request ``output="observables"`` so each record is ``O @ correction (mod 2)`` — for the gross-code DEM above this is 12 bits per record instead of 8,784, shrinking readback and post-processing cost by orders of magnitude. Supplying ``O`` alone does not select this result basis. For error-frame records, pass the matrix to ``stop_nconv_sweep(..., observables=O)`` instead so it can score the logical error rate.
 * **Memory.** ``relay_solutions=True`` records every convergence, bounded by ``num_sets`` (+1 if ``pre_iter > 0``) records per shot. To bound memory on long schedules, pass an integer cap (e.g. ``relay_solutions=16``); the sweep will refuse N values beyond a cap that actually truncated records, so cap at or above the largest N you intend to sweep.
 * **Repeatability.** With ``repeatable=True`` (and a non-zero ``clip_value``) the reconstruction is bit-for-bit identical to real ``stop_nconv=N`` runs. Without it, runs differ by floating-point non-determinism, and the reconstruction matches a real run only statistically.
 

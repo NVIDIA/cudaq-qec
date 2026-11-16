@@ -51,10 +51,75 @@ Detector Error Model
 .. autofunction:: cudaq_qec.dem_from_stim_text
 .. autofunction:: cudaq_qec.d_sparse
 
+.. _dyn_dem_python_api:
+
+Dynamic DEM
+===========
+
+The ``dem_chunks`` model types. See :doc:`/examples_rst/qec/dyn_dem`.
+
+.. autoclass:: cudaq_qec.DemChunksSpec
+    :members:
+
+.. autoclass:: cudaq_qec.PhaseSpecEntry
+    :members:
+
+.. autoclass:: cudaq_qec.PhaseConnection
+    :members:
+
+.. autoclass:: cudaq_qec.SeamConnection
+    :members:
+
+.. autoclass:: cudaq_qec.DemChunkSpec
+    :members:
+
+.. autoclass:: cudaq_qec.SeamSpecEntry
+    :members:
+
+.. autoclass:: cudaq_qec.DemSeamSpec
+    :members:
+
+.. autoclass:: cudaq_qec.SeamId
+    :members:
+
+.. autodata:: cudaq_qec.seam_name
+.. autodata:: cudaq_qec.phase_name
+
 Decoder Interfaces
 ==================
 
 .. autoclass:: cudaq_qec.Decoder
+    :members:
+
+Decoding Task Graph
+===================
+
+A :class:`cudaq_qec.DecodingTaskGraph` is a decoder pipeline of nodes wired by
+edges. See :doc:`/examples_rst/qec/decoding_task_graph` and
+:doc:`/examples_rst/qec/task_graph_parallel_window`.
+
+.. autoclass:: cudaq_qec.DecodingTaskGraph
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphNodeConfig
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphEnsembleSpec
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphOptions
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphStreamingResult
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphOutputProgress
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphStreamingStatus
+    :members:
+
+.. autoclass:: cudaq_qec.TaskGraphClosure
     :members:
 
 .. autoclass:: cudaq_qec.DecoderResult

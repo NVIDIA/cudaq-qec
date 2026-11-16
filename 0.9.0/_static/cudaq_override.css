@@ -1,0 +1,26 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022 - 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+.wy-nav-content {
+max-width: 1240px !important;
+}
+
+.wy-menu-vertical a {
+	font-size: 92%;
+}
+
+.wy-menu-vertical li code, .wy-menu-vertical li .rst-content tt, .rst-content .wy-menu-vertical li tt {
+    font-size: 100%;
+}
+
+code.code span.pre, code.cpp span.pre, code.docutils span.pre{
+    color: darkgreen;
+}
+
+/* Render the general index in a single column instead of the theme's multi-column layout */
+table.genindextable td {
+    display: block;
+    width: 100% !important;
+}

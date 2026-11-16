@@ -30,7 +30,7 @@
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
-    <link rel="next" title="Relay BP Decoding with CUDA-Q Realtime" href="realtime_relay_bp.html" />
+    <link rel="next" title="Ising Color-Code Emulator with Decoding Server" href="color_code_demo.html" />
     <link rel="prev" title="AI Predecoder with CUDA-Q Realtime" href="realtime_predecoder_pymatching.html" /> 
 </head>
 
@@ -46,7 +46,7 @@
             NVIDIA CUDA-Q QEC
           </a>
               <div class="version">
-                0.8.1
+                0.9.0
               </div>
 <div role="search">
   <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
@@ -134,6 +134,7 @@
 <li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html">QEC Decoders</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#class-structure">Class Structure</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#migrating-existing-c-decoder-plugins">Migrating Existing C++ Decoder Plugins</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-new-decoder-in-c">Implementing a New Decoder in C++</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#example-lookup-table-decoder">Example: Lookup Table Decoder</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-decoder-in-python">Implementing a Decoder in Python</a></li>
@@ -144,6 +145,7 @@
 <li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#detector-error-model">Detector Error Model</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#decoding-from-stim-dem-text">Decoding from Stim DEM Text</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dem-sampling">DEM Sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dynamic-dem">Dynamic DEM</a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
@@ -161,6 +163,7 @@
 <li class="toctree-l2"><a class="reference internal" href="../../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#workflow">Workflow</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#memory-experiment-configuration-generator">Memory experiment configuration generator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#see-also">See Also</a></li>
 </ul>
 </li>
@@ -227,12 +230,94 @@
 <li class="toctree-l3"><a class="reference internal" href="decoders.html#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="decoding_task_graph.html">   Decoding Task Graphs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#quick-start-a-sliding-window">Quick start: a sliding window</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#decoding-complete-shots">Decoding complete shots</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#streaming">Streaming</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#reading-results">Reading results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#logical-measurements">Logical measurements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#graphs-of-several-nodes">Graphs of several nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#node-kinds">Node kinds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#guarded-sliding-windows">Guarded sliding windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#asynchronous-streaming">Asynchronous streaming</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_parallel_window.html">   Task Graph Parallel Window</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#how-it-works">How it works</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#the-model">The model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#configuration">Configuration</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_parallel_window.html#advanced-options">Advanced options</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#building-a-graph-in-code">Building a graph in code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#decoding-a-shot">Decoding a shot</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#serving-with-the-decoding-server">Serving with the decoding server</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#what-the-pattern-builds">What the pattern builds</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_parallel_window.html#sharing-data-across-decoders">Sharing data across decoders</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_ensemble.html">   Task Graph Decoder Ensembles</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#how-it-works">How it works</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#configuration">Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#building-a-graph-in-code">Building a graph in code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#extending-ensembles">Extending ensembles</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_ensemble.html#reporting-a-cost">Reporting a cost</a></li>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_ensemble.html#honoring-cancellation">Honoring cancellation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_ensemble.html#pushing-candidates">Pushing candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_ensemble.html#adding-a-selection-strategy">Adding a selection strategy</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_reference.html">   Task Graph Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#asynchronous-streaming-options">Asynchronous streaming options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#fire-pools">Fire pools</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#streaming-results-in-detail">Streaming results in detail</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#staged-outputs">Staged outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#edge-values">Edge values</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#logical-outputs">Logical outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#native-streaming-nodes">Native streaming nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#arbitrary-length-sliding-windows">Arbitrary-length sliding windows</a></li>
+</ul>
+</li>
 <li class="toctree-l2 current"><a class="reference internal" href="realtime_decoding.html">   Realtime Decoding</a><ul class="current">
 <li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html">Getting Started with Realtime Decoding</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#configuration">Configuration</a></li>
 <li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#backend-selection">Backend Selection</a></li>
 <li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#compilation-and-execution-examples">Compilation and Execution Examples</a></li>
 <li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server.html">Decoding Server User Guide</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#workflow-at-a-glance">Workflow at a glance</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#generate-a-memory-experiment-configuration">Generate a memory-experiment configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#color-code-enabled-ai-decoder">Color-code-enabled AI decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#cuda-q-examples-surface-code-programs">CUDA-Q examples: surface-code programs</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#use-a-custom-decoder-plugin">Use a custom decoder plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#integrate-a-third-party-runtime">Integrate a third-party runtime</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html">Realtime Decoding with CUDA-Q Decoding Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#deliverables-versus-the-example">Deliverables versus the example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#building-the-example">Building the example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#ising-decoder-tensorrt-predecoder-pymatching">Ising decoder (TensorRT predecoder + PyMatching)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#decoders">Decoders</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#the-example-source">The example source</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="playback_emulator.html">Playback Emulator</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#schedule-format">Schedule Format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#output-format">Output Format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#syndrome-sources">Syndrome Sources</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#sessions">Sessions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#run-options">Run Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#example">Example</a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
@@ -257,26 +342,25 @@
 <li class="toctree-l4"><a class="reference internal" href="#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_relay_bp.html">Relay BP Decoding with CUDA-Q Realtime</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#decode-dispatch-architecture">Decode dispatch architecture</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#hardware">Hardware</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#software">Software</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#obtaining-the-nv-qldpc-decoder-plugin">Obtaining the nv-qldpc-decoder plugin</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#source-repositories">Source Repositories</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#build-the-hsb-bridge-and-playback-tools">Build the HSB bridge and playback tools</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#using-the-orchestration-script">Using the orchestration script</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#requirements">Requirements</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#running-the-emulated-test">Running the Emulated Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#fpga-requirements">FPGA Requirements</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#running-the-fpga-test">Running the FPGA Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#gpu-selection">GPU Selection</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#network-sanity-check">Network Sanity Check</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#modes">Modes</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#actions">Actions</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#build-options">Build Options</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#network-options">Network Options</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#run-options">Run Options</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_relay_bp.html#ring-buffer-depth-num-pages">Ring buffer depth (<code class="docutils literal notranslate"><span class="pre">num_pages</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html">Ising Color-Code Emulator with Decoding Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#the-example-source">The example source</a></li>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html">Streaming Interleaved Feed-forward Latency (SIFL)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#the-example-source">The example source</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html">Dynamic DEM</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#a-model">A model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#detectors-and-seams">Detectors and seams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#measurements-and-readout">Measurements and readout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#building-a-model-in-code">Building a model in code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#see-also">See also</a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="realtime_decoding.html#see-also">See Also</a></li>
@@ -310,12 +394,34 @@
 <li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Trajectory-Calibrated BP and Jittered OSD Beam Search</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#key-decoder-options">Key Decoder Options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#using-tcbp-and-jobs">Using TCBP and JOBS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#comparison-with-tesseract">Comparison With Tesseract</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#complementary-gap-post-selection">Complementary-Gap Post-Selection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#limitations-and-practical-guidance">Limitations and Practical Guidance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#references">References</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding Real-Time Decode Latency With NV-Fusion</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html">Learning Noise From Detector Data and Decoding With the Learned Rates</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#experiment-setup">Experiment Setup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-1-get-the-circuit-and-fit-the-tcbp-model">Step 1: Get the Circuit and Fit the TCBP Model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-2-learn-the-rates-from-detector-data">Step 2: Learn the Rates From Detector Data</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-3-decode-with-each-prior">Step 3: Decode With Each Prior</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#learning-time-and-accuracy">Learning Time and Accuracy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#error-of-the-learned-rates-versus-the-number-of-shots">Error of the Learned Rates Versus the Number of Shots</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#logical-error-rate-under-the-three-priors">Logical Error Rate Under the Three Priors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#choosing-the-number-of-passes">Choosing the Number of Passes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#reproducing-these-results">Reproducing These Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
 </ul>
@@ -331,8 +437,14 @@
 <li class="toctree-l1"><a class="reference internal" href="../../api/qec/cpp_api.html">CUDA-Q QEC C++ API</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#code">Code</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#detector-error-model">Detector Error Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#dynamic-dem">Dynamic DEM</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#detector-error-model-dem-sampling">Detector Error Model (DEM) Sampling</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#decoder-interfaces">Decoder Interfaces</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#decoding-task-graph">Decoding Task Graph</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#i-o-types">I/O types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#graph">Graph</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#built-in-decoders">Built-in Decoders</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#nvidia-qldpc-decoder">NVIDIA QLDPC Decoder</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#nv_qldpc_decoder"><code class="docutils literal notranslate"><span class="pre">nv_qldpc_decoder</span></code></a></li>
@@ -463,6 +575,76 @@
 <li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.d_sparse"><code class="docutils literal notranslate"><span class="pre">d_sparse()</span></code></a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#dynamic-dem">Dynamic DEM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.connections"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.connections</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.detectors_of"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.detectors_of</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.get_phase"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.get_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.has_D_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.has_D_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.has_repeating_phase"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.has_repeating_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.is_empty"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.is_empty</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.measurements_of"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.measurements_of</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.measurements_per_round"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.measurements_per_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.minimum_rounds"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.minimum_rounds</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.num_observables"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.num_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.num_rounds"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.num_rounds</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.observable_names"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.observable_names</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.phase_sequence"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.phase_sequence</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.phases"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.phases</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.phases_supply_D_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.phases_supply_D_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.repeating_phase"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.repeating_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.seam"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.seam</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.validate"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.validate</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseSpecEntry"><code class="docutils literal notranslate"><span class="pre">PhaseSpecEntry</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseSpecEntry.id"><code class="docutils literal notranslate"><span class="pre">PhaseSpecEntry.id</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseSpecEntry.spec"><code class="docutils literal notranslate"><span class="pre">PhaseSpecEntry.spec</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseConnection"><code class="docutils literal notranslate"><span class="pre">PhaseConnection</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseConnection.from_phase"><code class="docutils literal notranslate"><span class="pre">PhaseConnection.from_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseConnection.is_self"><code class="docutils literal notranslate"><span class="pre">PhaseConnection.is_self</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseConnection.to_phase"><code class="docutils literal notranslate"><span class="pre">PhaseConnection.to_phase</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamConnection"><code class="docutils literal notranslate"><span class="pre">SeamConnection</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamConnection.from_seam"><code class="docutils literal notranslate"><span class="pre">SeamConnection.from_seam</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamConnection.to_seam"><code class="docutils literal notranslate"><span class="pre">SeamConnection.to_seam</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.D_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.D_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.H_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.H_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.O_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.O_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.error_rates"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.error_rates</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.expand"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.expand</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.is_empty"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.is_empty</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.m2o_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.m2o_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.num_faults"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.num_faults</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.num_measurements"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.num_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.seam_specs"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.seam_specs</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.validate"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.validate</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamSpecEntry"><code class="docutils literal notranslate"><span class="pre">SeamSpecEntry</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamSpecEntry.id"><code class="docutils literal notranslate"><span class="pre">SeamSpecEntry.id</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamSpecEntry.spec"><code class="docutils literal notranslate"><span class="pre">SeamSpecEntry.spec</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemSeamSpec"><code class="docutils literal notranslate"><span class="pre">DemSeamSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemSeamSpec.H_sparse"><code class="docutils literal notranslate"><span class="pre">DemSeamSpec.H_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemSeamSpec.O_sparse"><code class="docutils literal notranslate"><span class="pre">DemSeamSpec.O_sparse</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamId"><code class="docutils literal notranslate"><span class="pre">SeamId</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamId.value"><code class="docutils literal notranslate"><span class="pre">SeamId.value</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.seam_name"><code class="docutils literal notranslate"><span class="pre">seam_name</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.phase_name"><code class="docutils literal notranslate"><span class="pre">phase_name</span></code></a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#decoder-interfaces">Decoder Interfaces</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder"><code class="docutils literal notranslate"><span class="pre">Decoder</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.decode"><code class="docutils literal notranslate"><span class="pre">Decoder.decode</span></code></a></li>
@@ -473,6 +655,90 @@
 <li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.get_version"><code class="docutils literal notranslate"><span class="pre">Decoder.get_version</span></code></a></li>
 </ul>
 </li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#decoding-task-graph">Decoding Task Graph</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.clear_corrections"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.clear_corrections</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.combine"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.combine</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.enqueue_syndrome"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.enqueue_syndrome</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.from_spec"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.from_spec</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.from_topology"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.from_topology</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_logical_measurements"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_logical_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_logical_measurements"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_logical_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_msyn_per_decode"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_msyn_per_decode</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_msyn_per_round"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_msyn_per_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_observables"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_obs_corrections"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_obs_corrections</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.output_names"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.output_names</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.reset_decoder"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.reset_decoder</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.run</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_all"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.run_all</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_batch"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.run_batch</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.streaming_incompatibility_reason"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.streaming_incompatibility_reason</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.streaming_result"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.streaming_result</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.supports_streaming"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.supports_streaming</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.d_sparse"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.d_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.decoder_type"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.decoder_type</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.dem"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.dem</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.ensemble"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.ensemble</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.h_sparse"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.h_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.id"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.id</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.kind"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.kind</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.max_in_flight"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.max_in_flight</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.node_params"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.node_params</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.o_sparse"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.o_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.params"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.params</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.stim_dem"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.stim_dem</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.windows"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.windows</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.add_member"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.add_member</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.join_params"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.join_params</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.join_strategy"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.join_strategy</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.num_members"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.num_members</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_coordinator_cpu"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_coordinator_cpu</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_num_workers"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_num_workers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_queue_capacity"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_queue_capacity</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_spin_pause_iters"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_spin_pause_iters</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_streaming"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_streaming</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_worker_cpus"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_worker_cpus</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.closure"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.closure</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.completed_operations"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.completed_operations</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.error"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.error</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.generation"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.generation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.operation_completed"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.operation_completed</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.outputs"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.outputs</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.result_revision"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.result_revision</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.shot_epoch"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.shot_epoch</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.status"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.status</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.values"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.values</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.closure"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.closure</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.coverage_begin_round"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.coverage_begin_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.coverage_end_round"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.coverage_end_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.generation"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.generation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.name"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.name</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.released"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.released</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.status"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.status</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.value_offset"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.value_offset</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.value_width"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.value_width</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingStatus"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingStatus</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphClosure"><code class="docutils literal notranslate"><span class="pre">TaskGraphClosure</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult"><code class="docutils literal notranslate"><span class="pre">DecoderResult</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult.converged"><code class="docutils literal notranslate"><span class="pre">DecoderResult.converged</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult.opt_results"><code class="docutils literal notranslate"><span class="pre">DecoderResult.opt_results</span></code></a></li>
@@ -529,7 +795,9 @@
 <li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#realtime-decoding">Realtime Decoding</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#core-decoding-functions">Core Decoding Functions</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.enqueue_syndromes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes_mapped"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.enqueue_syndromes_mapped()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_corrections"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.get_corrections()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_logical_measurements"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.get_logical_measurements()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.reset_decoder"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.reset_decoder()</span></code></a></li>
 </ul>
 </li>
@@ -598,7 +866,7 @@
       </li>
   </ul><div class="rst-breadcrumbs-buttons" role="navigation" aria-label="Sequential page navigation">
         <a href="realtime_predecoder_pymatching.html" class="btn btn-neutral float-left" title="AI Predecoder with CUDA-Q Realtime" accesskey="p"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="realtime_relay_bp.html" class="btn btn-neutral float-right" title="Relay BP Decoding with CUDA-Q Realtime" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="color_code_demo.html" class="btn btn-neutral float-right" title="Ising Color-Code Emulator with Decoding Server" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
   </div>
   <hr/>
 </div>
@@ -613,7 +881,8 @@
 from source and is not part of any distributed CUDA-Q QEC binaries.</p>
 </div>
 <p>This guide explains how to build, test, and run the AI predecoder + PyMatching
-pipeline over GPU RoCE RDMA using CUDA-Q’s realtime host dispatch system.
+pipeline over GPU RoCE RDMA using the cudaq-qec realtime pipeline over the
+<code class="docutils literal notranslate"><span class="pre">GpuRoceTransceiver</span></code> RDMA transport.
 The pipeline runs a TensorRT-accelerated neural network (the <em>predecoder</em>) on
 the GPU to reduce syndrome density, then feeds the residual detectors to a
 pool of PyMatching MWPM decoders on the CPU.  It operates in two
@@ -663,7 +932,7 @@ configurations:</p>
 <li><p><strong>CUDA Toolkit</strong>: 12.6 or later</p></li>
 <li><p><strong>TensorRT</strong>: 10.x (headers and libraries)</p></li>
 <li><p><strong>CUDA-Q SDK</strong>: pre-installed (provides <code class="docutils literal notranslate"><span class="pre">libcudaq</span></code>, <code class="docutils literal notranslate"><span class="pre">libnvqir</span></code>, <code class="docutils literal notranslate"><span class="pre">nvq++</span></code>)</p></li>
-<li><p><strong>DOCA</strong>: 3.3 or later (for <code class="docutils literal notranslate"><span class="pre">gpu_roce_transceiver</span></code> RDMA transport)</p></li>
+<li><p><strong>DOCA</strong>: 3.4 or later (for <code class="docutils literal notranslate"><span class="pre">gpu_roce_transceiver</span></code> RDMA transport)</p></li>
 <li><p><strong>PyMatching decoder plugin</strong>: the <code class="docutils literal notranslate"><span class="pre">cudaq-qec-pymatching</span></code> shared library
 (<code class="docutils literal notranslate"><span class="pre">libcudaq-qec-pymatching.so</span></code>).  Built as part of the CUDA-Q QEC build and
 required at runtime.</p></li>
@@ -695,17 +964,20 @@ for large models).</p></li>
 </tr>
 <tr class="row-odd"><td><p><strong>cuda-quantum</strong> (realtime)</p></td>
 <td><p><a class="reference external" href="https://github.com/NVIDIA/cuda-quantum">https://github.com/NVIDIA/cuda-quantum</a></p></td>
-<td><p>Branch <code class="docutils literal notranslate"><span class="pre">releases/v0.14.1</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">main</span></code> at the ref recorded in cudaq-qec’s <code class="docutils literal notranslate"><span class="pre">.cudaq_version</span></code></p></td>
 </tr>
 <tr class="row-even"><td><p><strong>holoscan-sensor-bridge</strong></p></td>
 <td><p><a class="reference external" href="https://github.com/nvidia-holoscan/holoscan-sensor-bridge">https://github.com/nvidia-holoscan/holoscan-sensor-bridge</a></p></td>
-<td><p>Tag <code class="docutils literal notranslate"><span class="pre">2.6.0-EA2</span></code></p></td>
+<td><p>Branch <code class="docutils literal notranslate"><span class="pre">EA_CUDAQ_10_26</span></code> (cloned and built by
+<code class="docutils literal notranslate"><span class="pre">realtime/scripts/install_devdeps.sh</span></code>)</p></td>
 </tr>
 </tbody>
 </table>
-<p><code class="docutils literal notranslate"><span class="pre">cuda-quantum</span></code> provides <code class="docutils literal notranslate"><span class="pre">libcudaq-realtime</span></code> (the host dispatcher, ring
-buffer management, and dispatch kernel).  <code class="docutils literal notranslate"><span class="pre">holoscan-sensor-bridge</span></code> provides
-the <code class="docutils literal notranslate"><span class="pre">GpuRoceTransceiver</span></code> library for RDMA transport.</p>
+<p><code class="docutils literal notranslate"><span class="pre">cuda-quantum</span></code> provides <code class="docutils literal notranslate"><span class="pre">libcudaq-realtime</span></code> (ring buffer helpers and the
+GPU dispatch kernels) and the GpuRoce bridge library.  The host dispatch loop
+that drives the predecoder graphs lives in cudaq-qec’s
+<code class="docutils literal notranslate"><span class="pre">libcudaq-realtime-pipeline</span></code>.  <code class="docutils literal notranslate"><span class="pre">holoscan-sensor-bridge</span></code> provides the
+<code class="docutils literal notranslate"><span class="pre">GpuRoceTransceiver</span></code> library for RDMA transport.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>The FPGA emulator (<code class="docutils literal notranslate"><span class="pre">hsb_fpga_emulator</span></code>) is built from the
@@ -766,52 +1038,34 @@ applies config-appropriate defaults automatically.</p>
 <section id="building">
 <h2>Building<a class="headerlink" href="#building" title="Permalink to this heading"></a></h2>
 <p>Building the FPGA demo requires <code class="docutils literal notranslate"><span class="pre">holoscan-sensor-bridge</span></code> and
-<code class="docutils literal notranslate"><span class="pre">libcudaq-realtime</span></code> with HSB tools enabled.</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># 1. Clone cuda-quantum (realtime)</span>
+<code class="docutils literal notranslate"><span class="pre">libcudaq-realtime</span></code> with HSB tools enabled.  The steps below are the ones
+cudaq-qec’s CI runs (<code class="docutils literal notranslate"><span class="pre">.github/actions/build-lib/build_qec.sh</span></code>).  The
+<code class="docutils literal notranslate"><span class="pre">install_devdeps.sh</span></code> script in the <code class="docutils literal notranslate"><span class="pre">cuda-quantum</span></code> realtime tree installs
+the DOCA GPUNetIO and Holoscan SDK packages with <code class="docutils literal notranslate"><span class="pre">apt-get</span></code> (it expects a
+host or container that already ships Mellanox OFED), then clones, patches
+and builds <code class="docutils literal notranslate"><span class="pre">holoscan-sensor-bridge</span></code> at branch <code class="docutils literal notranslate"><span class="pre">EA_CUDAQ_10_26</span></code> under
+<code class="docutils literal notranslate"><span class="pre">$HSB_ROOT</span></code>.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># 1. Clone cuda-quantum (realtime) at the ref recorded in cudaq-qec/.cudaq_version</span>
+<span class="nv">CUDAQ_REF</span><span class="o">=</span><span class="k">$(</span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.cudaq.ref'</span><span class="w"> </span>cudaq-qec/.cudaq_version<span class="k">)</span>
 git<span class="w"> </span>clone<span class="w"> </span>--filter<span class="o">=</span>blob:none<span class="w"> </span>--no-checkout<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>https://github.com/NVIDIA/cuda-quantum.git<span class="w"> </span>cudaq-realtime-src
 <span class="nb">cd</span><span class="w"> </span>cudaq-realtime-src
 git<span class="w"> </span>sparse-checkout<span class="w"> </span>init<span class="w"> </span>--cone
-git<span class="w"> </span>sparse-checkout<span class="w"> </span><span class="nb">set</span><span class="w"> </span>realtime
-git<span class="w"> </span>checkout<span class="w"> </span>releases/v0.14.1
+git<span class="w"> </span>sparse-checkout<span class="w"> </span><span class="nb">set</span><span class="w"> </span>realtime<span class="w"> </span>cmake
+git<span class="w"> </span>checkout<span class="w"> </span><span class="s2">"</span><span class="nv">$CUDAQ_REF</span><span class="s2">"</span>
 <span class="nb">cd</span><span class="w"> </span>..
 
-<span class="c1"># 2. Build holoscan-sensor-bridge (tag 2.6.0-EA2)</span>
-<span class="c1">#    Requires cmake &gt;= 3.30.4</span>
-git<span class="w"> </span>clone<span class="w"> </span>--branch<span class="w"> </span><span class="m">2</span>.6.0-EA2<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
-<span class="nb">cd</span><span class="w"> </span>holoscan-sensor-bridge
+<span class="c1"># 2. Install DOCA/Holoscan SDK and build holoscan-sensor-bridge (EA_CUDAQ_10_26)</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">HSB_ROOT</span><span class="o">=</span>/tmp/holoscan-sensor-bridge
+bash<span class="w"> </span>cudaq-realtime-src/realtime/scripts/install_devdeps.sh
 
-<span class="c1"># Strip operators we don't need to avoid configure failures</span>
-sed<span class="w"> </span>-i<span class="w"> </span><span class="s1">'/add_subdirectory(audio_packetizer)/d; /add_subdirectory(compute_crc)/d;</span>
-<span class="s1">        /add_subdirectory(csi_to_bayer)/d; /add_subdirectory(image_processor)/d;</span>
-<span class="s1">        /add_subdirectory(iq_dec)/d; /add_subdirectory(iq_enc)/d;</span>
-<span class="s1">        /add_subdirectory(linux_coe_receiver)/d; /add_subdirectory(linux_receiver)/d;</span>
-<span class="s1">        /add_subdirectory(packed_format_converter)/d; /add_subdirectory(sub_frame_combiner)/d;</span>
-<span class="s1">        /add_subdirectory(udp_transmitter)/d; /add_subdirectory(emulator)/d;</span>
-<span class="s1">        /add_subdirectory(sig_gen)/d; /add_subdirectory(sig_viewer)/d'</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>src/hololink/operators/CMakeLists.txt
-
-mkdir<span class="w"> </span>-p<span class="w"> </span>build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>build
-cmake<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Release<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOLINK_BUILD_ONLY_NATIVE<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOLINK_BUILD_PYTHON<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOLINK_BUILD_TESTS<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOLINK_BUILD_TOOLS<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOLINK_BUILD_EXAMPLES<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOLINK_BUILD_EMULATOR<span class="o">=</span>OFF<span class="w"> </span>..
-cmake<span class="w"> </span>--build<span class="w"> </span>.<span class="w"> </span>--target<span class="w"> </span>gpu_roce_transceiver<span class="w"> </span>hololink_core
-<span class="nb">cd</span><span class="w"> </span>../..
-
-<span class="c1"># 3. Build libcudaq-realtime with HSB tools enabled</span>
-<span class="nb">cd</span><span class="w"> </span>cudaq-realtime-src/realtime<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>mkdir<span class="w"> </span>-p<span class="w"> </span>build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>build
-cmake<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span>-DCMAKE_INSTALL_PREFIX<span class="o">=</span>/tmp/cudaq-realtime<span class="w"> </span><span class="se">\</span>
+<span class="c1"># 3. Build and install libcudaq-realtime with HSB tools enabled</span>
+cmake<span class="w"> </span>-S<span class="w"> </span>cudaq-realtime-src/realtime<span class="w"> </span>-B<span class="w"> </span>cudaq-realtime-src/realtime/build<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-G<span class="w"> </span>Ninja<span class="w"> </span>-DCMAKE_INSTALL_PREFIX<span class="o">=</span>/tmp/cudaq-realtime<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQ_REALTIME_ENABLE_HSB_TOOLS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span>../../holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span>../../holoscan-sensor-bridge/build<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>..
-ninja<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>ninja<span class="w"> </span>install
-<span class="nb">cd</span><span class="w"> </span>../../..
+<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span><span class="nv">$HSB_ROOT</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span><span class="nv">$HSB_ROOT</span>/build
+cmake<span class="w"> </span>--build<span class="w"> </span>cudaq-realtime-src/realtime/build<span class="w"> </span>--target<span class="w"> </span>install
 
 <span class="c1"># 4. Build cudaq-qec with HSB tools enabled</span>
 cmake<span class="w"> </span>-S<span class="w"> </span>cudaq-qec<span class="w"> </span>-B<span class="w"> </span>cudaq-qec/build<span class="w"> </span><span class="se">\</span>
@@ -822,13 +1076,22 @@ cmake<span class="w"> </span>-S<span class="w"> </span>cudaq-qec<span class="w">
 <span class="w">  </span>-DCUDAQX_ENABLE_LIBS<span class="o">=</span><span class="s2">"qec"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQX_INCLUDE_TESTS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-DCUDAQX_QEC_ENABLE_HSB_TOOLS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span>/path/to/holoscan-sensor-bridge/build
+<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR<span class="o">=</span><span class="nv">$HSB_ROOT</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR<span class="o">=</span><span class="nv">$HSB_ROOT</span>/build
 cmake<span class="w"> </span>--build<span class="w"> </span>cudaq-qec/build<span class="w"> </span>--target<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>gpu_roce_predecoder_bridge<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>hsb_fpga_syndrome_playback<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>cudaq-qec-pymatching
 </pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">gpu_roce_predecoder_bridge</span></code> target is skipped with a CMake warning
+(<code class="docutils literal notranslate"><span class="pre">gpu_roce_predecoder_bridge:</span> <span class="pre">skipped</span> <span class="pre">(missing</span> <span class="pre">deps)</span></code>) when the GpuRoce
+bridge libraries from step 3, TensorRT, or the <code class="docutils literal notranslate"><span class="pre">cudaq-realtime-pipeline</span></code>
+library are not found.  Check the configure output of step 4 for that
+warning, and for <code class="docutils literal notranslate"><span class="pre">RealtimePipeline:</span> <span class="pre">building</span></code>, before building the
+targets.</p>
 </div>
 </section>
 <section id="emulated-end-to-end-test">
@@ -874,6 +1137,35 @@ appropriate IP addresses and MTU.  It only needs to be run once per boot.</p>
 </pre></div>
 </div>
 </section>
+<section id="bounded-decoding-server-regression-software-emulator">
+<h3>Bounded decoding-server regression (software emulator)<a class="headerlink" href="#bounded-decoding-server-regression-software-emulator" title="Permalink to this heading"></a></h3>
+<p>The decoding-server regression harness can replay one BRAM-sized dataset for
+longer endurance checks without loading more distinct samples. Use the
+counter-capable software HSB emulator from the repository’s <code class="docutils literal notranslate"><span class="pre">.cudaq_version</span></code>
+and an already configured RoCE loopback connection. The server, emulator,
+syndrome player and surface-code data generator must already be built.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./libs/qec/unittests/utils/hsb_fpga_decoding_server_test.sh<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--emulate<span class="w"> </span>--decoder<span class="w"> </span>pymatching<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cudaqx-dir<span class="w"> </span>/path/to/cudaq-qec<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cuda-quantum-dir<span class="w"> </span>/path/to/cuda-quantum<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--hsb-dir<span class="w"> </span>/path/to/holoscan-sensor-bridge<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--loop-seconds<span class="w"> </span><span class="m">30</span><span class="w"> </span>--min-decodes<span class="w"> </span><span class="m">1000</span>
+</pre></div>
+</div>
+<p>The harness first verifies the corrections from one finite ILA capture, then
+replays that same load for the requested duration. Acceptance requires at
+least the requested number of completed measurements, matching sent/received
+frame counts, and no transport or RPC-status failures. The initial verification
+pass is excluded from the loop’s completed-measurement count. Repeated
+playback tests endurance, not accuracy on additional independent samples;
+it also does not increase the maximum size of a single BRAM load.</p>
+<p><code class="docutils literal notranslate"><span class="pre">--loop-seconds</span></code> and <code class="docutils literal notranslate"><span class="pre">--min-decodes</span></code> are emulator-only harness options;
+they are rejected for real-FPGA mode before any network setup. The player’s
+<code class="docutils literal notranslate"><span class="pre">--loop</span></code> option additionally allows manual continuous playback until Ctrl+C.
+On hardware, only the finite preflight is correction-verified: emulator-only
+cumulative counters must not be assumed to exist in the FPGA bitstream.
+Without loop options, the existing single-pass playback path is unchanged.</p>
+</section>
 </section>
 <section id="fpga-end-to-end-test">
 <h2>FPGA End-to-End Test<a class="headerlink" href="#fpga-end-to-end-test" title="Permalink to this heading"></a></h2>
@@ -915,8 +1207,8 @@ direct cable or switch</p></li>
     Mode: Real FPGA (2-tool)
     Config: d13_r104
 ...
-[RDMA+TRT] Shot 0: received 17472 detectors (input_nonzero=939),
-           predecoder logical_pred=1, residual_nonzero=23
+[RDMA+TRT] Shot 0: received 17472 detectors, predecoder logical_pred=1,
+           residual_nonzero=23
 
 ========================================
   PREDECODER BRIDGE TEST: PASS
@@ -961,7 +1253,8 @@ direct cable or switch</p></li>
 <td><p>Path to syndrome data directory</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--page-size</span></code></p></td>
-<td><p>Ring buffer slot size in bytes (auto-set per config by default)</p></td>
+<td><p>Ring buffer slot size in bytes (auto-set per config by default; at
+least 512, the playback tool’s minimum)</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--num-shots</span></code></p></td>
 <td><p>Number of syndrome shots to play back (limited by FPGA BRAM)</p></td>
@@ -1163,11 +1456,12 @@ different model, edit the <code class="docutils literal notranslate"><span class
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--page-size</span> <span class="pre">N</span></code></p></td>
 <td><p>Per-config</p></td>
-<td><p>Ring buffer slot size in bytes</p></td>
+<td><p>Ring buffer slot size in bytes (at least 512)</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--num-pages</span> <span class="pre">N</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">64</span></code></p></td>
-<td><p>Number of ring buffer slots</p></td>
+<td><p>Number of ring buffer slots (power of two; also the pipeline ring
+depth)</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--spacing</span> <span class="pre">N</span></code></p></td>
 <td><p><em>(unset)</em></p></td>
@@ -1196,7 +1490,7 @@ different model, edit the <code class="docutils literal notranslate"><span class
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
         <a href="realtime_predecoder_pymatching.html" class="btn btn-neutral float-left" title="AI Predecoder with CUDA-Q Realtime" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="realtime_relay_bp.html" class="btn btn-neutral float-right" title="Relay BP Decoding with CUDA-Q Realtime" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="color_code_demo.html" class="btn btn-neutral float-right" title="Ising Color-Code Emulator with Decoding Server" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>

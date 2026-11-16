@@ -43,7 +43,7 @@
             NVIDIA CUDA-Q QEC
           </a>
               <div class="version">
-                0.8.1
+                0.9.0
               </div>
 <div role="search">
   <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
@@ -131,6 +131,7 @@
 <li class="toctree-l2"><a class="reference internal" href="components/qec/decoders.html">QEC Decoders</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="components/qec/decoders.html#class-structure">Class Structure</a></li>
+<li class="toctree-l4"><a class="reference internal" href="components/qec/decoders.html#migrating-existing-c-decoder-plugins">Migrating Existing C++ Decoder Plugins</a></li>
 <li class="toctree-l4"><a class="reference internal" href="components/qec/decoders.html#implementing-a-new-decoder-in-c">Implementing a New Decoder in C++</a></li>
 <li class="toctree-l4"><a class="reference internal" href="components/qec/decoders.html#example-lookup-table-decoder">Example: Lookup Table Decoder</a></li>
 <li class="toctree-l4"><a class="reference internal" href="components/qec/decoders.html#implementing-a-decoder-in-python">Implementing a Decoder in Python</a></li>
@@ -141,6 +142,7 @@
 <li class="toctree-l3"><a class="reference internal" href="components/qec/decoders.html#detector-error-model">Detector Error Model</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="components/qec/decoders.html#decoding-from-stim-dem-text">Decoding from Stim DEM Text</a></li>
 <li class="toctree-l4"><a class="reference internal" href="components/qec/decoders.html#dem-sampling">DEM Sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="components/qec/decoders.html#dynamic-dem">Dynamic DEM</a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
@@ -158,6 +160,7 @@
 <li class="toctree-l2"><a class="reference internal" href="components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="components/qec/realtime_decoding.html#workflow">Workflow</a></li>
 <li class="toctree-l3"><a class="reference internal" href="components/qec/realtime_decoding.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="components/qec/realtime_decoding.html#memory-experiment-configuration-generator">Memory experiment configuration generator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="components/qec/realtime_decoding.html#see-also">See Also</a></li>
 </ul>
 </li>
@@ -224,12 +227,94 @@
 <li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoders.html#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html">   Decoding Task Graphs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html#quick-start-a-sliding-window">Quick start: a sliding window</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html#decoding-complete-shots">Decoding complete shots</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html#streaming">Streaming</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html#reading-results">Reading results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html#logical-measurements">Logical measurements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html#graphs-of-several-nodes">Graphs of several nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html#node-kinds">Node kinds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html#guarded-sliding-windows">Guarded sliding windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_task_graph.html#asynchronous-streaming">Asynchronous streaming</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html">   Task Graph Parallel Window</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html#how-it-works">How it works</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html#the-model">The model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html#configuration">Configuration</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html#advanced-options">Advanced options</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html#building-a-graph-in-code">Building a graph in code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html#decoding-a-shot">Decoding a shot</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html#serving-with-the-decoding-server">Serving with the decoding server</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html#what-the-pattern-builds">What the pattern builds</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/task_graph_parallel_window.html#sharing-data-across-decoders">Sharing data across decoders</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="examples_rst/qec/task_graph_ensemble.html">   Task Graph Decoder Ensembles</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_ensemble.html#how-it-works">How it works</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_ensemble.html#configuration">Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_ensemble.html#building-a-graph-in-code">Building a graph in code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_ensemble.html#extending-ensembles">Extending ensembles</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/task_graph_ensemble.html#reporting-a-cost">Reporting a cost</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/task_graph_ensemble.html#honoring-cancellation">Honoring cancellation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/task_graph_ensemble.html#pushing-candidates">Pushing candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/task_graph_ensemble.html#adding-a-selection-strategy">Adding a selection strategy</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="examples_rst/qec/task_graph_reference.html">   Task Graph Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_reference.html#asynchronous-streaming-options">Asynchronous streaming options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_reference.html#fire-pools">Fire pools</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_reference.html#streaming-results-in-detail">Streaming results in detail</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_reference.html#staged-outputs">Staged outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_reference.html#edge-values">Edge values</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_reference.html#logical-outputs">Logical outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_reference.html#native-streaming-nodes">Native streaming nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/task_graph_reference.html#arbitrary-length-sliding-windows">Arbitrary-length sliding windows</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="examples_rst/qec/realtime_decoding.html">   Realtime Decoding</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/getting_started_realtime_decoding.html">Getting Started with Realtime Decoding</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/getting_started_realtime_decoding.html#configuration">Configuration</a></li>
 <li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/getting_started_realtime_decoding.html#backend-selection">Backend Selection</a></li>
 <li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/getting_started_realtime_decoding.html#compilation-and-execution-examples">Compilation and Execution Examples</a></li>
 <li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/getting_started_realtime_decoding.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/decoding_server.html">Decoding Server User Guide</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/decoding_server.html#workflow-at-a-glance">Workflow at a glance</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/decoding_server.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/decoding_server.html#generate-a-memory-experiment-configuration">Generate a memory-experiment configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/decoding_server.html#color-code-enabled-ai-decoder">Color-code-enabled AI decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/decoding_server.html#cuda-q-examples-surface-code-programs">CUDA-Q examples: surface-code programs</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/decoding_server.html#use-a-custom-decoder-plugin">Use a custom decoder plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/decoding_server.html#integrate-a-third-party-runtime">Integrate a third-party runtime</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/decoding_server.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/decoding_server.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/realtime_decoding_demo.html">Realtime Decoding with CUDA-Q Decoding Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_decoding_demo.html#deliverables-versus-the-example">Deliverables versus the example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_decoding_demo.html#building-the-example">Building the example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_decoding_demo.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_decoding_demo.html#ising-decoder-tensorrt-predecoder-pymatching">Ising decoder (TensorRT predecoder + PyMatching)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_decoding_demo.html#decoders">Decoders</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_decoding_demo.html#the-example-source">The example source</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/playback_emulator.html">Playback Emulator</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/playback_emulator.html#schedule-format">Schedule Format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/playback_emulator.html#output-format">Output Format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/playback_emulator.html#syndrome-sources">Syndrome Sources</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/playback_emulator.html#sessions">Sessions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/playback_emulator.html#run-options">Run Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/playback_emulator.html#example">Example</a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
@@ -254,26 +339,25 @@
 <li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_predecoder_fpga.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html">Relay BP Decoding with CUDA-Q Realtime</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#decode-dispatch-architecture">Decode dispatch architecture</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#hardware">Hardware</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#software">Software</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#obtaining-the-nv-qldpc-decoder-plugin">Obtaining the nv-qldpc-decoder plugin</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#source-repositories">Source Repositories</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#build-the-hsb-bridge-and-playback-tools">Build the HSB bridge and playback tools</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#using-the-orchestration-script">Using the orchestration script</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#requirements">Requirements</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#running-the-emulated-test">Running the Emulated Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#fpga-requirements">FPGA Requirements</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#running-the-fpga-test">Running the FPGA Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#gpu-selection">GPU Selection</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#network-sanity-check">Network Sanity Check</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#modes">Modes</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#actions">Actions</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#build-options">Build Options</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#network-options">Network Options</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#run-options">Run Options</a></li>
-<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/realtime_relay_bp.html#ring-buffer-depth-num-pages">Ring buffer depth (<code class="docutils literal notranslate"><span class="pre">num_pages</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/color_code_demo.html">Ising Color-Code Emulator with Decoding Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/color_code_demo.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/color_code_demo.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/color_code_demo.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/color_code_demo.html#the-example-source">The example source</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/color_code_demo.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/sifl_demo.html">Streaming Interleaved Feed-forward Latency (SIFL)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/sifl_demo.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/sifl_demo.html#the-example-source">The example source</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/dyn_dem.html">Dynamic DEM</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/dyn_dem.html#a-model">A model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/dyn_dem.html#detectors-and-seams">Detectors and seams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/dyn_dem.html#measurements-and-readout">Measurements and readout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/dyn_dem.html#building-a-model-in-code">Building a model in code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="examples_rst/qec/dyn_dem.html#see-also">See also</a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="examples_rst/qec/realtime_decoding.html#see-also">See Also</a></li>
@@ -307,12 +391,34 @@
 <li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="performance/nv_qldpc_tcbp_jobs_user_guide.html">Trajectory-Calibrated BP and Jittered OSD Beam Search</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_tcbp_jobs_user_guide.html#key-decoder-options">Key Decoder Options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_tcbp_jobs_user_guide.html#using-tcbp-and-jobs">Using TCBP and JOBS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_tcbp_jobs_user_guide.html#comparison-with-tesseract">Comparison With Tesseract</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_tcbp_jobs_user_guide.html#complementary-gap-post-selection">Complementary-Gap Post-Selection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_tcbp_jobs_user_guide.html#limitations-and-practical-guidance">Limitations and Practical Guidance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_tcbp_jobs_user_guide.html#references">References</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="performance/nv_fusion_latency_user_guide.html">Bounding Real-Time Decode Latency With NV-Fusion</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html">Learning Noise From Detector Data and Decoding With the Learned Rates</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#experiment-setup">Experiment Setup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#step-1-get-the-circuit-and-fit-the-tcbp-model">Step 1: Get the Circuit and Fit the TCBP Model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#step-2-learn-the-rates-from-detector-data">Step 2: Learn the Rates From Detector Data</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#step-3-decode-with-each-prior">Step 3: Decode With Each Prior</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#learning-time-and-accuracy">Learning Time and Accuracy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#error-of-the-learned-rates-versus-the-number-of-shots">Error of the Learned Rates Versus the Number of Shots</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#logical-error-rate-under-the-three-priors">Logical Error Rate Under the Three Priors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#choosing-the-number-of-passes">Choosing the Number of Passes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#reproducing-these-results">Reproducing These Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance/nv_qldpc_noise_learning_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
 </ul>
@@ -328,8 +434,14 @@
 <li class="toctree-l1"><a class="reference internal" href="api/qec/cpp_api.html">CUDA-Q QEC C++ API</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="api/qec/cpp_api.html#code">Code</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api/qec/cpp_api.html#detector-error-model">Detector Error Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/qec/cpp_api.html#dynamic-dem">Dynamic DEM</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api/qec/cpp_api.html#detector-error-model-dem-sampling">Detector Error Model (DEM) Sampling</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api/qec/cpp_api.html#decoder-interfaces">Decoder Interfaces</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/qec/cpp_api.html#decoding-task-graph">Decoding Task Graph</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/cpp_api.html#i-o-types">I/O types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/cpp_api.html#graph">Graph</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="api/qec/cpp_api.html#built-in-decoders">Built-in Decoders</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api/qec/cpp_api.html#nvidia-qldpc-decoder">NVIDIA QLDPC Decoder</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="api/qec/cpp_api.html#nv_qldpc_decoder"><code class="docutils literal notranslate"><span class="pre">nv_qldpc_decoder</span></code></a></li>
@@ -460,6 +572,76 @@
 <li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.d_sparse"><code class="docutils literal notranslate"><span class="pre">d_sparse()</span></code></a></li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="api/qec/python_api.html#dynamic-dem">Dynamic DEM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.connections"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.connections</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.detectors_of"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.detectors_of</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.get_phase"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.get_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.has_D_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.has_D_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.has_repeating_phase"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.has_repeating_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.is_empty"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.is_empty</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.measurements_of"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.measurements_of</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.measurements_per_round"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.measurements_per_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.minimum_rounds"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.minimum_rounds</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.num_observables"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.num_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.num_rounds"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.num_rounds</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.observable_names"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.observable_names</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.phase_sequence"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.phase_sequence</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.phases"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.phases</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.phases_supply_D_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.phases_supply_D_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.repeating_phase"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.repeating_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.seam"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.seam</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.validate"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.validate</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.PhaseSpecEntry"><code class="docutils literal notranslate"><span class="pre">PhaseSpecEntry</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.PhaseSpecEntry.id"><code class="docutils literal notranslate"><span class="pre">PhaseSpecEntry.id</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.PhaseSpecEntry.spec"><code class="docutils literal notranslate"><span class="pre">PhaseSpecEntry.spec</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.PhaseConnection"><code class="docutils literal notranslate"><span class="pre">PhaseConnection</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.PhaseConnection.from_phase"><code class="docutils literal notranslate"><span class="pre">PhaseConnection.from_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.PhaseConnection.is_self"><code class="docutils literal notranslate"><span class="pre">PhaseConnection.is_self</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.PhaseConnection.to_phase"><code class="docutils literal notranslate"><span class="pre">PhaseConnection.to_phase</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.SeamConnection"><code class="docutils literal notranslate"><span class="pre">SeamConnection</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.SeamConnection.from_seam"><code class="docutils literal notranslate"><span class="pre">SeamConnection.from_seam</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.SeamConnection.to_seam"><code class="docutils literal notranslate"><span class="pre">SeamConnection.to_seam</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.D_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.D_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.H_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.H_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.O_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.O_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.error_rates"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.error_rates</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.expand"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.expand</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.is_empty"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.is_empty</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.m2o_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.m2o_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.num_faults"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.num_faults</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.num_measurements"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.num_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.seam_specs"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.seam_specs</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.validate"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.validate</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.SeamSpecEntry"><code class="docutils literal notranslate"><span class="pre">SeamSpecEntry</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.SeamSpecEntry.id"><code class="docutils literal notranslate"><span class="pre">SeamSpecEntry.id</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.SeamSpecEntry.spec"><code class="docutils literal notranslate"><span class="pre">SeamSpecEntry.spec</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemSeamSpec"><code class="docutils literal notranslate"><span class="pre">DemSeamSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemSeamSpec.H_sparse"><code class="docutils literal notranslate"><span class="pre">DemSeamSpec.H_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DemSeamSpec.O_sparse"><code class="docutils literal notranslate"><span class="pre">DemSeamSpec.O_sparse</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.SeamId"><code class="docutils literal notranslate"><span class="pre">SeamId</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.SeamId.value"><code class="docutils literal notranslate"><span class="pre">SeamId.value</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.seam_name"><code class="docutils literal notranslate"><span class="pre">seam_name</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.phase_name"><code class="docutils literal notranslate"><span class="pre">phase_name</span></code></a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="api/qec/python_api.html#decoder-interfaces">Decoder Interfaces</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.Decoder"><code class="docutils literal notranslate"><span class="pre">Decoder</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.Decoder.decode"><code class="docutils literal notranslate"><span class="pre">Decoder.decode</span></code></a></li>
@@ -470,6 +652,90 @@
 <li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.Decoder.get_version"><code class="docutils literal notranslate"><span class="pre">Decoder.get_version</span></code></a></li>
 </ul>
 </li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api/qec/python_api.html#decoding-task-graph">Decoding Task Graph</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.clear_corrections"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.clear_corrections</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.combine"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.combine</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.enqueue_syndrome"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.enqueue_syndrome</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.from_spec"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.from_spec</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.from_topology"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.from_topology</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_logical_measurements"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_logical_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_logical_measurements"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_logical_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_msyn_per_decode"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_msyn_per_decode</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_msyn_per_round"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_msyn_per_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_observables"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_obs_corrections"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_obs_corrections</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.output_names"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.output_names</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.reset_decoder"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.reset_decoder</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.run</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_all"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.run_all</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_batch"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.run_batch</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.streaming_incompatibility_reason"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.streaming_incompatibility_reason</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.streaming_result"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.streaming_result</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.supports_streaming"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.supports_streaming</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.d_sparse"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.d_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.decoder_type"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.decoder_type</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.dem"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.dem</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.ensemble"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.ensemble</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.h_sparse"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.h_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.id"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.id</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.kind"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.kind</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.max_in_flight"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.max_in_flight</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.node_params"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.node_params</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.o_sparse"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.o_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.params"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.params</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.stim_dem"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.stim_dem</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.windows"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.windows</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.add_member"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.add_member</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.join_params"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.join_params</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.join_strategy"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.join_strategy</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.num_members"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.num_members</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_coordinator_cpu"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_coordinator_cpu</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_num_workers"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_num_workers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_queue_capacity"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_queue_capacity</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_spin_pause_iters"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_spin_pause_iters</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_streaming"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_streaming</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_worker_cpus"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_worker_cpus</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.closure"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.closure</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.completed_operations"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.completed_operations</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.error"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.error</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.generation"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.generation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.operation_completed"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.operation_completed</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.outputs"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.outputs</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.result_revision"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.result_revision</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.shot_epoch"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.shot_epoch</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.status"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.status</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.values"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.values</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.closure"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.closure</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.coverage_begin_round"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.coverage_begin_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.coverage_end_round"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.coverage_end_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.generation"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.generation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.name"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.name</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.released"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.released</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.status"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.status</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.value_offset"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.value_offset</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.value_width"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.value_width</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingStatus"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingStatus</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.TaskGraphClosure"><code class="docutils literal notranslate"><span class="pre">TaskGraphClosure</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecoderResult"><code class="docutils literal notranslate"><span class="pre">DecoderResult</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecoderResult.converged"><code class="docutils literal notranslate"><span class="pre">DecoderResult.converged</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.DecoderResult.opt_results"><code class="docutils literal notranslate"><span class="pre">DecoderResult.opt_results</span></code></a></li>
@@ -526,7 +792,9 @@
 <li class="toctree-l2"><a class="reference internal" href="api/qec/python_api.html#realtime-decoding">Realtime Decoding</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api/qec/python_api.html#core-decoding-functions">Core Decoding Functions</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.enqueue_syndromes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes_mapped"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.enqueue_syndromes_mapped()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_corrections"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.get_corrections()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_logical_measurements"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.get_logical_measurements()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.reset_decoder"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.reset_decoder()</span></code></a></li>
 </ul>
 </li>
@@ -607,7 +875,10 @@
  | <a href="#E"><strong>E</strong></a>
  | <a href="#F"><strong>F</strong></a>
  | <a href="#G"><strong>G</strong></a>
+ | <a href="#H"><strong>H</strong></a>
  | <a href="#I"><strong>I</strong></a>
+ | <a href="#J"><strong>J</strong></a>
+ | <a href="#K"><strong>K</strong></a>
  | <a href="#L"><strong>L</strong></a>
  | <a href="#M"><strong>M</strong></a>
  | <a href="#N"><strong>N</strong></a>
@@ -626,10 +897,24 @@
 <h2 id="A">A</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="api/qec/python_api.html#cudaq_qec.AsyncDecoderResult">AsyncDecoderResult (class in cudaq_qec)</a>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.add_member">add_member (cudaq_qec.TaskGraphEnsembleSpec attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_coordinator_cpu">async_coordinator_cpu (cudaq_qec.TaskGraphOptions property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_num_workers">async_num_workers (cudaq_qec.TaskGraphOptions property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_queue_capacity">async_queue_capacity (cudaq_qec.TaskGraphOptions property)</a>
 </li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_spin_pause_iters">async_spin_pause_iters (cudaq_qec.TaskGraphOptions property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_streaming">async_streaming (cudaq_qec.TaskGraphOptions property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_worker_cpus">async_worker_cpus (cudaq_qec.TaskGraphOptions property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.AsyncDecoderResult">AsyncDecoderResult (class in cudaq_qec)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.StopNConvSweep.avg_iters">avg_iters (cudaq_qec.relay_solutions.StopNConvSweep attribute)</a>
 </li>
   </ul></td>
@@ -662,7 +947,21 @@
         <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.chromobius">(class in cudaq_qec.relay_solutions)</a>
 </li>
       </ul></li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.clear_corrections">clear_corrections (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.closure">closure (cudaq_qec.TaskGraphOutputProgress property)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.closure">(cudaq_qec.TaskGraphStreamingResult property)</a>
+</li>
+      </ul></li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code">Code (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.combine">combine (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.completed_operations">completed_operations (cudaq_qec.TaskGraphStreamingResult property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.connections">connections (cudaq_qec.DemChunksSpec property)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.contains_operation">contains_operation (cudaq_qec.Code attribute)</a>
 </li>
@@ -674,9 +973,57 @@
       </ul></li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.RelaySolutionRecords.counts">counts (cudaq_qec.relay_solutions.RelaySolutionRecords attribute)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.coverage_begin_round">coverage_begin_round (cudaq_qec.TaskGraphOutputProgress property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.coverage_end_round">coverage_end_round (cudaq_qec.TaskGraphOutputProgress property)</a>
+</li>
       <li><a href="api/core/cpp_api.html#_CPPv45cudaq">cudaq (C++ type)</a>
 </li>
       <li><a href="api/core/cpp_api.html#_CPPv4N5cudaq3qecE">cudaq::qec (C++ type)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14apply_d_sparseERK19measurement_resultsRKNSt6vectorINSt6vectorI8uint32_tEEEE">cudaq::qec::apply_d_sparse (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14apply_o_sparseERK13error_patternRKNSt6vectorINSt6vectorI8uint32_tEEEE">cudaq::qec::apply_o_sparse (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18cancellation_levelE">cudaq::qec::cancellation_level (C++ enum)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18cancellation_level4hardE">cudaq::qec::cancellation_level::hard (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18cancellation_level4noneE">cudaq::qec::cancellation_level::none (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18cancellation_level4softE">cudaq::qec::cancellation_level::soft (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19cancellation_sourceE">cudaq::qec::cancellation_source (C++ class)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19cancellation_source9get_tokenEv">cudaq::qec::cancellation_source::get_token (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19cancellation_source5levelEv">cudaq::qec::cancellation_source::level (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19cancellation_source7requestE18cancellation_level">cudaq::qec::cancellation_source::request (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19cancellation_source17request_hard_stopEv">cudaq::qec::cancellation_source::request_hard_stop (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19cancellation_source17request_soft_stopEv">cudaq::qec::cancellation_source::request_soft_stop (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18cancellation_tokenE">cudaq::qec::cancellation_token (C++ class)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18cancellation_token18cancellation_tokenEv">cudaq::qec::cancellation_token::cancellation_token (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec18cancellation_token13stop_possibleEv">cudaq::qec::cancellation_token::stop_possible (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec18cancellation_token14stop_requestedE18cancellation_level">cudaq::qec::cancellation_token::stop_requested (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec9candidateE">cudaq::qec::candidate (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14candidate_sinkE">cudaq::qec::candidate_sink (C++ class)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec14candidate_sink11best_so_farEv">cudaq::qec::candidate_sink::best_so_far (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14candidate_sink14candidate_sinkEv">cudaq::qec::candidate_sink::candidate_sink (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14candidate_sink8observerE">cudaq::qec::candidate_sink::observer (C++ type)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec14candidate_sink4pushE15logical_outcomeNSt6stringENSt8optionalIdEE">cudaq::qec::candidate_sink::push (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec4codeE">cudaq::qec::code (C++ class)</a>
 </li>
@@ -724,33 +1071,43 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8d_sparseERKN5cudaq15M2DSparseMatrixE">cudaq::qec::d_sparse (C++ function)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18decode_result_typeE">cudaq::qec::decode_result_type (C++ enum)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18decode_result_type6errorsE">cudaq::qec::decode_result_type::errors (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18decode_result_type11observablesE">cudaq::qec::decode_result_type::observables (C++ enumerator)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoderE">cudaq::qec::decoder (C++ class)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder10block_sizeE">cudaq::qec::decoder::block_size (C++ member)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder20capture_decode_graphEi">cudaq::qec::decoder::capture_decode_graph (C++ function)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder19check_syndrome_sizeENSt6size_tE">cudaq::qec::decoder::check_syndrome_size (C++ function)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder17clear_correctionsEv">cudaq::qec::decoder::clear_corrections (C++ function)</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder6decodeERKN6cudaqx6tensorI7uint8_tEE">cudaq::qec::decoder::decode (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder6decodeERKNSt6vectorI7float_tEE">[1]</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder15cuda_device_id_E">cudaq::qec::decoder::cuda_device_id_ (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder6decodeERKN6cudaqx6tensorI7uint8_tEE">cudaq::qec::decoder::decode (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder6decodeERKN6cudaqx6tensorI7uint8_tEE18cancellation_token">[1]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder6decodeERKNSt6vectorI7float_tEE">[2]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder6decodeERKNSt6vectorI7float_tEE18cancellation_token">[3]</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12decode_asyncERKNSt6vectorI7float_tEE">cudaq::qec::decoder::decode_async (C++ function)</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12decode_batchERKNSt6vectorINSt6vectorI7float_tEEEE">cudaq::qec::decoder::decode_batch (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12decode_batchERKNSt6vectorINSt6vectorI7float_tEEEERNSt8optionalIN6cudaqx17heterogeneous_mapEEE">[1]</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12decode_batchERKNSt6vectorINSt6vectorI7float_tEEEE">cudaq::qec::decoder::decode_batch (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12decode_batchERKNSt6vectorINSt6vectorI7float_tEEEE18cancellation_token">[1]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12decode_batchERKNSt6vectorINSt6vectorI7float_tEEEERNSt8optionalIN6cudaqx17heterogeneous_mapEEE">[2]</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder18decode_result_typeE">cudaq::qec::decoder::decode_result_type (C++ enum)</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder7decoderE12decoder_init22decoder_output_request">cudaq::qec::decoder::decoder (C++ function)</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder18decode_result_type14decode_to_errsE">cudaq::qec::decoder::decode_result_type::decode_to_errs (C++ enumerator)</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder16enqueue_syndromeEPK7uint8_tNSt6size_tE">cudaq::qec::decoder::enqueue_syndrome (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder16enqueue_syndromeEPK7uint8_tNSt6size_tE10round_type">[1]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder16enqueue_syndromeERKNSt6vectorI7uint8_tEE">[2]</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder18decode_result_type13decode_to_obsE">cudaq::qec::decoder::decode_result_type::decode_to_obs (C++ enumerator)</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder3getERKNSt6stringE12decoder_init22decoder_output_requestRKN6cudaqx17heterogeneous_mapE">cudaq::qec::decoder::get (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder3getERKNSt6stringE12decoder_initRKN6cudaqx17heterogeneous_mapE">[1]</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder7decoderEN5cudaq3qec20sparse_binary_matrixE">cudaq::qec::decoder::decoder (C++ function)</a>
-</li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder16enqueue_syndromeEPK7uint8_tNSt6size_tE">cudaq::qec::decoder::enqueue_syndrome (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder16enqueue_syndromeERKNSt6vectorI7uint8_tEE">[1]</a>
-</li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder3getERKNSt6stringERK12decoder_initRKN6cudaqx17heterogeneous_mapE">cudaq::qec::decoder::get (C++ function)</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder25get_auxiliary_result_typeEv">cudaq::qec::decoder::get_auxiliary_result_type (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder18get_cuda_device_idEv">cudaq::qec::decoder::get_cuda_device_id (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder14get_decoder_idEv">cudaq::qec::decoder::get_decoder_id (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder10get_inputsEv">cudaq::qec::decoder::get_inputs (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder23get_num_msyn_per_decodeEv">cudaq::qec::decoder::get_num_msyn_per_decode (C++ function)</a>
 </li>
@@ -758,23 +1115,33 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder19get_obs_correctionsEv">cudaq::qec::decoder::get_obs_corrections (C++ function)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder18get_output_requestEv">cudaq::qec::decoder::get_output_request (C++ function)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder15get_result_typeEv">cudaq::qec::decoder::get_result_type (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder11get_versionEv">cudaq::qec::decoder::get_version (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder27initialize_streaming_layoutENSt6size_tENSt6vectorINSt6size_tEEE">cudaq::qec::decoder::initialize_streaming_layout (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder29project_errors_to_observablesEPK7float_tP7float_tNSt6size_tE">cudaq::qec::decoder::project_errors_to_observables (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder20release_decode_graphEPv">cudaq::qec::decoder::release_decode_graph (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder13reset_decoderEv">cudaq::qec::decoder::reset_decoder (C++ function)</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12set_D_sparseERKNSt6vectorI7int64_tEE">cudaq::qec::decoder::set_D_sparse (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12set_D_sparseERKNSt6vectorINSt6vectorI8uint32_tEEEE">[1]</a>
-</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder14set_decoder_idE8uint32_t">cudaq::qec::decoder::set_decoder_id (C++ function)</a>
-</li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12set_O_sparseERKNSt6vectorI7int64_tEE">cudaq::qec::decoder::set_O_sparse (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder12set_O_sparseERKNSt6vectorINSt6vectorI8uint32_tEEEE">[1]</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7decoder23supports_graph_dispatchEv">cudaq::qec::decoder::supports_graph_dispatch (C++ function)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoder13syndrome_sizeE">cudaq::qec::decoder::syndrome_size (C++ member)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7decoderD0Ev">cudaq::qec::decoder::~decoder (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec29decoder_auxiliary_result_typeE">cudaq::qec::decoder_auxiliary_result_type (C++ enum)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec29decoder_auxiliary_result_type4noneE">cudaq::qec::decoder_auxiliary_result_type::none (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec29decoder_auxiliary_result_type18residual_detectorsE">cudaq::qec::decoder_auxiliary_result_type::residual_detectors (C++ enumerator)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15decoder_contextE">cudaq::qec::decoder_context (C++ struct)</a>
 </li>
@@ -788,9 +1155,57 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec35decoder_context_from_memory_circuitERK4code9operationNSt6size_tERN5cudaq11noise_modelEb">cudaq::qec::decoder_context_from_memory_circuit (C++ function)</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_initE">cudaq::qec::decoder_init (C++ type)</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_initE">cudaq::qec::decoder_init (C++ class)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init14canonicalize_HEv">cudaq::qec::decoder_init::canonicalize_H (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_init12decoder_initE20detector_error_modelNSt8optionalI20sparse_binary_matrixEE">cudaq::qec::decoder_init::decoder_init (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_init12decoder_initE20sparse_binary_matrix">[1]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_init12decoder_initE20sparse_binary_matrixNSt8optionalI20sparse_binary_matrixEENSt6vectorIdEENSt8optionalI20sparse_binary_matrixEENSt8optionalINSt6vectorINSt6size_tEEEEE">[2]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_init12decoder_initENSt6stringE">[3]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_init12decoder_initERR12decoder_init">[4]</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init22decoder_init_without_dEv">cudaq::qec::decoder_init::decoder_init_without_d (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init10dem_chunksEv">cudaq::qec::decoder_init::dem_chunks (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init21detector_error_matrixEv">cudaq::qec::decoder_init::detector_error_matrix (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init11error_ratesEv">cudaq::qec::decoder_init::error_rates (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_init15from_dem_chunksE15dem_chunks_specNSt8optionalI20sparse_binary_matrixEE">cudaq::qec::decoder_init::from_dem_chunks (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_init22from_dem_chunks_closedE15dem_chunks_specNSt8optionalI20sparse_binary_matrixEE">cudaq::qec::decoder_init::from_dem_chunks_closed (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_init13from_stim_demENSt6stringENSt8optionalI20sparse_binary_matrixEE">cudaq::qec::decoder_init::from_stim_dem (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init12has_matricesEv">cudaq::qec::decoder_init::has_matrices (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init20has_observable_modelEv">cudaq::qec::decoder_init::has_observable_model (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init24measurement_to_detectorsEv">cudaq::qec::decoder_init::measurement_to_detectors (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init13num_detectorsEv">cudaq::qec::decoder_init::num_detectors (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init23observable_flips_matrixEv">cudaq::qec::decoder_init::observable_flips_matrix (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12decoder_initaSERR12decoder_init">cudaq::qec::decoder_init::operator= (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init6sourceEv">cudaq::qec::decoder_init::source (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init8stim_demEv">cudaq::qec::decoder_init::stim_dem (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec12decoder_init19without_observablesEv">cudaq::qec::decoder_init::without_observables (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14decoder_inputsE">cudaq::qec::decoder_inputs (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20decoder_model_sourceE">cudaq::qec::decoder_model_source (C++ enum)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20decoder_model_source10dem_chunksE">cudaq::qec::decoder_model_source::dem_chunks (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20decoder_model_source8matricesE">cudaq::qec::decoder_model_source::matrices (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20decoder_model_source8stim_demE">cudaq::qec::decoder_model_source::stim_dem (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec28decoder_needs_model_matricesERKNSt6stringE20decoder_model_source">cudaq::qec::decoder_needs_model_matrices (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22decoder_output_requestE">cudaq::qec::decoder_output_request (C++ struct)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14decoder_resultE">cudaq::qec::decoder_result (C++ struct)</a>
 </li>
@@ -804,7 +1219,7 @@
 </li>
       <li><a href="api/core/cpp_api.html#_CPPv4N5cudaq3qec8decoding6configE">cudaq::qec::decoding::config (C++ type)</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config18configure_decodersER20multi_decoder_config">cudaq::qec::decoding::config::configure_decoders (C++ function)</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config18configure_decodersER20multi_decoder_config">cudaq::qec::decoding::config::configure_decoders (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config18configure_decodersER20multi_decoder_configRKNSt10filesystem4pathE">[1]</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config28configure_decoders_from_fileEPKc">cudaq::qec::decoding::config::configure_decoders_from_file (C++ function)</a>
 </li>
@@ -816,15 +1231,83 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config14cuda_device_idE">cudaq::qec::decoding::config::decoder_config::cuda_device_id (C++ member)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config8D_sparseE">cudaq::qec::decoding::config::decoder_config::D_sparse (C++ member)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config14decoder_config40decoder_custom_args_to_heterogeneous_mapEv">cudaq::qec::decoding::config::decoder_config::decoder_custom_args_to_heterogeneous_map (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config10dem_chunksE">cudaq::qec::decoding::config::decoder_config::dem_chunks (C++ member)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config19dem_chunks_artifactE">cudaq::qec::decoding::config::decoder_config::dem_chunks_artifact (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config14decoder_config21describe_decoder_typeEv">cudaq::qec::decoding::config::decoder_config::describe_decoder_type (C++ function)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config8dispatchE">cudaq::qec::decoding::config::decoder_config::dispatch (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config14decoder_config22effective_decoder_typeEv">cudaq::qec::decoding::config::decoder_config::effective_decoder_type (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config14decoder_config24effective_error_rate_vecEv">cudaq::qec::decoding::config::decoder_config::effective_error_rate_vec (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config14error_rate_vecE">cudaq::qec::decoding::config::decoder_config::error_rate_vec (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config8stim_demE">cudaq::qec::decoding::config::decoder_config::stim_dem (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config17stim_dem_artifactE">cudaq::qec::decoding::config::decoder_config::stim_dem_artifact (C++ member)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config13stim_dem_pathE">cudaq::qec::decoding::config::decoder_config::stim_dem_path (C++ member)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_specE">cudaq::qec::decoding::config::decoder_config::task_graph_spec (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec12column_rangeE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::column_range (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec5edgesE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::edges (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec10inner_typeE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::inner_type (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_specE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec19decoder_custom_argsE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::decoder_custom_args (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec10dem_chunksE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::dem_chunks (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec19dem_chunks_artifactE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::dem_chunks_artifact (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec13ensemble_specE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::ensemble_spec (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec13ensemble_spec6memberE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::ensemble_spec::member (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec8H_sparseE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::H_sparse (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec10inner_typeE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::inner_type (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec13max_in_flightE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::max_in_flight (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec11node_paramsE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::node_params (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec15partition_labelE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::partition_label (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec21resolved_decoder_typeEv">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::resolved_decoder_type (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec13resolved_kindEv">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::resolved_kind (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec8stim_demE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::stim_dem (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec17stim_dem_artifactE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::stim_dem_artifact (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec13stim_dem_pathE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::stim_dem_path (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec4typeE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::type (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec9node_spec7windowsE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::node_spec::windows (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec7optionsE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::options (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config14decoder_config15task_graph_spec4typeE">cudaq::qec::decoding::config::decoder_config::task_graph_spec::type (C++ member)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config14decoder_config20validate_custom_argsEv">cudaq::qec::decoding::config::decoder_config::validate_custom_args (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config21decoder_custom_args_tE">cudaq::qec::decoding::config::decoder_custom_args_t (C++ class)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config21decoder_custom_args_teqERK21decoder_custom_args_t">cudaq::qec::decoding::config::decoder_custom_args_t::operator== (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config15DecoderDispatchE">cudaq::qec::decoding::config::DecoderDispatch (C++ enum)</a>
 </li>
@@ -832,13 +1315,31 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config15DecoderDispatch4hostE">cudaq::qec::decoding::config::DecoderDispatch::host (C++ enumerator)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config17expand_dem_chunksER14decoder_config">cudaq::qec::decoding::config::expand_dem_chunks (C++ function)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config17finalize_decodersEv">cudaq::qec::decoding::config::finalize_decoders (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config20multi_decoder_configE">cudaq::qec::decoding::config::multi_decoder_config (C++ class)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config20multi_decoder_config14data_artifactsE">cudaq::qec::decoding::config::multi_decoder_config::data_artifacts (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config20multi_decoder_config16syndrome_mappingE">cudaq::qec::decoding::config::multi_decoder_config::syndrome_mapping (C++ member)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config20multi_decoder_config9transportE">cudaq::qec::decoding::config::multi_decoder_config::transport (C++ member)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config20multi_decoder_config20validate_custom_argsEv">cudaq::qec::decoding::config::multi_decoder_config::validate_custom_args (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config20multi_decoder_config25validate_syndrome_mappingEv">cudaq::qec::decoding::config::multi_decoder_config::validate_syndrome_mapping (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config23syndrome_mapping_configE">cudaq::qec::decoding::config::syndrome_mapping_config (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config23syndrome_mapping_config2idE">cudaq::qec::decoding::config::syndrome_mapping_config::id (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config23syndrome_mapping_config4typeE">cudaq::qec::decoding::config::syndrome_mapping_config::type (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec8decoding6config23syndrome_mapping_config8validateEv">cudaq::qec::decoding::config::syndrome_mapping_config::validate (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config23syndrome_mapping_config3vpsE">cudaq::qec::decoding::config::syndrome_mapping_config::vps (C++ member)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding6config16transport_configE">cudaq::qec::decoding::config::transport_config (C++ struct)</a>
 </li>
@@ -852,9 +1353,147 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding17enqueue_syndromesENSt8uint64_tERKNSt6vectorIN5cudaq14measure_resultEEENSt8uint64_tE">cudaq::qec::decoding::enqueue_syndromes (C++ function)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding24enqueue_syndromes_mappedENSt8uint64_tERKNSt6vectorIN5cudaq14measure_resultEEENSt8uint64_tENSt8uint64_tE">cudaq::qec::decoding::enqueue_syndromes_mapped (C++ function)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding15get_correctionsENSt8uint64_tENSt8uint64_tEb">cudaq::qec::decoding::get_corrections (C++ function)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding24get_logical_measurementsENSt8uint64_tENSt8uint64_tENSt8uint64_tEb">cudaq::qec::decoding::get_logical_measurements (C++ function)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8decoding13reset_decoderENSt8uint64_tE">cudaq::qec::decoding::reset_decoder (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graphE">cudaq::qec::decoding_task_graph (C++ class)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph18async_thread_countEv">cudaq::qec::decoding_task_graph::async_thread_count (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph13capture_graphEi">cudaq::qec::decoding_task_graph::capture_graph (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph17clear_correctionsEv">cudaq::qec::decoding_task_graph::clear_corrections (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph7combineENSt10unique_ptrI19decoding_task_graphEENSt10unique_ptrI19decoding_task_graphEE18task_graph_options">cudaq::qec::decoding_task_graph::combine (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph14cuda_device_idEv">cudaq::qec::decoding_task_graph::cuda_device_id (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph8d_matrixEv">cudaq::qec::decoding_task_graph::d_matrix (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph19decoding_task_graphENSt10unique_ptrI7decoderEENSt6vectorINSt6vectorI8uint32_tEEEENSt6vectorINSt6vectorI8uint32_tEEEE18task_graph_options">cudaq::qec::decoding_task_graph::decoding_task_graph (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph16enqueue_syndromeEPK7uint8_tNSt6size_tE">cudaq::qec::decoding_task_graph::enqueue_syndrome (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph16enqueue_syndromeEPK7uint8_tNSt6size_tE10round_type">[1]</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph9from_specERK15dem_chunks_specRKNSt6stringERKN6cudaqx17heterogeneous_mapE18task_graph_options">cudaq::qec::decoding_task_graph::from_spec (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph13from_topologyENSt6vectorI22task_graph_node_configEENSt6vectorI15task_graph_edgeEE18task_graph_options">cudaq::qec::decoding_task_graph::from_topology (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph24get_logical_measurementsENSt6size_tENSt6size_tE">cudaq::qec::decoding_task_graph::get_logical_measurements (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph24get_logical_measurementsEv">[1]</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph28get_num_logical_measurementsEv">cudaq::qec::decoding_task_graph::get_num_logical_measurements (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph23get_num_msyn_per_decodeEv">cudaq::qec::decoding_task_graph::get_num_msyn_per_decode (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph22get_num_msyn_per_roundEv">cudaq::qec::decoding_task_graph::get_num_msyn_per_round (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph19get_num_observablesEv">cudaq::qec::decoding_task_graph::get_num_observables (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph19get_obs_correctionsEv">cudaq::qec::decoding_task_graph::get_obs_corrections (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph13inner_decoderEv">cudaq::qec::decoding_task_graph::inner_decoder (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph8o_matrixEv">cudaq::qec::decoding_task_graph::o_matrix (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph12output_namesEv">cudaq::qec::decoding_task_graph::output_names (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph13release_graphEPv">cudaq::qec::decoding_task_graph::release_graph (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19decoding_task_graph13reset_decoderEv">cudaq::qec::decoding_task_graph::reset_decoder (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph3runERK19measurement_results">cudaq::qec::decoding_task_graph::run (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph7run_allERK19measurement_results">cudaq::qec::decoding_task_graph::run_all (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph9run_asyncERK19measurement_results">cudaq::qec::decoding_task_graph::run_async (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph9run_batchERKNSt6vectorI19measurement_resultsEE">cudaq::qec::decoding_task_graph::run_batch (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph32streaming_incompatibility_reasonEv">cudaq::qec::decoding_task_graph::streaming_incompatibility_reason (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph16streaming_resultEv">cudaq::qec::decoding_task_graph::streaming_result (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph23supports_graph_dispatchEv">cudaq::qec::decoding_task_graph::supports_graph_dispatch (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec19decoding_task_graph18supports_streamingEv">cudaq::qec::decoding_task_graph::supports_streaming (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec28default_task_graph_node_kindE">cudaq::qec::default_task_graph_node_kind (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14dem_chunk_specE">cudaq::qec::dem_chunk_spec (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14dem_chunk_spec8D_sparseE">cudaq::qec::dem_chunk_spec::D_sparse (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14dem_chunk_spec6expandERKNSt6vectorI7seam_idEE">cudaq::qec::dem_chunk_spec::expand (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14dem_chunk_spec8H_sparseE">cudaq::qec::dem_chunk_spec::H_sparse (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec14dem_chunk_spec8is_emptyEv">cudaq::qec::dem_chunk_spec::is_empty (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14dem_chunk_spec10m2o_sparseE">cudaq::qec::dem_chunk_spec::m2o_sparse (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14dem_chunk_spec16num_measurementsE">cudaq::qec::dem_chunk_spec::num_measurements (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14dem_chunk_spec8O_sparseE">cudaq::qec::dem_chunk_spec::O_sparse (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec14dem_chunk_spec10seam_specsE">cudaq::qec::dem_chunk_spec::seam_specs (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec14dem_chunk_spec8validateERKNSt6stringE">cudaq::qec::dem_chunk_spec::validate (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_specE">cudaq::qec::dem_chunks_spec (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec12detectors_ofERK14dem_chunk_specRKNSt6stringE">cudaq::qec::dem_chunks_spec::detectors_of (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec9get_phaseE8phase_id">cudaq::qec::dem_chunks_spec::get_phase (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec12has_D_sparseEv">cudaq::qec::dem_chunks_spec::has_D_sparse (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec11has_readoutEv">cudaq::qec::dem_chunks_spec::has_readout (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec19has_repeating_phaseEv">cudaq::qec::dem_chunks_spec::has_repeating_phase (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec8is_emptyEv">cudaq::qec::dem_chunks_spec::is_empty (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec6layoutEv">cudaq::qec::dem_chunks_spec::layout (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec15measurements_ofERK14dem_chunk_spec">cudaq::qec::dem_chunks_spec::measurements_of (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec22measurements_per_roundE">cudaq::qec::dem_chunks_spec::measurements_per_round (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec14minimum_roundsEv">cudaq::qec::dem_chunks_spec::minimum_rounds (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec15num_observablesEv">cudaq::qec::dem_chunks_spec::num_observables (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec16observable_namesE">cudaq::qec::dem_chunks_spec::observable_names (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec12phase_layoutE">cudaq::qec::dem_chunks_spec::phase_layout (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec12phase_layout6prefixE">cudaq::qec::dem_chunks_spec::phase_layout::prefix (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec12phase_layout9repeatingE">cudaq::qec::dem_chunks_spec::phase_layout::repeating (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec12phase_layout6suffixE">cudaq::qec::dem_chunks_spec::phase_layout::suffix (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec14phase_sequenceEv">cudaq::qec::dem_chunks_spec::phase_sequence (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec22phases_supply_D_sparseE">cudaq::qec::dem_chunks_spec::phases_supply_D_sparse (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec15repeating_phaseEv">cudaq::qec::dem_chunks_spec::repeating_phase (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec16repeating_roundsEv">cudaq::qec::dem_chunks_spec::repeating_rounds (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec14repeating_spanE">cudaq::qec::dem_chunks_spec::repeating_span (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec14repeating_span6lengthE">cudaq::qec::dem_chunks_spec::repeating_span::length (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec14repeating_span6prefixE">cudaq::qec::dem_chunks_spec::repeating_span::prefix (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dem_chunks_spec14repeating_span6suffixE">cudaq::qec::dem_chunks_spec::repeating_span::suffix (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec15dem_chunks_spec8validateEv">cudaq::qec::dem_chunks_spec::validate (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec23dem_from_memory_circuitERK4code9operationNSt6size_tERN5cudaq11noise_modelEb">cudaq::qec::dem_from_memory_circuit (C++ function)</a>
 </li>
@@ -871,6 +1510,12 @@
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec11dem_sampler3gpu10sample_demEPK7uint8_t6size_t6size_tPKd6size_tjP7uint8_tP7uint8_tNSt9uintptr_tE">cudaq::qec::dem_sampler::gpu::sample_dem (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12dem_samplingERKN6cudaqx6tensorI7uint8_tEENSt6size_tERKNSt6vectorIdEE">cudaq::qec::dem_sampling (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12dem_samplingERKN6cudaqx6tensorI7uint8_tEENSt6size_tERKNSt6vectorIdEEj">[1]</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec13dem_seam_specE">cudaq::qec::dem_seam_spec (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec13dem_seam_spec8H_sparseE">cudaq::qec::dem_seam_spec::H_sparse (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec13dem_seam_spec8O_sparseE">cudaq::qec::dem_seam_spec::O_sparse (C++ member)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15dense_to_sparseERKN6cudaqx6tensorI7uint8_tEE">cudaq::qec::dense_to_sparse (C++ function)</a>
 </li>
@@ -948,6 +1593,10 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec6detail4warnEKNSt11string_viewE">cudaq::qec::detail::warn (C++ function)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec16detection_eventsE">cudaq::qec::detection_events (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec16detection_events4bitsE">cudaq::qec::detection_events::bits (C++ member)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20detector_error_modelE">cudaq::qec::detector_error_model (C++ struct)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20detector_error_model23canonicalize_for_roundsE8uint32_tb">cudaq::qec::detector_error_model::canonicalize_for_rounds (C++ function)</a>
@@ -968,8 +1617,22 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20detector_error_model24observables_flips_matrixE">cudaq::qec::detector_error_model::observables_flips_matrix (C++ member)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15edge_value_typeE">cudaq::qec::edge_value_type (C++ class)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15edge_value_type15edge_value_typeENSt11string_viewE">cudaq::qec::edge_value_type::edge_value_type (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4I0EN5cudaq3qec15edge_value_type2ofE15edge_value_typev">cudaq::qec::edge_value_type::of (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec13error_patternE">cudaq::qec::error_pattern (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec13error_pattern11opt_resultsE">cudaq::qec::error_pattern::opt_results (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec13error_pattern6resultE">cudaq::qec::error_pattern::result (C++ member)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7float_tE">cudaq::qec::float_t (C++ type)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19generate_random_pcmENSt6size_tENSt6size_tENSt6size_tEiRRNSt10mt19937_64E">cudaq::qec::generate_random_pcm (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec26generate_random_pcm_sparseENSt6size_tENSt6size_tENSt6size_tEiRRNSt10mt19937_64E">cudaq::qec::generate_random_pcm_sparse (C++ function)</a>
@@ -979,6 +1642,20 @@
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18get_pcm_for_roundsERK20sparse_binary_matrixNSt8uint32_tENSt8uint32_tENSt8uint32_tEbbbNSt8uint32_tE">cudaq::qec::get_pcm_for_rounds (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18get_pcm_for_roundsERKN6cudaqx6tensorI7uint8_tEENSt8uint32_tENSt8uint32_tENSt8uint32_tEbbNSt8uint32_tE">[1]</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec29get_sorted_pcm_column_indicesERKN6cudaqx6tensorI7uint8_tEENSt8uint32_tE">cudaq::qec::get_sorted_pcm_column_indices (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec29get_sorted_pcm_column_indicesERKNSt6vectorINSt6vectorINSt8uint32_tEEEEENSt8uint32_tE">[1]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec29get_sorted_pcm_column_indicesERKNSt6vectorINSt6vectorINSt8uint32_tEEEEENSt8uint32_tENSt8uint32_tE">[2]</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15logical_outcomeE">cudaq::qec::logical_outcome (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15logical_outcome4bitsE">cudaq::qec::logical_outcome::bits (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15logical_outcome9convergedE">cudaq::qec::logical_outcome::converged (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19measurement_resultsE">cudaq::qec::measurement_results (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19measurement_results4bitsE">cudaq::qec::measurement_results::bits (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19measurement_results3tagE">cudaq::qec::measurement_results::tag (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec37memory_dem_chunks_from_decoder_inputsERK14decoder_inputsNSt6size_tENSt6size_tENSt6size_tE">cudaq::qec::memory_dem_chunks_from_decoder_inputs (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec9operationE">cudaq::qec::operation (C++ enum)</a>
 </li>
@@ -1028,6 +1705,20 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec17pcm_to_sparse_vecERK20sparse_binary_matrix">cudaq::qec::pcm_to_sparse_vec (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec17pcm_to_sparse_vecERKN6cudaqx6tensorI7uint8_tEE">[1]</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec16phase_connectionE">cudaq::qec::phase_connection (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8phase_idE">cudaq::qec::phase_id (C++ type)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec10phase_nameE">cudaq::qec::phase_name (C++ type)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec10phase_name8dem_bulkE">cudaq::qec::phase_name::dem_bulk (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec10phase_name9dem_finalE">cudaq::qec::phase_name::dem_final (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec10phase_name8dem_initE">cudaq::qec::phase_name::dem_init (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec16phase_spec_entryE">cudaq::qec::phase_spec_entry (C++ struct)</a>
+</li>
       <li><a href="api/core/cpp_api.html#_CPPv4N5cudaq3qec8realtimeE">cudaq::qec::realtime (C++ type)</a>
 </li>
       <li><a href="api/core/cpp_api.html#_CPPv4N5cudaq3qec8realtime12experimentalE">cudaq::qec::realtime::experimental (C++ type)</a>
@@ -1064,6 +1755,10 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime12experimental17cpu_stage_context11origin_slotE">cudaq::qec::realtime::experimental::cpu_stage_context::origin_slot (C++ member)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime12experimental17cpu_stage_context13ptp_timestampE">cudaq::qec::realtime::experimental::cpu_stage_context::ptp_timestamp (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime12experimental17cpu_stage_context10request_idE">cudaq::qec::realtime::experimental::cpu_stage_context::request_id (C++ member)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime12experimental17cpu_stage_context15response_bufferE">cudaq::qec::realtime::experimental::cpu_stage_context::response_buffer (C++ member)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime12experimental17cpu_stage_context12user_contextE">cudaq::qec::realtime::experimental::cpu_stage_context::user_context (C++ member)</a>
@@ -1072,8 +1767,6 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime12experimental19DEFERRED_COMPLETIONE">cudaq::qec::realtime::experimental::DEFERRED_COMPLETION (C++ member)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime12experimental17gpu_stage_factoryE">cudaq::qec::realtime::experimental::gpu_stage_factory (C++ type)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime12experimental20gpu_worker_resourcesE">cudaq::qec::realtime::experimental::gpu_worker_resources (C++ struct)</a>
@@ -1162,9 +1855,15 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime15graph_resourcesE">cudaq::qec::realtime::graph_resources (C++ struct)</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime15graph_resources9d_mailboxE">cudaq::qec::realtime::graph_resources::d_mailbox (C++ member)</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec36register_decoder_native_model_sourceENSt6stringE20decoder_model_source">cudaq::qec::register_decoder_native_model_source (C++ function)</a>
 </li>
-      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec8realtime15graph_resources9h_mailboxE">cudaq::qec::realtime::graph_resources::h_mailbox (C++ member)</a>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27register_selection_strategyENSt6stringEN8decoding6config14decoder_schemaE26selection_strategy_factory">cudaq::qec::register_selection_strategy (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27registered_edge_value_typesEv">cudaq::qec::registered_edge_value_types (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec31registered_selection_strategiesEv">cudaq::qec::registered_selection_strategies (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec32registered_task_graph_node_kindsEv">cudaq::qec::registered_task_graph_node_kinds (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19reorder_pcm_columnsERK20sparse_binary_matrixRKNSt6vectorINSt8uint32_tEEE8uint32_t8uint32_t">cudaq::qec::reorder_pcm_columns (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19reorder_pcm_columnsERKN6cudaqx6tensorI7uint8_tEERKNSt6vectorINSt8uint32_tEEE8uint32_t8uint32_t">[1]</a>
 </li>
@@ -1174,9 +1873,51 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec10repetition10repetition10repetitionERK17heterogeneous_map">cudaq::qec::repetition::repetition::repetition (C++ function)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec10round_typeE">cudaq::qec::round_type (C++ enum)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec10round_type4BULKE">cudaq::qec::round_type::BULK (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec10round_type5FINALE">cudaq::qec::round_type::FINAL (C++ enumerator)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20sample_code_capacityERK4codeNSt6size_tEd">cudaq::qec::sample_code_capacity (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20sample_code_capacityERK4codeNSt6size_tEdj">[1]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20sample_code_capacityERKN6cudaqx6tensorI7uint8_tEENSt6size_tEd">[2]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec20sample_code_capacityERKN6cudaqx6tensorI7uint8_tEENSt6size_tEdj">[3]</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec21sample_memory_circuitERK4code9operationNSt6size_tENSt6size_tE">cudaq::qec::sample_memory_circuit (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec21sample_memory_circuitERK4code9operationNSt6size_tENSt6size_tERN5cudaq11noise_modelE">[1]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec21sample_memory_circuitERK4codeNSt6size_tENSt6size_tE">[2]</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec21sample_memory_circuitERK4codeNSt6size_tENSt6size_tERN5cudaq11noise_modelE">[3]</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15seam_connectionE">cudaq::qec::seam_connection (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15seam_connection9from_seamE">cudaq::qec::seam_connection::from_seam (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15seam_connection7to_seamE">cudaq::qec::seam_connection::to_seam (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7seam_idE">cudaq::qec::seam_id (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7seam_id9from_nameENSt11string_viewE">cudaq::qec::seam_id::from_name (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec7seam_id4nameEv">cudaq::qec::seam_id::name (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec7seam_id13register_nameE7seam_idNSt11string_viewE">cudaq::qec::seam_id::register_name (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec9seam_nameE">cudaq::qec::seam_name (C++ type)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec9seam_name10next_roundE">cudaq::qec::seam_name::next_round (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec9seam_name10prev_roundE">cudaq::qec::seam_name::prev_round (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15seam_spec_entryE">cudaq::qec::seam_spec_entry (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18selection_strategyE">cudaq::qec::selection_strategy (C++ class)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18selection_strategy5beginE19cancellation_source14candidate_sink">cudaq::qec::selection_strategy::begin (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18selection_strategy6finishEv">cudaq::qec::selection_strategy::finish (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18selection_strategy5offerERK9candidate">cudaq::qec::selection_strategy::offer (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18selection_strategyD0Ev">cudaq::qec::selection_strategy::~selection_strategy (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec26selection_strategy_factoryE">cudaq::qec::selection_strategy_factory (C++ type)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec31selection_strategy_registrationE">cudaq::qec::selection_strategy_registration (C++ class)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19shuffle_pcm_columnsERK20sparse_binary_matrixRRNSt10mt19937_64E">cudaq::qec::shuffle_pcm_columns (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec19shuffle_pcm_columnsERKN6cudaqx6tensorI7uint8_tEERRNSt10mt19937_64E">[1]</a>
 </li>
@@ -1318,11 +2059,99 @@
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec12surface_code5vec2dE">cudaq::qec::surface_code::vec2d (C++ struct)</a>
 </li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_closureE">cudaq::qec::task_graph_closure (C++ enum)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_closure6closedE">cudaq::qec::task_graph_closure::closed (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_closure11not_checkedE">cudaq::qec::task_graph_closure::not_checked (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_closure4openE">cudaq::qec::task_graph_closure::open (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15task_graph_edgeE">cudaq::qec::task_graph_edge (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15task_graph_edge9from_nodeE">cudaq::qec::task_graph_edge::from_node (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15task_graph_edge11from_outputE">cudaq::qec::task_graph_edge::from_output (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15task_graph_edge12index_offsetE">cudaq::qec::task_graph_edge::index_offset (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15task_graph_edge8to_inputE">cudaq::qec::task_graph_edge::to_input (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec15task_graph_edge7to_nodeE">cudaq::qec::task_graph_edge::to_node (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec24task_graph_ensemble_specE">cudaq::qec::task_graph_ensemble_spec (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec24task_graph_ensemble_spec13join_strategyE">cudaq::qec::task_graph_ensemble_spec::join_strategy (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec24task_graph_ensemble_spec6memberE">cudaq::qec::task_graph_ensemble_spec::member (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_configE">cudaq::qec::task_graph_node_config (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config8d_sparseE">cudaq::qec::task_graph_node_config::d_sparse (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config16decoder_instanceE">cudaq::qec::task_graph_node_config::decoder_instance (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config12decoder_typeE">cudaq::qec::task_graph_node_config::decoder_type (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config3demE">cudaq::qec::task_graph_node_config::dem (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config8ensembleE">cudaq::qec::task_graph_node_config::ensemble (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config4kindE">cudaq::qec::task_graph_node_config::kind (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config13max_in_flightE">cudaq::qec::task_graph_node_config::max_in_flight (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config11node_paramsE">cudaq::qec::task_graph_node_config::node_params (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config8stim_demE">cudaq::qec::task_graph_node_config::stim_dem (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec22task_graph_node_config7windowsE">cudaq::qec::task_graph_node_config::windows (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_optionsE">cudaq::qec::task_graph_options (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_options21async_coordinator_cpuE">cudaq::qec::task_graph_options::async_coordinator_cpu (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_options17async_num_workersE">cudaq::qec::task_graph_options::async_num_workers (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_options20async_queue_capacityE">cudaq::qec::task_graph_options::async_queue_capacity (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_options22async_spin_pause_itersE">cudaq::qec::task_graph_options::async_spin_pause_iters (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_options15async_streamingE">cudaq::qec::task_graph_options::async_streaming (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec18task_graph_options17async_worker_cpusE">cudaq::qec::task_graph_options::async_worker_cpus (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec26task_graph_output_progressE">cudaq::qec::task_graph_output_progress (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec26task_graph_output_progress7closureE">cudaq::qec::task_graph_output_progress::closure (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec26task_graph_output_progress8releasedE">cudaq::qec::task_graph_output_progress::released (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27task_graph_streaming_resultE">cudaq::qec::task_graph_streaming_result (C++ struct)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27task_graph_streaming_result7closureE">cudaq::qec::task_graph_streaming_result::closure (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27task_graph_streaming_result20completed_operationsE">cudaq::qec::task_graph_streaming_result::completed_operations (C++ member)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4NK5cudaq3qec27task_graph_streaming_result20logical_measurementsENSt6size_tENSt6size_tE">cudaq::qec::task_graph_streaming_result::logical_measurements (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27task_graph_streaming_statusE">cudaq::qec::task_graph_streaming_status (C++ enum)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27task_graph_streaming_status9availableE">cudaq::qec::task_graph_streaming_status::available (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27task_graph_streaming_status8completeE">cudaq::qec::task_graph_streaming_status::complete (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27task_graph_streaming_status6failedE">cudaq::qec::task_graph_streaming_status::failed (C++ enumerator)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec27task_graph_streaming_status7pendingE">cudaq::qec::task_graph_streaming_status::pending (C++ enumerator)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec16to_parity_matrixERKNSt6vectorIN5cudaq12spin_op_termEEE15stabilizer_type">cudaq::qec::to_parity_matrix (C++ function)</a>, <a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec16to_parity_matrixERKNSt6vectorINSt6stringEEE15stabilizer_type">[1]</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec25x_dem_from_memory_circuitERK4code9operationNSt6size_tERN5cudaq11noise_modelEb">cudaq::qec::x_dem_from_memory_circuit (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec23x_sample_memory_circuitERK4code9operationNSt6size_tENSt6size_tERN5cudaq11noise_modelE">cudaq::qec::x_sample_memory_circuit (C++ function)</a>
+</li>
+      <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec11xor_logicalERK15logical_outcomeRK15logical_outcome">cudaq::qec::xor_logical (C++ function)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#_CPPv4N5cudaq3qec25z_dem_from_memory_circuitERK4code9operationNSt6size_tERN5cudaq11noise_modelEb">cudaq::qec::z_dem_from_memory_circuit (C++ function)</a>
 </li>
@@ -1365,7 +2194,11 @@
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes">cudaq_qec.qec.enqueue_syndromes() (in module cudaq_qec.relay_solutions)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes_mapped">cudaq_qec.qec.enqueue_syndromes_mapped() (in module cudaq_qec.relay_solutions)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_corrections">cudaq_qec.qec.get_corrections() (in module cudaq_qec.relay_solutions)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_logical_measurements">cudaq_qec.qec.get_logical_measurements() (in module cudaq_qec.relay_solutions)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.reset_decoder">cudaq_qec.qec.reset_decoder() (in module cudaq_qec.relay_solutions)</a>
 </li>
@@ -1502,6 +2335,10 @@
 <h2 id="D">D</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.D_sparse">D_sparse (cudaq_qec.DemChunkSpec property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.d_sparse">d_sparse (cudaq_qec.TaskGraphNodeConfig property)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.d_sparse">d_sparse() (in module cudaq_qec)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.stabilizer_grid.data_coords">data_coords (cudaq_qec.stabilizer_grid property)</a>
@@ -1520,13 +2357,19 @@
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Decoder">Decoder (class in cudaq_qec)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.decoder_context_from_memory_circuit">decoder_context_from_memory_circuit() (in module cudaq_qec)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.decoder_type">decoder_type (cudaq_qec.TaskGraphNodeConfig property)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.DecoderContext">DecoderContext (class in cudaq_qec)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.DecoderResult">DecoderResult (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph">DecodingTaskGraph (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.dem">dem (cudaq_qec.TaskGraphNodeConfig property)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.dem_from_memory_circuit">dem_from_memory_circuit() (in module cudaq_qec)</a>
 </li>
@@ -1534,9 +2377,17 @@
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.dem_sampling">dem_sampling() (in module cudaq_qec)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec">DemChunkSpec (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec">DemChunksSpec (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemSeamSpec">DemSeamSpec (class in cudaq_qec)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.detector_error_matrix">detector_error_matrix (cudaq_qec.DetectorErrorModel property)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel">DetectorErrorModel (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.detectors_of">detectors_of (cudaq_qec.DemChunksSpec attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.stabilizer_grid.distance">distance (cudaq_qec.stabilizer_grid property)</a>
 </li>
@@ -1546,11 +2397,23 @@
 <h2 id="E">E</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_ids">error_ids (cudaq_qec.DetectorErrorModel property)</a>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.enqueue_syndrome">enqueue_syndrome (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.ensemble">ensemble (cudaq_qec.TaskGraphNodeConfig property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.error">error (cudaq_qec.TaskGraphStreamingResult property)</a>
 </li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_rates">error_rates (cudaq_qec.DetectorErrorModel property)</a>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_ids">error_ids (cudaq_qec.DetectorErrorModel property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.error_rates">error_rates (cudaq_qec.DemChunkSpec property)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_rates">(cudaq_qec.DetectorErrorModel property)</a>
+</li>
+      </ul></li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.expand">expand (cudaq_qec.DemChunkSpec attribute)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -1564,13 +2427,21 @@
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_grid">format_stabilizer_grid (cudaq_qec.stabilizer_grid attribute)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_indices">format_stabilizer_indices (cudaq_qec.stabilizer_grid attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizers">format_stabilizers (cudaq_qec.stabilizer_grid attribute)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.StopNConvSweep.frac_exhausted">frac_exhausted (cudaq_qec.relay_solutions.StopNConvSweep attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.PhaseConnection.from_phase">from_phase (cudaq_qec.PhaseConnection property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.SeamConnection.from_seam">from_seam (cudaq_qec.SeamConnection property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.from_spec">from_spec (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.from_topology">from_topology (cudaq_qec.DecodingTaskGraph attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.DecoderContext.full_component">full_component (cudaq_qec.DecoderContext attribute)</a>
 </li>
@@ -1584,6 +2455,12 @@
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.generate_timelike_sparse_detector_matrix">generate_timelike_sparse_detector_matrix() (in module cudaq_qec)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.generation">generation (cudaq_qec.TaskGraphOutputProgress property)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.generation">(cudaq_qec.TaskGraphStreamingResult property)</a>
+</li>
+      </ul></li>
       <li><a href="api/qec/python_api.html#cudaq_qec.AsyncDecoderResult.get">get (cudaq_qec.AsyncDecoderResult attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Decoder.get_block_size">get_block_size (cudaq_qec.Decoder attribute)</a>
@@ -1598,6 +2475,8 @@
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.get_decoder">get_decoder() (in module cudaq_qec)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_logical_measurements">get_logical_measurements (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_qubits">get_num_ancilla_qubits (cudaq_qec.Code attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_x_qubits">get_num_ancilla_x_qubits (cudaq_qec.Code attribute)</a>
@@ -1606,16 +2485,26 @@
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_num_data_qubits">get_num_data_qubits (cudaq_qec.Code attribute)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_logical_measurements">get_num_logical_measurements (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_msyn_per_decode">get_num_msyn_per_decode (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_msyn_per_round">get_num_msyn_per_round (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_observables">get_num_observables (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_num_x_stabilizers">get_num_x_stabilizers (cudaq_qec.Code attribute)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_num_z_stabilizers">get_num_z_stabilizers (cudaq_qec.Code attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_obs_corrections">get_obs_corrections (cudaq_qec.DecodingTaskGraph attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_observables_x">get_observables_x (cudaq_qec.Code attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_observables_z">get_observables_z (cudaq_qec.Code attribute)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_operation_one_qubit">get_operation_one_qubit (cudaq_qec.Code attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_operation_two_qubit">get_operation_two_qubit (cudaq_qec.Code attribute)</a>
@@ -1629,6 +2518,8 @@
       <li><a href="api/qec/python_api.html#cudaq_qec.Code.get_pauli_observables_matrix">get_pauli_observables_matrix (cudaq_qec.Code attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.get_pcm_for_rounds">get_pcm_for_rounds() (in module cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.get_phase">get_phase (cudaq_qec.DemChunksSpec attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.get_sorted_pcm_column_indices">get_sorted_pcm_column_indices() (in module cudaq_qec)</a>
 </li>
@@ -1653,18 +2544,74 @@
   </ul></td>
 </tr></table>
 
+<h2 id="H">H</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.H_sparse">H_sparse (cudaq_qec.DemChunkSpec property)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.DemSeamSpec.H_sparse">(cudaq_qec.DemSeamSpec property)</a>
+</li>
+      </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.h_sparse">h_sparse (cudaq_qec.TaskGraphNodeConfig property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.has_D_sparse">has_D_sparse (cudaq_qec.DemChunksSpec attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.has_repeating_phase">has_repeating_phase (cudaq_qec.DemChunksSpec attribute)</a>
+</li>
+  </ul></td>
+</tr></table>
+
 <h2 id="I">I</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.PhaseSpecEntry.id">id (cudaq_qec.PhaseSpecEntry property)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.SeamSpecEntry.id">(cudaq_qec.SeamSpecEntry property)</a>
+</li>
+        <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.id">(cudaq_qec.TaskGraphNodeConfig property)</a>
+</li>
+      </ul></li>
       <li><a href="api/core/cpp_api.html#c.INSTANTIATE_REGISTRY">INSTANTIATE_REGISTRY (C macro)</a>
 </li>
       <li><a href="api/core/cpp_api.html#c.INSTANTIATE_REGISTRY_NO_ARGS">INSTANTIATE_REGISTRY_NO_ARGS (C macro)</a>
 </li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.is_empty">is_empty (cudaq_qec.DemChunkSpec attribute)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.is_empty">(cudaq_qec.DemChunksSpec attribute)</a>
+</li>
+      </ul></li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.PhaseConnection.is_self">is_self (cudaq_qec.PhaseConnection attribute)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.RelaySolutionRecords.iters">iters (cudaq_qec.relay_solutions.RelaySolutionRecords attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.StopNConvSweep.iters_percentiles">iters_percentiles (cudaq_qec.relay_solutions.StopNConvSweep attribute)</a>
+</li>
+  </ul></td>
+</tr></table>
+
+<h2 id="J">J</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.join_params">join_params (cudaq_qec.TaskGraphEnsembleSpec property)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.join_strategy">join_strategy (cudaq_qec.TaskGraphEnsembleSpec property)</a>
+</li>
+  </ul></td>
+</tr></table>
+
+<h2 id="K">K</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.kind">kind (cudaq_qec.TaskGraphNodeConfig property)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -1680,7 +2627,19 @@
 <h2 id="M">M</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.m2o_sparse">m2o_sparse (cudaq_qec.DemChunkSpec property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.max_in_flight">max_in_flight (cudaq_qec.TaskGraphNodeConfig property)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.RelaySolutionRecords.max_records">max_records (cudaq_qec.relay_solutions.RelaySolutionRecords attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.measurements_of">measurements_of (cudaq_qec.DemChunksSpec attribute)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.measurements_per_round">measurements_per_round (cudaq_qec.DemChunksSpec property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.minimum_rounds">minimum_rounds (cudaq_qec.DemChunksSpec attribute)</a>
 </li>
       <li>
     module
@@ -1699,17 +2658,35 @@
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.StopNConvSweep.n">n (cudaq_qec.relay_solutions.StopNConvSweep attribute)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.name">name (cudaq_qec.TaskGraphOutputProgress property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.node_params">node_params (cudaq_qec.TaskGraphNodeConfig property)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_detectors">num_detectors (cudaq_qec.DetectorErrorModel attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_error_mechanisms">num_error_mechanisms (cudaq_qec.DetectorErrorModel attribute)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.StopNConvSweep.num_errors">num_errors (cudaq_qec.relay_solutions.StopNConvSweep attribute)</a>
 </li>
-      <li><a href="api/qec/python_api.html#cudaq_qec.DecoderContext.num_measurements">num_measurements (cudaq_qec.DecoderContext property)</a>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.num_faults">num_faults (cudaq_qec.DemChunkSpec property)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecoderContext.num_measurements">num_measurements (cudaq_qec.DecoderContext property)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.num_measurements">(cudaq_qec.DemChunkSpec property)</a>
+</li>
+      </ul></li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_observables">num_observables (cudaq_qec.DetectorErrorModel attribute)</a>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.num_members">num_members (cudaq_qec.TaskGraphEnsembleSpec property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.num_observables">num_observables (cudaq_qec.DemChunksSpec attribute)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_observables">(cudaq_qec.DetectorErrorModel attribute)</a>
+</li>
+      </ul></li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.num_rounds">num_rounds (cudaq_qec.DemChunksSpec property)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.StopNConvSweep.num_unconverged">num_unconverged (cudaq_qec.relay_solutions.StopNConvSweep attribute)</a>
 </li>
@@ -1731,19 +2708,35 @@
 <h2 id="O">O</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.O_sparse">O_sparse (cudaq_qec.DemChunkSpec property)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.DemSeamSpec.O_sparse">(cudaq_qec.DemSeamSpec property)</a>
+</li>
+      </ul></li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.o_sparse">o_sparse (cudaq_qec.TaskGraphNodeConfig property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.observable_names">observable_names (cudaq_qec.DemChunksSpec property)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.DetectorErrorModel.observables_flips_matrix">observables_flips_matrix (cudaq_qec.DetectorErrorModel property)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.operation_completed">operation_completed (cudaq_qec.TaskGraphStreamingResult property)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.BatchDecoderResult.opt_results">opt_results (cudaq_qec.BatchDecoderResult property)</a>
 
       <ul>
         <li><a href="api/qec/python_api.html#cudaq_qec.DecoderResult.opt_results">(cudaq_qec.DecoderResult property)</a>
 </li>
       </ul></li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder.optimize_path">optimize_path() (cudaq_qec.relay_solutions.cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder method)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.stabilizer_grid.orientation">orientation (cudaq_qec.stabilizer_grid property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.output_names">output_names (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.outputs">outputs (cudaq_qec.TaskGraphStreamingResult property)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -1753,15 +2746,29 @@
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.RelaySolutionRecords.packed">packed (cudaq_qec.relay_solutions.RelaySolutionRecords attribute)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.params">params (cudaq_qec.TaskGraphNodeConfig property)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.pcm_extend_to_n_rounds">pcm_extend_to_n_rounds() (in module cudaq_qec)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.pcm_is_sorted">pcm_is_sorted() (in module cudaq_qec)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.pcm_to_sparse_vec">pcm_to_sparse_vec() (in module cudaq_qec)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.StopNConvSweep.percentiles">percentiles (cudaq_qec.relay_solutions.StopNConvSweep attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.phase_name">phase_name (in module cudaq_qec)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.phase_sequence">phase_sequence (cudaq_qec.DemChunksSpec attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.PhaseConnection">PhaseConnection (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.phases">phases (cudaq_qec.DemChunksSpec property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.phases_supply_D_sparse">phases_supply_D_sparse (cudaq_qec.DemChunksSpec property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.PhaseSpecEntry">PhaseSpecEntry (class in cudaq_qec)</a>
 </li>
       <li><a href="api/qec/cpp_api.html#pymatching">pymatching (built-in class)</a>
 
@@ -1779,7 +2786,13 @@
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.RelaySolutionRecords">RelaySolutionRecords (class in cudaq_qec.relay_solutions)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.released">released (cudaq_qec.TaskGraphOutputProgress property)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.reorder_pcm_columns">reorder_pcm_columns() (in module cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.repeating_phase">repeating_phase (cudaq_qec.DemChunksSpec attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.reset_decoder">reset_decoder (cudaq_qec.DecodingTaskGraph attribute)</a>
 </li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
@@ -1789,7 +2802,15 @@
         <li><a href="api/qec/python_api.html#cudaq_qec.DecoderResult.result">(cudaq_qec.DecoderResult property)</a>
 </li>
       </ul></li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.result_revision">result_revision (cudaq_qec.TaskGraphStreamingResult property)</a>
+</li>
       <li><a href="api/qec/python_api.html#cudaq_qec.stabilizer_grid.roles">roles (cudaq_qec.stabilizer_grid property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run">run (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_all">run_all (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_batch">run_batch (cudaq_qec.DecodingTaskGraph attribute)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -1800,6 +2821,20 @@
       <li><a href="api/qec/python_api.html#cudaq_qec.sample_code_capacity">sample_code_capacity() (in module cudaq_qec)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.sample_memory_circuit">sample_memory_circuit() (in module cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.seam">seam (cudaq_qec.DemChunksSpec property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.seam_name">seam_name (in module cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.seam_specs">seam_specs (cudaq_qec.DemChunkSpec property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.SeamConnection">SeamConnection (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.SeamId">SeamId (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.SeamSpecEntry">SeamSpecEntry (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.shot_epoch">shot_epoch (cudaq_qec.TaskGraphStreamingResult property)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.shuffle_pcm_columns">shuffle_pcm_columns() (in module cudaq_qec)</a>
 </li>
@@ -1815,11 +2850,31 @@
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.sort_pcm_columns">sort_pcm_columns() (in module cudaq_qec)</a>
 </li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.PhaseSpecEntry.spec">spec (cudaq_qec.PhaseSpecEntry property)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.SeamSpecEntry.spec">(cudaq_qec.SeamSpecEntry property)</a>
+</li>
+      </ul></li>
       <li><a href="api/qec/python_api.html#cudaq_qec.stabilizer_grid">stabilizer_grid (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.status">status (cudaq_qec.TaskGraphOutputProgress property)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.status">(cudaq_qec.TaskGraphStreamingResult property)</a>
+</li>
+      </ul></li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.stim_dem">stim_dem (cudaq_qec.TaskGraphNodeConfig property)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.stop_nconv_sweep">stop_nconv_sweep() (in module cudaq_qec.relay_solutions)</a>
 </li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.StopNConvSweep">StopNConvSweep (class in cudaq_qec.relay_solutions)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.streaming_incompatibility_reason">streaming_incompatibility_reason (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.streaming_result">streaming_result (cudaq_qec.DecodingTaskGraph attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.supports_streaming">supports_streaming (cudaq_qec.DecodingTaskGraph attribute)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -1827,10 +2882,28 @@
 <h2 id="T">T</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.RelaySolutionRecords.totals">totals (cudaq_qec.relay_solutions.RelaySolutionRecords attribute)</a>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphClosure">TaskGraphClosure (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec">TaskGraphEnsembleSpec (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig">TaskGraphNodeConfig (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOptions">TaskGraphOptions (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress">TaskGraphOutputProgress (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult">TaskGraphStreamingResult (class in cudaq_qec)</a>
 </li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingStatus">TaskGraphStreamingStatus (class in cudaq_qec)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.PhaseConnection.to_phase">to_phase (cudaq_qec.PhaseConnection property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.SeamConnection.to_seam">to_seam (cudaq_qec.SeamConnection property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.RelaySolutionRecords.totals">totals (cudaq_qec.relay_solutions.RelaySolutionRecords attribute)</a>
+</li>
       <li><a href="api/qec/cpp_api.html#trt_decoder">trt_decoder (built-in class)</a>
 
       <ul>
@@ -1851,7 +2924,23 @@
 <h2 id="V">V</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.DemChunkSpec.validate">validate (cudaq_qec.DemChunkSpec attribute)</a>
+
+      <ul>
+        <li><a href="api/qec/python_api.html#cudaq_qec.DemChunksSpec.validate">(cudaq_qec.DemChunksSpec attribute)</a>
+</li>
+      </ul></li>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.decoder_config.validate_custom_args">validate_custom_args() (cudaq_qec.relay_solutions.decoder_config method)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/qec/python_api.html#cudaq_qec.SeamId.value">value (cudaq_qec.SeamId property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.value_offset">value_offset (cudaq_qec.TaskGraphOutputProgress property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.value_width">value_width (cudaq_qec.TaskGraphOutputProgress property)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.values">values (cudaq_qec.TaskGraphStreamingResult property)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -1864,6 +2953,8 @@
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/qec/python_api.html#cudaq_qec.relay_solutions.RelaySolutionRecords.width">width (cudaq_qec.relay_solutions.RelaySolutionRecords attribute)</a>
+</li>
+      <li><a href="api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.windows">windows (cudaq_qec.TaskGraphNodeConfig property)</a>
 </li>
   </ul></td>
 </tr></table>

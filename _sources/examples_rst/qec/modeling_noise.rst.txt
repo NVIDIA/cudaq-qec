@@ -122,9 +122,10 @@ Code Explanation
     - X-basis readout when preparing the logical `|+>` or logical `|->` state with the `qec.operation.prepp` or `qec.operation.prepm` kernels.
 
 6. Logical Errors:
-    - From here, the decoding procedure is again similar to the code capacity case, except that we use a Pauli frame to track errors that happen each QEC cycle.
-    - The final values of the Pauli frame tell us how our logical state flipped during the experiment, and what needs to be done to correct it.
-    - We compare our known initial state (corrected by the Pauli frame), against our measured data qubits to determine if a logical error occurred.
+    - The decoder is built from the detector error model (DEM) of the same memory circuit and noise model, rather than from the code's parity check matrix. The DEM's `detector_error_matrix` has one row per detector, so it matches the width of each sampled shot.
+    - Each shot is decoded as a whole into the most likely set of error mechanisms.
+    - The DEM's `observables_flips_matrix` then tells us whether those errors flipped the logical observable.
+    - We compare our known initial state against our measured data qubits, corrected by that predicted flip, to determine if a logical error occurred.
 
 
 The CUDA-Q QEC library thus provides a platform for numerical QEC experiments. The `qec.code` can be used to analyze a variety of QEC codes (both library or user provided), with a variety of decoders (both library or user provided).

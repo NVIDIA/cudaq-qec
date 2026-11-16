@@ -1,0 +1,1416 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+  <meta charset="utf-8" /><meta name="generator" content="Docutils 0.18.1: http://docutils.sourceforge.net/" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ising Color-Code Emulator with Decoding Server &mdash; NVIDIA CUDA-Q QEC  documentation</title>
+      <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/css/theme.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/tabs.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/copybutton.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/cudaq_override.css" type="text/css" />
+      <link rel="stylesheet" href="../../_static/sg_gallery.css" type="text/css" />
+      <link rel="stylesheet" href="/__w/cudaq-qec/cudaq-qec/docs/sphinx/_static/cudaq_override.css" type="text/css" />
+  <!--[if lt IE 9]>
+    <script src="../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js"></script>
+        <script src="../../_static/jquery.js"></script>
+        <script src="../../_static/underscore.js"></script>
+        <script src="../../_static/_sphinx_javascript_frameworks_compat.js"></script>
+        <script src="../../_static/doctools.js"></script>
+        <script src="../../_static/sphinx_highlight.js"></script>
+        <script src="../../_static/tabs.js"></script>
+        <script src="../../_static/clipboard.min.js"></script>
+        <script src="../../_static/copybutton.js"></script>
+        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+        <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
+        <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+        <script src="../../_static/version-switcher.js"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="Streaming Interleaved Feed-forward Latency (SIFL)" href="sifl_demo.html" />
+    <link rel="prev" title="AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)" href="realtime_predecoder_fpga.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #76b900" > 
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            NVIDIA CUDA-Q QEC
+          </a>
+              <div class="version">
+                0.9.0
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+
+  <style>
+    /* Sidebar header (and topbar for mobile) */
+    .wy-side-nav-search, .wy-nav-top {
+      background: #76b900;
+    }
+
+    .wy-side-nav-search a:link, .wy-nav-top a:link {
+      color: #fff;
+    }
+    .wy-side-nav-search a:visited, .wy-nav-top a:visited {
+      color: #fff;
+    }
+    .wy-side-nav-search a:hover, .wy-nav-top a:hover {
+      color: #fff;
+    }
+
+    .wy-menu-vertical a:link, .wy-menu-vertical a:visited {
+      color: #d9d9d9
+    }
+
+    .wy-menu-vertical a:active {
+      background-color: #76b900
+    }
+
+    .wy-side-nav-search>div.version {
+      color: rgba(0, 0, 0, 0.3)
+    }
+
+    /* override table width restrictions */
+    .wy-table-responsive table td, .wy-table-responsive table th {
+        white-space: normal;
+    }
+
+    .wy-table-responsive {
+        margin-bottom: 24px;
+        max-width: 100%;
+        overflow: visible;
+    }
+  </style>
+  
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart/installation.html">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#pip-install">pip install</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#docker-container">Docker Container</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#building-from-source">Building from Source</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installing-pytorch">Installing PyTorch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Libraries</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/index.html">CUDA-Q QEC - Quantum Error Correction Library</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html">QEC Codes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#qec-code-framework-cudaq-qec-code">QEC Code Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::code</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#class-structure">Class Structure</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#implementing-a-new-code">Implementing a New Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#example-steane-code">Example: Steane Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#implementing-a-new-code-in-python">Implementing a New Code in Python</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#key-points">Key Points</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#using-the-code-framework">Using the Code Framework</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#pre-built-qec-codes">Pre-built QEC Codes</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#steane-code">Steane Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#repetition-code">Repetition Code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#surface-code">Surface Code</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html">QEC Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#class-structure">Class Structure</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#migrating-existing-c-decoder-plugins">Migrating Existing C++ Decoder Plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-new-decoder-in-c">Implementing a New Decoder in C++</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#example-lookup-table-decoder">Example: Lookup Table Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-decoder-in-python">Implementing a Decoder in Python</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#key-features">Key Features</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#usage-example">Usage Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#detector-error-model">Detector Error Model</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#decoding-from-stim-dem-text">Decoding from Stim DEM Text</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dem-sampling">DEM Sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dynamic-dem">Dynamic DEM</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#quantum-low-density-parity-check-decoder">Quantum Low-Density Parity-Check Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensor-network-decoder">Tensor Network Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensorrt-decoder">TensorRT Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#pymatching-decoder">PyMatching Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#chromobius-decoder">Chromobius Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#sliding-window-decoder">Sliding Window Decoder</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#workflow">Workflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#memory-experiment-configuration-generator">Memory experiment configuration generator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html">Experiments and Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#memory-circuit-experiments">Memory Circuit Experiments</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/conventions.html">Conventions</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="reference internal" href="examples.html">CUDA-Q QEC by Example</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="creating_qec_codes.html">   Creating New QEC Codes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html">   Experiments and Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#cuda-q-qec-implementation">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#code-explanation">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id1">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id2">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#memory-circuit-experiments">Memory Circuit Experiments</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#function-variants">Function Variants</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#return-values">Return Values</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#example-usage">Example Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#additional-noise-models">Additional Noise Models</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html">   Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#decoding-from-stim-dem-text">Decoding From Stim DEM Text</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#generating-a-multi-round-parity-check-matrix">Generating a Multi-Round Parity Check Matrix</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#dem-sampling-monte-carlo-sampling-from-detector-error-models">DEM Sampling — Monte-Carlo Sampling from Detector Error Models</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#example">Example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#gpu-acceleration">GPU Acceleration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#input-types-and-backend-selection">Input Types and Backend Selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#getting-started-with-the-nvidia-qldpc-decoder">Getting Started with the NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#belief-propagation-methods">Belief Propagation Methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#usage-example">Usage Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#deploying-ai-decoders-with-tensorrt">Deploying AI Decoders with TensorRT</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#overview-of-the-training-to-deployment-pipeline">Overview of the Training-to-Deployment Pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#training-a-neural-network-decoder-with-pytorch-and-stim">Training a Neural Network Decoder with PyTorch and Stim</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#using-the-tensorrt-decoder-in-cuda-q-qec">Using the TensorRT Decoder in CUDA-Q QEC</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#converting-onnx-models-to-tensorrt-engines">Converting ONNX Models to TensorRT Engines</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#dependencies-and-requirements">Dependencies and Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoders.html#id2">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#matching-based-decoding-with-pymatching">Matching-Based Decoding with PyMatching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="decoding_task_graph.html">   Decoding Task Graphs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#quick-start-a-sliding-window">Quick start: a sliding window</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#decoding-complete-shots">Decoding complete shots</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#streaming">Streaming</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#reading-results">Reading results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#logical-measurements">Logical measurements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#graphs-of-several-nodes">Graphs of several nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#node-kinds">Node kinds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#guarded-sliding-windows">Guarded sliding windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#asynchronous-streaming">Asynchronous streaming</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_parallel_window.html">   Task Graph Parallel Window</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#how-it-works">How it works</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#the-model">The model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#configuration">Configuration</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_parallel_window.html#advanced-options">Advanced options</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#building-a-graph-in-code">Building a graph in code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#decoding-a-shot">Decoding a shot</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#serving-with-the-decoding-server">Serving with the decoding server</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#what-the-pattern-builds">What the pattern builds</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_parallel_window.html#sharing-data-across-decoders">Sharing data across decoders</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_ensemble.html">   Task Graph Decoder Ensembles</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#how-it-works">How it works</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#configuration">Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#building-a-graph-in-code">Building a graph in code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#extending-ensembles">Extending ensembles</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_ensemble.html#reporting-a-cost">Reporting a cost</a></li>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_ensemble.html#honoring-cancellation">Honoring cancellation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_ensemble.html#pushing-candidates">Pushing candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="task_graph_ensemble.html#adding-a-selection-strategy">Adding a selection strategy</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_reference.html">   Task Graph Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#asynchronous-streaming-options">Asynchronous streaming options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#fire-pools">Fire pools</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#streaming-results-in-detail">Streaming results in detail</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#staged-outputs">Staged outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#edge-values">Edge values</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#logical-outputs">Logical outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#native-streaming-nodes">Native streaming nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#arbitrary-length-sliding-windows">Arbitrary-length sliding windows</a></li>
+</ul>
+</li>
+<li class="toctree-l2 current"><a class="reference internal" href="realtime_decoding.html">   Realtime Decoding</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html">Getting Started with Realtime Decoding</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#configuration">Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#backend-selection">Backend Selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#compilation-and-execution-examples">Compilation and Execution Examples</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server.html">Decoding Server User Guide</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#workflow-at-a-glance">Workflow at a glance</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#generate-a-memory-experiment-configuration">Generate a memory-experiment configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#color-code-enabled-ai-decoder">Color-code-enabled AI decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#cuda-q-examples-surface-code-programs">CUDA-Q examples: surface-code programs</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#use-a-custom-decoder-plugin">Use a custom decoder plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#integrate-a-third-party-runtime">Integrate a third-party runtime</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html">Realtime Decoding with CUDA-Q Decoding Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#deliverables-versus-the-example">Deliverables versus the example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#building-the-example">Building the example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#ising-decoder-tensorrt-predecoder-pymatching">Ising decoder (TensorRT predecoder + PyMatching)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#decoders">Decoders</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#the-example-source">The example source</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="playback_emulator.html">Playback Emulator</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#schedule-format">Schedule Format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#output-format">Output Format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#syndrome-sources">Syndrome Sources</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#sessions">Sessions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#run-options">Run Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#data-directory-layout">Data Directory Layout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#building">Building</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html">AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#repository-layout">Repository Layout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#data-directory-layout">Data Directory Layout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#building">Building</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#emulated-end-to-end-test">Emulated End-to-End Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#fpga-end-to-end-test">FPGA End-to-End Test</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#orchestration-script-reference">Orchestration Script Reference</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">Ising Color-Code Emulator with Decoding Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#the-example-source">The example source</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html">Streaming Interleaved Feed-forward Latency (SIFL)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#the-example-source">The example source</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html">Dynamic DEM</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#a-model">A model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#detectors-and-seams">Detectors and seams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#measurements-and-readout">Measurements and readout</a></li>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#building-a-model-in-code">Building a model in code</a></li>
+<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Performance Studies</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/index.html">Performance Studies</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html">Improving Relay BP Decoding With Gamma Ensembles</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#performance-comparison">Performance Comparison</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#latency-distribution">Latency Distribution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#logical-error-rate-under-hard-deadlines">Logical Error Rate Under Hard Deadlines</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html">Sweeping Relay BP Stopping Criteria From a Single Run</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#recording-a-run">Recording a run</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#example-relaybp-n-on-the-gross-code">Example: RelayBP-N on the gross code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#practical-notes">Practical notes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html">Improving BP+OSD Decoding With Min-LLR OSD Initialization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#column-ordering-importance-and-sensitivity">Column Ordering Importance and Sensitivity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#experiment">Experiment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#results">Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#controls-ordering-versus-iteration-count">Controls: Ordering Versus Iteration Count</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Trajectory-Calibrated BP and Jittered OSD Beam Search</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#key-decoder-options">Key Decoder Options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#using-tcbp-and-jobs">Using TCBP and JOBS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#comparison-with-tesseract">Comparison With Tesseract</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#complementary-gap-post-selection">Complementary-Gap Post-Selection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#limitations-and-practical-guidance">Limitations and Practical Guidance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#references">References</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding Real-Time Decode Latency With NV-Fusion</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html">Learning Noise From Detector Data and Decoding With the Learned Rates</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#experiment-setup">Experiment Setup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-1-get-the-circuit-and-fit-the-tcbp-model">Step 1: Get the Circuit and Fit the TCBP Model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-2-learn-the-rates-from-detector-data">Step 2: Learn the Rates From Detector Data</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-3-decode-with-each-prior">Step 3: Decode With Each Prior</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#learning-time-and-accuracy">Learning Time and Accuracy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#error-of-the-learned-rates-versus-the-number-of-shots">Error of the Learned Rates Versus the Number of Shots</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#logical-error-rate-under-the-three-priors">Logical Error Rate Under the Three Priors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#choosing-the-number-of-passes">Choosing the Number of Passes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#reproducing-these-results">Reproducing These Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../api/core/cpp_api.html">CUDA-Q QEC Namespaces and Core Library C++ API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/core/cpp_api.html#namespaces">Namespaces</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/core/cpp_api.html#core">Core</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/qec/cpp_api.html">CUDA-Q QEC C++ API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#code">Code</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#detector-error-model">Detector Error Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#dynamic-dem">Dynamic DEM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#detector-error-model-dem-sampling">Detector Error Model (DEM) Sampling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#decoder-interfaces">Decoder Interfaces</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#decoding-task-graph">Decoding Task Graph</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#i-o-types">I/O types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#graph">Graph</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#built-in-decoders">Built-in Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#nvidia-qldpc-decoder">NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#nv_qldpc_decoder"><code class="docutils literal notranslate"><span class="pre">nv_qldpc_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#nv_fusion_decoder"><code class="docutils literal notranslate"><span class="pre">nv_fusion_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#sliding-window-decoder">Sliding Window Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#sliding_window"><code class="docutils literal notranslate"><span class="pre">sliding_window</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#tensorrt-decoder">TensorRT Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#trt_decoder"><code class="docutils literal notranslate"><span class="pre">trt_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#pymatching-decoder">PyMatching Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#pymatching"><code class="docutils literal notranslate"><span class="pre">pymatching</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#chromobius-decoder">Chromobius Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/cpp_api.html#chromobius"><code class="docutils literal notranslate"><span class="pre">chromobius</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#realtime-decoding">Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#core-decoding-functions">Core Decoding Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#configuration-api">Configuration API</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#helper-functions">Helper Functions</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#realtime-pipeline-api">Realtime Pipeline API</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#configuration">Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#gpu-stage">GPU Stage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#cpu-stage">CPU Stage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#completion">Completion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#ring-buffer-injector">Ring Buffer Injector</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/cpp_api.html#pipeline">Pipeline</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#parity-check-matrix-utilities">Parity Check Matrix Utilities</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#logger">Logger</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/cpp_api.html#common">Common</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/qec/python_api.html">CUDA-Q QEC Python API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#code">Code</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code"><code class="docutils literal notranslate"><span class="pre">Code</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.contains_operation"><code class="docutils literal notranslate"><span class="pre">Code.contains_operation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_ancilla_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_x_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_ancilla_x_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_ancilla_z_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_ancilla_z_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_data_qubits"><code class="docutils literal notranslate"><span class="pre">Code.get_num_data_qubits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_x_stabilizers"><code class="docutils literal notranslate"><span class="pre">Code.get_num_x_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_num_z_stabilizers"><code class="docutils literal notranslate"><span class="pre">Code.get_num_z_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_observables_x"><code class="docutils literal notranslate"><span class="pre">Code.get_observables_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_observables_z"><code class="docutils literal notranslate"><span class="pre">Code.get_observables_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_operation_one_qubit"><code class="docutils literal notranslate"><span class="pre">Code.get_operation_one_qubit</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_operation_two_qubit"><code class="docutils literal notranslate"><span class="pre">Code.get_operation_two_qubit</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_parity"><code class="docutils literal notranslate"><span class="pre">Code.get_parity</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_parity_x"><code class="docutils literal notranslate"><span class="pre">Code.get_parity_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_parity_z"><code class="docutils literal notranslate"><span class="pre">Code.get_parity_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_pauli_observables_matrix"><code class="docutils literal notranslate"><span class="pre">Code.get_pauli_observables_matrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_stabilizer_round"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizer_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_stabilizer_schedule_x"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizer_schedule_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_stabilizer_schedule_z"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizer_schedule_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Code.get_stabilizers"><code class="docutils literal notranslate"><span class="pre">Code.get_stabilizers</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#surface-code-layout">Surface code layout</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.data_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.data_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.data_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.data_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.distance"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.distance</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_data_grid"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_data_grid</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizer_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_grid"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizer_grid</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizer_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizer_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.format_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.format_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_pairs_x"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_pairs_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_pairs_z"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_pairs_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_x"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_cnot_schedule_z"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_cnot_schedule_z</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_spin_op_observables"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_spin_op_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.get_spin_op_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.get_spin_op_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.grid_length"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.grid_length</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.orientation"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.orientation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.roles"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.roles</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.x_stab_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.x_stab_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.x_stab_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.x_stab_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.x_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.x_stabilizers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.z_stab_coords"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.z_stab_coords</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.z_stab_indices"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.z_stab_indices</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.stabilizer_grid.z_stabilizers"><code class="docutils literal notranslate"><span class="pre">stabilizer_grid.z_stabilizers</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#detector-error-model">Detector Error Model</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.canonicalize_for_rounds"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.canonicalize_for_rounds</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.canonicalize_for_rounds_with_boundary"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.canonicalize_for_rounds_with_boundary</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.detector_error_matrix"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.detector_error_matrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_ids"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.error_ids</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.error_rates"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.error_rates</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_detectors"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.num_detectors</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_error_mechanisms"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.num_error_mechanisms</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.num_observables"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.num_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DetectorErrorModel.observables_flips_matrix"><code class="docutils literal notranslate"><span class="pre">DetectorErrorModel.observables_flips_matrix</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext"><code class="docutils literal notranslate"><span class="pre">DecoderContext</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext.full_component"><code class="docutils literal notranslate"><span class="pre">DecoderContext.full_component</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext.num_measurements"><code class="docutils literal notranslate"><span class="pre">DecoderContext.num_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext.x_component"><code class="docutils literal notranslate"><span class="pre">DecoderContext.x_component</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderContext.z_component"><code class="docutils literal notranslate"><span class="pre">DecoderContext.z_component</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.dem_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">dem_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.x_dem_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">x_dem_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.z_dem_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">z_dem_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.decoder_context_from_memory_circuit"><code class="docutils literal notranslate"><span class="pre">decoder_context_from_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.dem_from_stim_text"><code class="docutils literal notranslate"><span class="pre">dem_from_stim_text()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.d_sparse"><code class="docutils literal notranslate"><span class="pre">d_sparse()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#dynamic-dem">Dynamic DEM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.connections"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.connections</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.detectors_of"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.detectors_of</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.get_phase"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.get_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.has_D_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.has_D_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.has_repeating_phase"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.has_repeating_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.is_empty"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.is_empty</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.measurements_of"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.measurements_of</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.measurements_per_round"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.measurements_per_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.minimum_rounds"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.minimum_rounds</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.num_observables"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.num_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.num_rounds"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.num_rounds</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.observable_names"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.observable_names</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.phase_sequence"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.phase_sequence</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.phases"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.phases</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.phases_supply_D_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.phases_supply_D_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.repeating_phase"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.repeating_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.seam"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.seam</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunksSpec.validate"><code class="docutils literal notranslate"><span class="pre">DemChunksSpec.validate</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseSpecEntry"><code class="docutils literal notranslate"><span class="pre">PhaseSpecEntry</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseSpecEntry.id"><code class="docutils literal notranslate"><span class="pre">PhaseSpecEntry.id</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseSpecEntry.spec"><code class="docutils literal notranslate"><span class="pre">PhaseSpecEntry.spec</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseConnection"><code class="docutils literal notranslate"><span class="pre">PhaseConnection</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseConnection.from_phase"><code class="docutils literal notranslate"><span class="pre">PhaseConnection.from_phase</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseConnection.is_self"><code class="docutils literal notranslate"><span class="pre">PhaseConnection.is_self</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.PhaseConnection.to_phase"><code class="docutils literal notranslate"><span class="pre">PhaseConnection.to_phase</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamConnection"><code class="docutils literal notranslate"><span class="pre">SeamConnection</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamConnection.from_seam"><code class="docutils literal notranslate"><span class="pre">SeamConnection.from_seam</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamConnection.to_seam"><code class="docutils literal notranslate"><span class="pre">SeamConnection.to_seam</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.D_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.D_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.H_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.H_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.O_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.O_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.error_rates"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.error_rates</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.expand"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.expand</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.is_empty"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.is_empty</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.m2o_sparse"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.m2o_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.num_faults"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.num_faults</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.num_measurements"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.num_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.seam_specs"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.seam_specs</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemChunkSpec.validate"><code class="docutils literal notranslate"><span class="pre">DemChunkSpec.validate</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamSpecEntry"><code class="docutils literal notranslate"><span class="pre">SeamSpecEntry</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamSpecEntry.id"><code class="docutils literal notranslate"><span class="pre">SeamSpecEntry.id</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamSpecEntry.spec"><code class="docutils literal notranslate"><span class="pre">SeamSpecEntry.spec</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemSeamSpec"><code class="docutils literal notranslate"><span class="pre">DemSeamSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemSeamSpec.H_sparse"><code class="docutils literal notranslate"><span class="pre">DemSeamSpec.H_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DemSeamSpec.O_sparse"><code class="docutils literal notranslate"><span class="pre">DemSeamSpec.O_sparse</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamId"><code class="docutils literal notranslate"><span class="pre">SeamId</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.SeamId.value"><code class="docutils literal notranslate"><span class="pre">SeamId.value</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.seam_name"><code class="docutils literal notranslate"><span class="pre">seam_name</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.phase_name"><code class="docutils literal notranslate"><span class="pre">phase_name</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#decoder-interfaces">Decoder Interfaces</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder"><code class="docutils literal notranslate"><span class="pre">Decoder</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.decode"><code class="docutils literal notranslate"><span class="pre">Decoder.decode</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.decode_async"><code class="docutils literal notranslate"><span class="pre">Decoder.decode_async</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.decode_batch"><code class="docutils literal notranslate"><span class="pre">Decoder.decode_batch</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.get_block_size"><code class="docutils literal notranslate"><span class="pre">Decoder.get_block_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.get_syndrome_size"><code class="docutils literal notranslate"><span class="pre">Decoder.get_syndrome_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder.get_version"><code class="docutils literal notranslate"><span class="pre">Decoder.get_version</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#decoding-task-graph">Decoding Task Graph</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.clear_corrections"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.clear_corrections</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.combine"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.combine</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.enqueue_syndrome"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.enqueue_syndrome</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.from_spec"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.from_spec</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.from_topology"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.from_topology</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_logical_measurements"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_logical_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_logical_measurements"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_logical_measurements</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_msyn_per_decode"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_msyn_per_decode</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_msyn_per_round"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_msyn_per_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_num_observables"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_num_observables</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.get_obs_corrections"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.get_obs_corrections</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.output_names"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.output_names</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.reset_decoder"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.reset_decoder</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.run</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_all"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.run_all</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_batch"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.run_batch</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.streaming_incompatibility_reason"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.streaming_incompatibility_reason</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.streaming_result"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.streaming_result</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.supports_streaming"><code class="docutils literal notranslate"><span class="pre">DecodingTaskGraph.supports_streaming</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.d_sparse"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.d_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.decoder_type"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.decoder_type</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.dem"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.dem</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.ensemble"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.ensemble</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.h_sparse"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.h_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.id"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.id</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.kind"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.kind</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.max_in_flight"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.max_in_flight</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.node_params"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.node_params</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.o_sparse"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.o_sparse</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.params"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.params</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.stim_dem"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.stim_dem</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig.windows"><code class="docutils literal notranslate"><span class="pre">TaskGraphNodeConfig.windows</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.add_member"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.add_member</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.join_params"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.join_params</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.join_strategy"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.join_strategy</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphEnsembleSpec.num_members"><code class="docutils literal notranslate"><span class="pre">TaskGraphEnsembleSpec.num_members</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_coordinator_cpu"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_coordinator_cpu</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_num_workers"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_num_workers</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_queue_capacity"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_queue_capacity</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_spin_pause_iters"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_spin_pause_iters</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_streaming"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_streaming</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions.async_worker_cpus"><code class="docutils literal notranslate"><span class="pre">TaskGraphOptions.async_worker_cpus</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.closure"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.closure</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.completed_operations"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.completed_operations</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.error"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.error</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.generation"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.generation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.operation_completed"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.operation_completed</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.outputs"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.outputs</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.result_revision"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.result_revision</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.shot_epoch"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.shot_epoch</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.status"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.status</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingResult.values"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingResult.values</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.closure"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.closure</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.coverage_begin_round"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.coverage_begin_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.coverage_end_round"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.coverage_end_round</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.generation"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.generation</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.name"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.name</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.released"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.released</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.status"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.status</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.value_offset"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.value_offset</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOutputProgress.value_width"><code class="docutils literal notranslate"><span class="pre">TaskGraphOutputProgress.value_width</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphStreamingStatus"><code class="docutils literal notranslate"><span class="pre">TaskGraphStreamingStatus</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphClosure"><code class="docutils literal notranslate"><span class="pre">TaskGraphClosure</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult"><code class="docutils literal notranslate"><span class="pre">DecoderResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult.converged"><code class="docutils literal notranslate"><span class="pre">DecoderResult.converged</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult.opt_results"><code class="docutils literal notranslate"><span class="pre">DecoderResult.opt_results</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecoderResult.result"><code class="docutils literal notranslate"><span class="pre">DecoderResult.result</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.batch_opt_results"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.batch_opt_results</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.converged"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.converged</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.opt_results"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.opt_results</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.BatchDecoderResult.result"><code class="docutils literal notranslate"><span class="pre">BatchDecoderResult.result</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.AsyncDecoderResult"><code class="docutils literal notranslate"><span class="pre">AsyncDecoderResult</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.AsyncDecoderResult.get"><code class="docutils literal notranslate"><span class="pre">AsyncDecoderResult.get</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.AsyncDecoderResult.ready"><code class="docutils literal notranslate"><span class="pre">AsyncDecoderResult.ready</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.get_decoder"><code class="docutils literal notranslate"><span class="pre">get_decoder()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#built-in-decoders">Built-in Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#nvidia-qldpc-decoder">NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.nv_qldpc_decoder"><code class="docutils literal notranslate"><span class="pre">nv_qldpc_decoder</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#module-cudaq_qec.relay_solutions">Relay Solutions Post-Processing</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.nv_fusion_decoder"><code class="docutils literal notranslate"><span class="pre">nv_fusion_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#sliding-window-decoder">Sliding Window Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.sliding_window"><code class="docutils literal notranslate"><span class="pre">sliding_window</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#tensorrt-decoder">TensorRT Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.trt_decoder"><code class="docutils literal notranslate"><span class="pre">trt_decoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#tensor-network-decoder">Tensor Network Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.plugins.decoders.tensor_network_decoder.TensorNetworkDecoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#pymatching-decoder">PyMatching Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.pymatching"><code class="docutils literal notranslate"><span class="pre">pymatching</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#chromobius-decoder">Chromobius Decoder</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.chromobius"><code class="docutils literal notranslate"><span class="pre">chromobius</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#realtime-decoding">Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#core-decoding-functions">Core Decoding Functions</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.enqueue_syndromes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.enqueue_syndromes_mapped"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.enqueue_syndromes_mapped()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_corrections"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.get_corrections()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.get_logical_measurements"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.get_logical_measurements()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.qec.reset_decoder"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.qec.reset_decoder()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#configuration-api">Configuration API</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#decoder-parameters">Decoder Parameters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#deprecated-typed-configuration-classes">Deprecated Typed Configuration Classes</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#configuration-functions">Configuration Functions</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#helper-functions">Helper Functions</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.pcm_to_sparse_vec"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.pcm_to_sparse_vec()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.pcm_from_sparse_vec"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.pcm_from_sparse_vec()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.relay_solutions.cudaq_qec.d_sparse"><code class="docutils literal notranslate"><span class="pre">cudaq_qec.d_sparse()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#common">Common</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.sample_memory_circuit"><code class="docutils literal notranslate"><span class="pre">sample_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.x_sample_memory_circuit"><code class="docutils literal notranslate"><span class="pre">x_sample_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.z_sample_memory_circuit"><code class="docutils literal notranslate"><span class="pre">z_sample_memory_circuit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.sample_code_capacity"><code class="docutils literal notranslate"><span class="pre">sample_code_capacity()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#detector-error-model-dem-sampling">Detector Error Model (DEM) Sampling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.dem_sampling"><code class="docutils literal notranslate"><span class="pre">dem_sampling()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/qec/python_api.html#parity-check-matrix-utilities">Parity Check Matrix Utilities</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.generate_random_pcm"><code class="docutils literal notranslate"><span class="pre">generate_random_pcm()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.generate_timelike_sparse_detector_matrix"><code class="docutils literal notranslate"><span class="pre">generate_timelike_sparse_detector_matrix()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.get_pcm_for_rounds"><code class="docutils literal notranslate"><span class="pre">get_pcm_for_rounds()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.get_sorted_pcm_column_indices"><code class="docutils literal notranslate"><span class="pre">get_sorted_pcm_column_indices()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.pcm_extend_to_n_rounds"><code class="docutils literal notranslate"><span class="pre">pcm_extend_to_n_rounds()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.pcm_is_sorted"><code class="docutils literal notranslate"><span class="pre">pcm_is_sorted()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.pcm_to_sparse_vec"><code class="docutils literal notranslate"><span class="pre">pcm_to_sparse_vec()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.reorder_pcm_columns"><code class="docutils literal notranslate"><span class="pre">reorder_pcm_columns()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.shuffle_pcm_columns"><code class="docutils literal notranslate"><span class="pre">shuffle_pcm_columns()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.simplify_pcm"><code class="docutils literal notranslate"><span class="pre">simplify_pcm()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.sort_pcm_columns"><code class="docutils literal notranslate"><span class="pre">sort_pcm_columns()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #76b900" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">NVIDIA CUDA-Q QEC</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="examples.html">CUDA-Q QEC by Example</a></li>
+          <li class="breadcrumb-item"><a href="realtime_decoding.html">Realtime Decoding</a></li>
+      <li class="breadcrumb-item active">Ising Color-Code Emulator with Decoding Server</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/examples_rst/qec/color_code_demo.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul><div class="rst-breadcrumbs-buttons" role="navigation" aria-label="Sequential page navigation">
+        <a href="realtime_predecoder_fpga.html" class="btn btn-neutral float-left" title="AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)" accesskey="p"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="sifl_demo.html" class="btn btn-neutral float-right" title="Streaming Interleaved Feed-forward Latency (SIFL)" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+  </div>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="ising-color-code-emulator-with-decoding-server">
+<h1>Ising Color-Code Emulator with Decoding Server<a class="headerlink" href="#ising-color-code-emulator-with-decoding-server" title="Permalink to this heading"></a></h1>
+<p>This example prepares and runs the
+<a class="reference external" href="https://huggingface.co/nvidia/Ising-Decoder-ColorCode-1-Fast">Ising-Decoder-ColorCode-1-Fast</a>
+neural-network predecoder using the CUDA-Q QEC realtime decoding server.
+It plots the logical error rate (LER) per round against the decode
+runtime per round, for two configurations:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">chromobius</span></code> — the Chromobius color-code decoder on its own.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">trt_decoder</span></code> — the Ising predecoder, run on TensorRT, with Chromobius as
+the global decoder for the residual syndrome.</p></li>
+</ul>
+<p>The syndromes come from Stim color-code memory experiments (distance
+<span class="math notranslate nohighlight">\(d\)</span>, <span class="math notranslate nohighlight">\(d\)</span> rounds, Z basis, physical error rate <code class="docutils literal notranslate"><span class="pre">--p</span></code>) and are
+replayed by the playback emulator. Each runtime is measured
+once per path between the emulator and the decoder (<code class="docutils literal notranslate"><span class="pre">session</span></code>):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">inproc</span></code> — the decoder runs inside the emulator process.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">server</span></code> — a <code class="docutils literal notranslate"><span class="pre">decoding_server</span></code> over UDP on the local machine.</p></li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><a class="reference internal" href="realtime_decoding_demo.html"><span class="doc">Realtime Decoding with CUDA-Q Decoding Server</span></a> serves the surface-code Ising
+predecoder from <code class="docutils literal notranslate"><span class="pre">decoding_server</span></code>, with syndromes sourced from a QPU kernel or an
+FPGA. Here, the playback emulator replays the pre-sampled shots of the superdense color-code
+memory circuit to each decoder on a fixed timing loop.</p>
+<p>For starting the prebuilt Docker server and connecting clients, see
+<a class="reference internal" href="decoding_server.html#decoding-server-color-code"><span class="std std-ref">Color-code-enabled AI decoder</span></a>. The model preparation and benchmark on
+this page require the software listed below.</p>
+</div>
+<section id="prerequisites">
+<h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Permalink to this heading"></a></h2>
+<section id="hardware">
+<h3>Hardware<a class="headerlink" href="#hardware" title="Permalink to this heading"></a></h3>
+<ul class="simple">
+<li><p>CUDA-capable GPU (for the TensorRT engine)</p></li>
+</ul>
+</section>
+<section id="software">
+<h3>Software<a class="headerlink" href="#software" title="Permalink to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong>CUDA Toolkit</strong> 12.6 or later</p></li>
+<li><p><strong>TensorRT</strong> 10.x libraries (<code class="docutils literal notranslate"><span class="pre">libnvinfer</span></code>, <code class="docutils literal notranslate"><span class="pre">libnvonnxparser</span></code>), also
+needed when CUDA-Q QEC is built: the TensorRT decoder plugin is built only if
+TensorRT is found (see <a class="reference internal" href="realtime_predecoder_pymatching.html"><span class="doc">AI Predecoder with CUDA-Q Realtime</span></a>)</p></li>
+<li><p><strong>CUDA-Q SDK</strong> pre-installed (<code class="docutils literal notranslate"><span class="pre">cudaq_qec</span></code> imports the <code class="docutils literal notranslate"><span class="pre">cudaq</span></code> Python
+package)</p></li>
+<li><p><strong>CUDA-Q Realtime</strong> libraries (<code class="docutils literal notranslate"><span class="pre">libcudaq-realtime</span></code> and the UDP bridge
+<code class="docutils literal notranslate"><span class="pre">libcudaq-realtime-bridge-udp</span></code>), used by <code class="docutils literal notranslate"><span class="pre">decoding_server</span></code></p></li>
+<li><p><strong>CUDA-Q QEC</strong> installed with <code class="docutils literal notranslate"><span class="pre">decoding_server</span></code>, the playback emulator, and
+the TensorRT decoder plugin</p></li>
+<li><p><strong>Python packages</strong>: the Ising-Decoding inference requirements
+(<code class="docutils literal notranslate"><span class="pre">code/requirements_public_inference.txt</span></code> in its repository, including
+<code class="docutils literal notranslate"><span class="pre">chromobius</span></code>, <code class="docutils literal notranslate"><span class="pre">matplotlib</span></code>, <code class="docutils literal notranslate"><span class="pre">onnx</span></code>, <code class="docutils literal notranslate"><span class="pre">stim</span></code>, and <code class="docutils literal notranslate"><span class="pre">torch</span></code>), and
+<code class="docutils literal notranslate"><span class="pre">huggingface_hub</span></code> for the <code class="docutils literal notranslate"><span class="pre">hf</span></code> CLI</p></li>
+<li><p><strong>Model access</strong>: <code class="docutils literal notranslate"><span class="pre">git</span></code>, plus the gated model’s terms accepted on its page
+above and the <code class="docutils literal notranslate"><span class="pre">hf</span></code> CLI authenticated (<code class="docutils literal notranslate"><span class="pre">hf</span> <span class="pre">auth</span> <span class="pre">login</span></code>), as for the
+<a class="reference internal" href="realtime_decoding_demo.html"><span class="doc">realtime decoding demo</span></a>.</p></li>
+</ul>
+</section>
+</section>
+<section id="running">
+<h2>Running<a class="headerlink" href="#running" title="Permalink to this heading"></a></h2>
+<p>From any scratch directory, with the CUDA-Q QEC Python environment set up:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python3<span class="w"> </span>/path/to/examples/qec/color_code_demo/color_code_demo.py
+</pre></div>
+</div>
+<p>The demo fetches pinned versions of Ising-Decoding and the model weights into
+<code class="docutils literal notranslate"><span class="pre">./deps</span></code> (<code class="docutils literal notranslate"><span class="pre">--weights</span></code> uses a local copy instead); <code class="docutils literal notranslate"><span class="pre">--help</span></code> lists the
+options. For each distance, the demo writes the detector
+error model, exports the predecoder to ONNX, builds its TensorRT engine, and
+replays the schedule through every decoder and session. It then writes the
+results to <code class="docutils literal notranslate"><span class="pre">results.json</span></code> and the figure to <code class="docutils literal notranslate"><span class="pre">color_code_demo.png</span></code>.
+All files go to the current directory.</p>
+</section>
+<section id="reading-the-output">
+<h2>Reading the Output<a class="headerlink" href="#reading-the-output" title="Permalink to this heading"></a></h2>
+<p>For each distance, Stim samples <code class="docutils literal notranslate"><span class="pre">--shots</span></code> shots (default 100,000) into one
+schedule, which every decoder and session replays once. Each run prints and
+records:</p>
+<ul class="simple">
+<li><p>The runtime per round: the time until the last correction returns, divided
+by the rounds decoded.</p></li>
+<li><p>The LER per round: the fraction of shots whose correction differs from
+Stim’s true observable flip, converted to a per-round rate.</p></li>
+</ul>
+<p>The generated figure uses grey for Chromobius and green for the Ising
+predecoder. Points with no logical errors are not drawn. The figure below
+shows example output from an earlier run with 100,000 shots per distance at
+<span class="math notranslate nohighlight">\(p = 0.001\)</span>.</p>
+<img alt="Example logical error rate per round versus runtime per round for Chromobius and the Ising predecoder, for distances 5 to 13, in process and over UDP" class="align-center" src="../../_images/color_code_demo.png" />
+<p>Current runs use one-microsecond ticks; reported runtime includes scheduling,
+transport, and decoding. Use the figure generated by your run when comparing
+configurations.</p>
+</section>
+<section id="the-example-source">
+<h2>The example source<a class="headerlink" href="#the-example-source" title="Permalink to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Ising color-code decoder: LER per round vs. runtime on the playback emulator.</span>
+
+<span class="sd">Usage: python3 color_code_demo.py [options]</span>
+<span class="sd">"""</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">argparse</span><span class="o">,</span><span class="w"> </span><span class="nn">json</span><span class="o">,</span><span class="w"> </span><span class="nn">os</span><span class="o">,</span><span class="w"> </span><span class="nn">re</span><span class="o">,</span><span class="w"> </span><span class="nn">shutil</span><span class="o">,</span><span class="w"> </span><span class="nn">subprocess</span><span class="o">,</span><span class="w"> </span><span class="nn">sys</span><span class="o">,</span><span class="w"> </span><span class="nn">warnings</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">cudaq_qec</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">qec</span>
+
+<span class="n">pb</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">playback</span>
+
+<span class="n">parser</span> <span class="o">=</span> <span class="n">argparse</span><span class="o">.</span><span class="n">ArgumentParser</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="vm">__doc__</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()[</span><span class="mi">0</span><span class="p">])</span>
+<span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">"--deps"</span><span class="p">,</span>
+                    <span class="n">default</span><span class="o">=</span><span class="s2">"deps"</span><span class="p">,</span>
+                    <span class="n">help</span><span class="o">=</span><span class="s2">"where to fetch Ising-Decoding and the weights"</span><span class="p">)</span>
+<span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">"--weights"</span><span class="p">,</span>
+                    <span class="n">help</span><span class="o">=</span><span class="s2">"Ising-Decoder-ColorCode-1-Fast .safetensors file "</span>
+                    <span class="s2">"(default: downloaded into --deps)"</span><span class="p">)</span>
+<span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">"--distances"</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="s2">"5,7,9,11,13"</span><span class="p">)</span>
+<span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">"--p"</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="nb">float</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">"physical error rate"</span><span class="p">)</span>
+<span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">"--shots"</span><span class="p">,</span>
+                    <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span>
+                    <span class="n">default</span><span class="o">=</span><span class="mi">100000</span><span class="p">,</span>
+                    <span class="n">help</span><span class="o">=</span><span class="s2">"shots per distance"</span><span class="p">)</span>
+<span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">"--seed"</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="mi">1234</span><span class="p">)</span>
+<span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">"--decoding-server"</span><span class="p">,</span>
+                    <span class="n">default</span><span class="o">=</span><span class="n">shutil</span><span class="o">.</span><span class="n">which</span><span class="p">(</span><span class="s2">"decoding_server"</span><span class="p">),</span>
+                    <span class="n">help</span><span class="o">=</span><span class="s2">"decoding_server binary (default: from PATH)"</span><span class="p">)</span>
+<span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">"--server-timeout"</span><span class="p">,</span>
+                    <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span>
+                    <span class="n">default</span><span class="o">=</span><span class="mi">7200</span><span class="p">,</span>
+                    <span class="n">help</span><span class="o">=</span><span class="s2">"decoding_server --timeout, in s"</span><span class="p">)</span>
+<span class="n">args</span> <span class="o">=</span> <span class="n">parser</span><span class="o">.</span><span class="n">parse_args</span><span class="p">()</span>
+
+<span class="n">distances</span> <span class="o">=</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">d</span><span class="p">)</span> <span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="n">args</span><span class="o">.</span><span class="n">distances</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">","</span><span class="p">)]</span>
+<span class="k">if</span> <span class="ow">not</span> <span class="n">args</span><span class="o">.</span><span class="n">decoding_server</span><span class="p">:</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s2">"decoding_server not found; pass --decoding-server"</span><span class="p">)</span>
+
+<span class="c1"># Ising-Decoding source and model weights</span>
+<span class="n">ISING_REPOSITORY</span> <span class="o">=</span> <span class="s2">"https://github.com/NVIDIA/Ising-Decoding.git"</span>
+<span class="n">ISING_COMMIT</span> <span class="o">=</span> <span class="s2">"33acb152e403bc189f2effdb07f1a87b34c745f1"</span>
+<span class="n">HF_REPOSITORY</span> <span class="o">=</span> <span class="s2">"nvidia/Ising-Decoder-ColorCode-1-Fast"</span>
+<span class="n">HF_REVISION</span> <span class="o">=</span> <span class="s2">"c5775431d0ebb06ffecc3836935708b787db51ee"</span>
+<span class="n">HF_FILENAME</span> <span class="o">=</span> <span class="s2">"ising_decoder_color_code_1_fast_r13_v1.0.400_fp16.safetensors"</span>
+
+<span class="n">ising</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">deps</span><span class="p">,</span> <span class="s2">"Ising-Decoding"</span><span class="p">)</span>
+<span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isdir</span><span class="p">(</span><span class="n">ising</span><span class="p">):</span>
+    <span class="c1"># Check out into a scratch directory so an interrupted fetch is redone.</span>
+    <span class="n">partial</span> <span class="o">=</span> <span class="n">ising</span> <span class="o">+</span> <span class="s2">".partial"</span>
+    <span class="n">shutil</span><span class="o">.</span><span class="n">rmtree</span><span class="p">(</span><span class="n">partial</span><span class="p">,</span> <span class="n">ignore_errors</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">command</span> <span class="ow">in</span> <span class="p">(</span>
+        <span class="p">[</span><span class="s2">"git"</span><span class="p">,</span> <span class="s2">"init"</span><span class="p">,</span> <span class="s2">"-q"</span><span class="p">,</span> <span class="n">partial</span><span class="p">],</span>
+        <span class="p">[</span><span class="s2">"git"</span><span class="p">,</span> <span class="s2">"-C"</span><span class="p">,</span> <span class="n">partial</span><span class="p">,</span> <span class="s2">"remote"</span><span class="p">,</span> <span class="s2">"add"</span><span class="p">,</span> <span class="s2">"origin"</span><span class="p">,</span> <span class="n">ISING_REPOSITORY</span><span class="p">],</span>
+        <span class="p">[</span><span class="s2">"git"</span><span class="p">,</span> <span class="s2">"-C"</span><span class="p">,</span> <span class="n">partial</span><span class="p">,</span> <span class="s2">"sparse-checkout"</span><span class="p">,</span> <span class="s2">"init"</span><span class="p">,</span> <span class="s2">"--cone"</span><span class="p">],</span>
+        <span class="p">[</span><span class="s2">"git"</span><span class="p">,</span> <span class="s2">"-C"</span><span class="p">,</span> <span class="n">partial</span><span class="p">,</span> <span class="s2">"sparse-checkout"</span><span class="p">,</span> <span class="s2">"set"</span><span class="p">,</span> <span class="s2">"code"</span><span class="p">],</span>
+        <span class="p">[</span>
+            <span class="s2">"git"</span><span class="p">,</span> <span class="s2">"-C"</span><span class="p">,</span> <span class="n">partial</span><span class="p">,</span> <span class="s2">"fetch"</span><span class="p">,</span> <span class="s2">"-q"</span><span class="p">,</span> <span class="s2">"--depth"</span><span class="p">,</span> <span class="s2">"1"</span><span class="p">,</span>
+            <span class="s2">"--filter=blob:none"</span><span class="p">,</span> <span class="s2">"origin"</span><span class="p">,</span> <span class="n">ISING_COMMIT</span>
+        <span class="p">],</span>
+        <span class="p">[</span><span class="s2">"git"</span><span class="p">,</span> <span class="s2">"-C"</span><span class="p">,</span> <span class="n">partial</span><span class="p">,</span> <span class="s2">"checkout"</span><span class="p">,</span> <span class="s2">"-q"</span><span class="p">,</span> <span class="s2">"--detach"</span><span class="p">,</span> <span class="s2">"FETCH_HEAD"</span><span class="p">],</span>
+    <span class="p">):</span>
+        <span class="n">subprocess</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">command</span><span class="p">,</span> <span class="n">check</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">rename</span><span class="p">(</span><span class="n">partial</span><span class="p">,</span> <span class="n">ising</span><span class="p">)</span>
+<span class="n">weights</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">weights</span> <span class="ow">or</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">deps</span><span class="p">,</span> <span class="n">HF_FILENAME</span><span class="p">)</span>
+<span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">weights</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">shutil</span><span class="o">.</span><span class="n">which</span><span class="p">(</span><span class="s2">"hf"</span><span class="p">):</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="s2">"the hf CLI is needed to download the weights; install "</span>
+                 <span class="s2">"huggingface_hub, or pass --weights"</span><span class="p">)</span>
+    <span class="n">subprocess</span><span class="o">.</span><span class="n">run</span><span class="p">([</span>
+        <span class="s2">"hf"</span><span class="p">,</span> <span class="s2">"download"</span><span class="p">,</span> <span class="n">HF_REPOSITORY</span><span class="p">,</span> <span class="n">HF_FILENAME</span><span class="p">,</span> <span class="s2">"--revision"</span><span class="p">,</span> <span class="n">HF_REVISION</span><span class="p">,</span>
+        <span class="s2">"--local-dir"</span><span class="p">,</span> <span class="n">args</span><span class="o">.</span><span class="n">deps</span>
+    <span class="p">],</span>
+                   <span class="n">check</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">sys</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">ising</span><span class="p">,</span> <span class="s2">"code"</span><span class="p">))</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">qec.color_code.color_code</span><span class="w"> </span><span class="kn">import</span> <span class="n">ColorCode</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">qec.color_code.reference_superdense_noise</span><span class="w"> </span><span class="kn">import</span> <span class="n">build_color_memory_circuit</span>
+
+<span class="c1"># Shots in flight: shot i starts once shot i - DEPTH has its correction.</span>
+<span class="n">DEPTH</span> <span class="o">=</span> <span class="mi">4</span>
+<span class="c1"># Playback requires a positive tick duration; use one microsecond.</span>
+<span class="n">PLAYBACK_TICK_NS</span> <span class="o">=</span> <span class="mi">1000</span>
+<span class="n">MEASURE_OPS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"M"</span><span class="p">,</span> <span class="s2">"MZ"</span><span class="p">,</span> <span class="s2">"MX"</span><span class="p">,</span> <span class="s2">"MY"</span><span class="p">,</span> <span class="s2">"MR"</span><span class="p">,</span> <span class="s2">"MRX"</span><span class="p">,</span> <span class="s2">"MRY"</span><span class="p">,</span> <span class="s2">"MRZ"</span><span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">color_circuit</span><span class="p">(</span><span class="n">d</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Z-basis color-code memory circuit with d rounds, as in the model card."""</span>
+    <span class="k">return</span> <span class="n">build_color_memory_circuit</span><span class="p">(</span><span class="n">distance</span><span class="o">=</span><span class="n">d</span><span class="p">,</span>
+                                      <span class="n">n_rounds</span><span class="o">=</span><span class="n">d</span><span class="p">,</span>
+                                      <span class="n">basis</span><span class="o">=</span><span class="s2">"Z"</span><span class="p">,</span>
+                                      <span class="n">p_error</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">p</span><span class="p">,</span>
+                                      <span class="n">noise_model_family</span><span class="o">=</span><span class="s2">"legacy"</span><span class="p">,</span>
+                                      <span class="n">noise_instruction_semantics</span><span class="o">=</span><span class="s2">"current"</span><span class="p">,</span>
+                                      <span class="n">gidney_style_noise</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+                                      <span class="n">schedule</span><span class="o">=</span><span class="s2">"nearest-neighbor"</span><span class="p">,</span>
+                                      <span class="n">add_boundary_detectors</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span><span class="o">.</span><span class="n">stim_circuit</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">measurement_maps</span><span class="p">(</span><span class="n">circuit</span><span class="p">,</span> <span class="n">d</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Returns (m2d, support): the measurements each detector reads, and the</span>
+<span class="sd">    data qubits the observable reads. Stim's converter reveals both when</span>
+<span class="sd">    measurements are flipped one at a time."""</span>
+    <span class="n">n</span> <span class="o">=</span> <span class="n">circuit</span><span class="o">.</span><span class="n">num_measurements</span>
+    <span class="n">flips</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">vstack</span><span class="p">([</span><span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="mi">1</span><span class="p">,</span> <span class="n">n</span><span class="p">),</span> <span class="nb">bool</span><span class="p">),</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">bool</span><span class="p">)])</span>
+    <span class="n">dets</span><span class="p">,</span> <span class="n">obs</span> <span class="o">=</span> <span class="n">circuit</span><span class="o">.</span><span class="n">compile_m2d_converter</span><span class="p">()</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span>
+        <span class="n">measurements</span><span class="o">=</span><span class="n">flips</span><span class="p">,</span> <span class="n">separate_observables</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">dets</span><span class="p">,</span> <span class="n">obs</span> <span class="o">=</span> <span class="n">dets</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span> <span class="o">^</span> <span class="n">dets</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">obs</span><span class="p">[</span><span class="mi">1</span><span class="p">:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">^</span> <span class="n">obs</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">]</span>
+    <span class="n">data_start</span> <span class="o">=</span> <span class="n">n</span> <span class="o">-</span> <span class="n">ColorCode</span><span class="p">(</span><span class="n">d</span><span class="p">)</span><span class="o">.</span><span class="n">num_data</span>
+    <span class="k">return</span> <span class="p">([</span><span class="n">np</span><span class="o">.</span><span class="n">flatnonzero</span><span class="p">(</span><span class="n">col</span><span class="p">)</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span> <span class="k">for</span> <span class="n">col</span> <span class="ow">in</span> <span class="n">dets</span><span class="o">.</span><span class="n">T</span><span class="p">],</span>
+            <span class="n">np</span><span class="o">.</span><span class="n">flatnonzero</span><span class="p">(</span><span class="n">obs</span><span class="p">[</span><span class="n">data_start</span><span class="p">:])</span><span class="o">.</span><span class="n">tolist</span><span class="p">())</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">export_onnx</span><span class="p">(</span><span class="n">d</span><span class="p">,</span> <span class="n">model</span><span class="p">,</span> <span class="n">support</span><span class="p">,</span> <span class="n">onnx_path</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Exports the Ising predecoder, with the observable's support baked in."""</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">qec.color_code</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">get_data_to_grid_flat_index</span><span class="p">,</span>
+                                <span class="n">get_parity_matrix_data_only</span><span class="p">,</span>
+                                <span class="n">get_stab_to_grid_flat_index</span><span class="p">)</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">qec.color_code.detector_input</span><span class="w"> </span><span class="kn">import</span> <span class="n">ColorDetectorInputTransform</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">benchmarks.export_detector_input_trtexec</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+        <span class="n">DetectorInputColorEval</span><span class="p">,</span> <span class="n">DetectorInputModel</span><span class="p">)</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">evaluation.logical_error_rate_color</span><span class="w"> </span><span class="kn">import</span> <span class="n">PreDecoderColorEvalModule</span>
+    <span class="n">xform</span> <span class="o">=</span> <span class="n">ColorDetectorInputTransform</span><span class="p">(</span><span class="n">distance</span><span class="o">=</span><span class="n">d</span><span class="p">,</span> <span class="n">rounds</span><span class="o">=</span><span class="n">d</span><span class="p">,</span> <span class="n">basis</span><span class="o">=</span><span class="s2">"Z"</span><span class="p">)</span>
+    <span class="c1"># Mirrors Ising's private _build_color_code_parity_maps.</span>
+    <span class="n">code</span> <span class="o">=</span> <span class="n">ColorCode</span><span class="p">(</span><span class="n">d</span><span class="p">)</span>
+    <span class="n">H</span> <span class="o">=</span> <span class="n">get_parity_matrix_data_only</span><span class="p">(</span><span class="n">code</span><span class="p">)</span>
+    <span class="n">K</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">H</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">max</span><span class="p">())</span>
+    <span class="n">H_idx</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">full</span><span class="p">((</span><span class="n">H</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">K</span><span class="p">),</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">long</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">row</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">H</span><span class="p">):</span>
+        <span class="n">cols</span> <span class="o">=</span> <span class="n">row</span><span class="o">.</span><span class="n">nonzero</span><span class="p">()</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span>
+        <span class="n">H_idx</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="p">:</span><span class="nb">len</span><span class="p">(</span><span class="n">cols</span><span class="p">)]</span> <span class="o">=</span> <span class="n">cols</span>
+    <span class="n">maps</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">H_idx</span><span class="o">=</span><span class="n">H_idx</span><span class="p">,</span>
+                <span class="n">H_mask</span><span class="o">=</span><span class="n">H_idx</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">,</span>
+                <span class="n">K</span><span class="o">=</span><span class="n">K</span><span class="p">,</span>
+                <span class="n">stab_to_grid</span><span class="o">=</span><span class="n">get_stab_to_grid_flat_index</span><span class="p">(</span><span class="n">code</span><span class="p">),</span>
+                <span class="n">data_to_grid</span><span class="o">=</span><span class="n">get_data_to_grid_flat_index</span><span class="p">(</span><span class="n">code</span><span class="p">),</span>
+                <span class="n">num_plaq</span><span class="o">=</span><span class="n">H</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span>
+                <span class="n">num_data</span><span class="o">=</span><span class="n">H</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+                <span class="n">n_rows</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">n_rows</span><span class="p">,</span>
+                <span class="n">n_cols</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">n_cols</span><span class="p">)</span>
+    <span class="n">obs_support</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">H</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+    <span class="n">obs_support</span><span class="p">[</span><span class="n">support</span><span class="p">]</span> <span class="o">=</span> <span class="mf">1.0</span>
+    <span class="c1"># Module defaults match Ising's config.</span>
+    <span class="n">cfg</span> <span class="o">=</span> <span class="n">argparse</span><span class="o">.</span><span class="n">Namespace</span><span class="p">(</span><span class="n">test</span><span class="o">=</span><span class="n">argparse</span><span class="o">.</span><span class="n">Namespace</span><span class="p">())</span>
+    <span class="n">pipeline</span> <span class="o">=</span> <span class="n">DetectorInputColorEval</span><span class="p">(</span>
+        <span class="n">DetectorInputModel</span><span class="p">(</span><span class="n">xform</span><span class="p">,</span> <span class="n">model</span><span class="p">),</span>
+        <span class="n">PreDecoderColorEvalModule</span><span class="p">(</span><span class="n">model</span><span class="p">,</span>
+                                  <span class="n">cfg</span><span class="p">,</span>
+                                  <span class="n">maps</span><span class="p">,</span>
+                                  <span class="n">basis</span><span class="o">=</span><span class="s2">"Z"</span><span class="p">,</span>
+                                  <span class="n">obs_support</span><span class="o">=</span><span class="n">obs_support</span><span class="p">,</span>
+                                  <span class="n">num_boundary_dets</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span>
+                                      <span class="n">xform</span><span class="o">.</span><span class="n">num_stabs</span><span class="p">)))</span><span class="o">.</span><span class="n">eval</span><span class="p">()</span>
+    <span class="k">with</span> <span class="n">warnings</span><span class="o">.</span><span class="n">catch_warnings</span><span class="p">():</span>
+        <span class="n">warnings</span><span class="o">.</span><span class="n">simplefilter</span><span class="p">(</span><span class="s2">"ignore"</span><span class="p">,</span> <span class="ne">DeprecationWarning</span><span class="p">)</span>
+        <span class="n">warnings</span><span class="o">.</span><span class="n">simplefilter</span><span class="p">(</span><span class="s2">"ignore"</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">jit</span><span class="o">.</span><span class="n">TracerWarning</span><span class="p">)</span>
+        <span class="n">torch</span><span class="o">.</span><span class="n">onnx</span><span class="o">.</span><span class="n">export</span><span class="p">(</span><span class="n">pipeline</span><span class="p">,</span>
+                          <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">xform</span><span class="o">.</span><span class="n">detector_width</span><span class="p">),</span>
+                          <span class="n">onnx_path</span><span class="p">,</span>
+                          <span class="n">opset_version</span><span class="o">=</span><span class="mi">17</span><span class="p">,</span>
+                          <span class="n">input_names</span><span class="o">=</span><span class="p">[</span><span class="s2">"dets"</span><span class="p">],</span>
+                          <span class="n">output_names</span><span class="o">=</span><span class="p">[</span><span class="s2">"L_and_residual_dets"</span><span class="p">],</span>
+                          <span class="n">dynamic_axes</span><span class="o">=</span><span class="p">{</span>
+                              <span class="s2">"dets"</span><span class="p">:</span> <span class="p">{</span>
+                                  <span class="mi">0</span><span class="p">:</span> <span class="s2">"batch"</span>
+                              <span class="p">},</span>
+                              <span class="s2">"L_and_residual_dets"</span><span class="p">:</span> <span class="p">{</span>
+                                  <span class="mi">0</span><span class="p">:</span> <span class="s2">"batch"</span>
+                              <span class="p">}</span>
+                          <span class="p">},</span>
+                          <span class="n">dynamo</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">decoder_config</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">d</span><span class="p">,</span> <span class="n">m2d</span><span class="p">,</span> <span class="n">engine_args</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""A one-decoder config. The decoder reads its matrices from the DEM file;</span>
+<span class="sd">    D_sparse maps the raw measurements to detectors."""</span>
+    <span class="n">dc</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">decoder_config</span><span class="p">()</span>
+    <span class="n">dc</span><span class="o">.</span><span class="n">type</span> <span class="o">=</span> <span class="n">name</span>
+    <span class="n">dc</span><span class="o">.</span><span class="n">D_sparse</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">d_sparse</span><span class="p">(</span><span class="n">m2d</span><span class="p">)</span>
+    <span class="n">dc</span><span class="o">.</span><span class="n">stim_dem_path</span> <span class="o">=</span> <span class="s2">"dem_d</span><span class="si">%d</span><span class="s2">.txt"</span> <span class="o">%</span> <span class="n">d</span>
+    <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">"trt_decoder"</span><span class="p">:</span>
+        <span class="c1"># The predecoder returns its observable flips and residual detectors;</span>
+        <span class="c1"># Chromobius decodes the residual.</span>
+        <span class="n">dc</span><span class="o">.</span><span class="n">decoder_custom_args</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">"batch_size"</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+            <span class="s2">"engine_output_format"</span><span class="p">:</span> <span class="s2">"observables_and_residual_detectors"</span><span class="p">,</span>
+            <span class="s2">"global_decoder"</span><span class="p">:</span> <span class="s2">"chromobius"</span><span class="p">,</span>
+            <span class="o">**</span><span class="p">(</span><span class="n">engine_args</span> <span class="ow">or</span> <span class="p">{</span>
+                <span class="s2">"engine_load_path"</span><span class="p">:</span> <span class="s2">"engine_d</span><span class="si">%d</span><span class="s2">.trt"</span> <span class="o">%</span> <span class="n">d</span>
+            <span class="p">})</span>
+        <span class="p">}</span>
+    <span class="n">mdc</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">multi_decoder_config</span><span class="p">()</span>
+    <span class="n">mdc</span><span class="o">.</span><span class="n">decoders</span> <span class="o">=</span> <span class="p">[</span><span class="n">dc</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">mdc</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">write_schedule</span><span class="p">(</span><span class="n">circuit</span><span class="p">,</span> <span class="n">shots</span><span class="p">,</span> <span class="n">sched_path</span><span class="p">,</span> <span class="n">chunk</span><span class="o">=</span><span class="mi">10000</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Samples `circuit` and writes a playback schedule.</span>
+<span class="sd">    Each shot is a reset, one enqueue per measurement layer, and a</span>
+<span class="sd">    get_corrections that expects the shot's true observable flips.</span>
+<span class="sd">    """</span>
+    <span class="n">layers</span><span class="p">,</span> <span class="n">offset</span> <span class="o">=</span> <span class="p">[],</span> <span class="mi">0</span>
+    <span class="k">for</span> <span class="n">inst</span> <span class="ow">in</span> <span class="n">circuit</span><span class="o">.</span><span class="n">flattened</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">inst</span><span class="o">.</span><span class="n">name</span> <span class="ow">in</span> <span class="n">MEASURE_OPS</span><span class="p">:</span>
+            <span class="n">width</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">inst</span><span class="o">.</span><span class="n">targets_copy</span><span class="p">())</span>
+            <span class="n">layers</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">offset</span><span class="p">,</span> <span class="n">width</span><span class="p">))</span>
+            <span class="n">offset</span> <span class="o">+=</span> <span class="n">width</span>
+    <span class="n">sampler</span> <span class="o">=</span> <span class="n">circuit</span><span class="o">.</span><span class="n">compile_sampler</span><span class="p">(</span><span class="n">seed</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">seed</span><span class="p">)</span>
+    <span class="n">converter</span> <span class="o">=</span> <span class="n">circuit</span><span class="o">.</span><span class="n">compile_m2d_converter</span><span class="p">()</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">sched_path</span><span class="p">,</span> <span class="s2">"w"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">start</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">shots</span><span class="p">,</span> <span class="n">chunk</span><span class="p">):</span>
+            <span class="n">meas</span> <span class="o">=</span> <span class="n">sampler</span><span class="o">.</span><span class="n">sample</span><span class="p">(</span><span class="nb">min</span><span class="p">(</span><span class="n">chunk</span><span class="p">,</span> <span class="n">shots</span> <span class="o">-</span> <span class="n">start</span><span class="p">))</span>
+            <span class="n">obs</span> <span class="o">=</span> <span class="n">converter</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="n">measurements</span><span class="o">=</span><span class="n">meas</span><span class="p">,</span>
+                                    <span class="n">separate_observables</span><span class="o">=</span><span class="kc">True</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span>
+            <span class="n">text</span> <span class="o">=</span> <span class="p">(</span><span class="n">meas</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span> <span class="o">+</span> <span class="nb">ord</span><span class="p">(</span><span class="s2">"0"</span><span class="p">))</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="s2">"S1"</span><span class="p">)</span>
+            <span class="n">obs_text</span> <span class="o">=</span> <span class="p">(</span><span class="n">obs</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span> <span class="o">+</span> <span class="nb">ord</span><span class="p">(</span><span class="s2">"0"</span><span class="p">))</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="s2">"S1"</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">row</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">text</span><span class="p">):</span>
+                <span class="n">s</span> <span class="o">=</span> <span class="n">start</span> <span class="o">+</span> <span class="n">i</span>
+                <span class="n">after</span> <span class="o">=</span> <span class="s2">" after=s</span><span class="si">%d</span><span class="s2">"</span> <span class="o">%</span> <span class="p">(</span><span class="n">s</span> <span class="o">-</span> <span class="n">DEPTH</span><span class="p">)</span> <span class="k">if</span> <span class="n">s</span> <span class="o">&gt;=</span> <span class="n">DEPTH</span> <span class="k">else</span> <span class="s2">""</span>
+                <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">"- reset</span><span class="si">%s</span><span class="se">\n</span><span class="s2">"</span> <span class="o">%</span> <span class="n">after</span><span class="p">)</span>
+                <span class="k">for</span> <span class="n">off</span><span class="p">,</span> <span class="n">w</span> <span class="ow">in</span> <span class="n">layers</span><span class="p">:</span>
+                    <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">"- enqueue source=0b</span><span class="si">%s</span><span class="se">\n</span><span class="s2">"</span> <span class="o">%</span>
+                            <span class="n">row</span><span class="p">[</span><span class="n">off</span><span class="p">:</span><span class="n">off</span> <span class="o">+</span> <span class="n">w</span><span class="p">]</span><span class="o">.</span><span class="n">tobytes</span><span class="p">()</span><span class="o">.</span><span class="n">decode</span><span class="p">())</span>
+                <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">"- get_corrections </span><span class="si">%s</span><span class="s2"> signal=s</span><span class="si">%d</span><span class="se">\n</span><span class="s2">"</span> <span class="o">%</span>
+                        <span class="p">(</span><span class="n">obs_text</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">tobytes</span><span class="p">()</span><span class="o">.</span><span class="n">decode</span><span class="p">(),</span> <span class="n">s</span><span class="p">))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">per_round</span><span class="p">(</span><span class="n">ler</span><span class="p">,</span> <span class="n">rounds</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Per-round logical error rate from the rate over `rounds` rounds."""</span>
+    <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">np</span><span class="o">.</span><span class="n">clip</span><span class="p">(</span><span class="n">ler</span><span class="p">,</span> <span class="mf">1e-12</span><span class="p">,</span> <span class="mi">1</span> <span class="o">-</span> <span class="mf">1e-12</span><span class="p">))</span><span class="o">**</span><span class="p">(</span><span class="mi">1</span> <span class="o">/</span> <span class="n">rounds</span><span class="p">))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">run_checked</span><span class="p">(</span><span class="n">schedule</span><span class="p">,</span> <span class="n">shots</span><span class="p">,</span> <span class="o">**</span><span class="n">session</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Runs `schedule`; fails unless every shot returned its correction."""</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">pb</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">schedule</span><span class="p">,</span> <span class="n">tick_ns</span><span class="o">=</span><span class="n">PLAYBACK_TICK_NS</span><span class="p">,</span> <span class="n">sources</span><span class="o">=</span><span class="p">{},</span> <span class="o">**</span><span class="n">session</span><span class="p">)</span>
+    <span class="n">records</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">records</span>
+    <span class="n">gc</span> <span class="o">=</span> <span class="p">[</span><span class="n">r</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">records</span> <span class="k">if</span> <span class="n">r</span><span class="p">[</span><span class="s2">"op"</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"get_corrections"</span><span class="p">]</span>
+    <span class="n">bad</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="nb">str</span><span class="p">(</span><span class="n">r</span><span class="p">[</span><span class="s2">"status"</span><span class="p">])</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">gc</span> <span class="k">if</span> <span class="n">r</span><span class="p">[</span><span class="s2">"status"</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">0</span> <span class="ow">or</span>
+        <span class="ow">not</span> <span class="n">r</span><span class="p">[</span><span class="s2">"read_completed"</span><span class="p">]</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">r</span><span class="p">[</span><span class="s2">"correction_bits"</span><span class="p">]</span>
+    <span class="p">]</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">gc</span><span class="p">)</span> <span class="o">!=</span> <span class="n">shots</span> <span class="ow">or</span> <span class="n">bad</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"</span><span class="si">%d</span><span class="s2">/</span><span class="si">%d</span><span class="s2"> corrections returned, failures: </span><span class="si">%s</span><span class="s2">"</span> <span class="o">%</span>
+                           <span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">gc</span><span class="p">),</span> <span class="n">shots</span><span class="p">,</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">bad</span><span class="p">))))</span>
+    <span class="k">return</span> <span class="n">result</span><span class="p">,</span> <span class="n">gc</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">run_session</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">mdc</span><span class="p">,</span> <span class="n">schedule</span><span class="p">,</span> <span class="n">shots</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Runs `schedule` with requests routed through session `name`: inproc,</span>
+<span class="sd">    or a decoding_server for `mdc` over UDP, stopped once the run ends."""</span>
+    <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">"inproc"</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">run_checked</span><span class="p">(</span><span class="n">schedule</span><span class="p">,</span> <span class="n">shots</span><span class="p">,</span> <span class="n">decoders</span><span class="o">=</span><span class="n">mdc</span><span class="p">)</span>
+    <span class="n">cfg_path</span> <span class="o">=</span> <span class="s2">"server_config.yaml"</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">cfg_path</span><span class="p">,</span> <span class="s2">"w"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">mdc</span><span class="o">.</span><span class="n">to_yaml_str</span><span class="p">())</span>
+    <span class="n">proc</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">Popen</span><span class="p">([</span>
+        <span class="n">args</span><span class="o">.</span><span class="n">decoding_server</span><span class="p">,</span> <span class="s2">"--config="</span> <span class="o">+</span> <span class="n">cfg_path</span><span class="p">,</span> <span class="s2">"--transport=udp"</span><span class="p">,</span>
+        <span class="s2">"--port=0"</span><span class="p">,</span>
+        <span class="s2">"--timeout=</span><span class="si">%d</span><span class="s2">"</span> <span class="o">%</span> <span class="n">args</span><span class="o">.</span><span class="n">server_timeout</span>
+    <span class="p">],</span>
+                            <span class="n">stdout</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">PIPE</span><span class="p">,</span>
+                            <span class="n">stderr</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">STDOUT</span><span class="p">,</span>
+                            <span class="n">text</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">log</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">proc</span><span class="o">.</span><span class="n">stdout</span><span class="p">:</span>
+            <span class="n">log</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+            <span class="n">m</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="sa">r</span><span class="s2">"QEC_DECODING_SERVER_READY port=(\d+)"</span><span class="p">,</span> <span class="n">line</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">m</span><span class="p">:</span>
+                <span class="k">break</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"decoding_server did not start:</span><span class="se">\n</span><span class="s2">"</span> <span class="o">+</span>
+                               <span class="s2">""</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">log</span><span class="p">))</span>
+        <span class="k">return</span> <span class="n">run_checked</span><span class="p">(</span><span class="n">schedule</span><span class="p">,</span>
+                           <span class="n">shots</span><span class="p">,</span>
+                           <span class="n">udp_endpoints</span><span class="o">=</span><span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">"127.0.0.1:</span><span class="si">%s</span><span class="s2">"</span> <span class="o">%</span> <span class="n">m</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="mi">1</span><span class="p">)},</span>
+                           <span class="n">udp_timeout_ms</span><span class="o">=</span><span class="mi">5000</span><span class="p">)</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+        <span class="n">proc</span><span class="o">.</span><span class="n">wait</span><span class="p">()</span>
+
+
+<span class="c1"># Build and run the experiments</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">export.safetensors_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_safetensors</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">load_safetensors</span><span class="p">(</span><span class="n">weights</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s2">"cpu"</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">float</span><span class="p">()</span><span class="o">.</span><span class="n">eval</span><span class="p">()</span>
+<span class="n">results</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="n">distances</span><span class="p">:</span>
+    <span class="n">circuit</span> <span class="o">=</span> <span class="n">color_circuit</span><span class="p">(</span><span class="n">d</span><span class="p">)</span>
+    <span class="n">m2d</span><span class="p">,</span> <span class="n">support</span> <span class="o">=</span> <span class="n">measurement_maps</span><span class="p">(</span><span class="n">circuit</span><span class="p">,</span> <span class="n">d</span><span class="p">)</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"dem_d</span><span class="si">%d</span><span class="s2">.txt"</span> <span class="o">%</span> <span class="n">d</span><span class="p">,</span> <span class="s2">"w"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">circuit</span><span class="o">.</span><span class="n">detector_error_model</span><span class="p">()))</span>
+    <span class="n">export_onnx</span><span class="p">(</span><span class="n">d</span><span class="p">,</span> <span class="n">model</span><span class="p">,</span> <span class="n">support</span><span class="p">,</span> <span class="s2">"pre_d</span><span class="si">%d</span><span class="s2">.onnx"</span> <span class="o">%</span> <span class="n">d</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">"d=</span><span class="si">%-2d</span><span class="s2"> </span><span class="si">%d</span><span class="s2"> detectors"</span> <span class="o">%</span> <span class="p">(</span><span class="n">d</span><span class="p">,</span> <span class="n">circuit</span><span class="o">.</span><span class="n">num_detectors</span><span class="p">),</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">write_schedule</span><span class="p">(</span><span class="n">circuit</span><span class="p">,</span> <span class="n">args</span><span class="o">.</span><span class="n">shots</span><span class="p">,</span> <span class="s2">"schedule.txt"</span><span class="p">)</span>
+    <span class="n">schedule</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"schedule.txt"</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">dec</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">"chromobius"</span><span class="p">,</span> <span class="s2">"trt_decoder"</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">sess</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">"inproc"</span><span class="p">,</span> <span class="s2">"server"</span><span class="p">):</span>
+            <span class="c1"># The inproc trt_decoder builds the TensorRT engine that the</span>
+            <span class="c1"># server then loads.</span>
+            <span class="n">engine_args</span> <span class="o">=</span> <span class="p">{</span>
+                <span class="s2">"onnx_load_path"</span><span class="p">:</span> <span class="s2">"pre_d</span><span class="si">%d</span><span class="s2">.onnx"</span> <span class="o">%</span> <span class="n">d</span><span class="p">,</span>
+                <span class="s2">"engine_save_path"</span><span class="p">:</span> <span class="s2">"engine_d</span><span class="si">%d</span><span class="s2">.trt"</span> <span class="o">%</span> <span class="n">d</span>
+            <span class="p">}</span> <span class="k">if</span> <span class="n">sess</span> <span class="o">==</span> <span class="s2">"inproc"</span> <span class="k">else</span> <span class="kc">None</span>
+            <span class="n">result</span><span class="p">,</span> <span class="n">gc</span> <span class="o">=</span> <span class="n">run_session</span><span class="p">(</span><span class="n">sess</span><span class="p">,</span>
+                                     <span class="n">decoder_config</span><span class="p">(</span><span class="n">dec</span><span class="p">,</span> <span class="n">d</span><span class="p">,</span> <span class="n">m2d</span><span class="p">,</span> <span class="n">engine_args</span><span class="p">),</span>
+                                     <span class="n">schedule</span><span class="p">,</span> <span class="n">args</span><span class="o">.</span><span class="n">shots</span><span class="p">)</span>
+            <span class="c1"># Runtime per round: the time until the last reply, divided by</span>
+            <span class="c1"># the rounds decoded.</span>
+            <span class="n">runtime</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span>
+                <span class="n">r</span><span class="p">[</span><span class="s2">"return_ns"</span><span class="p">]</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">records</span><span class="p">)</span> <span class="o">/</span> <span class="mf">1e3</span> <span class="o">/</span> <span class="n">args</span><span class="o">.</span><span class="n">shots</span> <span class="o">/</span> <span class="n">d</span>
+            <span class="n">errors</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">r</span><span class="p">[</span><span class="s2">"correction_mismatch"</span><span class="p">]</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">gc</span><span class="p">)</span>
+            <span class="c1"># Per-round rate from the d-round rate, with a binomial error</span>
+            <span class="c1"># bar.</span>
+            <span class="n">total</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="nb">max</span><span class="p">(</span><span class="n">errors</span> <span class="o">/</span> <span class="n">args</span><span class="o">.</span><span class="n">shots</span><span class="p">,</span> <span class="mf">0.5</span> <span class="o">/</span> <span class="n">args</span><span class="o">.</span><span class="n">shots</span><span class="p">),</span> <span class="mi">1</span> <span class="o">-</span> <span class="mf">1e-12</span><span class="p">)</span>
+            <span class="n">sigma</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">total</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">total</span><span class="p">)</span> <span class="o">/</span> <span class="n">args</span><span class="o">.</span><span class="n">shots</span><span class="p">)</span>
+            <span class="n">lo</span><span class="p">,</span> <span class="n">mid</span><span class="p">,</span> <span class="n">hi</span> <span class="o">=</span> <span class="p">(</span>
+                <span class="n">per_round</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">d</span><span class="p">)</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="p">(</span><span class="n">total</span> <span class="o">-</span> <span class="n">sigma</span><span class="p">,</span> <span class="n">total</span><span class="p">,</span> <span class="n">total</span> <span class="o">+</span> <span class="n">sigma</span><span class="p">))</span>
+            <span class="n">point</span> <span class="o">=</span> <span class="n">results</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">d</span><span class="p">),</span> <span class="p">{})</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">dec</span><span class="p">,</span> <span class="p">{})</span>
+            <span class="n">point</span><span class="p">[</span><span class="n">sess</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">runtime</span><span class="o">=</span><span class="n">runtime</span><span class="p">,</span>
+                               <span class="n">ler</span><span class="o">=</span><span class="n">mid</span><span class="p">,</span>
+                               <span class="n">ler_unc</span><span class="o">=</span><span class="nb">max</span><span class="p">(</span><span class="n">hi</span> <span class="o">-</span> <span class="n">mid</span><span class="p">,</span> <span class="n">mid</span> <span class="o">-</span> <span class="n">lo</span><span class="p">),</span>
+                               <span class="n">errors</span><span class="o">=</span><span class="n">errors</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">"d=</span><span class="si">%-2d</span><span class="s2"> </span><span class="si">%-10s</span><span class="s2"> </span><span class="si">%-6s</span><span class="s2"> </span><span class="si">%8.3f</span><span class="s2"> us/round  LER/round </span><span class="si">%.3g</span><span class="s2"> +/- "</span>
+                  <span class="s2">"</span><span class="si">%.1g</span><span class="s2"> (</span><span class="si">%d</span><span class="s2">/</span><span class="si">%d</span><span class="s2">)"</span> <span class="o">%</span> <span class="p">(</span><span class="n">d</span><span class="p">,</span> <span class="n">dec</span><span class="p">,</span> <span class="n">sess</span><span class="p">,</span> <span class="n">runtime</span><span class="p">,</span> <span class="n">mid</span><span class="p">,</span>
+                                    <span class="n">point</span><span class="p">[</span><span class="n">sess</span><span class="p">][</span><span class="s2">"ler_unc"</span><span class="p">],</span> <span class="n">errors</span><span class="p">,</span> <span class="n">args</span><span class="o">.</span><span class="n">shots</span><span class="p">),</span>
+                  <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="nb">dict</span><span class="p">(</span><span class="n">p</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">p</span><span class="p">,</span> <span class="n">results</span><span class="o">=</span><span class="n">results</span><span class="p">),</span>
+              <span class="nb">open</span><span class="p">(</span><span class="s2">"results.json"</span><span class="p">,</span> <span class="s2">"w"</span><span class="p">),</span>
+              <span class="n">indent</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="c1"># Plot the results</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">matplotlib</span>
+
+<span class="n">matplotlib</span><span class="o">.</span><span class="n">use</span><span class="p">(</span><span class="s2">"Agg"</span><span class="p">)</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">matplotlib.pyplot</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">plt</span>
+
+<span class="n">labels</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"chromobius"</span><span class="p">:</span> <span class="s2">"Raw Chromobius"</span><span class="p">,</span>
+    <span class="s2">"trt_decoder"</span><span class="p">:</span> <span class="s2">"Ising-Decoder-ColorCode-1-Fast"</span>
+<span class="p">}</span>
+<span class="n">colors</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"chromobius"</span><span class="p">:</span> <span class="s2">"#808080"</span><span class="p">,</span> <span class="s2">"trt_decoder"</span><span class="p">:</span> <span class="s2">"#76b900"</span><span class="p">}</span>
+<span class="n">styles</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"server"</span><span class="p">:</span> <span class="p">(</span><span class="s2">"--"</span><span class="p">,</span> <span class="s2">"o"</span><span class="p">,</span> <span class="s2">"server, UDP"</span><span class="p">),</span> <span class="s2">"inproc"</span><span class="p">:</span> <span class="p">(</span><span class="s2">":"</span><span class="p">,</span> <span class="s2">"o"</span><span class="p">,</span> <span class="s2">"inproc"</span><span class="p">)}</span>
+<span class="n">fig</span><span class="p">,</span> <span class="n">ax</span> <span class="o">=</span> <span class="n">plt</span><span class="o">.</span><span class="n">subplots</span><span class="p">(</span><span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mf">6.5</span><span class="p">))</span>
+<span class="k">for</span> <span class="n">dec</span> <span class="ow">in</span> <span class="n">labels</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">sess</span><span class="p">,</span> <span class="p">(</span><span class="n">style</span><span class="p">,</span> <span class="n">marker</span><span class="p">,</span> <span class="n">sess_label</span><span class="p">)</span> <span class="ow">in</span> <span class="n">styles</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">pts</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">((</span><span class="nb">int</span><span class="p">(</span><span class="n">d</span><span class="p">),</span> <span class="n">r</span><span class="p">[</span><span class="n">dec</span><span class="p">][</span><span class="n">sess</span><span class="p">])</span>
+                     <span class="k">for</span> <span class="n">d</span><span class="p">,</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">results</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
+                     <span class="k">if</span> <span class="n">r</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">dec</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">sess</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"errors"</span><span class="p">))</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">pts</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="p">[</span><span class="s2">"runtime"</span><span class="p">]</span> <span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">pts</span><span class="p">]</span>
+        <span class="n">y</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="p">[</span><span class="s2">"ler"</span><span class="p">]</span> <span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">pts</span><span class="p">]</span>
+        <span class="n">ax</span><span class="o">.</span><span class="n">errorbar</span><span class="p">(</span><span class="n">x</span><span class="p">,</span>
+                    <span class="n">y</span><span class="p">,</span>
+                    <span class="n">yerr</span><span class="o">=</span><span class="p">[</span><span class="n">p</span><span class="p">[</span><span class="s2">"ler_unc"</span><span class="p">]</span> <span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">pts</span><span class="p">],</span>
+                    <span class="n">color</span><span class="o">=</span><span class="n">colors</span><span class="p">[</span><span class="n">dec</span><span class="p">],</span>
+                    <span class="n">linestyle</span><span class="o">=</span><span class="n">style</span><span class="p">,</span>
+                    <span class="n">marker</span><span class="o">=</span><span class="n">marker</span><span class="p">,</span>
+                    <span class="n">markersize</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span>
+                    <span class="n">linewidth</span><span class="o">=</span><span class="mf">2.5</span><span class="p">,</span>
+                    <span class="n">capsize</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+                    <span class="n">label</span><span class="o">=</span><span class="s2">"</span><span class="si">%s</span><span class="s2"> (</span><span class="si">%s</span><span class="s2">)"</span> <span class="o">%</span> <span class="p">(</span><span class="n">labels</span><span class="p">[</span><span class="n">dec</span><span class="p">],</span> <span class="n">sess_label</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">sess</span> <span class="o">==</span> <span class="s2">"server"</span><span class="p">:</span>
+            <span class="k">for</span> <span class="p">(</span><span class="n">d</span><span class="p">,</span> <span class="n">_</span><span class="p">),</span> <span class="n">xi</span><span class="p">,</span> <span class="n">yi</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">pts</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+                <span class="n">ax</span><span class="o">.</span><span class="n">annotate</span><span class="p">(</span><span class="s2">"d=</span><span class="si">%d</span><span class="s2">"</span> <span class="o">%</span> <span class="n">d</span><span class="p">,</span> <span class="p">(</span><span class="n">xi</span><span class="p">,</span> <span class="n">yi</span><span class="p">),</span>
+                            <span class="n">textcoords</span><span class="o">=</span><span class="s2">"offset points"</span><span class="p">,</span>
+                            <span class="n">xytext</span><span class="o">=</span><span class="p">(</span><span class="mi">9</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span>
+                            <span class="n">color</span><span class="o">=</span><span class="n">colors</span><span class="p">[</span><span class="n">dec</span><span class="p">])</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">set_xscale</span><span class="p">(</span><span class="s2">"log"</span><span class="p">)</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">set_yscale</span><span class="p">(</span><span class="s2">"log"</span><span class="p">)</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">set_xlabel</span><span class="p">(</span><span class="sa">r</span><span class="s2">"Runtime ($\mu$s / round)"</span><span class="p">)</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">set_ylabel</span><span class="p">(</span><span class="s2">"Logical error rate per round"</span><span class="p">)</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">set_title</span><span class="p">(</span><span class="sa">r</span><span class="s2">"$p = </span><span class="si">%g</span><span class="s2">$ (Z basis)"</span> <span class="o">%</span> <span class="n">args</span><span class="o">.</span><span class="n">p</span><span class="p">)</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">grid</span><span class="p">(</span><span class="kc">True</span><span class="p">,</span> <span class="n">which</span><span class="o">=</span><span class="s2">"both"</span><span class="p">,</span> <span class="n">linestyle</span><span class="o">=</span><span class="s2">":"</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="mf">0.6</span><span class="p">)</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">legend</span><span class="p">(</span><span class="n">loc</span><span class="o">=</span><span class="s2">"lower left"</span><span class="p">)</span>
+<span class="n">xlo</span><span class="p">,</span> <span class="n">xhi</span> <span class="o">=</span> <span class="n">ax</span><span class="o">.</span><span class="n">get_xlim</span><span class="p">()</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">set_xlim</span><span class="p">(</span><span class="n">xlo</span> <span class="o">/</span> <span class="mf">1.5</span><span class="p">,</span> <span class="n">xhi</span> <span class="o">*</span> <span class="mf">2.6</span><span class="p">)</span>
+<span class="n">fig</span><span class="o">.</span><span class="n">tight_layout</span><span class="p">()</span>
+<span class="n">fig</span><span class="o">.</span><span class="n">savefig</span><span class="p">(</span><span class="s2">"color_code_demo.png"</span><span class="p">,</span> <span class="n">dpi</span><span class="o">=</span><span class="mi">150</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"wrote"</span><span class="p">,</span> <span class="s2">"color_code_demo.png"</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="see-also">
+<h2>See Also<a class="headerlink" href="#see-also" title="Permalink to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="../../components/qec/realtime_decoding.html"><span class="doc">Realtime Decoding</span></a> – concept and workflow</p></li>
+<li><p><a class="reference internal" href="getting_started_realtime_decoding.html"><span class="doc">Getting Started with Realtime Decoding</span></a></p></li>
+<li><p><a class="reference internal" href="../../api/qec/cpp_api.html#cpp-realtime-decoding-api"><span class="std std-ref">C++</span></a> and <a class="reference internal" href="../../api/qec/python_api.html#python-realtime-decoding-api"><span class="std std-ref">Python</span></a> realtime decoding API</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="realtime_predecoder_fpga.html" class="btn btn-neutral float-left" title="AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="sifl_demo.html" class="btn btn-neutral float-right" title="Streaming Interleaved Feed-forward Latency (SIFL)" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA Corporation &amp; Affiliates.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(false);
+      });
+  </script>  
+
+  <style>
+  a:link, a:visited {
+    color: #76b900;
+  }
+
+  a:hover {
+    color: #8c0;
+  }
+
+  .rst-content dl:not(.docutils) dt {
+    background: rgba(118, 185, 0, 0.1);
+    color: rgba(59,93,0,1);
+    border-top: solid 3px rgba(59,93,0,1);
+  }
+  </style>
+  
+
+</body>
+</html>

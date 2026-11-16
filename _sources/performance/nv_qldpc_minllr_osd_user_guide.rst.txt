@@ -37,15 +37,15 @@ history.
     #   error_rates  prior probability of each error mechanism
     decoder = qec.get_decoder(
         "nv-qldpc-decoder", H, error_rate_vec=error_rates,
-        O=L,                                  # decode straight to observables
+        O=L, output="observables",            # explicit result basis
         use_sparsity=True, use_osd=True,
         osd_method=3, osd_order=10,           # OSD combination sweep, lambda = 10
         max_iterations=10,                    # only 10 BP iterations ...
         osd_init_method="min_llr",            # ... ordered by the running-min LLR
         bp_batch_size=2048)
 
-    # With O given, each result is the predicted observable flips (k bits),
-    # not a correction vector; compare it directly to the measured observables.
+    # Observable output is k predicted flip bits, so compare it directly to
+    # the measured observables.
     results = decoder.decode_batch(syndromes)
     predicted = [r.result for r in results]
 
@@ -139,7 +139,7 @@ shot cap; points with zero observed failures are shown as their 95% Wilson upper
    * - ``bp_batch_size``
      - 2048
    * - Priors
-     - ``error_rate_vec`` from the DEM; observables decoded via ``O=L``
+     - ``error_rate_vec`` and ``O=L`` from the DEM; explicit observable output
 
 Results
 +++++++
