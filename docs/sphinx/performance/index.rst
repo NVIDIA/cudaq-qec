@@ -27,8 +27,8 @@ decode latency, logical error rate, and the trade-offs behind decoder tuning kno
   of a circuit-level noise model are learned from detector data alone, and how the logical
   error rate of TCBP-JOBS decoding with learned rates compares with uniform and oracle rates:
   on the ``[[144,12,12]]`` bivariate-bicycle code with ``si1000`` noise the observed logical error
-  rate with learned rates is **1.00x to 1.05x** that of the oracle (these runs do not establish
-  equivalence within 5%) and up to **~30x** lower than with a uniform prior (measured on a single GB200).
+  rate with learned rates is **1.00x to 1.05x** that of the oracle and up to **~30x** lower
+  than with a uniform prior (measured on a single GB200).
 
 .. toctree::
    :maxdepth: 1
