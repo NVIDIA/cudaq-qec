@@ -490,6 +490,23 @@ The Quantum Low-Density Parity-Check (QLDPC) decoder leverages GPU-accelerated b
 Since belief propagation is an iterative method which may not converge, decoding can be improved with a second-stage post-processing step. The `nv-qldpc-decoder`
 API provides various post-processing options, which can be selected through its parameters.
 
+For every option, its default and its constraints, see the full ``nv-qldpc-decoder`` API reference for
+:ref:`Python <nv_qldpc_decoder_api_python>` or :ref:`C++ <nv_qldpc_decoder_api_cpp>`.
+
+**Decoder Pipeline:**
+
+The decoder runs BP first. The BP result is either returned directly or used to order the columns of the
+parity-check matrix for an ordered-statistics decoding (OSD) post-processor. When a Trajectory-Calibrated BP
+(TCBP) model is supplied, the decoder computes a calibrated error probability for each error mechanism, which
+is either returned as the result or used as the OSD column ordering.
+
+.. image:: ../../../../assets/docs/nv_qldpc_decoder_pipeline.png
+   :align: center
+   :alt: Block diagram of the nv-qldpc decoder pipeline: BP front end, TCBP calibrated scores, column ordering, OSD post-processing, and the four results.
+
+The API reference lists the supported configurations of this pipeline and the options and presets that select
+them.
+
 **Belief Propagation Methods:**
 
 The decoder supports several belief-propagation algorithms -- sum-product, min-sum, and memory-based variants -- selected via ``bp_method``, with optional BP+OSD post-processing. For the complete list of methods, parameters, and defaults, see the ``nv-qldpc-decoder`` entries in the :ref:`C++ <nv_qldpc_decoder_api_cpp>` and :ref:`Python <nv_qldpc_decoder_api_python>` API reference.
@@ -498,6 +515,10 @@ The decoder supports several belief-propagation algorithms -- sum-product, min-s
 
 * **Sequential Relay BP** (``composition=1``): chains multiple "relay legs" -- sequential BP runs with different gamma configurations -- to decode syndromes that stall a single BP pass. **Requires:** ``bp_method=3``, ``gamma0``, ``srelay_config``, and either ``gamma_dist`` OR ``explicit_gammas``.
 * **Gamma ensembling** (``gamma_ensemble_size``): an extension of Relay BP that explores multiple sets of gamma values in parallel on a single GPU (N independent "lanes"). The first lane to converge lets the decoder exit early, so slow lanes are terminated without adding to the decode time -- narrowing the latency distribution and improving performance on hard-to-decode syndromes that would otherwise stall Relay BP. See :doc:`Improving Relay BP Decoding With Gamma Ensembles </performance/nv_qldpc_gamma_ensemble_user_guide>` for a performance study.
+* **Trajectory-Calibrated BP (TCBP)** (``tcbp_model``): computes a calibrated error probability for each error mechanism from its LLR at every BP iteration, using a model that is fitted once per code family. The probabilities are returned directly (``use_osd=false``) or used to order the OSD columns (``osd_init_method="tcbp"``). Introduced in 0.9.0.
+* **Jittered OSD Beam Search (JOBS)** (``osd_method=4``): an OSD post-processor that runs on the GPU. For each shot it searches several perturbed column orderings and refines each OSD-0 solution with a beam search. It can also return a per-shot confidence value, the JOBS gap, for post-selection. Introduced in 0.9.0. See :ref:`tcbp_jobs_user_guide` for measured accuracy and latency.
+* **Presets** (``cudaq_qec.plugins.nv_qldpc.preset``): named option sets for common configurations, such as ``bp60-osd0``, ``relay-bp`` and ``tcbp-jobs``. The API reference lists all of them.
+* **Noise learning** (``learn_noise``): learns the error rate of every mechanism of a detector error model from recorded detector data alone, using the TCBP model. See :ref:`Noise Learning and Trajectory-Calibrated BP <qldpc_noise_learning>`.
 
 The QLDPC decoder `nv-qldpc-decoder` requires a CUDA-Q compatible GPU. See the `CUDA-Q dependencies and compatibility <https://nvidia.github.io/cuda-quantum/latest/using/install/local_installation.html#dependencies-and-compatibility>`_ list.
 
@@ -507,6 +528,7 @@ The decoder is based on the following references:
 * https://github.com/quantumgizmos/ldpc 
 * https://arxiv.org/pdf/2506.01779 
 * https://github.com/trmue/relay 
+* B. Howe, S. Maurya, J. Olle, I. Basov, M. Li, J. G. Lietz, K. Young and K. M. Svore, "TCBP-JOBS: GPU-Accelerated Quantum Error Correction Decoding and Noise Learning with Near-Optimal Accuracy," NVIDIA Research (2026).
 
 
 Usage:
@@ -550,6 +572,123 @@ Usage:
         auto d2 = cudaq::qec::get_decoder("nv-qldpc-decoder", H, {{"use_osd", true}, {"bp_batch_size", 100}});
 
 For a runnable example, see :ref:`Getting Started with the NVIDIA QLDPC Decoder <qldpc_decoder_example>`.
+For the full list of options, see the ``nv-qldpc-decoder`` API reference for
+:ref:`Python <nv_qldpc_decoder_api_python>` or :ref:`C++ <nv_qldpc_decoder_api_cpp>`.
+
+.. _qldpc_noise_learning:
+
+**Noise Learning and Trajectory-Calibrated BP:**
+
+The ``nv-qldpc-decoder`` package can also learn the error rate of every mechanism of a detector error
+model (DEM) from recorded detector data alone, and use the learned rates and a Trajectory-Calibrated BP
+(TCBP) model in the decoder. A BP-based decoder works best when its prior matches the device, but on real
+hardware the rates are not known in advance and change over time. Noise learning needs no logical labels
+and no assumed rates, and it runs on the GPU. The learned rates are passed to the decoder as
+``error_rate_vec``.
+
+Noise learning is provided by two functions in ``cudaq_qec.plugins.nv_qldpc`` (they need ``numpy``; the
+helpers in ``tying`` and ``p25`` and the command-line tools also need ``stim``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 38 20 20
+
+   * - Function
+     - Purpose
+     - Input
+     - Output
+   * - ``init_tcbp_model``
+     - Fit the TCBP model of a code family. Run once and reuse.
+     - ``H``
+     - TCBP model (bytes); with ``return_report=True``, also a report
+   * - ``learn_noise``
+     - Learn the error rate of every column of ``H`` from recorded detector data.
+     - ``H``, detector data ``[N, m]`` (uint8), TCBP model
+     - rates ``[n]`` and a report
+
+``H`` is the ``uint8`` detector error matrix ``[m detectors, n mechanisms]``; the detector data has
+one row per shot, with columns in the order of the rows of ``H``. ``learn_noise`` takes no error rates.
+``init_tcbp_model`` needs only ``H`` and no information about your device: by default it draws its own training
+rates. It also accepts training rates as ``error_rate_vec``. For noise learning, do not pass the true rates of the
+device or rates learned from its data, because the learned rates would then not be an independent estimate. Fit it once
+per code family and reuse it. The options, the report and recommendations for ``init_tcbp_model`` are in the
+Trajectory-Calibrated BP section of the :ref:`API reference <nv_qldpc_decoder_api_python>`. ``learn_noise`` runs at most ``passes`` passes (default 4) and stops early
+when the rates stop changing by more than ``tol``. More passes and more shots give more accurate
+rates, and the run time grows linearly with both.
+
+Usage:
+
+.. tab:: Python
+
+    .. code-block:: python
+
+        import numpy as np
+        import cudaq_qec as qec
+        from cudaq_qec.plugins import nv_qldpc
+
+        # H: uint8 [m, n] detector error matrix of your circuit
+        # dets: uint8 [N, m] detector samples recorded from the device
+        tcbp_model = nv_qldpc.init_tcbp_model(H)                    # once per code family
+        rates, report = nv_qldpc.learn_noise(H, dets, tcbp_model)   # rates: float64 [n]
+
+        # Decode with the learned rates as the prior
+        decoder = qec.get_decoder("nv-qldpc-decoder", H, error_rate_vec=rates,
+                                  use_sparsity=True, bp_method=0, max_iterations=10,
+                                  clip_value=15.0, proc_float="fp32")
+
+``learn_noise`` accepts ``mode`` to trade accuracy for assumptions about the noise:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 78
+
+   * - ``mode``
+     - Use when
+   * - ``"per_mechanism"`` (default)
+     - You trust the mechanisms of ``H`` but know nothing about the rates. One rate per column; needs the most shots.
+   * - ``"tied"``
+     - The noise does not change from round to round. Mechanisms that repeat every round share a rate (``class_ids=tying.round_classes(circuit).class_ids``), which lowers the shot-noise floor.
+   * - ``"parametric"``
+     - The circuit follows a 25-parameter circuit-level model. The data constrain 25 parameters (``design`` from ``p25.design_map``), which gives the best accuracy per shot, at the cost of assuming that structure.
+
+The report returned with the rates holds convergence diagnostics (per-pass change of the rates,
+held-out detector statistics, ``start_rate``, wall time). A run has converged when the per-pass
+change has levelled off. The same functions are available as command-line tools in
+``cudaq_qec.plugins.nv_qldpc.cli``; ``--help`` lists the options of each.
+
+The TCBP model also configures the decoder. Pass it as ``tcbp_model`` (a writable 1-D ``uint8`` array or
+a file path) together with the BP settings it was fitted for (``bp_method``, ``max_iterations``,
+``clip_value`` and ``proc_float`` must match):
+
+.. tab:: Python
+
+    .. code-block:: python
+
+        tcbp = np.array(bytearray(tcbp_model), dtype=np.uint8)
+        decoder = qec.get_decoder("nv-qldpc-decoder", H, error_rate_vec=rates, tcbp_model=tcbp,
+                                  use_sparsity=True, bp_method=0, max_iterations=10,
+                                  clip_value=15.0, proc_float="fp32",
+                                  use_osd=True, osd_init_method="tcbp",
+                                  osd_method=4)                     # JOBS
+
+``osd_init_method="tcbp"`` uses the TCBP model to initialize the OSD post-processor, and
+``osd_method=4`` selects JOBS, a GPU OSD post-processor. With ``use_osd=False`` the decoder instead
+returns the calibrated probability of error of every mechanism. The decoder options are described in the
+:ref:`API reference <nv_qldpc_decoder_api_python>`.
+
+The following limits apply:
+
+* ``H`` must be a 2-D ``uint8`` array or a ``scipy.sparse`` matrix; a stim ``DetectorErrorModel`` or an ``(H, rates)`` tuple is rejected.
+* Only the rates of mechanisms already in ``H`` are learned; mechanisms missing from the DEM are not discovered.
+* The TCBP model is required for noise learning. Model and decoder must use the same BP settings.
+* Rates outside the range the model was fitted on are reported (``rates_outside_training_range``); pass ``min_p``/``max_p`` to ``init_tcbp_model`` if your device lies outside the default range.
+* JOBS requires ``use_osd=True``, ``use_sparsity=True`` and ``composition=0``, and at most 8192 detectors.
+
+For a measured example (learning time, accuracy of the learned rates, and logical error rate with
+uniform, learned and oracle rates on a bivariate-bicycle code), see
+:doc:`Learning Noise From Detector Data and Decoding With the Learned Rates
+</performance/nv_qldpc_noise_learning_user_guide>`. For the accuracy and speed of the TCBP-JOBS decoder
+itself, see :ref:`tcbp_jobs_user_guide`.
 
 NVIDIA Fusion Decoder
 ^^^^^^^^^^^^^^^^^^^^^
