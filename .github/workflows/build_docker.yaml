@@ -100,7 +100,7 @@ jobs:
             base_image=${{ env.base_image }}
             cuda_version=${{ inputs.cuda_version }}
           labels: |
-            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.source=https://github.com/NVIDIA/cudaq-qec
             org.opencontainers.image.revision=${{ github.sha }}
           tags: ${{ inputs.pub_tag || format('ghcr.io/nvidia/private/cuda-quantum:{0}-cudaqx', env.tag) }}
           platforms: linux/amd64,linux/arm64
