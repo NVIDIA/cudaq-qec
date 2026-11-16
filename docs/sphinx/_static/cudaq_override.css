@@ -11,8 +11,9 @@ max-width: 1240px !important;
 	font-size: 92%;
 }
 
-/* Hide the permalink beside the home page's feature list heading. */
-#key-features > h2 > .headerlink {
+/* Hide the permalinks beside the home page's feature and index headings. */
+#key-features > h2 > .headerlink,
+#indices > h2 > .headerlink {
     display: none;
 }
 
