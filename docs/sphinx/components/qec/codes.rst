@@ -1,353 +1,11 @@
 QEC Codes
 =========
 
-The ``cudaq-qec`` code interface (:code:`cudaq::qec::code`) defines what a quantum error correcting code is: a mapping from logical operations to their physical CUDA-Q kernel implementations. This page covers the framework — the class structure and how to define or extend a code — together with the codes that ship with the library. Read it to understand the model or to implement your own code. For a runnable, end-to-end program, see the :doc:`Creating New QEC Codes example </examples_rst/qec/creating_qec_codes>`.
-
-QEC Code Framework :code:`cudaq::qec::code`
--------------------------------------------
-
-The :code:`cudaq::qec::code` class serves as the base class for all quantum error correcting codes in CUDA-Q QEC. It provides
-a flexible extension point for implementing new codes and defines the core interface that all QEC codes must support.
-
-The core abstraction here is that of a mapping or dictionary of logical operations to their
-corresponding physical implementation in the error correcting code as CUDA-Q quantum kernels.
-
-Class Structure
-^^^^^^^^^^^^^^^
-
-The code base class provides:
-
-1. **Operation Enumeration**: Defines supported logical operations
-
-   .. code-block:: cpp
-
-       enum class operation {
-           x,     // Logical X gate
-           y,     // Logical Y gate
-           z,     // Logical Z gate
-           h,     // Logical Hadamard gate
-           s,     // Logical S gate
-           cx,    // Logical CNOT gate
-           cy,    // Logical CY gate
-           cz,    // Logical CZ gate
-           stabilizer_round,  // Stabilizer measurement round
-           prep0, // Prepare |0⟩ state
-           prep1, // Prepare |1⟩ state
-           prepp, // Prepare |+⟩ state
-           prepm  // Prepare |-⟩ state
-       };
-
-
-2. **Patch Type**: Defines the structure of a logical qubit patch
-
-   .. code-block:: cpp
-
-       struct patch {
-           cudaq::qview<> data;  // View of data qubits
-           cudaq::qview<> ancx;  // View of X stabilizer ancilla qubits
-           cudaq::qview<> ancz;  // View of Z stabilizer ancilla qubits
-       };
-
-   The `patch` type represents a logical qubit in quantum error correction codes. It contains:
-
-   - `data`: A view of the data qubits in the patch
-   - `ancx`: A view of the ancilla qubits used for X stabilizer measurements
-   - `ancz`: A view of the ancilla qubits used for Z stabilizer measurements
-
-   This structure is designed for use within CUDA-Q kernel code and provides a
-   convenient way to access different qubit subsets within a logical qubit patch.
-
-
-3. **Kernel Type Aliases**: Defines quantum kernel signatures
-
-   .. code-block:: cpp
-
-       using one_qubit_encoding = cudaq::qkernel<void(patch)>;
-       using two_qubit_encoding = cudaq::qkernel<void(patch, patch)>;
-       using stabilizer_round = cudaq::qkernel<std::vector<cudaq::measure_result>(
-           patch, const std::vector<std::size_t>&, const std::vector<std::size_t>&)>;
-
-   The two vector arguments of :code:`stabilizer_round` are the flattened X and
-   Z stabilizer *schedule* matrices, which can encode an optimized gate order
-   on top of the parity-check support. See
-   :cpp:func:`cudaq::qec::code::get_stabilizer_schedule_x` for the encoding
-   and the default (the plain parity matrices).
-
-4. **Protected Members**:
-
-   - :code:`operation_encodings`: Maps operations to their quantum kernel implementations. The key is the ``operation`` enum and the value is a variant on the above kernel type aliases.
-   - :code:`m_stabilizers`: Stores the code's stabilizer generators
-
-Implementing a New Code
-^^^^^^^^^^^^^^^^^^^^^^^
-
-To implement a new quantum error correcting code:
-
-1. **Create a New Class**:
-
-   .. code-block:: cpp
-
-       class my_code : public qec::code {
-       protected:
-           // Implement required virtual methods
-       public:
-           my_code(const heterogeneous_map& options);
-       };
-
-2. **Implement Required Virtual Methods**:
-
-   .. code-block:: cpp
-
-       // Number of physical data qubits
-       std::size_t get_num_data_qubits() const override;
-
-       // Total number of ancilla qubits
-       std::size_t get_num_ancilla_qubits() const override;
-
-       // Number of X-type ancilla qubits
-       std::size_t get_num_ancilla_x_qubits() const override;
-
-       // Number of Z-type ancilla qubits
-       std::size_t get_num_ancilla_z_qubits() const override;
-
-3. **Define Quantum Kernels**:
-
-   Create CUDA-Q kernels for each logical operation:
-
-   .. code-block:: cpp
-
-       __qpu__ void x(patch p) {
-           // Implement logical X
-       }
-
-       __qpu__ std::vector<cudaq::measure_result> stabilizer(patch p,
-           const std::vector<std::size_t>& x_stabs,
-           const std::vector<std::size_t>& z_stabs) {
-           // Implement stabilizer measurements
-       }
-
-   .. note::
-
-      The two vector arguments passed to the :code:`stabilizer_round` kernel
-      are the flattened X and Z stabilizer *schedule* matrices returned by
-      :cpp:func:`cudaq::qec::code::get_stabilizer_schedule_x` and
-      :cpp:func:`cudaq::qec::code::get_stabilizer_schedule_z`. By default
-      these equal the plain parity-check matrices (every entry 0 or 1), but a
-      code can override the :code:`get_stabilizer_schedule_*` methods to
-      encode a gate order, in which case entry :code:`k >= 1` means the
-      interaction executes at timestep :code:`k` (the built-in
-      :code:`surface_code` does this to avoid hook errors). A kernel that only
-      needs the support pattern should therefore test entries for
-      :code:`!= 0` rather than :code:`== 1`.
-
-4. **Register Operations**:
-
-   In the constructor, register quantum kernels for each operation:
-
-   .. code-block:: cpp
-
-        my_code::my_code(const heterogeneous_map& options) : code() {
-            // Register operations
-            operation_encodings.insert(
-               std::make_pair(operation::x, x));
-            operation_encodings.insert(
-               std::make_pair(operation::stabilizer_round, stabilizer));
-
-            // Define stabilizer generators
-            m_stabilizers = fromPauliWords({"XXXX", "ZZZZ"});
-        }
-
-
-   Note that in your constructor, you have access to user-provided ``options``. For
-   example, if your code depends on an integer parameter called ``distance``, you can
-   retrieve that from the user via
-
-   .. code-block:: cpp
-
-        my_code::my_code(const heterogeneous_map& options) : code() {
-            // ... fill the map and stabilizers ...
-
-            // Get the user-provided distance, or just
-            // set to 3 if user did not provide one
-            this->distance = options.get<int>("distance", /*defaultValue*/ 3);
-        }
-
-5. **Register Extension Point**:
-
-   Add extension point registration.
-
-   .. code-block:: cpp
-
-       class my_code : public qec::code {
-           // ... members from above ...
-
-           CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
-               my_code,
-               static std::unique_ptr<qec::code> create(
-                   const heterogeneous_map &options) {
-                   return std::make_unique<my_code>(options);
-               })
-       };
-
-       CUDAQ_EXT_PT_REGISTER_TYPE(my_code)
-
-Example: Steane Code
-^^^^^^^^^^^^^^^^^^^^^
-
-The Steane [[7,1,3]] code provides a complete example implementation:
-
-1. **Header Definition**:
-
-   - Declares quantum kernels for all logical operations
-   - Defines the code class with required virtual methods
-   - Specifies 7 data qubits and 6 ancilla qubits (3 X-type, 3 Z-type)
-
-2. **Implementation**:
-
-   .. code-block:: cpp
-
-       steane::steane(const heterogeneous_map &options) : code() {
-           // Register all logical operations
-           operation_encodings.insert(
-               std::make_pair(operation::x, x));
-           // ... register other operations ...
-
-           // Define stabilizer generators
-           m_stabilizers = fromPauliWords({
-               "XXXXIII", "IXXIXXI", "IIXXIXX",
-               "ZZZZIII", "IZZIZZI", "IIZZIZZ"
-           });
-       }
-
-3. **Quantum Kernels**:
-
-   Implements fault-tolerant logical operations:
-
-   .. code-block:: cpp
-
-       __qpu__ void x(patch logicalQubit) {
-           // Apply logical X to specific data qubits
-           x(logicalQubit.data[4], logicalQubit.data[5],
-             logicalQubit.data[6]);
-       }
-
-       __qpu__ std::vector<cudaq::measure_result> stabilizer(patch logicalQubit,
-           const std::vector<std::size_t>& x_stabilizers,
-           const std::vector<std::size_t>& z_stabilizers) {
-           // Measure X stabilizers
-           h(logicalQubit.ancx);
-           // ... apply controlled-X gates ...
-           h(logicalQubit.ancx);
-
-           // Measure Z stabilizers
-           // ... apply controlled-X gates ...
-
-           // Return measurement results
-           return mz(logicalQubit.ancz, logicalQubit.ancx);
-       }
-
-Implementing a New Code in Python
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-CUDA-Q QEC supports implementing quantum error correction codes in Python
-using the :code:`@qec.code` decorator. This provides a more accessible way
-to prototype and develop new codes.
-
-1. **Create a New Python File**:
-
-   Create a new file (e.g., :code:`my_steane.py`) with your code implementation:
-
-   .. literalinclude:: ../../examples/qec/python/my_steane.py
-      :language: python
-      :start-after: [Begin Documentation1]
-      :end-before: [End Documentation1]
-
-2. **Define Quantum Kernels**:
-
-   Implement the required quantum kernels using the :code:`@cudaq.kernel` decorator:
-
-   .. literalinclude:: ../../examples/qec/python/my_steane.py
-      :language: python
-      :start-after: [Begin Documentation2]
-      :end-before: [End Documentation2]
-
-   .. note::
-
-      The kernel registered for :code:`stabilizer_round` must be annotated to
-      return :code:`list[cudaq.measure_handle]`.
-
-   .. note::
-
-      As in C++, the two list arguments passed to the
-      :code:`stabilizer_round` kernel are the flattened X and Z stabilizer
-      schedule matrices, which default to the parity-check matrices. A Python
-      code can optionally define :code:`get_stabilizer_schedule_x` /
-      :code:`get_stabilizer_schedule_z` methods returning a 2D array with the
-      same shape and support pattern as the corresponding parity-check
-      matrix, where entry :code:`k >= 1` schedules that interaction at
-      timestep :code:`k`.
-
-3. **Implement the Code Class**:
-
-   Create a class decorated with :code:`@qec.code` that implements the required interface:
-
-   .. literalinclude:: ../../examples/qec/python/my_steane.py
-      :language: python
-      :start-after: [Begin Documentation3]
-      :end-before: [End Documentation3]
-
-4. **Using the Code**:
-
-   The code can now be used like any other CUDA-Q QEC code:
-
-   .. literalinclude:: ../../examples/qec/python/my_steane_test.py
-      :language: python
-      :start-after: [Begin Documentation]
-
-Key Points
-^^^^^^^^^^^
-
-* The :code:`@qec.code` decorator takes the name of the code as an argument
-* Operation encodings are registered via the :code:`operation_encodings` dictionary
-* Stabilizer generators are defined as a list of :code:`cudaq.SpinOperator`
-* The code must implement all required methods from the base class interface
-
-
-Using the Code Framework
-^^^^^^^^^^^^^^^^^^^^^^^^^
-
-To use an implemented code:
-
-.. tab:: Python
-
-    .. code-block:: python
-
-        import cudaq_qec as qec
-
-        # Create a code instance
-        code = qec.get_code("steane")
-
-        # Access stabilizer information
-        stabilizers = code.get_stabilizers()
-        parity = code.get_parity()
-
-        # The code can now be used for various numerical
-        # experiments - see section below.
-
-.. tab:: C++
-
-    .. code-block:: cpp
-
-        // Create a code instance
-        auto code = cudaq::qec::get_code("steane");
-
-        // Access stabilizer information
-        auto stabilizers = code->get_stabilizers();
-        auto parity = code->get_parity();
-
-        // The code can now be used for various numerical
-        // experiments - see section below.
-
+The ``cudaq-qec`` code interface (:code:`cudaq::qec::code`) maps logical
+operations to their physical CUDA-Q kernel implementations. Choose from the
+pre-built codes below, or use the code framework to implement your own.
+For a runnable, end-to-end program, see the
+:doc:`Creating New QEC Codes example </examples_rst/qec/creating_qec_codes>`.
 
 Pre-built QEC Codes
 -------------------
@@ -373,7 +31,7 @@ one logical qubit into seven physical qubits with a code distance of 3.
 * Z-type: ``["ZZZZIII", "IZZIZZI", "IIZZIZZ"]``
 
 The Steane code can correct any single-qubit error and detect up to two errors.
-It is particularly notable for being the smallest CSS code that can implement a universal set of transversal gates.
+It supports transversal Clifford gates.
 
 Usage:
 
@@ -566,4 +224,355 @@ Usage:
         auto stabilizers = code->get_stabilizers();
         auto parity = code->get_parity();
 
+Build Your Own Code
+--------------------
 
+To add a quantum error correcting code, define its stabilizers and the
+CUDA-Q kernels that implement its logical operations, then register the code
+with CUDA-Q QEC. The following sections describe the framework and show how
+to implement a code in C++ or Python.
+
+QEC Code Framework :code:`cudaq::qec::code`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The :code:`cudaq::qec::code` class serves as the base class for all quantum error correcting codes in CUDA-Q QEC. It provides
+a flexible extension point for implementing new codes and defines the core interface that all QEC codes must support.
+
+The core abstraction here is that of a mapping or dictionary of logical operations to their
+corresponding physical implementation in the error correcting code as CUDA-Q quantum kernels.
+
+Class Structure
+"""""""""""""""
+
+The code base class provides:
+
+1. **Operation Enumeration**: Defines supported logical operations
+
+   .. code-block:: cpp
+
+       enum class operation {
+           x,     // Logical X gate
+           y,     // Logical Y gate
+           z,     // Logical Z gate
+           h,     // Logical Hadamard gate
+           s,     // Logical S gate
+           cx,    // Logical CNOT gate
+           cy,    // Logical CY gate
+           cz,    // Logical CZ gate
+           stabilizer_round,  // Stabilizer measurement round
+           prep0, // Prepare |0⟩ state
+           prep1, // Prepare |1⟩ state
+           prepp, // Prepare |+⟩ state
+           prepm  // Prepare |-⟩ state
+       };
+
+
+2. **Patch Type**: Defines the structure of a logical qubit patch
+
+   .. code-block:: cpp
+
+       struct patch {
+           cudaq::qview<> data;  // View of data qubits
+           cudaq::qview<> ancx;  // View of X stabilizer ancilla qubits
+           cudaq::qview<> ancz;  // View of Z stabilizer ancilla qubits
+       };
+
+   The `patch` type represents a logical qubit in quantum error correction codes. It contains:
+
+   - `data`: A view of the data qubits in the patch
+   - `ancx`: A view of the ancilla qubits used for X stabilizer measurements
+   - `ancz`: A view of the ancilla qubits used for Z stabilizer measurements
+
+   This structure is designed for use within CUDA-Q kernel code and provides a
+   convenient way to access different qubit subsets within a logical qubit patch.
+
+
+3. **Kernel Type Aliases**: Defines quantum kernel signatures
+
+   .. code-block:: cpp
+
+       using one_qubit_encoding = cudaq::qkernel<void(patch)>;
+       using two_qubit_encoding = cudaq::qkernel<void(patch, patch)>;
+       using stabilizer_round = cudaq::qkernel<std::vector<cudaq::measure_result>(
+           patch, const std::vector<std::size_t>&, const std::vector<std::size_t>&)>;
+
+   The two vector arguments of :code:`stabilizer_round` are the flattened X and
+   Z stabilizer *schedule* matrices, which can encode an optimized gate order
+   on top of the parity-check support. See
+   :cpp:func:`cudaq::qec::code::get_stabilizer_schedule_x` for the encoding
+   and the default (the plain parity matrices).
+
+4. **Protected Members**:
+
+   - :code:`operation_encodings`: Maps operations to their quantum kernel implementations. The key is the ``operation`` enum and the value is a variant on the above kernel type aliases.
+   - :code:`m_stabilizers`: Stores the code's stabilizer generators
+
+Implementing a New Code
+"""""""""""""""""""""""
+
+To implement a new quantum error correcting code:
+
+1. **Create a New Class**:
+
+   .. code-block:: cpp
+
+       class my_code : public qec::code {
+       protected:
+           // Implement required virtual methods
+       public:
+           my_code(const heterogeneous_map& options);
+       };
+
+2. **Implement Required Virtual Methods**:
+
+   .. code-block:: cpp
+
+       // Number of physical data qubits
+       std::size_t get_num_data_qubits() const override;
+
+       // Total number of ancilla qubits
+       std::size_t get_num_ancilla_qubits() const override;
+
+       // Number of X-type ancilla qubits
+       std::size_t get_num_ancilla_x_qubits() const override;
+
+       // Number of Z-type ancilla qubits
+       std::size_t get_num_ancilla_z_qubits() const override;
+
+3. **Define Quantum Kernels**:
+
+   Create CUDA-Q kernels for each logical operation:
+
+   .. code-block:: cpp
+
+       __qpu__ void x(patch p) {
+           // Implement logical X
+       }
+
+       __qpu__ std::vector<cudaq::measure_result> stabilizer(patch p,
+           const std::vector<std::size_t>& x_stabs,
+           const std::vector<std::size_t>& z_stabs) {
+           // Implement stabilizer measurements
+       }
+
+   .. note::
+
+      The two vector arguments passed to the :code:`stabilizer_round` kernel
+      are the flattened X and Z stabilizer *schedule* matrices returned by
+      :cpp:func:`cudaq::qec::code::get_stabilizer_schedule_x` and
+      :cpp:func:`cudaq::qec::code::get_stabilizer_schedule_z`. By default
+      these equal the plain parity-check matrices (every entry 0 or 1), but a
+      code can override the :code:`get_stabilizer_schedule_*` methods to
+      encode a gate order, in which case entry :code:`k >= 1` means the
+      interaction executes at timestep :code:`k` (the built-in
+      :code:`surface_code` does this to avoid hook errors). A kernel that only
+      needs the support pattern should therefore test entries for
+      :code:`!= 0` rather than :code:`== 1`.
+
+4. **Register Operations**:
+
+   In the constructor, register quantum kernels for each operation:
+
+   .. code-block:: cpp
+
+        my_code::my_code(const heterogeneous_map& options) : code() {
+            // Register operations
+            operation_encodings.insert(
+               std::make_pair(operation::x, x));
+            operation_encodings.insert(
+               std::make_pair(operation::stabilizer_round, stabilizer));
+
+            // Define stabilizer generators
+            m_stabilizers = fromPauliWords({"XXXX", "ZZZZ"});
+        }
+
+
+   Note that in your constructor, you have access to user-provided ``options``. For
+   example, if your code depends on an integer parameter called ``distance``, you can
+   retrieve that from the user via
+
+   .. code-block:: cpp
+
+        my_code::my_code(const heterogeneous_map& options) : code() {
+            // ... fill the map and stabilizers ...
+
+            // Get the user-provided distance, or just
+            // set to 3 if user did not provide one
+            this->distance = options.get<int>("distance", /*defaultValue*/ 3);
+        }
+
+5. **Register Extension Point**:
+
+   Add extension point registration.
+
+   .. code-block:: cpp
+
+       class my_code : public qec::code {
+           // ... members from above ...
+
+           CUDAQ_EXTENSION_CUSTOM_CREATOR_FUNCTION(
+               my_code,
+               static std::unique_ptr<qec::code> create(
+                   const heterogeneous_map &options) {
+                   return std::make_unique<my_code>(options);
+               })
+       };
+
+       CUDAQ_EXT_PT_REGISTER_TYPE(my_code)
+
+Example: Steane Code
+"""""""""""""""""""""
+
+The Steane [[7,1,3]] code provides a complete example implementation:
+
+1. **Header Definition**:
+
+   - Declares quantum kernels for all logical operations
+   - Defines the code class with required virtual methods
+   - Specifies 7 data qubits and 6 ancilla qubits (3 X-type, 3 Z-type)
+
+2. **Implementation**:
+
+   .. code-block:: cpp
+
+       steane::steane(const heterogeneous_map &options) : code() {
+           // Register all logical operations
+           operation_encodings.insert(
+               std::make_pair(operation::x, x));
+           // ... register other operations ...
+
+           // Define stabilizer generators
+           m_stabilizers = fromPauliWords({
+               "XXXXIII", "IXXIXXI", "IIXXIXX",
+               "ZZZZIII", "IZZIZZI", "IIZZIZZ"
+           });
+       }
+
+3. **Quantum Kernels**:
+
+   Implements fault-tolerant logical operations:
+
+   .. code-block:: cpp
+
+       __qpu__ void x(patch logicalQubit) {
+           // Apply logical X to specific data qubits
+           x(logicalQubit.data[4], logicalQubit.data[5],
+             logicalQubit.data[6]);
+       }
+
+       __qpu__ std::vector<cudaq::measure_result> stabilizer(patch logicalQubit,
+           const std::vector<std::size_t>& x_stabilizers,
+           const std::vector<std::size_t>& z_stabilizers) {
+           // Measure X stabilizers
+           h(logicalQubit.ancx);
+           // ... apply controlled-X gates ...
+           h(logicalQubit.ancx);
+
+           // Measure Z stabilizers
+           // ... apply controlled-X gates ...
+
+           // Return measurement results
+           return mz(logicalQubit.ancz, logicalQubit.ancx);
+       }
+
+Implementing a New Code in Python
+""""""""""""""""""""""""""""""""""
+
+CUDA-Q QEC supports implementing quantum error correction codes in Python
+using the :code:`@qec.code` decorator. This provides a more accessible way
+to prototype and develop new codes.
+
+1. **Create a New Python File**:
+
+   Create a new file (e.g., :code:`my_steane.py`) with your code implementation:
+
+   .. literalinclude:: ../../examples/qec/python/my_steane.py
+      :language: python
+      :start-after: [Begin Documentation1]
+      :end-before: [End Documentation1]
+
+2. **Define Quantum Kernels**:
+
+   Implement the required quantum kernels using the :code:`@cudaq.kernel` decorator:
+
+   .. literalinclude:: ../../examples/qec/python/my_steane.py
+      :language: python
+      :start-after: [Begin Documentation2]
+      :end-before: [End Documentation2]
+
+   .. note::
+
+      The kernel registered for :code:`stabilizer_round` must be annotated to
+      return :code:`list[cudaq.measure_handle]`.
+
+   .. note::
+
+      As in C++, the two list arguments passed to the
+      :code:`stabilizer_round` kernel are the flattened X and Z stabilizer
+      schedule matrices, which default to the parity-check matrices. A Python
+      code can optionally define :code:`get_stabilizer_schedule_x` /
+      :code:`get_stabilizer_schedule_z` methods returning a 2D array with the
+      same shape and support pattern as the corresponding parity-check
+      matrix, where entry :code:`k >= 1` schedules that interaction at
+      timestep :code:`k`.
+
+3. **Implement the Code Class**:
+
+   Create a class decorated with :code:`@qec.code` that implements the required interface:
+
+   .. literalinclude:: ../../examples/qec/python/my_steane.py
+      :language: python
+      :start-after: [Begin Documentation3]
+      :end-before: [End Documentation3]
+
+4. **Using the Code**:
+
+   The code can now be used like any other CUDA-Q QEC code:
+
+   .. literalinclude:: ../../examples/qec/python/my_steane_test.py
+      :language: python
+      :start-after: [Begin Documentation]
+
+Key Points
+"""""""""""
+
+* The :code:`@qec.code` decorator takes the name of the code as an argument
+* Operation encodings are registered via the :code:`operation_encodings` dictionary
+* Stabilizer generators are defined as a list of :code:`cudaq.SpinOperator`
+* The code must implement all required methods from the base class interface
+
+
+Using the Code Framework
+"""""""""""""""""""""""""
+
+To use an implemented code:
+
+.. tab:: Python
+
+    .. code-block:: python
+
+        import cudaq_qec as qec
+
+        # Create a code instance
+        code = qec.get_code("steane")
+
+        # Access stabilizer information
+        stabilizers = code.get_stabilizers()
+        parity = code.get_parity()
+
+        # The code can now be used for various numerical
+        # experiments - see section below.
+
+.. tab:: C++
+
+    .. code-block:: cpp
+
+        // Create a code instance
+        auto code = cudaq::qec::get_code("steane");
+
+        // Access stabilizer information
+        auto stabilizers = code->get_stabilizers();
+        auto parity = code->get_parity();
+
+        // The code can now be used for various numerical
+        // experiments - see section below.

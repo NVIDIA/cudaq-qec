@@ -1,18 +1,13 @@
-.. The figures on this page can be regenerated from benchmark logs with the
-   scripts in benchmarks/qec/nv_fusion_latency/ (see the README for the
-   commands, parameters, and plotting instructions).
-   Benchmark-source revision used to interpret the supplied logs:
-     cudaqx  3539fecbb1c6e0ca4331b2980a4312d24e54d8b1
-   The logs do not contain a source revision or complete software manifest.
-
 .. _nv_fusion_latency_user_guide:
 
-Bounding Real-Time Decode Latency With NV-Fusion
+.. _bounding-real-time-decode-latency-with-nv-fusion:
+
+Bounding realtime decode latency with NV-Fusion
 ================================================
 
-The NVIDIA Fusion decoder (``nv-fusion-decoder``) is a multi-threaded
+The NVIDIA Fusion decoder (``nv-fusion-decoder``) is a multithreaded CPU
 minimum-weight perfect matching (MWPM) decoder designed for long-running,
-real-time quantum error correction. It divides the detector matching graph
+realtime quantum error correction. It divides the detector matching graph
 into temporal leaf blocks, solves independent leaves as syndrome data arrives,
 and fuses their matchings through a dependency graph. This moves most decoding
 work ahead of the final syndrome round and limits how much work remains before
@@ -29,13 +24,16 @@ experiments at code distances 5, 7, and 13, NV-Fusion lowered median
 streaming tail latency by 27--41x and p99 latency by 22--32x relative to
 monolithic PyMatching.
 
+To run these experiments yourself, see the `Fusion latency benchmark README
+<https://github.com/NVIDIA/cudaq-qec/blob/main/benchmarks/qec/nv_fusion_latency/README.md>`_.
+
 What Is Streaming Tail Latency?
 +++++++++++++++++++++++++++++++
 
 **Streaming tail latency** starts immediately before the final
 ``enqueue_syndrome()`` call and ends after ``get_obs_corrections()`` returns.
 It therefore measures the time from receiving the final detector round to
-obtaining the correction needed by a real-time controller.
+obtaining the correction needed by a realtime controller.
 
 The benchmark also records the sum of time spent in every streaming enqueue
 call. That sum excludes the configured wait between rounds and is useful for
@@ -69,8 +67,7 @@ depolarization.
 
 The result logs record the CPU allocation, but do not capture the exact CPU
 SKU, OS, compiler, CUDA-Q version, container digest, or decoder dependency
-revisions. The source revision above identifies the benchmark implementation
-used to interpret the data, not a complete reproducibility manifest.
+revisions.
 
 .. list-table:: Decoder and experiment parameters
    :header-rows: 1
@@ -142,7 +139,7 @@ not be interpreted as a worst-case latency guarantee.
 Latency With Concurrent Decoders
 ++++++++++++++++++++++++++++++++
 
-A real-time system may decode several logical qubits concurrently. The
+A realtime system may decode several logical qubits concurrently. The
 benchmark therefore runs independent decoder instances in parallel, pins each
 instance to a disjoint share of the NUMA node, and pools their latency samples.
 The automatic thread allocation decreases from 84 threads for one instance to
@@ -164,5 +161,3 @@ See Also
 * :ref:`NVIDIA Fusion Decoder API <nv_fusion_decoder_api_python>` -- decoder
   behavior, schedule selection, parameters, and Python API
 * :ref:`NVIDIA Fusion Decoder C++ API <nv_fusion_decoder_api_cpp>`
-* ``benchmarks/qec/nv_fusion_latency/README.md`` -- commands and plotting
-  instructions used for this study

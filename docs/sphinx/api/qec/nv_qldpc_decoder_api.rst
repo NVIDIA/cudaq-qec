@@ -28,15 +28,7 @@
     References:
 
     - `Decoding Across the Quantum LDPC Code Landscape <https://arxiv.org/pdf/2005.07016>`_
-    - B. Howe, S. Maurya, J. Olle, I. Basov, M. Li, J. G. Lietz, K. Young
-      and K. M. Svore, "TCBP-JOBS: GPU-Accelerated Quantum Error Correction
-      Decoding and Noise Learning with Near-Optimal Accuracy," NVIDIA
-      Research (2026).
-
-    .. TODO: add the NVIDIA Research link to the TCBP-JOBS article above, to
-       reference [2] of performance/nv_qldpc_tcbp_jobs_user_guide.rst and to
-       the reference list of the NV-qLDPC section of
-       components/qec/decoders.rst.
+    - `TCBP+JOBS: GPU-Accelerated Quantum Error Correction Decoding and Noise Learning with Near-Optimal Accuracy <https://research.nvidia.com/publication/_tcbpjobs-gpu-accelerated-quantum-error-correction-decoding-and-noise-learning-near>`_
 
     .. note::
       It is required to create decoders with the `get_decoder` API from the CUDA-Q QEC
