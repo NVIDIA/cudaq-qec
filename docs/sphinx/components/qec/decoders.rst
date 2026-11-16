@@ -123,15 +123,26 @@ The QLDPC decoder `nv-qldpc-decoder` requires a CUDA-Q compatible GPU. See the `
 
 The decoder is based on the following references:
 
-* https://arxiv.org/pdf/2005.07016
-* https://github.com/quantumgizmos/ldpc
-* https://arxiv.org/pdf/2506.01779
-* https://github.com/trmue/relay
+* J. Roffe, D. R. White, S. Burton and E. T. Campbell,
+  `Decoding Across the Quantum LDPC Code Landscape
+  <https://arxiv.org/pdf/2005.07016>`__,
+  Physical Review Research 2, 043423 (2020).
+* T. Müller, T. Alexander, M. E. Beverland, M. Bühler, B. R. Johnson,
+  T. Maurer and D. Vandeth, `Improved belief propagation is sufficient for
+  real-time decoding of quantum memory <https://arxiv.org/pdf/2506.01779>`__,
+  arXiv:2506.01779 (2025).
 * B. Howe, S. Maurya, J. Olle, I. Basov, M. Li, J. G. Lietz, K. Young and
   K. M. Svore, `TCBP+JOBS: GPU-Accelerated Quantum Error Correction Decoding
   and Noise Learning with Near-Optimal Accuracy
   <https://research.nvidia.com/publication/_tcbpjobs-gpu-accelerated-quantum-error-correction-decoding-and-noise-learning-near>`__,
   NVIDIA Research (2026).
+
+Software repositories:
+
+* J. Roffe, `LDPC: Python tools for low density parity check codes
+  <https://github.com/quantumgizmos/ldpc>`__, GitHub (2022).
+* `Relay-BP decoder <https://github.com/trmue/relay>`__, GitHub
+  (``trmue/relay``).
 
 
 Usage:
