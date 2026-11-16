@@ -19,6 +19,11 @@ max-width: 1240px !important;
     display: none !important;
 }
 
+/* Keep the TCBP/JOBS example link on the page without a sidebar entry. */
+.wy-menu-vertical li:has(> a[href$="#tcbp-and-jobs"]) {
+    display: none;
+}
+
 /* Keep overview summaries on the page without adding navigation entries. */
 .wy-menu-vertical li:has(> a[href$="#highlights-in-0-9-0"]),
 .wy-menu-vertical li:has(> a[href$="#what-the-library-provides"]),

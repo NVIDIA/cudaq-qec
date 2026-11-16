@@ -12,6 +12,13 @@ directly from a detector error model.
 
 The sections below follow the :doc:`Conventions <conventions>` for errors, syndromes, and logical observables.
 
+To estimate a detector error model's mechanism probabilities from recorded
+detector samples, use :ref:`noise learning <qldpc_noise_learning>`. The
+:doc:`Learning Noise and Decoding with Learned Rates
+</examples_rst/qec/noise_learning>` example compares uniform, learned, and
+known priors on held-out shots; the :ref:`performance study
+<noise_learning_user_guide>` measures accuracy and runtime at larger scales.
+
 To test how a realtime pipeline handles measurements as they arrive, use the
 :doc:`Playback Emulator <playback_emulator>`. It can replay recorded or
 simulated measurements without a QPU, either in process or through a decoding

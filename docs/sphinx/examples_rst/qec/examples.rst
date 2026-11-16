@@ -9,4 +9,5 @@ Examples that illustrate how to use CUDA-Q QEC for application development are a
 * :doc:`Decoding Task Graph <decoding_task_graph>`
 * :doc:`Realtime Decoding <realtime_decoding>`
 * :doc:`Experiments and Noise Modeling <modeling_noise>`
+* :doc:`Learning Noise and Decoding with Learned Rates <noise_learning>`
 * :doc:`Creating New QEC Codes <creating_qec_codes>`

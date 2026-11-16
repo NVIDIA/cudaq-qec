@@ -54,6 +54,18 @@ The example demonstrates:
 
 .. [#f1] [BCGMRY] Sergey Bravyi, Andrew Cross, Jay Gambetta, Dmitri Maslov, Patrick Rall, Theodore Yoder, High-threshold and low-overhead fault-tolerant quantum memory https://arxiv.org/abs/2308.07915
 
+TCBP and JOBS
++++++++++++++
+
+:doc:`Decoding with TCBP and JOBS <tcbp_jobs>` fits a TCBP model, decodes a
+batch of detector samples, and reads per-shot confidence information.
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+
+   tcbp_jobs
+
 .. _tensor_network_decoder_example:
 
 Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder

@@ -31,6 +31,7 @@ cases in quantum error correction.
    Decoding Task Graphs <components/qec/decoding_task_graph>
    Realtime Decoding <components/qec/realtime_decoding>
    Experiments and Noise Modeling <components/qec/numerical_experiments>
+   Noise Learning <components/qec/noise_learning>
    QEC Codes <components/qec/codes>
    Conventions <components/qec/conventions>
 
@@ -44,6 +45,7 @@ cases in quantum error correction.
    Decoding Task Graph <examples_rst/qec/decoding_task_graph>
    Realtime Decoding <examples_rst/qec/realtime_decoding>
    Experiments and Noise Modeling <examples_rst/qec/modeling_noise>
+   Learning Noise and Decoding with Learned Rates <examples_rst/qec/noise_learning>
    Creating New QEC Codes <examples_rst/qec/creating_qec_codes>
 
 .. toctree::
@@ -55,7 +57,7 @@ cases in quantum error correction.
    Improving Relay BP Decoding With Gamma Ensembles <performance/nv_qldpc_gamma_ensemble_user_guide>
    Sweeping Relay BP Stopping Criteria From a Single Run <performance/nv_qldpc_relay_solutions_user_guide>
    Improving BP+OSD Decoding With Min-LLR OSD Initialization <performance/nv_qldpc_minllr_osd_user_guide>
-   Trajectory-Calibrated BP and Jittered OSD Beam Search <performance/nv_qldpc_tcbp_jobs_user_guide>
+   Accuracy and Latency of TCBP-JOBS <performance/nv_qldpc_tcbp_jobs_user_guide>
    Bounding realtime decode latency with NV-Fusion <performance/nv_fusion_latency_user_guide>
    Learning Noise From Detector Data and Decoding With the Learned Rates <performance/nv_qldpc_noise_learning_user_guide>
 
@@ -83,6 +85,7 @@ Key Features
 * :doc:`Decoding server <components/qec/decoding_server>` and
   :doc:`playback emulator <components/qec/playback_emulator>`
 * :doc:`Experiments and noise modeling <components/qec/numerical_experiments>`
+* :doc:`Noise learning <components/qec/noise_learning>`
 
 Indices
 -------

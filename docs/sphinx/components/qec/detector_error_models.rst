@@ -16,6 +16,12 @@ is a detector and each column a possible error mechanism. For a runnable
 example that generates a DEM from a surface code and decodes with it, see
 :doc:`Experiments and Noise Modeling </examples_rst/qec/modeling_noise>`.
 
+When the error mechanisms are known but their probabilities are uncertain,
+:ref:`noise learning <qldpc_noise_learning>` can estimate those probabilities
+from detector samples. It learns rates for the existing DEM mechanisms; it
+does not discover missing mechanisms. See :doc:`Learning Noise and Decoding
+with Learned Rates </examples_rst/qec/noise_learning>` for the workflow.
+
 .. toctree::
    :hidden:
    :maxdepth: 2

@@ -14,6 +14,9 @@ it, and use it for decoding. For the underlying concepts, see
 * :doc:`dyn_dem`: construct a DEM from reusable phases and decode a
   measurement record with a task graph.
 
+To estimate mechanism probabilities from recorded detector samples, see
+:doc:`Learning Noise and Decoding with Learned Rates <noise_learning>`.
+
 .. toctree::
    :hidden:
    :maxdepth: 1

@@ -13,6 +13,16 @@ realtime decoding during quantum circuit execution.
 Highlights in 0.9.0
 -------------------
 
+* :ref:`Trajectory-Calibrated BP and Jittered OSD Beam Search
+  <qldpc_tcbp_jobs>` expand the NVIDIA QLDPC decoder's GPU decoding pipeline.
+  TCBP turns BP trajectories into calibrated error probabilities; JOBS uses
+  parallel searches over alternative corrections and can report a per-shot
+  confidence measure for post-selection.
+* :ref:`Noise learning <qldpc_noise_learning>` estimates a detector error
+  model's mechanism probabilities from recorded detector samples, without
+  logical labels or known device error rates. Use the learned probabilities
+  as decoder priors when the model's mechanisms are known but their rates
+  need to be measured.
 * :doc:`Decoding task graphs <decoding_task_graph>` let you connect
   decoders and combine their results in a single pipeline. Build pipelines with
   parallel windows or decoder ensembles to decode complete shots or
@@ -53,6 +63,9 @@ What the Library Provides
 * **Experiments and noise modeling:** Run :doc:`experiments
   <numerical_experiments>` to simulate code-capacity or circuit-level noise,
   sample detector error models, and estimate logical error rates.
+* **Noise learning:** Estimate a detector error model's mechanism
+  probabilities from recorded detector samples with :doc:`noise learning
+  <noise_learning>`, then use those estimates as decoder priors.
 
 Explore the :doc:`examples </examples_rst/qec/examples>` for working programs
 and the :doc:`performance studies </performance/index>` for benchmark results.
@@ -66,5 +79,6 @@ formats.
 * :doc:`Decoding Task Graphs <decoding_task_graph>`
 * :doc:`Realtime Decoding <realtime_decoding>`
 * :doc:`Experiments and Noise Modeling <numerical_experiments>`
+* :doc:`Noise Learning <noise_learning>`
 * :doc:`QEC Codes <codes>`
 * :doc:`Conventions <conventions>`
