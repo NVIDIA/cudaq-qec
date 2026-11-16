@@ -7,9 +7,11 @@ earlier versions are listed below.
 0.9.0 — Current Version
 ------------------------
 
-Start with the :ref:`0.9.0 highlights <qec_v090_highlights>` for decoding task
-graphs, dynamic detector error models, and the playback emulator. The
-:doc:`examples <examples_rst/qec/examples>` show how to use these features.
+See the `0.9.0 release notes
+<https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.0>`__ for new features,
+performance improvements, bug fixes, and API changes. The
+:ref:`0.9.0 highlights <qec_v090_highlights>` introduce the key features, and
+the :doc:`examples <examples_rst/qec/examples>` show how to use them.
 
 Published Releases
 ------------------
