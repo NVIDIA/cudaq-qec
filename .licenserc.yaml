@@ -35,6 +35,8 @@ header:
     # Plain-text data formats consumed by Stim/decoder tooling, not source.
     - '**/*.stim'
     - '**/*.dem'
+    # Benchmark result records (JSON data, which cannot carry a header).
+    - 'benchmarks/qec/tesseract_longbeam_vs_tcbp_jobs/results/*.json'
     # Auto-generated data
     - 'libs/qec/unittests/decoders/trt_decoder/trt_test_data.h'
     # No actual code, just an explanatory comment (CMake device-link workaround).
