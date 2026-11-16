@@ -11,6 +11,11 @@ max-width: 1240px !important;
 	font-size: 92%;
 }
 
+/* Hide the permalink beside the home page's feature list heading. */
+#key-features > h2 > .headerlink {
+    display: none;
+}
+
 /* Keep framework details on the page without a one-item sidebar expansion. */
 .wy-menu-vertical li:has(> a[href$="#build-your-own-code"]) > ul,
 .wy-menu-vertical li:has(> a[href$="#build-your-own-decoder"]) > ul,
