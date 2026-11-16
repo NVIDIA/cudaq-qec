@@ -1,11 +1,11 @@
 # Tesseract long beam vs TCBP-JOBS on the Tesseract SI1000 benchmark
 
-One figure: logical error rate per round against decoding time per round for the circuits of Google's
-Tesseract benchmark at `p = 0.002` (Z basis), with Google's published unsparsified long-beam Tesseract
-results on one side and `nv-qldpc-decoder` TCBP-JOBS on the other, decoding the same number of shots per
+One figure: logical error rate per round against decoding time per round for the circuits of the
+Tesseract benchmark at `p = 0.002` (Z basis), with the unsparsified long-beam Tesseract results from the
+tesseract-decoder repository on one side and `nv-qldpc-decoder` TCBP-JOBS on the other, decoding the same number of shots per
 circuit. The LER on both sides and the compute panel come from throughput-style runs; the x position of each
 TCBP-JOBS point is its serial latency (one shot per `decode()` call), while Tesseract's x position is its
-per-thread time from Google's multi-threaded runs. The footnote inside the figure states this.
+per-thread time from the multi-threaded runs recorded in that repository. The footnote inside the figure states this.
 
 ## Steps
 
@@ -17,7 +17,7 @@ python3 tradeoff.py plot                  # plots/tradeoff_longbeam_vs_tcbp_jobs
 ```
 
 `fetch` downloads the 14 `.stim` files and the results file, and checks each circuit's
-sha256 against the value recorded in Google's rows. `run` spreads the circuits over the given GPUs by
+sha256 against the value recorded in the repository's rows. `run` spreads the circuits over the given GPUs by
 expected cost, writes one JSON record and a per-shot `.npz` per circuit under `results/`, and can be
 restarted (finished circuits are skipped). `serial` adds a `serial` block to each record; if it has not been
 run, `plot` falls back to the batched time for x and says so in the footnote. `--basis X` and `--p` select other rows of the sweep. With a

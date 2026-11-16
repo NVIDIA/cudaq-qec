@@ -169,19 +169,19 @@ configuration, one of the two recommended starting points in the
 `Tesseract repository <https://github.com/quantumlib/tesseract-decoder>`__:
 beam width 20, 21 detector orderings, a priority-queue limit of 1,000,000,
 beam climbing and no detector revisits. The Tesseract measurements are the
-results published in that repository [4]_ and are treated as source data
+results in that repository [4]_ and are treated as source data
 rather than rerun as part of this study.
 
 The scope of the comparison is this one configuration. Tesseract also
 offers a short-beam configuration and error sparsification, which trade
 some accuracy for speed and are not shown here, so the ratios below should
-not be read as applying to Tesseract in general. The published results do
-not record the Tesseract version or the hardware they were measured on, and
+not be read as applying to Tesseract in general. The results in the
+repository do not record the Tesseract version or the hardware they were measured on, and
 other versions or machines may perform differently. The research
 article [2]_ has the fuller comparison: both measurement bases, further
 physical error rates and additional Tesseract configurations.
 
-The comparison uses the circuit-level SI1000 memory circuits published in
+The comparison uses the circuit-level SI1000 memory circuits in
 the tesseract-decoder repository, at physical error rate ``p = 0.002`` in
 the Z basis. They cover rotated surface codes, superdense color codes and
 bivariate-bicycle codes over several distances. Detector error models are
@@ -192,7 +192,8 @@ before decoding, and the default JOBS search of 16 draws, one round, beam
 width 32, beam depth 40, patience 8 and noise scale 1.0. With this preset
 JOBS searches every shot, including the shots BP converges on
 (``jobs_search_converged=True``). TCBP-JOBS decodes the same number of
-shots per circuit as the published Tesseract results, sampled independently
+shots per circuit as the Tesseract results in the repository, sampled
+independently
 with Stim: the two decoders see the same distribution, not the same shots.
 
 Accuracy is reported as shot failure probability divided by the number of
@@ -207,7 +208,8 @@ per-experiment logical error rate ``LER``, the plotted value is
 Runtime is likewise divided by the number of rounds. TCBP-JOBS serial
 latency is the mean over 4,096 shots per circuit, each decoded by its own
 ``decode()`` call on one NVIDIA GB200. The Tesseract values are the
-per-shot decode times of the published results [4]_, summed over worker
+per-shot decode times recorded in the repository's results [4]_, summed
+over worker
 threads. That data is from a machine that had at least 30 active threads.
 Timings from an otherwise quiet machine would differ somewhat; we do not
 estimate by how much. The horizontal axis therefore compares one CPU thread
@@ -234,7 +236,7 @@ codes.
    Each arrow connects the Tesseract and TCBP-JOBS result for the same
    circuit. The annotations report the corresponding time and error ratios;
    lower and farther left are better. Tesseract times are per CPU thread
-   from its published results; TCBP-JOBS times are serial latency on one
+   from the results on the tesseract-decoder repository; TCBP-JOBS times are serial latency on one
    GB200.
 
 Across the 14 circuits, TCBP-JOBS stays in a narrow sub-millisecond latency
@@ -250,8 +252,8 @@ be read together with its interval.
 
 The compute behind the points differs as well. The
 TCBP-JOBS study decoded 12.0 million shots in 0.36 GB200 GPU-hours using
-batched execution. The published long-beam results cover the same 12.0
-million shots in 63,334 CPU core-hours. These totals describe the cost of
+batched execution. The long-beam results on the tesseract-decoder repository
+cover the same 12.0 million shots in 63,334 CPU core-hours. These totals describe the cost of
 collecting the data, not a hardware-normalized speed ratio: GPU-hours and
 CPU core-hours are different resources, the timing modes differ, and the
 GPU-hours count the decode calls only, not shot sampling, detector error
@@ -331,7 +333,7 @@ References
   decoder for quantum error correction" (2025).
   `arXiv:2503.10988 <https://arxiv.org/abs/2503.10988>`__
 
-.. [4] Google Quantum AI, "Error sparsification benchmarks," results file
-  ``benchmarking/sparsify_errors/aggregated_results.jsonl`` in the
+.. [4] Results file ``benchmarking/sparsify_errors/aggregated_results.jsonl``
+  (error sparsification benchmarks) in the
   `tesseract-decoder repository <https://github.com/quantumlib/tesseract-decoder/tree/main/benchmarking/sparsify_errors>`__;
   the rows without error sparsification are used here.

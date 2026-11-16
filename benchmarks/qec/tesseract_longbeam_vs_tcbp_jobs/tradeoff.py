@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tesseract long beam (unsparsified, Google's published results) vs TCBP-JOBS on the Tesseract SI1000 benchmark.
+"""Tesseract long beam (unsparsified, results from the tesseract-decoder repository) vs TCBP-JOBS on the Tesseract SI1000 benchmark.
 
 Three steps, each a subcommand:
 
   python3 tradeoff.py fetch                      # circuits + aggregated_results.jsonl from quantumlib/tesseract-decoder
-  python3 tradeoff.py run    --gpus 0,1,3        # TCBP-JOBS batched on every circuit, Google's shot count per circuit
+  python3 tradeoff.py run    --gpus 0,1,3        # TCBP-JOBS batched on every circuit, the repository's shot count per circuit
   python3 tradeoff.py serial --gpu 1             # TCBP-JOBS one shot at a time on a subset, for the x axis (idle machine)
   python3 tradeoff.py plot                       # plots/tradeoff_longbeam_vs_tcbp_jobs_p0.002_Z.{pdf,png}
 
@@ -18,7 +18,7 @@ Tesseract side: the ``sparsify_errors=false`` rows of ``benchmarking/sparsify_er
 TCBP-JOBS side: ``nv-qldpc-decoder`` from CUDA-Q QEC 0.9.0, preset ``tcbp-jobs-sc`` (sparse sum-product BP, 10
 iterations, clip 15, fp32, repeatable; JOBS with the TCBP ordering, 16 draws, pad 8, beam 32/40/8; every shot is
 searched, including the BP-converged ones), TCBP model ``init_tcbp_model(H, seed=1)``, the circuit's own undecomposed DEM. Shots are sampled here with
-Stim (seed 2026) so they match Google's in number and distribution, not identity. The LER and the GPU-hours in the
+Stim (seed 2026) so they match the repository's in number and distribution, not identity. The LER and the GPU-hours in the
 figure's panel come from this batched run (``decode_batch`` of 16,384 shots). The x position of each TCBP-JOBS point is
 the mean serial latency from ``serial``: one shot per ``decode()`` call (``bp_batch_size=1``) on the first 4,096 shots
 of a second seeded stream of the same circuit, on an otherwise idle machine. Without a serial record the batched time
@@ -78,7 +78,7 @@ def cmd_fetch(a):
         assert sha == r["circuit_sha256"], f"sha256 mismatch for {cp}"
         print(f"{tag_of(cp):16} {r['num_shots']:>10,} shots  ok")
     print(
-        f"{len(plain)} circuits, {sum(r['num_shots'] for r in plain.values()):,} shots in Google's unsparsified rows"
+        f"{len(plain)} circuits, {sum(r['num_shots'] for r in plain.values()):,} shots in the repository's unsparsified rows"
     )
 
 
@@ -711,7 +711,7 @@ def cmd_plot(a):
         0.01,
         -0.015,
         "Tesseract long beam: --beam 20 --beam-climbing --num-det-orders 21 --pqlimit 1e6 --no-revisit-dets, no sparsification, "
-        "CPU time per shot on one thread (Google's published results)\n"
+        "CPU time per shot on one thread (results on the tesseract-decoder repository)\n"
         f"TCBP-JOBS ({VERSION}, preset {PRESET}): BP10 sum-product + JOBS search, TCBP ordering, converged shots searched; one GB200.\n"
         +
         (f"    x = mean serial decode() latency, one shot per call, {SERIAL_SHOTS:,} shots per circuit; LER and GPU-hours from the "
@@ -929,7 +929,7 @@ def main():
         type=int,
         default=None,
         help=
-        "run: override Google's shot count (testing); serial: shots per circuit"
+        "run: override the repository's shot count (testing); serial: shots per circuit"
     )
     ap.add_argument(
         "--gpu",
