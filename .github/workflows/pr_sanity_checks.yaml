@@ -109,7 +109,10 @@ jobs:
           git fetch --recurse-submodules=no origin ${{ github.base_ref }}
           DIFF_COMMIT_SHA=$(git rev-parse origin/${{ github.base_ref }})
 
-          if ! git clang-format-$LLVM_VERSION $DIFF_COMMIT_SHA; then
+          # Same extensions as "clang-format all things": git clang-format's
+          # defaults include .inc, which the Sphinx docs use for RST includes.
+          if ! git clang-format-$LLVM_VERSION \
+              --extensions c,h,cpp,hpp,cc,hh,cxx,hxx,cu,cuh $DIFF_COMMIT_SHA; then
             git diff --ignore-submodules > clang-format.patch
             echo "🟥 Clang-format found formatting problems (check the uploaded artifact)." >> $GITHUB_STEP_SUMMARY
             exit 1
