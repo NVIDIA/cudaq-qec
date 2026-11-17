@@ -37,5 +37,5 @@ Published Releases
      - `0.6.0 release notes <https://github.com/NVIDIA/cudaq-qec/releases/tag/0.6.0>`__
 
 The 0.6.0 and 0.7.0 archives retain the earlier CUDA-QX project name. For the
-full release history, see `GitHub Releases
-<https://github.com/NVIDIA/cudaq-qec/releases>`__.
+full release history, see `GitHub Tags
+<https://github.com/NVIDIA/cudaq-qec/tags>`__.
