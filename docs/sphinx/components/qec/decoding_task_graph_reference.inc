@@ -153,6 +153,14 @@ uses one copy, and corrections fold in record order.
 * Copies decode at once only with ``async_streaming``. Each copy beyond the
   first adds a worker to the default pool.
 
+Profiling
+^^^^^^^^^
+
+Build with ``-DENABLE_NVTX=ON`` to mark every event with an NVTX range for
+Nsight Systems, named for its kind and node (``ingest``, ``deliver``,
+``flush``, ``fire``) and carrying a window's index, and an asynchronous
+graph's admission and retirement of records.
+
 .. _task_graph_streaming_results:
 
 Reading Streaming Results

@@ -510,8 +510,10 @@ void decoding_task_graph::impl::compile_wires() {
         }
       if (!indexed.front())
         indexed.clear();
-      streaming_nodes.push_back({static_cast<int>(i), streaming,
-                                 std::move(replicas), std::move(indexed)});
+      streaming_nodes.push_back(
+          {static_cast<int>(i), streaming, std::move(replicas),
+           std::move(indexed),
+           i < node_ids.size() ? node_ids[i] : "node " + std::to_string(i)});
       streaming_by_node[i] = static_cast<int>(streaming_nodes.size() - 1);
     }
   }

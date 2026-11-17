@@ -13,8 +13,10 @@
 #include "decoding_task_graph_impl.h"
 #include "../hardware_guards.h"
 #include "cudaq/qec/logger.h"
+#include "cudaq/qec/realtime/nvtx_helpers.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -226,7 +228,25 @@ struct decoding_task_graph::impl::record_scheduler {
         wire_last(owner.streaming_value_wire_count, no_index),
         fire_inputs(owner.streaming_nodes.size()),
         fire_entries(owner.streaming_nodes.size()),
+        event_labels(owner.streaming_nodes.size()),
+        one_shot_labels(owner.nodes.size()),
         has_waiting_workers(owner.parallel_pool->num_threads() > 1) {
+    // NVTX range names: an event's kind and its node. A one-shot event names
+    // a topology node, which has an id only if it also streams.
+    static constexpr const char *kind_names[event_kinds] = {
+        "one-shot", "ingest", "deliver", "flush", "flush release", "fire"};
+    for (std::size_t n = 0; n < owner.nodes.size(); ++n)
+      one_shot_labels[n] = "one-shot node " + std::to_string(n);
+    for (std::size_t si = 0; si < owner.streaming_nodes.size(); ++si) {
+      const auto &id = owner.streaming_nodes[si].id;
+      for (std::size_t k = 0; k < event_kinds; ++k)
+        event_labels[si][k] = std::string(kind_names[k]) + " " + id;
+      if (owner.streaming_nodes[si].node_index >= 0 &&
+          static_cast<std::size_t>(owner.streaming_nodes[si].node_index) <
+              owner.nodes.size())
+        one_shot_labels[owner.streaming_nodes[si].node_index] =
+            "one-shot " + id;
+    }
     const auto N = owner.nodes.size();
     admitting.reserve(context_count);
     const auto M = owner.streaming_nodes.size();
@@ -1502,7 +1522,10 @@ struct decoding_task_graph::impl::record_scheduler {
 
         active_context = c;
         active_id = id;
-        execute(*c, id, event);
+        {
+          NVTX_RANGE_INDEXED(event_label(event), event.index);
+          execute(*c, id, event);
+        }
         done_context = c;
         done_id = id;
         active_context = nullptr;
@@ -2156,6 +2179,23 @@ public:
   // Whether publication copies outputs into the record (several contexts,
   // or a fire pool).
   bool copy_outputs = false;
+  // NVTX range names, by streaming node and event kind, and of one-shot
+  // events by topology node.
+  // One name per graph_event_kind, the last being an indexed fire.
+  static constexpr std::size_t event_kinds = 6;
+  static_assert(
+      static_cast<std::size_t>(graph_event_kind::streaming_indexed_fire) + 1 ==
+          event_kinds,
+      "kind_names lists every graph_event_kind, in order");
+  std::vector<std::array<std::string, event_kinds>> event_labels;
+  std::vector<std::string> one_shot_labels;
+  // The NVTX range name of @p event.
+  const char *event_label(const graph_event &event) const {
+    if (event.kind == graph_event_kind::one_shot)
+      return one_shot_labels[event.node].c_str();
+    return event_labels[event.node][static_cast<std::size_t>(event.kind)]
+        .c_str();
+  }
   const bool has_waiting_workers;
   std::mutex mutex;
   std::condition_variable wake;
@@ -2580,8 +2620,9 @@ void decoding_task_graph::impl::dispatch_async_session() {
     }
 
     // Retire finished records, oldest first, then release them together.
-    {
-      const auto complete = S.complete_prefix();
+    // Marked in NVTX only when there are some, not on every idle pass.
+    if (const auto complete = S.complete_prefix(); complete != 0) {
+      NVTX_RANGE("task graph retire");
       std::size_t retired = 0;
       for (; retired < complete; ++retired) {
         try {
@@ -2603,6 +2644,7 @@ void decoding_task_graph::impl::dispatch_async_session() {
     // Admit what free contexts allow: fill them without the lock, then
     // activate them under one lock and wake the workers once.
     if (admitted < state.submitted.load(std::memory_order_acquire)) {
+      NVTX_RANGE("task graph admit");
       std::exception_ptr admit_error;
       const auto submitted = state.submitted.load(std::memory_order_acquire);
       S.admitting.clear();

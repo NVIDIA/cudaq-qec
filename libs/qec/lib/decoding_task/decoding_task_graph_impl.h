@@ -55,6 +55,8 @@ struct decoding_task_graph::impl {
     /// The copies' index-join capability, parallel to replicas; null when
     /// the node joins by record.
     std::vector<indexed_join_node *> indexed;
+    /// The node's id, kept for NVTX range names after node_ids is cleared.
+    std::string id;
   };
 
   // Nodes in topological execution order.
