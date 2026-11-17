@@ -175,7 +175,7 @@ Logical Error Rate Under the Three Priors
 LER is failures divided by shots, with a 95% Clopper-Pearson interval. The learned rows use
 ``passes=16, tol=0`` and 2,097,152 learning shots.
 
-.. list-table:: LER of TCBP-JOBS under uniform, learned and oracle priors
+.. list-table:: LER of TCBP+JOBS under uniform, learned and oracle priors
    :header-rows: 1
    :widths: 10 14 16 12 16 32
 
@@ -326,6 +326,6 @@ See Also
 ++++++++
 
 * :ref:`Noise Learning <qldpc_noise_learning>` -- what it provides and how to use it
-* :ref:`tcbp_jobs_user_guide` -- performance study of the TCBP-JOBS decoder used on this page
+* :ref:`tcbp_jobs_user_guide` -- performance study of the TCBP+JOBS decoder used on this page
 * :ref:`Quantum Low-Density Parity-Check Decoder <qldpc_decoder>` -- the nv-qldpc-decoder overview
 * :ref:`C++ <nv_qldpc_decoder_api_cpp>` and :ref:`Python <nv_qldpc_decoder_api_python>` API reference

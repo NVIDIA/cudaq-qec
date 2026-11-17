@@ -793,7 +793,7 @@
 
     The following example constructs a decoder from an OSD preset with the
     K* window enabled and a pad of 4.0 in place of the default 8.0, and a
-    second decoder from a TCBP-JOBS preset that
+    second decoder from a TCBP+JOBS preset that
     returns the JOBS gap:
 
     .. code-block:: python
