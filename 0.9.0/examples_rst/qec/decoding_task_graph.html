@@ -4,7 +4,7 @@
   <meta charset="utf-8" /><meta name="generator" content="Docutils 0.18.1: http://docutils.sourceforge.net/" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Decoding Task Graphs &mdash; NVIDIA CUDA-Q QEC  documentation</title>
+  <title>Decoding Task Graph &mdash; NVIDIA CUDA-Q QEC  documentation</title>
       <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
       <link rel="stylesheet" href="../../_static/css/theme.css" type="text/css" />
       <link rel="stylesheet" href="../../_static/tabs.css" type="text/css" />
@@ -30,8 +30,8 @@
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
-    <link rel="next" title="Task Graph Parallel Window" href="task_graph_parallel_window.html" />
-    <link rel="prev" title="Decoders" href="decoders.html" /> 
+    <link rel="next" title="Getting Started with a Decoding Task Graph" href="getting_started_decoding_task_graph.html" />
+    <link rel="prev" title="Decoding with a Dynamic DEM" href="dyn_dem.html" /> 
 </head>
 
 <body class="wy-body-for-nav"> 
@@ -92,7 +92,7 @@
     .wy-table-responsive {
         margin-bottom: 24px;
         max-width: 100%;
-        overflow: visible;
+        overflow-x: auto;
     }
   </style>
   
@@ -100,20 +100,148 @@
               <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../quickstart/installation.html">Installation Guide</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installation-methods">Installation Methods</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#pip-install">pip install</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#docker-container">Docker Container</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#building-from-source">Building from Source</a></li>
-</ul>
-</li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#pip-install">pip install</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#docker-container">Docker Container</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#building-from-source">Building from Source</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installing-pytorch">Installing PyTorch</a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart/quick_start.html">Quick Start</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#before-you-start">Before You Start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#run-the-experiment">Run the Experiment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#expected-result">Expected Result</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#next-steps">Next Steps</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">Libraries</span></p>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Library Guide</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../../components/qec/index.html">CUDA-Q QEC - Quantum Error Correction Library</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html">QEC Codes</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/index.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/decoders.html">QEC Decoders</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#quantum-low-density-parity-check-decoder">Quantum Low-Density Parity-Check Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#tensor-network-decoder">Tensor Network Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#tensorrt-decoder">TensorRT Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#pymatching-decoder">PyMatching Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#chromobius-decoder">Chromobius Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#sliding-window-decoder">Sliding Window Decoder</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html#build-your-own-decoder">Build Your Own Decoder</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/detector_error_models.html">Detector Error Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/stim_dem.html">Decoding from Stim DEM Text</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/dem_sampling.html">DEM Sampling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/dynamic_dem.html">Dynamic DEM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#why-use-a-dynamic-dem">Why Use a Dynamic DEM?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#phases-and-connections">Phases and Connections</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#detectors-across-round-boundaries">Detectors Across Round Boundaries</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#measurements-and-logical-readout">Measurements and Logical Readout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#constructing-a-dynamic-dem">Constructing a Dynamic DEM</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#choosing-a-decoding-path">Choosing a Decoding Path</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/decoding_task_graph.html">Decoding Task Graphs</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#how-data-flows-through-a-graph">How Data Flows Through a Graph</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#complete-shots-and-streaming">Complete Shots and Streaming</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#building-a-task-graph">Building a Task Graph</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#reference">Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#node-kinds">Node Kinds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#guarded-sliding-windows">Guarded Sliding Windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#asynchronous-streaming-options">Asynchronous Streaming Options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#fire-pools">Fire Pools</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#reading-streaming-results">Reading Streaming Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#staged-outputs">Staged Outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#edge-values">Edge Values</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#logical-measurements">Logical Measurements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#configuring-logical-outputs">Configuring Logical Outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#native-streaming-nodes">Native Streaming Nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#arbitrary-length-sliding-windows">Arbitrary-Length Sliding Windows</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html">Workflow and Data Flow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html#workflow">Workflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/ai_predecoding.html">AI Predecoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/ai_predecoding.html#how-the-stages-fit-together">How the Stages Fit Together</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/ai_predecoding.html#choose-an-example">Choose an Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/ai_predecoding.html#evaluate-the-complete-pipeline">Evaluate the Complete Pipeline</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_server.html">Decoding Server</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#workflow-at-a-glance">Workflow at a Glance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#set-up-the-prebuilt-container">Set Up the Prebuilt Container</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#get-the-prebuilt-package">Get the Prebuilt Package</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#prepare-the-run-directory">Prepare the Run Directory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#open-the-decoding-server-container">Open the Decoding-Server Container</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#configure-a-surface-code-memory-experiment">Configure a Surface-Code Memory Experiment</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#send-the-experiment-s-measurements">Send the Experiment’s Measurements</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#color-code-ai-predecoding">Color-Code AI Predecoding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#use-a-custom-decoder-plugin">Use a Custom Decoder Plugin</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#implement-and-build-the-plugin">Implement and Build the Plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#deploy-and-select-the-plugin">Deploy and Select the Plugin</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#integrate-a-third-party-runtime">Integrate a Third-Party Runtime</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#host-dispatch-loops">Host Dispatch Loops</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/playback_emulator.html">Playback Emulator</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/playback_emulator.html#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/playback_emulator.html#reference">Reference</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#python-and-command-line-interfaces">Python and Command-Line Interfaces</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#schedule-format">Schedule Format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#syndrome-sources">Syndrome Sources</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#sessions">Sessions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#run-options">Run Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#output-format">Output Format</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/memory_experiment_generator.html">Memory Experiment Configuration Generator</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/memory_experiment_generator.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/numerical_experiments.html">Experiments and Noise Modeling</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html#memory-circuit-experiments">Memory Circuit Experiments</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/noise_learning.html">Noise Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/codes.html">QEC Codes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html#pre-built-qec-codes">Pre-built QEC Codes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#steane-code">Steane Code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#repetition-code">Repetition Code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#surface-code">Surface Code</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html#build-your-own-code">Build Your Own Code</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#qec-code-framework-cudaq-qec-code">QEC Code Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::code</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#class-structure">Class Structure</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#implementing-a-new-code">Implementing a New Code</a></li>
@@ -123,128 +251,72 @@
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#using-the-code-framework">Using the Code Framework</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#pre-built-qec-codes">Pre-built QEC Codes</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#steane-code">Steane Code</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#repetition-code">Repetition Code</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#surface-code">Surface Code</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html">QEC Decoders</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#class-structure">Class Structure</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#migrating-existing-c-decoder-plugins">Migrating Existing C++ Decoder Plugins</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-new-decoder-in-c">Implementing a New Decoder in C++</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#example-lookup-table-decoder">Example: Lookup Table Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-decoder-in-python">Implementing a Decoder in Python</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#key-features">Key Features</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#usage-example">Usage Example</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#detector-error-model">Detector Error Model</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#decoding-from-stim-dem-text">Decoding from Stim DEM Text</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dem-sampling">DEM Sampling</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dynamic-dem">Dynamic DEM</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#quantum-low-density-parity-check-decoder">Quantum Low-Density Parity-Check Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensor-network-decoder">Tensor Network Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensorrt-decoder">TensorRT Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#pymatching-decoder">PyMatching Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#chromobius-decoder">Chromobius Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#sliding-window-decoder">Sliding Window Decoder</a></li>
-</ul>
-</li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#workflow">Workflow</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#memory-experiment-configuration-generator">Memory experiment configuration generator</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html">Experiments and Noise Modeling</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#memory-circuit-experiments">Memory Circuit Experiments</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/conventions.html">Conventions</a></li>
-</ul>
-</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/conventions.html">Conventions</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul class="current">
-<li class="toctree-l1 current"><a class="reference internal" href="examples.html">CUDA-Q QEC by Example</a><ul class="current">
-<li class="toctree-l2"><a class="reference internal" href="creating_qec_codes.html">   Creating New QEC Codes</a></li>
-<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html">   Experiments and Noise Modeling</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#cuda-q-qec-implementation">CUDA-Q QEC Implementation</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#code-explanation">Code Explanation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="decoders.html">Decoders</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#getting-started-with-the-nvidia-qldpc-decoder">Getting Started with the NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#belief-propagation-methods">Belief Propagation Methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#usage-example">Usage Example</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id1">CUDA-Q QEC Implementation</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id2">Code Explanation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#tcbp-and-jobs">TCBP and JOBS</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="tcbp_jobs.html">Decoding with TCBP and JOBS</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#memory-circuit-experiments">Memory Circuit Experiments</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#function-variants">Function Variants</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#return-values">Return Values</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#example-usage">Example Usage</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#additional-noise-models">Additional Noise Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder</a></li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#deploying-ai-decoders-with-tensorrt">Deploying AI Decoders with TensorRT</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#overview-of-the-training-to-deployment-pipeline">Overview of the Training-to-Deployment Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#training-a-neural-network-decoder-with-pytorch-and-stim">Training a Neural Network Decoder with PyTorch and Stim</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#using-the-tensorrt-decoder-in-cuda-q-qec">Using the TensorRT Decoder in CUDA-Q QEC</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#converting-onnx-models-to-tensorrt-engines">Converting ONNX Models to TensorRT Engines</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#dependencies-and-requirements">Dependencies and Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#matching-based-decoding-with-pymatching">Matching-Based Decoding with PyMatching</a></li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="detector_error_models.html">Working with Detector Error Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="stim_dem.html">Decoding From Stim DEM Text</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multi_round_pcm.html">Generating a Multi-Round Parity Check Matrix</a></li>
+<li class="toctree-l2"><a class="reference internal" href="dem_sampling.html">DEM Sampling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#example">Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#gpu-acceleration">GPU Acceleration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#input-types-and-backend-selection">Input Types and Backend Selection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="dyn_dem.html">Decoding with a Dynamic DEM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#describe-the-repetition-code-experiment">Describe the Repetition-Code Experiment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#check-the-round-boundaries">Check the Round Boundaries</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#follow-the-measurements">Follow the Measurements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#build-the-dem-and-decode-a-shot">Build the DEM and Decode a Shot</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#see-also">See Also</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="decoders.html">   Decoders</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#decoding-from-stim-dem-text">Decoding From Stim DEM Text</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#generating-a-multi-round-parity-check-matrix">Generating a Multi-Round Parity Check Matrix</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#dem-sampling-monte-carlo-sampling-from-detector-error-models">DEM Sampling — Monte-Carlo Sampling from Detector Error Models</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#example">Example</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#gpu-acceleration">GPU Acceleration</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#input-types-and-backend-selection">Input Types and Backend Selection</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#see-also">See Also</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Decoding Task Graph</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="getting_started_decoding_task_graph.html">Getting Started with a Decoding Task Graph</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#construct-the-graph">Construct the Graph</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#decode-complete-shots">Decode Complete Shots</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#stream-measurement-rounds">Stream Measurement Rounds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#connect-several-nodes">Connect Several Nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#expected-results">Expected Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#getting-started-with-the-nvidia-qldpc-decoder">Getting Started with the NVIDIA QLDPC Decoder</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#belief-propagation-methods">Belief Propagation Methods</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#usage-example">Usage Example</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#deploying-ai-decoders-with-tensorrt">Deploying AI Decoders with TensorRT</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#overview-of-the-training-to-deployment-pipeline">Overview of the Training-to-Deployment Pipeline</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#training-a-neural-network-decoder-with-pytorch-and-stim">Training a Neural Network Decoder with PyTorch and Stim</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#using-the-tensorrt-decoder-in-cuda-q-qec">Using the TensorRT Decoder in CUDA-Q QEC</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#converting-onnx-models-to-tensorrt-engines">Converting ONNX Models to TensorRT Engines</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#dependencies-and-requirements">Dependencies and Requirements</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#id2">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#matching-based-decoding-with-pymatching">Matching-Based Decoding with PyMatching</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
-</ul>
-</li>
-<li class="toctree-l2 current"><a class="current reference internal" href="#">   Decoding Task Graphs</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#quick-start-a-sliding-window">Quick start: a sliding window</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#decoding-complete-shots">Decoding complete shots</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#streaming">Streaming</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#reading-results">Reading results</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#logical-measurements">Logical measurements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#graphs-of-several-nodes">Graphs of several nodes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#node-kinds">Node kinds</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#guarded-sliding-windows">Guarded sliding windows</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#asynchronous-streaming">Asynchronous streaming</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="task_graph_parallel_window.html">   Task Graph Parallel Window</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_parallel_window.html">Parallel Window</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#how-it-works">How it works</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#the-model">The model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#detector-error-model">Detector Error Model</a></li>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#configuration">Configuration</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="task_graph_parallel_window.html#advanced-options">Advanced options</a></li>
 </ul>
@@ -258,7 +330,7 @@
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="task_graph_ensemble.html">   Task Graph Decoder Ensembles</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_ensemble.html">Decoder Ensembles</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#how-it-works">How it works</a></li>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#configuration">Configuration</a></li>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#building-a-graph-in-code">Building a graph in code</a></li>
@@ -271,161 +343,220 @@
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="task_graph_reference.html">   Task Graph Reference</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#asynchronous-streaming-options">Asynchronous streaming options</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#fire-pools">Fire pools</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#streaming-results-in-detail">Streaming results in detail</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#staged-outputs">Staged outputs</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#edge-values">Edge values</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#logical-outputs">Logical outputs</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#native-streaming-nodes">Native streaming nodes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#arbitrary-length-sliding-windows">Arbitrary-length sliding windows</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="realtime_decoding.html">   Realtime Decoding</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html">Getting Started with Realtime Decoding</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#configuration">Configuration</a></li>
-<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#backend-selection">Backend Selection</a></li>
-<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#compilation-and-execution-examples">Compilation and Execution Examples</a></li>
-<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l1"><a class="reference internal" href="realtime_decoding.html">Realtime Decoding</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="getting_started_realtime_decoding.html">Getting Started with Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html#configuration">Configuration</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#step-1-generate-detector-error-model">Step 1: Generate Detector Error Model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#step-2-configure-and-save-decoder">Step 2: Configure and Save Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#step-3-load-configuration">Step 3: Load Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#step-4-use-in-quantum-kernels">Step 4: Use in Quantum Kernels</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_server.html">Decoding Server User Guide</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#workflow-at-a-glance">Workflow at a glance</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#generate-a-memory-experiment-configuration">Generate a memory-experiment configuration</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#color-code-enabled-ai-decoder">Color-code-enabled AI decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#cuda-q-examples-surface-code-programs">CUDA-Q examples: surface-code programs</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#use-a-custom-decoder-plugin">Use a custom decoder plugin</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#integrate-a-third-party-runtime">Integrate a third-party runtime</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#troubleshooting">Troubleshooting</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#see-also">See also</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html#backend-selection">Backend Selection</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#simulation-backend">Simulation Backend</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#quantinuum-hardware-backend">Quantinuum Hardware Backend</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html">Realtime Decoding with CUDA-Q Decoding Server</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#deliverables-versus-the-example">Deliverables versus the example</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#building-the-example">Building the example</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#ising-decoder-tensorrt-predecoder-pymatching">Ising decoder (TensorRT predecoder + PyMatching)</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#decoders">Decoders</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#the-example-source">The example source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html#compilation-and-execution-examples">Compilation and Execution Examples</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#common-use-cases">Common Use Cases</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#c-compilation">C++ Compilation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#python-execution">Python Execution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#complete-workflow-example">Complete Workflow Example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#debugging-and-environment-variables">Debugging and Environment Variables</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#decoder-selection">Decoder Selection</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="playback_emulator.html">Playback Emulator</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#schedule-format">Schedule Format</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#output-format">Output Format</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#syndrome-sources">Syndrome Sources</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#sessions">Sessions</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#run-options">Run Options</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#example">Example</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#data-directory-layout">Data Directory Layout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#building">Building</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#reading-the-output">Reading the Output</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html">AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#repository-layout">Repository Layout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#data-directory-layout">Data Directory Layout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#building">Building</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#emulated-end-to-end-test">Emulated End-to-End Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#fpga-end-to-end-test">FPGA End-to-End Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#orchestration-script-reference">Orchestration Script Reference</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html">Ising Color-Code Emulator with Decoding Server</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#reading-the-output">Reading the Output</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#the-example-source">The example source</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html">Streaming Interleaved Feed-forward Latency (SIFL)</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#the-example-source">The example source</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html">Dynamic DEM</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#a-model">A model</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#detectors-and-seams">Detectors and seams</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#measurements-and-readout">Measurements and readout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#building-a-model-in-code">Building a model in code</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#see-also">See also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_decoding.html#see-also">See Also</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#configuration-upload-failures-quantinuum-backend">Configuration Upload Failures (Quantinuum Backend)</a></li>
 </ul>
 </li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_decoding_demo.html">Realtime Decoding from a Quantum Kernel or FPGA</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#deliverables-versus-the-example">Deliverables versus the example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#building-the-example">Building the example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#running">Running</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#qpu-kernel-source-software-udp-no-hardware">QPU-kernel source (software, UDP, no hardware)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#qpu-kernel-source-over-real-rdma-wire-cpu-roce">QPU-kernel source over real RDMA (<code class="docutils literal notranslate"><span class="pre">--wire</span> <span class="pre">cpu_roce</span></code>)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#fpga-source-real-fpga-over-roce">FPGA source (real FPGA over RoCE)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#ising-decoder-tensorrt-predecoder-pymatching">Ising decoder (TensorRT predecoder + PyMatching)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#decoders">Decoders</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#packaged-surface-code-client">Packaged Surface-Code Client</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#build-the-packaged-client">Build the Packaged Client</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#generate-configurations-and-select-a-decoder">Generate Configurations and Select a Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#read-the-application-results">Read the Application Results</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#source-for-the-cmake-example">Source for the CMake Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="decoding_server_playback.html">Realtime Decoding with the Playback Emulator</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server_playback.html#in-process-repetition-code-playback">In-Process Repetition-Code Playback</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#run-the-example">Run the Example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#check-the-result">Check the Result</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#use-the-same-configuration-with-a-server">Use the Same Configuration with a Server</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server_playback.html#playback-against-a-decoding-server">Playback Against a Decoding Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#id1">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#generate-the-configuration">Generate the Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#run-playback">Run Playback</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#id2">Check the Result</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server_playback.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#software">Software</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#data-directory-layout">Data directory layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#building">Building</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#running">Running</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#positional-arguments">Positional arguments</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#named-flags">Named flags</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#pipeline-configurations">Pipeline configurations</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#changing-the-predecoder-model">Changing the predecoder model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#reading-the-output">Reading the output</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#throughput-and-timing">Throughput and timing</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#latency-distribution">Latency distribution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#pymatching-average-time">PyMatching average time</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#syndrome-density">Syndrome density</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#correctness-verification">Correctness verification</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_predecoder_fpga.html">AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#software">Software</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#source-repositories">Source repositories</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#repository-layout">Repository layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#data-directory-layout">Data directory layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#building">Building</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#emulated-end-to-end-test">Emulated end-to-end test</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#requirements">Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#bounded-decoding-server-regression-software-emulator">Bounded decoding-server regression (software emulator)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#fpga-end-to-end-test">FPGA end-to-end test</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#id1">Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#id2">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#gpu-selection">GPU selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#network-sanity-check">Network sanity check</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#changing-the-predecoder-model">Changing the predecoder model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#orchestration-script-reference">Orchestration script reference</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#modes">Modes</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#actions">Actions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#directory-options">Directory options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#network-options">Network options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#run-options">Run options</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="color_code_demo.html">Comparing Ising and Chromobius for Color-Code Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#what-the-experiment-compares">What the Experiment Compares</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#software">Software</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#run-the-comparison">Run the Comparison</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#the-example-source">The Example Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="sifl_demo.html">Measuring Streaming Interleaved Feed-forward Latency (SIFL)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#run-the-experiment">Run the Experiment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#how-the-example-runs">How the Example Runs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#the-example-source">The Example Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_decoding.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="modeling_noise.html">Experiments and Noise Modeling</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#cuda-q-qec-implementation">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#code-explanation">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#id1">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#id2">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html#memory-circuit-experiments">Memory Circuit Experiments</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#function-variants">Function Variants</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#return-values">Return Values</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#example-usage">Example Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#additional-noise-models">Additional Noise Models</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="noise_learning.html">Learning Noise and Decoding with Learned Rates</a></li>
+<li class="toctree-l1"><a class="reference internal" href="creating_qec_codes.html">Creating New QEC Codes</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Performance Studies</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../../performance/index.html">Performance Studies</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html">Improving Relay BP Decoding With Gamma Ensembles</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#performance-comparison">Performance Comparison</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#latency-distribution">Latency Distribution</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#logical-error-rate-under-hard-deadlines">Logical Error Rate Under Hard Deadlines</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/index.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html">Improving Relay BP Decoding With Gamma Ensembles</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#performance-comparison">Performance Comparison</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#latency-distribution">Latency Distribution</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#logical-error-rate-under-hard-deadlines">Logical Error Rate Under Hard Deadlines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html">Sweeping Relay BP Stopping Criteria From a Single Run</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#recording-a-run">Recording a run</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#example-relaybp-n-on-the-gross-code">Example: RelayBP-N on the gross code</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#practical-notes">Practical notes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html">Sweeping Relay BP Stopping Criteria From a Single Run</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#recording-a-run">Recording a run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#example-relaybp-n-on-the-gross-code">Example: RelayBP-N on the gross code</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#practical-notes">Practical notes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html">Improving BP+OSD Decoding With Min-LLR OSD Initialization</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#column-ordering-importance-and-sensitivity">Column Ordering Importance and Sensitivity</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#experiment">Experiment</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#results">Results</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#controls-ordering-versus-iteration-count">Controls: Ordering Versus Iteration Count</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html">Improving BP+OSD Decoding With Min-LLR OSD Initialization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#column-ordering-importance-and-sensitivity">Column Ordering Importance and Sensitivity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#experiment">Experiment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#results">Results</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#controls-ordering-versus-iteration-count">Controls: Ordering Versus Iteration Count</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Trajectory-Calibrated BP and Jittered OSD Beam Search</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#key-decoder-options">Key Decoder Options</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#using-tcbp-and-jobs">Using TCBP and JOBS</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#comparison-with-tesseract">Comparison With Tesseract</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#complementary-gap-post-selection">Complementary-Gap Post-Selection</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#limitations-and-practical-guidance">Limitations and Practical Guidance</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#references">References</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Accuracy and Latency of TCBP-JOBS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding realtime decode latency with NV-Fusion</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding Real-Time Decode Latency With NV-Fusion</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html">Learning Noise From Detector Data and Decoding With the Learned Rates</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#experiment-setup">Experiment Setup</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-1-get-the-circuit-and-fit-the-tcbp-model">Step 1: Get the Circuit and Fit the TCBP Model</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-2-learn-the-rates-from-detector-data">Step 2: Learn the Rates From Detector Data</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-3-decode-with-each-prior">Step 3: Decode With Each Prior</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#learning-time-and-accuracy">Learning Time and Accuracy</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#error-of-the-learned-rates-versus-the-number-of-shots">Error of the Learned Rates Versus the Number of Shots</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#logical-error-rate-under-the-three-priors">Logical Error Rate Under the Three Priors</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#choosing-the-number-of-passes">Choosing the Number of Passes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#reproducing-these-results">Reproducing These Results</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#see-also">See Also</a></li>
-</ul>
-</li>
-</ul>
-</li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html">Learning Noise From Detector Data and Decoding With the Learned Rates</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
 <ul>
@@ -843,6 +974,14 @@
 </ul>
 </li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Releases</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../releases.html">Release History</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../releases.html#current-version">0.9.0 — Current Version</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../releases.html#published-releases">Published Releases</a></li>
+</ul>
+</li>
+</ul>
 
         </div>
       </div>
@@ -858,581 +997,43 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
-          <li class="breadcrumb-item"><a href="examples.html">CUDA-Q QEC by Example</a></li>
-      <li class="breadcrumb-item active">Decoding Task Graphs</li>
+      <li class="breadcrumb-item active">Decoding Task Graph</li>
       <li class="wy-breadcrumbs-aside">
             <a href="../../_sources/examples_rst/qec/decoding_task_graph.rst.txt" rel="nofollow"> View page source</a>
       </li>
   </ul><div class="rst-breadcrumbs-buttons" role="navigation" aria-label="Sequential page navigation">
-        <a href="decoders.html" class="btn btn-neutral float-left" title="Decoders" accesskey="p"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="task_graph_parallel_window.html" class="btn btn-neutral float-right" title="Task Graph Parallel Window" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="dyn_dem.html" class="btn btn-neutral float-left" title="Decoding with a Dynamic DEM" accesskey="p"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="getting_started_decoding_task_graph.html" class="btn btn-neutral float-right" title="Getting Started with a Decoding Task Graph" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
   </div>
   <hr/>
 </div>
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
            <div itemprop="articleBody">
              
-  <section id="decoding-task-graphs">
-<span id="decoding-task-graph-example"></span><h1>Decoding Task Graphs<a class="headerlink" href="#decoding-task-graphs" title="Permalink to this heading"></a></h1>
-<p>A decoding task graph is a decoder pipeline. Measurements enter the graph,
-flow through its nodes, and leave as corrections to the logical observables,
-and, if the model reads them, as corrected logical measurements. A node
-decodes, often by wrapping a decoder plugin such as PyMatching, or combines
-results; edges carry values between nodes.</p>
-<img alt="Measurements feed a predecoder node, pre. Its residual port passes the detectors it did not explain to a global decoder node, and an xor node, sum, adds the corrections of both into the graph's output." src="../../_images/task_graph_basics.svg" /><p>In this graph, a fast predecoder corrects the errors it is sure of and passes
-the detectors it did not explain to a global decoder. Both correct the same
-observables, so an <code class="docutils literal notranslate"><span class="pre">xor</span></code> adds their corrections.</p>
-<p>A graph runs in two ways:</p>
+  <section id="decoding-task-graph">
+<h1>Decoding Task Graph<a class="headerlink" href="#decoding-task-graph" title="Permalink to this heading"></a></h1>
+<p>These examples show how to build and run decoding task graphs, then use
+parallel windows and ensembles for more specialized pipelines. For the
+concepts and configuration reference, see
+<a class="reference internal" href="../../components/qec/decoding_task_graph.html"><span class="doc">Decoding Task Graphs</span></a>.</p>
 <ul class="simple">
-<li><p><strong>Complete shots</strong>: <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run" title="cudaq_qec.DecodingTaskGraph.run"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run()</span></code></a> decodes one
-shot and <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_batch" title="cudaq_qec.DecodingTaskGraph.run_batch"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run_batch()</span></code></a> many, for offline
-analysis and testing.</p></li>
-<li><p><strong>Streaming</strong>: <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.enqueue_syndrome" title="cudaq_qec.DecodingTaskGraph.enqueue_syndrome"><code class="xref py py-meth docutils literal notranslate"><span class="pre">enqueue_syndrome()</span></code></a> takes
-rounds as they arrive, and windows decode as soon as they hold enough
-rounds. This is the real-time QEC path.</p></li>
+<li><p><a class="reference internal" href="getting_started_decoding_task_graph.html"><span class="doc">Getting Started with a Decoding Task Graph</span></a>: construct a graph, decode
+complete shots, stream measurement rounds, and combine corrections.</p></li>
+<li><p><a class="reference internal" href="task_graph_parallel_window.html"><span class="doc">Parallel Window</span></a>: distribute
+overlapping decoding windows across workers.</p></li>
+<li><p><a class="reference internal" href="task_graph_ensemble.html"><span class="doc">Decoder Ensembles</span></a>: run several member graphs
+and select a result.</p></li>
 </ul>
-<p>Build a graph in Python or C++, or declare it in the <code class="docutils literal notranslate"><span class="pre">task_graph</span></code> block of a
-decoder’s YAML configuration, which the realtime decoding server reads.</p>
-<p>To decode streams of any length with windows that decode at the same time, see
-<a class="reference internal" href="task_graph_parallel_window.html"><span class="doc">Task Graph Parallel Window</span></a>. For orchestrating an ensemble of decoders,
-see <a class="reference internal" href="task_graph_ensemble.html"><span class="doc">Task Graph Decoder Ensembles</span></a>. For execution details and other
-advanced topics, see <a class="reference internal" href="task_graph_reference.html"><span class="doc">Task Graph Reference</span></a>.</p>
-<section id="quick-start-a-sliding-window">
-<h2>Quick start: a sliding window<a class="headerlink" href="#quick-start-a-sliding-window" title="Permalink to this heading"></a></h2>
-<p>The simplest graph is one sliding-window node around an inner decoder. Its
-model is a <code class="docutils literal notranslate"><span class="pre">dem_chunks</span></code> description of the experiment’s rounds (see
-<a class="reference internal" href="dyn_dem.html#dyn-dem-example"><span class="std std-ref">Dynamic DEM</span></a>).</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">decoders</span><span class="p">:</span>
-<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
-<span class="w">    </span><span class="nt">task_graph</span><span class="p">:</span>
-<span class="w">      </span><span class="nt">nodes</span><span class="p">:</span>
-<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sw</span>
-<span class="w">          </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sliding_window</span>
-<span class="w">          </span><span class="nt">window_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span><span class="w">                 </span><span class="c1"># rounds per decode</span>
-<span class="w">          </span><span class="nt">step_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span><span class="w">                   </span><span class="c1"># rounds to advance per decode</span>
-<span class="w">          </span><span class="nt">inner</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="nv">single_error_lut</span><span class="p p-Indicator">}</span>
-<span class="w">    </span><span class="nt">dem_chunks</span><span class="p">:</span>
-<span class="w">      </span><span class="nt">seam</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">from</span><span class="p">:</span><span class="w"> </span><span class="nv">next_round</span><span class="p p-Indicator">,</span><span class="nt"> to</span><span class="p">:</span><span class="w"> </span><span class="nv">prev_round</span><span class="p p-Indicator">}</span>
-<span class="w">      </span><span class="nt">connections</span><span class="p">:</span>
-<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">from</span><span class="p">:</span><span class="w"> </span><span class="nv">init</span><span class="p p-Indicator">,</span><span class="nt"> to</span><span class="p">:</span><span class="w"> </span><span class="nv">bulk</span><span class="p p-Indicator">}</span>
-<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">from</span><span class="p">:</span><span class="w"> </span><span class="nv">bulk</span><span class="p p-Indicator">,</span><span class="nt"> to</span><span class="p">:</span><span class="w"> </span><span class="nv">bulk</span><span class="p p-Indicator">}</span><span class="w">   </span><span class="c1"># bulk repeats</span>
-<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">from</span><span class="p">:</span><span class="w"> </span><span class="nv">bulk</span><span class="p p-Indicator">,</span><span class="nt"> to</span><span class="p">:</span><span class="w"> </span><span class="nv">final</span><span class="p p-Indicator">}</span>
-<span class="w">      </span><span class="nt">phases</span><span class="p">:</span>
-<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">init</span>
-<span class="w">          </span><span class="nt">spec</span><span class="p">:</span>
-<span class="w">            </span><span class="nt">num_faults</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">9</span>
-<span class="w">            </span><span class="nt">H_sparse</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="nv">5</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="nv">6</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="nv">3</span><span class="p p-Indicator">,</span><span class="nv">7</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">3</span><span class="p p-Indicator">,</span><span class="nv">4</span><span class="p p-Indicator">,</span><span class="nv">8</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">]</span>
-<span class="w">            </span><span class="nt">O_sparse</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">]</span>
-<span class="w">            </span><span class="nt">error_rates</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">]</span>
-<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bulk</span>
-<span class="w">          </span><span class="nt">spec</span><span class="p">:</span>
-<span class="w">            </span><span class="nt">num_faults</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">9</span>
-<span class="w">            </span><span class="nt">H_sparse</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="nv">5</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="nv">6</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="nv">3</span><span class="p p-Indicator">,</span><span class="nv">7</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">3</span><span class="p p-Indicator">,</span><span class="nv">4</span><span class="p p-Indicator">,</span><span class="nv">8</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">]</span>
-<span class="w">            </span><span class="nt">O_sparse</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">]</span>
-<span class="w">            </span><span class="nt">error_rates</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">]</span>
-<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">final</span>
-<span class="w">          </span><span class="nt">spec</span><span class="p">:</span>
-<span class="w">            </span><span class="nt">num_faults</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5</span>
-<span class="w">            </span><span class="nt">H_sparse</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="nv">3</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">3</span><span class="p p-Indicator">,</span><span class="nv">4</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">]</span>
-<span class="w">            </span><span class="nt">O_sparse</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="nv">-1</span><span class="p p-Indicator">]</span>
-<span class="w">            </span><span class="nt">error_rates</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">,</span><span class="nv">0.02</span><span class="p p-Indicator">]</span>
-</pre></div>
+<div class="toctree-wrapper compound">
 </div>
-<ul class="simple">
-<li><p>The graph streams: it first decodes once it holds three rounds, then on
-every round after. <code class="docutils literal notranslate"><span class="pre">window_size</span></code> must be at least the fewest rounds the
-phases allow, three here.</p></li>
-<li><p>For shots of a fixed length, set <code class="docutils literal notranslate"><span class="pre">dem_chunks.num_rounds</span></code> and write
-<code class="docutils literal notranslate"><span class="pre">type:</span> <span class="pre">single_window</span></code>: the graph decodes each complete shot once.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">inner</span></code>’s other keys configure the inner decoder.</p></li>
-</ul>
-<p>The same graph built in code. <code class="docutils literal notranslate"><span class="pre">from_spec</span></code> picks the window itself: the
-fewest rounds the phases allow, advancing one round at a time, or the whole
-shot when <code class="docutils literal notranslate"><span class="pre">num_rounds</span></code> is set:</p>
-<div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--0-input--1" name="tab-set--0" type="radio"><label class="tab-label" for="tab-set--0-input--1">Python</label><div class="tab-content docutils">
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Build a single-decoder task graph from a dem_chunks_spec.</span>
-<span class="c1">#</span>
-<span class="c1"># When num_rounds is set the graph uses a fixed-T window that processes one</span>
-<span class="c1"># complete shot per run() call.  When num_rounds is absent and a repeating</span>
-<span class="c1"># (bulk self-loop) phase exists, the graph uses a streaming sliding window.</span>
-<span class="c1"># ---------------------------------------------------------------------------</span>
-
-<span class="c1"># Fixed-T graph: processes one 5-round shot at a time.</span>
-<span class="n">fixed_spec</span> <span class="o">=</span> <span class="n">rep5_spec</span><span class="p">(</span><span class="n">num_rounds</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
-<span class="n">fixed_graph</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">DecodingTaskGraph</span><span class="o">.</span><span class="n">from_spec</span><span class="p">(</span><span class="n">fixed_spec</span><span class="p">,</span> <span class="s2">"single_error_lut"</span><span class="p">)</span>
-
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"fixed-T  msyn/decode: </span><span class="si">{</span><span class="n">fixed_graph</span><span class="o">.</span><span class="n">get_num_msyn_per_decode</span><span class="p">()</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"fixed-T  observables: </span><span class="si">{</span><span class="n">fixed_graph</span><span class="o">.</span><span class="n">get_num_observables</span><span class="p">()</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-<span class="c1"># Streaming graph: num_rounds absent — a 3-round window that moves one round</span>
-<span class="c1"># at a time.</span>
-<span class="n">streaming_spec</span> <span class="o">=</span> <span class="n">rep5_spec</span><span class="p">()</span>
-<span class="n">streaming_spec</span><span class="o">.</span><span class="n">num_rounds</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># remove fixed round count</span>
-<span class="n">streaming_graph</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">DecodingTaskGraph</span><span class="o">.</span><span class="n">from_spec</span><span class="p">(</span><span class="n">streaming_spec</span><span class="p">,</span>
-                                                  <span class="s2">"single_error_lut"</span><span class="p">)</span>
-
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"streaming msyn/round: </span><span class="si">{</span><span class="n">streaming_graph</span><span class="o">.</span><span class="n">get_num_msyn_per_round</span><span class="p">()</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"streaming observables: </span><span class="si">{</span><span class="n">streaming_graph</span><span class="o">.</span><span class="n">get_num_observables</span><span class="p">()</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-</pre></div>
-</div>
-</div>
-<input class="tab-input" id="tab-set--0-input--2" name="tab-set--0" type="radio"><label class="tab-label" for="tab-set--0-input--2">C++</label><div class="tab-content docutils">
-<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Build a single-decoder task graph from a dem_chunks_spec.</span>
-<span class="c1">//</span>
-<span class="c1">// When num_rounds is set the graph uses a fixed-T window (one call to run()</span>
-<span class="c1">// per shot).  When num_rounds is absent the graph uses a streaming window of</span>
-<span class="c1">// the fewest rounds the phases allow, moving one round at a time.</span>
-<span class="c1">// ---------------------------------------------------------------------------</span>
-
-<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">example_from_spec</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<span class="w">  </span><span class="c1">// Fixed-T graph: processes one 5-round shot at a time.</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">fixed_spec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rep5_spec</span><span class="p">(</span><span class="cm">/*num_rounds=*/</span><span class="mi">5</span><span class="p">);</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">fixed_graph</span><span class="w"> </span><span class="o">=</span>
-<span class="w">      </span><span class="n">decoding_task_graph</span><span class="o">::</span><span class="n">from_spec</span><span class="p">(</span><span class="n">fixed_spec</span><span class="p">,</span><span class="w"> </span><span class="s">"single_error_lut"</span><span class="p">);</span>
-
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"fixed-T  msyn/decode: "</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">fixed_graph</span><span class="o">-&gt;</span><span class="n">get_num_msyn_per_decode</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"fixed-T  observables: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">fixed_graph</span><span class="o">-&gt;</span><span class="n">get_num_observables</span><span class="p">()</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-
-<span class="w">  </span><span class="c1">// Streaming graph: num_rounds absent — a 3-round window that moves one</span>
-<span class="w">  </span><span class="c1">// round at a time.</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">streaming_spec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rep5_spec</span><span class="p">();</span>
-<span class="w">  </span><span class="n">streaming_spec</span><span class="p">.</span><span class="n">num_rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">nullopt</span><span class="p">;</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">streaming_graph</span><span class="w"> </span><span class="o">=</span>
-<span class="w">      </span><span class="n">decoding_task_graph</span><span class="o">::</span><span class="n">from_spec</span><span class="p">(</span><span class="n">streaming_spec</span><span class="p">,</span><span class="w"> </span><span class="s">"single_error_lut"</span><span class="p">);</span>
-
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"streaming msyn/round: "</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">streaming_graph</span><span class="o">-&gt;</span><span class="n">get_num_msyn_per_round</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"streaming observables: "</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">streaming_graph</span><span class="o">-&gt;</span><span class="n">get_num_observables</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="p">}</span>
-</pre></div>
-</div>
-<p>Compile and run with</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>nvq++<span class="w"> </span>-lcudaq-qec<span class="w"> </span>-lcudaq-qec-decoders<span class="w"> </span>decoding_task_graph.cpp
-./a.out
-</pre></div>
-</div>
-</div>
-</div>
-</section>
-<section id="decoding-complete-shots">
-<h2>Decoding complete shots<a class="headerlink" href="#decoding-complete-shots" title="Permalink to this heading"></a></h2>
-<p><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run" title="cudaq_qec.DecodingTaskGraph.run"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run()</span></code></a> decodes one shot:</p>
-<div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--1-input--1" name="tab-set--1" type="radio"><label class="tab-label" for="tab-set--1-input--1">Python</label><div class="tab-content docutils">
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># One-shot execution: run() processes one complete shot and returns a</span>
-<span class="c1"># LogicalOutcome.  Does not touch the streaming accumulation buffer.</span>
-<span class="c1"># ---------------------------------------------------------------------------</span>
-
-<span class="n">n</span> <span class="o">=</span> <span class="n">fixed_graph</span><span class="o">.</span><span class="n">get_num_msyn_per_decode</span><span class="p">()</span>
-
-<span class="n">m</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">MeasurementResults</span><span class="p">()</span>
-<span class="n">m</span><span class="o">.</span><span class="n">bits</span> <span class="o">=</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">n</span>  <span class="c1"># zero syndrome → no predicted errors</span>
-
-<span class="n">lo</span> <span class="o">=</span> <span class="n">fixed_graph</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">m</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"converged: </span><span class="si">{</span><span class="n">lo</span><span class="o">.</span><span class="n">converged</span><span class="si">}</span><span class="s2">, corrections: </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">lo</span><span class="o">.</span><span class="n">bits</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-</pre></div>
-</div>
-</div>
-<input class="tab-input" id="tab-set--1-input--2" name="tab-set--1" type="radio"><label class="tab-label" for="tab-set--1-input--2">C++</label><div class="tab-content docutils">
-<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// One-shot execution: run() processes one complete shot and returns a</span>
-<span class="c1">// logical_outcome.  Does not touch the streaming accumulation buffer.</span>
-<span class="c1">// ---------------------------------------------------------------------------</span>
-
-<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">example_one_shot</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">graph</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">decoding_task_graph</span><span class="o">::</span><span class="n">from_spec</span><span class="p">(</span><span class="n">rep5_spec</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span><span class="w"> </span><span class="s">"single_error_lut"</span><span class="p">);</span>
-<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">get_num_msyn_per_decode</span><span class="p">();</span>
-
-<span class="w">  </span><span class="n">measurement_results</span><span class="w"> </span><span class="n">m</span><span class="p">;</span>
-<span class="w">  </span><span class="n">m</span><span class="p">.</span><span class="n">bits</span><span class="p">.</span><span class="n">assign</span><span class="p">(</span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"> </span><span class="c1">// zero syndrome → no predicted errors</span>
-
-<span class="w">  </span><span class="n">logical_outcome</span><span class="w"> </span><span class="n">lo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">run</span><span class="p">(</span><span class="n">m</span><span class="p">);</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"converged: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">lo</span><span class="p">.</span><span class="n">converged</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">", corrections: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">lo</span><span class="p">.</span><span class="n">bits</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="p">}</span>
-</pre></div>
-</div>
-</div>
-</div>
-<p><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.run_batch" title="cudaq_qec.DecodingTaskGraph.run_batch"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run_batch()</span></code></a> decodes many:</p>
-<div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--2-input--1" name="tab-set--2" type="radio"><label class="tab-label" for="tab-set--2-input--1">Python</label><div class="tab-content docutils">
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Batch execution: run_batch() processes a collection of complete shots.</span>
-<span class="c1"># ---------------------------------------------------------------------------</span>
-
-<span class="n">batch_shot</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">MeasurementResults</span><span class="p">()</span>
-<span class="n">batch_shot</span><span class="o">.</span><span class="n">bits</span> <span class="o">=</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">fixed_graph</span><span class="o">.</span><span class="n">get_num_msyn_per_decode</span><span class="p">()</span>
-<span class="n">shots</span> <span class="o">=</span> <span class="p">[</span><span class="n">batch_shot</span><span class="p">]</span> <span class="o">*</span> <span class="mi">8</span>
-<span class="n">results</span> <span class="o">=</span> <span class="n">fixed_graph</span><span class="o">.</span><span class="n">run_batch</span><span class="p">(</span><span class="n">shots</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"batch results: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">results</span><span class="p">)</span><span class="si">}</span><span class="s2"> shots processed"</span><span class="p">)</span>
-</pre></div>
-</div>
-</div>
-<input class="tab-input" id="tab-set--2-input--2" name="tab-set--2" type="radio"><label class="tab-label" for="tab-set--2-input--2">C++</label><div class="tab-content docutils">
-<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Batch execution: run_batch() processes a collection of complete shots.</span>
-<span class="c1">// ---------------------------------------------------------------------------</span>
-
-<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">example_batch</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">graph</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">decoding_task_graph</span><span class="o">::</span><span class="n">from_spec</span><span class="p">(</span><span class="n">rep5_spec</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span><span class="w"> </span><span class="s">"single_error_lut"</span><span class="p">);</span>
-<span class="w">  </span><span class="n">measurement_results</span><span class="w"> </span><span class="n">m</span><span class="p">;</span>
-<span class="w">  </span><span class="n">m</span><span class="p">.</span><span class="n">bits</span><span class="p">.</span><span class="n">assign</span><span class="p">(</span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">get_num_msyn_per_decode</span><span class="p">(),</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">measurement_results</span><span class="o">&gt;</span><span class="w"> </span><span class="n">shots</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="w"> </span><span class="n">m</span><span class="p">);</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">run_batch</span><span class="p">(</span><span class="n">shots</span><span class="p">);</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"batch results: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">results</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">" shots processed</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="p">}</span>
-</pre></div>
-</div>
-</div>
-</div>
-<p>A graph with more than one output returns one result per output from
-<code class="docutils literal notranslate"><span class="pre">run_all</span></code>, in <code class="docutils literal notranslate"><span class="pre">output_names()</span></code> order.</p>
-</section>
-<section id="streaming">
-<h2>Streaming<a class="headerlink" href="#streaming" title="Permalink to this heading"></a></h2>
-<div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--3-input--1" name="tab-set--3" type="radio"><label class="tab-label" for="tab-set--3-input--1">Python</label><div class="tab-content docutils">
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Stream a 10-round shot one round per call, tagging the last round FINAL.</span>
-<span class="c1"># ---------------------------------------------------------------------------</span>
-
-<span class="n">graph</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">DecodingTaskGraph</span><span class="o">.</span><span class="n">from_spec</span><span class="p">(</span><span class="n">streaming_spec</span><span class="p">,</span> <span class="s2">"single_error_lut"</span><span class="p">)</span>
-<span class="n">per_round</span> <span class="o">=</span> <span class="n">graph</span><span class="o">.</span><span class="n">get_num_msyn_per_round</span><span class="p">()</span>
-<span class="n">num_rounds</span> <span class="o">=</span> <span class="mi">10</span>
-<span class="k">for</span> <span class="n">round_idx</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_rounds</span><span class="p">):</span>
-    <span class="n">syndrome</span> <span class="o">=</span> <span class="nb">bytes</span><span class="p">(</span><span class="n">per_round</span><span class="p">)</span>  <span class="c1"># zero syndrome: no errors</span>
-    <span class="k">if</span> <span class="n">round_idx</span> <span class="o">&lt;</span> <span class="n">num_rounds</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span>
-        <span class="n">graph</span><span class="o">.</span><span class="n">enqueue_syndrome</span><span class="p">(</span><span class="n">syndrome</span><span class="p">)</span>
-    <span class="k">else</span><span class="p">:</span>
-        <span class="n">graph</span><span class="o">.</span><span class="n">enqueue_syndrome</span><span class="p">(</span><span class="n">syndrome</span><span class="p">,</span> <span class="n">qec</span><span class="o">.</span><span class="n">round_type</span><span class="o">.</span><span class="n">FINAL</span><span class="p">)</span>
-
-<span class="n">progress</span> <span class="o">=</span> <span class="n">graph</span><span class="o">.</span><span class="n">streaming_result</span><span class="p">()</span><span class="o">.</span><span class="n">outputs</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"status: </span><span class="si">{</span><span class="n">progress</span><span class="o">.</span><span class="n">status</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"corrections: </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">graph</span><span class="o">.</span><span class="n">get_obs_corrections</span><span class="p">())</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-<span class="c1"># Start the next shot.</span>
-<span class="n">graph</span><span class="o">.</span><span class="n">clear_corrections</span><span class="p">()</span>
-</pre></div>
-</div>
-</div>
-<input class="tab-input" id="tab-set--3-input--2" name="tab-set--3" type="radio"><label class="tab-label" for="tab-set--3-input--2">C++</label><div class="tab-content docutils">
-<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Stream a 10-round shot one round per call, tagging the last round FINAL.</span>
-<span class="c1">// ---------------------------------------------------------------------------</span>
-
-<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">example_streaming</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">streaming_spec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rep5_spec</span><span class="p">();</span>
-<span class="w">  </span><span class="n">streaming_spec</span><span class="p">.</span><span class="n">num_rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">nullopt</span><span class="p">;</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">graph</span><span class="w"> </span><span class="o">=</span>
-<span class="w">      </span><span class="n">decoding_task_graph</span><span class="o">::</span><span class="n">from_spec</span><span class="p">(</span><span class="n">streaming_spec</span><span class="p">,</span><span class="w"> </span><span class="s">"single_error_lut"</span><span class="p">);</span>
-<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">per_round</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">get_num_msyn_per_round</span><span class="p">();</span>
-<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">num_rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span>
-<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">uint8_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">syndrome</span><span class="p">(</span><span class="n">per_round</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"> </span><span class="c1">// no errors</span>
-
-<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_rounds</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">r</span><span class="p">)</span>
-<span class="w">    </span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">enqueue_syndrome</span><span class="p">(</span><span class="n">syndrome</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span><span class="w"> </span><span class="n">per_round</span><span class="p">,</span>
-<span class="w">                            </span><span class="n">r</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_rounds</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">round_type</span><span class="o">::</span><span class="n">BULK</span>
-<span class="w">                                               </span><span class="o">:</span><span class="w"> </span><span class="n">round_type</span><span class="o">::</span><span class="n">FINAL</span><span class="p">);</span>
-
-<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">progress</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">streaming_result</span><span class="p">().</span><span class="n">outputs</span><span class="p">.</span><span class="n">at</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"complete: "</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="n">progress</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">task_graph_streaming_status</span><span class="o">::</span><span class="n">complete</span><span class="p">)</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"corrections[0]: "</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">get_obs_corrections</span><span class="p">()[</span><span class="mi">0</span><span class="p">])</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-
-<span class="w">  </span><span class="c1">// Start the next shot.</span>
-<span class="w">  </span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">clear_corrections</span><span class="p">();</span>
-<span class="p">}</span>
-</pre></div>
-</div>
-</div>
-</div>
-<ul class="simple">
-<li><p>Send one round per call: <code class="docutils literal notranslate"><span class="pre">get_num_msyn_per_round()</span></code> measurements. Larger
-chunks also work; the graph splits them.</p></li>
-<li><p>Tag the shot’s last round <code class="docutils literal notranslate"><span class="pre">FINAL</span></code>, as in
-<code class="docutils literal notranslate"><span class="pre">enqueue_syndrome(syndrome,</span> <span class="pre">round_type.FINAL)</span></code>. It decodes whatever
-windows still hold, so the end of the shot is corrected. Untagged rounds
-never end a shot.</p></li>
-<li><p>Corrections accumulate across the shot. After <code class="docutils literal notranslate"><span class="pre">FINAL</span></code>, the graph drops
-further rounds until <code class="docutils literal notranslate"><span class="pre">clear_corrections()</span></code>, which consumes the
-corrections and starts the next shot. <code class="docutils literal notranslate"><span class="pre">reset_decoder()</span></code> also starts a
-new shot, discarding rounds not yet decoded.</p></li>
-</ul>
-</section>
-<section id="reading-results">
-<h2>Reading results<a class="headerlink" href="#reading-results" title="Permalink to this heading"></a></h2>
-<p><code class="docutils literal notranslate"><span class="pre">get_obs_corrections()</span></code> returns the corrections, one byte per observable.
-<code class="docutils literal notranslate"><span class="pre">streaming_result()</span></code> also says whether they are ready and which rounds they
-cover. For each graph output it reports:</p>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">status</span></code>: <code class="docutils literal notranslate"><span class="pre">PENDING</span></code> before the output has published or after
-<code class="docutils literal notranslate"><span class="pre">clear_corrections()</span></code>, <code class="docutils literal notranslate"><span class="pre">AVAILABLE</span></code> mid-shot, <code class="docutils literal notranslate"><span class="pre">COMPLETE</span></code> after
-<code class="docutils literal notranslate"><span class="pre">FINAL</span></code>, or <code class="docutils literal notranslate"><span class="pre">FAILED</span></code>. (In C++, lowercase.)</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">coverage_begin_round</span></code> and <code class="docutils literal notranslate"><span class="pre">coverage_end_round</span></code>: the rounds the latest
-update committed, as a half-open range. For a parallel window, this is every
-round committed since the last <code class="docutils literal notranslate"><span class="pre">clear_corrections()</span></code>.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">closure</span></code>: whether decoded windows were checked against their detectors
-(see <a class="reference internal" href="task_graph_parallel_window.html"><span class="doc">Task Graph Parallel Window</span></a>).</p></li>
-</ul>
-<p>A zero correction with status <code class="docutils literal notranslate"><span class="pre">AVAILABLE</span></code> is a real result. Synchronously,
-<code class="docutils literal notranslate"><span class="pre">enqueue_syndrome</span></code> also returns whether any node decoded; with
-<code class="docutils literal notranslate"><span class="pre">async_streaming</span></code>, an untagged call returns <code class="docutils literal notranslate"><span class="pre">False</span></code>, so read <code class="docutils literal notranslate"><span class="pre">status</span></code>
-instead.</p>
-</section>
-<section id="logical-measurements">
-<span id="task-graph-logical-measurements"></span><h2>Logical measurements<a class="headerlink" href="#logical-measurements" title="Permalink to this heading"></a></h2>
-<p>A graph can return two results:</p>
-<ul class="simple">
-<li><p><strong>Corrections</strong>, the flips of the logical observables:
-<code class="docutils literal notranslate"><span class="pre">get_obs_corrections()</span></code>, <code class="docutils literal notranslate"><span class="pre">run()</span></code> and the decoding server’s
-<code class="docutils literal notranslate"><span class="pre">get_corrections</span></code>.</p></li>
-<li><p><strong>Logical measurements</strong>, the raw logical readout with the corrections
-applied: <code class="docutils literal notranslate"><span class="pre">get_logical_measurements()</span></code> and the server’s
-<code class="docutils literal notranslate"><span class="pre">get_logical_measurements</span></code>.</p></li>
-</ul>
-<p>Logical measurements need a model that reads the observables, through
-<code class="docutils literal notranslate"><span class="pre">m2o_sparse</span></code> (see <a class="reference internal" href="dyn_dem.html#dyn-dem-example"><span class="std std-ref">Dynamic DEM</span></a>), and a graph with a logical
-output. <code class="docutils literal notranslate"><span class="pre">parallel_window</span></code> wires one with
-<code class="docutils literal notranslate"><span class="pre">output:</span> <span class="pre">corrections_and_logical</span></code> (see <a class="reference internal" href="task_graph_parallel_window.html"><span class="doc">Task Graph Parallel Window</span></a>);
-other graphs wire a <code class="docutils literal notranslate"><span class="pre">logical_readout</span></code> node (see
-<a class="reference internal" href="task_graph_reference.html#task-graph-logical-output"><span class="std std-ref">Logical outputs</span></a>).</p>
-<ul class="simple">
-<li><p>A logical measurement is <em>released</em> once its readout has arrived and every
-correction that can flip it is committed. A final readout is released at
-<code class="docutils literal notranslate"><span class="pre">FINAL</span></code>. A mid-circuit readout is released mid-shot when the corrections
-are staged, as <code class="docutils literal notranslate"><span class="pre">parallel_window</span></code>’s are; otherwise at <code class="docutils literal notranslate"><span class="pre">FINAL</span></code>.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">get_logical_measurements(first,</span> <span class="pre">count)</span></code> returns <code class="docutils literal notranslate"><span class="pre">None</span></code> (C++:
-<code class="docutils literal notranslate"><span class="pre">nullptr</span></code>) until every measurement in the range is released, and again
-once the shot is consumed.</p></li>
-<li><p>The logical output is the last of <code class="docutils literal notranslate"><span class="pre">streaming_result().outputs</span></code>, with a
-<code class="docutils literal notranslate"><span class="pre">released</span></code> flag per measurement. It is not in <code class="docutils literal notranslate"><span class="pre">output_names()</span></code>, and
-<code class="docutils literal notranslate"><span class="pre">get_num_logical_measurements()</span></code> gives its width.</p></li>
-<li><p>The logical measurements apply every correction of the shot, so the shot
-can be consumed only after <code class="docutils literal notranslate"><span class="pre">FINAL</span></code>: <code class="docutils literal notranslate"><span class="pre">clear_corrections()</span></code> raises before
-then. <code class="docutils literal notranslate"><span class="pre">reset_decoder()</span></code> still abandons a shot.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">run</span></code> and <code class="docutils literal notranslate"><span class="pre">run_batch</span></code> return corrections only.</p></li>
-</ul>
-</section>
-<section id="graphs-of-several-nodes">
-<h2>Graphs of several nodes<a class="headerlink" href="#graphs-of-several-nodes" title="Permalink to this heading"></a></h2>
-<p><code class="docutils literal notranslate"><span class="pre">task_graph.nodes</span></code> lists the nodes and <code class="docutils literal notranslate"><span class="pre">task_graph.edges</span></code> wires them. A
-node names its kind in <code class="docutils literal notranslate"><span class="pre">type</span></code>, its inner decoder in <code class="docutils literal notranslate"><span class="pre">inner</span></code>, and the kind’s
-parameters inline. This is the graph in the figure above, on the quick
-start’s model:</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">task_graph</span><span class="p">:</span>
-<span class="w">  </span><span class="nt">nodes</span><span class="p">:</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pre</span>
-<span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">predecoder</span>
-<span class="w">      </span><span class="nt">window_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5</span>
-<span class="w">      </span><span class="nt">residual_from</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">parity_check</span><span class="w">  </span><span class="c1"># inner returns the errors it found</span>
-<span class="w">      </span><span class="nt">inner</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="nv">single_error_lut</span><span class="p p-Indicator">}</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">global</span>
-<span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">single_window</span>
-<span class="w">      </span><span class="nt">window_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5</span>
-<span class="w">      </span><span class="nt">inner</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="nv">multi_error_lut</span><span class="p p-Indicator">,</span><span class="nt"> lut_error_depth</span><span class="p">:</span><span class="w"> </span><span class="nv">2</span><span class="p p-Indicator">}</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sum</span>
-<span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">xor</span>
-<span class="w">  </span><span class="nt">edges</span><span class="p">:</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">from</span><span class="p">:</span><span class="w"> </span><span class="nv">measurements</span><span class="p p-Indicator">,</span><span class="nt"> to</span><span class="p">:</span><span class="w"> </span><span class="nv">pre</span><span class="p p-Indicator">}</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">from</span><span class="p">:</span><span class="w"> </span><span class="nv">pre.pre_L</span><span class="p p-Indicator">,</span><span class="nt"> to</span><span class="p">:</span><span class="w"> </span><span class="nv">sum.a</span><span class="p p-Indicator">}</span><span class="w">       </span><span class="c1"># the predecoder's corrections</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">from</span><span class="p">:</span><span class="w"> </span><span class="nv">pre.residual</span><span class="p p-Indicator">,</span><span class="nt"> to</span><span class="p">:</span><span class="w"> </span><span class="nv">global</span><span class="p p-Indicator">}</span><span class="w">   </span><span class="c1"># the detectors it left</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">from</span><span class="p">:</span><span class="w"> </span><span class="nv">global</span><span class="p p-Indicator">,</span><span class="nt"> to</span><span class="p">:</span><span class="w"> </span><span class="nv">sum.b</span><span class="p p-Indicator">}</span><span class="w">          </span><span class="c1"># the global decoder's corrections</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">from</span><span class="p">:</span><span class="w"> </span><span class="nv">sum</span><span class="p p-Indicator">,</span><span class="nt"> to</span><span class="p">:</span><span class="w"> </span><span class="nv">output</span><span class="p p-Indicator">}</span>
-</pre></div>
-</div>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">measurements</span></code> is the incoming shot and <code class="docutils literal notranslate"><span class="pre">output</span></code> the graph’s result.</p></li>
-<li><p>An edge endpoint is a node id, with <code class="docutils literal notranslate"><span class="pre">.port</span></code> for a node that has named ports,
-such as <code class="docutils literal notranslate"><span class="pre">xor</span></code>’s <code class="docutils literal notranslate"><span class="pre">a</span></code> and <code class="docutils literal notranslate"><span class="pre">b</span></code> and <code class="docutils literal notranslate"><span class="pre">predecoder</span></code>’s <code class="docutils literal notranslate"><span class="pre">pre_L</span></code> (its
-corrections) and <code class="docutils literal notranslate"><span class="pre">residual</span></code>.</p></li>
-<li><p>A node fed by another decodes that node’s output, so <code class="docutils literal notranslate"><span class="pre">pre</span></code> and
-<code class="docutils literal notranslate"><span class="pre">global</span></code> decode the same rounds: their <code class="docutils literal notranslate"><span class="pre">window_size</span></code> must match.</p></li>
-<li><p>A single node needs no edges: it is wired
-<code class="docutils literal notranslate"><span class="pre">measurements</span> <span class="pre">→</span> <span class="pre">node</span> <span class="pre">→</span> <span class="pre">output</span></code>.</p></li>
-<li><p>List nodes in the order data flows. A node without its own <code class="docutils literal notranslate"><span class="pre">dem_chunks</span></code>
-uses the decoder’s.</p></li>
-</ul>
-<p><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.combine" title="cudaq_qec.DecodingTaskGraph.combine"><code class="xref py py-meth docutils literal notranslate"><span class="pre">combine()</span></code></a> joins two single-node graphs
-with an <code class="docutils literal notranslate"><span class="pre">xor</span></code>, for two decoders whose corrections add:</p>
-<div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--4-input--1" name="tab-set--4" type="radio"><label class="tab-label" for="tab-set--4-input--1">Python</label><div class="tab-content docutils">
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># combine() runs two independent decoders and XORs their logical outcomes.</span>
-<span class="c1"># Each branch applies its own D matrix; they may decode the same DEM with</span>
-<span class="c1"># different algorithms.  Both input graphs are consumed by the call.</span>
-<span class="c1"># In streaming mode, enqueue_syndrome routes the syndrome to both branches</span>
-<span class="c1"># simultaneously.</span>
-<span class="c1"># ---------------------------------------------------------------------------</span>
-
-<span class="n">left</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">DecodingTaskGraph</span><span class="o">.</span><span class="n">from_spec</span><span class="p">(</span><span class="n">rep5_spec</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span> <span class="s2">"single_error_lut"</span><span class="p">)</span>
-<span class="n">right</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">DecodingTaskGraph</span><span class="o">.</span><span class="n">from_spec</span><span class="p">(</span><span class="n">rep5_spec</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span> <span class="s2">"single_error_lut"</span><span class="p">)</span>
-
-<span class="n">combined</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">DecodingTaskGraph</span><span class="o">.</span><span class="n">combine</span><span class="p">(</span><span class="n">left</span><span class="p">,</span> <span class="n">right</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"combined observables: </span><span class="si">{</span><span class="n">combined</span><span class="o">.</span><span class="n">get_num_observables</span><span class="p">()</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-<span class="c1"># Batch: run() walks both branches and XORs the results.</span>
-<span class="n">n</span> <span class="o">=</span> <span class="n">combined</span><span class="o">.</span><span class="n">get_num_msyn_per_decode</span><span class="p">()</span>
-<span class="n">m</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">MeasurementResults</span><span class="p">()</span>
-<span class="n">m</span><span class="o">.</span><span class="n">bits</span> <span class="o">=</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">n</span>
-<span class="n">lo</span> <span class="o">=</span> <span class="n">combined</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">m</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"combined corrections: </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">lo</span><span class="o">.</span><span class="n">bits</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>  <span class="c1"># XOR of identical results = 0</span>
-
-<span class="c1"># Streaming: both branches receive the same syndrome bytes.</span>
-<span class="n">fired</span> <span class="o">=</span> <span class="n">combined</span><span class="o">.</span><span class="n">enqueue_syndrome</span><span class="p">(</span><span class="nb">bytes</span><span class="p">(</span><span class="n">n</span><span class="p">))</span>
-<span class="k">if</span> <span class="n">fired</span><span class="p">:</span>
-    <span class="n">corr</span> <span class="o">=</span> <span class="n">combined</span><span class="o">.</span><span class="n">get_obs_corrections</span><span class="p">()</span>
-    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"combined streaming corrections: </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">corr</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-</pre></div>
-</div>
-</div>
-<input class="tab-input" id="tab-set--4-input--2" name="tab-set--4" type="radio"><label class="tab-label" for="tab-set--4-input--2">C++</label><div class="tab-content docutils">
-<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// combine() runs two independent decoders and XORs their logical outcomes.</span>
-<span class="c1">// Each branch applies its own D matrix.  Both input graphs are consumed.</span>
-<span class="c1">// In streaming mode, enqueue_syndrome routes the syndrome to both branches</span>
-<span class="c1">// simultaneously.</span>
-<span class="c1">// ---------------------------------------------------------------------------</span>
-
-<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">example_combine</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">left</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">decoding_task_graph</span><span class="o">::</span><span class="n">from_spec</span><span class="p">(</span><span class="n">rep5_spec</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span><span class="w"> </span><span class="s">"single_error_lut"</span><span class="p">);</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">right</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">decoding_task_graph</span><span class="o">::</span><span class="n">from_spec</span><span class="p">(</span><span class="n">rep5_spec</span><span class="p">(</span><span class="mi">5</span><span class="p">),</span><span class="w"> </span><span class="s">"single_error_lut"</span><span class="p">);</span>
-
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">combined</span><span class="w"> </span><span class="o">=</span>
-<span class="w">      </span><span class="n">decoding_task_graph</span><span class="o">::</span><span class="n">combine</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">left</span><span class="p">),</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">right</span><span class="p">));</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"combined observables: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">combined</span><span class="o">-&gt;</span><span class="n">get_num_observables</span><span class="p">()</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-
-<span class="w">  </span><span class="c1">// Batch: run() walks both branches and XORs the results.</span>
-<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">combined</span><span class="o">-&gt;</span><span class="n">get_num_msyn_per_decode</span><span class="p">();</span>
-<span class="w">  </span><span class="n">measurement_results</span><span class="w"> </span><span class="n">m</span><span class="p">;</span>
-<span class="w">  </span><span class="n">m</span><span class="p">.</span><span class="n">bits</span><span class="p">.</span><span class="n">assign</span><span class="p">(</span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
-<span class="w">  </span><span class="n">logical_outcome</span><span class="w"> </span><span class="n">lo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">combined</span><span class="o">-&gt;</span><span class="n">run</span><span class="p">(</span><span class="n">m</span><span class="p">);</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"combined corrections: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">lo</span><span class="p">.</span><span class="n">bits</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span><span class="w"> </span><span class="c1">// XOR of identical = 0</span>
-
-<span class="w">  </span><span class="c1">// Streaming: both branches receive the same syndrome bytes.</span>
-<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">uint8_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">zero_syndrome</span><span class="p">(</span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
-<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">combined</span><span class="o">-&gt;</span><span class="n">enqueue_syndrome</span><span class="p">(</span><span class="n">zero_syndrome</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span><span class="w"> </span><span class="n">n</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="o">*</span><span class="n">corr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">combined</span><span class="o">-&gt;</span><span class="n">get_obs_corrections</span><span class="p">();</span>
-<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"combined streaming corrections: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">corr</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
-<span class="w">              </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="p">}</span>
-<span class="p">}</span>
-</pre></div>
-</div>
-</div>
-</div>
-<p>For any other topology, use
-<a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.DecodingTaskGraph.from_topology" title="cudaq_qec.DecodingTaskGraph.from_topology"><code class="xref py py-meth docutils literal notranslate"><span class="pre">from_topology()</span></code></a> with a list of
-<a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphNodeConfig" title="cudaq_qec.TaskGraphNodeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">TaskGraphNodeConfig</span></code></a> nodes and their edges. In code, a
-node’s <code class="docutils literal notranslate"><span class="pre">kind</span></code>, <code class="docutils literal notranslate"><span class="pre">decoder_type</span></code>, <code class="docutils literal notranslate"><span class="pre">params</span></code> and <code class="docutils literal notranslate"><span class="pre">node_params</span></code> hold what
-YAML writes as <code class="docutils literal notranslate"><span class="pre">type</span></code>, <code class="docutils literal notranslate"><span class="pre">inner.type</span></code>, <code class="docutils literal notranslate"><span class="pre">inner</span></code>’s other keys and the
-inline parameters.</p>
-</section>
-<section id="node-kinds">
-<h2>Node kinds<a class="headerlink" href="#node-kinds" title="Permalink to this heading"></a></h2>
-<table class="docutils align-default">
-<colgroup>
-<col style="width: 25%" />
-<col style="width: 75%" />
-</colgroup>
-<thead>
-<tr class="row-odd"><th class="head"><p>Kind</p></th>
-<th class="head"><p>What it does</p></th>
-</tr>
-</thead>
-<tbody>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">sliding_window</span></code></p></td>
-<td><p>Decodes <code class="docutils literal notranslate"><span class="pre">window_size</span></code> rounds and advances <code class="docutils literal notranslate"><span class="pre">step_size</span></code> rounds. The
-default <code class="docutils literal notranslate"><span class="pre">kind</span></code> in code; YAML nodes always name a <code class="docutils literal notranslate"><span class="pre">type</span></code>.</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">single_window</span></code></p></td>
-<td><p>Decodes a complete fixed-length shot.</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">streaming</span></code></p></td>
-<td><p>Passes each round to an inner decoder that streams natively.</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">parallel_window</span></code></p></td>
-<td><p>Decodes streams of any length in windows that decode at the same time.
-See <a class="reference internal" href="task_graph_parallel_window.html"><span class="doc">Task Graph Parallel Window</span></a>.</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ingest</span></code>, <code class="docutils literal notranslate"><span class="pre">decode_window</span></code></p></td>
-<td><p>The nodes <code class="docutils literal notranslate"><span class="pre">parallel_window</span></code> builds: <code class="docutils literal notranslate"><span class="pre">ingest</span></code> cuts rounds into
-windows and <code class="docutils literal notranslate"><span class="pre">decode_window</span></code> decodes them.</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">xor</span></code></p></td>
-<td><p>XORs its inputs: ports <code class="docutils literal notranslate"><span class="pre">a</span></code> and <code class="docutils literal notranslate"><span class="pre">b</span></code>, or <code class="docutils literal notranslate"><span class="pre">in_0</span></code> to <code class="docutils literal notranslate"><span class="pre">in_{N-1}</span></code>
-with <code class="docutils literal notranslate"><span class="pre">num_inputs:</span> <span class="pre">N</span></code>.</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">logical_readout</span></code></p></td>
-<td><p>Reads the raw logical value through the model’s <code class="docutils literal notranslate"><span class="pre">m2o_sparse</span></code>. See
-<a class="reference internal" href="task_graph_reference.html#task-graph-logical-output"><span class="std std-ref">Logical outputs</span></a>.</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">predecoder</span></code></p></td>
-<td><p>Runs a predecoder and passes its residual detectors on through its
-<code class="docutils literal notranslate"><span class="pre">residual</span></code> port.</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ensemble</span></code></p></td>
-<td><p>Runs several member graphs and keeps one answer. See
-<a class="reference internal" href="task_graph_ensemble.html"><span class="doc">Task Graph Decoder Ensembles</span></a>.</p></td>
-</tr>
-</tbody>
-</table>
-<p>Kinds are a registry, so plugins can add more.
-<code class="docutils literal notranslate"><span class="pre">registered_task_graph_node_kinds()</span></code> lists an installation’s kinds,
-<code class="docutils literal notranslate"><span class="pre">decoder_param_schema(&quot;task_graph_node.&lt;kind&gt;&quot;)</span></code> describes a kind’s
-parameters, and <code class="docutils literal notranslate"><span class="pre">decoder_config_json_schema()</span></code> returns a JSON Schema for
-checking configurations with your own tools.</p>
-</section>
-<section id="guarded-sliding-windows">
-<h2>Guarded sliding windows<a class="headerlink" href="#guarded-sliding-windows" title="Permalink to this heading"></a></h2>
-<p>Overlapping windows see each round more than once. Guard rounds are context
-only: the window decodes with them but does not correct them, because a
-neighboring window does.</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sw</span>
-<span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sliding_window</span>
-<span class="w">  </span><span class="nt">window_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5</span>
-<span class="w">  </span><span class="nt">step_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
-<span class="w">  </span><span class="nt">end_guard</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span><span class="w">            </span><span class="c1"># the last round is context only</span>
-<span class="w">  </span><span class="nt">inner</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="nv">single_error_lut</span><span class="p p-Indicator">}</span>
-</pre></div>
-</div>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">start_guard</span></code> and <code class="docutils literal notranslate"><span class="pre">end_guard</span></code> (or <code class="docutils literal notranslate"><span class="pre">guard_rounds</span></code> for both) set the
-guards.</p></li>
-<li><p>With a guard, <code class="docutils literal notranslate"><span class="pre">step_size</span></code> must equal
-<code class="docutils literal notranslate"><span class="pre">window_size</span> <span class="pre">-</span> <span class="pre">start_guard</span> <span class="pre">-</span> <span class="pre">end_guard</span></code>, so each round is corrected
-exactly once.</p></li>
-<li><p>The <code class="docutils literal notranslate"><span class="pre">FINAL</span></code> round corrects the last window’s <code class="docutils literal notranslate"><span class="pre">end_guard</span></code>.</p></li>
-</ul>
-</section>
-<section id="asynchronous-streaming">
-<h2>Asynchronous streaming<a class="headerlink" href="#asynchronous-streaming" title="Permalink to this heading"></a></h2>
-<p>By default, <code class="docutils literal notranslate"><span class="pre">enqueue_syndrome</span></code> returns after the decodes it starts. With
-<code class="docutils literal notranslate"><span class="pre">async_streaming</span></code>, it copies the round and returns, and the graph decodes on
-its own worker threads; it waits only when the graph’s queue is full. Reads
-(<code class="docutils literal notranslate"><span class="pre">get_obs_corrections</span></code>, <code class="docutils literal notranslate"><span class="pre">streaming_result</span></code>) wait for rounds already sent,
-and a <code class="docutils literal notranslate"><span class="pre">FINAL</span></code> round returns once the whole shot is decoded.</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">task_graph</span><span class="p">:</span>
-<span class="w">  </span><span class="nt">async_streaming</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<span class="w">  </span><span class="nt">async_num_workers</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span><span class="w">          </span><span class="c1"># worker threads; default: sized to the graph</span>
-<span class="w">  </span><span class="nt">async_worker_cpus</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">4</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">5</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">6</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">7</span><span class="p p-Indicator">]</span>
-<span class="w">  </span><span class="nt">nodes</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">...</span><span class="p p-Indicator">]</span>
-</pre></div>
-</div>
-<p>In Python and C++, set the same fields on <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.TaskGraphOptions" title="cudaq_qec.TaskGraphOptions"><code class="xref py py-class docutils literal notranslate"><span class="pre">TaskGraphOptions</span></code></a>
-and pass it when building the graph. <code class="docutils literal notranslate"><span class="pre">max_in_flight</span></code> on a node
-such as <code class="docutils literal notranslate"><span class="pre">decode_window</span></code> lets that many of its decodes run at once. The
-reference lists every option: <a class="reference internal" href="task_graph_reference.html#task-graph-async-options"><span class="std std-ref">Asynchronous streaming options</span></a>.</p>
-</section>
 </section>
 
 
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="decoders.html" class="btn btn-neutral float-left" title="Decoders" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="task_graph_parallel_window.html" class="btn btn-neutral float-right" title="Task Graph Parallel Window" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="dyn_dem.html" class="btn btn-neutral float-left" title="Decoding with a Dynamic DEM" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="getting_started_decoding_task_graph.html" class="btn btn-neutral float-right" title="Getting Started with a Decoding Task Graph" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>

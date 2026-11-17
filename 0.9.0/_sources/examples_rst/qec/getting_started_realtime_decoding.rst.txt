@@ -3,6 +3,19 @@ Getting Started with Realtime Decoding
 
 This walkthrough builds a complete realtime decoding application end to end: decoder configuration, backend selection, compilation, and troubleshooting. Each stage of the underlying ``real_time_complete`` example is shown in place in the sections below.
 
+The local simulation in this walkthrough runs the decoders in the same
+process as the quantum simulator. You do not need to start a standalone
+server for that route.
+
+Use a :doc:`Decoding Server </components/qec/decoding_server>` when the
+decoders need to run independently of the application or controller producing
+measurements. The server loads the decoder configuration and handles
+measurement and correction requests from a CUDA-Q client or a third-party
+control system over a configured transport. To build and run that deployment,
+follow :doc:`Realtime Decoding from a Quantum Kernel or FPGA
+<realtime_decoding_demo>`; its software UDP route can be tested without a QPU
+or FPGA.
+
 A realtime decoding application has the following main components:
 
 - Decoder configuration file: Initializes and configures the decoders before circuit execution.
@@ -66,8 +79,8 @@ Step 2: Configure and Save Decoder
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Once a DEM has been generated, the next step is to package this information into a decoder configuration and save it to a YAML file. 
-The configuration structure holds all the parameters a decoder needs: the parity check matrix (H_sparse), 
-the observable flip matrix (O_sparse), the detector error matrix (D_sparse), 
+The configuration structure holds all the parameters a decoder needs: the detector error matrix (H_sparse),
+the observable flip matrix (O_sparse), the measurement-to-detector matrix (D_sparse),
 and decoder-specific tuning parameters. 
 
 These matrices are generated in sparse matrix format, which is crucial for performance. 

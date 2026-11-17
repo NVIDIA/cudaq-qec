@@ -1,162 +1,22 @@
+:tocdepth: 1
+
 .. _tcbp_jobs_user_guide:
 
-Trajectory-Calibrated BP and Jittered OSD Beam Search
-=====================================================
+Accuracy and Latency of TCBP-JOBS
+=================================
 
-Belief propagation (BP) produces more information than its final hard
-decision. At every iteration, it updates a marginal log-likelihood ratio
-(LLR) for every error mechanism. A successful BP run turns those marginals
-into a syndrome-consistent correction. An unsuccessful run still leaves a
-trajectory: which mechanisms appeared likely to be in error, when that
-happened, whether the estimate was stable or oscillatory, and how it was
-moving when BP stopped.
+This study measures how Trajectory-Calibrated BP (TCBP) and Jittered OSD Beam
+Search (JOBS) extend BP+OSD decoding [1]_ on NVIDIA GPUs. It compares their
+accuracy and serial latency with a Tesseract long-beam configuration, then
+measures how selecting shots by the JOBS gap changes the logical error rate
+and the fraction of shots retained. The algorithms and wider evaluation are
+described in the TCBP-JOBS research article [2]_.
 
-Conventional BP+OSD decoders [1]_ retain only one number from each
-trajectory. Most order the columns of the detector error matrix by the final
-LLR; minimum-LLR variants
-(:ref:`minllr_osd_user_guide`) retain the minimum value reached during BP.
-Both give that single summary ordering to an ordered-statistics decoder
-(OSD), which discards valuable information. The final LLR can miss a strong
-signal from an earlier iteration, while a minimum LLR records the strength
-of an excursion but not its timing or stability. OSD then explores
-candidates around only that one summary ordering.
-
-Starting in CUDA-Q QEC 0.9.0, the
-:ref:`NV-qLDPC decoder <qldpc_decoder>` provides two components that use
-this information more fully:
-
-* **Trajectory-Calibrated BP (TCBP)** is a soft reweighting predecoder. It
-  maps each mechanism's BP trajectory to a calibrated probability that the
-  mechanism fired.
-* **Jittered OSD Beam Search (JOBS)** is a GPU-parallel OSD
-  post-processor. It searches many perturbed column orderings and refines
-  each OSD-0 solution with a bounded beam search.
-
-This page summarizes how to use the two components and what to expect from
-them. The algorithms, the training procedure and the full evaluation are in
-the TCBP-JOBS research article [2]_.
-
-TCBP uses AI in a deliberately lightweight form: a small neural network
-learns how BP trajectory shapes relate to error probabilities. Training
-uses simulations generated from the parity-check matrix (PCM), requires no
-experimental training set, and completed in under a minute in our
-development runs on NVIDIA GPUs. The default model has only 529 trainable
-weights. It is designed for reuse across physical error rates and code
-distances within the same code family, so one fit can support many decoding
-runs. The same model is what noise learning uses to estimate error rates
-from detector data; see :ref:`noise_learning_user_guide`.
-
-TCBP also works well with short BP trajectories. Every experiment in this
-study uses 10 BP iterations. Larger
-iteration counts give BP more opportunities to explore different beliefs
-and give TCBP a longer trajectory to interpret, at the cost of additional
-BP work. Because the iteration count is part of the fitted model
-configuration, changing it requires a matching TCBP model.
-
-The components are useful separately, but their combination is the focus of
-this study. TCBP gives JOBS high-quality, syndrome-specific probability
-estimates, which JOBS uses to explore multiple syndrome-consistent
-corrections in parallel. During the search it can also retain the cheapest
-candidate found in every logical class, providing complementary information
-about the returned answer.
-
-.. figure:: ../../../assets/docs/nv_qldpc_decoder_pipeline.png
-   :align: center
-   :alt: NV-qLDPC pipeline from BP trajectories through TCBP calibrated scores, column ordering and JOBS
-
-   TCBP is both a soft-output predecoder and a source of calibrated column
-   scores for OSD. JOBS is the GPU-parallel hard-decoding path that consumes
-   those scores.
-
-Key Decoder Options
-+++++++++++++++++++
-
-The main options selecting and tuning the TCBP path are:
-
-* ``tcbp_model`` supplies the model bytes returned by
-  ``init_tcbp_model`` or the path to a saved model. Its BP method, iteration
-  count, clipping value and processing precision must match the decoder.
-* ``use_osd=False`` returns TCBP's soft probabilities.
-  ``use_osd=True, osd_init_method="tcbp"`` instead uses its scores as the
-  column ordering for OSD or JOBS.
-
-JOBS is selected with ``use_osd=True, osd_method=4``. Its principal search
-options are:
-
-* ``jobs_draws`` (default 16) sets the number of orderings searched per
-  round; ``jobs_rounds`` (default 1) permits additional rounds while they
-  continue to improve the answer.
-* ``jobs_draw_noise`` (default 1.0) sets the Gumbel perturbation applied
-  after draw zero.
-* ``jobs_beam_width`` (default 32), ``jobs_beam_depth`` (default 40) and
-  ``jobs_beam_patience`` (default 8) bound the search from each OSD-0
-  solution.
-* ``jobs_search_converged`` (default false) also searches BP-converged
-  shots and returns the cheaper correction.
-* ``osd_sparsify_pad`` (default 8) sizes JOBS's mandatory
-  :math:`K^*`-based window. :math:`K^*` is the smallest number of leading
-  columns of the ordering whose span contains the syndrome; JOBS searches
-  the first :math:`\lceil` ``osd_sparsify_pad`` :math:`\times K^*\rceil`
-  columns. ``bp_batch_size`` controls the shots in flight; the search's
-  device memory is allocated at construction for
-  ``bp_batch_size * jobs_draws`` items.
-* ``opt_results={"jobs_gap": True}`` returns ``jobs_gap`` and
-  ``jobs_gap_class`` for every shot. The JOBS gap is the cost, in nats, of
-  the cheapest correction the search visited in a different logical class
-  minus the cost of the returned correction; it is a search-limited
-  approximation of the complementary gap, and it is ``+inf`` (class ``-1``)
-  when no competing class was visited. This requires an observables matrix
-  and supports at most 12 observables.
-
-TCBP and JOBS require the sparse GPU path (``use_sparsity=True``) and
-``composition=0``; JOBS supports at most 8192 detector rows and a beam width
-of 64. See the complete ``nv-qldpc-decoder`` option reference for
-:ref:`Python <nv_qldpc_decoder_api_python>` or
-:ref:`C++ <nv_qldpc_decoder_api_cpp>` for types, constraints and memory
-behavior.
-
-Using TCBP and JOBS
-+++++++++++++++++++
-
-The named presets encode the matching BP, TCBP and JOBS configuration. The
-following example fits a model for a code family, constructs a decoder that
-searches every shot, and requests the complementary gap:
-
-.. code-block:: python
-
-   import numpy as np
-   import cudaq_qec as qec
-   from cudaq_qec.plugins import nv_qldpc
-
-   # H: detector-error matrix
-   # O: observable-flips matrix
-   # rates: prior probability of each error mechanism
-   model, report = nv_qldpc.init_tcbp_model(H, return_report=True)
-
-   decoder = qec.get_decoder(
-       "nv-qldpc-decoder",
-       H,
-       O=O,
-       output="observables",
-       error_rate_vec=rates,
-       bp_batch_size=2048,
-       **nv_qldpc.preset("tcbp-jobs-sc-gap", tcbp_model=model),
-   )
-
-   results = decoder.decode_batch(syndromes)
-   predicted = np.asarray([r.result for r in results])
-   gap = np.asarray([r["jobs_gap"] for r in results.opt_results])
-   competitor = np.asarray(
-       [r["jobs_gap_class"] for r in results.opt_results])
-
-``tcbp-jobs`` omits search on BP-converged shots. ``tcbp-jobs-sc`` searches
-them without allocating the logical-class table, and
-``tcbp-jobs-sc-gap`` requests both behaviors. The presets use sparse
-sum-product BP, 10 iterations, an LLR clip of 15, FP32 processing and
-repeatable execution. JOBS then uses its default search parameters unless
-they are overridden. The options of ``init_tcbp_model``, its report and
-recommendations for fitting a model are in the Trajectory-Calibrated BP
-section of the :ref:`API reference <nv_qldpc_decoder_api_python>`.
+For the decoding pipeline and configuration choices, see :ref:`qldpc_tcbp_jobs`.
+For a small usage example, see :doc:`Decoding with TCBP and JOBS
+</examples_rst/qec/tcbp_jobs>`. To run the Tesseract comparison or regenerate
+its trade-off figure from the recorded data, see the `benchmark README
+<https://github.com/NVIDIA/cudaq-qec/blob/main/benchmarks/qec/tesseract_longbeam_vs_tcbp_jobs/README.md>`_.
 
 Comparison With Tesseract
 +++++++++++++++++++++++++
@@ -326,8 +186,10 @@ References
   `doi:10.1103/PhysRevResearch.2.043423 <https://doi.org/10.1103/PhysRevResearch.2.043423>`__
 
 .. [2] B. Howe, S. Maurya, J. Olle, I. Basov, M. Li, J. G. Lietz, K. Young and
-  K. M. Svore, "TCBP-JOBS: GPU-Accelerated Quantum Error Correction Decoding
-  and Noise Learning with Near-Optimal Accuracy," NVIDIA Research (2026).
+  K. M. Svore, `TCBP+JOBS: GPU-Accelerated Quantum Error Correction Decoding
+  and Noise Learning with Near-Optimal Accuracy
+  <https://research.nvidia.com/publication/_tcbpjobs-gpu-accelerated-quantum-error-correction-decoding-and-noise-learning-near>`__,
+  NVIDIA Research (2026).
 
 .. [3] L. Aghababaie Beni, O. Higgott and N. Shutty, "Tesseract: A search-based
   decoder for quantum error correction" (2025).

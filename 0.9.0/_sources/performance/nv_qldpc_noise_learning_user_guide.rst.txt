@@ -1,3 +1,5 @@
+:tocdepth: 1
+
 .. All parameters of the study are listed in the table on this page.
    Tested at:
      cudaqx  d5a6308139fc0635c4be65eec3f1d0eb34ab6b9a
@@ -8,11 +10,11 @@
 Learning Noise From Detector Data and Decoding With the Learned Rates
 ======================================================================
 
-A detector error model (DEM) tells a decoder *which* error mechanisms can occur, but a decoder
-also needs to know *how likely* each one is. On a real device these rates are not known in advance
-and they drift. The NV-qLDPC decoder package can learn them: given only the detector outcomes recorded
-from the device (no logical labels, no knowledge of the noise), it estimates the rate of every
-error mechanism on the GPU. The learned rates are then used as the decoder's prior.
+Noise learning estimates a detector error model's mechanism probabilities
+from detector samples, then supplies them as priors to the decoder. See
+:ref:`qldpc_noise_learning` for the method and its assumptions. For the
+step-by-step experiment, see :doc:`Learning Noise and Decoding with Learned
+Rates </examples_rst/qec/noise_learning>`.
 
 This page measures the whole workflow on a circuit-level noise model with 67,752 error mechanisms.
 We start from a single uniform guess, learn the rates from simulated device data, and compare the
@@ -35,8 +37,8 @@ The main results, measured on one GB200 with the bivariate-bicycle ``[[144,12,12
   shots, down to 1.8x to 3.1x above the sampling floor at 2.1M shots.
 
 The study uses the TCBP decoder with JOBS post-processing
-(``osd_method=4``, ``osd_init_method="tcbp"``). See :ref:`Noise Learning and Trajectory-Calibrated BP
-<qldpc_noise_learning>` for what these are and for the full set of options, and
+(``osd_method=4``, ``osd_init_method="tcbp"``). See :ref:`qldpc_tcbp_jobs`
+for these decoding options, :ref:`qldpc_noise_learning` for the learning step, and
 :ref:`tcbp_jobs_user_guide` for a performance study of the decoder itself.
 
 Experiment Setup
@@ -99,98 +101,9 @@ The "device" is simulated: detector samples are drawn from the ``si1000`` circui
 the true rates of that circuit are kept aside to score the result. The learning step never sees them.
 With real hardware, pass the recorded detector data instead.
 
-The three steps below are one script and run as written, in order. The script needs a GPU, ``cudaq_qec``
-with the ``nv-qldpc-decoder`` plugin, and ``stim``. To keep the run short it uses the ``p = 0.004``
-circuit, 65,536 learning shots and 4,096 decoding shots, and takes about 13 minutes on one GB200, most of
-it in the uniform arm. The measurements on this page use up to 2,097,152 learning shots and the stopping
-rule from the table above.
-
-Step 1: Get the Circuit and Fit the TCBP Model
-++++++++++++++++++++++++++++++++++++++++++++++
-
-The circuit is downloaded from the ``bivariatebicyclecodes`` test data of the
-`tesseract-decoder <https://github.com/quantumlib/tesseract-decoder>`__ repository. The TCBP model is fitted
-once per code family and needs no information about the device.
-
-.. code-block:: python
-
-    import urllib.parse, urllib.request
-    import numpy as np, stim
-    import cudaq_qec as qec
-    from cudaq_qec.plugins import nv_qldpc
-    from cudaq_qec.plugins.nv_qldpc import tying
-
-    # si1000 memory circuit: [[144,12,12]] code, 12 rounds, Z basis, p = 0.004
-    name = ("r=12,d=12,p=0.004,noise=si1000,c=bivariate_bicycle_Z,nkd=[[144,12,12]],q=288,"
-            "iscolored=True,A_poly=x^3+y+y^2,B_poly=y^3+x+x^2.stim")
-    url = ("https://raw.githubusercontent.com/quantumlib/tesseract-decoder/"
-           "98c663db388ab095939647a165c87b4d31cdd6b1/testdata/bivariatebicyclecodes/"
-           + urllib.parse.quote(name))
-    urllib.request.urlretrieve(url, "bb144_r12_si1000_p0.004.stim")
-
-    circuit = stim.Circuit.from_file("bb144_r12_si1000_p0.004.stim")
-    H, O, true_rates = tying.dem_arrays(tying.circuit_dem(circuit))   # true_rates: scoring only
-
-    tcbp_model = nv_qldpc.init_tcbp_model(H, seed=1)                  # about 10 s
-
-Step 2: Learn the Rates From Detector Data
-++++++++++++++++++++++++++++++++++++++++++
-
-``learn_noise`` takes the structure ``H``, the recorded detector samples, and the TCBP model, and
-returns the learned rates together with a report.
-
-.. code-block:: python
-
-    dets = circuit.compile_detector_sampler(seed=10001).sample(2**16).astype(np.uint8)   # [N shots, 1728]
-    learned_rates, report = nv_qldpc.learn_noise(H, dets, tcbp_model, passes=16, tol=0)  # about 2 min
-    uniform_rate = report["start_rate"]                    # the uniform prior used below
-
-``passes`` is the maximum number of passes and ``tol`` is an early-stop threshold. Without them the
-defaults apply (``passes=4``, ``tol=0.1``): learning runs at most 4 passes and stops earlier if a pass
-changes the rates by less than ``tol``. ``tol=0`` disables the early stop so that exactly ``passes``
-passes run.
-
-Step 3: Decode With Each Prior
-++++++++++++++++++++++++++++++
-
-Fresh detector shots are sampled together with their observable flips. The same shots are decoded
-three times, changing only ``error_rate_vec``, and each prediction is compared with the sampled
-observables:
-
-.. code-block:: python
-
-    syndromes, observables = circuit.compile_detector_sampler(seed=778).sample(
-        4096, separate_observables=True)
-    syndromes, observables = syndromes.astype(np.uint8), observables.astype(np.uint8)
-
-    tcbp = np.array(bytearray(tcbp_model), dtype=np.uint8)
-    bp = dict(use_sparsity=True, bp_method=0, max_iterations=10, clip_value=15.0,
-              proc_float="fp32", use_osd=True, osd_method=4, osd_init_method="tcbp",
-              tcbp_model=tcbp, bp_batch_size=4096)
-    priors = {"uniform": np.full(H.shape[1], uniform_rate),
-              "learned": learned_rates,
-              "oracle":  true_rates}
-
-    for name, rates in priors.items():
-        decoder = qec.get_decoder("nv-qldpc-decoder", H,
-                                  error_rate_vec=np.clip(rates, 1e-9, 0.45), **bp)
-        results = decoder.decode_batch(syndromes)
-        errors = (np.asarray(results.result) > 0.5).astype(np.uint8)   # [shots, mechanisms]
-        predicted = (errors @ O.T.astype(np.int32)) % 2                # predicted observable flips
-        failures = int((predicted != observables).any(axis=1).sum())
-        print(f"{name:8s} LER = {failures / len(observables):.3e} "
-              f"({failures} failures in {len(observables)} shots)")
-
-The script prints:
-
-.. code-block:: text
-
-    uniform  LER = 5.710e-01 (2339 failures in 4096 shots)
-    learned  LER = 6.152e-02 (252 failures in 4096 shots)
-    oracle   LER = 5.640e-02 (231 failures in 4096 shots)
-
-The decoders above are built without ``repeatable=True``, so the counts can differ by a few failures
-from run to run (floating-point non-determinism).
+The ``si1000`` circuits are the ``bivariatebicyclecodes`` test data of the
+`tesseract-decoder <https://github.com/quantumlib/tesseract-decoder>`_ repository. The seeds are ``1`` (TCBP model), ``10001`` (learning
+data) and ``778`` (decoding data).
 
 Learning Time and Accuracy
 ++++++++++++++++++++++++++
@@ -409,18 +322,10 @@ between the 16-pass rows are within it.
 * At 2.1M shots the error of the rates is still falling at 16 passes, so more passes or more shots
   would help further. Time grows linearly with both.
 
-Reproducing These Results
-+++++++++++++++++++++++++
-
-All parameters needed to reproduce the numbers and the figure on this page are listed in the table at
-the top of the page. The ``si1000`` circuits are the ``bivariatebicyclecodes`` test data of the
-`tesseract-decoder <https://github.com/quantumlib/tesseract-decoder>`_ repository. The seeds are ``1`` (TCBP model), ``10001`` (learning
-data) and ``778`` (decoding data).
-
 See Also
 ++++++++
 
-* :ref:`Noise Learning and Trajectory-Calibrated BP <qldpc_noise_learning>` -- what it provides and how to use it
+* :ref:`Noise Learning <qldpc_noise_learning>` -- what it provides and how to use it
 * :ref:`tcbp_jobs_user_guide` -- performance study of the TCBP-JOBS decoder used on this page
 * :ref:`Quantum Low-Density Parity-Check Decoder <qldpc_decoder>` -- the nv-qldpc-decoder overview
 * :ref:`C++ <nv_qldpc_decoder_api_cpp>` and :ref:`Python <nv_qldpc_decoder_api_python>` API reference

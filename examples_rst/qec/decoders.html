@@ -26,14 +26,12 @@
         <script src="../../_static/clipboard.min.js"></script>
         <script src="../../_static/copybutton.js"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
-        <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
-        <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
         <script src="../../_static/version-switcher.js"></script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
-    <link rel="next" title="Decoding Task Graphs" href="decoding_task_graph.html" />
-    <link rel="prev" title="Experiments and Noise Modeling" href="modeling_noise.html" /> 
+    <link rel="next" title="Decoding with TCBP and JOBS" href="tcbp_jobs.html" />
+    <link rel="prev" title="CUDA-Q QEC by Example" href="examples.html" /> 
 </head>
 
 <body class="wy-body-for-nav"> 
@@ -94,7 +92,7 @@
     .wy-table-responsive {
         margin-bottom: 24px;
         max-width: 100%;
-        overflow: visible;
+        overflow-x: auto;
     }
   </style>
   
@@ -102,20 +100,148 @@
               <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../quickstart/installation.html">Installation Guide</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installation-methods">Installation Methods</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#pip-install">pip install</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#docker-container">Docker Container</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#building-from-source">Building from Source</a></li>
-</ul>
-</li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#pip-install">pip install</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#docker-container">Docker Container</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#building-from-source">Building from Source</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installing-pytorch">Installing PyTorch</a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart/quick_start.html">Quick Start</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#before-you-start">Before You Start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#run-the-experiment">Run the Experiment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#expected-result">Expected Result</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#next-steps">Next Steps</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">Libraries</span></p>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Library Guide</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../../components/qec/index.html">CUDA-Q QEC - Quantum Error Correction Library</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html">QEC Codes</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/index.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/decoders.html">QEC Decoders</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#quantum-low-density-parity-check-decoder">Quantum Low-Density Parity-Check Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#tensor-network-decoder">Tensor Network Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#tensorrt-decoder">TensorRT Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#pymatching-decoder">PyMatching Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#chromobius-decoder">Chromobius Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#sliding-window-decoder">Sliding Window Decoder</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html#build-your-own-decoder">Build Your Own Decoder</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/detector_error_models.html">Detector Error Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/stim_dem.html">Decoding from Stim DEM Text</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/dem_sampling.html">DEM Sampling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/dynamic_dem.html">Dynamic DEM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#why-use-a-dynamic-dem">Why Use a Dynamic DEM?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#phases-and-connections">Phases and Connections</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#detectors-across-round-boundaries">Detectors Across Round Boundaries</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#measurements-and-logical-readout">Measurements and Logical Readout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#constructing-a-dynamic-dem">Constructing a Dynamic DEM</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#choosing-a-decoding-path">Choosing a Decoding Path</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/decoding_task_graph.html">Decoding Task Graphs</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#how-data-flows-through-a-graph">How Data Flows Through a Graph</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#complete-shots-and-streaming">Complete Shots and Streaming</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#building-a-task-graph">Building a Task Graph</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#reference">Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#node-kinds">Node Kinds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#guarded-sliding-windows">Guarded Sliding Windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#asynchronous-streaming-options">Asynchronous Streaming Options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#fire-pools">Fire Pools</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#reading-streaming-results">Reading Streaming Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#staged-outputs">Staged Outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#edge-values">Edge Values</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#logical-measurements">Logical Measurements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#configuring-logical-outputs">Configuring Logical Outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#native-streaming-nodes">Native Streaming Nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#arbitrary-length-sliding-windows">Arbitrary-Length Sliding Windows</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html">Workflow and Data Flow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html#workflow">Workflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/ai_predecoding.html">AI Predecoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/ai_predecoding.html#how-the-stages-fit-together">How the Stages Fit Together</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/ai_predecoding.html#choose-an-example">Choose an Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/ai_predecoding.html#evaluate-the-complete-pipeline">Evaluate the Complete Pipeline</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_server.html">Decoding Server</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#workflow-at-a-glance">Workflow at a Glance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#set-up-the-prebuilt-container">Set Up the Prebuilt Container</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#get-the-prebuilt-package">Get the Prebuilt Package</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#prepare-the-run-directory">Prepare the Run Directory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#open-the-decoding-server-container">Open the Decoding-Server Container</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#configure-a-surface-code-memory-experiment">Configure a Surface-Code Memory Experiment</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#send-the-experiment-s-measurements">Send the Experiment’s Measurements</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#color-code-ai-predecoding">Color-Code AI Predecoding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#use-a-custom-decoder-plugin">Use a Custom Decoder Plugin</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#implement-and-build-the-plugin">Implement and Build the Plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#deploy-and-select-the-plugin">Deploy and Select the Plugin</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#integrate-a-third-party-runtime">Integrate a Third-Party Runtime</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#host-dispatch-loops">Host Dispatch Loops</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/playback_emulator.html">Playback Emulator</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/playback_emulator.html#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/playback_emulator.html#reference">Reference</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#python-and-command-line-interfaces">Python and Command-Line Interfaces</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#schedule-format">Schedule Format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#syndrome-sources">Syndrome Sources</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#sessions">Sessions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#run-options">Run Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#output-format">Output Format</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/memory_experiment_generator.html">Memory Experiment Configuration Generator</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/memory_experiment_generator.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/numerical_experiments.html">Experiments and Noise Modeling</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html#memory-circuit-experiments">Memory Circuit Experiments</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/noise_learning.html">Noise Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/codes.html">QEC Codes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html#pre-built-qec-codes">Pre-built QEC Codes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#steane-code">Steane Code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#repetition-code">Repetition Code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#surface-code">Surface Code</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html#build-your-own-code">Build Your Own Code</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#qec-code-framework-cudaq-qec-code">QEC Code Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::code</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#class-structure">Class Structure</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#implementing-a-new-code">Implementing a New Code</a></li>
@@ -125,128 +251,72 @@
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#using-the-code-framework">Using the Code Framework</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#pre-built-qec-codes">Pre-built QEC Codes</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#steane-code">Steane Code</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#repetition-code">Repetition Code</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#surface-code">Surface Code</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html">QEC Decoders</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#class-structure">Class Structure</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#migrating-existing-c-decoder-plugins">Migrating Existing C++ Decoder Plugins</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-new-decoder-in-c">Implementing a New Decoder in C++</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#example-lookup-table-decoder">Example: Lookup Table Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-decoder-in-python">Implementing a Decoder in Python</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#key-features">Key Features</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#usage-example">Usage Example</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#detector-error-model">Detector Error Model</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#decoding-from-stim-dem-text">Decoding from Stim DEM Text</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dem-sampling">DEM Sampling</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dynamic-dem">Dynamic DEM</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#quantum-low-density-parity-check-decoder">Quantum Low-Density Parity-Check Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensor-network-decoder">Tensor Network Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensorrt-decoder">TensorRT Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#pymatching-decoder">PyMatching Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#chromobius-decoder">Chromobius Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#sliding-window-decoder">Sliding Window Decoder</a></li>
-</ul>
-</li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#workflow">Workflow</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#memory-experiment-configuration-generator">Memory experiment configuration generator</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html">Experiments and Noise Modeling</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#memory-circuit-experiments">Memory Circuit Experiments</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/conventions.html">Conventions</a></li>
-</ul>
-</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/conventions.html">Conventions</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul class="current">
-<li class="toctree-l1 current"><a class="reference internal" href="examples.html">CUDA-Q QEC by Example</a><ul class="current">
-<li class="toctree-l2"><a class="reference internal" href="creating_qec_codes.html">   Creating New QEC Codes</a></li>
-<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html">   Experiments and Noise Modeling</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#cuda-q-qec-implementation">CUDA-Q QEC Implementation</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#code-explanation">Code Explanation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Overview</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Decoders</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#getting-started-with-the-nvidia-qldpc-decoder">Getting Started with the NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#belief-propagation-methods">Belief Propagation Methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#usage-example">Usage Example</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id1">CUDA-Q QEC Implementation</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id2">Code Explanation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#tcbp-and-jobs">TCBP and JOBS</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="tcbp_jobs.html">Decoding with TCBP and JOBS</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#memory-circuit-experiments">Memory Circuit Experiments</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#function-variants">Function Variants</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#return-values">Return Values</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#example-usage">Example Usage</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#additional-noise-models">Additional Noise Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#deploying-ai-decoders-with-tensorrt">Deploying AI Decoders with TensorRT</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#overview-of-the-training-to-deployment-pipeline">Overview of the Training-to-Deployment Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#training-a-neural-network-decoder-with-pytorch-and-stim">Training a Neural Network Decoder with PyTorch and Stim</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#using-the-tensorrt-decoder-in-cuda-q-qec">Using the TensorRT Decoder in CUDA-Q QEC</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#converting-onnx-models-to-tensorrt-engines">Converting ONNX Models to TensorRT Engines</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#dependencies-and-requirements">Dependencies and Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#matching-based-decoding-with-pymatching">Matching-Based Decoding with PyMatching</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="detector_error_models.html">Working with Detector Error Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="stim_dem.html">Decoding From Stim DEM Text</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multi_round_pcm.html">Generating a Multi-Round Parity Check Matrix</a></li>
+<li class="toctree-l2"><a class="reference internal" href="dem_sampling.html">DEM Sampling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#example">Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#gpu-acceleration">GPU Acceleration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#input-types-and-backend-selection">Input Types and Backend Selection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="dyn_dem.html">Decoding with a Dynamic DEM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#describe-the-repetition-code-experiment">Describe the Repetition-Code Experiment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#check-the-round-boundaries">Check the Round Boundaries</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#follow-the-measurements">Follow the Measurements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#build-the-dem-and-decode-a-shot">Build the DEM and Decode a Shot</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#see-also">See Also</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li class="toctree-l2 current"><a class="current reference internal" href="#">   Decoders</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#decoding-from-stim-dem-text">Decoding From Stim DEM Text</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#generating-a-multi-round-parity-check-matrix">Generating a Multi-Round Parity Check Matrix</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#dem-sampling-monte-carlo-sampling-from-detector-error-models">DEM Sampling — Monte-Carlo Sampling from Detector Error Models</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#example">Example</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#gpu-acceleration">GPU Acceleration</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#input-types-and-backend-selection">Input Types and Backend Selection</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="decoding_task_graph.html">Decoding Task Graph</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="getting_started_decoding_task_graph.html">Getting Started with a Decoding Task Graph</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#construct-the-graph">Construct the Graph</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#decode-complete-shots">Decode Complete Shots</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#stream-measurement-rounds">Stream Measurement Rounds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#connect-several-nodes">Connect Several Nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#expected-results">Expected Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="#getting-started-with-the-nvidia-qldpc-decoder">Getting Started with the NVIDIA QLDPC Decoder</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#belief-propagation-methods">Belief Propagation Methods</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#usage-example">Usage Example</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#deploying-ai-decoders-with-tensorrt">Deploying AI Decoders with TensorRT</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#overview-of-the-training-to-deployment-pipeline">Overview of the Training-to-Deployment Pipeline</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#training-a-neural-network-decoder-with-pytorch-and-stim">Training a Neural Network Decoder with PyTorch and Stim</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#using-the-tensorrt-decoder-in-cuda-q-qec">Using the TensorRT Decoder in CUDA-Q QEC</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#converting-onnx-models-to-tensorrt-engines">Converting ONNX Models to TensorRT Engines</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#dependencies-and-requirements">Dependencies and Requirements</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#id2">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#matching-based-decoding-with-pymatching">Matching-Based Decoding with PyMatching</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="decoding_task_graph.html">   Decoding Task Graphs</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#quick-start-a-sliding-window">Quick start: a sliding window</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#decoding-complete-shots">Decoding complete shots</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#streaming">Streaming</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#reading-results">Reading results</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#logical-measurements">Logical measurements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#graphs-of-several-nodes">Graphs of several nodes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#node-kinds">Node kinds</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#guarded-sliding-windows">Guarded sliding windows</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#asynchronous-streaming">Asynchronous streaming</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="task_graph_parallel_window.html">   Task Graph Parallel Window</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_parallel_window.html">Parallel Window</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#how-it-works">How it works</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#the-model">The model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#detector-error-model">Detector Error Model</a></li>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#configuration">Configuration</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="task_graph_parallel_window.html#advanced-options">Advanced options</a></li>
 </ul>
@@ -260,7 +330,7 @@
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="task_graph_ensemble.html">   Task Graph Decoder Ensembles</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_ensemble.html">Decoder Ensembles</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#how-it-works">How it works</a></li>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#configuration">Configuration</a></li>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#building-a-graph-in-code">Building a graph in code</a></li>
@@ -273,161 +343,220 @@
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="task_graph_reference.html">   Task Graph Reference</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#asynchronous-streaming-options">Asynchronous streaming options</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#fire-pools">Fire pools</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#streaming-results-in-detail">Streaming results in detail</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#staged-outputs">Staged outputs</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#edge-values">Edge values</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#logical-outputs">Logical outputs</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#native-streaming-nodes">Native streaming nodes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#arbitrary-length-sliding-windows">Arbitrary-length sliding windows</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="realtime_decoding.html">   Realtime Decoding</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html">Getting Started with Realtime Decoding</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#configuration">Configuration</a></li>
-<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#backend-selection">Backend Selection</a></li>
-<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#compilation-and-execution-examples">Compilation and Execution Examples</a></li>
-<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l1"><a class="reference internal" href="realtime_decoding.html">Realtime Decoding</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="getting_started_realtime_decoding.html">Getting Started with Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html#configuration">Configuration</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#step-1-generate-detector-error-model">Step 1: Generate Detector Error Model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#step-2-configure-and-save-decoder">Step 2: Configure and Save Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#step-3-load-configuration">Step 3: Load Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#step-4-use-in-quantum-kernels">Step 4: Use in Quantum Kernels</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_server.html">Decoding Server User Guide</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#workflow-at-a-glance">Workflow at a glance</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#generate-a-memory-experiment-configuration">Generate a memory-experiment configuration</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#color-code-enabled-ai-decoder">Color-code-enabled AI decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#cuda-q-examples-surface-code-programs">CUDA-Q examples: surface-code programs</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#use-a-custom-decoder-plugin">Use a custom decoder plugin</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#integrate-a-third-party-runtime">Integrate a third-party runtime</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#troubleshooting">Troubleshooting</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#see-also">See also</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html#backend-selection">Backend Selection</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#simulation-backend">Simulation Backend</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#quantinuum-hardware-backend">Quantinuum Hardware Backend</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html">Realtime Decoding with CUDA-Q Decoding Server</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#deliverables-versus-the-example">Deliverables versus the example</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#building-the-example">Building the example</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#ising-decoder-tensorrt-predecoder-pymatching">Ising decoder (TensorRT predecoder + PyMatching)</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#decoders">Decoders</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#the-example-source">The example source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html#compilation-and-execution-examples">Compilation and Execution Examples</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#common-use-cases">Common Use Cases</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#c-compilation">C++ Compilation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#python-execution">Python Execution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#complete-workflow-example">Complete Workflow Example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#debugging-and-environment-variables">Debugging and Environment Variables</a></li>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#decoder-selection">Decoder Selection</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="playback_emulator.html">Playback Emulator</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#schedule-format">Schedule Format</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#output-format">Output Format</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#syndrome-sources">Syndrome Sources</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#sessions">Sessions</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#run-options">Run Options</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#example">Example</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#data-directory-layout">Data Directory Layout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#building">Building</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#reading-the-output">Reading the Output</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html">AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#repository-layout">Repository Layout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#data-directory-layout">Data Directory Layout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#building">Building</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#emulated-end-to-end-test">Emulated End-to-End Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#fpga-end-to-end-test">FPGA End-to-End Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#orchestration-script-reference">Orchestration Script Reference</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html">Ising Color-Code Emulator with Decoding Server</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#reading-the-output">Reading the Output</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#the-example-source">The example source</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html">Streaming Interleaved Feed-forward Latency (SIFL)</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#the-example-source">The example source</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html">Dynamic DEM</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#a-model">A model</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#detectors-and-seams">Detectors and seams</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#measurements-and-readout">Measurements and readout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#building-a-model-in-code">Building a model in code</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#see-also">See also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_decoding.html#see-also">See Also</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_realtime_decoding.html#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="getting_started_realtime_decoding.html#configuration-upload-failures-quantinuum-backend">Configuration Upload Failures (Quantinuum Backend)</a></li>
 </ul>
 </li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_decoding_demo.html">Realtime Decoding from a Quantum Kernel or FPGA</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#deliverables-versus-the-example">Deliverables versus the example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#building-the-example">Building the example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#running">Running</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#qpu-kernel-source-software-udp-no-hardware">QPU-kernel source (software, UDP, no hardware)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#qpu-kernel-source-over-real-rdma-wire-cpu-roce">QPU-kernel source over real RDMA (<code class="docutils literal notranslate"><span class="pre">--wire</span> <span class="pre">cpu_roce</span></code>)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#fpga-source-real-fpga-over-roce">FPGA source (real FPGA over RoCE)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#ising-decoder-tensorrt-predecoder-pymatching">Ising decoder (TensorRT predecoder + PyMatching)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#decoders">Decoders</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#packaged-surface-code-client">Packaged Surface-Code Client</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#build-the-packaged-client">Build the Packaged Client</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#generate-configurations-and-select-a-decoder">Generate Configurations and Select a Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#read-the-application-results">Read the Application Results</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#source-for-the-cmake-example">Source for the CMake Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="decoding_server_playback.html">Realtime Decoding with the Playback Emulator</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server_playback.html#in-process-repetition-code-playback">In-Process Repetition-Code Playback</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#run-the-example">Run the Example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#check-the-result">Check the Result</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#use-the-same-configuration-with-a-server">Use the Same Configuration with a Server</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server_playback.html#playback-against-a-decoding-server">Playback Against a Decoding Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#id1">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#generate-the-configuration">Generate the Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#run-playback">Run Playback</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#id2">Check the Result</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server_playback.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#software">Software</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#data-directory-layout">Data directory layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#building">Building</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#running">Running</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#positional-arguments">Positional arguments</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#named-flags">Named flags</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#pipeline-configurations">Pipeline configurations</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#changing-the-predecoder-model">Changing the predecoder model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#reading-the-output">Reading the output</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#throughput-and-timing">Throughput and timing</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#latency-distribution">Latency distribution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#pymatching-average-time">PyMatching average time</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#syndrome-density">Syndrome density</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#correctness-verification">Correctness verification</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_predecoder_fpga.html">AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#software">Software</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#source-repositories">Source repositories</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#repository-layout">Repository layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#data-directory-layout">Data directory layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#building">Building</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#emulated-end-to-end-test">Emulated end-to-end test</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#requirements">Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#bounded-decoding-server-regression-software-emulator">Bounded decoding-server regression (software emulator)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#fpga-end-to-end-test">FPGA end-to-end test</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#id1">Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#id2">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#gpu-selection">GPU selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#network-sanity-check">Network sanity check</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#changing-the-predecoder-model">Changing the predecoder model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#orchestration-script-reference">Orchestration script reference</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#modes">Modes</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#actions">Actions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#directory-options">Directory options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#network-options">Network options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#run-options">Run options</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="color_code_demo.html">Comparing Ising and Chromobius for Color-Code Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#what-the-experiment-compares">What the Experiment Compares</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#software">Software</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#run-the-comparison">Run the Comparison</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#the-example-source">The Example Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="sifl_demo.html">Measuring Streaming Interleaved Feed-forward Latency (SIFL)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#run-the-experiment">Run the Experiment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#how-the-example-runs">How the Example Runs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#the-example-source">The Example Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_decoding.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="modeling_noise.html">Experiments and Noise Modeling</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#cuda-q-qec-implementation">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#code-explanation">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#id1">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#id2">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html#memory-circuit-experiments">Memory Circuit Experiments</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#function-variants">Function Variants</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#return-values">Return Values</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#example-usage">Example Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#additional-noise-models">Additional Noise Models</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="noise_learning.html">Learning Noise and Decoding with Learned Rates</a></li>
+<li class="toctree-l1"><a class="reference internal" href="creating_qec_codes.html">Creating New QEC Codes</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Performance Studies</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../../performance/index.html">Performance Studies</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html">Improving Relay BP Decoding With Gamma Ensembles</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#performance-comparison">Performance Comparison</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#latency-distribution">Latency Distribution</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#logical-error-rate-under-hard-deadlines">Logical Error Rate Under Hard Deadlines</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/index.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html">Improving Relay BP Decoding With Gamma Ensembles</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#performance-comparison">Performance Comparison</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#latency-distribution">Latency Distribution</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#logical-error-rate-under-hard-deadlines">Logical Error Rate Under Hard Deadlines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html">Sweeping Relay BP Stopping Criteria From a Single Run</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#recording-a-run">Recording a run</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#example-relaybp-n-on-the-gross-code">Example: RelayBP-N on the gross code</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#practical-notes">Practical notes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html">Sweeping Relay BP Stopping Criteria From a Single Run</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#recording-a-run">Recording a run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#example-relaybp-n-on-the-gross-code">Example: RelayBP-N on the gross code</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#practical-notes">Practical notes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html">Improving BP+OSD Decoding With Min-LLR OSD Initialization</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#column-ordering-importance-and-sensitivity">Column Ordering Importance and Sensitivity</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#experiment">Experiment</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#results">Results</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#controls-ordering-versus-iteration-count">Controls: Ordering Versus Iteration Count</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html">Improving BP+OSD Decoding With Min-LLR OSD Initialization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#column-ordering-importance-and-sensitivity">Column Ordering Importance and Sensitivity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#experiment">Experiment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#results">Results</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#controls-ordering-versus-iteration-count">Controls: Ordering Versus Iteration Count</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Trajectory-Calibrated BP and Jittered OSD Beam Search</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#key-decoder-options">Key Decoder Options</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#using-tcbp-and-jobs">Using TCBP and JOBS</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#comparison-with-tesseract">Comparison With Tesseract</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#complementary-gap-post-selection">Complementary-Gap Post-Selection</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#limitations-and-practical-guidance">Limitations and Practical Guidance</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#references">References</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Accuracy and Latency of TCBP-JOBS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding realtime decode latency with NV-Fusion</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding Real-Time Decode Latency With NV-Fusion</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html">Learning Noise From Detector Data and Decoding With the Learned Rates</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#experiment-setup">Experiment Setup</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-1-get-the-circuit-and-fit-the-tcbp-model">Step 1: Get the Circuit and Fit the TCBP Model</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-2-learn-the-rates-from-detector-data">Step 2: Learn the Rates From Detector Data</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-3-decode-with-each-prior">Step 3: Decode With Each Prior</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#learning-time-and-accuracy">Learning Time and Accuracy</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#error-of-the-learned-rates-versus-the-number-of-shots">Error of the Learned Rates Versus the Number of Shots</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#logical-error-rate-under-the-three-priors">Logical Error Rate Under the Three Priors</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#choosing-the-number-of-passes">Choosing the Number of Passes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#reproducing-these-results">Reproducing These Results</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#see-also">See Also</a></li>
-</ul>
-</li>
-</ul>
-</li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html">Learning Noise From Detector Data and Decoding With the Learned Rates</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
 <ul>
@@ -845,6 +974,14 @@
 </ul>
 </li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Releases</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../releases.html">Release History</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../releases.html#current-version">0.9.0 — Current Version</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../releases.html#published-releases">Published Releases</a></li>
+</ul>
+</li>
+</ul>
 
         </div>
       </div>
@@ -860,14 +997,13 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
-          <li class="breadcrumb-item"><a href="examples.html">CUDA-Q QEC by Example</a></li>
       <li class="breadcrumb-item active">Decoders</li>
       <li class="wy-breadcrumbs-aside">
             <a href="../../_sources/examples_rst/qec/decoders.rst.txt" rel="nofollow"> View page source</a>
       </li>
   </ul><div class="rst-breadcrumbs-buttons" role="navigation" aria-label="Sequential page navigation">
-        <a href="modeling_noise.html" class="btn btn-neutral float-left" title="Experiments and Noise Modeling" accesskey="p"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="decoding_task_graph.html" class="btn btn-neutral float-right" title="Decoding Task Graphs" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="examples.html" class="btn btn-neutral float-left" title="CUDA-Q QEC by Example" accesskey="p"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="tcbp_jobs.html" class="btn btn-neutral float-right" title="Decoding with TCBP and JOBS" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
   </div>
   <hr/>
 </div>
@@ -882,505 +1018,11 @@ and the decoder’s task is to determine what errors most likely caused that syn
 <p>The relationship between errors and syndromes is captured mathematically by the parity check matrix. Each row of this matrix represents a
 stabilizer measurement, while each column represents a possible error. When we multiply an error pattern by this matrix, we get the syndrome
 that would result from those errors.</p>
-<p>A detector error model (DEM) describes how the errors in a QEC circuit produce the syndrome bits that detect them. The examples below work with DEMs in three ways: the first constructs a decoder directly from raw Stim <code class="docutils literal notranslate"><span class="pre">.dem</span></code> text; the second expands a DEM into a multi-round parity check matrix; and the third samples synthetic error and syndrome data from a DEM to exercise a decoder. See <a class="reference internal" href="../../components/qec/decoders.html#detector-error-model"><span class="std std-ref">Detector Error Model</span></a> for more details.</p>
-<section id="decoding-from-stim-dem-text">
-<span id="stim-dem-text-example"></span><h2>Decoding From Stim DEM Text<a class="headerlink" href="#decoding-from-stim-dem-text" title="Permalink to this heading"></a></h2>
-<p>This example constructs a decoder from raw Stim <code class="docutils literal notranslate"><span class="pre">.dem</span></code> text and uses the matching parsed matrix for observable predictions. For what a detector error model is and how the text is parsed, see <a class="reference internal" href="../../components/qec/decoders.html#decoding-from-stim-dem-text"><span class="std std-ref">Decoding from Stim DEM Text</span></a>.</p>
-<div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--0-input--1" name="tab-set--0" type="radio"><label class="tab-label" for="tab-set--0-input--1">Python</label><div class="tab-content docutils">
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">cudaq_qec</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">qec</span>
-
-<span class="n">dem_text</span> <span class="o">=</span> <span class="s2">"""</span><span class="se">\</span>
-<span class="s2">error(0.1) D0 L0</span>
-<span class="s2">error(0.1) D1 L0</span>
-<span class="s2">error(0.05) D0 D1</span>
-<span class="s2">error(0.02) D0 ^ D1</span>
-<span class="s2">"""</span>
-
-<span class="c1"># Decoder construction uses default parsing (use_decomp_suggestions=False):</span>
-<span class="c1"># '^' hints in the DEM text are ignored.</span>
-<span class="n">decoder</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">get_decoder</span><span class="p">(</span><span class="s2">"single_error_lut"</span><span class="p">,</span> <span class="n">dem_text</span><span class="p">)</span>
-<span class="n">dem</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">dem_from_stim_text</span><span class="p">(</span><span class="n">dem_text</span><span class="p">)</span>
-
-<span class="nb">print</span><span class="p">(</span><span class="s2">"detectors:"</span><span class="p">,</span> <span class="n">dem</span><span class="o">.</span><span class="n">num_detectors</span><span class="p">())</span>
-<span class="nb">print</span><span class="p">(</span><span class="s2">"error mechanisms (used by decoder):"</span><span class="p">,</span> <span class="n">dem</span><span class="o">.</span><span class="n">num_error_mechanisms</span><span class="p">())</span>
-<span class="nb">print</span><span class="p">(</span><span class="s2">"observables:"</span><span class="p">,</span> <span class="n">dem</span><span class="o">.</span><span class="n">num_observables</span><span class="p">())</span>
-
-<span class="c1"># Inspection only: show how many columns the matrix would have if '^'</span>
-<span class="c1"># hints were honored. This does not affect the decoder above.</span>
-<span class="n">dem_decomposed</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">dem_from_stim_text</span><span class="p">(</span><span class="n">dem_text</span><span class="p">,</span> <span class="n">use_decomp_suggestions</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-
-<span class="nb">print</span><span class="p">(</span><span class="s2">"error mechanisms (if ^ hints honored):"</span><span class="p">,</span>
-      <span class="n">dem_decomposed</span><span class="o">.</span><span class="n">num_error_mechanisms</span><span class="p">())</span>
-
-<span class="n">syndromes</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">]],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span>
-<span class="n">results</span> <span class="o">=</span> <span class="n">decoder</span><span class="o">.</span><span class="n">decode_batch</span><span class="p">(</span><span class="n">syndromes</span><span class="p">)</span>
-<span class="n">error_predictions</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">r</span><span class="o">.</span><span class="n">result</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">results</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span>
-<span class="n">observable_predictions</span> <span class="o">=</span> <span class="p">(</span>
-    <span class="n">dem</span><span class="o">.</span><span class="n">observables_flips_matrix</span> <span class="o">@</span> <span class="n">error_predictions</span><span class="o">.</span><span class="n">T</span><span class="p">)</span> <span class="o">%</span> <span class="mi">2</span>
-
-<span class="k">for</span> <span class="n">syndrome</span><span class="p">,</span> <span class="n">error</span><span class="p">,</span> <span class="n">observable</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">syndromes</span><span class="p">,</span> <span class="n">error_predictions</span><span class="p">,</span>
-                                       <span class="n">observable_predictions</span><span class="o">.</span><span class="n">T</span><span class="p">):</span>
-    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"syndrome </span><span class="si">{</span><span class="n">syndrome</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span><span class="si">}</span><span class="s2"> -&gt; "</span>
-          <span class="sa">f</span><span class="s2">"error </span><span class="si">{</span><span class="n">error</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span><span class="si">}</span><span class="s2"> -&gt; "</span>
-          <span class="sa">f</span><span class="s2">"observable flip </span><span class="si">{</span><span class="n">observable</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-</pre></div>
-</div>
-</div>
-<input class="tab-input" id="tab-set--0-input--2" name="tab-set--0" type="radio"><label class="tab-label" for="tab-set--0-input--2">C++</label><div class="tab-content docutils">
-<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Compile and run with:</span>
-<span class="c1">// nvq++ -lcudaq-qec -lcudaq-qec-decoders stim_dem_decoder.cpp</span>
-<span class="c1">// ./a.out</span>
-
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">"cudaq/qec/decoder.h"</span>
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">"cudaq/qec/detector_error_model.h"</span>
-
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdint&gt;</span>
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;string&gt;</span>
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;vector&gt;</span>
-
-<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">dem_text</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sa">R</span><span class="s">"</span><span class="dl">(</span><span class="s">error(0.1) D0 L0</span>
-<span class="s">error(0.1) D1 L0</span>
-<span class="s">error(0.05) D0 D1</span>
-<span class="s">error(0.02) D0 ^ D1</span>
-<span class="dl">)</span><span class="s">"</span><span class="p">;</span>
-
-<span class="w">  </span><span class="c1">// Decoder construction uses default parsing (use_decomp_suggestions=false):</span>
-<span class="w">  </span><span class="c1">// '^' hints in the DEM text are ignored.</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">decoder</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">get_decoder</span><span class="p">(</span><span class="s">"single_error_lut"</span><span class="p">,</span><span class="w"> </span><span class="n">dem_text</span><span class="p">);</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">dem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">dem_from_stim_text</span><span class="p">(</span><span class="n">dem_text</span><span class="p">);</span>
-
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"detectors: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">dem</span><span class="p">.</span><span class="n">num_detectors</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"error mechanisms (used by decoder): "</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">dem</span><span class="p">.</span><span class="n">num_error_mechanisms</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"observables: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">dem</span><span class="p">.</span><span class="n">num_observables</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-
-<span class="w">  </span><span class="c1">// Inspection only: show how many columns the matrix would have if</span>
-<span class="w">  </span><span class="c1">// '^' hints were honored. This does not affect the decoder above.</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">dem_decomposed</span><span class="w"> </span><span class="o">=</span>
-<span class="w">      </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">dem_from_stim_text</span><span class="p">(</span><span class="n">dem_text</span><span class="p">,</span><span class="w"> </span><span class="cm">/*use_decomp_suggestions=*/</span><span class="nb">true</span><span class="p">);</span>
-
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"error mechanisms (if ^ hints honored): "</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">dem_decomposed</span><span class="p">.</span><span class="n">num_error_mechanisms</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-
-<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">float_t</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">syndromes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
-<span class="w">      </span><span class="p">{</span><span class="mf">0.0</span><span class="p">,</span><span class="w"> </span><span class="mf">0.0</span><span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="mf">1.0</span><span class="p">,</span><span class="w"> </span><span class="mf">0.0</span><span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="mf">0.0</span><span class="p">,</span><span class="w"> </span><span class="mf">1.0</span><span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="mf">1.0</span><span class="p">,</span><span class="w"> </span><span class="mf">1.0</span><span class="p">}};</span>
-
-<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="o">&amp;</span><span class="n">syndrome</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">syndromes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">decoder</span><span class="o">-&gt;</span><span class="n">decode</span><span class="p">(</span><span class="n">syndrome</span><span class="p">);</span>
-
-<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"syndrome ["</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">syndrome</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">", "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">syndrome</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"]"</span>
-<span class="w">              </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">" -&gt; error ["</span><span class="p">;</span>
-<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">result</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
-<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">", "</span><span class="p">;</span>
-<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">result</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
-<span class="w">    </span><span class="p">}</span>
-<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"] -&gt; observable flip ["</span><span class="p">;</span>
-<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">obs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">obs</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">dem</span><span class="p">.</span><span class="n">num_observables</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">obs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">obs</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
-<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">", "</span><span class="p">;</span>
-<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">flip</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
-<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">error</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">error</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">result</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">error</span><span class="p">)</span>
-<span class="w">        </span><span class="n">flip</span><span class="w"> </span><span class="o">^=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="kt">uint8_t</span><span class="o">&gt;</span><span class="p">(</span>
-<span class="w">            </span><span class="n">dem</span><span class="p">.</span><span class="n">observables_flips_matrix</span><span class="p">.</span><span class="n">at</span><span class="p">({</span><span class="n">obs</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">})</span><span class="w"> </span><span class="o">&amp;&amp;</span>
-<span class="w">            </span><span class="n">result</span><span class="p">.</span><span class="n">result</span><span class="p">[</span><span class="n">error</span><span class="p">]</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mf">0.0</span><span class="p">);</span>
-<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">flip</span><span class="p">);</span>
-<span class="w">    </span><span class="p">}</span>
-<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"]</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="p">}</span>
-<span class="p">}</span>
-</pre></div>
-</div>
-<p>Compile and run with</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>nvq++<span class="w"> </span>-lcudaq-qec<span class="w"> </span>-lcudaq-qec-decoders<span class="w"> </span>stim_dem_decoder.cpp<span class="w"> </span>-o<span class="w"> </span>stim_dem_decoder
-./stim_dem_decoder
-</pre></div>
-</div>
-</div>
-</div>
-</section>
-<section id="generating-a-multi-round-parity-check-matrix">
-<h2>Generating a Multi-Round Parity Check Matrix<a class="headerlink" href="#generating-a-multi-round-parity-check-matrix" title="Permalink to this heading"></a></h2>
-<p>A single-round DEM captures one measurement cycle. Under circuit-level noise, errors accumulate across many rounds, and the DEM expands into a multi-round parity check matrix. The following example constructs one for an error correction code in Python:</p>
-<div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--1-input--1" name="tab-set--1" type="radio"><label class="tab-label" for="tab-set--1-input--1">Python</label><div class="tab-content docutils">
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">cudaq</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">cudaq_qec</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">qec</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
-
-<span class="c1"># Set target simulator (Stim) for fast stabilizer circuit simulation</span>
-<span class="n">cudaq</span><span class="o">.</span><span class="n">set_target</span><span class="p">(</span><span class="s2">"stim"</span><span class="p">)</span>
-
-<span class="n">distance</span> <span class="o">=</span> <span class="mi">3</span>  <span class="c1"># Code distance (number of physical qubits for repetition code)</span>
-<span class="n">nRounds</span> <span class="o">=</span> <span class="mi">6</span>  <span class="c1"># Number of syndrome measurement rounds</span>
-<span class="n">nShots</span> <span class="o">=</span> <span class="mi">10000</span>  <span class="c1"># Number of circuit samples to run</span>
-
-<span class="c1"># Set verbosity based on shot count</span>
-<span class="n">verbose</span> <span class="o">=</span> <span class="n">nShots</span> <span class="o">&lt;=</span> <span class="mi">10</span>
-
-
-<span class="k">def</span><span class="w"> </span><span class="nf">vprint</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
-    <span class="k">if</span> <span class="n">verbose</span><span class="p">:</span>
-        <span class="nb">print</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
-
-
-<span class="c1"># Retrieve a 3-qubit repetition code instance</span>
-<span class="n">three_qubit_repetition_code</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">get_code</span><span class="p">(</span><span class="s2">"repetition"</span><span class="p">,</span> <span class="n">distance</span><span class="o">=</span><span class="n">distance</span><span class="p">)</span>
-
-<span class="c1"># Z logical observable (for repetition codes, only Z matters)</span>
-<span class="n">logical_single_round</span> <span class="o">=</span> <span class="n">three_qubit_repetition_code</span><span class="o">.</span><span class="n">get_observables_z</span><span class="p">()</span>
-
-<span class="c1"># Use predefined state preparation (|1⟩ for logical '1')</span>
-<span class="n">statePrep</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">operation</span><span class="o">.</span><span class="n">prep1</span>
-
-<span class="c1"># Create a noise model instance</span>
-<span class="n">noise_model</span> <span class="o">=</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">NoiseModel</span><span class="p">()</span>
-
-<span class="c1"># Define physical gate error probability</span>
-<span class="n">p</span> <span class="o">=</span> <span class="mf">0.01</span>
-<span class="c1"># Define measurement error probability (not activated by default)</span>
-<span class="n">p_per_mz</span> <span class="o">=</span> <span class="mf">0.001</span>
-
-<span class="c1"># Inject depolarizing noise on CX gates</span>
-<span class="n">noise_model</span><span class="o">.</span><span class="n">add_all_qubit_channel</span><span class="p">(</span><span class="s2">"x"</span><span class="p">,</span> <span class="n">cudaq</span><span class="o">.</span><span class="n">Depolarization2</span><span class="p">(</span><span class="n">p</span><span class="p">),</span> <span class="mi">1</span><span class="p">)</span>
-<span class="c1"># noise_model.add_all_qubit_channel("mz", cudaq.BitFlipChannel(p_per_mz))  # Optional: measurement noise</span>
-
-<span class="c1"># === Decoder Setup ===</span>
-
-<span class="c1"># Generate full detector error model (DEM), tracking all observables</span>
-<span class="n">dem_rep_full</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">dem_from_memory_circuit</span><span class="p">(</span><span class="n">three_qubit_repetition_code</span><span class="p">,</span>
-                                           <span class="n">statePrep</span><span class="p">,</span> <span class="n">nRounds</span><span class="p">,</span> <span class="n">noise_model</span><span class="p">)</span>
-
-<span class="c1"># Generate Z-only detector error model (sufficient for repetition code)</span>
-<span class="n">dem_rep_z</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">z_dem_from_memory_circuit</span><span class="p">(</span><span class="n">three_qubit_repetition_code</span><span class="p">,</span>
-                                          <span class="n">statePrep</span><span class="p">,</span> <span class="n">nRounds</span><span class="p">,</span> <span class="n">noise_model</span><span class="p">)</span>
-
-<span class="c1"># Extract multi-round parity check matrix (H matrix)</span>
-<span class="n">H_pcm_from_dem_full</span> <span class="o">=</span> <span class="n">dem_rep_full</span><span class="o">.</span><span class="n">detector_error_matrix</span>
-<span class="n">H_pcm_from_dem_z</span> <span class="o">=</span> <span class="n">dem_rep_z</span><span class="o">.</span><span class="n">detector_error_matrix</span>
-
-<span class="c1"># Sanity check: for repetition codes, full and Z-only matrices should match</span>
-<span class="k">assert</span> <span class="p">(</span><span class="n">H_pcm_from_dem_z</span> <span class="o">==</span> <span class="n">H_pcm_from_dem_full</span><span class="p">)</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
-
-<span class="c1"># Retrieve observable flips matrix: maps physical errors to logical flips</span>
-<span class="n">Lz_observables_flips_matrix</span> <span class="o">=</span> <span class="n">dem_rep_z</span><span class="o">.</span><span class="n">observables_flips_matrix</span>
-
-<span class="c1"># Instantiate a decoder: single-error lookup table (fast and sufficient for small codes)</span>
-<span class="n">decoder</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">get_decoder</span><span class="p">(</span><span class="s2">"single_error_lut"</span><span class="p">,</span> <span class="n">H_pcm_from_dem_z</span><span class="p">)</span>
-
-<span class="c1"># === Simulation ===</span>
-
-<span class="c1"># Sample noisy executions of the code circuit</span>
-<span class="n">syndromes</span><span class="p">,</span> <span class="n">data</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">sample_memory_circuit</span><span class="p">(</span><span class="n">three_qubit_repetition_code</span><span class="p">,</span>
-                                            <span class="n">statePrep</span><span class="p">,</span> <span class="n">nShots</span><span class="p">,</span> <span class="n">nRounds</span><span class="p">,</span>
-                                            <span class="n">noise_model</span><span class="p">)</span>
-
-<span class="n">syndromes</span> <span class="o">=</span> <span class="n">syndromes</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="n">nShots</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
-
-<span class="c1"># Expected logical measurement (we prepared |1⟩)</span>
-<span class="n">expected_value</span> <span class="o">=</span> <span class="mi">1</span>
-
-<span class="c1"># Counters for statistics</span>
-<span class="n">nLogicalErrorsWithoutDecoding</span> <span class="o">=</span> <span class="mi">0</span>
-<span class="n">nLogicalErrorsWDecoding</span> <span class="o">=</span> <span class="mi">0</span>
-<span class="n">nCorrections</span> <span class="o">=</span> <span class="mi">0</span>
-
-<span class="c1"># === Loop over shots ===</span>
-<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">nShots</span><span class="p">):</span>
-    <span class="n">vprint</span><span class="p">(</span><span class="sa">f</span><span class="s2">"shot: </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-    <span class="n">data_i</span> <span class="o">=</span> <span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="p">:]</span>  <span class="c1"># Final data measurement</span>
-    <span class="n">vprint</span><span class="p">(</span><span class="sa">f</span><span class="s2">"data: </span><span class="si">{</span><span class="n">data_i</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-    <span class="n">results</span> <span class="o">=</span> <span class="n">decoder</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="n">syndromes</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="p">:])</span>
-    <span class="n">convergence</span> <span class="o">=</span> <span class="n">results</span><span class="o">.</span><span class="n">converged</span>
-    <span class="n">result</span> <span class="o">=</span> <span class="n">results</span><span class="o">.</span><span class="n">result</span>
-    <span class="n">error_prediction</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span>
-    <span class="n">vprint</span><span class="p">(</span><span class="sa">f</span><span class="s2">"error_prediction: </span><span class="si">{</span><span class="n">error_prediction</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-    <span class="n">predicted_observable_flip</span> <span class="o">=</span> <span class="n">Lz_observables_flips_matrix</span> <span class="o">@</span> <span class="n">error_prediction</span> <span class="o">%</span> <span class="mi">2</span>
-    <span class="n">vprint</span><span class="p">(</span><span class="sa">f</span><span class="s2">"predicted_observable_flip: </span><span class="si">{</span><span class="n">predicted_observable_flip</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-    <span class="n">measured_observable</span> <span class="o">=</span> <span class="n">logical_single_round</span> <span class="o">@</span> <span class="n">data_i</span> <span class="o">%</span> <span class="mi">2</span>
-    <span class="n">vprint</span><span class="p">(</span><span class="sa">f</span><span class="s2">"measured_observable: </span><span class="si">{</span><span class="n">measured_observable</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-    <span class="k">if</span> <span class="n">measured_observable</span> <span class="o">!=</span> <span class="n">expected_value</span><span class="p">:</span>
-        <span class="n">nLogicalErrorsWithoutDecoding</span> <span class="o">+=</span> <span class="mi">1</span>
-
-    <span class="n">predicted_observable</span> <span class="o">=</span> <span class="n">predicted_observable_flip</span> <span class="o">^</span> <span class="n">measured_observable</span>
-    <span class="n">vprint</span><span class="p">(</span><span class="sa">f</span><span class="s2">"predicted_observable: </span><span class="si">{</span><span class="n">predicted_observable</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-    <span class="k">if</span> <span class="n">predicted_observable</span> <span class="o">!=</span> <span class="n">expected_value</span><span class="p">:</span>
-        <span class="n">nLogicalErrorsWDecoding</span> <span class="o">+=</span> <span class="mi">1</span>
-
-    <span class="n">nCorrections</span> <span class="o">+=</span> <span class="nb">int</span><span class="p">(</span><span class="n">predicted_observable_flip</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
-
-<span class="c1"># === Summary statistics ===</span>
-<span class="nb">print</span><span class="p">(</span>
-    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">nLogicalErrorsWithoutDecoding</span><span class="si">}</span><span class="s2"> logical errors without decoding in </span><span class="si">{</span><span class="n">nShots</span><span class="si">}</span><span class="s2"> shots</span><span class="se">\n</span><span class="s2">"</span>
-<span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span>
-    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">nLogicalErrorsWDecoding</span><span class="si">}</span><span class="s2"> logical errors with decoding in </span><span class="si">{</span><span class="n">nShots</span><span class="si">}</span><span class="s2"> shots</span><span class="se">\n</span><span class="s2">"</span>
-<span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">nCorrections</span><span class="si">}</span><span class="s2"> corrections applied in </span><span class="si">{</span><span class="n">nShots</span><span class="si">}</span><span class="s2"> shots</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
-</pre></div>
-</div>
-</div>
-</div>
-<p>This example illustrates how to:</p>
-<ul class="simple">
-<li><p>Retrieve and configure an error correction code
-Load a repetition code using <code class="docutils literal notranslate"><span class="pre">qec.get_code(...)</span></code> from the CUDA-Q QEC library, and define a custom circuit-level noise model using <code class="docutils literal notranslate"><span class="pre">.add_all_qubit_channel(...)</span></code>.</p></li>
-<li><p>Generate a multi-round parity check matrix
-Extend a single-round detector error model (DEM) across multiple rounds using <code class="docutils literal notranslate"><span class="pre">qec.dem_from_memory_circuit(...)</span></code>. This captures syndrome evolution over time, including measurement noise, and provides:</p>
-<ul>
-<li><p><code class="docutils literal notranslate"><span class="pre">detector_error_matrix</span></code> – the multi-round parity check matrix</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">observables_flips_matrix</span></code> – used to identify logical flips due to physical errors</p></li>
-</ul>
-</li>
-<li><p>Simulate circuit-level noise and collect data
-Run multiple shots of the memory experiment using <code class="docutils literal notranslate"><span class="pre">qec.sample_memory_circuit(...)</span></code> to sample both the data and syndrome measurements from noisy executions. The resulting bitstrings can be used for decoding and performance evaluation of the error correction scheme.</p></li>
-</ul>
-</section>
-<section id="dem-sampling-monte-carlo-sampling-from-detector-error-models">
-<span id="dem-sampling-example"></span><h2>DEM Sampling — Monte-Carlo Sampling from Detector Error Models<a class="headerlink" href="#dem-sampling-monte-carlo-sampling-from-detector-error-models" title="Permalink to this heading"></a></h2>
-<p>This example samples synthetic error and syndrome data from a detector error model, then walks through the GPU-accelerated and CPU paths and the supported input types. For the sampling model itself, see <a class="reference internal" href="../../components/qec/decoders.html#dem-sampling"><span class="std std-ref">DEM Sampling</span></a>.</p>
-<section id="example">
-<h3>Example<a class="headerlink" href="#example" title="Permalink to this heading"></a></h3>
-<div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--2-input--1" name="tab-set--2" type="radio"><label class="tab-label" for="tab-set--2-input--1">Python</label><div class="tab-content docutils">
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">cudaq_qec</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">qec</span>
-
-<span class="c1"># Define a check matrix for a [3,1] repetition code.</span>
-<span class="c1"># Rows = checks (stabilizers), columns = error mechanisms.</span>
-<span class="n">H</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">]],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span>
-
-<span class="c1"># Independent error probability for each mechanism.</span>
-<span class="n">error_probs</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="mf">0.05</span><span class="p">,</span> <span class="mf">0.10</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">])</span>
-
-<span class="n">num_shots</span> <span class="o">=</span> <span class="mi">10</span>
-
-<span class="c1"># Sample syndromes and errors from the detector error model.</span>
-<span class="c1"># backend="auto" (default) tries GPU first, then falls back to CPU.</span>
-<span class="n">syndromes</span><span class="p">,</span> <span class="n">errors</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">dem_sampling</span><span class="p">(</span><span class="n">H</span><span class="p">,</span> <span class="n">num_shots</span><span class="p">,</span> <span class="n">error_probs</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">42</span><span class="p">)</span>
-
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Check matrix H (</span><span class="si">{</span><span class="n">H</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2"> checks x </span><span class="si">{</span><span class="n">H</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s2"> mechanisms):"</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="n">H</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="se">\n</span><span class="s2">Error probabilities: </span><span class="si">{</span><span class="n">error_probs</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="se">\n</span><span class="s2">Sampled errors  (</span><span class="si">{</span><span class="n">errors</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">):</span><span class="se">\n</span><span class="si">{</span><span class="n">errors</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="se">\n</span><span class="s2">Sampled syndromes (</span><span class="si">{</span><span class="n">syndromes</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">):</span><span class="se">\n</span><span class="si">{</span><span class="n">syndromes</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-
-<span class="c1"># Verify: syndromes should equal (errors @ H^T) mod 2.</span>
-<span class="n">expected</span> <span class="o">=</span> <span class="p">(</span><span class="n">errors</span> <span class="o">@</span> <span class="n">H</span><span class="o">.</span><span class="n">T</span><span class="p">)</span> <span class="o">%</span> <span class="mi">2</span>
-<span class="k">assert</span> <span class="n">np</span><span class="o">.</span><span class="n">array_equal</span><span class="p">(</span><span class="n">syndromes</span><span class="p">,</span> <span class="n">expected</span><span class="p">),</span> <span class="s2">"Mismatch!"</span>
-<span class="nb">print</span><span class="p">(</span><span class="s2">"</span><span class="se">\n</span><span class="s2">Verification passed: syndromes == (errors @ H^T) mod 2"</span><span class="p">)</span>
-
-<span class="c1"># Reproducibility: the same seed yields the same results.</span>
-<span class="n">s1</span><span class="p">,</span> <span class="n">e1</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">dem_sampling</span><span class="p">(</span><span class="n">H</span><span class="p">,</span> <span class="n">num_shots</span><span class="p">,</span> <span class="n">error_probs</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">123</span><span class="p">)</span>
-<span class="n">s2</span><span class="p">,</span> <span class="n">e2</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">dem_sampling</span><span class="p">(</span><span class="n">H</span><span class="p">,</span> <span class="n">num_shots</span><span class="p">,</span> <span class="n">error_probs</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">123</span><span class="p">)</span>
-<span class="k">assert</span> <span class="n">np</span><span class="o">.</span><span class="n">array_equal</span><span class="p">(</span><span class="n">e1</span><span class="p">,</span> <span class="n">e2</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="s2">"Reproducibility check passed: same seed -&gt; same output"</span><span class="p">)</span>
-
-<span class="c1"># Force the GPU backend explicitly. It raises RuntimeError when no GPU (or</span>
-<span class="c1"># cuStabilizer) is available, so guard it for portability; backend="auto"</span>
-<span class="c1"># instead falls back to CPU automatically.</span>
-<span class="k">try</span><span class="p">:</span>
-    <span class="n">syndromes_gpu</span><span class="p">,</span> <span class="n">errors_gpu</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">dem_sampling</span><span class="p">(</span><span class="n">H</span><span class="p">,</span>
-                                                 <span class="n">num_shots</span><span class="p">,</span>
-                                                 <span class="n">error_probs</span><span class="p">,</span>
-                                                 <span class="n">seed</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span>
-                                                 <span class="n">backend</span><span class="o">=</span><span class="s2">"gpu"</span><span class="p">)</span>
-    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="se">\n</span><span class="s2">GPU backend result shapes: syndromes </span><span class="si">{</span><span class="n">syndromes_gpu</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">, "</span>
-          <span class="sa">f</span><span class="s2">"errors </span><span class="si">{</span><span class="n">errors_gpu</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-<span class="k">except</span> <span class="ne">RuntimeError</span> <span class="k">as</span> <span class="n">err</span><span class="p">:</span>
-    <span class="nb">print</span><span class="p">(</span>
-        <span class="sa">f</span><span class="s2">"</span><span class="se">\n</span><span class="s2">GPU backend unavailable (</span><span class="si">{</span><span class="n">err</span><span class="si">}</span><span class="s2">); backend='auto' falls back to CPU."</span><span class="p">)</span>
-
-<span class="c1"># Force the CPU backend explicitly.</span>
-<span class="n">syndromes_cpu</span><span class="p">,</span> <span class="n">errors_cpu</span> <span class="o">=</span> <span class="n">qec</span><span class="o">.</span><span class="n">dem_sampling</span><span class="p">(</span><span class="n">H</span><span class="p">,</span>
-                                             <span class="n">num_shots</span><span class="p">,</span>
-                                             <span class="n">error_probs</span><span class="p">,</span>
-                                             <span class="n">seed</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span>
-                                             <span class="n">backend</span><span class="o">=</span><span class="s2">"cpu"</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="se">\n</span><span class="s2">CPU backend result shapes: syndromes </span><span class="si">{</span><span class="n">syndromes_cpu</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">, "</span>
-      <span class="sa">f</span><span class="s2">"errors </span><span class="si">{</span><span class="n">errors_cpu</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-</pre></div>
-</div>
-</div>
-<input class="tab-input" id="tab-set--2-input--2" name="tab-set--2" type="radio"><label class="tab-label" for="tab-set--2-input--2">C++</label><div class="tab-content docutils">
-<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// DEM Sampling — sample errors and syndromes from a detector error model.</span>
-<span class="c1">//</span>
-<span class="c1">// Compile and run with:</span>
-<span class="c1">// nvq++ -lcudaq-qec dem_sampling.cpp</span>
-<span class="c1">// ./a.out</span>
-
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdint&gt;</span>
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;vector&gt;</span>
-
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">"cudaq/qec/dem_sampling.h"</span>
-
-<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<span class="w">  </span><span class="c1">// [3,1] repetition code check matrix:</span>
-<span class="w">  </span><span class="c1">//   H = | 1 1 0 |</span>
-<span class="w">  </span><span class="c1">//       | 0 1 1 |</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">uint8_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">H_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">};</span>
-<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">num_checks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
-<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
-
-<span class="w">  </span><span class="n">cudaqx</span><span class="o">::</span><span class="n">tensor</span><span class="o">&lt;</span><span class="kt">uint8_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">H</span><span class="p">({</span><span class="n">num_checks</span><span class="p">,</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="p">});</span>
-<span class="w">  </span><span class="n">H</span><span class="p">.</span><span class="n">copy</span><span class="p">(</span><span class="n">H_data</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span><span class="w"> </span><span class="n">H</span><span class="p">.</span><span class="n">shape</span><span class="p">());</span>
-
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="w"> </span><span class="n">error_probs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="mf">0.05</span><span class="p">,</span><span class="w"> </span><span class="mf">0.10</span><span class="p">,</span><span class="w"> </span><span class="mf">0.05</span><span class="p">};</span>
-<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">num_shots</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span>
-<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="n">seed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="p">;</span>
-
-<span class="w">  </span><span class="c1">// CPU sampling</span>
-<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="p">[</span><span class="n">syndromes</span><span class="p">,</span><span class="w"> </span><span class="n">errors</span><span class="p">]</span><span class="w"> </span><span class="o">=</span>
-<span class="w">      </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">dem_sampler</span><span class="o">::</span><span class="n">cpu</span><span class="o">::</span><span class="n">sample_dem</span><span class="p">(</span><span class="n">H</span><span class="p">,</span><span class="w"> </span><span class="n">num_shots</span><span class="p">,</span><span class="w"> </span><span class="n">error_probs</span><span class="p">,</span><span class="w"> </span><span class="n">seed</span><span class="p">);</span>
-
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"Syndromes ["</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">syndromes</span><span class="p">.</span><span class="n">shape</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">" x "</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">syndromes</span><span class="p">.</span><span class="n">shape</span><span class="p">()[</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"]:</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">shot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">shot</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_shots</span><span class="p">;</span><span class="w"> </span><span class="n">shot</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_checks</span><span class="p">;</span><span class="w"> </span><span class="n">c</span><span class="o">++</span><span class="p">)</span>
-<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">syndromes</span><span class="p">.</span><span class="n">at</span><span class="p">({</span><span class="n">shot</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">}))</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">" "</span><span class="p">;</span>
-<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="p">}</span>
-
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">Errors ["</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">errors</span><span class="p">.</span><span class="n">shape</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">" x "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">errors</span><span class="p">.</span><span class="n">shape</span><span class="p">()[</span><span class="mi">1</span><span class="p">]</span>
-<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"]:</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">shot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">shot</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_shots</span><span class="p">;</span><span class="w"> </span><span class="n">shot</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">e</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">e</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="p">;</span><span class="w"> </span><span class="n">e</span><span class="o">++</span><span class="p">)</span>
-<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">errors</span><span class="p">.</span><span class="n">at</span><span class="p">({</span><span class="n">shot</span><span class="p">,</span><span class="w"> </span><span class="n">e</span><span class="p">}))</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">" "</span><span class="p">;</span>
-<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-<span class="w">  </span><span class="p">}</span>
-
-<span class="w">  </span><span class="c1">// Verify: syndromes == (errors * H^T) mod 2</span>
-<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">ok</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
-<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">shot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">shot</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_shots</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">ok</span><span class="p">;</span><span class="w"> </span><span class="n">shot</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_checks</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">ok</span><span class="p">;</span><span class="w"> </span><span class="n">c</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">      </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">expected</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
-<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">e</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">e</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="p">;</span><span class="w"> </span><span class="n">e</span><span class="o">++</span><span class="p">)</span>
-<span class="w">        </span><span class="n">expected</span><span class="w"> </span><span class="o">^=</span><span class="w"> </span><span class="n">errors</span><span class="p">.</span><span class="n">at</span><span class="p">({</span><span class="n">shot</span><span class="p">,</span><span class="w"> </span><span class="n">e</span><span class="p">})</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">H</span><span class="p">.</span><span class="n">at</span><span class="p">({</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">e</span><span class="p">});</span>
-<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">syndromes</span><span class="p">.</span><span class="n">at</span><span class="p">({</span><span class="n">shot</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">})</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">expected</span><span class="p">)</span>
-<span class="w">        </span><span class="n">ok</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
-<span class="w">    </span><span class="p">}</span>
-<span class="w">  </span><span class="p">}</span>
-<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">Verification: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="n">ok</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s">"PASSED"</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">"FAILED"</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
-
-<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">ok</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
-<span class="p">}</span>
-</pre></div>
-</div>
-<p>Compile and run with</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>nvq++<span class="w"> </span>-lcudaq-qec<span class="w"> </span>dem_sampling.cpp
-./a.out
-</pre></div>
-</div>
-</div>
-</div>
-</section>
-<section id="gpu-acceleration">
-<h3>GPU Acceleration<a class="headerlink" href="#gpu-acceleration" title="Permalink to this heading"></a></h3>
-<p>When a CUDA-capable GPU is available, <code class="docutils literal notranslate"><span class="pre">dem_sampling</span></code> keeps the sampling and
-syndrome computation on-device, which is significantly faster than per-shot CPU
-sampling, especially for large numbers of shots and sparse error models (low
-probabilities):</p>
-<ol class="arabic simple">
-<li><p><strong>Sparse Bernoulli sampling</strong> — Errors are generated directly in compressed
-sparse row (CSR) format. For low error probabilities the CSR representation
-is compact, and the sampler skips mechanisms with zero probability entirely
-rather than evaluating a Bernoulli trial for every mechanism in every shot.</p></li>
-<li><p><strong>GF(2) sparse-dense matrix multiply</strong> — Syndromes are computed as
-<span class="math notranslate nohighlight">\(\text{errors} \times H^T \pmod{2}\)</span> using a sparse-dense multiply
-over GF(2). The check matrix <span class="math notranslate nohighlight">\(H^T\)</span> is stored in a bitpacked layout,
-reducing memory bandwidth by 8x compared to one byte per entry.</p></li>
-<li><p><strong>On-device packing and unpacking</strong> — <span class="math notranslate nohighlight">\(H\)</span> is transposed and bitpacked
-on the GPU in a single kernel. Syndromes are unpacked from the bitpacked
-result, and the dense error matrix is produced from the CSR representation
-via a fused zero-and-scatter kernel.</p></li>
-</ol>
-<p>The CPU path uses <code class="docutils literal notranslate"><span class="pre">std::bernoulli_distribution</span></code> per mechanism per shot
-followed by a dense dot product for the syndrome.</p>
-</section>
-<section id="input-types-and-backend-selection">
-<h3>Input Types and Backend Selection<a class="headerlink" href="#input-types-and-backend-selection" title="Permalink to this heading"></a></h3>
-<p>The <code class="docutils literal notranslate"><span class="pre">backend</span></code> parameter controls where sampling runs:</p>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">&quot;auto&quot;</span></code> (default) — try GPU first, fall back to CPU.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">&quot;gpu&quot;</span></code> — require GPU; raise <code class="docutils literal notranslate"><span class="pre">RuntimeError</span></code> if unavailable.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">&quot;cpu&quot;</span></code> — always use the CPU path.</p></li>
-</ul>
-<p>The Python binding accepts several input types, each routed through a different
-code path:</p>
-<ol class="arabic simple">
-<li><p><strong>NumPy arrays</strong> (most common) — When the GPU is available the bindings
-automatically allocate device memory, copy inputs host-to-device, run
-cuStabilizer, and copy results back as NumPy <code class="docutils literal notranslate"><span class="pre">uint8</span></code> arrays. With
-<code class="docutils literal notranslate"><span class="pre">backend=&quot;cpu&quot;</span></code> the GPU path is skipped entirely. No user action is
-required beyond passing standard <code class="docutils literal notranslate"><span class="pre">uint8</span></code> and <code class="docutils literal notranslate"><span class="pre">float64</span></code> arrays.</p></li>
-<li><p><strong>PyTorch CUDA tensors</strong> — The GPU path reads input device pointers directly
-via <code class="docutils literal notranslate"><span class="pre">data_ptr()</span></code> and writes outputs into <code class="docutils literal notranslate"><span class="pre">torch.empty</span></code> tensors on the
-same device, avoiding any host-device copies. This is the fastest path when
-inputs are already on the GPU. PyTorch is an optional dependency; install
-with <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">torch</span></code>.</p></li>
-<li><p><strong>PyTorch CPU tensors</strong> — With <code class="docutils literal notranslate"><span class="pre">backend=&quot;gpu&quot;</span></code> the tensors are
-automatically moved to CUDA (via <code class="docutils literal notranslate"><span class="pre">.to(device)</span></code>) before sampling. With
-<code class="docutils literal notranslate"><span class="pre">backend=&quot;auto&quot;</span></code> CPU tensors are rejected with an error; convert them to
-NumPy with <code class="docutils literal notranslate"><span class="pre">.numpy()</span></code> first.</p></li>
-</ol>
-<p>The C++ API exposes two namespaces:</p>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">cudaq::qec::dem_sampler::cpu::sample_dem</span></code> — takes a <code class="docutils literal notranslate"><span class="pre">cudaqx::tensor</span></code>
-check matrix and a <code class="docutils literal notranslate"><span class="pre">std::vector&lt;double&gt;</span></code> of probabilities; returns
-<code class="docutils literal notranslate"><span class="pre">(syndromes,</span> <span class="pre">errors)</span></code> as tensors.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">cudaq::qec::dem_sampler::gpu::sample_dem</span></code> — takes raw device pointers and
-writes results into caller-provided device buffers; returns <code class="docutils literal notranslate"><span class="pre">false</span></code> if
-cuStabilizer is not available at runtime.</p></li>
-</ul>
-<p>The <code class="docutils literal notranslate"><span class="pre">gpu</span></code> overload works with device pointers that you allocate, populate,
-and free yourself. Guard the call behind a device-count check and fall back to
-the <code class="docutils literal notranslate"><span class="pre">cpu</span></code> overload when it returns <code class="docutils literal notranslate"><span class="pre">false</span></code>:</p>
-<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"cudaq/qec/dem_sampling.h"</span>
-<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cuda_runtime.h&gt;</span>
-
-<span class="c1">// H: [num_checks x num_mechanisms] uint8, probs: [num_mechanisms] double.</span>
-<span class="kt">uint8_t</span><span class="w"> </span><span class="o">*</span><span class="n">d_H</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">d_syndromes</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">d_errors</span><span class="p">;</span>
-<span class="kt">double</span><span class="w"> </span><span class="o">*</span><span class="n">d_probs</span><span class="p">;</span>
-<span class="n">cudaMalloc</span><span class="p">(</span><span class="o">&amp;</span><span class="n">d_H</span><span class="p">,</span><span class="w"> </span><span class="n">num_checks</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="p">);</span>
-<span class="n">cudaMalloc</span><span class="p">(</span><span class="o">&amp;</span><span class="n">d_probs</span><span class="p">,</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">double</span><span class="p">));</span>
-<span class="n">cudaMalloc</span><span class="p">(</span><span class="o">&amp;</span><span class="n">d_syndromes</span><span class="p">,</span><span class="w"> </span><span class="n">num_shots</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">num_checks</span><span class="p">);</span>
-<span class="n">cudaMalloc</span><span class="p">(</span><span class="o">&amp;</span><span class="n">d_errors</span><span class="p">,</span><span class="w"> </span><span class="n">num_shots</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="p">);</span>
-<span class="n">cudaMemcpy</span><span class="p">(</span><span class="n">d_H</span><span class="p">,</span><span class="w"> </span><span class="n">h_data</span><span class="p">,</span><span class="w"> </span><span class="n">num_checks</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="p">,</span><span class="w"> </span><span class="n">cudaMemcpyHostToDevice</span><span class="p">);</span>
-<span class="n">cudaMemcpy</span><span class="p">(</span><span class="n">d_probs</span><span class="p">,</span><span class="w"> </span><span class="n">prob_data</span><span class="p">,</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">double</span><span class="p">),</span>
-<span class="w">           </span><span class="n">cudaMemcpyHostToDevice</span><span class="p">);</span>
-
-<span class="kt">bool</span><span class="w"> </span><span class="n">ok</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cudaq</span><span class="o">::</span><span class="n">qec</span><span class="o">::</span><span class="n">dem_sampler</span><span class="o">::</span><span class="n">gpu</span><span class="o">::</span><span class="n">sample_dem</span><span class="p">(</span>
-<span class="w">    </span><span class="n">d_H</span><span class="p">,</span><span class="w"> </span><span class="n">num_checks</span><span class="p">,</span><span class="w"> </span><span class="n">num_mechanisms</span><span class="p">,</span><span class="w"> </span><span class="n">d_probs</span><span class="p">,</span><span class="w"> </span><span class="n">num_shots</span><span class="p">,</span><span class="w"> </span><span class="cm">/*seed=*/</span><span class="mi">42</span><span class="p">,</span>
-<span class="w">    </span><span class="n">d_syndromes</span><span class="p">,</span><span class="w"> </span><span class="n">d_errors</span><span class="p">);</span>
-<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">ok</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">  </span><span class="c1">// cuStabilizer unavailable at runtime — use the cpu overload instead.</span>
-<span class="p">}</span>
-<span class="c1">// Copy d_syndromes / d_errors back to host, then cudaFree each buffer.</span>
-</pre></div>
-</div>
-</section>
-<section id="see-also">
-<h3>See Also<a class="headerlink" href="#see-also" title="Permalink to this heading"></a></h3>
-<ul class="simple">
-<li><p><a class="reference internal" href="../../api/qec/python_api.html"><span class="doc">CUDA-Q QEC Python API</span></a> — <code class="docutils literal notranslate"><span class="pre">dem_sampling</span></code> Python API reference</p></li>
-<li><p><a class="reference internal" href="../../api/qec/cpp_api.html"><span class="doc">CUDA-Q QEC C++ API</span></a> — <code class="docutils literal notranslate"><span class="pre">dem_sampler</span></code> C++ API reference</p></li>
-</ul>
-</section>
-</section>
+<p>For examples that construct, sample, and decode with detector error models (DEMs),
+see <a class="reference internal" href="detector_error_models.html"><span class="doc">Working with Detector Error Models</span></a>.</p>
 <section id="getting-started-with-the-nvidia-qldpc-decoder">
 <span id="qldpc-decoder-example"></span><h2>Getting Started with the NVIDIA QLDPC Decoder<a class="headerlink" href="#getting-started-with-the-nvidia-qldpc-decoder" title="Permalink to this heading"></a></h2>
-<p>The remaining sections describe the built-in decoders that consume the parity check matrices and detector error models above. Each is selected by name through <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.get_decoder" title="cudaq_qec.get_decoder"><code class="xref py py-func docutils literal notranslate"><span class="pre">cudaq_qec.get_decoder()</span></code></a> and targets a different regime, trading off speed, accuracy, and the class of codes it supports. We begin with the most general.</p>
+<p>The following sections describe built-in decoders that consume parity check matrices and detector error models. Each is selected by name through <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.get_decoder" title="cudaq_qec.get_decoder"><code class="xref py py-func docutils literal notranslate"><span class="pre">cudaq_qec.get_decoder()</span></code></a> and targets a different regime, trading off speed, accuracy, and the class of codes it supports. We begin with the most general.</p>
 <p>Starting with CUDA-Q QEC v0.2, a GPU-accelerated decoder is included with the
 CUDA-Q QEC library. The library follows the CUDA-Q decoder Python and C++ interfaces
 (namely <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder" title="cudaq_qec.Decoder"><code class="xref py py-class docutils literal notranslate"><span class="pre">cudaq_qec.Decoder</span></code></a> for Python and
@@ -1788,13 +1430,20 @@ it includes parity check matrices (PCMs) and test syndromes to exercise a decode
 </aside>
 </section>
 </section>
+<section id="tcbp-and-jobs">
+<h2>TCBP and JOBS<a class="headerlink" href="#tcbp-and-jobs" title="Permalink to this heading"></a></h2>
+<p><a class="reference internal" href="tcbp_jobs.html"><span class="doc">Decoding with TCBP and JOBS</span></a> fits a TCBP model, decodes a
+batch of detector samples, and reads per-shot confidence information.</p>
+<div class="toctree-wrapper compound">
+</div>
+</section>
 <section id="exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">
 <span id="tensor-network-decoder-example"></span><h2>Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder<a class="headerlink" href="#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder" title="Permalink to this heading"></a></h2>
 <p>Where belief propagation trades exactness for speed, the tensor network decoder computes the exact maximum-likelihood correction — valuable as an accuracy baseline against which the faster decoders can be measured.</p>
 <p>Starting with CUDA-Q QEC v0.4.0, a GPU-accelerated Maximum Likelihood Decoder is included with the
 CUDA-Q QEC library. The library follows the CUDA-Q decoder Python interface, namely <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder" title="cudaq_qec.Decoder"><code class="xref py py-class docutils literal notranslate"><span class="pre">cudaq_qec.Decoder</span></code></a>.
 At this time, we only support the Python interface for the decoder, which is
-available at <a class="reference internal" href="../../api/qec/python_api.html#tensor-network-decoder-api-python"><span class="std std-ref">TensorNetworkDecoder</span></a>.
+available at <a class="reference internal" href="../../api/qec/python_api.html#tensor-network-decoder-api-python"><span class="std std-ref">Tensor Network Decoder</span></a>.
 As documented in the API sections <a class="reference internal" href="../../api/qec/python_api.html#tensor-network-decoder-api-python"><span class="std std-ref">Tensor Network Decoder</span></a>, there are many configuration options
 that can be passed to the constructor. The decoder requires Python 3.11 or higher.</p>
 <p>In the following example, we show how to use the <code class="code docutils literal notranslate"><span class="pre">TensorNetworkDecoder</span></code> class from the <code class="code docutils literal notranslate"><span class="pre">cudaq_qec</span></code> library to decode a circuit-level noise problem derived from a Stim surface code circuit.</p>
@@ -2184,7 +1833,7 @@ by the training example beside the model: it fixes the detector and observable d
 error-mechanism ordering that the model was trained against.</p>
 <p><strong>Loading from ONNX (with automatic TensorRT optimization)</strong>:</p>
 <div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--3-input--1" name="tab-set--3" type="radio"><label class="tab-label" for="tab-set--3-input--1">Python</label><div class="tab-content docutils">
+<input checked="True" class="tab-input" id="tab-set--0-input--1" name="tab-set--0" type="radio"><label class="tab-label" for="tab-set--0-input--1">Python</label><div class="tab-content docutils">
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">cudaq_qec</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">qec</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
 
@@ -2208,7 +1857,7 @@ error-mechanism ordering that the model was trained against.</p>
 </pre></div>
 </div>
 </div>
-<input class="tab-input" id="tab-set--3-input--2" name="tab-set--3" type="radio"><label class="tab-label" for="tab-set--3-input--2">C++</label><div class="tab-content docutils">
+<input class="tab-input" id="tab-set--0-input--2" name="tab-set--0" type="radio"><label class="tab-label" for="tab-set--0-input--2">C++</label><div class="tab-content docutils">
 <div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"cudaq/qec/decoder.h"</span>
 <span class="cp">#include</span><span class="w"> </span><span class="cpf">"cuda-qx/core/heterogeneous_map.h"</span>
 
@@ -2248,7 +1897,7 @@ error-mechanism ordering that the model was trained against.</p>
 <p>If you’ve already converted your ONNX model to a TensorRT engine using the provided utility script,
 you can load it directly:</p>
 <div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--4-input--1" name="tab-set--4" type="radio"><label class="tab-label" for="tab-set--4-input--1">Python</label><div class="tab-content docutils">
+<input checked="True" class="tab-input" id="tab-set--1-input--1" name="tab-set--1" type="radio"><label class="tab-label" for="tab-set--1-input--1">Python</label><div class="tab-content docutils">
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"surface_code_decoder.dem"</span><span class="p">)</span> <span class="k">as</span> <span class="n">dem_file</span><span class="p">:</span>
     <span class="n">dem_text</span> <span class="o">=</span> <span class="n">dem_file</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
 
@@ -2305,8 +1954,8 @@ trtexec<span class="w"> </span>--onnx<span class="o">=</span>surface_code_decode
 <li><p><strong>Stim</strong>: For quantum circuit simulation and data generation</p></li>
 </ul>
 </section>
-<section id="id2">
-<h3>See Also<a class="headerlink" href="#id2" title="Permalink to this heading"></a></h3>
+<section id="see-also">
+<h3>See Also<a class="headerlink" href="#see-also" title="Permalink to this heading"></a></h3>
 <ul class="simple">
 <li><p><a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.Decoder" title="cudaq_qec.Decoder"><code class="xref py py-class docutils literal notranslate"><span class="pre">cudaq_qec.Decoder</span></code></a> - Base decoder interface</p></li>
 <li><p><a class="reference external" href="https://onnx.ai/">ONNX</a> - Open Neural Network Exchange format</p></li>
@@ -2323,7 +1972,7 @@ suitable for matchable codes such as the surface code. It is selected by name
 through <a class="reference internal" href="../../api/qec/python_api.html#cudaq_qec.get_decoder" title="cudaq_qec.get_decoder"><code class="xref py py-func docutils literal notranslate"><span class="pre">cudaq_qec.get_decoder()</span></code></a> and takes a parity-check matrix whose
 columns each have one or two set entries:</p>
 <div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--5-input--1" name="tab-set--5" type="radio"><label class="tab-label" for="tab-set--5-input--1">Python</label><div class="tab-content docutils">
+<input checked="True" class="tab-input" id="tab-set--2-input--1" name="tab-set--2" type="radio"><label class="tab-label" for="tab-set--2-input--1">Python</label><div class="tab-content docutils">
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">cudaq_qec</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">qec</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
 
@@ -2351,7 +2000,7 @@ the matrix-based decoders, Chromobius is <em>detector-error-model native</em>: i
 constructed from Stim detector-error-model (DEM) text rather than a
 parity-check matrix, and predicts logical observable flips directly.</p>
 <div class="tab-set docutils">
-<input checked="True" class="tab-input" id="tab-set--6-input--1" name="tab-set--6" type="radio"><label class="tab-label" for="tab-set--6-input--1">Python</label><div class="tab-content docutils">
+<input checked="True" class="tab-input" id="tab-set--3-input--1" name="tab-set--3" type="radio"><label class="tab-label" for="tab-set--3-input--1">Python</label><div class="tab-content docutils">
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">cudaq_qec</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">qec</span>
 
 <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"color_code.dem"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
@@ -2373,8 +2022,8 @@ available options.</p>
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="modeling_noise.html" class="btn btn-neutral float-left" title="Experiments and Noise Modeling" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="decoding_task_graph.html" class="btn btn-neutral float-right" title="Decoding Task Graphs" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="examples.html" class="btn btn-neutral float-left" title="CUDA-Q QEC by Example" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="tcbp_jobs.html" class="btn btn-neutral float-right" title="Decoding with TCBP and JOBS" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>

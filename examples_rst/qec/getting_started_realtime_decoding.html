@@ -30,7 +30,7 @@
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
-    <link rel="next" title="Decoding Server User Guide" href="decoding_server.html" />
+    <link rel="next" title="Realtime Decoding from a Quantum Kernel or FPGA" href="realtime_decoding_demo.html" />
     <link rel="prev" title="Realtime Decoding" href="realtime_decoding.html" /> 
 </head>
 
@@ -92,7 +92,7 @@
     .wy-table-responsive {
         margin-bottom: 24px;
         max-width: 100%;
-        overflow: visible;
+        overflow-x: auto;
     }
   </style>
   
@@ -100,20 +100,148 @@
               <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../quickstart/installation.html">Installation Guide</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installation-methods">Installation Methods</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#pip-install">pip install</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#docker-container">Docker Container</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../quickstart/installation.html#building-from-source">Building from Source</a></li>
-</ul>
-</li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#pip-install">pip install</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#docker-container">Docker Container</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#building-from-source">Building from Source</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../quickstart/installation.html#installing-pytorch">Installing PyTorch</a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart/quick_start.html">Quick Start</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#before-you-start">Before You Start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#run-the-experiment">Run the Experiment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#expected-result">Expected Result</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart/quick_start.html#next-steps">Next Steps</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">Libraries</span></p>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Library Guide</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../../components/qec/index.html">CUDA-Q QEC - Quantum Error Correction Library</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html">QEC Codes</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/index.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/decoders.html">QEC Decoders</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#quantum-low-density-parity-check-decoder">Quantum Low-Density Parity-Check Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#tensor-network-decoder">Tensor Network Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#tensorrt-decoder">TensorRT Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#pymatching-decoder">PyMatching Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#chromobius-decoder">Chromobius Decoder</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#sliding-window-decoder">Sliding Window Decoder</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html#build-your-own-decoder">Build Your Own Decoder</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/detector_error_models.html">Detector Error Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/stim_dem.html">Decoding from Stim DEM Text</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/dem_sampling.html">DEM Sampling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/dynamic_dem.html">Dynamic DEM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#why-use-a-dynamic-dem">Why Use a Dynamic DEM?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#phases-and-connections">Phases and Connections</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#detectors-across-round-boundaries">Detectors Across Round Boundaries</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#measurements-and-logical-readout">Measurements and Logical Readout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#constructing-a-dynamic-dem">Constructing a Dynamic DEM</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#choosing-a-decoding-path">Choosing a Decoding Path</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/dynamic_dem.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/decoding_task_graph.html">Decoding Task Graphs</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#how-data-flows-through-a-graph">How Data Flows Through a Graph</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#complete-shots-and-streaming">Complete Shots and Streaming</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#building-a-task-graph">Building a Task Graph</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#reference">Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#node-kinds">Node Kinds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#guarded-sliding-windows">Guarded Sliding Windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#asynchronous-streaming-options">Asynchronous Streaming Options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#fire-pools">Fire Pools</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#reading-streaming-results">Reading Streaming Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#staged-outputs">Staged Outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#edge-values">Edge Values</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#logical-measurements">Logical Measurements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#configuring-logical-outputs">Configuring Logical Outputs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#native-streaming-nodes">Native Streaming Nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_task_graph.html#arbitrary-length-sliding-windows">Arbitrary-Length Sliding Windows</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html">Workflow and Data Flow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html#workflow">Workflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding_workflow.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/ai_predecoding.html">AI Predecoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/ai_predecoding.html#how-the-stages-fit-together">How the Stages Fit Together</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/ai_predecoding.html#choose-an-example">Choose an Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/ai_predecoding.html#evaluate-the-complete-pipeline">Evaluate the Complete Pipeline</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoding_server.html">Decoding Server</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#workflow-at-a-glance">Workflow at a Glance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#set-up-the-prebuilt-container">Set Up the Prebuilt Container</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#get-the-prebuilt-package">Get the Prebuilt Package</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#prepare-the-run-directory">Prepare the Run Directory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#open-the-decoding-server-container">Open the Decoding-Server Container</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#configure-a-surface-code-memory-experiment">Configure a Surface-Code Memory Experiment</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#send-the-experiment-s-measurements">Send the Experiment’s Measurements</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#color-code-ai-predecoding">Color-Code AI Predecoding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#use-a-custom-decoder-plugin">Use a Custom Decoder Plugin</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#implement-and-build-the-plugin">Implement and Build the Plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#deploy-and-select-the-plugin">Deploy and Select the Plugin</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#integrate-a-third-party-runtime">Integrate a Third-Party Runtime</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoding_server.html#host-dispatch-loops">Host Dispatch Loops</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoding_server.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/playback_emulator.html">Playback Emulator</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/playback_emulator.html#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/playback_emulator.html#reference">Reference</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#python-and-command-line-interfaces">Python and Command-Line Interfaces</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#schedule-format">Schedule Format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#syndrome-sources">Syndrome Sources</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#sessions">Sessions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#run-options">Run Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../components/qec/playback_emulator.html#output-format">Output Format</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/memory_experiment_generator.html">Memory Experiment Configuration Generator</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/memory_experiment_generator.html#see-also">See Also</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/numerical_experiments.html">Experiments and Noise Modeling</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html#memory-circuit-experiments">Memory Circuit Experiments</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/noise_learning.html">Noise Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/codes.html">QEC Codes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html#pre-built-qec-codes">Pre-built QEC Codes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#steane-code">Steane Code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#repetition-code">Repetition Code</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#surface-code">Surface Code</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../components/qec/codes.html#build-your-own-code">Build Your Own Code</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#qec-code-framework-cudaq-qec-code">QEC Code Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::code</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#class-structure">Class Structure</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#implementing-a-new-code">Implementing a New Code</a></li>
@@ -123,128 +251,72 @@
 <li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#using-the-code-framework">Using the Code Framework</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/codes.html#pre-built-qec-codes">Pre-built QEC Codes</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#steane-code">Steane Code</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#repetition-code">Repetition Code</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/codes.html#surface-code">Surface Code</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/decoders.html">QEC Decoders</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#decoder-framework-cudaq-qec-decoder">Decoder Framework <code class="code docutils literal notranslate"><span class="pre">cudaq::qec::decoder</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#class-structure">Class Structure</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#migrating-existing-c-decoder-plugins">Migrating Existing C++ Decoder Plugins</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-new-decoder-in-c">Implementing a New Decoder in C++</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#example-lookup-table-decoder">Example: Lookup Table Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#implementing-a-decoder-in-python">Implementing a Decoder in Python</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#key-features">Key Features</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#usage-example">Usage Example</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#detector-error-model">Detector Error Model</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#decoding-from-stim-dem-text">Decoding from Stim DEM Text</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dem-sampling">DEM Sampling</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#dynamic-dem">Dynamic DEM</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/decoders.html#pre-built-qec-decoders">Pre-built QEC Decoders</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#quantum-low-density-parity-check-decoder">Quantum Low-Density Parity-Check Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#nvidia-fusion-decoder">NVIDIA Fusion Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensor-network-decoder">Tensor Network Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#tensorrt-decoder">TensorRT Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#pymatching-decoder">PyMatching Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#chromobius-decoder">Chromobius Decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="../../components/qec/decoders.html#sliding-window-decoder">Sliding Window Decoder</a></li>
-</ul>
-</li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/realtime_decoding.html">Realtime Decoding</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#workflow">Workflow</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#terminology-and-data-flow">Terminology and Data Flow</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#memory-experiment-configuration-generator">Memory experiment configuration generator</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/realtime_decoding.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/numerical_experiments.html">Experiments and Noise Modeling</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../components/qec/numerical_experiments.html#memory-circuit-experiments">Memory Circuit Experiments</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../components/qec/conventions.html">Conventions</a></li>
-</ul>
-</li>
+<li class="toctree-l1"><a class="reference internal" href="../../components/qec/conventions.html">Conventions</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul class="current">
-<li class="toctree-l1 current"><a class="reference internal" href="examples.html">CUDA-Q QEC by Example</a><ul class="current">
-<li class="toctree-l2"><a class="reference internal" href="creating_qec_codes.html">   Creating New QEC Codes</a></li>
-<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html">   Experiments and Noise Modeling</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#cuda-q-qec-implementation">CUDA-Q QEC Implementation</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#code-explanation">Code Explanation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="decoders.html">Decoders</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#getting-started-with-the-nvidia-qldpc-decoder">Getting Started with the NVIDIA QLDPC Decoder</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#belief-propagation-methods">Belief Propagation Methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#usage-example">Usage Example</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id1">CUDA-Q QEC Implementation</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#id2">Code Explanation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#tcbp-and-jobs">TCBP and JOBS</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="tcbp_jobs.html">Decoding with TCBP and JOBS</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#memory-circuit-experiments">Memory Circuit Experiments</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#function-variants">Function Variants</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#return-values">Return Values</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#example-usage">Example Usage</a></li>
-<li class="toctree-l4"><a class="reference internal" href="modeling_noise.html#additional-noise-models">Additional Noise Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder</a></li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#deploying-ai-decoders-with-tensorrt">Deploying AI Decoders with TensorRT</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#overview-of-the-training-to-deployment-pipeline">Overview of the Training-to-Deployment Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#training-a-neural-network-decoder-with-pytorch-and-stim">Training a Neural Network Decoder with PyTorch and Stim</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#using-the-tensorrt-decoder-in-cuda-q-qec">Using the TensorRT Decoder in CUDA-Q QEC</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#converting-onnx-models-to-tensorrt-engines">Converting ONNX Models to TensorRT Engines</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#dependencies-and-requirements">Dependencies and Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="decoders.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#matching-based-decoding-with-pymatching">Matching-Based Decoding with PyMatching</a></li>
+<li class="toctree-l2"><a class="reference internal" href="decoders.html#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="detector_error_models.html">Working with Detector Error Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="stim_dem.html">Decoding From Stim DEM Text</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multi_round_pcm.html">Generating a Multi-Round Parity Check Matrix</a></li>
+<li class="toctree-l2"><a class="reference internal" href="dem_sampling.html">DEM Sampling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#example">Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#gpu-acceleration">GPU Acceleration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#input-types-and-backend-selection">Input Types and Backend Selection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dem_sampling.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="dyn_dem.html">Decoding with a Dynamic DEM</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#describe-the-repetition-code-experiment">Describe the Repetition-Code Experiment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#check-the-round-boundaries">Check the Round Boundaries</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#follow-the-measurements">Follow the Measurements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#build-the-dem-and-decode-a-shot">Build the DEM and Decode a Shot</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html#see-also">See Also</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="decoders.html">   Decoders</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#decoding-from-stim-dem-text">Decoding From Stim DEM Text</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#generating-a-multi-round-parity-check-matrix">Generating a Multi-Round Parity Check Matrix</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#dem-sampling-monte-carlo-sampling-from-detector-error-models">DEM Sampling — Monte-Carlo Sampling from Detector Error Models</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#example">Example</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#gpu-acceleration">GPU Acceleration</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#input-types-and-backend-selection">Input Types and Backend Selection</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="decoding_task_graph.html">Decoding Task Graph</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="getting_started_decoding_task_graph.html">Getting Started with a Decoding Task Graph</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#construct-the-graph">Construct the Graph</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#decode-complete-shots">Decode Complete Shots</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#stream-measurement-rounds">Stream Measurement Rounds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#connect-several-nodes">Connect Several Nodes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#expected-results">Expected Results</a></li>
+<li class="toctree-l3"><a class="reference internal" href="getting_started_decoding_task_graph.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#getting-started-with-the-nvidia-qldpc-decoder">Getting Started with the NVIDIA QLDPC Decoder</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#belief-propagation-methods">Belief Propagation Methods</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#usage-example">Usage Example</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#exact-maximum-likelihood-decoding-with-nvidia-tensor-network-decoder">Exact Maximum Likelihood Decoding with NVIDIA Tensor Network Decoder</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#deploying-ai-decoders-with-tensorrt">Deploying AI Decoders with TensorRT</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#overview-of-the-training-to-deployment-pipeline">Overview of the Training-to-Deployment Pipeline</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#training-a-neural-network-decoder-with-pytorch-and-stim">Training a Neural Network Decoder with PyTorch and Stim</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#using-the-tensorrt-decoder-in-cuda-q-qec">Using the TensorRT Decoder in CUDA-Q QEC</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#converting-onnx-models-to-tensorrt-engines">Converting ONNX Models to TensorRT Engines</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#dependencies-and-requirements">Dependencies and Requirements</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoders.html#id2">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#matching-based-decoding-with-pymatching">Matching-Based Decoding with PyMatching</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoders.html#color-code-decoding-with-chromobius">Color-Code Decoding with Chromobius</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="decoding_task_graph.html">   Decoding Task Graphs</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#quick-start-a-sliding-window">Quick start: a sliding window</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#decoding-complete-shots">Decoding complete shots</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#streaming">Streaming</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#reading-results">Reading results</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#logical-measurements">Logical measurements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#graphs-of-several-nodes">Graphs of several nodes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#node-kinds">Node kinds</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#guarded-sliding-windows">Guarded sliding windows</a></li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_task_graph.html#asynchronous-streaming">Asynchronous streaming</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="task_graph_parallel_window.html">   Task Graph Parallel Window</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_parallel_window.html">Parallel Window</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#how-it-works">How it works</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#the-model">The model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#detector-error-model">Detector Error Model</a></li>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_parallel_window.html#configuration">Configuration</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="task_graph_parallel_window.html#advanced-options">Advanced options</a></li>
 </ul>
@@ -258,7 +330,7 @@
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="task_graph_ensemble.html">   Task Graph Decoder Ensembles</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="task_graph_ensemble.html">Decoder Ensembles</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#how-it-works">How it works</a></li>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#configuration">Configuration</a></li>
 <li class="toctree-l3"><a class="reference internal" href="task_graph_ensemble.html#building-a-graph-in-code">Building a graph in code</a></li>
@@ -271,161 +343,220 @@
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="task_graph_reference.html">   Task Graph Reference</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#asynchronous-streaming-options">Asynchronous streaming options</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#fire-pools">Fire pools</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#streaming-results-in-detail">Streaming results in detail</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#staged-outputs">Staged outputs</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#edge-values">Edge values</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#logical-outputs">Logical outputs</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#native-streaming-nodes">Native streaming nodes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="task_graph_reference.html#arbitrary-length-sliding-windows">Arbitrary-length sliding windows</a></li>
 </ul>
 </li>
-<li class="toctree-l2 current"><a class="reference internal" href="realtime_decoding.html">   Realtime Decoding</a><ul class="current">
-<li class="toctree-l3 current"><a class="current reference internal" href="#">Getting Started with Realtime Decoding</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#configuration">Configuration</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#backend-selection">Backend Selection</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#compilation-and-execution-examples">Compilation and Execution Examples</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="realtime_decoding.html">Realtime Decoding</a><ul class="current">
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Getting Started with Realtime Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#configuration">Configuration</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#step-1-generate-detector-error-model">Step 1: Generate Detector Error Model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#step-2-configure-and-save-decoder">Step 2: Configure and Save Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#step-3-load-configuration">Step 3: Load Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#step-4-use-in-quantum-kernels">Step 4: Use in Quantum Kernels</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="decoding_server.html">Decoding Server User Guide</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#workflow-at-a-glance">Workflow at a glance</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#generate-a-memory-experiment-configuration">Generate a memory-experiment configuration</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#color-code-enabled-ai-decoder">Color-code-enabled AI decoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#cuda-q-examples-surface-code-programs">CUDA-Q examples: surface-code programs</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#use-a-custom-decoder-plugin">Use a custom decoder plugin</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#integrate-a-third-party-runtime">Integrate a third-party runtime</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#troubleshooting">Troubleshooting</a></li>
-<li class="toctree-l4"><a class="reference internal" href="decoding_server.html#see-also">See also</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#backend-selection">Backend Selection</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#simulation-backend">Simulation Backend</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#quantinuum-hardware-backend">Quantinuum Hardware Backend</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html">Realtime Decoding with CUDA-Q Decoding Server</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#deliverables-versus-the-example">Deliverables versus the example</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#building-the-example">Building the example</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#ising-decoder-tensorrt-predecoder-pymatching">Ising decoder (TensorRT predecoder + PyMatching)</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#decoders">Decoders</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#the-example-source">The example source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#compilation-and-execution-examples">Compilation and Execution Examples</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#common-use-cases">Common Use Cases</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#c-compilation">C++ Compilation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#python-execution">Python Execution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#complete-workflow-example">Complete Workflow Example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#debugging-and-environment-variables">Debugging and Environment Variables</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#decoder-selection">Decoder Selection</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="playback_emulator.html">Playback Emulator</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#schedule-format">Schedule Format</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#output-format">Output Format</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#syndrome-sources">Syndrome Sources</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#sessions">Sessions</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#run-options">Run Options</a></li>
-<li class="toctree-l4"><a class="reference internal" href="playback_emulator.html#example">Example</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#data-directory-layout">Data Directory Layout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#building">Building</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#reading-the-output">Reading the Output</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html">AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#repository-layout">Repository Layout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#data-directory-layout">Data Directory Layout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#building">Building</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#emulated-end-to-end-test">Emulated End-to-End Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#fpga-end-to-end-test">FPGA End-to-End Test</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#changing-the-predecoder-model">Changing the Predecoder Model</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#orchestration-script-reference">Orchestration Script Reference</a></li>
-<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html">Ising Color-Code Emulator with Decoding Server</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#prerequisites">Prerequisites</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#reading-the-output">Reading the Output</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#the-example-source">The example source</a></li>
-<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html">Streaming Interleaved Feed-forward Latency (SIFL)</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#running">Running</a></li>
-<li class="toctree-l4"><a class="reference internal" href="sifl_demo.html#the-example-source">The example source</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="dyn_dem.html">Dynamic DEM</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#a-model">A model</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#detectors-and-seams">Detectors and seams</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#measurements-and-readout">Measurements and readout</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#building-a-model-in-code">Building a model in code</a></li>
-<li class="toctree-l4"><a class="reference internal" href="dyn_dem.html#see-also">See also</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="realtime_decoding.html#see-also">See Also</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#configuration-upload-failures-quantinuum-backend">Configuration Upload Failures (Quantinuum Backend)</a></li>
 </ul>
 </li>
 </ul>
 </li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_decoding_demo.html">Realtime Decoding from a Quantum Kernel or FPGA</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#deliverables-versus-the-example">Deliverables versus the example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#building-the-example">Building the example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#running">Running</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#qpu-kernel-source-software-udp-no-hardware">QPU-kernel source (software, UDP, no hardware)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#qpu-kernel-source-over-real-rdma-wire-cpu-roce">QPU-kernel source over real RDMA (<code class="docutils literal notranslate"><span class="pre">--wire</span> <span class="pre">cpu_roce</span></code>)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#fpga-source-real-fpga-over-roce">FPGA source (real FPGA over RoCE)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#ising-decoder-tensorrt-predecoder-pymatching">Ising decoder (TensorRT predecoder + PyMatching)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#decoders">Decoders</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#packaged-surface-code-client">Packaged Surface-Code Client</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#build-the-packaged-client">Build the Packaged Client</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#generate-configurations-and-select-a-decoder">Generate Configurations and Select a Decoder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_decoding_demo.html#read-the-application-results">Read the Application Results</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_decoding_demo.html#source-for-the-cmake-example">Source for the CMake Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="decoding_server_playback.html">Realtime Decoding with the Playback Emulator</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server_playback.html#in-process-repetition-code-playback">In-Process Repetition-Code Playback</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#run-the-example">Run the Example</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#check-the-result">Check the Result</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#use-the-same-configuration-with-a-server">Use the Same Configuration with a Server</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server_playback.html#playback-against-a-decoding-server">Playback Against a Decoding Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#id1">Prerequisites</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#generate-the-configuration">Generate the Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#run-playback">Run Playback</a></li>
+<li class="toctree-l4"><a class="reference internal" href="decoding_server_playback.html#id2">Check the Result</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="decoding_server_playback.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_predecoder_pymatching.html">AI Predecoder with CUDA-Q Realtime</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#software">Software</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#data-directory-layout">Data directory layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#building">Building</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#running">Running</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#positional-arguments">Positional arguments</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#named-flags">Named flags</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#pipeline-configurations">Pipeline configurations</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#changing-the-predecoder-model">Changing the predecoder model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#reading-the-output">Reading the output</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#throughput-and-timing">Throughput and timing</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#latency-distribution">Latency distribution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#pymatching-average-time">PyMatching average time</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#syndrome-density">Syndrome density</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_pymatching.html#correctness-verification">Correctness verification</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_pymatching.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_predecoder_fpga.html">AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#software">Software</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#source-repositories">Source repositories</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#repository-layout">Repository layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#data-directory-layout">Data directory layout</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#building">Building</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#emulated-end-to-end-test">Emulated end-to-end test</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#requirements">Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#running">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#bounded-decoding-server-regression-software-emulator">Bounded decoding-server regression (software emulator)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#fpga-end-to-end-test">FPGA end-to-end test</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#id1">Requirements</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#id2">Running</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#gpu-selection">GPU selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#network-sanity-check">Network sanity check</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#changing-the-predecoder-model">Changing the predecoder model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#orchestration-script-reference">Orchestration script reference</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#modes">Modes</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#actions">Actions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#directory-options">Directory options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#network-options">Network options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="realtime_predecoder_fpga.html#run-options">Run options</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="realtime_predecoder_fpga.html#see-also">See also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="color_code_demo.html">Comparing Ising and Chromobius for Color-Code Decoding</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#what-the-experiment-compares">What the Experiment Compares</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#hardware">Hardware</a></li>
+<li class="toctree-l4"><a class="reference internal" href="color_code_demo.html#software">Software</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#run-the-comparison">Run the Comparison</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#the-example-source">The Example Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="color_code_demo.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="sifl_demo.html">Measuring Streaming Interleaved Feed-forward Latency (SIFL)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#run-the-experiment">Run the Experiment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#how-the-example-runs">How the Example Runs</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#reading-the-output">Reading the Output</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#the-example-source">The Example Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="sifl_demo.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="realtime_decoding.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="modeling_noise.html">Experiments and Noise Modeling</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html#code-capacity-noise-modeling">Code-Capacity Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#cuda-q-qec-implementation">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#code-explanation">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html#circuit-level-noise-modeling">Circuit-level Noise Modeling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#id1">CUDA-Q QEC Implementation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#id2">Code Explanation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modeling_noise.html#memory-circuit-experiments">Memory Circuit Experiments</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#function-variants">Function Variants</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#return-values">Return Values</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#example-usage">Example Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modeling_noise.html#additional-noise-models">Additional Noise Models</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="noise_learning.html">Learning Noise and Decoding with Learned Rates</a></li>
+<li class="toctree-l1"><a class="reference internal" href="creating_qec_codes.html">Creating New QEC Codes</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Performance Studies</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../../performance/index.html">Performance Studies</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html">Improving Relay BP Decoding With Gamma Ensembles</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#performance-comparison">Performance Comparison</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#latency-distribution">Latency Distribution</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#logical-error-rate-under-hard-deadlines">Logical Error Rate Under Hard Deadlines</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/index.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html">Improving Relay BP Decoding With Gamma Ensembles</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#performance-comparison">Performance Comparison</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#latency-distribution">Latency Distribution</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#logical-error-rate-under-hard-deadlines">Logical Error Rate Under Hard Deadlines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_gamma_ensemble_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html">Sweeping Relay BP Stopping Criteria From a Single Run</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#recording-a-run">Recording a run</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#example-relaybp-n-on-the-gross-code">Example: RelayBP-N on the gross code</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#practical-notes">Practical notes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html">Sweeping Relay BP Stopping Criteria From a Single Run</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#recording-a-run">Recording a run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#example-relaybp-n-on-the-gross-code">Example: RelayBP-N on the gross code</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#practical-notes">Practical notes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_relay_solutions_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html">Improving BP+OSD Decoding With Min-LLR OSD Initialization</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#column-ordering-importance-and-sensitivity">Column Ordering Importance and Sensitivity</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#experiment">Experiment</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#results">Results</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#controls-ordering-versus-iteration-count">Controls: Ordering Versus Iteration Count</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html">Improving BP+OSD Decoding With Min-LLR OSD Initialization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#column-ordering-importance-and-sensitivity">Column Ordering Importance and Sensitivity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#experiment">Experiment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#results">Results</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#controls-ordering-versus-iteration-count">Controls: Ordering Versus Iteration Count</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Trajectory-Calibrated BP and Jittered OSD Beam Search</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#key-decoder-options">Key Decoder Options</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#using-tcbp-and-jobs">Using TCBP and JOBS</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#comparison-with-tesseract">Comparison With Tesseract</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#complementary-gap-post-selection">Complementary-Gap Post-Selection</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#limitations-and-practical-guidance">Limitations and Practical Guidance</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#references">References</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Accuracy and Latency of TCBP-JOBS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding realtime decode latency with NV-Fusion</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding Real-Time Decode Latency With NV-Fusion</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#streaming-tail-latency">Streaming Tail Latency</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#latency-with-concurrent-decoders">Latency With Concurrent Decoders</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#see-also">See Also</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html">Learning Noise From Detector Data and Decoding With the Learned Rates</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#experiment-setup">Experiment Setup</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-1-get-the-circuit-and-fit-the-tcbp-model">Step 1: Get the Circuit and Fit the TCBP Model</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-2-learn-the-rates-from-detector-data">Step 2: Learn the Rates From Detector Data</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#step-3-decode-with-each-prior">Step 3: Decode With Each Prior</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#learning-time-and-accuracy">Learning Time and Accuracy</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#error-of-the-learned-rates-versus-the-number-of-shots">Error of the Learned Rates Versus the Number of Shots</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#logical-error-rate-under-the-three-priors">Logical Error Rate Under the Three Priors</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#choosing-the-number-of-passes">Choosing the Number of Passes</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#reproducing-these-results">Reproducing These Results</a></li>
-<li class="toctree-l3"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html#see-also">See Also</a></li>
-</ul>
-</li>
-</ul>
-</li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_noise_learning_user_guide.html">Learning Noise From Detector Data and Decoding With the Learned Rates</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
 <ul>
@@ -843,6 +974,14 @@
 </ul>
 </li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Releases</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../releases.html">Release History</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../releases.html#current-version">0.9.0 — Current Version</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../releases.html#published-releases">Published Releases</a></li>
+</ul>
+</li>
+</ul>
 
         </div>
       </div>
@@ -858,7 +997,6 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
-          <li class="breadcrumb-item"><a href="examples.html">CUDA-Q QEC by Example</a></li>
           <li class="breadcrumb-item"><a href="realtime_decoding.html">Realtime Decoding</a></li>
       <li class="breadcrumb-item active">Getting Started with Realtime Decoding</li>
       <li class="wy-breadcrumbs-aside">
@@ -866,7 +1004,7 @@
       </li>
   </ul><div class="rst-breadcrumbs-buttons" role="navigation" aria-label="Sequential page navigation">
         <a href="realtime_decoding.html" class="btn btn-neutral float-left" title="Realtime Decoding" accesskey="p"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="decoding_server.html" class="btn btn-neutral float-right" title="Decoding Server User Guide" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="realtime_decoding_demo.html" class="btn btn-neutral float-right" title="Realtime Decoding from a Quantum Kernel or FPGA" accesskey="n">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
   </div>
   <hr/>
 </div>
@@ -876,6 +1014,16 @@
   <section id="getting-started-with-realtime-decoding">
 <h1>Getting Started with Realtime Decoding<a class="headerlink" href="#getting-started-with-realtime-decoding" title="Permalink to this heading"></a></h1>
 <p>This walkthrough builds a complete realtime decoding application end to end: decoder configuration, backend selection, compilation, and troubleshooting. Each stage of the underlying <code class="docutils literal notranslate"><span class="pre">real_time_complete</span></code> example is shown in place in the sections below.</p>
+<p>The local simulation in this walkthrough runs the decoders in the same
+process as the quantum simulator. You do not need to start a standalone
+server for that route.</p>
+<p>Use a <a class="reference internal" href="../../components/qec/decoding_server.html"><span class="doc">Decoding Server</span></a> when the
+decoders need to run independently of the application or controller producing
+measurements. The server loads the decoder configuration and handles
+measurement and correction requests from a CUDA-Q client or a third-party
+control system over a configured transport. To build and run that deployment,
+follow <a class="reference internal" href="realtime_decoding_demo.html"><span class="doc">Realtime Decoding from a Quantum Kernel or FPGA</span></a>; its software UDP route can be tested without a QPU
+or FPGA.</p>
 <p>A realtime decoding application has the following main components:</p>
 <ul class="simple">
 <li><p>Decoder configuration file: Initializes and configures the decoders before circuit execution.</p></li>
@@ -936,8 +1084,8 @@ This characterization is circuit-specific and depends on the code structure, noi
 <section id="step-2-configure-and-save-decoder">
 <h3>Step 2: Configure and Save Decoder<a class="headerlink" href="#step-2-configure-and-save-decoder" title="Permalink to this heading"></a></h3>
 <p>Once a DEM has been generated, the next step is to package this information into a decoder configuration and save it to a YAML file.
-The configuration structure holds all the parameters a decoder needs: the parity check matrix (H_sparse),
-the observable flip matrix (O_sparse), the detector error matrix (D_sparse),
+The configuration structure holds all the parameters a decoder needs: the detector error matrix (H_sparse),
+the observable flip matrix (O_sparse), the measurement-to-detector matrix (D_sparse),
 and decoder-specific tuning parameters.</p>
 <p>These matrices are generated in sparse matrix format, which is crucial for performance.
 They can be large considering error correcting codes with large number of physical qubits, and moreover,
@@ -1639,7 +1787,7 @@ syndrome and error spaces. See <a class="reference internal" href="../../api/qec
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
         <a href="realtime_decoding.html" class="btn btn-neutral float-left" title="Realtime Decoding" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="decoding_server.html" class="btn btn-neutral float-right" title="Decoding Server User Guide" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="realtime_decoding_demo.html" class="btn btn-neutral float-right" title="Realtime Decoding from a Quantum Kernel or FPGA" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>

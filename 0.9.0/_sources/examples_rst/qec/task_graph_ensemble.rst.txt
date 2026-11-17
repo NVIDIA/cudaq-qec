@@ -1,13 +1,14 @@
 .. _task_graph_ensemble:
 
-Task Graph Decoder Ensembles
-----------------------------
+Decoder Ensembles
+-----------------
 
 An ``ensemble`` task graph runs several member graphs on the same input at
 the same time and keeps one answer. Use it to orchestrate decoders that trade speed
 for accuracy differently, or to bound the time to an answer with a deadline.
 
-This page builds on :doc:`decoding_task_graph`.
+This page builds on the :doc:`Decoding Task Graphs
+</components/qec/decoding_task_graph>` guide.
 
 How it works
 ++++++++++++
