@@ -4,7 +4,7 @@
   <meta charset="utf-8" /><meta name="generator" content="Docutils 0.18.1: http://docutils.sourceforge.net/" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Accuracy and Latency of TCBP-JOBS &mdash; NVIDIA CUDA-Q QEC  documentation</title>
+  <title>Accuracy and Latency of TCBP+JOBS &mdash; NVIDIA CUDA-Q QEC  documentation</title>
       <link rel="stylesheet" href="../_static/pygments.css" type="text/css" />
       <link rel="stylesheet" href="../_static/css/theme.css" type="text/css" />
       <link rel="stylesheet" href="../_static/tabs.css" type="text/css" />
@@ -549,7 +549,7 @@
 <li class="toctree-l2"><a class="reference internal" href="nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Accuracy and Latency of TCBP-JOBS</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Accuracy and Latency of TCBP+JOBS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="nv_fusion_latency_user_guide.html">Bounding realtime decode latency with NV-Fusion</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
 <li class="toctree-l2"><a class="reference internal" href="nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
@@ -999,7 +999,7 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
-      <li class="breadcrumb-item active">Accuracy and Latency of TCBP-JOBS</li>
+      <li class="breadcrumb-item active">Accuracy and Latency of TCBP+JOBS</li>
       <li class="wy-breadcrumbs-aside">
             <a href="../_sources/performance/nv_qldpc_tcbp_jobs_user_guide.rst.txt" rel="nofollow"> View page source</a>
       </li>
@@ -1013,19 +1013,19 @@
            <div itemprop="articleBody">
              
   <section id="accuracy-and-latency-of-tcbp-jobs">
-<span id="tcbp-jobs-user-guide"></span><h1>Accuracy and Latency of TCBP-JOBS<a class="headerlink" href="#accuracy-and-latency-of-tcbp-jobs" title="Permalink to this heading"></a></h1>
+<span id="tcbp-jobs-user-guide"></span><h1>Accuracy and Latency of TCBP+JOBS<a class="headerlink" href="#accuracy-and-latency-of-tcbp-jobs" title="Permalink to this heading"></a></h1>
 <p>This study measures how Trajectory-Calibrated BP (TCBP) and Jittered OSD Beam
 Search (JOBS) extend BP+OSD decoding <a class="footnote-reference brackets" href="#id7" id="id1" role="doc-noteref"><span class="fn-bracket">[</span>1<span class="fn-bracket">]</span></a> on NVIDIA GPUs. It compares their
 accuracy and serial latency with a Tesseract long-beam configuration, then
 measures how selecting shots by the JOBS gap changes the logical error rate
 and the fraction of shots retained. The algorithms and wider evaluation are
-described in the TCBP-JOBS research article <a class="footnote-reference brackets" href="#id8" id="id2" role="doc-noteref"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></a>.</p>
+described in the TCBP+JOBS research article <a class="footnote-reference brackets" href="#id8" id="id2" role="doc-noteref"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></a>.</p>
 <p>For the decoding pipeline and configuration choices, see <a class="reference internal" href="../components/qec/decoders.html#qldpc-tcbp-jobs"><span class="std std-ref">Trajectory-Calibrated BP and Jittered OSD Beam Search</span></a>.
 For a small usage example, see <a class="reference internal" href="../examples_rst/qec/tcbp_jobs.html"><span class="doc">Decoding with TCBP and JOBS</span></a>. To run the Tesseract comparison or regenerate
 its trade-off figure from the recorded data, see the <a class="reference external" href="https://github.com/NVIDIA/cudaq-qec/blob/main/benchmarks/qec/tesseract_longbeam_vs_tcbp_jobs/README.md">benchmark README</a>.</p>
 <section id="comparison-with-tesseract">
 <h2>Comparison With Tesseract<a class="headerlink" href="#comparison-with-tesseract" title="Permalink to this heading"></a></h2>
-<p>We compare TCBP-JOBS with Tesseract <a class="footnote-reference brackets" href="#id9" id="id3" role="doc-noteref"><span class="fn-bracket">[</span>3<span class="fn-bracket">]</span></a>, the search-based
+<p>We compare TCBP+JOBS with Tesseract <a class="footnote-reference brackets" href="#id9" id="id3" role="doc-noteref"><span class="fn-bracket">[</span>3<span class="fn-bracket">]</span></a>, the search-based
 most-likely-error decoder from Google Quantum AI. Tesseract runs on CPUs,
 needs neither a GPU nor a fitted model, and is the accuracy reference for
 this study. We use its <code class="docutils literal notranslate"><span class="pre">tesseract-long-beam</span></code>
@@ -1047,13 +1047,13 @@ physical error rates and additional Tesseract configurations.</p>
 the tesseract-decoder repository, at physical error rate <code class="docutils literal notranslate"><span class="pre">p</span> <span class="pre">=</span> <span class="pre">0.002</span></code> in
 the Z basis. They cover rotated surface codes, superdense color codes and
 bivariate-bicycle codes over several distances. Detector error models are
-flattened with <code class="docutils literal notranslate"><span class="pre">approximate_disjoint_errors=True</span></code>. TCBP-JOBS runs with
+flattened with <code class="docutils literal notranslate"><span class="pre">approximate_disjoint_errors=True</span></code>. TCBP+JOBS runs with
 the <code class="docutils literal notranslate"><span class="pre">tcbp-jobs-sc</span></code> preset: sparse sum-product BP for 10 iterations with
 clip value 15 and FP32 processing, a TCBP model fitted from simulated data
 before decoding, and the default JOBS search of 16 draws, one round, beam
 width 32, beam depth 40, patience 8 and noise scale 1.0. With this preset
 JOBS searches every shot, including the shots BP converges on
-(<code class="docutils literal notranslate"><span class="pre">jobs_search_converged=True</span></code>). TCBP-JOBS decodes the same number of
+(<code class="docutils literal notranslate"><span class="pre">jobs_search_converged=True</span></code>). TCBP+JOBS decodes the same number of
 shots per circuit as the Tesseract results in the repository, sampled
 independently
 with Stim: the two decoders see the same distribution, not the same shots.</p>
@@ -1063,7 +1063,7 @@ per-experiment logical error rate <code class="docutils literal notranslate"><sp
 <div class="math notranslate nohighlight">
 \[p_{\mathrm{fail,round}}
   = \frac{\mathrm{LER}}{r}.\]</div>
-<p>Runtime is likewise divided by the number of rounds. TCBP-JOBS serial
+<p>Runtime is likewise divided by the number of rounds. TCBP+JOBS serial
 latency is the mean over 4,096 shots per circuit, each decoded by its own
 <code class="docutils literal notranslate"><span class="pre">decode()</span></code> call on one NVIDIA GB200. The Tesseract values are the
 per-shot decode times recorded in the repository’s results <a class="footnote-reference brackets" href="#id10" id="id6" role="doc-noteref"><span class="fn-bracket">[</span>4<span class="fn-bracket">]</span></a>, summed
@@ -1077,7 +1077,7 @@ shots) are used separately to measure logical error rate and total compute.
 Those aggregate GPU-hours must not be interpreted as the serial response
 latency shown on the horizontal axis.</p>
 <p>The figure connects the two decoders at each code point. Filled colored
-markers show TCBP-JOBS on one GB200; hollow markers show the long-beam CPU
+markers show TCBP+JOBS on one GB200; hollow markers show the long-beam CPU
 result. The horizontal coordinate is time per round and the vertical
 coordinate is failure probability per round, so movement toward the lower
 left is better. An arrow therefore shows the change in both runtime and
@@ -1087,26 +1087,26 @@ codes.</p>
 <img alt="Accuracy and latency tradeoff between TCBP plus JOBS on a GB200 and Tesseract long beam on CPUs" src="../_images/nv_qldpc_tcbp_jobs_tradeoff.png" />
 <figcaption>
 <p><span class="caption-text">Failure probability and decode time per syndrome-extraction round at
-<code class="docutils literal notranslate"><span class="pre">p</span> <span class="pre">=</span> <span class="pre">0.002</span></code>, Z basis, with TCBP-JOBS in the <code class="docutils literal notranslate"><span class="pre">tcbp-jobs-sc</span></code> preset.
-Each arrow connects the Tesseract and TCBP-JOBS result for the same
+<code class="docutils literal notranslate"><span class="pre">p</span> <span class="pre">=</span> <span class="pre">0.002</span></code>, Z basis, with TCBP+JOBS in the <code class="docutils literal notranslate"><span class="pre">tcbp-jobs-sc</span></code> preset.
+Each arrow connects the Tesseract and TCBP+JOBS result for the same
 circuit. The annotations report the corresponding time and error ratios;
 lower and farther left are better. Tesseract times are per CPU thread
-from the results on the tesseract-decoder repository; TCBP-JOBS times are serial latency on one
+from the results on the tesseract-decoder repository; TCBP+JOBS times are serial latency on one
 GB200.</span><a class="headerlink" href="#id11" title="Permalink to this image"></a></p>
 </figcaption>
 </figure>
-<p>Across the 14 circuits, TCBP-JOBS stays in a narrow sub-millisecond latency
+<p>Across the 14 circuits, TCBP+JOBS stays in a narrow sub-millisecond latency
 band per round, while Tesseract’s time per round grows with code size, from
 below that band on the distance-3 surface code to several seconds on the
 larger bivariate-bicycle codes. The logical error rates are of the same
 order throughout. On two circuits the 95% intervals of the two decoders do
-not overlap: TCBP-JOBS has fewer failures on the distance-11 color code and
+not overlap: TCBP+JOBS has fewer failures on the distance-11 color code and
 more on the distance-9 color code. On the other twelve circuits the two
 decoders are indistinguishable at this sample size. Because the two
 decoders saw independent samples, a difference on a single circuit should
 be read together with its interval.</p>
 <p>The compute behind the points differs as well. The
-TCBP-JOBS study decoded 12.0 million shots in 0.36 GB200 GPU-hours using
+TCBP+JOBS study decoded 12.0 million shots in 0.36 GB200 GPU-hours using
 batched execution. The long-beam results on the tesseract-decoder repository
 cover the same 12.0 million shots in 63,334 CPU core-hours. These totals describe the cost of
 collecting the data, not a hardware-normalized speed ratio: GPU-hours and
@@ -1141,7 +1141,7 @@ percentage of shots retained.</span><a class="headerlink" href="#id12" title="Pe
 </section>
 <section id="limitations-and-practical-guidance">
 <h2>Limitations and Practical Guidance<a class="headerlink" href="#limitations-and-practical-guidance" title="Permalink to this heading"></a></h2>
-<p>TCBP-JOBS is a bounded learned search, not maximum-likelihood decoding.
+<p>TCBP+JOBS is a bounded learned search, not maximum-likelihood decoding.
 TCBP calibration depends on the training distribution and matching BP
 configuration. JOBS explores only its sampled orderings, window and beam,
 and the reported complementary gap covers only candidates it visited.
@@ -1163,7 +1163,7 @@ mean that the bounded search saw no competing class, or that the search did
 not run on a BP-converged shot.</p>
 <p>Within those limits, the components form a useful hierarchy. TCBP alone
 exposes calibrated soft information. TCBP ordering can improve an existing
-OSD post-processor. TCBP-JOBS spends parallel GPU work on alternative valid
+OSD post-processor. TCBP+JOBS spends parallel GPU work on alternative valid
 corrections. Enabling search on converged shots and the complementary gap
 adds an all-shot confidence signal when the extra search and class-table
 memory are justified.</p>

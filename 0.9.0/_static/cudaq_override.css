@@ -11,6 +11,25 @@ max-width: 1240px !important;
 	font-size: 92%;
 }
 
+/* Reserve the version selector's natural height below the scrolling navigation. */
+.wy-nav-side:has(> .rst-versions) {
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 0;
+}
+
+.wy-nav-side:has(> .rst-versions) > .wy-side-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+}
+
+.wy-nav-side > .rst-versions {
+    position: static;
+    flex: 0 0 auto;
+    width: 100%;
+}
+
 /* Hide the permalinks beside the home page's feature and index headings. */
 #key-features > h2 > .headerlink,
 #indices > h2 > .headerlink {

@@ -547,7 +547,7 @@
 <li class="toctree-l2"><a class="reference internal" href="nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="nv_qldpc_tcbp_jobs_user_guide.html">Accuracy and Latency of TCBP-JOBS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="nv_qldpc_tcbp_jobs_user_guide.html">Accuracy and Latency of TCBP+JOBS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="nv_fusion_latency_user_guide.html">Bounding realtime decode latency with NV-Fusion</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
 <li class="toctree-l2"><a class="reference internal" href="nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
@@ -1040,7 +1040,7 @@ shots, down to 1.8x to 3.1x above the sampling floor at 2.1M shots.</p></li>
 <p>The study uses the TCBP decoder with JOBS post-processing
 (<code class="docutils literal notranslate"><span class="pre">osd_method=4</span></code>, <code class="docutils literal notranslate"><span class="pre">osd_init_method=&quot;tcbp&quot;</span></code>). See <a class="reference internal" href="../components/qec/decoders.html#qldpc-tcbp-jobs"><span class="std std-ref">Trajectory-Calibrated BP and Jittered OSD Beam Search</span></a>
 for these decoding options, <a class="reference internal" href="../components/qec/noise_learning.html#qldpc-noise-learning"><span class="std std-ref">Noise Learning</span></a> for the learning step, and
-<a class="reference internal" href="nv_qldpc_tcbp_jobs_user_guide.html#tcbp-jobs-user-guide"><span class="std std-ref">Accuracy and Latency of TCBP-JOBS</span></a> for a performance study of the decoder itself.</p>
+<a class="reference internal" href="nv_qldpc_tcbp_jobs_user_guide.html#tcbp-jobs-user-guide"><span class="std std-ref">Accuracy and Latency of TCBP+JOBS</span></a> for a performance study of the decoder itself.</p>
 <section id="experiment-setup">
 <h2>Experiment Setup<a class="headerlink" href="#experiment-setup" title="Permalink to this heading"></a></h2>
 <table class="docutils align-default" id="id1">
@@ -1207,7 +1207,7 @@ against 0.334 with the default). This is a statement about the rates only; the l
 <p>LER is failures divided by shots, with a 95% Clopper-Pearson interval. The learned rows use
 <code class="docutils literal notranslate"><span class="pre">passes=16,</span> <span class="pre">tol=0</span></code> and 2,097,152 learning shots.</p>
 <table class="docutils align-default" id="id3">
-<caption><span class="caption-text">LER of TCBP-JOBS under uniform, learned and oracle priors</span><a class="headerlink" href="#id3" title="Permalink to this table"></a></caption>
+<caption><span class="caption-text">LER of TCBP+JOBS under uniform, learned and oracle priors</span><a class="headerlink" href="#id3" title="Permalink to this table"></a></caption>
 <colgroup>
 <col style="width: 10%" />
 <col style="width: 14%" />
@@ -1401,7 +1401,7 @@ would help further. Time grows linearly with both.</p></li>
 <h2>See Also<a class="headerlink" href="#see-also" title="Permalink to this heading"></a></h2>
 <ul class="simple">
 <li><p><a class="reference internal" href="../components/qec/noise_learning.html#qldpc-noise-learning"><span class="std std-ref">Noise Learning</span></a> – what it provides and how to use it</p></li>
-<li><p><a class="reference internal" href="nv_qldpc_tcbp_jobs_user_guide.html#tcbp-jobs-user-guide"><span class="std std-ref">Accuracy and Latency of TCBP-JOBS</span></a> – performance study of the TCBP-JOBS decoder used on this page</p></li>
+<li><p><a class="reference internal" href="nv_qldpc_tcbp_jobs_user_guide.html#tcbp-jobs-user-guide"><span class="std std-ref">Accuracy and Latency of TCBP+JOBS</span></a> – performance study of the TCBP+JOBS decoder used on this page</p></li>
 <li><p><a class="reference internal" href="../components/qec/decoders.html#qldpc-decoder"><span class="std std-ref">Quantum Low-Density Parity-Check Decoder</span></a> – the nv-qldpc-decoder overview</p></li>
 <li><p><a class="reference internal" href="../api/qec/cpp_api.html#nv-qldpc-decoder-api-cpp"><span class="std std-ref">C++</span></a> and <a class="reference internal" href="../api/qec/python_api.html#nv-qldpc-decoder-api-python"><span class="std std-ref">Python</span></a> API reference</p></li>
 </ul>

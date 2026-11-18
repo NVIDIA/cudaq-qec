@@ -30,7 +30,7 @@ CUDA-Q QEC provides pre-built decoders for a variety of use cases.
      - Yes
      - Yes
      - Yes
-     - Supports Relay BP, BP+OSD, and :ref:`TCBP-JOBS <qldpc_tcbp_jobs>`
+     - Supports Relay BP, BP+OSD, and :ref:`TCBP+JOBS <qldpc_tcbp_jobs>`
    * - NVIDIA Fusion Decoder
      - `"nv-fusion-decoder"`
      - Yes

@@ -547,7 +547,7 @@
 <li class="toctree-l2"><a class="reference internal" href="../../performance/nv_qldpc_minllr_osd_user_guide.html#see-also">See Also</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Accuracy and Latency of TCBP-JOBS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html">Accuracy and Latency of TCBP+JOBS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html">Bounding realtime decode latency with NV-Fusion</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#what-is-streaming-tail-latency">What Is Streaming Tail Latency?</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../performance/nv_fusion_latency_user_guide.html#experiment-configuration">Experiment Configuration</a></li>
@@ -3048,7 +3048,7 @@ error mechanism, as a 2-D <code class="docutils literal notranslate"><span class
 The function samples errors from <code class="docutils literal notranslate"><span class="pre">H</span></code> at the training rates, runs BP on
 them and fits the model to the result. It needs no data from a device.
 Fitting took between 9 and 24 seconds per circuit on one GB200 for the
-circuits of <a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#tcbp-jobs-user-guide"><span class="std std-ref">Accuracy and Latency of TCBP-JOBS</span></a>.</p>
+circuits of <a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#tcbp-jobs-user-guide"><span class="std std-ref">Accuracy and Latency of TCBP+JOBS</span></a>.</p>
 <p>Options of <code class="docutils literal notranslate"><span class="pre">init_tcbp_model</span></code>:</p>
 <ul class="simple">
 <li><p><code class="code docutils literal notranslate"><span class="pre">min_p</span></code>, <code class="code docutils literal notranslate"><span class="pre">max_p</span></code> (float): Bounds of the training error rates. The
@@ -3204,7 +3204,7 @@ that it finds. The cost of a correction is the sum of the prior
 log-likelihood ratios of its error mechanisms. The options in this
 section require <code class="docutils literal notranslate"><span class="pre">use_osd=true</span></code> and <code class="docutils literal notranslate"><span class="pre">osd_method=4</span></code>. Setting any of
 them otherwise is a construction error. For measured accuracy and
-latency, see <a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#tcbp-jobs-user-guide"><span class="std std-ref">Accuracy and Latency of TCBP-JOBS</span></a>.</p>
+latency, see <a class="reference internal" href="../../performance/nv_qldpc_tcbp_jobs_user_guide.html#tcbp-jobs-user-guide"><span class="std std-ref">Accuracy and Latency of TCBP+JOBS</span></a>.</p>
 <ul class="simple">
 <li><p><code class="code docutils literal notranslate"><span class="pre">jobs_draws</span></code> (int &gt;= 1): Number of column orderings (“draws”)
 searched per round for each shot (defaults to 16). Introduced in
@@ -3494,7 +3494,7 @@ applies).</p></li>
 </ul>
 <p>The following example constructs a decoder from an OSD preset with the
 K* window enabled and a pad of 4.0 in place of the default 8.0, and a
-second decoder from a TCBP-JOBS preset that
+second decoder from a TCBP+JOBS preset that
 returns the JOBS gap:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">cudaq_qec</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">qec</span>
