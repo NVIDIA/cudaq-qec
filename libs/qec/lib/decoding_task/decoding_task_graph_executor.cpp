@@ -27,6 +27,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
 
 namespace cudaq::qec {
 
@@ -41,6 +42,12 @@ constexpr std::int64_t no_index = std::numeric_limits<std::int64_t>::min();
 // margin, and an idle pool still parks within a fraction of one large
 // window's decode.
 constexpr std::chrono::microseconds handoff_spin_time{40};
+
+// Idle workers that may spin at once; the rest park until woken. The gate
+// sends one spinner per change, so more keep cores busy for little; four
+// covers bursts of a few events without a wake, and a pool of up to five
+// executors never parks.
+constexpr std::size_t max_idle_spinners = 4;
 
 // Cap on record_bytes. A windowed graph's ingest chunk is one first-layer
 // period, 3d rounds of about d^2 measurements: 8 KB at d = 11, 126 KB at
@@ -1038,7 +1045,7 @@ struct decoding_task_graph::impl::record_scheduler {
   void snapshot_node(context &c, std::size_t si) {
     // Copies of a pooled or indexed node may publish into one record at
     // once, as may a staged node's.
-    std::unique_lock<std::mutex> lock;
+    runtime_lock lock;
     if (staged(si) || pooled(si) || indexed(si))
       lock = lock_runtime();
     snapshot_node_locked(c, si, *owner.streaming_nodes[si].capability, 0);
@@ -1098,7 +1105,7 @@ struct decoding_task_graph::impl::record_scheduler {
   // A fire leaves a publication current; publish it and each further one
   // the node makes current. Only the first may carry the fire's own index.
   // Without @p completes, a record-ordered node's publications send no
-  // completion. Workers are woken once, for all of them.
+  // completion.
   bool publish_all(context &c, std::size_t parent, std::size_t root,
                    std::size_t producer,
                    streaming_task_graph_node *capability = nullptr,
@@ -1115,13 +1122,12 @@ struct decoding_task_graph::impl::record_scheduler {
     const auto &completions = owner.completion_wires_from[node_idx];
     if (indexed(producer) && index != no_index && !completions.empty())
       publish_wires(c, parent, root, completions, index);
-    else
-      notify_workers();
     return true;
   }
 
   // One publication, in one critical section: its capture, its closure and
-  // convergence, its outputs' copies and its deliveries. Wakes no worker.
+  // convergence, its outputs' copies and its deliveries, and the change that
+  // sends an idle worker to them.
   void publish_streaming(context &c, std::size_t parent, std::size_t root,
                          std::size_t producer,
                          const streaming_task_graph_node *capability = nullptr,
@@ -1193,6 +1199,7 @@ struct decoding_task_graph::impl::record_scheduler {
         if (!indexed(owner.streaming_by_node[wire.to_node]))
           publish_wire_locked(c, parent, root, wire, no_index, nullptr);
     }
+    notify_workers();
   } // end - publish_streaming()
 
   void publish_wires(context &c, std::size_t parent, std::size_t root,
@@ -2196,7 +2203,10 @@ struct decoding_task_graph::impl::record_scheduler {
                 throw std::logic_error(
                     "decoding_task_graph: event queue stalled");
               if (!spin_for_ready(lock, searching)) {
-                wake.wait(lock);
+                ++parked;
+                send_wakes(take_wakes_locked());
+                park.wait(lock);
+                --parked;
                 after_idle = true;
               }
               continue;
@@ -2208,9 +2218,9 @@ struct decoding_task_graph::impl::record_scheduler {
           ++running;
           claim_locked(*c, selected);
           event = selected.event;
-          // Spinners skip changes a search covered: hand another runnable
-          // event to an idle worker. A finisher's pick needs none, as its
-          // finish published a change.
+          // Spinners skip changes a search covered, and a parked worker wakes
+          // only on demand: hand another runnable event to an idle worker. A
+          // finisher's pick needs none, as its finish published a change.
           if (spin_while_active && after_idle && any_runnable_locked())
             notify_workers();
         }
@@ -2238,12 +2248,45 @@ struct decoding_task_graph::impl::record_scheduler {
     return executing > 1 ? executing - 1 : 1;
   }
 
-  std::unique_lock<std::mutex> lock_runtime() {
-    std::unique_lock<std::mutex> lock(mutex, std::defer_lock);
-    if (has_waiting_workers)
-      lock.lock();
-    return lock;
-  }
+  // The runtime lock. Releasing it sends the wakes notify_workers() queued
+  // under it, so a woken worker never blocks on its waker's lock. A wait on
+  // a condition variable releases it without them: send them first.
+  class runtime_lock : public std::unique_lock<std::mutex> {
+  public:
+    runtime_lock() = default;
+    explicit runtime_lock(record_scheduler &owner)
+        : std::unique_lock<std::mutex>(owner.mutex, std::defer_lock),
+          owner_(&owner) {
+      if (owner.has_waiting_workers)
+        lock();
+    }
+    runtime_lock(runtime_lock &&other) noexcept
+        : std::unique_lock<std::mutex>(std::move(other)),
+          owner_(std::exchange(other.owner_, nullptr)) {}
+    runtime_lock &operator=(runtime_lock &&other) noexcept {
+      if (this != &other) {
+        unlock();
+        std::unique_lock<std::mutex>::operator=(std::move(other));
+        owner_ = std::exchange(other.owner_, nullptr);
+      }
+      return *this;
+    }
+    ~runtime_lock() { unlock(); }
+
+    // Release the lock, then send the wakes queued under it.
+    void unlock() {
+      if (!owns_lock())
+        return;
+      const auto wakes = owner_->take_wakes_locked();
+      std::unique_lock<std::mutex>::unlock();
+      owner_->send_wakes(wakes);
+    }
+
+  private:
+    record_scheduler *owner_ = nullptr;
+  };
+
+  runtime_lock lock_runtime() { return runtime_lock(*this); }
 
   // Only the async coordinator admits, activates and releases contexts, so it
   // reads `active` and `in_use` without the lock; workers read them under it.
@@ -2285,12 +2328,32 @@ struct decoding_task_graph::impl::record_scheduler {
     notify_workers();
   }
 
-  // Publish a scheduler change for the spinners, and wake parked workers.
+  // Publish a scheduler change; called under the runtime lock. In an
+  // asynchronous session a spinner searches it, or, when none spins, one
+  // parked worker wakes once the lock is released; a stop, a session's end or
+  // a synchronous run wakes every worker at once.
   void notify_workers() {
     if (!has_waiting_workers)
       return;
     idle_gate.publish();
-    wake.notify_all();
+    if (stop || session_done || !spin_while_active) {
+      park.notify_all();
+      wake.notify_all();
+      return;
+    }
+    if (spinning == 0 && parked > wakes_due)
+      ++wakes_due;
+  } // end - notify_workers()
+
+  // The parked-worker wakes queued so far, now owed by the caller.
+  std::size_t take_wakes_locked() {
+    return std::exchange(wakes_due, std::size_t{0});
+  }
+
+  // Wake @p wakes parked workers; best sent with the lock released.
+  void send_wakes(std::size_t wakes) {
+    for (; wakes != 0; --wakes)
+      park.notify_one();
   }
 
 private:
@@ -2374,15 +2437,18 @@ private:
   } // end - plan_delivery_storage()
 
   // Spin, unlocked, for a scheduler change this worker should search, before
-  // parking. Returns true when the caller should select again, with
-  // @p searching set when it took the gate; false when it should park.
-  bool spin_for_ready(std::unique_lock<std::mutex> &lock, bool &searching) {
-    if (!spin_while_active)
+  // parking; past max_idle_spinners, park at once. Returns true when the
+  // caller should select again, with @p searching set when it took the gate;
+  // false when it should park.
+  bool spin_for_ready(runtime_lock &lock, bool &searching) {
+    if (!spin_while_active || spinning >= max_idle_spinners)
       return false;
     const auto seen = idle_gate.generation();
+    ++spinning;
     lock.unlock();
     const auto woken = idle_gate.wait(seen, handoff_spin_time);
     lock.lock();
+    --spinning;
     if (woken == detail::idle_wake::search) {
       idle_gate.begin_search();
       searching = true;
@@ -3090,7 +3156,15 @@ public:
   }
   const bool has_waiting_workers;
   std::mutex mutex;
+  // Stop and session-end waits, which every change wakes.
   std::condition_variable wake;
+  // Idle workers past the spinner cap, woken one at a time.
+  std::condition_variable park;
+  // Idle workers spinning or parked, and parked-worker wakes queued for
+  // when the lock is released; all under the runtime lock.
+  std::size_t spinning = 0;
+  std::size_t parked = 0;
+  std::size_t wakes_due = 0;
   // Idle workers spin on this; it keeps its state on cache lines of its own,
   // apart from the mutex every worker takes and the state written under it.
   detail::idle_search_gate idle_gate;
