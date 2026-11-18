@@ -5,7 +5,8 @@
 
 /// @file
 ///
-/// Unit tests for the shared persistent QEC thread pool.
+/// Unit tests for the shared persistent QEC thread pool, and the spin bounded
+/// by time that its idle workers use.
 
 #include "../lib/decoding_task/thread_pool.h"
 
@@ -116,6 +117,40 @@ TEST(QecThreadPool, RunWorkersPropagatesErrorsAndRemainsReusable) {
   }));
   EXPECT_EQ(workers.load(std::memory_order_relaxed), 4);
 } // end - RunWorkersPropagatesErrorsAndRemainsReusable
+
+using std::chrono::steady_clock;
+
+// A wait that must time out: long enough to measure, short enough to keep
+// the suite fast.
+constexpr std::chrono::milliseconds short_budget{20};
+// A wait that must end by an event, never by its budget.
+constexpr std::chrono::seconds long_budget{30};
+
+TEST(IdleSpin, SpinForReturnsOnceDone) {
+  int calls = 0;
+  const auto start = steady_clock::now();
+
+  EXPECT_TRUE(spin_for(long_budget, [&] { return ++calls == 100; }));
+  EXPECT_EQ(calls, 100);
+  EXPECT_LT(steady_clock::now() - start, long_budget);
+}
+
+TEST(IdleSpin, SpinForGivesUpAfterItsBudget) {
+  const auto start = steady_clock::now();
+
+  EXPECT_FALSE(spin_for(short_budget, [] { return false; }));
+  EXPECT_GE(steady_clock::now() - start, short_budget);
+}
+
+TEST(IdleSpin, SpinForChecksOnceWithoutABudget) {
+  int calls = 0;
+
+  EXPECT_FALSE(spin_for(std::chrono::nanoseconds{0}, [&] {
+    ++calls;
+    return false;
+  }));
+  EXPECT_EQ(calls, 1);
+}
 
 } // namespace
 } // namespace cudaq::qec::detail

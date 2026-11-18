@@ -7,12 +7,14 @@
 ///
 /// Persistent fork-join thread pool for QEC dependency executors.
 /// This QEC-local implementation deliberately exposes only the phase
-/// operations used by decoding task graphs.
+/// operations used by decoding task graphs, and the spin bounded by time that
+/// their idle workers use.
 
 #ifndef CUDAQ_QEC_DETAIL_THREAD_POOL_H
 #define CUDAQ_QEC_DETAIL_THREAD_POOL_H
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -169,6 +171,28 @@ private:
   std::mutex phase_error_mutex_;
   std::exception_ptr phase_error_;
 };
+
+/// Pause hints between clock reads in spin_for().
+// About 0.6 us of x86 pauses: a budget overshoots by at most that, and the
+// ~20 ns clock read stays a small share of the spin.
+inline constexpr std::size_t spin_clock_stride = 64;
+
+/// @brief Spin until `done()` holds or `budget` has passed.
+/// @param budget Time to spin; zero checks `done()` once.
+/// @param done Predicate checked before each pause hint.
+/// @return Whether `done()` held.
+template <typename Done>
+bool spin_for(std::chrono::nanoseconds budget, Done &&done) {
+  const auto start = std::chrono::steady_clock::now();
+  for (std::size_t spin = 1;; ++spin) {
+    if (done())
+      return true;
+    if (spin % spin_clock_stride == 1 &&
+        std::chrono::steady_clock::now() - start >= budget)
+      return false;
+    CUDAQ_REALTIME_CPU_RELAX();
+  }
+}
 
 } // namespace cudaq::qec::detail
 

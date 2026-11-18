@@ -35,10 +35,12 @@ namespace {
 constexpr std::size_t no_event = std::numeric_limits<std::size_t>::max();
 constexpr std::int64_t no_index = std::numeric_limits<std::int64_t>::min();
 
-// Hand-offs between the dispatcher and workers usually complete within a few
-// microseconds, far less than a park and wake. Spin that long first while a
-// session has records in flight; idle sessions park at once.
-constexpr std::size_t kHandoffSpinPauseIters = 4096;
+// How long an idle worker, or a dispatcher with records in flight, spins
+// before it parks. While rounds stream in, hand-offs between the dispatcher
+// and the workers come every few microseconds; 40 us bridges those gaps with
+// margin, and an idle pool still parks within a fraction of one large
+// window's decode.
+constexpr std::chrono::microseconds handoff_spin_time{40};
 
 // Cap on record_bytes. A windowed graph's ingest chunk is one first-layer
 // period, 3d rounds of about d^2 measurements: 8 KB at d = 11, 126 KB at
@@ -2352,13 +2354,9 @@ private:
       return false;
     const auto seen = ready_generation.load(std::memory_order_acquire);
     lock.unlock();
-    bool changed = false;
-    for (std::size_t spin = 0; spin < kHandoffSpinPauseIters && !changed;
-         ++spin) {
-      changed = ready_generation.load(std::memory_order_acquire) != seen;
-      if (!changed)
-        CUDAQ_REALTIME_CPU_RELAX();
-    }
+    const bool changed = detail::spin_for(handoff_spin_time, [&] {
+      return ready_generation.load(std::memory_order_acquire) != seen;
+    });
     lock.lock();
     return changed || ready_generation.load(std::memory_order_acquire) != seen;
   }
@@ -3647,8 +3645,8 @@ void decoding_task_graph::impl::dispatch_async_session() {
                      S.contexts.begin(), S.contexts.end(),
                      [](const auto &c) { return !c.in_use; });
         },
-        in_flight ? std::max(state.spin_pause_iters, kHandoffSpinPauseIters)
-                  : state.spin_pause_iters);
+        state.spin_pause_iters,
+        in_flight ? handoff_spin_time : std::chrono::nanoseconds{0});
   }
 }
 
