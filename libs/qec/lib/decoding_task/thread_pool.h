@@ -7,8 +7,9 @@
 ///
 /// Persistent fork-join thread pool for QEC dependency executors.
 /// This QEC-local implementation deliberately exposes only the phase
-/// operations used by decoding task graphs, and the spin bounded by time that
-/// their idle workers use.
+/// operations used by decoding task graphs, and the idle waits their workers
+/// use: a spin bounded by time, and a gate that sends one idle worker at a
+/// time to search for work after a scheduler change.
 
 #ifndef CUDAQ_QEC_DETAIL_THREAD_POOL_H
 #define CUDAQ_QEC_DETAIL_THREAD_POOL_H
@@ -193,6 +194,59 @@ bool spin_for(std::chrono::nanoseconds budget, Done &&done) {
     CUDAQ_REALTIME_CPU_RELAX();
   }
 }
+
+/// What ended an idle_search_gate::wait().
+enum class idle_wake : std::uint8_t {
+  search,      ///< a change needs a search, and the caller holds the gate
+  interrupted, ///< interrupt() was called
+  timeout      ///< the budget passed with no change left to search
+};
+
+/// Sends one idle worker at a time to search the ready queue after a
+/// scheduler change. A change is covered once a search begins after it, so
+/// the other spinners skip it instead of each taking the scheduler lock.
+/// publish(), generation() and begin_search() run under the scheduler lock;
+/// wait() runs without it.
+class idle_search_gate {
+public:
+  /// @brief Record a scheduler change.
+  void publish() noexcept;
+
+  /// @brief Return the number of changes so far, for a later wait().
+  std::uint64_t generation() const noexcept;
+
+  /// @brief Spin until a change after `seen` needs a search and the caller
+  /// takes the gate, until interrupt(), or until `budget` passes.
+  /// @param seen generation() when the caller last searched.
+  /// @param budget Time to spin.
+  /// @return idle_wake::search when the caller must begin_search() and,
+  /// after searching, end_search().
+  idle_wake wait(std::uint64_t seen, std::chrono::nanoseconds budget) noexcept;
+
+  /// @brief Cover every change so far; the gate holder calls it before it
+  /// searches.
+  void begin_search() noexcept;
+
+  /// @brief Release the gate.
+  void end_search() noexcept;
+
+  /// @brief End every wait(), current and later, until clear_interrupt().
+  void interrupt() noexcept;
+
+  /// @brief Let wait() spin again.
+  void clear_interrupt() noexcept;
+
+private:
+  /// @brief Whether a change after `seen` has had no search begin since.
+  bool unsearched_since(std::uint64_t seen) const noexcept;
+
+  // Spinners read all four, and different threads write them: one cache
+  // line each.
+  alignas(64) std::atomic<std::uint64_t> generation_{0};
+  alignas(64) std::atomic<std::uint64_t> searched_{0};
+  alignas(64) std::atomic<bool> held_{false};
+  alignas(64) std::atomic<bool> interrupted_{false};
+};
 
 } // namespace cudaq::qec::detail
 

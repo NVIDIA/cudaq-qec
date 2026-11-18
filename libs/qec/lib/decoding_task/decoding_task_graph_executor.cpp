@@ -884,6 +884,7 @@ struct decoding_task_graph::impl::record_scheduler {
     std::fill(wire_last.begin(), wire_last.end(), no_index);
     std::fill(node_deliveries_seen.begin(), node_deliveries_seen.end(), 0);
     stop = false;
+    idle_gate.clear_interrupt();
     error = nullptr;
   }
 
@@ -895,6 +896,7 @@ struct decoding_task_graph::impl::record_scheduler {
     next_record = 0;
     session_done = false;
     stop = false;
+    idle_gate.clear_interrupt();
     error = nullptr;
   }
 
@@ -2153,12 +2155,17 @@ struct decoding_task_graph::impl::record_scheduler {
     // The event this worker ran last, finished under the next lock it takes.
     context *done_context = nullptr;
     std::size_t done_id = no_event;
+    // Whether this worker holds the idle search gate.
+    bool searching = false;
     try {
       detail_affinity::CudaDeviceGuard device_guard(cuda_device_id);
       while (true) {
         context *c = nullptr;
         std::size_t id = no_event;
         graph_event event;
+        // Whether this worker searched through the gate or woke from parking
+        // before its pick.
+        bool after_idle = false;
         {
           auto lock = lock_runtime();
           if (done_context) {
@@ -2166,6 +2173,10 @@ struct decoding_task_graph::impl::record_scheduler {
             done_context = nullptr;
           }
           while (id == no_event) {
+            if (searching && (stop || until())) {
+              idle_gate.end_search();
+              searching = false;
+            }
             if (stop) {
               if (running == 0)
                 return;
@@ -2175,21 +2186,33 @@ struct decoding_task_graph::impl::record_scheduler {
             if (until())
               return;
             std::tie(c, id) = select_ready_locked();
+            if (searching) {
+              idle_gate.end_search();
+              searching = false;
+              after_idle = true;
+            }
             if (id == no_event) {
               if (!has_waiting_workers)
                 throw std::logic_error(
                     "decoding_task_graph: event queue stalled");
-              if (!spin_for_ready(lock))
+              if (!spin_for_ready(lock, searching)) {
                 wake.wait(lock);
+                after_idle = true;
+              }
               continue;
             }
-          }
+          } // end - while(id == no_event)
           auto &selected = c->slots[id];
           selected.running = true;
           selected.queued = false;
           ++running;
           claim_locked(*c, selected);
           event = selected.event;
+          // Spinners skip changes a search covered: hand another runnable
+          // event to an idle worker. A finisher's pick needs none, as its
+          // finish published a change.
+          if (spin_while_active && after_idle && any_runnable_locked())
+            notify_workers();
         }
 
         active_context = c;
@@ -2247,6 +2270,7 @@ struct decoding_task_graph::impl::record_scheduler {
 
   void request_stop_locked() {
     stop = true;
+    idle_gate.interrupt();
     notify_workers();
   }
 
@@ -2257,13 +2281,15 @@ struct decoding_task_graph::impl::record_scheduler {
 
   void end_session_locked() {
     session_done = true;
+    idle_gate.interrupt();
     notify_workers();
   }
 
+  // Publish a scheduler change for the spinners, and wake parked workers.
   void notify_workers() {
     if (!has_waiting_workers)
       return;
-    ready_generation.fetch_add(1, std::memory_order_release);
+    idle_gate.publish();
     wake.notify_all();
   }
 
@@ -2347,19 +2373,26 @@ private:
     return replay_capacity;
   } // end - plan_delivery_storage()
 
-  // Spin briefly for a scheduler change before parking. Returns true when one
-  // happened, so the caller re-selects instead of waiting.
-  bool spin_for_ready(std::unique_lock<std::mutex> &lock) {
+  // Spin, unlocked, for a scheduler change this worker should search, before
+  // parking. Returns true when the caller should select again, with
+  // @p searching set when it took the gate; false when it should park.
+  bool spin_for_ready(std::unique_lock<std::mutex> &lock, bool &searching) {
     if (!spin_while_active)
       return false;
-    const auto seen = ready_generation.load(std::memory_order_acquire);
+    const auto seen = idle_gate.generation();
     lock.unlock();
-    const bool changed = detail::spin_for(handoff_spin_time, [&] {
-      return ready_generation.load(std::memory_order_acquire) != seen;
-    });
+    const auto woken = idle_gate.wait(seen, handoff_spin_time);
     lock.lock();
-    return changed || ready_generation.load(std::memory_order_acquire) != seen;
-  }
+    if (woken == detail::idle_wake::search) {
+      idle_gate.begin_search();
+      searching = true;
+      return true;
+    }
+    // Out of time: select again if a change landed, even a covered one,
+    // rather than park past it.
+    return woken == detail::idle_wake::interrupted ||
+           idle_gate.generation() != seen;
+  } // end - spin_for_ready()
 
   std::size_t push_locked(context &c, graph_event event,
                           std::size_t parent = no_event,
@@ -2594,6 +2627,14 @@ private:
     return true;
   }
 
+  // Whether any active context has an event that could run now.
+  bool any_runnable_locked() {
+    for (auto *c : active)
+      if (find_ready_locked(*c) != no_event)
+        return true;
+    return false;
+  }
+
   std::pair<context *, std::size_t> select_ready_locked() {
     for (auto *c : active) {
       const auto id = select_ready_locked(*c);
@@ -2603,7 +2644,16 @@ private:
     return {nullptr, no_event};
   }
 
+  // Take @p c's first queued event that could run now.
   std::size_t select_ready_locked(context &c) {
+    const auto id = find_ready_locked(c);
+    if (id != no_event)
+      remove_ready_locked(c, id);
+    return id;
+  }
+
+  // @p c's first queued event that could run now, left queued.
+  std::size_t find_ready_locked(context &c) {
     for (std::size_t id = c.ready_head; id != no_event;
          id = c.slots[id].next_ready) {
       const auto &candidate = c.slots[id];
@@ -2642,11 +2692,10 @@ private:
       }
       if (!root_is_ready(c, candidate.event, candidate))
         continue;
-      remove_ready_locked(c, id);
       return id;
-    }
+    } // end - for(id)
     return no_event;
-  }
+  } // end - find_ready_locked()
 
   // Hand node `si` to the next record once this record can create no more
   // events for it: every producer has been handed on and nothing targeting
@@ -2864,6 +2913,7 @@ private:
     if (!error)
       error = std::move(failure);
     stop = true;
+    idle_gate.interrupt();
     if (c && id < c->slots.size() && c->slots[id].running) {
       auto &failed = c->slots[id];
       // A fire's entry, which finish_locked() would have freed.
@@ -3041,9 +3091,9 @@ public:
   const bool has_waiting_workers;
   std::mutex mutex;
   std::condition_variable wake;
-  // Idle workers spin on this, so it keeps a cache line of its own, apart
-  // from the mutex every worker takes and the state written under it.
-  alignas(64) std::atomic<uint64_t> ready_generation{0};
+  // Idle workers spin on this; it keeps its state on cache lines of its own,
+  // apart from the mutex every worker takes and the state written under it.
+  detail::idle_search_gate idle_gate;
   alignas(64) std::size_t running = 0;
   // Indexed fires running, and the most that may: one fewer than the
   // executing workers, so other events never queue behind decodes.
