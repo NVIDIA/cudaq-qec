@@ -2245,8 +2245,7 @@ struct decoding_task_graph::impl::record_scheduler {
         context *c = nullptr;
         std::size_t id = no_event;
         graph_event event;
-        // Whether this worker searched through the gate or woke from parking
-        // before its pick.
+        // Whether this worker spun or parked before its pick.
         bool after_idle = false;
         {
           auto lock = carried.owns_lock() ? std::move(carried) : lock_runtime();
@@ -2271,7 +2270,6 @@ struct decoding_task_graph::impl::record_scheduler {
             if (searching) {
               idle_gate.end_search();
               searching = false;
-              after_idle = true;
             }
             if (id == no_event) {
               if (!has_waiting_workers)
@@ -2282,8 +2280,11 @@ struct decoding_task_graph::impl::record_scheduler {
                 send_wakes(take_wakes_locked());
                 park.wait(lock);
                 --parked;
-                after_idle = true;
               }
+              // However the wait ended, this pick may hold a change's only
+              // wake: a publish while this worker spun queued none, even if
+              // it then ran out of time.
+              after_idle = true;
               continue;
             }
           } // end - while(id == no_event)
