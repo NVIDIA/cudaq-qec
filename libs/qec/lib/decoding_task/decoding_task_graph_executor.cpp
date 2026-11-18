@@ -402,6 +402,44 @@ struct decoding_task_graph::impl::record_scheduler {
   // Index and topological node order put a producer before its consumer.
   using feedback_join = std::tuple<std::int64_t, std::size_t, std::size_t>;
 
+  // The runtime lock. Releasing it sends the wakes notify_workers() queued
+  // under it, so a woken worker never blocks on its waker's lock. A wait on
+  // a condition variable releases it without them: send them first.
+  class runtime_lock : public std::unique_lock<std::mutex> {
+  public:
+    runtime_lock() = default;
+    explicit runtime_lock(record_scheduler &owner)
+        : std::unique_lock<std::mutex>(owner.mutex, std::defer_lock),
+          owner_(&owner) {
+      if (owner.has_waiting_workers)
+        lock();
+    }
+    runtime_lock(runtime_lock &&other) noexcept
+        : std::unique_lock<std::mutex>(std::move(other)),
+          owner_(std::exchange(other.owner_, nullptr)) {}
+    runtime_lock &operator=(runtime_lock &&other) noexcept {
+      if (this != &other) {
+        unlock();
+        std::unique_lock<std::mutex>::operator=(std::move(other));
+        owner_ = std::exchange(other.owner_, nullptr);
+      }
+      return *this;
+    }
+    ~runtime_lock() { unlock(); }
+
+    // Release the lock, then send the wakes queued under it.
+    void unlock() {
+      if (!owns_lock())
+        return;
+      const auto wakes = owner_->take_wakes_locked();
+      std::unique_lock<std::mutex>::unlock();
+      owner_->send_wakes(wakes);
+    }
+
+  private:
+    record_scheduler *owner_ = nullptr;
+  };
+
   record_scheduler(impl &owner, std::size_t context_count,
                    std::size_t event_capacity)
       : owner(owner), contexts(context_count), node_busy(owner.nodes.size(), 0),
@@ -1001,6 +1039,11 @@ struct decoding_task_graph::impl::record_scheduler {
 
   void set_continuation(context &c, std::size_t id, graph_event event) {
     auto lock = lock_runtime();
+    set_continuation_locked(c, id, event);
+  }
+
+  // set_continuation() under the caller's lock.
+  void set_continuation_locked(context &c, std::size_t id, graph_event event) {
     if (stop || id >= c.slots.size() || !c.slots[id].occupied)
       return;
     if (c.slots[id].has_continuation) {
@@ -1105,31 +1148,37 @@ struct decoding_task_graph::impl::record_scheduler {
   // A fire leaves a publication current; publish it and each further one
   // the node makes current. Only the first may carry the fire's own index.
   // Without @p completes, a record-ordered node's publications send no
-  // completion.
-  bool publish_all(context &c, std::size_t parent, std::size_t root,
-                   std::size_t producer,
-                   streaming_task_graph_node *capability = nullptr,
-                   std::int64_t index = no_index, bool completes = true) {
+  // completion. Returns the last publication's lock, still held.
+  runtime_lock publish_all(context &c, std::size_t parent, std::size_t root,
+                           std::size_t producer,
+                           streaming_task_graph_node *capability = nullptr,
+                           std::int64_t index = no_index,
+                           bool completes = true) {
+    runtime_lock held;
+    bool repeat = false;
     if (!capability)
       capability = owner.streaming_nodes[producer].capability;
-    bool repeat = false;
     do {
-      publish_streaming(c, parent, root, producer, capability,
+      publish_streaming(held, c, parent, root, producer, capability,
                         repeat ? no_index : index, repeat, completes);
       repeat = true;
     } while (capability->publish_next());
+    // An indexed fire's one completion follows under the same lock.
     const auto node_idx = owner.streaming_nodes[producer].node_index;
     const auto &completions = owner.completion_wires_from[node_idx];
-    if (indexed(producer) && index != no_index && !completions.empty())
-      publish_wires(c, parent, root, completions, index);
-    return true;
-  }
+    if (indexed(producer) && index != no_index && !completions.empty()) {
+      publish_wires_locked(c, parent, root, completions, index);
+      notify_workers();
+    }
+    return held;
+  } // end - publish_all()
 
   // One publication, in one critical section: its capture, its closure and
   // convergence, its outputs' copies and its deliveries, and the change that
-  // sends an idle worker to them.
-  void publish_streaming(context &c, std::size_t parent, std::size_t root,
-                         std::size_t producer,
+  // sends an idle worker to them. Takes the runtime lock into @p held unless
+  // it already holds it, and leaves it held.
+  void publish_streaming(runtime_lock &held, context &c, std::size_t parent,
+                         std::size_t root, std::size_t producer,
                          const streaming_task_graph_node *capability = nullptr,
                          std::int64_t index = no_index, bool repeat = false,
                          bool completes = true) {
@@ -1139,7 +1188,7 @@ struct decoding_task_graph::impl::record_scheduler {
     const auto &wires = owner.streaming_wires_from[node_idx];
     const auto &completions = owner.completion_wires_from[node_idx];
     const auto anchor = owner.feedback_anchor[producer];
-    auto lock = lock_runtime();
+    hold(held);
     // Captured in the record holding the operation it follows from, as a
     // synchronous graph would.
     const auto &event = c.slots[parent].event;
@@ -1202,14 +1251,16 @@ struct decoding_task_graph::impl::record_scheduler {
     notify_workers();
   } // end - publish_streaming()
 
-  void publish_wires(context &c, std::size_t parent, std::size_t root,
-                     const std::vector<compiled_wire> &wires,
-                     std::int64_t index = no_index) {
+  // Returns the lock it took, still held; none when there are no wires.
+  runtime_lock publish_wires(context &c, std::size_t parent, std::size_t root,
+                             const std::vector<compiled_wire> &wires,
+                             std::int64_t index = no_index) {
     if (wires.empty())
-      return;
+      return runtime_lock();
     auto lock = lock_runtime();
     publish_wires_locked(c, parent, root, wires, index);
     notify_workers();
+    return lock;
   }
 
   void publish_wires_locked(context &c, std::size_t parent, std::size_t root,
@@ -1323,7 +1374,9 @@ struct decoding_task_graph::impl::record_scheduler {
   // File one delivery under the consumer instance it addresses. The entry is
   // complete once every input is present or known to be absent; the fire it
   // queues belongs to the record whose delivery completed it.
-  void deliver_indexed(context &c, std::size_t id, const graph_event &event) {
+  // Files the delivery under the runtime lock and returns that lock, held.
+  runtime_lock deliver_indexed(context &c, std::size_t id,
+                               const graph_event &event) {
     const auto si = event.node;
     const auto &node = owner.streaming_nodes[si];
     if (event.index == no_index)
@@ -1338,7 +1391,7 @@ struct decoding_task_graph::impl::record_scheduler {
     const auto *value = delivered_value(event, buffer);
     auto lock = lock_runtime();
     if (k < 0 || is_dropped(si, k))
-      return; // instances are numbered from 0, and a dropped one stays so
+      return lock; // instances are numbered from 0, and a dropped one stays so
     auto &table = joins[si];
     std::size_t index = find_join_locked(si, k);
     const bool fresh = index == table.size();
@@ -1380,7 +1433,7 @@ struct decoding_task_graph::impl::record_scheduler {
         if (absent && join_required[si][i]) {
           release_join_locked(si, *entry);
           drop_instance_locked(c, id, si, k, event.root);
-          return; // an instance without a required input does not exist
+          return lock; // an instance without a required input does not exist
         }
         entry->state[i] = absent ? join_entry::absent : join_entry::missing;
         entry->pending += !absent;
@@ -1403,7 +1456,7 @@ struct decoding_task_graph::impl::record_scheduler {
             " input " + std::to_string(slot) + " of instance " +
             std::to_string(k) + " was delivered after it was known absent");
       if (!fresh || entry->pending != 0)
-        return;
+        return lock;
     } else {
       --entry->pending;
     }
@@ -1418,7 +1471,7 @@ struct decoding_task_graph::impl::record_scheduler {
       if (join_required[si][slot]) {
         release_join_locked(si, *entry);
         drop_instance_locked(c, id, si, k, event.root);
-        return;
+        return lock;
       }
     }
     if (entry->pending != 0) {
@@ -1428,11 +1481,12 @@ struct decoding_task_graph::impl::record_scheduler {
         if (group.resolving)
           push_feedback_join_locked(group, {k, si, index});
       }
-      return;
+      return lock;
     }
     queue_indexed_fire_locked(c, fire_parent(c, id), si, index, event.root);
     notify_workers();
-  }
+    return lock;
+  } // end - deliver_indexed()
 
   bool is_dropped(std::size_t si, std::int64_t k) const {
     return dropped[si].contains(k);
@@ -1855,8 +1909,10 @@ struct decoding_task_graph::impl::record_scheduler {
 
   // Run instance k on the replica claimed at dispatch, with the entry's
   // inputs, then free the entry.
-  bool execute_indexed_fire(context &c, std::size_t id,
-                            const graph_event &event) {
+  // Returns its publication's lock, still held, so the worker finishes the
+  // event under it; @p fired says whether the copy fired.
+  runtime_lock execute_indexed_fire(context &c, std::size_t id,
+                                    const graph_event &event, bool &fired) {
     const auto si = event.node;
     const auto &node = owner.streaming_nodes[si];
     const auto replica = c.slots[id].pool_slot;
@@ -1869,24 +1925,25 @@ struct decoding_task_graph::impl::record_scheduler {
     capability->clear_corrections(); // its corrections become this delta
     // The entry is freed once: by finish_locked() when this returns, or by
     // fail() if the fire or its publication throws.
-    const bool fired = node.indexed[replica]->fire(event.index, inputs);
+    fired = node.indexed[replica]->fire(event.index, inputs);
     // A failure the node reported takes the path of a thrown one.
     if (const auto *failure = capability->fire_failure())
       throw std::runtime_error(*failure);
     if (fired)
-      (void)publish_all(c, id, event.root, si, capability, event.index);
-    else
-      publish_wires(c, id, event.root,
-                    owner.completion_wires_from[node.node_index], event.index);
-    return fired;
-  }
+      return publish_all(c, id, event.root, si, capability, event.index);
+    return publish_wires(c, id, event.root,
+                         owner.completion_wires_from[node.node_index],
+                         event.index);
+  } // end - execute_indexed_fire()
 
-  bool deliver_streaming_edge(context &c, std::size_t id,
-                              const graph_event &event) {
-    if (indexed(event.node)) {
-      deliver_indexed(c, id, event);
-      return false;
-    }
+  // Returns the lock its last scheduler step holds, if any, so the worker
+  // finishes the event under it; @p fired says whether the consumer fired.
+  runtime_lock deliver_streaming_edge(context &c, std::size_t id,
+                                      const graph_event &event, bool &fired) {
+    runtime_lock held;
+    fired = false;
+    if (indexed(event.node))
+      return deliver_indexed(c, id, event);
     const auto consumer =
         static_cast<std::size_t>(owner.streaming_nodes[event.node].node_index);
     const bool pool = pooled(event.node);
@@ -1908,13 +1965,13 @@ struct decoding_task_graph::impl::record_scheduler {
     const bool completes =
         !unordered || owner.streaming_wires_to_count[consumer] == 0;
     const auto *value = delivered_value(event, c.slots[id].buffer);
-    const bool fired =
+    fired =
         value && consumer_node->enqueue_edge_value(*value, event.wire.to_slot);
     if (fired)
-      (void)publish_all(c, id, event.root, event.node, consumer_node, no_index,
-                        completes);
+      held = publish_all(c, id, event.root, event.node, consumer_node, no_index,
+                         completes);
     if (unordered)
-      return fired;
+      return held;
     // An edge-fed node completes the window after its last delivery. A
     // pooled node counts per record; a record-ordered one counts across
     // records, as its producers may fire in different ones.
@@ -1925,43 +1982,50 @@ struct decoding_task_graph::impl::record_scheduler {
       if (pool)
         c.slots[id].releases_pool = true;
       if (!fired)
-        publish_wires(c, id, event.root, owner.completion_wires_from[consumer]);
+        held = publish_wires(c, id, event.root,
+                             owner.completion_wires_from[consumer]);
     }
-    return fired;
+    return held;
   } // end - deliver_streaming_edge()
 
   // ----- Event handlers ----------------------------------------------------
 
-  void execute(context &c, std::size_t id, const graph_event &event) {
+  // Run one event. Returns the runtime lock its last scheduler step still
+  // holds, if any: the worker finishes the event under it rather than
+  // locking again. Node compute never runs under it.
+  runtime_lock execute(context &c, std::size_t id, const graph_event &event) {
+    runtime_lock held;
+    bool fired = false;
     switch (event.kind) {
     case graph_event_kind::one_shot:
       execute_one_shot(c, event);
-      return;
+      return held;
     case graph_event_kind::streaming_raw:
-      execute_raw(c, id, event);
-      return;
+      return execute_raw(c, id, event);
     case graph_event_kind::streaming_edge:
       if (event.next_skipped != no_index) {
         execute_skipped_index(c, id, event);
-        return;
+        return held;
       }
-      if (deliver_streaming_edge(c, id, event))
+      held = deliver_streaming_edge(c, id, event, fired);
+      if (fired)
         c.fired.store(true, std::memory_order_relaxed);
-      return;
+      return held;
     case graph_event_kind::streaming_flush:
       execute_flush(c, id, event);
-      return;
+      return held;
     case graph_event_kind::streaming_flush_release:
       release_dependencies(c, owner.flush_dependents[event.node],
                            graph_event_kind::streaming_flush);
-      return;
+      return held;
     case graph_event_kind::streaming_indexed_fire:
-      if (execute_indexed_fire(c, id, event))
+      held = execute_indexed_fire(c, id, event, fired);
+      if (fired)
         c.fired.store(true, std::memory_order_relaxed);
-      return;
+      return held;
     }
     throw std::logic_error("decoding_task_graph: unexpected graph event");
-  }
+  } // end - execute()
 
   // Drain one skipped index before continuing the original value delivery.
   void execute_skipped_index(context &c, std::size_t id,
@@ -1993,14 +2057,19 @@ struct decoding_task_graph::impl::record_scheduler {
     release_dependencies(c, owner.dependents[node], graph_event_kind::one_shot);
   }
 
-  void execute_raw(context &c, std::size_t id, const graph_event &event) {
+  // Returns the lock its last publication or continuation still holds, if
+  // any. Each chunk's ingest runs with it released.
+  runtime_lock execute_raw(context &c, std::size_t id,
+                           const graph_event &event) {
     auto &node = *owner.streaming_nodes[event.node].capability;
     const auto node_index = owner.streaming_nodes[event.node].node_index;
     const bool no_deliveries = owner.streaming_wires_from[node_index].empty() &&
                                owner.completion_wires_from[node_index].empty();
     auto offset = event.offset;
     auto operation = event.operation;
+    runtime_lock held;
     while (true) {
+      held.unlock(); // the node ingests the chunk unlocked
       const auto end = c.operations > 1
                            ? c.operation_ends[operation - c.first_operation]
                            : c.len;
@@ -2018,11 +2087,12 @@ struct decoding_task_graph::impl::record_scheduler {
                                   : round_type::BULK;
       const bool fired = c.type ? node.enqueue(chunk, take, chunk_type)
                                 : node.enqueue_untagged(chunk, take);
-      if (fired)
-        c.fired.store(publish_all(c, id, event.root, event.node),
-                      std::memory_order_relaxed);
-      else if (chunk_type == round_type::FINAL && !staged(event.node))
+      if (fired) {
+        held = publish_all(c, id, event.root, event.node);
+        c.fired.store(true, std::memory_order_relaxed);
+      } else if (chunk_type == round_type::FINAL && !staged(event.node)) {
         snapshot_node(c, event.node); // a FINAL round may commit coverage
+      }
       if (next < c.len && take != 0) {
         // Recheck capacity after each chunk and let its causal deliveries
         // finish before another operation can reuse this context's publication
@@ -2031,7 +2101,7 @@ struct decoding_task_graph::impl::record_scheduler {
           ++operation;
         if (c.operations > 1 && (!fired || no_deliveries)) {
           if (stop.load(std::memory_order_acquire))
-            return;
+            return held;
           // No deliveries means no children can read this running event's
           // operation tag. Captured results remain owned by this context.
           offset = next;
@@ -2041,19 +2111,22 @@ struct decoding_task_graph::impl::record_scheduler {
         auto continuation = event;
         continuation.offset = next;
         continuation.operation = operation;
-        set_continuation(c, id, continuation);
+        hold(held);
+        set_continuation_locked(c, id, continuation);
       }
-      return;
-    }
-  }
+      return held;
+    } // end - while(true)
+  } // end - execute_raw()
 
   // Publish any data the node commits when its last input is known.
   void flush_node(context &c, std::size_t id, const graph_event &event) {
-    if (owner.streaming_nodes[event.node].capability->flush())
-      c.fired.store(publish_all(c, id, event.root, event.node),
-                    std::memory_order_relaxed);
-    else if (!pooled(event.node) && !indexed(event.node) && !staged(event.node))
+    if (owner.streaming_nodes[event.node].capability->flush()) {
+      publish_all(c, id, event.root, event.node).unlock();
+      c.fired.store(true, std::memory_order_relaxed);
+    } else if (!pooled(event.node) && !indexed(event.node) &&
+               !staged(event.node)) {
       snapshot_node(c, event.node); // a pooled copy holds only its last delta
+    }
   }
 
   // Drain the node or feedback group before running the node's callback.
@@ -2164,6 +2237,8 @@ struct decoding_task_graph::impl::record_scheduler {
     std::size_t done_id = no_event;
     // Whether this worker holds the idle search gate.
     bool searching = false;
+    // The lock the last event's final scheduler step still holds, if any.
+    runtime_lock carried;
     try {
       detail_affinity::CudaDeviceGuard device_guard(cuda_device_id);
       while (true) {
@@ -2174,7 +2249,7 @@ struct decoding_task_graph::impl::record_scheduler {
         // before its pick.
         bool after_idle = false;
         {
-          auto lock = lock_runtime();
+          auto lock = carried.owns_lock() ? std::move(carried) : lock_runtime();
           if (done_context) {
             finish_locked(*done_context, done_id);
             done_context = nullptr;
@@ -2229,7 +2304,7 @@ struct decoding_task_graph::impl::record_scheduler {
         active_id = id;
         {
           NVTX_RANGE_INDEXED(event_label(event), event.index);
-          execute(*c, id, event);
+          carried = execute(*c, id, event);
         }
         done_context = c;
         done_id = id;
@@ -2248,45 +2323,13 @@ struct decoding_task_graph::impl::record_scheduler {
     return executing > 1 ? executing - 1 : 1;
   }
 
-  // The runtime lock. Releasing it sends the wakes notify_workers() queued
-  // under it, so a woken worker never blocks on its waker's lock. A wait on
-  // a condition variable releases it without them: send them first.
-  class runtime_lock : public std::unique_lock<std::mutex> {
-  public:
-    runtime_lock() = default;
-    explicit runtime_lock(record_scheduler &owner)
-        : std::unique_lock<std::mutex>(owner.mutex, std::defer_lock),
-          owner_(&owner) {
-      if (owner.has_waiting_workers)
-        lock();
-    }
-    runtime_lock(runtime_lock &&other) noexcept
-        : std::unique_lock<std::mutex>(std::move(other)),
-          owner_(std::exchange(other.owner_, nullptr)) {}
-    runtime_lock &operator=(runtime_lock &&other) noexcept {
-      if (this != &other) {
-        unlock();
-        std::unique_lock<std::mutex>::operator=(std::move(other));
-        owner_ = std::exchange(other.owner_, nullptr);
-      }
-      return *this;
-    }
-    ~runtime_lock() { unlock(); }
-
-    // Release the lock, then send the wakes queued under it.
-    void unlock() {
-      if (!owns_lock())
-        return;
-      const auto wakes = owner_->take_wakes_locked();
-      std::unique_lock<std::mutex>::unlock();
-      owner_->send_wakes(wakes);
-    }
-
-  private:
-    record_scheduler *owner_ = nullptr;
-  };
-
   runtime_lock lock_runtime() { return runtime_lock(*this); }
+
+  // Hold the runtime lock in @p held, taking it unless already held.
+  void hold(runtime_lock &held) {
+    if (!held.owns_lock())
+      held = lock_runtime();
+  }
 
   // Only the async coordinator admits, activates and releases contexts, so it
   // reads `active` and `in_use` without the lock; workers read them under it.
