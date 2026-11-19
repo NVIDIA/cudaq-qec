@@ -36,8 +36,9 @@ namespace allocation_counter {
 
 /// Whether this thread's allocations are being counted.
 inline thread_local bool counting = false;
-/// This thread's allocations counted so far.
+/// This thread's allocations and requested bytes counted so far.
 inline thread_local std::size_t counted = 0;
+inline thread_local std::size_t counted_bytes = 0;
 
 /// Whether every thread's allocations are being counted, and how many.
 inline std::atomic<bool> counting_all = false;
@@ -58,17 +59,21 @@ std::size_t on_every_thread_during(const Run &run) {
 }
 
 /// The allocations @p run makes on this thread. Calls nest: an inner count
-/// is included in the outer one. Always 0 under a sanitizer.
+/// is included in the outer one. Optionally report their requested bytes.
+/// Always 0 under a sanitizer.
 template <typename Run>
-std::size_t during(const Run &run) {
+std::size_t during(const Run &run, std::size_t *bytes = nullptr) {
   // Restores the flag however run() returns, an exception included.
   struct restore {
     bool was_counting;
     ~restore() { counting = was_counting; }
   } guard{counting};
   const auto before = counted;
+  const auto before_bytes = counted_bytes;
   counting = true;
   run();
+  if (bytes)
+    *bytes = counted_bytes - before_bytes;
   return counted - before;
 }
 
@@ -79,8 +84,10 @@ std::size_t during(const Run &run) {
 // forms call these.
 void *operator new(std::size_t size) {
   void *p = std::malloc(size == 0 ? 1 : size);
-  if (allocation_counter::counting)
+  if (allocation_counter::counting) {
     ++allocation_counter::counted;
+    allocation_counter::counted_bytes += size;
+  }
   if (allocation_counter::counting_all.load(std::memory_order_relaxed))
     allocation_counter::counted_all.fetch_add(1, std::memory_order_relaxed);
   if (!p)
@@ -94,8 +101,10 @@ void *operator new(std::size_t size, std::align_val_t align) {
   const auto rounded =
       (std::max(size, std::size_t{1}) + alignment - 1) / alignment * alignment;
   void *p = std::aligned_alloc(alignment, rounded);
-  if (allocation_counter::counting)
+  if (allocation_counter::counting) {
     ++allocation_counter::counted;
+    allocation_counter::counted_bytes += size;
+  }
   if (allocation_counter::counting_all.load(std::memory_order_relaxed))
     allocation_counter::counted_all.fetch_add(1, std::memory_order_relaxed);
   if (!p)
