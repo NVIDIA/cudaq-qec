@@ -278,6 +278,11 @@ public:
 /// negative is absent. At the end of a shot, once every producer has
 /// finished, a pending instance fires with its remaining optional inputs
 /// absent; one still missing a required input never existed and is dropped.
+///
+/// A streaming feedback cycle consists of indexed nodes with at least one
+/// required input each. Inside it only fire(k) publishes, every value with
+/// index k, so the end of a shot resolves the cycle in instance order. A
+/// member's flush() may publish only to nodes outside its cycle.
 class indexed_join_node {
 public:
   virtual ~indexed_join_node() = default;
