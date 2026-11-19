@@ -21,6 +21,9 @@ the build, operating it, and extending it (decoder plugins, transport
 providers, wire format). The other realtime decoding documents cover
 different viewpoints:
 
+- [Decoding server](../../../../docs/sphinx/components/qec/decoding_server.rst)
+  — the deployment guide: running the prebuilt decoding-server image, its
+  configuration, and its examples.
 - [Getting started with realtime decoding](../../../../docs/sphinx/examples_rst/qec/getting_started_realtime_decoding.rst)
   — the in-process API: generating a detector error model, configuring
   decoders inside your application, and calling them from quantum kernels
@@ -29,7 +32,7 @@ different viewpoints:
   — using the *delivered* server and the FPGA playback tool inside the
   CUDA-Q decoding container (nothing built but the example), including the
   `cpu_roce` and FPGA syndrome sources.
-- [Decoding task graphs](../../../../docs/sphinx/examples_rst/qec/decoding_task_graph.rst)
+- [Decoding task graphs](../../../../docs/sphinx/components/qec/decoding_task_graph.rst)
   — the task-graph execution model in depth.
 
 If you do not need to build anything, start with the container-based demo
@@ -308,7 +311,7 @@ decoders:
 Configurations can also use `dem_chunks` or Stim DEM text (`stim_dem` /
 `stim_dem_path`), with different required and derived fields. See the
 [configuration API](../../include/cudaq/qec/realtime/decoding_config.h) and
-[task-graph guide](../../../../docs/sphinx/examples_rst/qec/decoding_task_graph.rst).
+[task-graph guide](../../../../docs/sphinx/components/qec/decoding_task_graph.rst).
 
 **Adding a decoder.** An out-of-tree plugin is a shared library installed
 in `decoder-plugins/`. Register the decoder, then register its parameter
@@ -498,7 +501,7 @@ its inner decoder must support graph dispatch and capture successfully.
 Multi-node graphs and graphs with a CPU-only inner decoder require host
 dispatch. Host-dispatched graphs also support parallel-window decoding,
 sparse window models, and asynchronous streaming; see the
-[task-graph documentation](../../../../docs/sphinx/examples_rst/qec/decoding_task_graph.rst).
+[task-graph documentation](../../../../docs/sphinx/components/qec/decoding_task_graph.rst).
 
 Device dispatch requires a CUDA GPU with compute capability 9.0 or newer,
 GPU-accessible provider rings, and a server linked with the device-graph component,
@@ -512,10 +515,11 @@ The server never links a transport. A wire is a shared library loaded at
 runtime, implementing the bridge interface in the installed CUDA-Q header
 `include/cudaq/realtime/daemon/bridge/bridge_interface.h` and exporting
 `cudaq_realtime_get_bridge_interface`.
-Build it against the matching CUDA-Q realtime headers: the
-[CUDA-Q revision pinned by this checkout](https://github.com/NVIDIA/cuda-quantum/blob/d39eeed57a7c160de0946de16e373d41a87034e2/realtime/include/cudaq/realtime/daemon/bridge/bridge_interface.h#L238-L250)
-uses bridge interface version **4**. A different reported version is rejected
-with `Bridge interface version mismatch` before the provider is created.
+Build it against the CUDA-Q realtime headers of the SDK you deploy against,
+and advertise the `CUDAQ_REALTIME_BRIDGE_INTERFACE_VERSION` defined in that
+SDK's `bridge_interface.h`. The published v0.9.0 decoding-server image uses
+bridge interface version **5**. A different reported version is rejected with
+`Bridge interface version mismatch` before the provider is created.
 
 A provider value containing `/` is used as a library path. A bare name maps
 underscores to hyphens: `cpu_roce` becomes
@@ -553,12 +557,18 @@ required by the selected dispatch mode. Keep transport-specific framing and
 conversion in the provider: publish canonical decoder RPC requests into the
 receive ring and transmit the responses from the send ring. A QPU controller
 can construct those requests directly or have its provider translate native
-packets. The pinned
-[UDP bridge](https://github.com/NVIDIA/cuda-quantum/blob/d39eeed57a7c160de0946de16e373d41a87034e2/realtime/lib/daemon/bridge/udp/bridge_impl.cpp)
+packets. CUDA-Q's
+[UDP bridge](https://github.com/NVIDIA/cuda-quantum/blob/main/realtime/lib/daemon/bridge/udp/bridge_impl.cpp)
 provides a reference implementation.
 
-The three data-plane RPCs are `enqueue_syndromes`, `get_corrections`, and
-`reset_decoder`. Their function IDs and tightly packed payload structures are
+The data-plane RPCs are `enqueue_syndromes`, `get_corrections`,
+`get_logical_measurements`, and `reset_decoder`. `get_corrections` returns the
+correction bits, the predicted flips of the logical observables.
+`get_logical_measurements` returns the corrected logical measurements, the raw
+logical readout with those corrections applied; it needs a task graph with a
+logical output. See the Logical Measurements reference in the
+[task-graph documentation](../../../../docs/sphinx/components/qec/decoding_task_graph.rst)
+for details. The function IDs and tightly packed payload structures are
 defined in
 [`decoder_rpc_wire_format.h`](../../include/cudaq/qec/realtime/decoder_rpc_wire_format.h).
 Use little-endian scalar fields and LSB-first packed bits. Requests have a
@@ -609,8 +619,8 @@ an explicit row. For parser behavior and response construction, see
 - [Getting started with realtime decoding](../../../../docs/sphinx/examples_rst/qec/getting_started_realtime_decoding.rst) — the in-process API viewpoint: DEM generation, in-app decoder configuration, kernel usage
 - [Realtime decoding demo](../../../../docs/sphinx/examples_rst/qec/realtime_decoding_demo.rst) — the container viewpoint: the delivered server, the FPGA playback tool, and the `cpu_roce`/FPGA syndrome sources
 - [Realtime decoding components](../../../../docs/sphinx/components/qec/realtime_decoding.rst) — workflow, terminology, and data flow
-- [Playback emulator](../../../../docs/sphinx/examples_rst/qec/playback_emulator.rst) — replaying recorded syndrome streams into a decoding server without hardware
-- [Decoding task graphs](../../../../docs/sphinx/examples_rst/qec/decoding_task_graph.rst) — window models and parallel-window streaming
+- [Playback emulator](../../../../docs/sphinx/components/qec/playback_emulator.rst) — replaying recorded syndrome streams into a decoding server without hardware
+- [Decoding task graphs](../../../../docs/sphinx/components/qec/decoding_task_graph.rst) — window models and parallel-window streaming
 - [`MESSAGE_FORMAT.md`](MESSAGE_FORMAT.md) — companion wire-format notes; use the canonical definitions under [Transport providers](#transport-providers)
 - [`Building.md`](../../../../Building.md) — build options, including the
   decoders-only configuration (`CUDAQ_QEC_DECODERS_ONLY`) that builds the
