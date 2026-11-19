@@ -44,8 +44,10 @@ struct measurement_results {
 };
 
 /// Marker carried by every node's implicit `done` output, which fires when the
-/// node has completed execution. It lets an edge
-/// express "after this node" without an explicit data dependence.
+/// node has completed execution. It lets an edge express "after this node"
+/// without an explicit data dependence. In streaming, indexed fires send
+/// completions at their instance index. A streaming `done` wire connects
+/// nodes that both join by index or both join by record.
 struct completion {};
 
 /// Aggregated detection events: s = D * m (mod 2).

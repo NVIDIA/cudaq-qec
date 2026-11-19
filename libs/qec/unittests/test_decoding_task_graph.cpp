@@ -13961,10 +13961,8 @@ static std::shared_ptr<pipeline_probe> active_pipeline_probe;
 /// and records the pair it saw so cross-record mixing is detectable. `after`
 /// takes a producer's `done` completion and publishes nothing. `after_pair`
 /// takes two completion inputs and logs their arrival order. `relay_done`
-/// publishes the completion's input slot as a bit. `pair_done`
-/// pairs a completion with a value by arrival, as an ensemble join does,
-/// and logs the value or, when the pair is not one of each, `.mixed`. Each
-/// node numbers the records it handles itself. `rendezvous_pass` relays one
+/// publishes the completion's input slot as a bit. Each node numbers the
+/// records it handles itself. `rendezvous_pass` relays one
 /// input and allows sibling branches to reach it in either order.
 class pipeline_probe_node : public task_graph_node,
                             public streaming_task_graph_node {
@@ -14008,18 +14006,6 @@ public:
       const auto record = records_++;
       probe_->log(id_, record);
       probe_->maybe_block(id_, record);
-      return false;
-    }
-    if (mode_ == "pair_done") {
-      if (slot == 0)
-        ++dones_;
-      else
-        paired_bit_ = value.get<logical_outcome>().bits[0];
-      if (++received_ < 2)
-        return false;
-      probe_->log(id_ + (dones_ == 1 ? ".value" : ".mixed"), paired_bit_);
-      received_ = 0;
-      dones_ = 0;
       return false;
     }
     const uint8_t bit = value.get<logical_outcome>().bits[0];
@@ -14121,7 +14107,7 @@ public:
     if (mode_ == "after_pair" || mode_ == "relay_done")
       return supports_streaming_input(slot) &&
              type == edge_value_type("completion");
-    if (mode_ == "after" || (mode_ == "pair_done" && slot == 0))
+    if (mode_ == "after")
       return slot == 0 && type == edge_value_type("completion");
     return supports_streaming_input(slot) &&
            type == edge_value_type("logical_outcome");
@@ -14143,8 +14129,8 @@ public:
   }
   // `rendezvous` joins as `join` does, opting in to any arrival order.
   bool joins() const {
-    return mode_ == "join" || mode_ == "rendezvous" || mode_ == "pair_done" ||
-           mode_ == "after_pair" || mode_ == "relay_done";
+    return mode_ == "join" || mode_ == "rendezvous" || mode_ == "after_pair" ||
+           mode_ == "relay_done";
   }
 
 private:
@@ -14159,8 +14145,6 @@ private:
   std::size_t skipped_ = 0;
   std::size_t records_ = 0;
   const uint8_t *last_end_ = nullptr; ///< where `wide`'s last round ended
-  std::size_t dones_ = 0;             ///< `pair_done`'s completions so far
-  uint8_t paired_bit_ = 0;            ///< `pair_done`'s value so far
   uint8_t pending_[2] = {0, 0};
   edge_value value_out_;
 };
@@ -16402,21 +16386,21 @@ TEST(DecodingTaskGraph, IndexedFinalResolvesPendingFeedbackInInstanceOrder) {
 
 // A streaming conflict permits a batch graph and rejects async startup.
 template <class build_graph>
-static void expect_feedback_streaming_conflict(build_graph build,
-                                               const char *reason) {
+static void expect_streaming_build_conflict(build_graph build,
+                                            const char *reason) {
   const auto graph = build(false);
   EXPECT_FALSE(graph->supports_streaming());
   EXPECT_NE(graph->streaming_incompatibility_reason().find(reason),
             std::string::npos);
   try {
     (void)build(true);
-    ADD_FAILURE() << "Expected feedback wiring to reject async startup";
+    ADD_FAILURE() << "Expected streaming wiring to reject async startup";
   } catch (const std::logic_error &e) {
     const std::string message = e.what();
     EXPECT_NE(message.find("prepare_async_streaming"), std::string::npos);
     EXPECT_NE(message.find(reason), std::string::npos);
   }
-} // end - expect_feedback_streaming_conflict()
+} // end - expect_streaming_build_conflict()
 
 // An ordered relay can choose new indices independently of the source fire.
 TEST(DecodingTaskGraph, StreamingRejectsRecordOrderedFeedbackCycle) {
@@ -16445,8 +16429,8 @@ TEST(DecodingTaskGraph, StreamingRejectsRecordOrderedFeedbackCycle) {
          .async_queue_capacity = 16,
          .async_num_workers = 2});
   };
-  expect_feedback_streaming_conflict(
-      build, "record-ordered node 'R' in a feedback cycle");
+  expect_streaming_build_conflict(build,
+                                  "node 'J.done' requires an indexed consumer");
 } // end - TEST(DecodingTaskGraph, StreamingRejectsRecordOrderedFeedbackCycle)
 
 // A flush ends a node's shot only after that node's fires in the flush
@@ -16642,27 +16626,23 @@ static void wait_for_scheduler_records(pipeline_probe &probe, const char *node,
 // Released, the queued J fires run one after another, ahead of what their
 // deliveries queue, as fires leave a worker for other events, and each
 // keeps its slot until those finish: they must fit as well, whether J feeds
-// joins K and L through its output or through its `done`. When J's `done`
-// reaches nodes that join by record instead, J's fires keep their parent,
-// so those nodes see the record's rounds in order: P pairs each completion
-// with the round's value. When J reads its own previous instance through a
-// loop-carried edge, as a sliding window does, the rounds admitted behind
-// its held fire 1 wait as a chain, each fire queued by the last one's
-// delivery.
+// joins K and L through its output or through its `done`. When J reads its
+// own previous instance through a loop-carried edge, as a sliding window
+// does, the rounds admitted behind its held fire 1 wait as a chain, each
+// fire queued by the last one's delivery.
 TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
   ASSERT_TRUE(index_probe_registered);
   // Several times the event store, and within A's chunk limit.
   constexpr std::size_t rounds = 600;
   // Fill the record contexts' worth of rounds behind a detached fire.
   constexpr std::size_t coalesced_progress = 16;
-  enum class after_j { output, joins, done, ordered, loop };
-  for (const auto shape : {after_j::output, after_j::joins, after_j::done,
-                           after_j::ordered, after_j::loop}) {
-    SCOPED_TRACE(shape == after_j::output    ? "J feeds the output"
-                 : shape == after_j::joins   ? "J feeds joins K and L"
-                 : shape == after_j::done    ? "J's done feeds K and L"
-                 : shape == after_j::ordered ? "J's done feeds C and P"
-                                             : "J feeds itself");
+  enum class after_j { output, joins, done, loop };
+  for (const auto shape :
+       {after_j::output, after_j::joins, after_j::done, after_j::loop}) {
+    SCOPED_TRACE(shape == after_j::output  ? "J feeds the output"
+                 : shape == after_j::joins ? "J feeds joins K and L"
+                 : shape == after_j::done  ? "J's done feeds K and L"
+                                           : "J feeds itself");
     auto probe = std::make_shared<pipeline_probe>();
     active_pipeline_probe = probe;
     {
@@ -16703,12 +16683,6 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
       edges.push_back({"K", "output", "X", "a"});
       edges.push_back({"L", "output", "X", "b"});
       edges.push_back({"X", "output", "output", "input"});
-    } else if (shape == after_j::ordered) {
-      nodes.push_back(pipeline_node("C", "after"));
-      nodes.push_back(pipeline_node("P", "pair_done"));
-      edges.push_back({"J", "done", "C", "input"});
-      edges.push_back({"J", "done", "P", "a"});
-      edges.push_back({"A", "output", "P", "b"});
     }
     auto graph =
         decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
@@ -16736,7 +16710,7 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
       first_fire.release();
       batch_fire.wait_for_arrivals();
       // Observe ingest running ahead on paths where the held fire detaches.
-      if (shape != after_j::ordered && shape != after_j::loop)
+      if (shape != after_j::loop)
         wait_for_scheduler_records(*probe, "A", coalesced_progress);
       batch_fire.release();
       graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
@@ -16763,13 +16737,6 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
     }
     if (shape == after_j::output)
       expect_indexed_pairs(records, rounds);
-    if (shape == after_j::ordered) {
-      // One completion per round, and each paired with its own round.
-      EXPECT_EQ(probe->records("C"), all);
-      EXPECT_EQ(probe->records("P.mixed").size(), 0u);
-      EXPECT_EQ(probe->records("P.value"),
-                std::vector<std::size_t>(records.begin(), records.end()));
-    }
   } // end - for(shape)
 } // end - TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires)
 
@@ -16893,9 +16860,9 @@ TEST(DecodingTaskGraph, FeedbackReservesMissingInputNotifications) {
   constexpr std::size_t rounds = 600;
   constexpr std::size_t branches = 4;
   constexpr std::int64_t held = 32;
-  // Half of this graph's 752 slots holds 17 detached M fires at 21 slots
-  // each. The following fire stays attached to the round that produces it.
-  constexpr std::size_t detached_fires = 17;
+  // Half of this graph's 752 slots holds at most 17 detached M fires at
+  // 21 slots each. An attached fire can hold up ingest sooner.
+  constexpr std::size_t max_detached_fires = 17;
   auto probe = std::make_shared<pipeline_probe>();
   active_pipeline_probe = probe;
   std::vector<task_graph_node_config> nodes;
@@ -16960,10 +16927,10 @@ TEST(DecodingTaskGraph, FeedbackReservesMissingInputNotifications) {
       graph->enqueue_syndrome(&records[k], 1, round_type::BULK);
     first_fire.release();
     batch_fire.wait_for_arrivals();
-    const auto admitted = held + detached_fires + 1;
-    wait_for_scheduler_records(*probe, "A", admitted);
-    // An extra round here would leave too little room for the notifications.
-    EXPECT_FALSE(probe->wait_for_count("A", admitted + 1));
+    // Allow one ingest for the attached fire. Other live work can use
+    // slots and make ingest stop sooner while M is held.
+    const auto max_admitted = held + max_detached_fires + 1;
+    EXPECT_FALSE(probe->wait_for_count("A", max_admitted + 1));
     batch_fire.release();
     leaf_fires.wait_for_arrivals(2 * branches);
     // A following M fire drains while the resulting leaf fires are held.
@@ -17068,6 +17035,22 @@ public:
   bool requires_input(std::size_t) const override { return false; }
 };
 
+class seeded_required_index_join : public seeded_index_join {
+public:
+  using seeded_index_join::seeded_index_join;
+
+  // The seed can open a join but both value inputs must arrive to fire it.
+  bool requires_input(std::size_t slot) const override { return slot < 2; }
+};
+
+class required_index_join : public index_probe_node {
+public:
+  using index_probe_node::index_probe_node;
+
+  // Both incoming paths must supply the instance.
+  bool requires_input(std::size_t) const override { return true; }
+};
+
 class terminal_index_join : public index_probe_node {
 public:
   using index_probe_node::index_probe_node;
@@ -17099,7 +17082,10 @@ public:
 
   // Start the withheld publications at index zero on the first flush.
   bool flush() override {
-    return !std::exchange(flushed_, true) && publications_ != 0;
+    if (std::exchange(flushed_, true))
+      return false;
+    active_pipeline_probe->log("sender.flush", 0);
+    return publications_ != 0;
   }
 
   // Report the biggest batch that the callback can publish.
@@ -17230,6 +17216,9 @@ static const bool feedback_probe_kinds_registered = [] {
   add.operator()<branching_index_join>("test_branching_index_join",
                                        "join_send");
   add.operator()<optional_index_join>("test_optional_index_join", "join_send");
+  add.operator()<seeded_required_index_join>("test_seeded_required_index_join",
+                                             "join_send");
+  add.operator()<required_index_join>("test_required_index_join", "join_send");
   add.operator()<terminal_index_join>("test_terminal_index_join", "join");
   task_graph_node_kind_spec sender;
   sender.name = "test_indexed_flushing_sender";
@@ -17309,7 +17298,7 @@ TEST(DecodingTaskGraph, StreamingRejectsFeedbackWithoutRequiredInput) {
          {"J", "output", "output", "input"}},
         {.async_streaming = async});
   };
-  expect_feedback_streaming_conflict(
+  expect_streaming_build_conflict(
       build, "indexed node 'J' in a feedback cycle needs a required input");
 } // end - TEST(DecodingTaskGraph, StreamingRejectsFeedbackWithoutRequiredInput)
 
@@ -17381,7 +17370,8 @@ TEST(DecodingTaskGraph, IndexedFireCannotChangeItsFeedbackIndex) {
 } // end - TEST(IndexedFireCannotChangeItsFeedbackIndex)
 
 // The same callback is valid on a one-way edge between components.
-TEST(DecodingTaskGraph, FinalCallbackCannotPublishInsideAFeedbackCycle) {
+TEST(DecodingTaskGraph,
+     FinalCallbackCannotPublishBackwardInsideAFeedbackCycle) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
   for (const bool async : {false, true}) {
     SCOPED_TRACE(async);
@@ -17434,11 +17424,280 @@ TEST(DecodingTaskGraph, FinalCallbackCannotPublishInsideAFeedbackCycle) {
     } // end - for(cycle)
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph,
-  // FinalCallbackCannotPublishInsideAFeedbackCycle)
+  // FinalCallbackCannotPublishBackwardInsideAFeedbackCycle)
 
-// Each flush publication completes ordered consumers while indexed consumers
-// receive the completion of the actual fire at its index.
-TEST(DecodingTaskGraph, IndexedFlushCompletesRecordOrderedPublications) {
+// The callback supplies an optional forward input before its join closes.
+TEST(DecodingTaskGraph, FinalCallbackDeliversForwardInsideAFeedbackCycle) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  enum class sender_shape { anchor, member, pending_member };
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    for (const auto shape : {sender_shape::anchor, sender_shape::member,
+                             sender_shape::pending_member}) {
+      SCOPED_TRACE(static_cast<int>(shape));
+      const bool non_anchor = shape != sender_shape::anchor;
+      const bool pending_sender = shape == sender_shape::pending_member;
+      auto probe = std::make_shared<pipeline_probe>();
+      active_pipeline_probe = probe;
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pipeline_node("A", "source"));
+      nodes.push_back(index_node("T", "tag"));
+      if (pending_sender)
+        nodes.push_back(index_node("G", "tag", /*limit=*/0));
+      if (non_anchor)
+        nodes.push_back(index_node("H", "join"));
+      task_graph_node_config sender;
+      sender.id = "J";
+      sender.kind = "test_indexed_flushing_sender";
+      nodes.push_back(std::move(sender));
+      nodes.push_back(index_node("K", "join_send"));
+      std::vector<task_graph_edge> edges{
+          {"measurements", "output", "A", "input"},
+          {"A", "output", "T", "input"},
+          {"T", "output", "K", "a"},
+          {"J", "send", "K", "b"},
+          {"K", "send", non_anchor ? "H" : "J", "b", -1},
+          {"K", "output", "output", "input"}};
+      if (non_anchor) {
+        edges.push_back({"T", "output", "H", "a"});
+        // The silent gate holds J[1] until FINAL even though K[0] needs
+        // J's callback. J can settle the missing gate before resolving K.
+        edges.push_back({"H", "output", "J", "a", pending_sender ? -1 : 0});
+        edges.push_back({pending_sender ? "G" : "T", "output", "J", "b",
+                         pending_sender ? 0 : -1});
+        if (pending_sender)
+          edges.push_back({"A", "output", "G", "input"});
+      } else {
+        edges.push_back({"T", "output", "J", "a"});
+      }
+      auto graph = decoding_task_graph::from_topology(
+          std::move(nodes), std::move(edges),
+          {.async_streaming = async, .async_num_workers = 2});
+      const uint8_t bit = 0;
+      ASSERT_TRUE(graph->supports_streaming())
+          << graph->streaming_incompatibility_reason();
+      ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+      EXPECT_EQ(graph->streaming_result().status,
+                task_graph_streaming_status::complete);
+      EXPECT_EQ(graph->streaming_result().values, std::vector<uint8_t>{1});
+      EXPECT_EQ(probe->records("J"),
+                std::vector<std::size_t>{pending_sender ? 1u : 0u});
+      EXPECT_EQ(probe->records("K"), std::vector<std::size_t>{0});
+    } // end - for(shape)
+  } // end - for(async)
+} // end - TEST(FinalCallbackDeliversForwardInsideAFeedbackCycle)
+
+// Closing K[1] cannot rule out a callback delivering its first value to K[0].
+TEST(DecodingTaskGraph, FinalCallbackCanSupplyAnEarlierUnresolvedIndex) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    task_graph_node_config sender;
+    sender.id = "J";
+    sender.kind = "test_indexed_flushing_sender";
+    nodes.push_back(std::move(sender));
+    nodes.push_back(index_node("K", "join_send"));
+    // T supplies J[2] and an optional input to K[1]. J[2] can finish when
+    // K[1] drops, and J's callback then supplies the required input to K[0].
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a", -2},
+         {"K", "send", "J", "b", -1},
+         {"T", "output", "K", "b", -1},
+         {"J", "send", "K", "a"},
+         {"K", "output", "output", "input"}},
+        {.async_streaming = async, .async_num_workers = 2});
+    const uint8_t bit = 0;
+    ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete);
+    EXPECT_EQ(graph->streaming_result().values, std::vector<uint8_t>{1});
+    EXPECT_EQ(probe->records("J"), std::vector<std::size_t>{2});
+    EXPECT_EQ(probe->records("K"), std::vector<std::size_t>{0});
+  } // end - for(async)
+} // end - TEST(FinalCallbackCanSupplyAnEarlierUnresolvedIndex)
+
+// A callback cannot supply input for a fire it was itself waiting on.
+TEST(DecodingTaskGraph, FinalCallbackRejectsAnAlreadyClosedForwardInput) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    active_pipeline_probe = std::make_shared<pipeline_probe>();
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    task_graph_node_config sender;
+    sender.id = "J";
+    sender.kind = "test_indexed_flushing_sender";
+    nodes.push_back(std::move(sender));
+    nodes.push_back(index_node("K", "join_send"));
+    // K[0] needs J's callback, but J[1] is still waiting for K[0].
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"T", "output", "K", "a"},
+         {"J", "send", "K", "b"},
+         {"K", "send", "J", "b", -1},
+         {"K", "output", "output", "input"}},
+        {.async_streaming = async, .async_num_workers = 2});
+    const uint8_t bit = 0;
+    ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::BULK));
+    try {
+      graph->enqueue_syndrome(&bit, 1, round_type::FINAL);
+      ADD_FAILURE() << "Expected the cyclic callback dependency to fail";
+    } catch (const std::logic_error &e) {
+      EXPECT_NE(
+          std::string(e.what()).find("already resolved feedback instance"),
+          std::string::npos);
+    }
+  } // end - for(async)
+} // end - TEST(FinalCallbackRejectsAnAlreadyClosedForwardInput)
+
+// A late optional value is harmless for a join with missing required data.
+TEST(DecodingTaskGraph, FinalCallbackIgnoresOptionalInputForDroppedJoin) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  enum class late_values { optional, one_required, all_required };
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    for (const auto shape : {late_values::optional, late_values::one_required,
+                             late_values::all_required}) {
+      SCOPED_TRACE(static_cast<int>(shape));
+      const bool supply_all = shape == late_values::all_required;
+      auto probe = std::make_shared<pipeline_probe>();
+      active_pipeline_probe = probe;
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pipeline_node("A", "source"));
+      nodes.push_back(index_node("T", "tag"));
+      task_graph_node_config sender;
+      sender.id = "J";
+      sender.kind = "test_indexed_flushing_sender";
+      nodes.push_back(std::move(sender));
+      task_graph_node_config join;
+      join.id = "K";
+      join.kind = shape == late_values::optional
+                      ? "test_seeded_index_join"
+                      : "test_seeded_required_index_join";
+      nodes.push_back(std::move(join));
+      // K[0] drops so J[1] can finish. Its callback always supplies b.
+      // Only the last case also gets a, so only that case can reopen K[0].
+      auto graph = decoding_task_graph::from_topology(
+          std::move(nodes),
+          {{"measurements", "output", "A", "input"},
+           {"A", "output", "T", "input"},
+           {"T", "output", "J", "a", -1},
+           {"K", "send", "J", "b", -1},
+           {"T", "output", "K", "seed"},
+           {"J", "send", "K", "b"},
+           {"J", supply_all ? "send" : "output", "K", "a"},
+           {"A", "output", "output", "input"}},
+          {.async_streaming = async, .async_num_workers = 2});
+      const uint8_t bit = 1;
+      if (supply_all) {
+        try {
+          graph->enqueue_syndrome(&bit, 1, round_type::FINAL);
+          ADD_FAILURE() << "Expected the missing required value to fail FINAL";
+        } catch (const std::logic_error &e) {
+          EXPECT_NE(std::string(e.what()).find(
+                        "received input 0 for an already resolved feedback "
+                        "instance 0"),
+                    std::string::npos);
+        }
+      } else {
+        ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+        EXPECT_EQ(graph->streaming_result().status,
+                  task_graph_streaming_status::complete);
+      }
+      EXPECT_EQ(probe->records("J"), std::vector<std::size_t>{1});
+      EXPECT_TRUE(probe->records("K").empty());
+    } // end - for(shape)
+  } // end - for(async)
+} // end - TEST(FinalCallbackIgnoresOptionalInputForDroppedJoin)
+
+// A single settled join reaches each layer by many paths at the same index.
+TEST(DecodingTaskGraph, FinalHandlesReconvergentRequiredFeedbackPaths) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  // Enough layers to expose repeated traversal while keeping the graph small.
+  constexpr int layers = 22;
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  std::vector<task_graph_edge> edges{{"measurements", "output", "A", "input"},
+                                     {"A", "output", "T", "input"},
+                                     {"T", "output", "J", "a", -1},
+                                     {"K", "send", "J", "b", -1},
+                                     {"A", "output", "output", "input"}};
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "tag"));
+  task_graph_node_config sender;
+  sender.id = "J";
+  sender.kind = "test_indexed_flushing_sender";
+  sender.node_params.insert("publications", 0);
+  nodes.push_back(std::move(sender));
+  std::array<std::string, 2> prior{"J", "J"};
+  const auto add_join = [&](const std::string &id) {
+    task_graph_node_config node;
+    node.id = id;
+    node.kind = "test_required_index_join";
+    nodes.push_back(std::move(node));
+    edges.push_back({prior[0], "output", id, "a"});
+    edges.push_back({prior[1], "output", id, "b"});
+  };
+  for (int layer = 0; layer < layers; ++layer) {
+    auto left = "left" + std::to_string(layer);
+    auto right = "right" + std::to_string(layer);
+    add_join(left);
+    add_join(right);
+    prior = {std::move(left), std::move(right)};
+  }
+  add_join("K");
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), std::move(edges));
+  const uint8_t bit = 1;
+  ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+  EXPECT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::complete);
+  EXPECT_EQ(probe->records("J"), std::vector<std::size_t>{1});
+  EXPECT_TRUE(probe->records("K").empty());
+} // end - TEST(FinalHandlesReconvergentRequiredFeedbackPaths)
+
+// A positional consumer cannot tell which instance sent an indexed completion.
+TEST(DecodingTaskGraph, StreamingRejectsIndexedDoneToRecordOrderedConsumer) {
+  ASSERT_TRUE(index_probe_registered);
+  active_pipeline_probe = std::make_shared<pipeline_probe>();
+  const auto build = [](bool async) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("J", "join"));
+    nodes.push_back(pipeline_node("R", "after"));
+    return decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"T", "output", "J", "b"},
+         {"J", "done", "R", "input"},
+         {"J", "output", "output", "input"}},
+        {.async_streaming = async});
+  };
+  expect_streaming_build_conflict(build,
+                                  "node 'J.done' requires an indexed consumer");
+  const auto batch = build(false);
+  EXPECT_NO_THROW((void)batch->run(measurement_results{{0}}));
+} // end - TEST(StreamingRejectsIndexedDoneToRecordOrderedConsumer)
+
+// FINAL runs the pending fire before its flush callback. Only the fire
+// sends an indexed completion, even when the callback publishes a burst.
+TEST(DecodingTaskGraph, IndexedFlushWaitsForFiresQueuedByItsResolver) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
   // The burst exceeds the event store for this topology.
   constexpr int burst_size = 400;
@@ -17446,62 +17705,55 @@ TEST(DecodingTaskGraph, IndexedFlushCompletesRecordOrderedPublications) {
     SCOPED_TRACE(async);
     for (const int publications : {0, 1, burst_size}) {
       SCOPED_TRACE(publications);
-      // Exercise a burst of completions even with no value wires to defer.
-      const bool wire_values = publications != burst_size;
       auto probe = std::make_shared<pipeline_probe>();
       std::vector<task_graph_node_config> nodes;
       std::vector<task_graph_edge> edges{
           {"measurements", "output", "A", "input"},
           {"A", "output", "T", "input"},
+          {"A", "output", "M", "input"},
           {"T", "output", "J", "a"},
-          {"T", "output", "J", "b", -1},
-          {"J", "done", "R", "input"},
-          {"R", "output", "K", "a"},
-          {"R", "output", "K", "b", -1},
-          {"R", "done", "X", "input"},
+          {"M", "output", "J", "b"},
           {"J", "done", "I", "a"},
           {"T", "output", "I", "b", -1},
-          {"K", "output", "output", "input"}};
+          {"J", "send", "H", "a"},
+          {"J", "send", "H", "b", -1},
+          {"I", "output", "output", "input"}};
       task_graph_node_config sender;
       active_pipeline_probe = probe;
       nodes.push_back(pipeline_node("A", "source"));
       nodes.push_back(index_node("T", "tag"));
+      // No optional value arrives, so J only fires once FINAL resolves it.
+      nodes.push_back(index_node("M", "tag", /*limit=*/0));
       sender.id = "J";
       sender.kind = "test_indexed_flushing_sender";
       sender.node_params.insert("publications", publications);
       nodes.push_back(std::move(sender));
-      nodes.push_back(index_node("R", "tag_done"));
-      nodes.push_back(index_node("K", "join"));
-      nodes.push_back(pipeline_node("X", "after"));
       nodes.push_back(index_node("I", "join_done"));
-      if (wire_values) {
-        nodes.push_back(index_node("H", "join"));
-        edges.push_back({"J", "send", "H", "a"});
-        edges.push_back({"J", "send", "H", "b", -1});
-      }
+      nodes.push_back(index_node("H", "join"));
       auto graph = decoding_task_graph::from_topology(
           std::move(nodes), std::move(edges),
-          {.async_streaming = async, .async_num_workers = 2});
+          {.async_streaming = async, .async_num_workers = 1});
       const uint8_t bit = 1;
       ASSERT_TRUE(graph->supports_streaming())
           << graph->streaming_incompatibility_reason();
       ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
       EXPECT_EQ(graph->streaming_result().status,
                 task_graph_streaming_status::complete);
-      std::vector<std::size_t> ordered(publications + 1);
-      std::iota(ordered.begin(), ordered.end(), std::size_t{0});
-      EXPECT_EQ(probe->records("R"), ordered);
-      EXPECT_EQ(probe->records("X"), ordered);
+      auto lifecycle = probe->events();
+      std::erase_if(lifecycle, [](const auto &event) {
+        return event.first != "J" && event.first != "sender.flush";
+      });
+      EXPECT_EQ(lifecycle, (std::vector<std::pair<std::string, std::size_t>>{
+                               {"J", 0}, {"sender.flush", 0}}));
       EXPECT_EQ(probe->records("I"), (std::vector<std::size_t>{0}));
-      if (wire_values) {
-        auto values = probe->records("H");
-        ordered.pop_back();
-        std::sort(values.begin(), values.end());
-        EXPECT_EQ(values, ordered);
-      }
+      std::vector<std::size_t> expected(publications);
+      std::iota(expected.begin(), expected.end(), std::size_t{0});
+      auto values = probe->records("H");
+      std::sort(values.begin(), values.end());
+      EXPECT_EQ(values, expected);
     } // end - for(publications)
   } // end - for(async)
-} // end - TEST(IndexedFlushCompletesRecordOrderedPublications)
+} // end - TEST(IndexedFlushWaitsForFiresQueuedByItsResolver)
 
 // Drain a finite absence cascade around a cycle without firing a join.
 TEST(DecodingTaskGraph, MissingInputNotificationsCanCircleAFeedbackLoop) {
@@ -17575,7 +17827,7 @@ TEST(DecodingTaskGraph, StreamingRejectsCyclesOfRequiredInputs) {
       return decoding_task_graph::from_topology(
           std::move(nodes), std::move(edges), {.async_streaming = async});
     };
-    expect_feedback_streaming_conflict(build, "cycle of required inputs");
+    expect_streaming_build_conflict(build, "cycle of required inputs");
   } // end - for(multi_node)
 } // end - TEST(StreamingRejectsCyclesOfRequiredInputs)
 
@@ -17909,6 +18161,124 @@ TEST(DecodingTaskGraph, FirstDeliveryBurstUsesPreallocatedStorage) {
   EXPECT_EQ(allocations, 0u);
   EXPECT_EQ(allocation_probe_node::received, allocation_probe_node::burst_size);
 } // end - TEST(FirstDeliveryBurstUsesPreallocatedStorage)
+
+// Expand a bit into a large measurement frame or read it back as a correction.
+class snapshot_relay_probe : public pipeline_probe_node {
+public:
+  // A 64 KiB frame makes whole-event-store preallocation visible.
+  static constexpr std::size_t frame_bytes = 64 * 1024;
+
+  // Both sides reuse their output storage across records.
+  explicit snapshot_relay_probe(const std::string &id)
+      : pipeline_probe_node(id, "relay", active_pipeline_probe),
+        expands_(id == "B"), frame_(measurement_results{std::vector<uint8_t>(
+                                 expands_ ? frame_bytes : 0)}) {}
+
+  // Follow the streaming path even when called through the batch API.
+  bool has_one_shot_path() const override { return false; }
+
+  // The expander supplies measurements only. The reader emits a correction.
+  std::size_t num_observables() const override { return expands_ ? 0 : 1; }
+
+  // Move the bit between the two representations without allocating.
+  bool enqueue_edge_value(const edge_value &value, std::size_t slot) override {
+    if (expands_) {
+      frame_.get<measurement_results>().bits[0] =
+          value.get<logical_outcome>().bits[0];
+      return true;
+    }
+    input_.get<logical_outcome>().bits[0] =
+        value.get<measurement_results>().bits[0];
+    return pipeline_probe_node::enqueue_edge_value(input_, slot);
+  } // end - enqueue_edge_value()
+
+  // Exercise a flush publication on the same wire as the regular delivery.
+  bool flush() override {
+    if (expands_)
+      frame_.get<measurement_results>().bits[0] = 1;
+    return expands_;
+  }
+
+  // The reader takes the measurement frame produced by the expander.
+  bool accepts_input_type(std::size_t slot,
+                          edge_value_type type) const override {
+    return slot == 0 &&
+           type == (expands_ ? logical_outcome_type : measurement_results_type);
+  }
+
+  // Expose the expander's measurement frame as an ordinary value wire.
+  std::optional<edge_value_type> output_type(std::size_t slot) const override {
+    if (slot == 0 && expands_)
+      return measurement_results_type;
+    return pipeline_probe_node::output_type(slot);
+  }
+
+  // Declare the frame size so the graph can preallocate its snapshots.
+  std::optional<std::size_t>
+  output_value_size(std::size_t slot) const override {
+    if (slot == 0 && expands_)
+      return frame_bytes;
+    return pipeline_probe_node::output_value_size(slot);
+  }
+
+  // Hand the already allocated payload back after a publication.
+  const edge_value *streaming_output(std::size_t slot) const override {
+    if (slot == 0 && expands_)
+      return &frame_;
+    return pipeline_probe_node::streaming_output(slot);
+  }
+
+private:
+  bool expands_;
+  edge_value frame_;
+  edge_value input_{logical_outcome{{0}, true}};
+};
+
+// Count construction bytes directly and exercise the smaller pool in use.
+TEST(DecodingTaskGraph, SerialRelayPreallocatesOneSnapshotBatchPerRecord) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "the sanitizer replaces the counting operator new";
+  task_graph_node_kind_spec kind;
+  kind.name = "test_snapshot_relay";
+  kind.requires_decoder = false;
+  kind.requires_dem = false;
+  register_node_kind(std::move(kind), {}, [](node_build_context &ctx) {
+    return std::make_unique<snapshot_relay_probe>(ctx.id);
+  });
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  for (const auto *id : {"B", "C"}) {
+    task_graph_node_config node;
+    node.id = id;
+    node.kind = "test_snapshot_relay";
+    nodes.push_back(std::move(node));
+  }
+  std::unique_ptr<decoding_task_graph> graph;
+  std::size_t bytes = 0;
+  allocation_counter::during(
+      [&] {
+        graph = decoding_task_graph::from_topology(
+            std::move(nodes),
+            {{"measurements", "output", "A", "input"},
+             {"A", "output", "B", "input"},
+             {"B", "output", "C", "input"},
+             {"C", "output", "output", "input"}},
+            {.async_streaming = true, .async_num_workers = 2});
+      },
+      &bytes);
+  // Sixteen frame snapshots take 1 MiB. Allow room for graph metadata and
+  // node buffers while catching an event store's worth of frames per record.
+  EXPECT_LT(bytes, 8 * 1024 * 1024u);
+  const auto rounds = pipeline_records(40);
+  for (std::size_t i = 0; i + 1 < rounds.size(); ++i)
+    graph->enqueue_syndrome(&rounds[i], 1, round_type::BULK);
+  graph->enqueue_syndrome(&rounds.back(), 1, round_type::FINAL);
+  std::vector<std::size_t> expected(rounds.begin(), rounds.end());
+  expected.push_back(1);
+  EXPECT_EQ(probe->records("C.value"), expected);
+} // end - TEST(SerialRelayPreallocatesOneSnapshotBatchPerRecord)
 
 // Keep record-ordered completions in publication order across a burst.
 TEST(DecodingTaskGraph, LargePublicationBurstDeliversOrderedCompletions) {

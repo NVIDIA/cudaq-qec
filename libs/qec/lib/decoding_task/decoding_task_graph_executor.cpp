@@ -47,6 +47,9 @@ constexpr std::size_t max_record_bytes = std::size_t{128} << 10;
 
 // Flush stage tags stored in graph_event::offset. Zero begins normal flush.
 constexpr std::size_t flush_resolved = 1;
+// The anchor queued just this member's callback. The normal flush event
+// still releases the node's dependents after the whole group has drained.
+constexpr std::size_t feedback_callback = 2;
 
 enum class graph_event_kind : uint8_t {
   one_shot,
@@ -89,6 +92,8 @@ void decoding_task_graph::impl::compile_feedback_flush() {
   flush_producers = streaming_producers;
   flush_predecessor_counts = streaming_predecessor_counts;
   feedback_anchor.assign(size, no_event);
+  if (!streaming_conflict.empty())
+    return;
 
   std::vector<std::pair<std::size_t, std::size_t>> backward;
   for (std::size_t target = 0; target < size; ++target) {
@@ -174,16 +179,14 @@ void decoding_task_graph::impl::compile_feedback_flush() {
                                  *it) != producers[*it].end();
     if (!cycle)
       continue;
+    // A backward edge targets an indexed node and streaming edges from it
+    // can reach only indexed nodes, so every member is indexed.
     for (const auto member : members) {
       const auto &entry = streaming_nodes[member];
       const auto &inputs = wires_to[entry.node_index];
-      if (entry.indexed.empty())
-        record_streaming_conflict("record-ordered node '" + entry.id +
-                                  "' in a feedback cycle");
-      else if (std::none_of(
-                   inputs.begin(), inputs.end(), [&](const auto &wire) {
-                     return entry.indexed.front()->requires_input(wire.to_slot);
-                   }))
+      if (std::none_of(inputs.begin(), inputs.end(), [&](const auto &wire) {
+            return entry.indexed.front()->requires_input(wire.to_slot);
+          }))
         record_streaming_conflict(
             "indexed node '" + entry.id +
             "' in a feedback cycle needs a required input");
@@ -193,8 +196,8 @@ void decoding_task_graph::impl::compile_feedback_flush() {
         if (required_cycle(required_cycle, member))
           break;
 
-    // One flush resolves the group's instances before its other node
-    // flushes can run. Wait for every producer outside the group first.
+    // The anchor resolves the group's instances and callbacks before the
+    // member flushes release dependencies. Wait for outside producers first.
     const auto anchor = *std::min_element(members.begin(), members.end());
     auto &group = feedback_groups[anchor];
     for (const auto member : members) {
@@ -330,6 +333,9 @@ struct decoding_task_graph::impl::record_context {
   // Of those, the indexed fires.
   std::vector<std::uint32_t> node_fires_live;
   std::vector<uint8_t> node_released;
+  // During FINAL a feedback member may finish firing before its callback.
+  std::vector<uint8_t> feedback_fires_closed;
+  std::vector<uint8_t> feedback_callbacks;
   std::size_t occupied = 0;
   std::size_t next_sequence = 0;
   std::size_t ready_head = no_event;
@@ -389,6 +395,9 @@ struct decoding_task_graph::impl::record_scheduler {
   struct feedback_flush;
   // Index and topological node order put a producer before its consumer.
   using feedback_join = std::tuple<std::int64_t, std::size_t, std::size_t>;
+  using feedback_address = std::pair<std::int64_t, std::size_t>;
+  // The last field says the change also affects the member's dependents.
+  using feedback_change = std::tuple<std::int64_t, std::size_t, bool>;
 
   record_scheduler(impl &owner, std::size_t context_count,
                    std::size_t event_capacity)
@@ -397,12 +406,12 @@ struct decoding_task_graph::impl::record_scheduler {
         pool_free(owner.streaming_nodes.size()),
         replica_busy(owner.streaming_nodes.size()),
         joins(owner.streaming_nodes.size()),
+        feedback_nodes(owner.streaming_nodes.size()),
         join_input_buffers(owner.streaming_nodes.size()),
         join_live(owner.streaming_nodes.size()),
         join_scan(owner.streaming_nodes.size()),
         self_fed(owner.streaming_nodes.size(), 0),
         fire_slots(owner.streaming_nodes.size(), 0),
-        reaches_ordered(owner.streaming_nodes.size(), 0),
         join_grew(owner.streaming_nodes.size(), join_growth::none),
         join_home(owner.streaming_nodes.size(), 1),
         join_displaced(owner.streaming_nodes.size(), 0),
@@ -560,9 +569,28 @@ struct decoding_task_graph::impl::record_scheduler {
     feedback_flushes.resize(owner.feedback_groups.size());
     for (std::size_t anchor = 0; anchor < feedback_flushes.size(); ++anchor) {
       std::size_t capacity = 0;
-      for (const auto member : owner.feedback_groups[anchor].members)
-        capacity += joins[member].size();
-      feedback_flushes[anchor].pending.reserve(capacity);
+      std::size_t wires = 0;
+      const auto &members = owner.feedback_groups[anchor].members;
+      for (const auto member : members) {
+        const auto count = joins[member].size();
+        capacity += count;
+        if (members.size() > 1) {
+          const auto node = owner.streaming_nodes[member].node_index;
+          wires += owner.wires_to[node].size();
+          auto &state = feedback_nodes[member];
+          state.settled.reserve(count);
+          state.closed_inputs.resize(join_required[member].size());
+          for (auto &input : state.closed_inputs)
+            input.reserve(count);
+        }
+      }
+      auto &group = feedback_flushes[anchor];
+      group.pending.reserve(capacity);
+      if (members.size() > 1) {
+        group.ready.reserve(capacity);
+        group.prerequisites.reserve(wires);
+        group.changes.reserve(wires);
+      }
     }
 
     // Bound the events one delivery holds until it drains. A feedback fire
@@ -654,10 +682,8 @@ struct decoding_task_graph::impl::record_scheduler {
     for (std::size_t si = M; si-- > 0;)
       count_slots(count_slots, si, /*dropped_join=*/false);
     // A detached fire reserves enough for any subtree that can reuse its slot
-    // through feedback. Also propagate whether an indexed fire can reach a
-    // node that joins its inputs by record, which precludes detaching.
-    // Loop-carried wires lead to earlier nodes, so repeat until nothing
-    // changes.
+    // through feedback. Loop-carried wires lead to earlier nodes, so repeat
+    // until nothing changes.
     for (bool changed = true; changed;) {
       changed = false;
       for (std::size_t si = M; si-- > 0;) {
@@ -665,7 +691,6 @@ struct decoding_task_graph::impl::record_scheduler {
           continue;
         const auto node_idx = owner.streaming_nodes[si].node_index;
         auto slots = fire_slots[si];
-        auto ordered = reaches_ordered[si];
         for (const auto *wires : {&owner.streaming_wires_from[node_idx],
                                   &owner.completion_wires_from[node_idx]})
           for (const auto &wire : *wires) {
@@ -674,13 +699,9 @@ struct decoding_task_graph::impl::record_scheduler {
             const auto consumer =
                 static_cast<std::size_t>(owner.streaming_by_node[wire.to_node]);
             slots = std::max(slots, fire_slots[consumer]);
-            if (!this->indexed(consumer) || reaches_ordered[consumer])
-              ordered = 1;
           }
-        changed = changed || slots != fire_slots[si] ||
-                  ordered != reaches_ordered[si];
+        changed = changed || slots != fire_slots[si];
         fire_slots[si] = slots;
-        reaches_ordered[si] = ordered;
       } // end - for(si)
     } // end - for(changed)
     for (std::size_t k = 0; k < owner.output_stagers.size(); ++k) {
@@ -741,6 +762,10 @@ struct decoding_task_graph::impl::record_scheduler {
       c.node_live.assign(M, 0);
       c.node_fires_live.assign(M, 0);
       c.node_released.assign(M, 0);
+      if (!owner.feedback_groups.empty()) {
+        c.feedback_fires_closed.resize(M);
+        c.feedback_callbacks.resize(M);
+      }
       for (std::size_t i = event_capacity; i-- > 0;)
         c.free_slots.push_back(i);
     }
@@ -870,6 +895,7 @@ struct decoding_task_graph::impl::record_scheduler {
       live.clear();
     for (auto &flush : feedback_flushes) {
       flush.pending.clear();
+      flush.ready.clear();
       flush.resolving = false;
     }
     running_fires = 0;
@@ -922,6 +948,9 @@ struct decoding_task_graph::impl::record_scheduler {
   void configure_flush(context &c) {
     auto lock = lock_runtime();
     c.dependency_remaining = owner.flush_predecessor_counts;
+    std::fill(c.feedback_fires_closed.begin(), c.feedback_fires_closed.end(),
+              0);
+    std::fill(c.feedback_callbacks.begin(), c.feedback_callbacks.end(), 0);
     for (std::size_t node = 0; node < owner.flush_predecessor_counts.size();
          ++node)
       if (owner.flush_predecessor_counts[node] == 0)
@@ -1158,7 +1187,8 @@ struct decoding_task_graph::impl::record_scheduler {
         continue;
       const bool internal_feedback =
           anchor != no_event && anchor == owner.feedback_anchor[consumer];
-      if (internal_feedback && event.kind == graph_event_kind::streaming_flush)
+      const bool callback = event.kind == graph_event_kind::streaming_flush;
+      if (internal_feedback && callback && wire.loop_carried())
         throw std::logic_error("decoding_task_graph: node '" +
                                owner.streaming_nodes[producer].id +
                                "' flush published inside a feedback cycle");
@@ -1169,22 +1199,15 @@ struct decoding_task_graph::impl::record_scheduler {
       // A repeat publication can name its index independently. Internal
       // feedback uses the firing instance's index so FINAL can settle
       // dependencies in instance order.
-      if (internal_feedback && wire_index != event.index)
+      if (internal_feedback && !callback && wire_index != event.index)
         throw std::logic_error(
             "decoding_task_graph: node '" + owner.streaming_nodes[producer].id +
             "' feedback index " + std::to_string(wire_index) +
             " differs from firing index " + std::to_string(event.index));
       publish_wire_locked(c, parent, root, wire, wire_index, value);
     }
-    if (!indexed(producer)) {
+    if (!indexed(producer))
       publish_wires_locked(c, parent, root, completions, index);
-    } else if (event.kind == graph_event_kind::streaming_flush) {
-      // A callback publication completes ordered consumers. Indexed
-      // consumers get a completion only from the fire that names its index.
-      for (const auto &wire : completions)
-        if (!indexed(owner.streaming_by_node[wire.to_node]))
-          publish_wire_locked(c, parent, root, wire, no_index, nullptr);
-    }
   } // end - publish_streaming()
 
   void publish_wires(context &c, std::size_t parent, std::size_t root,
@@ -1241,21 +1264,15 @@ struct decoding_task_graph::impl::record_scheduler {
       }
       // Leave room for descendants by replaying excess deliveries in
       // publication order once the producer's current subtree drains.
-      // An indexed flush can send a completion per publication, beyond
-      // the single completion budgeted for an indexed fire.
       auto &producer = c.slots[parent];
-      const bool defer =
-          !absent &&
-          (defer_publications[source] || producer.first_delivery != no_event ||
-           c.free_slots.size() <= c.slots.size() / 2 ||
-           (producer.event.kind == graph_event_kind::streaming_flush &&
-            indexed(source)));
+      const bool defer = !absent && (defer_publications[source] ||
+                                     producer.first_delivery != no_event ||
+                                     c.free_slots.size() <= c.slots.size() / 2);
       std::size_t blocker = no_event;
       std::size_t blocker_sequence = 0;
       // Direct children are stored in declared wire order. A later branch
       // waits only when its transitive descendants intersect an earlier
-      // branch; disjoint fan-out remains immediately runnable. An indexed
-      // consumer accepts its inputs in any order, so it never waits.
+      // branch. An indexed consumer accepts its inputs in any order.
       for (std::size_t earlier = c.slots[parent].first_child;
            earlier != no_event && !defer && !indexed(consumer);
            earlier = c.slots[earlier].next_sibling) {
@@ -1324,6 +1341,11 @@ struct decoding_task_graph::impl::record_scheduler {
     auto lock = lock_runtime();
     if (k < 0 || is_dropped(si, k))
       return; // instances are numbered from 0, and a dropped one stays so
+    const bool feedback_final = c.kind == phase::flush && feedback_active(si);
+    if (feedback_final &&
+        !accept_final_feedback_input_locked(si, k, slot, value != nullptr))
+      return;
+
     auto &table = joins[si];
     std::size_t index = find_join_locked(si, k);
     const bool fresh = index == table.size();
@@ -1359,6 +1381,13 @@ struct decoding_task_graph::impl::record_scheduler {
       entry->k = k;
       entry->pending = 0;
       entry->operation = 0;
+      entry->feedback_ready = false;
+      if (feedback_final) {
+        if (table.size() > 2 * join_scan[si].size())
+          rebuild_feedback_lookup_locked(si);
+        else
+          link_feedback_join_locked(si, index);
+      }
       for (std::size_t i = 0; i < entry->state.size(); ++i) {
         // A producer index below 0 never publishes.
         const bool absent = k + join_offsets[si][i] < 0;
@@ -1416,6 +1445,8 @@ struct decoding_task_graph::impl::record_scheduler {
                          std::greater<>{});
         }
       }
+      if (feedback_final)
+        refresh_feedback_dependents_locked(c, si, k);
       return;
     }
     queue_indexed_fire_locked(c, fire_parent(c, id), si, index, event.root);
@@ -1441,6 +1472,13 @@ struct decoding_task_graph::impl::record_scheduler {
       return home;
     if (join_displaced[si] == 0)
       return table.size();
+    if (feedback_active(si)) {
+      for (auto index = feedback_bucket(si, k); index != no_event;
+           index = table[index].feedback_next)
+        if (table[index].k == k)
+          return index;
+      return table.size();
+    }
     for (const auto i : join_live[si])
       if (table[i].displaced && table[i].k == k)
         return i;
@@ -1452,6 +1490,12 @@ struct decoding_task_graph::impl::record_scheduler {
   void release_join_locked(std::size_t si, join_entry &entry) {
     if (!entry.used)
       return;
+    if (feedback_active(si)) {
+      auto *link = &feedback_bucket(si, entry.k);
+      while (&joins[si][*link] != &entry)
+        link = &joins[si][*link].feedback_next;
+      *link = entry.feedback_next;
+    }
     auto &live = join_live[si];
     const auto moved = live.back();
     live[entry.live_at] = moved;
@@ -1469,6 +1513,7 @@ struct decoding_task_graph::impl::record_scheduler {
     if (is_dropped(si, k))
       return;
     dropped[si].add(k);
+    settle_feedback_join_locked(c, si, k, 0);
     const auto node_idx = owner.streaming_nodes[si].node_index;
     const auto &values = owner.streaming_wires_from[node_idx];
     const auto &completions = owner.completion_wires_from[node_idx];
@@ -1570,9 +1615,8 @@ struct decoding_task_graph::impl::record_scheduler {
   // in an enqueue record no chunk limit cut, rounds admitted together
   // included, it needs none and ingest goes on while it decodes, as long as
   // the record's fires without a parent, each with the slots it holds until
-  // its deliveries drain, fit in half the event store, and none of its
-  // deliveries can reach a node that joins by record. A feedback cycle
-  // keeps its fires attached so each lap drains before the record advances.
+  // its deliveries drain, fit in half the event store. A feedback cycle keeps
+  // its fires attached so each lap drains before the record advances.
   std::size_t fire_parent(const context &c, std::size_t id) const {
     const auto si = c.slots[id].event.node;
     const bool one_chunk = owner.record_bytes != 0 &&
@@ -1583,7 +1627,6 @@ struct decoding_task_graph::impl::record_scheduler {
                       fire_slots[si] <= budget - c.detached_slots &&
                       fire_slots[si] <= available_fire_slots(c);
     const bool detach = c.kind == phase::enqueue && one_chunk && room &&
-                        !reaches_ordered[si] &&
                         owner.feedback_anchor[si] == no_event;
     return detach ? no_event : id;
   }
@@ -1607,6 +1650,11 @@ struct decoding_task_graph::impl::record_scheduler {
   // while the slot's parent still waits for the feedback to finish.
   void queue_indexed_fire_locked(context &c, std::size_t parent, std::size_t si,
                                  std::size_t entry, std::size_t root) {
+    if (c.kind == phase::flush && owner.feedback_anchor[si] != no_event &&
+        c.feedback_callbacks[si])
+      throw std::logic_error("decoding_task_graph: node '" +
+                             owner.streaming_nodes[si].id +
+                             "' cannot fire after its feedback flush callback");
     const auto fire = indexed_fire_event(si, entry, root);
     if (parent != no_event &&
         c.slots[parent].event.kind == graph_event_kind::streaming_edge &&
@@ -1649,13 +1697,12 @@ struct decoding_task_graph::impl::record_scheduler {
   // pending input will arrive: instances with their required inputs fire
   // with the rest absent, and the others never existed.
   // The table may have outgrown the event store. Keep space for one fire's
-  // subtree as well as the queued descriptors, and report when a later
-  // pass must continue.
+  // subtree as well as the queued descriptors. Return true when another
+  // pass must queue work or wait for the last batch before the callback.
   bool resolve_joins_locked(context &c, std::size_t parent, std::size_t si,
                             std::size_t root) {
     auto &table = joins[si];
-    // The used entries in table order, the order a full scan took them;
-    // releasing one below reorders join_live, not this copy.
+    // Releasing an entry reorders join_live, so scan a copy in table order.
     auto &scan = join_scan[si];
     scan.assign(join_live[si].begin(), join_live[si].end());
     std::sort(scan.begin(), scan.end());
@@ -1674,18 +1721,42 @@ struct decoding_task_graph::impl::record_scheduler {
         return true;
       queued |= resolve_join_locked(c, parent, si, index, root);
     }
-    return false;
-  }
+    return queued;
+  } // end - resolve_joins_locked()
 
   // Close missing inputs and queue one fire if all required values arrived.
+  // A speculative drop tracks the missing required values that could undo it.
   bool resolve_join_locked(context &c, std::size_t parent, std::size_t si,
-                           std::size_t index, std::size_t root) {
+                           std::size_t index, std::size_t root,
+                           bool provisional = false) {
     auto &entry = joins[si][index];
+    const auto k = entry.k;
+    std::size_t missing_required = 0;
+    std::size_t pending_required = 0;
     for (std::size_t i = 0; i < entry.state.size(); ++i)
-      if (entry.state[i] == join_entry::missing && join_required[si][i]) {
-        release_join_locked(si, entry);
-        return false;
+      missing_required +=
+          entry.state[i] == join_entry::missing && join_required[si][i];
+    if (provisional) {
+      const auto anchor = owner.feedback_anchor[si];
+      const auto node_idx = owner.streaming_nodes[si].node_index;
+      for (const auto &wire : owner.wires_to[node_idx]) {
+        const auto slot = wire.to_slot;
+        const bool required = join_required[si][slot];
+        if (entry.state[slot] == join_entry::missing &&
+            (missing_required == 0 || required) &&
+            feedback_value_pending_locked(c, anchor, wire, k)) {
+          remember_feedback_index(feedback_nodes[si].closed_inputs[slot], {k});
+          pending_required += required;
+        }
       }
+    } // end - if(provisional)
+    if (missing_required != 0) {
+      release_join_locked(si, entry);
+      settle_feedback_join_locked(
+          c, si, k,
+          pending_required == missing_required ? missing_required : 0);
+      return false;
+    }
     const auto *joiner = owner.streaming_nodes[si].indexed.front();
     for (std::size_t i = 0; i < entry.state.size(); ++i)
       if (entry.state[i] == join_entry::missing &&
@@ -1703,36 +1774,396 @@ struct decoding_task_graph::impl::record_scheduler {
     return true;
   }
 
-  // Outside producers have finished. Every internal dependency runs from
-  // a lower index, or from an earlier node at the same index. Resolve joins
-  // in that order and drain each fire before considering its consumers.
+  // A multi-node group's FINAL may look up many displaced join indices.
+  bool feedback_active(std::size_t si) const {
+    const auto anchor = owner.feedback_anchor[si];
+    return !feedback_nodes[si].closed_inputs.empty() &&
+           feedback_flushes[anchor].resolving;
+  }
+
+  // FINAL borrows the member's scan scratch as the lookup bucket heads.
+  std::size_t &feedback_bucket(std::size_t si, std::int64_t k) {
+    auto &heads = join_scan[si];
+    return heads[static_cast<std::size_t>(k) % heads.size()];
+  }
+
+  // Read a bucket without changing the lookup.
+  std::size_t feedback_bucket(std::size_t si, std::int64_t k) const {
+    const auto &heads = join_scan[si];
+    return heads[static_cast<std::size_t>(k) % heads.size()];
+  }
+
+  // Link a live entry into its bucket using its stable join-table index.
+  void link_feedback_join_locked(std::size_t si, std::size_t index) {
+    auto &entry = joins[si][index];
+    auto &head = feedback_bucket(si, entry.k);
+    entry.feedback_next = head;
+    head = index;
+  }
+
+  // Index live entries at the start of FINAL and after the table doubles.
+  void rebuild_feedback_lookup_locked(std::size_t si) {
+    join_scan[si].assign(joins[si].size(), no_event);
+    for (const auto index : join_live[si])
+      link_feedback_join_locked(si, index);
+  }
+
+  // Find the record for an exact FINAL instance index.
+  template <class History>
+  static auto feedback_history_entry(History &history, std::int64_t k) {
+    return std::ranges::lower_bound(
+        history, k, {}, [](const auto &entry) { return entry.index; });
+  }
+
+  // Record a sparse index, appending when instances close in order.
+  template <class Entry>
+  static void remember_feedback_index(std::vector<Entry> &history,
+                                      Entry record) {
+    if (history.empty() || history.back().index < record.index) {
+      history.push_back(record);
+      return;
+    }
+    const auto at = feedback_history_entry(history, record.index);
+    if (at == history.end() || at->index != record.index)
+      history.insert(at, record);
+  }
+
+  // Ignore deliveries to a dropped join unless they supply every missing
+  // required value. A completed fire cannot accept a value it ran without.
+  bool accept_final_feedback_input_locked(std::size_t si, std::int64_t k,
+                                          std::size_t slot, bool present) {
+    auto &state = feedback_nodes[si];
+    auto &inputs = state.closed_inputs[slot];
+    const auto closed = feedback_history_entry(inputs, k);
+    const auto settled = feedback_history_entry(state.settled, k);
+    const bool assumed_absent = closed != inputs.end() && closed->index == k;
+    if (settled != state.settled.end() && settled->index == k &&
+        settled->missing_required) {
+      auto &missing = *settled->missing_required;
+      if (missing == 0 || !assumed_absent || closed->received)
+        return false;
+      if (!present) {
+        missing = 0;
+        return false;
+      }
+      closed->received = true;
+      if (--missing != 0)
+        return false;
+    } else if (!present || !assumed_absent) {
+      return true;
+    }
+    throw std::logic_error(
+        "decoding_task_graph: node '" + owner.streaming_nodes[si].id +
+        "' received input " + std::to_string(slot) +
+        " for an already resolved feedback instance " + std::to_string(k));
+  } // end - accept_final_feedback_input_locked()
+
+  // Only forward value edges can receive a publication from a callback.
+  bool feedback_callback_input(const compiled_wire &wire) const {
+    return !wire.loop_carried() &&
+           owner.node_outputs[wire.from_node][wire.from_slot].type() !=
+               completion_type;
+  }
+
+  // Find feedback members done firing and choose a callback in forward order.
+  std::size_t
+  ready_feedback_callback_locked(context &c, std::size_t anchor,
+                                 const std::vector<std::size_t> &members) {
+    bool changed = false;
+    do {
+      changed = false;
+      for (const auto node : members) {
+        if (c.feedback_fires_closed[node] || !join_live[node].empty())
+          continue;
+        const auto node_idx = owner.streaming_nodes[node].node_index;
+        for (const auto &wire : owner.wires_to[node_idx]) {
+          if (!join_required[node][wire.to_slot])
+            continue;
+          const auto source = owner.streaming_by_node[wire.from_node];
+          // A closed required port accounts for every possible fire: any
+          // instance that still has its value must already have a join entry.
+          if (owner.feedback_anchor[source] == anchor &&
+              (!c.feedback_fires_closed[source] ||
+               (feedback_callback_input(wire) &&
+                !c.feedback_callbacks[source])))
+            continue;
+          c.feedback_fires_closed[node] = 1;
+          feedback_flushes[anchor].refresh_ready = true;
+          changed = true;
+          break;
+        } // end - for(wire)
+      } // end - for(node)
+    } while (changed);
+
+    for (const auto node : members)
+      if (c.feedback_fires_closed[node] && !c.feedback_callbacks[node] &&
+          std::none_of(owner.streaming_producers[node].begin(),
+                       owner.streaming_producers[node].end(),
+                       [&](std::size_t source) {
+                         return owner.feedback_anchor[source] == anchor &&
+                                !c.feedback_callbacks[source];
+                       }))
+        return node;
+    return no_event;
+  } // end - ready_feedback_callback_locked()
+
+  // A missing value can still arrive from an open forward callback or a
+  // possible indexed fire. Visit each required predecessor address once,
+  // from later to earlier in instance and node order.
+  bool feedback_value_pending_locked(const context &c, std::size_t anchor,
+                                     const compiled_wire &wire,
+                                     std::int64_t consumer_index) {
+    auto &prerequisites = feedback_flushes[anchor].prerequisites;
+    const auto may_arrive = [&](const compiled_wire &input, std::int64_t k) {
+      const auto producer_index = k + input.index_offset;
+      const auto source = owner.streaming_by_node[input.from_node];
+      if (producer_index < 0 || owner.feedback_anchor[source] != anchor)
+        return false;
+      if (!c.feedback_callbacks[source] && feedback_callback_input(input))
+        return true;
+      const auto &settled = feedback_nodes[source].settled;
+      const auto at = feedback_history_entry(settled, producer_index);
+      if (c.feedback_fires_closed[source] ||
+          is_dropped(source, producer_index) ||
+          (at != settled.end() && at->index == producer_index))
+        return false;
+      prerequisites.emplace_back(producer_index, source);
+      std::push_heap(prerequisites.begin(), prerequisites.end());
+      return true;
+    };
+    prerequisites.clear();
+    if (!may_arrive(wire, consumer_index))
+      return false;
+    while (!prerequisites.empty()) {
+      const auto address = prerequisites.front();
+      const auto [k, source] = address;
+      do {
+        std::pop_heap(prerequisites.begin(), prerequisites.end());
+        prerequisites.pop_back();
+      } while (!prerequisites.empty() && prerequisites.front() == address);
+
+      const auto &table = joins[source];
+      const auto index = find_join_locked(source, k);
+      const auto source_node = owner.streaming_nodes[source].node_index;
+      for (const auto &input : owner.wires_to[source_node])
+        if (join_required[source][input.to_slot] &&
+            (index == table.size() ||
+             table[index].state[input.to_slot] != join_entry::present) &&
+            !may_arrive(input, k))
+          return false;
+    } // end - while(!prerequisites.empty())
+    return true;
+  } // end - feedback_value_pending_locked()
+
+  // A join can close once every missing input is known absent. One missing
+  // required input that can never arrive is enough to drop it.
+  bool feedback_join_ready_locked(const context &c, std::size_t anchor,
+                                  const feedback_join &join) {
+    const auto [k, node, index] = join;
+    const auto &entry = joins[node][index];
+    const auto node_idx = owner.streaming_nodes[node].node_index;
+    bool waiting = false;
+    for (const auto &wire : owner.wires_to[node_idx]) {
+      const auto slot = wire.to_slot;
+      if (entry.state[slot] != join_entry::missing)
+        continue;
+      const bool open = feedback_value_pending_locked(c, anchor, wire, k);
+      if (!open && join_required[node][slot])
+        return true;
+      waiting |= open;
+    }
+    return !waiting;
+  } // end - feedback_join_ready_locked()
+
+  // Whether a heap element still names a pending join in its table slot.
+  bool live_feedback_join(const feedback_join &join) const {
+    const auto [k, node, index] = join;
+    const auto &entry = joins[node][index];
+    return entry.used && entry.k == k && entry.pending != 0;
+  }
+
+  // Queue a ready join once. Validate it again after its subtree drains.
+  void consider_feedback_join_locked(context &c, std::size_t anchor,
+                                     const feedback_join &join) {
+    const auto [k, node, index] = join;
+    auto &entry = joins[node][index];
+    if (entry.feedback_ready || !feedback_join_ready_locked(c, anchor, join))
+      return;
+    auto &ready = feedback_flushes[anchor].ready;
+    ready.push_back(join);
+    std::push_heap(ready.begin(), ready.end(), std::greater<>{});
+    entry.feedback_ready = true;
+  } // end - consider_feedback_join_locked()
+
+  // Dependencies advance in instance and node order. Merge all changes
+  // for an address before visiting it, even when paths reconverge.
+  void refresh_feedback_dependents_locked(context &c, std::size_t si,
+                                          std::int64_t k) {
+    const auto anchor = owner.feedback_anchor[si];
+    auto &group = feedback_flushes[anchor];
+    auto &changes = group.changes;
+    if (group.refresh_ready)
+      return; // the anchor will rebuild readiness after the callback drains
+    changes.clear();
+    changes.emplace_back(k, si, true);
+    while (!changes.empty()) {
+      const auto [instance, node, propagate] = changes.front();
+      bool expand = false;
+      do {
+        expand |= std::get<2>(changes.front());
+        std::pop_heap(changes.begin(), changes.end(), std::greater<>{});
+        changes.pop_back();
+      } while (!changes.empty() && std::get<0>(changes.front()) == instance &&
+               std::get<1>(changes.front()) == node);
+      const auto index = find_join_locked(node, instance);
+      if (index != joins[node].size() && joins[node][index].pending != 0)
+        consider_feedback_join_locked(c, anchor, {instance, node, index});
+      if (!expand)
+        continue;
+
+      const auto node_idx = owner.streaming_nodes[node].node_index;
+      for (const auto *wires : {&owner.streaming_wires_from[node_idx],
+                                &owner.completion_wires_from[node_idx]})
+        for (const auto &wire : *wires) {
+          const auto target = owner.streaming_by_node[wire.to_node];
+          if (owner.feedback_anchor[target] != anchor ||
+              instance >
+                  std::numeric_limits<std::int64_t>::max() + wire.index_offset)
+            continue;
+          changes.emplace_back(instance - wire.index_offset, target,
+                               join_required[target][wire.to_slot]);
+          std::push_heap(changes.begin(), changes.end(), std::greater<>{});
+        }
+    } // end - while(!changes.empty())
+  } // end - refresh_feedback_dependents_locked()
+
+  // Record whether an instance fired or dropped. A separate callback may
+  // still supply forward values at its index.
+  void settle_feedback_join_locked(
+      context &c, std::size_t si, std::int64_t k,
+      std::optional<std::size_t> missing_required = std::nullopt) {
+    if (c.kind != phase::flush || !feedback_active(si))
+      return;
+    remember_feedback_index(feedback_nodes[si].settled, {k, missing_required});
+    refresh_feedback_dependents_locked(c, si, k);
+  }
+
+  // A callback or node closure affects all indices. Rebuild readiness only
+  // after one of those changes, with its deliveries drained.
+  void rebuild_feedback_ready_locked(context &c, std::size_t anchor) {
+    auto &group = feedback_flushes[anchor];
+    group.ready.clear();
+    for (const auto &join : group.pending)
+      if (live_feedback_join(join)) {
+        const auto [k, node, index] = join;
+        joins[node][index].feedback_ready = false;
+      }
+    for (const auto &join : group.pending)
+      if (live_feedback_join(join))
+        consider_feedback_join_locked(c, anchor, join);
+    group.refresh_ready = false;
+  } // end - rebuild_feedback_ready_locked()
+
+  // Make the callback a child so the anchor resumes after its deliveries and
+  // all the fires they trigger. The normal member flush releases dependencies.
+  void queue_feedback_callback_locked(context &c, std::size_t parent,
+                                      std::size_t node, std::size_t root) {
+    c.feedback_fires_closed[node] = 1;
+    c.feedback_callbacks[node] = 1;
+    feedback_flushes[owner.feedback_anchor[node]].refresh_ready = true;
+    push_locked(
+        c,
+        {graph_event_kind::streaming_flush, node, {}, feedback_callback, root},
+        parent);
+  }
+
+  // Outside producers have finished. A ready callback drains first, then
+  // the next available join. If all are blocked, settle the oldest join and
+  // remember exactly which inputs were assumed absent.
   bool resolve_feedback_joins_locked(context &c, std::size_t parent,
                                      const graph_event &event) {
     auto &group = feedback_flushes[event.node];
     auto &pending = group.pending;
+    auto &ready = group.ready;
+    const auto &members = owner.feedback_groups[event.node].members;
+    const bool has_forward = members.size() > 1;
+    const auto pop = [](auto &heap) {
+      std::pop_heap(heap.begin(), heap.end(), std::greater<>{});
+      heap.pop_back();
+    };
     if (!group.resolving) {
       pending.clear();
-      for (const auto node : owner.feedback_groups[event.node].members)
+      for (const auto node : members) {
+        if (has_forward) {
+          rebuild_feedback_lookup_locked(node);
+          auto &state = feedback_nodes[node];
+          state.settled.clear();
+          state.settled.reserve(joins[node].size());
+          for (auto &input : state.closed_inputs) {
+            input.clear();
+            input.reserve(joins[node].size());
+          }
+        }
         for (const auto index : join_live[node]) {
           const auto &entry = joins[node][index];
           if (entry.pending != 0)
             pending.emplace_back(entry.k, node, index);
         }
+      } // end - for(node)
       std::make_heap(pending.begin(), pending.end(), std::greater<>{});
       group.resolving = true;
+      group.refresh_ready = has_forward;
     } // end - if(!group.resolving)
 
-    while (!pending.empty()) {
+    while (true) {
+      while (!pending.empty() && !live_feedback_join(pending.front()))
+        pop(pending);
+      if (has_forward) {
+        auto callback = ready_feedback_callback_locked(c, event.node, members);
+        if (callback == no_event && pending.empty()) {
+          const auto next = std::find_if(
+              members.begin(), members.end(),
+              [&](std::size_t node) { return !c.feedback_callbacks[node]; });
+          if (next != members.end())
+            callback = *next;
+        }
+        if (callback != no_event) {
+          if (!c.free_slots.empty())
+            queue_feedback_callback_locked(c, parent, callback, event.root);
+          return true;
+        }
+        if (group.refresh_ready)
+          rebuild_feedback_ready_locked(c, event.node);
+      } // end - if(has_forward)
+      if (pending.empty())
+        break;
+      if (c.free_slots.empty())
+        return true;
+
+      bool resolved_ready = false;
+      while (has_forward && !ready.empty()) {
+        const auto candidate = ready.front();
+        const auto [k, node, index] = candidate;
+        pop(ready);
+        if (!live_feedback_join(candidate))
+          continue;
+        joins[node][index].feedback_ready = false;
+        if (!feedback_join_ready_locked(c, event.node, candidate))
+          continue;
+        if (resolve_join_locked(c, parent, node, index, event.root))
+          return true;
+        resolved_ready = true;
+        break;
+      } // end - while(has_forward && !ready.empty())
+      if (resolved_ready)
+        continue;
+
       const auto [k, node, index] = pending.front();
-      const auto &entry = joins[node][index];
-      const bool live = entry.used && entry.k == k && entry.pending != 0;
-      if (live && c.free_slots.empty())
+      pop(pending);
+      if (resolve_join_locked(c, parent, node, index, event.root,
+                              /*provisional=*/has_forward))
         return true;
-      std::pop_heap(pending.begin(), pending.end(), std::greater<>{});
-      pending.pop_back();
-      if (live && resolve_join_locked(c, parent, node, index, event.root))
-        return true;
-    } // end - while(!pending.empty())
+    } // end - while(true)
     group.resolving = false;
     return false;
   } // end - resolve_feedback_joins_locked()
@@ -1999,15 +2430,20 @@ struct decoding_task_graph::impl::record_scheduler {
 
   // Drain the node or feedback group before running the node's callback.
   void execute_flush(context &c, std::size_t id, const graph_event &event) {
+    if (event.offset == feedback_callback) {
+      flush_node(c, id, event);
+      return;
+    }
     if (indexed(event.node)) {
-      bool more;
+      bool needs_continuation = false;
       {
         auto lock = lock_runtime();
-        more = owner.feedback_anchor[event.node] == event.node
-                   ? resolve_feedback_joins_locked(c, id, event)
-                   : resolve_joins_locked(c, id, event.node, event.root);
+        needs_continuation =
+            owner.feedback_anchor[event.node] == event.node
+                ? resolve_feedback_joins_locked(c, id, event)
+                : resolve_joins_locked(c, id, event.node, event.root);
       }
-      if (more) { // reuse this slot once the queued fires have drained
+      if (needs_continuation) { // resume after the queued fires drain
         set_continuation(c, id, event);
         return;
       }
@@ -2042,7 +2478,9 @@ struct decoding_task_graph::impl::record_scheduler {
                       owner.streaming_nodes[event.node].node_index,
                       join_home[event.node]);
     } // end - if(indexed(event.node))
-    flush_node(c, id, event);
+    if (owner.feedback_anchor[event.node] == no_event ||
+        !c.feedback_callbacks[event.node])
+      flush_node(c, id, event);
     {
       // The flush was the shot's last publication on the node's wires; the
       // next shot's indices start a new run.
@@ -2236,9 +2674,10 @@ private:
   } // end - make_wire_buffer()
 
   // Bound replay storage including the batches suspended on occupied slots.
-  // A raw root drains its batch before running another chunk. Other producers
-  // can have one batch on each occupied slot. A slot that replays a delivery
-  // can publish along forward edges, so it holds at most one batch per wire.
+  // A raw root drains its batch before running another chunk. A serial path
+  // can share that bound. Else a producer can have a batch on each occupied
+  // slot. A replaying slot can publish along forward edges, so it holds at
+  // most one batch per wire.
   std::size_t
   plan_delivery_storage(std::size_t event_capacity,
                         std::vector<std::size_t> &wire_buffer_counts) const {
@@ -2255,16 +2694,24 @@ private:
     };
     if (!owner.streaming_conflict.empty())
       return 0;
+    std::vector<uint8_t> single_publication(owner.streaming_nodes.size(), 0);
     for (std::size_t si = 0; si < owner.streaming_nodes.size(); ++si) {
       const auto &entry = owner.streaming_nodes[si];
       const auto &values = owner.streaming_wires_from[entry.node_index];
       const auto &completions = owner.completion_wires_from[entry.node_index];
+      const auto &producers = owner.streaming_producers[si];
       const auto publications = std::max(
           std::size_t{1}, entry.capability->max_publications_per_delivery());
-      const auto simultaneous =
-          owner.streaming_node_has_raw_input[si] ? 1 : event_capacity;
+      // A single ordered input keeps its subtree attached to the one
+      // publication that feeds it. FINAL also drains a producer's deliveries
+      // before the dependent's callback starts.
+      const bool one_batch =
+          owner.streaming_node_has_raw_input[si] ||
+          (!pooled(si) && !indexed(si) && producers.size() == 1 &&
+           single_publication[producers.front()]);
+      single_publication[si] = one_batch && publications == 1;
       std::size_t batch_count = 0;
-      add_batches(batch_count, simultaneous, publications);
+      add_batches(batch_count, one_batch ? 1 : event_capacity, publications);
       add_batches(replay_capacity, batch_count,
                   values.size() + completions.size());
       if (copy_publications[si])
@@ -2577,6 +3024,7 @@ private:
       // Resolving an indexed node's pending instances needs every delivery
       // to it, from any record and any loop-carried producer, filed first.
       if (candidate.event.kind == graph_event_kind::streaming_flush &&
+          candidate.event.offset != feedback_callback &&
           targets_pool(candidate.event) &&
           !flush_may_start_locked(c, candidate.event))
         continue;
@@ -2670,7 +3118,10 @@ private:
     if (id < c.slots.size() && c.slots[id].running &&
         c.slots[id].event.kind == graph_event_kind::streaming_indexed_fire) {
       const auto si = c.slots[id].event.node;
+      const auto k = c.slots[id].event.index;
       release_join_locked(si, *fire_entries[si][c.slots[id].pool_slot]);
+      if (!stop)
+        settle_feedback_join_locked(c, si, k);
     }
     if (stop) {
       if (id < c.slots.size() && c.slots[id].running) {
@@ -2870,8 +3321,24 @@ public:
     std::vector<uint8_t> state;
     std::uint64_t operation = 0; ///< the latest of its inputs'
     deferred_fire feedback;
+    std::size_t feedback_next = no_event; ///< next join in FINAL's lookup
+    bool feedback_ready = false;          ///< queued on FINAL's ready heap
   };
   std::vector<std::deque<join_entry>> joins;
+  struct feedback_settlement {
+    std::int64_t index;
+    // None means it fired. Zero means missing required values ruled it out.
+    std::optional<std::size_t> missing_required;
+  };
+  struct feedback_closed_input {
+    std::int64_t index;
+    bool received = false;
+  };
+  struct feedback_node_state {
+    std::vector<feedback_settlement> settled;
+    std::vector<std::vector<feedback_closed_input>> closed_inputs;
+  };
+  std::vector<feedback_node_state> feedback_nodes;
   std::vector<std::vector<edge_value>> join_input_buffers;
   // By streaming node: its used entries' table indices, unordered, so a
   // flush need not scan the whole table; and the flush's scratch to sort
@@ -2880,7 +3347,11 @@ public:
   std::vector<std::vector<std::size_t>> join_scan;
   struct feedback_flush {
     std::vector<feedback_join> pending;
+    std::vector<feedback_join> ready;
+    std::vector<feedback_address> prerequisites;
+    std::vector<feedback_change> changes;
     bool resolving = false;
+    bool refresh_ready = false;
   };
   // A feedback group's first node owns its flush work and heap.
   std::vector<feedback_flush> feedback_flushes;
@@ -2890,9 +3361,6 @@ public:
   // By indexed node: the largest subtree its slot may run, including
   // feedback, capped at the event store capacity.
   std::vector<std::size_t> fire_slots;
-  // By streaming node: for an indexed one, whether its fires can deliver to
-  // a node that joins its inputs by record (see fire_parent()).
-  std::vector<uint8_t> reaches_ordered;
   // By streaming node: whether its join table grew, and whether that was
   // reported, which happens once.
   enum class join_growth : uint8_t { none, unreported, reported };

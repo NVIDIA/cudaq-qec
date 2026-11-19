@@ -758,7 +758,8 @@ void decoding_task_graph::impl::compile_wires() {
           streaming_by_node[w.from_node] < 0 ||
           streaming_by_node[w.to_node] < 0)
         continue; // not an edge between two streaming nodes
-      if (is_done_slot(w.from_node, w.from_slot)) {
+      const bool completion = is_done_slot(w.from_node, w.from_slot);
+      if (completion) {
         completion_wires_from[w.from_node].push_back(w);
       } else {
         w.id = static_cast<int>(streaming_value_wire_count++);
@@ -770,20 +771,26 @@ void decoding_task_graph::impl::compile_wires() {
         record_streaming_conflict("node '" + node_ids[w.to_node] +
                                   "' has no streaming input on slot '" +
                                   node_input_names[w.to_node][w.to_slot] + "'");
-      // An indexed node's instances complete in any order, so a consumer
-      // that sees records in order would read them out of order.
+      // Indexed instances can complete in any order. Both ends of a
+      // completion wire must agree on how it identifies an instance.
       const auto &producer = streaming_nodes[streaming_by_node[w.from_node]];
-      if (is_done_slot(w.from_node, w.from_slot)) {
-        if (producer.indexed.empty() && !consumer.indexed.empty())
+      if (!producer.indexed.empty() && consumer.indexed.empty()) {
+        if (completion)
           record_streaming_conflict(
               "node '" + node_ids[w.from_node] +
-              ".done' supplies an unindexed completion to node '" +
-              node_ids[w.to_node] + "', which joins its inputs by index");
-      } else if (!producer.indexed.empty() && consumer.indexed.empty()) {
-        record_streaming_conflict("node '" + node_ids[w.to_node] +
-                                  "' joins its inputs by record but node '" +
-                                  node_ids[w.from_node] +
-                                  "' publishes them by index");
+              ".done' requires an indexed consumer in streaming, but node '" +
+              node_ids[w.to_node] + "' joins its inputs by record");
+        else
+          record_streaming_conflict("node '" + node_ids[w.to_node] +
+                                    "' joins its inputs by record but node '" +
+                                    node_ids[w.from_node] +
+                                    "' publishes them by index");
+      } else if (completion && producer.indexed.empty() &&
+                 !consumer.indexed.empty()) {
+        record_streaming_conflict(
+            "node '" + node_ids[w.from_node] +
+            ".done' supplies an unindexed completion to node '" +
+            node_ids[w.to_node] + "', which joins its inputs by index");
       }
     }
 
