@@ -42,7 +42,7 @@ Detector Error Model
    - ``m2o`` (``list[list[int]]``) — measurement-to-observable map
 
    Pass ``m2d`` to :func:`d_sparse` to produce the ``D_sparse`` vector for a
-   real-time decoder config.
+   realtime decoder config.
 
 .. autofunction:: cudaq_qec.dem_from_memory_circuit
 .. autofunction:: cudaq_qec.x_dem_from_memory_circuit
@@ -56,7 +56,9 @@ Detector Error Model
 Dynamic DEM
 ===========
 
-The ``dem_chunks`` model types. See :doc:`/examples_rst/qec/dyn_dem`.
+Types for constructing a dynamic detector error model (DEM). See the
+:doc:`Dynamic Detector Error Models </components/qec/dynamic_dem>` and the
+:doc:`Decoding with a Dynamic DEM example </examples_rst/qec/dyn_dem>`.
 
 .. autoclass:: cudaq_qec.DemChunksSpec
     :members:
@@ -91,12 +93,15 @@ Decoder Interfaces
 .. autoclass:: cudaq_qec.Decoder
     :members:
 
+.. _decoding_task_graph_python_api:
+
 Decoding Task Graph
 ===================
 
 A :class:`cudaq_qec.DecodingTaskGraph` is a decoder pipeline of nodes wired by
-edges. See :doc:`/examples_rst/qec/decoding_task_graph` and
-:doc:`/examples_rst/qec/task_graph_parallel_window`.
+edges. See the :doc:`Decoding Task Graphs </components/qec/decoding_task_graph>`, its
+:ref:`Reference section <task_graph_reference>`, and the
+:doc:`Getting Started with a Decoding Task Graph </examples_rst/qec/getting_started_decoding_task_graph>`.
 
 .. autoclass:: cudaq_qec.DecodingTaskGraph
     :members:
@@ -188,6 +193,8 @@ NVIDIA Fusion Decoder
 
 .. include:: nv_fusion_decoder_api.rst
 
+.. _sliding_window_decoder_api_python:
+
 Sliding Window Decoder
 ----------------------
 
@@ -228,6 +235,8 @@ Realtime Decoding
 
 .. include:: python_realtime_decoding_api.rst
 
+
+.. _memory_experiments_python_api:
 
 Common
 =============

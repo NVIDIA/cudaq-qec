@@ -214,8 +214,95 @@
 
         **Fusion schedule:**
 
-        - ``fusion_strategy`` (str): Fusion schedule to use.  Currently
-          only ``"brickwall"`` is supported.
+        - ``fusion_strategy`` (str): Fusion schedule to use.  Only
+          ``"brickwall"`` (the default) is supported; ``"balanced-tree"`` and
+          ``"linear-tree"`` are reserved and rejected.  The former
+          ``"sliding-window"`` value is also rejected, because
+          ``"brickwall"`` now rolls on its own (see below).
+
+        **Rolling:**
+
+        When the model allows it, ``"brickwall"`` decodes the shot with a
+        rolling window: head blocks laid as the finite schedule lays them, a
+        ring that recycles its
+        oldest pair of blocks as the stream advances, and a tail pair, all
+        joined by ordinary layer-2 seams.  Memory and scaffold size are then
+        bounded by the ring rather than the shot length.  The observables are
+        identical to a finite brickwall with the same blocks laid out across
+        the whole shot, so rolling costs no accuracy.
+
+        Error output rolls too.  Each block keeps the matching edges wholly
+        inside it, away from its cuts, and what that leaves unexplained is
+        rematched in windows of two block pairs that slide up the shot, so the
+        repair's memory does not grow with the shot.  The result always
+        reproduces the syndrome, and flips exactly the observables the rolling
+        decode predicts, so its logical error rate is the rolling decode's.  It
+        is not necessarily the monolithic matching: the selected columns can
+        differ by an error that flips no detector and no observable, and
+        their total weight is typically within a few percent of it.  A shot
+        whose repair finds no such correction is reported as heralded.
+
+        It rolls when all of these hold, and otherwise builds one finite
+        scaffold over the whole shot:
+
+        - for error output, ``rolling_error_output`` is not ``false``;
+        - the schedule is fused, i.e. ``block_leaf_size`` is set, or it is
+          omitted and the automatic ``2 * d`` leaf applies (more than 192
+          rounds with a measurable distance);
+        - one ring revolution fits between a minimal head and the tail, so
+          with the defaults the shot needs more than ``32 * d`` rounds;
+        - the rounds are contiguous from 0, every bulk round has the same
+          number of detectors, and every bulk error mechanism recurs one
+          block pair (``2 * block_leaf_size`` rounds) later on the same
+          detectors (by position within their round), observables and
+          weight;
+        - no error mechanism reaches from the head past the ring's first
+          revolution, or from the rest of the bulk into the tail.
+
+        The decoder logs at info level whether it rolled, and if not, why.
+
+        Constructed from :cpp:func:`cudaq::qec::decoder_init::from_dem_chunks`
+        (or a realtime configuration's ``dem_chunks``), the decoder rolls
+        without ever building the shot's flat model: it closes the chunks over
+        a representative number of rounds, independent of ``num_rounds``, and
+        extends that model to the shot by whole ring revolutions of the bulk
+        chunk.  The corrections are those of the same chunks closed over the
+        whole shot.  When the model does not roll, the decoder closes the
+        chunks itself for the finite scaffold.  A realtime configuration hands
+        nv-fusion the chunks without their closed model; a C++ caller that
+        needs the matrices for another use constructs the inputs with
+        :cpp:func:`cudaq::qec::decoder_init::from_dem_chunks_closed` instead.
+
+        - ``rolling_ring_blocks`` (uint64): Blocks in the ring, each
+          ``block_leaf_size`` rounds tall.  Defaults to ``12``; even and at
+          least ``6``.  Not accepted in a realtime YAML configuration, which
+          uses the default.
+        - ``rolling_boundary_leaf_size`` (uint64): Leaf height of the tail's
+          two blocks, and the least for the head's.  Defaults to the ring's
+          leaf.  Like ``block_leaf_size``, a value below the measured code
+          distance logs a warning.  Not accepted in a realtime YAML
+          configuration, which uses the default.
+        - ``rolling_error_output`` (bool): Whether error output rolls.
+          Defaults to ``true``; ``false`` keeps the finite scaffold, whose
+          error output is the monolithic matching of the whole shot.  Not
+          accepted in a realtime YAML configuration, which always decodes to
+          observables.
+        - ``rolling_error_margin`` (uint64): Rounds either side of each cut
+          between blocks whose block corrections rolling error output
+          rematches.  Defaults to a quarter of ``block_leaf_size``, at least
+          1, which keeps the middle half of each block's corrections.  It
+          must be below half of ``block_leaf_size``: every round of a block
+          lies within that of a cut, so a larger margin would rematch the
+          whole shot, and the decoder falls back to the finite window
+          instead (as it does for a leaf under 4 rounds).  ``1`` keeps more
+          of the blocks' corrections and decodes faster, at a percent or two
+          more weight with the automatic ``2 * d`` leaf.  Not accepted in a
+          realtime YAML configuration.
+
+        The ring carries a whole number of revolutions, and the head grows
+        to take up the remainder.  The head is ``block_leaf_size`` blocks
+        from round 0, the last pair splitting what is left, so it commits
+        pair by pair as the ring does.
 
     **Decode result format:**
 
@@ -228,7 +315,10 @@
 
     - ``converged`` — ``True`` if the fuse pass raised no herald flag.  A
       ``False`` value indicates a suspect or ambiguous match; the correction
-      is still populated and may be used.
+      is still populated and may be used.  For rolling error output it is
+      also ``False`` when no tail logical brings the errors onto the rolling
+      observables; the errors are then the stitched matching alone, which
+      explains the syndrome but may flip other observables.
 
     - ``opt_results`` — heterogeneous map with key:
 
@@ -245,6 +335,15 @@
     via ``D_sparse`` as each detector round's measurements become complete.
     Observable corrections are XOR-accumulated into a running Pauli frame
     and exposed via ``get_obs_corrections()``.
+
+    Task-graph streaming uses the optional ``streaming_correction_provider``
+    capability: BULK publications read committed corrections without sealing
+    the shot, and FINAL, which carries the shot's last measurements,
+    completes deferred work. Reaching the configured template
+    length therefore does not split a longer task-graph shot. Final coverage
+    uses the actual number of physical rounds, not the template length or the
+    terminal payload's byte width. Direct callers
+    retain the existing configured-length behavior of ``get_obs_corrections()``.
 
     .. note::
       ``D`` must be supplied in :cpp:class:`cudaq::qec::decoder_init` before
