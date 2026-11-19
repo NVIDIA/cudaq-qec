@@ -16804,8 +16804,11 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
 } // end - TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires)
 
 // Hold an indexed feedback fire during a coalesced record while an
-// independent detached fire occupies the same record's event store.
-static void expect_feedback_stays_attached(bool multi_node) {
+// independent detached fire occupies the same record's event store. A cycle
+// of two nodes keeps its fires attached, so its held lap stops the record's
+// ingest. A node that feeds only itself detaches its fires, so ingest goes
+// on past the held lap. Either way the store holds and every instance fires.
+static void expect_feedback_with_detached_work(bool multi_node) {
   ASSERT_TRUE(index_probe_registered);
   // Several times the event store, and within A's chunk limit.
   constexpr std::size_t rounds = 600;
@@ -16881,7 +16884,10 @@ static void expect_feedback_stays_attached(bool multi_node) {
     detached_fire.wait_for_arrivals();
     feedback_fire.wait_for_arrivals();
     const auto held_count = static_cast<std::size_t>(feedback_held + 1);
-    EXPECT_EQ(probe->count("A"), held_count);
+    if (multi_node)
+      EXPECT_EQ(probe->count("A"), held_count);
+    else
+      wait_for_scheduler_records(*probe, "A", held_count + 1);
     feedback_fire.release();
     // Observe a later feedback fire while the detached fire is still held.
     wait_for_scheduler_records(*probe, "J", held_count + 1);
@@ -16908,13 +16914,14 @@ static void expect_feedback_stays_attached(bool multi_node) {
     std::sort(fired.begin(), fired.end());
     EXPECT_EQ(fired, all) << node;
   }
-} // end - expect_feedback_stays_attached()
+} // end - expect_feedback_with_detached_work()
 
-// Check both self-feedback and a two-node cycle under the same load.
-TEST(DecodingTaskGraph, FeedbackStaysAttachedWithDetachedWorkInFlight) {
+// Check self-feedback, which detaches, and a two-node cycle, which stays
+// attached, under the same load.
+TEST(DecodingTaskGraph, FeedbackLapsWithDetachedWorkInFlight) {
   for (const bool multi_node : {false, true}) {
     SCOPED_TRACE(multi_node);
-    expect_feedback_stays_attached(multi_node);
+    expect_feedback_with_detached_work(multi_node);
   }
 }
 

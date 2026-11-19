@@ -1649,8 +1649,12 @@ struct decoding_task_graph::impl::record_scheduler {
   // included, it needs none and ingest goes on while it decodes, as long as
   // the record's fires without a parent, each with the slots it holds until
   // its deliveries drain, fit in half the event store, and none of its
-  // deliveries can reach a node that joins by record. A feedback cycle
-  // keeps its fires attached so each lap drains before the record advances.
+  // deliveries can reach a node that joins by record. A cycle of several
+  // nodes keeps its fires attached so each lap drains before the record
+  // advances. A node that feeds only itself, as a sliding window does,
+  // detaches like any other: each lap's fire then holds its own
+  // reservation, and one that cannot detach waits for the outermost fire's
+  // slot (see queue_indexed_fire_locked()), so laps never nest.
   std::size_t fire_parent(const context &c, std::size_t id) const {
     const auto si = c.slots[id].event.node;
     const bool one_chunk = owner.record_bytes != 0 &&
@@ -1660,9 +1664,12 @@ struct decoding_task_graph::impl::record_scheduler {
     const bool room = c.detached_slots <= budget &&
                       fire_slots[si] <= budget - c.detached_slots &&
                       fire_slots[si] <= available_fire_slots(c);
+    const auto anchor = owner.feedback_anchor[si];
+    const bool self_loop =
+        anchor != no_event && owner.feedback_groups[anchor].members.size() == 1;
     const bool detach = c.kind == phase::enqueue && one_chunk && room &&
                         !reaches_ordered[si] &&
-                        owner.feedback_anchor[si] == no_event;
+                        (anchor == no_event || self_loop);
     return detach ? no_event : id;
   } // end - fire_parent()
 
