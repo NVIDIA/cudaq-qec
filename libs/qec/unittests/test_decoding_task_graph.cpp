@@ -37,6 +37,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -13853,9 +13854,11 @@ public:
                              [&] { return blocking_; });
   }
 
-  bool wait_for_count(const std::string &node, std::size_t count) {
+  // Wait for an observed delivery with a deadline set by the test.
+  bool wait_for_count(const std::string &node, std::size_t count,
+                      std::chrono::seconds timeout = std::chrono::seconds{2}) {
     std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, std::chrono::seconds(2),
+    return changed_.wait_for(lock, timeout,
                              [&] { return count_locked(node) >= count; });
   }
 
@@ -13960,7 +13963,8 @@ static std::shared_ptr<pipeline_probe> active_pipeline_probe;
 /// publishes the completion's input slot as a bit. `pair_done`
 /// pairs a completion with a value by arrival, as an ensemble join does,
 /// and logs the value or, when the pair is not one of each, `.mixed`. Each
-/// node numbers the records it handles itself.
+/// node numbers the records it handles itself. `rendezvous_pass` relays one
+/// input and allows sibling branches to reach it in either order.
 class pipeline_probe_node : public task_graph_node,
                             public streaming_task_graph_node {
 public:
@@ -14134,7 +14138,7 @@ public:
   }
   std::vector<std::string> outputs() const override { return {"output"}; }
   bool supports_streaming_rendezvous() const override {
-    return mode_ == "rendezvous";
+    return mode_ == "rendezvous" || mode_ == "rendezvous_pass";
   }
   // `rendezvous` joins as `join` does, opting in to any arrival order.
   bool joins() const {
@@ -15727,6 +15731,103 @@ TEST(DecodingTaskGraph, RendezvousKeepsEachRecordsInputsTogether) {
   }
 } // end - TEST(DecodingTaskGraph, RendezvousKeepsEachRecordsInputsTogether)
 
+// Hold the first aligned pair so two deliveries in the next record can fire.
+class buffered_rendezvous_probe : public pipeline_probe_node {
+public:
+  // Reuse the relay's value storage and publication logging.
+  explicit buffered_rendezvous_probe(const std::string &id)
+      : pipeline_probe_node(id, "pass", active_pipeline_probe) {}
+
+  // Either input can arrive first because each has its own FIFO.
+  bool supports_streaming_rendezvous() const override { return true; }
+
+  // Each fire consumes one value from each named input.
+  std::vector<std::string> inputs() const override { return {"a", "b"}; }
+
+  // Accept streaming values on both sides of the join.
+  bool supports_streaming_input(std::size_t slot) const override {
+    return slot < pending_.size();
+  }
+
+  // Buffer the first two deliveries and then publish at most once per input.
+  bool enqueue_edge_value(const edge_value &value, std::size_t slot) override {
+    pending_[slot].push_back(value.get<logical_outcome>().bits[0]);
+    return ++deliveries_ > pending_.size() && publish_pair();
+  }
+
+  // Publish the first buffered pair if the shot ends before the next input.
+  bool flush() override { return publish_pair(); }
+
+  // Start the next shot with empty inputs and the initial delay restored.
+  void reset_streaming_state() override {
+    pipeline_probe_node::reset_streaming_state();
+    for (auto &queue : pending_)
+      queue.clear();
+    deliveries_ = 0;
+  }
+
+private:
+  // Consume an aligned pair and relay its first value.
+  bool publish_pair() {
+    if (pending_[0].empty() || pending_[1].empty())
+      return false;
+    const uint8_t bit = pending_[0].front();
+    for (auto &queue : pending_)
+      queue.pop_front();
+    return pipeline_probe_node::enqueue_edge_value(
+        edge_value{logical_outcome{{bit}, true}}, 0);
+  }
+
+  std::array<std::deque<uint8_t>, 2> pending_{};
+  std::size_t deliveries_ = 0;
+};
+
+// Queue both rendezvous deliveries ahead of the first relay on one worker.
+TEST(DecodingTaskGraph, BufferedRendezvousKeepsEachDeliveryValue) {
+  static const bool registered = [] {
+    task_graph_node_kind_spec spec;
+    spec.name = "test_buffered_rendezvous";
+    spec.requires_decoder = false;
+    spec.requires_dem = false;
+    register_node_kind(std::move(spec), {}, [](node_build_context &ctx) {
+      return std::make_unique<buffered_rendezvous_probe>(ctx.id);
+    });
+    return true;
+  }();
+  ASSERT_TRUE(pipeline_probe_registered && registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  task_graph_node_config join;
+  const uint8_t zero = 0, one = 1;
+  active_pipeline_probe = probe;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(pipeline_node("X", "pass"));
+  nodes.push_back(pipeline_node("Y", "pass"));
+  join.id = "P";
+  join.kind = "test_buffered_rendezvous";
+  nodes.push_back(std::move(join));
+  nodes.push_back(pipeline_node("Q", "rendezvous_pass"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "X", "input"},
+       {"A", "output", "Y", "input"},
+       {"X", "output", "P", "a"},
+       {"Y", "output", "P", "b"},
+       {"P", "output", "Q", "input"},
+       {"Q", "output", "output", "input"}},
+      {.async_streaming = true,
+       .async_queue_capacity = 1,
+       .async_num_workers = 1});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  ASSERT_NO_THROW(graph->enqueue_syndrome(&zero, 1, round_type::BULK));
+  ASSERT_NO_THROW(graph->enqueue_syndrome(&one, 1, round_type::FINAL));
+  EXPECT_EQ(probe->records("P.value"), (std::vector<std::size_t>{0, 1}));
+  EXPECT_EQ(probe->records("Q.value"), (std::vector<std::size_t>{0, 1}));
+  EXPECT_EQ(graph->streaming_result().values, std::vector<uint8_t>{1});
+} // end - TEST(BufferedRendezvousKeepsEachDeliveryValue)
+
 // ---------------------------------------------------------------------------
 // Indexed joins
 // ---------------------------------------------------------------------------
@@ -16456,6 +16557,57 @@ TEST(DecodingTaskGraph, RecordsOfANarrowingNodeWaitForTheirFires) {
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph, RecordsOfANarrowingNodeWaitForTheirFires)
 
+// Coordinate the test thread and held fires through observed arrivals.
+class scheduler_test_gate {
+public:
+  // Allow slow CI workers to reach a milestone before declaring a stall.
+  static constexpr auto progress_timeout = std::chrono::seconds(15);
+
+  // Name the milestone in failures from either side of the gate.
+  explicit scheduler_test_gate(const char *name) : name_(name) {}
+
+  // Report an arrival before holding the fire until the test releases it.
+  void hold() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++arrivals_;
+    changed_.notify_all();
+    if (!changed_.wait_for(lock, hold_timeout, [&] { return released_; }))
+      throw std::runtime_error(std::string(name_) + " was never released");
+  }
+
+  // Wait until the required workers have reached their gates.
+  void wait_for_arrivals(std::size_t count = 1) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!changed_.wait_for(lock, progress_timeout,
+                           [&] { return arrivals_ >= count; }))
+      throw std::runtime_error(std::string(name_) + " did not reach its gate");
+  }
+
+  // Let any current or subsequent arrivals proceed, including on cleanup.
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    changed_.notify_all();
+  }
+
+private:
+  // Keep a held fire in place while the test waits for several milestones.
+  static constexpr auto hold_timeout = std::chrono::seconds(60);
+  const char *name_;
+  std::mutex mutex_;
+  std::condition_variable changed_;
+  std::size_t arrivals_ = 0;
+  bool released_ = false;
+};
+
+// Fail the setup on a missed milestone so the caller can release all gates.
+static void wait_for_scheduler_records(pipeline_probe &probe, const char *node,
+                                       std::size_t count) {
+  if (!probe.wait_for_count(node, count, scheduler_test_gate::progress_timeout))
+    throw std::runtime_error(std::string(node) + " did not reach " +
+                             std::to_string(count) + " records");
+}
+
 // Rounds queued while the graph is behind are admitted together, as one
 // record that A takes in one chunk, so its fires do not hold up its ingest.
 // A publishes every round: with J's fires held, hundreds of rounds admitted
@@ -16474,9 +16626,8 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
   ASSERT_TRUE(index_probe_registered);
   // Several times the event store, and within A's chunk limit.
   constexpr std::size_t rounds = 600;
-  // A wait that outlasts any healthy run: a stalled scheduler fails the
-  // test rather than hanging it.
-  constexpr auto patience = std::chrono::seconds(10);
+  // Fill the record contexts' worth of rounds behind a detached fire.
+  constexpr std::size_t coalesced_progress = 16;
   enum class after_j { output, joins, done, ordered, loop };
   for (const auto shape : {after_j::output, after_j::joins, after_j::done,
                            after_j::ordered, after_j::loop}) {
@@ -16537,70 +16688,38 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
                                            {.async_streaming = true,
                                             .async_queue_capacity = 1024,
                                             .async_num_workers = 2});
-    // J's fire 0 holds round 0's record until the rest are queued; fire 1
-    // holds J, so the fires of the rounds admitted after it wait. (K and L
-    // pass the hook only after J's fires 0 and 1.)
-    std::mutex gate_mutex;
-    std::condition_variable gate;
-    bool first_fired = false;
-    bool queued = false;
-    bool released = false;
-    index_fire_hook = [&](std::int64_t k) {
-      std::unique_lock<std::mutex> lock(gate_mutex);
-      if (k == 0) {
-        first_fired = true;
-        gate.notify_all();
-        gate.wait_for(lock, patience, [&] { return queued; });
-      } else if (k == 1) {
-        gate.wait_for(lock, patience, [&] { return released; });
-      }
-    };
-    const auto open = [&](bool &flag) {
-      std::lock_guard<std::mutex> lock(gate_mutex);
-      flag = true;
-      gate.notify_all();
-    };
-    // Wait, for up to 2 s, until `count` stops growing.
-    const auto settle = [](const std::function<std::size_t()> &count) {
-      std::size_t seen = count();
-      for (int i = 0; i < 200; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        const auto now = count();
-        if (now == seen)
-          return;
-        seen = now;
-      }
-    };
-    const auto fires = [] {
-      std::lock_guard<std::mutex> lock(index_fires_mutex);
-      return index_fires.size();
+    // Hold record zero while submitting the batch, then hold its first fire.
+    scheduler_test_gate first_fire("J[0]");
+    scheduler_test_gate batch_fire("J[1]");
+    index_node_fire_hook = [&](const std::string &id, std::int64_t k) {
+      if (id != "J")
+        return;
+      if (k == 0)
+        first_fire.hold();
+      else if (k == 1)
+        batch_fire.hold();
     };
     const auto records = pipeline_records(rounds);
     std::string error;
     try {
       graph->enqueue_syndrome(&records[0], 1, round_type::BULK);
-      bool started = false;
-      {
-        std::unique_lock<std::mutex> lock(gate_mutex);
-        started = gate.wait_for(lock, patience, [&] { return first_fired; });
-      }
-      EXPECT_TRUE(started) << "J's fire 0 never ran";
+      first_fire.wait_for_arrivals();
       for (std::size_t i = 1; i + 1 < rounds; ++i)
         graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
-      // Round 0's record retires, and the queued rounds are admitted
-      // together into its context; let A take as many as it will.
-      open(queued);
-      settle([&] { return probe->records("A").size(); });
-      open(released);
-      settle(fires);
+      first_fire.release();
+      batch_fire.wait_for_arrivals();
+      // Observe ingest running ahead on paths where the held fire detaches.
+      if (shape != after_j::ordered && shape != after_j::loop)
+        wait_for_scheduler_records(*probe, "A", coalesced_progress);
+      batch_fire.release();
       graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
     } catch (const std::exception &e) {
       error = e.what();
     }
-    open(queued);
-    open(released);
+    first_fire.release();
+    batch_fire.release();
     const auto &result = graph->streaming_result();
-    index_fire_hook = nullptr;
+    index_node_fire_hook = nullptr;
     EXPECT_EQ(error, "");
     EXPECT_EQ(result.status, task_graph_streaming_status::complete)
         << result.error;
@@ -16637,7 +16756,6 @@ static void expect_feedback_stays_attached(bool multi_node) {
   constexpr std::size_t singles = 15;
   const std::int64_t k_held = multi_node ? 40 : 100;
   const std::int64_t feedback_held = multi_node ? 45 : 110;
-  constexpr auto patience = std::chrono::seconds(10);
   auto probe = std::make_shared<pipeline_probe>();
   active_pipeline_probe = probe;
   {
@@ -16678,84 +16796,45 @@ static void expect_feedback_stays_attached(bool multi_node) {
                                          {.async_streaming = true,
                                           .async_queue_capacity = 1024,
                                           .async_num_workers = 3});
-  std::mutex gate_mutex;
-  std::condition_variable gate;
-  bool first_fired = false, queued = false; // K's fire 0 holds record 0
-  bool feedback_holding = false, feedback_released = false;
-  bool k_released = false;
+  scheduler_test_gate first_fire("K[0]");
+  scheduler_test_gate detached_fire("K's detached fire");
+  scheduler_test_gate feedback_fire("J's feedback fire");
   index_node_fire_hook = [&](const std::string &id, std::int64_t k) {
-    std::unique_lock<std::mutex> lock(gate_mutex);
-    if (id == "K" && k == 0) {
-      first_fired = true;
-      gate.notify_all();
-      gate.wait_for(lock, patience, [&] { return queued; });
-    } else if (id == "K" && k == k_held) {
-      gate.wait_for(lock, patience, [&] { return k_released; });
-    } else if (id == "J" && k == feedback_held) {
-      feedback_holding = true;
-      gate.notify_all();
-      gate.wait_for(lock, patience, [&] { return feedback_released; });
-    }
+    if (id == "K" && k == 0)
+      first_fire.hold();
+    else if (id == "K" && k == k_held)
+      detached_fire.hold();
+    else if (id == "J" && k == feedback_held)
+      feedback_fire.hold();
   };
-  const auto open = [&](bool &flag) {
-    std::lock_guard<std::mutex> lock(gate_mutex);
-    flag = true;
-    gate.notify_all();
-  };
-  const auto wait_for = [&](const std::function<bool()> &done) {
-    for (int i = 0; i < 1000 && !done(); ++i)
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    return done();
-  };
-  // Wait, for up to 2 s, until `count` stops growing.
-  const auto settle = [](const std::function<std::size_t()> &count) {
-    std::size_t seen = count();
-    for (int i = 0; i < 200; ++i) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      const auto now = count();
-      if (now == seen)
-        return;
-      seen = now;
-    }
-  };
-  const auto ingested = [&] { return probe->records("A").size(); };
-  const auto j_fires = [&] { return probe->records("J").size(); };
   const auto records = pipeline_records(rounds);
   std::string error;
   try {
     graph->enqueue_syndrome(&records[0], 1, round_type::BULK);
-    EXPECT_TRUE(wait_for([&] {
-      std::lock_guard<std::mutex> lock(gate_mutex);
-      return first_fired;
-    })) << "K's fire 0 never ran";
-    // One round per record, each waiting behind K's fire 0, until every
-    // record context is in use.
+    first_fire.wait_for_arrivals();
+    // Admit a round to each context before filling the next coalesced record.
     for (std::size_t i = 1; i <= singles; ++i) {
       graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
-      EXPECT_TRUE(wait_for([&] { return ingested() == i + 1; }))
-          << "round " << i << " was not admitted alone";
+      wait_for_scheduler_records(*probe, "A", i + 1);
     }
     for (std::size_t i = singles + 1; i + 1 < rounds; ++i)
       graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
-    open(queued);
-    EXPECT_TRUE(wait_for([&] {
-      std::lock_guard<std::mutex> lock(gate_mutex);
-      return feedback_holding;
-    })) << "J never reached its held fire";
-    settle(ingested);
-    EXPECT_EQ(ingested(), static_cast<std::size_t>(feedback_held + 1));
-    open(feedback_released);
-    EXPECT_TRUE(wait_for([&] {
-      return j_fires() > static_cast<std::size_t>(feedback_held + 1);
-    })) << "J did not resume while K was held";
-    open(k_released);
+    first_fire.release();
+    detached_fire.wait_for_arrivals();
+    feedback_fire.wait_for_arrivals();
+    const auto held_count = static_cast<std::size_t>(feedback_held + 1);
+    EXPECT_EQ(probe->count("A"), held_count);
+    feedback_fire.release();
+    // Observe a later feedback fire while the detached fire is still held.
+    wait_for_scheduler_records(*probe, "J", held_count + 1);
+    detached_fire.release();
     graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
   } catch (const std::exception &e) {
     error = e.what();
   }
-  open(queued);
-  open(feedback_released);
-  open(k_released);
+  first_fire.release();
+  feedback_fire.release();
+  detached_fire.release();
   const auto &result = graph->streaming_result();
   index_node_fire_hook = nullptr;
   EXPECT_EQ(error, "");
@@ -16787,7 +16866,9 @@ TEST(DecodingTaskGraph, FeedbackReservesMissingInputNotifications) {
   constexpr std::size_t rounds = 600;
   constexpr std::size_t branches = 4;
   constexpr std::int64_t held = 32;
-  constexpr auto patience = std::chrono::seconds(10);
+  // Half of this graph's 752 slots holds 17 detached M fires at 21 slots
+  // each. The following fire stays attached to the round that produces it.
+  constexpr std::size_t detached_fires = 17;
   auto probe = std::make_shared<pipeline_probe>();
   active_pipeline_probe = probe;
   std::vector<task_graph_node_config> nodes;
@@ -16826,75 +16907,48 @@ TEST(DecodingTaskGraph, FeedbackReservesMissingInputNotifications) {
   ASSERT_TRUE(graph->supports_streaming())
       << graph->streaming_incompatibility_reason();
 
-  std::mutex mutex;
-  std::condition_variable gate;
-  bool first_started = false, first_released = false;
-  bool batch_started = false, batch_released = false;
-  std::size_t leaves_started = 0;
-  bool leaves_released = false;
+  scheduler_test_gate first_fire("M[0]");
+  scheduler_test_gate batch_fire("M's coalesced fire");
+  scheduler_test_gate leaf_fires("missing-input leaf fires");
   index_node_fire_hook = [&](const std::string &id, std::int64_t k) {
-    std::unique_lock<std::mutex> lock(mutex);
-    if (id == "M" && k == 0) {
-      first_started = true;
-      gate.notify_all();
-      gate.wait_for(lock, patience, [&] { return first_released; });
-    } else if (id == "M" && k == held) {
-      batch_started = true;
-      gate.notify_all();
-      gate.wait_for(lock, patience, [&] { return batch_released; });
-    } else if (id.starts_with("L") && k == held + 1) {
-      ++leaves_started;
-      gate.notify_all();
-      gate.wait_for(lock, patience, [&] { return leaves_released; });
-    }
+    if (id == "M" && k == 0)
+      first_fire.hold();
+    else if (id == "M" && k == held)
+      batch_fire.hold();
+    else if (id.starts_with("L") && k == held + 1)
+      leaf_fires.hold();
   };
-  const auto release = [&](bool &flag) {
-    std::lock_guard<std::mutex> lock(mutex);
-    flag = true;
-    gate.notify_all();
-  };
-  const auto wait_for = [&](const auto &ready) {
-    std::unique_lock<std::mutex> lock(mutex);
-    return gate.wait_for(lock, patience, ready);
-  };
-  const auto wait_until_settled = [&](const std::string &node) {
-    for (int i = 0; i < 40; ++i) {
-      const auto seen = probe->count(node);
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      if (probe->count(node) == seen)
-        return;
-    }
-  };
-
   const auto records = pipeline_records(rounds);
   std::string error;
   try {
     graph->enqueue_syndrome(&records[0], 1, round_type::BULK);
-    EXPECT_TRUE(wait_for([&] { return first_started; }));
+    first_fire.wait_for_arrivals();
     // Fill the other 15 contexts individually so the queued rounds that
     // follow are admitted together after M releases the first context.
     for (std::size_t k = 1; k < 16; ++k) {
       graph->enqueue_syndrome(&records[k], 1, round_type::BULK);
-      EXPECT_TRUE(probe->wait_for_count("A", k + 1));
+      wait_for_scheduler_records(*probe, "A", k + 1);
     }
     for (std::size_t k = 16; k + 1 < rounds; ++k)
       graph->enqueue_syndrome(&records[k], 1, round_type::BULK);
-    release(first_released);
-    EXPECT_TRUE(wait_for([&] { return batch_started; }));
-    wait_until_settled("A");
-    // With the record's budget occupied, the notifications queue leaves
-    // under their deliveries. Hold the leaves while M drains its backlog.
-    release(batch_released);
-    EXPECT_TRUE(wait_for([&] { return leaves_started == 2 * branches; }));
-    wait_until_settled("M");
-    release(leaves_released);
+    first_fire.release();
+    batch_fire.wait_for_arrivals();
+    const auto admitted = held + detached_fires + 1;
+    wait_for_scheduler_records(*probe, "A", admitted);
+    // An extra round here would leave too little room for the notifications.
+    EXPECT_FALSE(probe->wait_for_count("A", admitted + 1));
+    batch_fire.release();
+    leaf_fires.wait_for_arrivals(2 * branches);
+    // A following M fire drains while the resulting leaf fires are held.
+    wait_for_scheduler_records(*probe, "M", held + 2);
+    leaf_fires.release();
     graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
   } catch (const std::exception &e) {
     error = e.what();
   }
-  release(first_released);
-  release(batch_released);
-  release(leaves_released);
+  first_fire.release();
+  batch_fire.release();
+  leaf_fires.release();
   const auto &result = graph->streaming_result();
   index_node_fire_hook = nullptr;
   EXPECT_EQ(error, "");
@@ -16908,7 +16962,7 @@ TEST(DecodingTaskGraph, FeedbackReservesMissingInputNotifications) {
     std::sort(fired.begin(), fired.end());
     EXPECT_EQ(fired, expected) << "L" << i;
   }
-}
+} // end - TEST(FeedbackReservesMissingInputNotifications)
 
 class seeded_index_join : public index_probe_node {
 public:
@@ -17005,9 +17059,10 @@ public:
 class indexed_flushing_sender : public index_probe_node {
 public:
   // Create an indexed node whose feedback is held until FINAL.
-  explicit indexed_flushing_sender(const std::string &id)
+  indexed_flushing_sender(const std::string &id, int publications)
       : index_probe_node(id, "join_send", 1 << 30, 0, -1, false,
-                         active_pipeline_probe) {}
+                         active_pipeline_probe),
+        publications_(publications) {}
 
   // Record the fire while leaving the feedback unpublished.
   bool fire(std::int64_t k, const std::vector<const edge_value *> &) override {
@@ -17015,20 +17070,32 @@ public:
     return false;
   }
 
-  // Make the withheld value available exactly once.
-  bool flush() override { return !std::exchange(flushed_, true); }
+  // Start the withheld publications at index zero on the first flush.
+  bool flush() override {
+    return !std::exchange(flushed_, true) && publications_ != 0;
+  }
+
+  // Report the biggest batch that the callback can publish.
+  std::size_t max_publications_per_delivery() const override {
+    return publications_;
+  }
+
+  // Expose one additional value for each remaining index in the batch.
+  bool publish_next() override { return ++index_ < publications_; }
 
   // Only the feedback port carries the withheld value.
   const edge_value *streaming_output(std::size_t slot) const override {
-    return slot == 1 && flushed_ ? &tail_ : nullptr;
+    return slot == 1 && flushed_ && index_ < publications_ ? &tail_ : nullptr;
   }
 
-  // Stamp the withheld feedback with its original index.
+  // Stamp each withheld publication with the current index.
   std::optional<std::int64_t> published_index(std::size_t) const override {
-    return 0;
+    return index_;
   }
 
 private:
+  int publications_;
+  std::int64_t index_ = 0;
   bool flushed_ = false;
   edge_value tail_{measurement_results{{1}}};
 };
@@ -17141,9 +17208,14 @@ static const bool feedback_probe_kinds_registered = [] {
   sender.name = "test_indexed_flushing_sender";
   sender.requires_decoder = false;
   sender.requires_dem = false;
-  register_node_kind(std::move(sender), {}, [](node_build_context &ctx) {
-    return std::make_unique<indexed_flushing_sender>(ctx.id);
-  });
+  decoding::config::decoder_schema sender_schema;
+  sender_schema.params.push_back(
+      {"publications", decoding::config::param_kind::int32, false});
+  register_node_kind(
+      std::move(sender), std::move(sender_schema), [](node_build_context &ctx) {
+        return std::make_unique<indexed_flushing_sender>(
+            ctx.id, ctx.node_params->get<int>("publications", 1));
+      });
   task_graph_node_kind_spec repeating_sender;
   repeating_sender.name = "test_indexed_repeating_sender";
   repeating_sender.requires_decoder = false;
@@ -17335,6 +17407,73 @@ TEST(DecodingTaskGraph, FinalCallbackCannotPublishInsideAFeedbackCycle) {
 } // end - TEST(DecodingTaskGraph,
   // FinalCallbackCannotPublishInsideAFeedbackCycle)
 
+// Each flush publication completes ordered consumers while indexed consumers
+// receive the completion of the actual fire at its index.
+TEST(DecodingTaskGraph, IndexedFlushCompletesRecordOrderedPublications) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  // The burst exceeds the event store for this topology.
+  constexpr int burst_size = 400;
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    for (const int publications : {0, 1, burst_size}) {
+      SCOPED_TRACE(publications);
+      // Exercise a burst of completions even with no value wires to defer.
+      const bool wire_values = publications != burst_size;
+      auto probe = std::make_shared<pipeline_probe>();
+      std::vector<task_graph_node_config> nodes;
+      std::vector<task_graph_edge> edges{
+          {"measurements", "output", "A", "input"},
+          {"A", "output", "T", "input"},
+          {"T", "output", "J", "a"},
+          {"T", "output", "J", "b", -1},
+          {"J", "done", "R", "input"},
+          {"R", "output", "K", "a"},
+          {"R", "output", "K", "b", -1},
+          {"R", "done", "X", "input"},
+          {"J", "done", "I", "a"},
+          {"T", "output", "I", "b", -1},
+          {"K", "output", "output", "input"}};
+      task_graph_node_config sender;
+      active_pipeline_probe = probe;
+      nodes.push_back(pipeline_node("A", "source"));
+      nodes.push_back(index_node("T", "tag"));
+      sender.id = "J";
+      sender.kind = "test_indexed_flushing_sender";
+      sender.node_params.insert("publications", publications);
+      nodes.push_back(std::move(sender));
+      nodes.push_back(index_node("R", "tag_done"));
+      nodes.push_back(index_node("K", "join"));
+      nodes.push_back(pipeline_node("X", "after"));
+      nodes.push_back(index_node("I", "join_done"));
+      if (wire_values) {
+        nodes.push_back(index_node("H", "join"));
+        edges.push_back({"J", "send", "H", "a"});
+        edges.push_back({"J", "send", "H", "b", -1});
+      }
+      auto graph = decoding_task_graph::from_topology(
+          std::move(nodes), std::move(edges),
+          {.async_streaming = async, .async_num_workers = 2});
+      const uint8_t bit = 1;
+      ASSERT_TRUE(graph->supports_streaming())
+          << graph->streaming_incompatibility_reason();
+      ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+      EXPECT_EQ(graph->streaming_result().status,
+                task_graph_streaming_status::complete);
+      std::vector<std::size_t> ordered(publications + 1);
+      std::iota(ordered.begin(), ordered.end(), std::size_t{0});
+      EXPECT_EQ(probe->records("R"), ordered);
+      EXPECT_EQ(probe->records("X"), ordered);
+      EXPECT_EQ(probe->records("I"), (std::vector<std::size_t>{0}));
+      if (wire_values) {
+        auto values = probe->records("H");
+        ordered.pop_back();
+        std::sort(values.begin(), values.end());
+        EXPECT_EQ(values, ordered);
+      }
+    } // end - for(publications)
+  } // end - for(async)
+} // end - TEST(IndexedFlushCompletesRecordOrderedPublications)
+
 // Drain a finite absence cascade around a cycle without firing a join.
 TEST(DecodingTaskGraph, MissingInputNotificationsCanCircleAFeedbackLoop) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
@@ -17462,7 +17601,6 @@ TEST(DecodingTaskGraph, BranchingMissingInputNotificationsFitTheEventStore) {
 // An attached burst waits for room alongside independent detached fires.
 TEST(DecodingTaskGraph, AttachedBurstWaitsForDetachedFireCapacity) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
-  constexpr auto patience = std::chrono::seconds(10);
   auto probe = std::make_shared<pipeline_probe>();
   active_pipeline_probe = probe;
   std::vector<task_graph_node_config> nodes;
@@ -17492,57 +17630,40 @@ TEST(DecodingTaskGraph, AttachedBurstWaitsForDetachedFireCapacity) {
       {.async_streaming = true,
        .async_queue_capacity = 1024,
        .async_num_workers = 3});
-  std::mutex mutex;
-  std::condition_variable gate;
-  bool first_started = false, first_released = false;
-  bool batch_started = false, batch_released = false;
+  scheduler_test_gate first_fire("K[0]");
+  scheduler_test_gate batch_fire("K's coalesced fire");
   index_node_fire_hook = [&](const std::string &id, std::int64_t k) {
     if (id != "K")
       return;
-    std::unique_lock<std::mutex> lock(mutex);
-    if (k == 0) {
-      first_started = true;
-      gate.notify_all();
-      gate.wait_for(lock, patience, [&] { return first_released; });
-    } else if (k == 40) {
-      batch_started = true;
-      gate.notify_all();
-      gate.wait_for(lock, patience, [&] { return batch_released; });
-    }
-  };
-  const auto wait = [&](const bool &flag) {
-    std::unique_lock<std::mutex> lock(mutex);
-    return gate.wait_for(lock, patience, [&] { return flag; });
-  };
-  const auto release = [&](bool &flag) {
-    std::lock_guard<std::mutex> lock(mutex);
-    flag = true;
-    gate.notify_all();
+    if (k == 0)
+      first_fire.hold();
+    else if (k == 40)
+      batch_fire.hold();
   };
   constexpr std::size_t rounds = 251;
   const uint8_t bit = 1;
   std::string error;
   try {
     graph->enqueue_syndrome(&bit, 1, round_type::BULK);
-    EXPECT_TRUE(wait(first_started));
+    first_fire.wait_for_arrivals();
     for (std::size_t k = 1; k < 16; ++k) {
       graph->enqueue_syndrome(&bit, 1, round_type::BULK);
-      EXPECT_TRUE(probe->wait_for_count("A", k + 1));
+      wait_for_scheduler_records(*probe, "A", k + 1);
     }
     for (std::size_t k = 16; k + 1 < rounds; ++k)
       graph->enqueue_syndrome(&bit, 1, round_type::BULK);
-    release(first_released);
-    EXPECT_TRUE(wait(batch_started));
+    first_fire.release();
+    batch_fire.wait_for_arrivals();
     // The shifted required input keeps earlier instances of M from firing.
-    EXPECT_TRUE(probe->wait_for_count("A", burst_index_join::burst_index));
+    wait_for_scheduler_records(*probe, "A", burst_index_join::burst_index);
     // M fits in the store by itself. It must wait for K's reserved backlog
     // to drain before it starts publishing to L.
     EXPECT_FALSE(probe->wait_for_count("M", 1));
   } catch (const std::exception &e) {
     error = e.what();
   }
-  release(first_released);
-  release(batch_released);
+  first_fire.release();
+  batch_fire.release();
   EXPECT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
   const auto &result = graph->streaming_result();
   index_node_fire_hook = nullptr;
@@ -17551,7 +17672,7 @@ TEST(DecodingTaskGraph, AttachedBurstWaitsForDetachedFireCapacity) {
       << result.error;
   EXPECT_EQ(probe->count("K"), rounds);
   EXPECT_EQ(probe->count("M"), 1u);
-}
+} // end - TEST(AttachedBurstWaitsForDetachedFireCapacity)
 
 // Deliver a long skipped range before the first value following it.
 TEST(DecodingTaskGraph, LongPublicationGapDrainsBeforeItsValue) {

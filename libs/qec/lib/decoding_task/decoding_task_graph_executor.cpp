@@ -312,9 +312,12 @@ struct decoding_task_graph::impl::record_scheduler {
     bool copy_outputs = context_count > 1;
     for (std::size_t si = 0; si < M; ++si) {
       const auto node_idx = owner.streaming_nodes[si].node_index;
-      publications[si] =
-          owner.streaming_nodes[si].capability->max_publications_per_delivery();
-      copy_publications[si] |= publications[si] > 1;
+      const auto *capability = owner.streaming_nodes[si].capability;
+      publications[si] = capability->max_publications_per_delivery();
+      // Overlapping branches can make a rendezvous node publish twice
+      // before the first delivery reads its output.
+      copy_publications[si] |=
+          publications[si] > 1 || capability->supports_streaming_rendezvous();
       for (const auto producer : owner.streaming_producers[si]) {
         publications[si] = std::max(publications[si], publications[producer]);
         copy_publications[si] |= copy_publications[producer];
@@ -959,6 +962,7 @@ struct decoding_task_graph::impl::record_scheduler {
     if (!capability)
       capability = owner.streaming_nodes[producer].capability;
     const auto &wires = owner.streaming_wires_from[node_idx];
+    const auto &completions = owner.completion_wires_from[node_idx];
     const auto anchor = feedback_anchor[producer];
     auto lock = lock_runtime();
     // Captured in the record holding the operation it follows from, as a
@@ -1010,10 +1014,16 @@ struct decoding_task_graph::impl::record_scheduler {
             " differs from firing index " + std::to_string(event.index));
       publish_wire_locked(c, parent, root, wire, wire_index, value);
     }
-    if (!indexed(producer))
-      publish_wires_locked(c, parent, root,
-                           owner.completion_wires_from[node_idx], index);
-  }
+    if (!indexed(producer)) {
+      publish_wires_locked(c, parent, root, completions, index);
+    } else if (event.kind == graph_event_kind::streaming_flush) {
+      // A callback publication completes ordered consumers. Indexed
+      // consumers get a completion only from the fire that names its index.
+      for (const auto &wire : completions)
+        if (!indexed(owner.streaming_by_node[wire.to_node]))
+          publish_wire_locked(c, parent, root, wire, no_index, nullptr);
+    }
+  } // end - publish_streaming()
 
   void publish_wires(context &c, std::size_t parent, std::size_t root,
                      const std::vector<compiled_wire> &wires,
@@ -1069,10 +1079,15 @@ struct decoding_task_graph::impl::record_scheduler {
       }
       // Leave room for descendants by replaying excess deliveries in
       // publication order once the producer's current subtree drains.
+      // An indexed flush can send a completion per publication, beyond
+      // the single completion budgeted for an indexed fire.
       auto &producer = c.slots[parent];
-      const bool defer = !absent && (defer_publications[source] ||
-                                     producer.first_delivery != no_event ||
-                                     c.free_slots.size() <= c.slots.size() / 2);
+      const bool defer =
+          !absent &&
+          (defer_publications[source] || producer.first_delivery != no_event ||
+           c.free_slots.size() <= c.slots.size() / 2 ||
+           (producer.event.kind == graph_event_kind::streaming_flush &&
+            indexed(source)));
       std::size_t blocker = no_event;
       std::size_t blocker_sequence = 0;
       // Direct children are stored in declared wire order. A later branch
@@ -1115,7 +1130,7 @@ struct decoding_task_graph::impl::record_scheduler {
         c.slots[id].buffer = buffer;
       }
     }
-  }
+  } // end - publish_wire_locked()
 
   // Read this delivery's snapshot or the producer output held for it.
   const edge_value *delivered_value(const graph_event &event,
