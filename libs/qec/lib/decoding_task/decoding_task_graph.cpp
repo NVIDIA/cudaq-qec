@@ -888,12 +888,20 @@ void decoding_task_graph::impl::compile_wires() {
       const auto &entry = streaming_nodes[si];
       const int idx = entry.node_index;
       std::vector<streaming_task_graph_node::input_schedule> input_schedules;
+      std::vector<streaming_task_graph_node::input_schedule>
+          unordered_schedules;
       for (const auto &sw : wires_to[idx]) {
         // A loop-carried producer's schedule is not derived yet; its
         // consumer's schedule follows its forward inputs.
         if (sw.from_node < 0 || streaming_by_node[sw.from_node] < 0 ||
             sw.loop_carried())
           continue;
+        // An indexed completion into a record-ordered node is out of step
+        // with the windows of its other inputs.
+        const bool unordered =
+            is_done_slot(sw.from_node, sw.from_slot) &&
+            !streaming_nodes[streaming_by_node[sw.from_node]].indexed.empty() &&
+            entry.indexed.empty();
         const auto &producer_schedule =
             effective_schedule[sw.from_node][sw.from_slot];
         if (!producer_schedule) {
@@ -912,11 +920,15 @@ void decoding_task_graph::impl::compile_wires() {
                                     "' is incompatible: " + validation_error);
           break;
         }
-        input_schedules.push_back(
-            {static_cast<std::size_t>(sw.to_slot), *producer_schedule});
+        (unordered ? unordered_schedules : input_schedules)
+            .push_back(
+                {static_cast<std::size_t>(sw.to_slot), *producer_schedule});
       }
       if (!streaming_conflict.empty())
         break;
+      // A node fed only by unordered completions follows them.
+      if (input_schedules.empty())
+        input_schedules = std::move(unordered_schedules);
       const auto derivation_error = derive_streaming_output_schedules(
           *entry.capability, input_schedules, effective_schedule[idx]);
       if (!derivation_error.empty())

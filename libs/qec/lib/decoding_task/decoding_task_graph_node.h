@@ -195,8 +195,10 @@ public:
   /// completions arrive in any order, and a dropped instance sends none. An
   /// input that pairs completions with other inputs, or counts on one per
   /// instance, must leave this false and its node must join by index. Such
-  /// a completion does not count toward the node's window, so the node's own
-  /// `done` follows its other inputs. A fire pool cannot opt in.
+  /// a completion does not count toward the node's window. If the node has
+  /// other inputs, it does not set the node's schedule and what it makes the
+  /// node publish sends no completion, so the node's own `done` follows
+  /// those inputs. A fire pool cannot opt in.
   virtual bool accepts_unordered_completions(std::size_t /*slot*/) const {
     return false;
   }

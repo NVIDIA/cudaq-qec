@@ -1093,17 +1093,18 @@ struct decoding_task_graph::impl::record_scheduler {
 
   // A fire leaves a publication current; publish it and each further one
   // the node makes current. Only the first may carry the fire's own index.
-  // Workers are woken once, for all of them.
+  // Without @p completes, a record-ordered node's publications send no
+  // completion. Workers are woken once, for all of them.
   bool publish_all(context &c, std::size_t parent, std::size_t root,
                    std::size_t producer,
                    streaming_task_graph_node *capability = nullptr,
-                   std::int64_t index = no_index) {
+                   std::int64_t index = no_index, bool completes = true) {
     if (!capability)
       capability = owner.streaming_nodes[producer].capability;
     bool repeat = false;
     do {
       publish_streaming(c, parent, root, producer, capability,
-                        repeat ? no_index : index, repeat);
+                        repeat ? no_index : index, repeat, completes);
       repeat = true;
     } while (capability->publish_next());
     const auto node_idx = owner.streaming_nodes[producer].node_index;
@@ -1120,7 +1121,8 @@ struct decoding_task_graph::impl::record_scheduler {
   void publish_streaming(context &c, std::size_t parent, std::size_t root,
                          std::size_t producer,
                          const streaming_task_graph_node *capability = nullptr,
-                         std::int64_t index = no_index, bool repeat = false) {
+                         std::int64_t index = no_index, bool repeat = false,
+                         bool completes = true) {
     const auto node_idx = owner.streaming_nodes[producer].node_index;
     if (!capability)
       capability = owner.streaming_nodes[producer].capability;
@@ -1178,7 +1180,8 @@ struct decoding_task_graph::impl::record_scheduler {
       publish_wire_locked(c, parent, root, wire, wire_index, value);
     }
     if (!indexed(producer)) {
-      publish_wires_locked(c, parent, root, completions, index);
+      if (completes)
+        publish_wires_locked(c, parent, root, completions, index);
     } else if (event.kind == graph_event_kind::streaming_flush) {
       // A callback publication completes ordered consumers. Indexed
       // consumers get a completion only from the fire that names its index.
@@ -1883,18 +1886,27 @@ struct decoding_task_graph::impl::record_scheduler {
                                : owner.streaming_nodes[event.node].capability;
     if (pool)
       consumer_node->clear_corrections();
+    // An indexed completion is out of step with the node's records. It does
+    // not count toward the window, and if the node has other inputs, what it
+    // makes the node publish sends no completion: the node's own `done`
+    // follows those inputs. A node fed only by such completions keeps its
+    // `done` on its own publications.
+    const auto source = owner.streaming_by_node[event.wire.from_node];
+    const bool unordered =
+        event.wire.id < 0 && indexed(static_cast<std::size_t>(source));
+    const bool completes =
+        !unordered || owner.streaming_wires_to_count[consumer] == 0;
     const auto *value = delivered_value(event, c.slots[id].buffer);
     const bool fired =
         value && consumer_node->enqueue_edge_value(*value, event.wire.to_slot);
     if (fired)
-      (void)publish_all(c, id, event.root, event.node, consumer_node);
+      (void)publish_all(c, id, event.root, event.node, consumer_node, no_index,
+                        completes);
+    if (unordered)
+      return fired;
     // An edge-fed node completes the window after its last delivery. A
     // pooled node counts per record; a record-ordered one counts across
-    // records, as its producers may fire in different ones. An indexed
-    // completion is out of step with records and does not count.
-    const auto source = owner.streaming_by_node[event.wire.from_node];
-    if (event.wire.id < 0 && indexed(static_cast<std::size_t>(source)))
-      return fired;
+    // records, as its producers may fire in different ones.
     auto &seen =
         pool ? c.deliveries_seen[consumer] : node_deliveries_seen[consumer];
     if (++seen == owner.streaming_wires_to_count[consumer]) {
@@ -1905,7 +1917,7 @@ struct decoding_task_graph::impl::record_scheduler {
         publish_wires(c, id, event.root, owner.completion_wires_from[consumer]);
     }
     return fired;
-  }
+  } // end - deliver_streaming_edge()
 
   // ----- Event handlers ----------------------------------------------------
 

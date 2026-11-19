@@ -15256,8 +15256,13 @@ public:
       const std::vector<input_schedule> &inputs) const override {
     if (!has_output(output_slot) || inputs.empty())
       return std::nullopt;
+    if (period_ != 0)
+      return window_spec{period_, period_, 0, 0};
     return inputs[0].schedule;
   }
+  // Declare windows of `period` rounds instead of the input's, so a test can
+  // give two paths different schedules.
+  void set_period(uint32_t period) { period_ = period; }
   std::optional<edge_value_type> output_type(std::size_t slot) const override {
     if (!has_output(slot))
       return std::nullopt;
@@ -15323,6 +15328,7 @@ private:
   bool second_ready_ = false;
   std::size_t records_ = 0;
   std::int64_t published_ = 0;
+  uint32_t period_ = 0; ///< declared window period, or 0 for the input's
   std::optional<committed_coverage> coverage_;
   edge_value value_out_;
   edge_value value_odd_;
@@ -15344,9 +15350,10 @@ static const bool index_probe_registered = [] {
   schema.params.push_back({"first", param_kind::int32, /*required=*/false});
   schema.params.push_back(
       {"guaranteed", param_kind::int32, /*required=*/false});
+  schema.params.push_back({"period", param_kind::int32, /*required=*/false});
   register_node_kind(
       std::move(spec), std::move(schema), [](node_build_context &ctx) {
-        return std::make_unique<index_probe_node>(
+        auto node = std::make_unique<index_probe_node>(
             ctx.id, ctx.node_params->get<std::string>("mode"),
             ctx.node_params->get<int>("limit", 1 << 30),
             ctx.node_params->get<std::size_t>("hold_ms", 0),
@@ -15354,6 +15361,9 @@ static const bool index_probe_registered = [] {
             ctx.node_params->get<int>("staged", 0) != 0, active_pipeline_probe,
             ctx.node_params->get<int>("first", 0),
             ctx.node_params->get<int>("guaranteed", -1));
+        node->set_period(
+            static_cast<uint32_t>(ctx.node_params->get<int>("period", 0)));
+        return node;
       });
   return true;
 }();
@@ -17685,9 +17695,11 @@ TEST(DecodingTaskGraph, UnorderedCompletionsAreDeclaredPerInput) {
 } // end - TEST(DecodingTaskGraph, UnorderedCompletionsAreDeclaredPerInput)
 
 // Indexed completions are out of step with records, and a dropped instance
-// sends none, so they do not count toward a record-ordered node's window. R's
-// own completion follows its record-ordered input, one per record, while J
-// drops the instances T no longer feeds.
+// sends none, so they neither count toward a record-ordered node's window nor
+// bind its schedule. R's own completion follows its record-ordered input, one
+// per record, while J drops the instances T no longer feeds, whether or not
+// R publishes when it handles J's completions and whether or not J runs on
+// R's schedule.
 TEST(DecodingTaskGraph, DeclaredCompletionsDoNotCountTowardTheWindow) {
   ASSERT_TRUE(index_probe_registered && pipeline_probe_registered);
   // More rounds than T publishes, so J's last instance drops.
@@ -17695,43 +17707,53 @@ TEST(DecodingTaskGraph, DeclaredCompletionsDoNotCountTowardTheWindow) {
   // T's publications: J fires this many instances.
   constexpr int published = 8;
   for (const bool async : {false, true}) {
-    SCOPED_TRACE(async ? "async" : "sync");
-    auto probe = std::make_shared<pipeline_probe>();
-    active_pipeline_probe = probe;
-    std::vector<task_graph_node_config> nodes;
-    nodes.push_back(pipeline_node("A", "source"));
-    nodes.push_back(index_node("T", "tag", published));
-    nodes.push_back(index_node("J", "join"));
-    auto observer = pipeline_node("R", "after_pair");
-    observer.node_params.insert("unordered_completion_slot", 1);
-    nodes.push_back(std::move(observer));
-    nodes.push_back(pipeline_node("X", "after"));
-    auto graph = decoding_task_graph::from_topology(
-        std::move(nodes),
-        {{"measurements", "output", "A", "input"},
-         {"A", "output", "T", "input"},
-         {"T", "output", "J", "a"},
-         {"T", "output", "J", "b", -1},
-         {"A", "done", "R", "a"},
-         {"J", "done", "R", "b"},
-         {"R", "done", "X", "input"},
-         {"J", "output", "output", "input"}},
-        {.async_streaming = async,
-         .async_queue_capacity = 16,
-         .async_num_workers = 2});
-    ASSERT_TRUE(graph->supports_streaming())
-        << graph->streaming_incompatibility_reason();
-    const auto records = pipeline_records(rounds);
-    for (std::size_t i = 0; i + 1 < rounds; ++i)
-      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
-    graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
-    EXPECT_EQ(graph->streaming_result().status,
-              task_graph_streaming_status::complete)
-        << graph->streaming_result().error;
-    EXPECT_EQ(probe->records("J").size(), static_cast<std::size_t>(published));
-    // R saw every completion, but completed once per record.
-    EXPECT_EQ(probe->records("R").size(), rounds + published);
-    EXPECT_EQ(probe->records("X").size(), rounds);
+    for (const bool publishes : {false, true}) {
+      // J's windows of two rounds against A's one, or the same as A's.
+      for (const int period : {0, 2}) {
+        SCOPED_TRACE(std::string(async ? "async" : "sync") +
+                     (publishes ? ", R publishes" : ", R only observes") +
+                     ", J period " + std::to_string(period));
+        auto probe = std::make_shared<pipeline_probe>();
+        active_pipeline_probe = probe;
+        std::vector<task_graph_node_config> nodes;
+        nodes.push_back(pipeline_node("A", "source"));
+        nodes.push_back(index_node("T", "tag", published));
+        nodes.back().node_params.insert("period", period);
+        nodes.push_back(index_node("J", "join"));
+        auto observer =
+            pipeline_node("R", publishes ? "relay_done" : "after_pair");
+        observer.node_params.insert("unordered_completion_slot", 1);
+        nodes.push_back(std::move(observer));
+        nodes.push_back(pipeline_node("X", "after"));
+        auto graph = decoding_task_graph::from_topology(
+            std::move(nodes),
+            {{"measurements", "output", "A", "input"},
+             {"A", "output", "T", "input"},
+             {"T", "output", "J", "a"},
+             {"T", "output", "J", "b", -1},
+             {"A", "done", "R", "a"},
+             {"J", "done", "R", "b"},
+             {"R", "done", "X", "input"},
+             {"J", "output", "output", "input"}},
+            {.async_streaming = async,
+             .async_queue_capacity = 16,
+             .async_num_workers = 2});
+        ASSERT_TRUE(graph->supports_streaming())
+            << graph->streaming_incompatibility_reason();
+        const auto records = pipeline_records(rounds);
+        for (std::size_t i = 0; i + 1 < rounds; ++i)
+          graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+        graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+        EXPECT_EQ(graph->streaming_result().status,
+                  task_graph_streaming_status::complete)
+            << graph->streaming_result().error;
+        EXPECT_EQ(probe->records("J").size(),
+                  static_cast<std::size_t>(published));
+        // R saw every completion, but completed once per record.
+        EXPECT_EQ(probe->records("R").size(), rounds + published);
+        EXPECT_EQ(probe->records("X").size(), rounds);
+      } // end - for(period)
+    } // end - for(publishes)
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph, DeclaredCompletionsDoNotCountTowardTheWindow)
 
