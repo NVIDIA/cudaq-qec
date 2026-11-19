@@ -11240,6 +11240,16 @@ TEST(DecodingTaskGraph, AsyncThreadCountFollowsWorkerCpuCap) {
 #endif
 }
 
+// The worker count must leave room for the coordinator in the total.
+TEST(DecodingTaskGraph, AsyncWorkerCountLeavesRoomForCoordinator) {
+  EXPECT_THROW(
+      decoding_task_graph::from_spec(
+          rep5_spec(5), "single_error_lut", {},
+          {.async_streaming = true,
+           .async_num_workers = std::numeric_limits<std::size_t>::max()}),
+      std::invalid_argument);
+}
+
 TEST(DecodingTaskGraph, AsyncStreamingRejectsCoordinatorCpuBelowSentinel) {
   auto probe = std::make_shared<async_stream_probe>();
   EXPECT_THROW(
@@ -13869,6 +13879,12 @@ public:
     return out;
   }
 
+  // Snapshot delivery order while workers may still be logging.
+  std::vector<std::pair<std::string, std::size_t>> events() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return events_;
+  }
+
   /// Make @p node's reset throw, or none's for an empty name.
   void fail_reset(std::string node) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -13938,8 +13954,13 @@ static std::shared_ptr<pipeline_probe> active_pipeline_probe;
 
 /// One-byte streaming nodes. `source` emits the record's byte, `pass` relays
 /// it, `invert` relays it with bit zero flipped, and `join` XORs two inputs
-/// and records the pair it saw so cross-record mixing is detectable. Each node
-/// numbers the records it handles itself.
+/// and records the pair it saw so cross-record mixing is detectable. `after`
+/// takes a producer's `done` completion and publishes nothing. `after_pair`
+/// takes two completion inputs and logs their arrival order. `relay_done`
+/// publishes the completion's input slot as a bit. `pair_done`
+/// pairs a completion with a value by arrival, as an ensemble join does,
+/// and logs the value or, when the pair is not one of each, `.mixed`. Each
+/// node numbers the records it handles itself.
 class pipeline_probe_node : public task_graph_node,
                             public streaming_task_graph_node {
 public:
@@ -13972,6 +13993,30 @@ public:
     return true;
   }
   bool enqueue_edge_value(const edge_value &value, std::size_t slot) override {
+    if (mode_ == "relay_done") {
+      const auto bit = static_cast<uint8_t>(slot);
+      return enqueue(&bit, 1, round_type::BULK);
+    }
+    if (mode_ == "after" || mode_ == "after_pair") {
+      if (mode_ == "after_pair")
+        probe_->log(id_ + ".slot", slot);
+      const auto record = records_++;
+      probe_->log(id_, record);
+      probe_->maybe_block(id_, record);
+      return false;
+    }
+    if (mode_ == "pair_done") {
+      if (slot == 0)
+        ++dones_;
+      else
+        paired_bit_ = value.get<logical_outcome>().bits[0];
+      if (++received_ < 2)
+        return false;
+      probe_->log(id_ + (dones_ == 1 ? ".value" : ".mixed"), paired_bit_);
+      received_ = 0;
+      dones_ = 0;
+      return false;
+    }
     const uint8_t bit = value.get<logical_outcome>().bits[0];
     probe_->log(id_ + ".value", bit);
     if (mode_ == "skip" && (skipped_++ % 2) == 0)
@@ -14007,8 +14052,12 @@ public:
   }
   const uint8_t *corrections() const override { return &correction_; }
   void clear_corrections() override { correction_ = 0; }
-  // Whether the node takes raw measurements: `source`, or `wide`.
-  bool raw() const { return mode_ == "source" || mode_ == "wide"; }
+  // Whether the node takes raw measurements: `source`, `wide`, `wider` or
+  // `narrowing`.
+  bool raw() const {
+    return mode_ == "source" || mode_ == "wide" || mode_ == "wider" ||
+           mode_ == "narrowing";
+  }
   void reset_streaming_state() override {
     probe_->resetting();
     if (probe_->reset_fails(id_))
@@ -14024,10 +14073,16 @@ public:
   std::size_t num_msyn_per_round() const override { return 1; }
   std::size_t num_observables() const override { return 1; }
   // `wide` takes up to 64 rounds a record, so rounds admitted together
-  // fit in one.
+  // fit in one; `wider` takes 1024, more than an event store holds.
+  // `narrowing` takes 256 rounds in a shot's first chunk and one after, as
+  // a sliding window's room shrinks to its stride.
   std::optional<std::size_t> raw_chunk_limit() const override {
     if (mode_ == "wide")
       return 64;
+    if (mode_ == "wider")
+      return 1024;
+    if (mode_ == "narrowing")
+      return records_ == 0 ? 256 : 1;
     return mode_ == "source" ? std::optional<std::size_t>{1} : std::nullopt;
   }
   bool supports_raw_streaming_input(std::size_t slot) const override {
@@ -14058,6 +14113,11 @@ public:
                           edge_value_type type) const override {
     if (raw())
       return slot == 0 && type == edge_value_type("measurement_results");
+    if (mode_ == "after_pair" || mode_ == "relay_done")
+      return supports_streaming_input(slot) &&
+             type == edge_value_type("completion");
+    if (mode_ == "after" || (mode_ == "pair_done" && slot == 0))
+      return slot == 0 && type == edge_value_type("completion");
     return supports_streaming_input(slot) &&
            type == edge_value_type("logical_outcome");
   }
@@ -14077,7 +14137,10 @@ public:
     return mode_ == "rendezvous";
   }
   // `rendezvous` joins as `join` does, opting in to any arrival order.
-  bool joins() const { return mode_ == "join" || mode_ == "rendezvous"; }
+  bool joins() const {
+    return mode_ == "join" || mode_ == "rendezvous" || mode_ == "pair_done" ||
+           mode_ == "after_pair" || mode_ == "relay_done";
+  }
 
 private:
   std::string id_;
@@ -14091,6 +14154,8 @@ private:
   std::size_t skipped_ = 0;
   std::size_t records_ = 0;
   const uint8_t *last_end_ = nullptr; ///< where `wide`'s last round ended
+  std::size_t dones_ = 0;             ///< `pair_done`'s completions so far
+  uint8_t paired_bit_ = 0;            ///< `pair_done`'s value so far
   uint8_t pending_[2] = {0, 0};
   edge_value value_out_;
 };
@@ -14953,6 +15018,9 @@ static std::mutex index_fires_mutex;
 static std::vector<index_fire> index_fires;
 /// Called with k as each fire of a `join` starts, when set.
 static std::function<void(std::int64_t)> index_fire_hook;
+/// Called with the node's id and k as each fire of a `join` starts, when set.
+static std::function<void(const std::string &, std::int64_t)>
+    index_node_fire_hook;
 
 /// Indexed one-byte probes. `tag` relays its input and publishes with the
 /// index of its own fire ordinal, and publishes nothing from `limit` on.
@@ -14965,6 +15033,8 @@ static std::function<void(std::int64_t)> index_fire_hook;
 /// at or above 0 declares its `b` guaranteed from that instance on.
 /// `join_send` is a `join` that also publishes its value on `send`, typed as
 /// measurements rather than corrections, so it may feed a loop-carried edge.
+/// `join_done` is a `join` whose `a` is a producer's `done` completion.
+/// `tag_done` publishes a one bit at the ordinal of each completion.
 class index_probe_node : public task_graph_node,
                          public streaming_task_graph_node,
                          public indexed_join_node {
@@ -14987,7 +15057,10 @@ public:
   indexed_join_node *indexed_join() override {
     return joins() ? this : nullptr;
   }
-  bool joins() const { return mode_ == "join" || mode_ == "join_send"; }
+  // Expose the indexed capability only for the join modes.
+  bool joins() const {
+    return mode_ == "join" || mode_ == "join_send" || mode_ == "join_done";
+  }
 
   // indexed_join_node
   bool requires_input(std::size_t slot) const override { return slot == 0; }
@@ -14996,15 +15069,23 @@ public:
   }
   bool fire(std::int64_t k,
             const std::vector<const edge_value *> &inputs) override {
-    const int a = inputs[0]->get<logical_outcome>().bits[0];
-    const int b = inputs[1] ? inputs[1]->get<logical_outcome>().bits[0] : -1;
+    // `join_done`'s required input is a producer's completion: no bit.
+    const auto bit = [](const edge_value &value) {
+      const auto *measurements = value.get_if<measurement_results>();
+      return measurements ? measurements->bits[0]
+                          : value.get<logical_outcome>().bits[0];
+    };
+    const int a = mode_ == "join_done" ? 0 : bit(*inputs[0]);
+    const int b = inputs[1] ? bit(*inputs[1]) : -1;
     if (index_fire_hook)
       index_fire_hook(k);
+    if (index_node_fire_hook)
+      index_node_fire_hook(id_, k);
     {
       std::lock_guard<std::mutex> lock(index_fires_mutex);
       index_fires.push_back({k, a, b});
     }
-    probe_->log(id_, static_cast<std::size_t>(k));
+    record_fire(k);
     if (hold_) {
       probe_->pool_enter();
       std::this_thread::sleep_for(std::chrono::milliseconds(hold_));
@@ -15012,6 +15093,8 @@ public:
     }
     const uint8_t out = static_cast<uint8_t>(b < 0 ? a : (a ^ b));
     value_out_.get<logical_outcome>().bits[0] = out;
+    if (mode_ == "join_send")
+      send_out_.get<measurement_results>().bits[0] = out;
     correction_ ^= out;
     published_ = k;
     coverage_ = committed_coverage{static_cast<std::uint64_t>(k),
@@ -15025,7 +15108,8 @@ public:
     return false;
   }
   bool enqueue_edge_value(const edge_value &value, std::size_t) override {
-    const uint8_t bit = value.get<logical_outcome>().bits[0];
+    const uint8_t bit =
+        mode_ == "tag_done" ? 1 : value.get<logical_outcome>().bits[0];
     probe_->log(id_, records_);
     if (mode_ == "logical") {
       // Publishes its running parity without coverage: nothing to fold yet.
@@ -15148,13 +15232,15 @@ public:
   }
   bool accepts_input_type(std::size_t slot,
                           edge_value_type type) const override {
+    if ((mode_ == "join_done" || mode_ == "tag_done") && slot == 0)
+      return type == edge_value_type("completion");
     return supports_streaming_input(slot) &&
            (type == edge_value_type("logical_outcome") ||
             type == edge_value_type("measurement_results"));
   }
   const edge_value *streaming_output(std::size_t slot) const override {
     if (slot == 1 && mode_ == "join_send")
-      return valid_ ? &value_out_ : nullptr;
+      return valid_ ? &send_out_ : nullptr;
     if (slot == 1)
       return odd_valid_ ? &value_odd_ : nullptr;
     return slot == 0 && valid_ ? &value_out_ : nullptr;
@@ -15172,6 +15258,12 @@ public:
       return {"output", "send"};
     return mode_ == "split" ? std::vector<std::string>{"output", "odd"}
                             : std::vector<std::string>{"output"};
+  }
+
+protected:
+  // Record the actual instance index for assertions after the shot.
+  void record_fire(std::int64_t k) {
+    probe_->log(id_, static_cast<std::size_t>(k));
   }
 
 private:
@@ -15194,6 +15286,7 @@ private:
   std::optional<committed_coverage> coverage_;
   edge_value value_out_;
   edge_value value_odd_;
+  edge_value send_out_{measurement_results{{0}}};
 };
 
 static const bool index_probe_registered = [] {
@@ -16138,6 +16231,96 @@ TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer) {
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph, IndexedJoinFlushWaitsForALoopCarriedProducer)
 
+// A pending fire can supply a later join's feedback during FINAL.
+TEST(DecodingTaskGraph, IndexedFinalResolvesPendingFeedbackInInstanceOrder) {
+  ASSERT_TRUE(index_probe_registered);
+  enum class feedback_path { backward, indexed_cycle };
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    for (const auto path :
+         {feedback_path::backward, feedback_path::indexed_cycle}) {
+      SCOPED_TRACE(static_cast<int>(path));
+      for (const bool guaranteed : {false, true}) {
+        SCOPED_TRACE(guaranteed);
+        auto probe = std::make_shared<pipeline_probe>();
+        active_pipeline_probe = probe;
+        std::vector<task_graph_node_config> nodes;
+        nodes.push_back(pipeline_node("A", "source"));
+        nodes.push_back(index_node("T", "tag"));
+        nodes.push_back(index_node("J", "join"));
+        nodes.back().node_params.insert("guaranteed", guaranteed ? 1 : -1);
+        nodes.push_back(index_node("S", "tag", /*limit=*/0));
+        nodes.push_back(index_node("K", "join_send"));
+        // S never publishes. At FINAL, K[0] can fire with its optional
+        // input absent and supply J[1]. The cycle also requires J[0] before
+        // K[0] and J[1] before K[1].
+        std::vector<task_graph_edge> edges{
+            {"measurements", "output", "A", "input"},
+            {"A", "output", "T", "input"},
+            {"A", "output", "S", "input"},
+            {"T", "output", "J", "a"},
+            {"K", "send", "J", "b", -1},
+            {"S", "output", "K", "b"}};
+        edges.push_back({path == feedback_path::indexed_cycle ? "J" : "T",
+                         "output", "K", "a"});
+        edges.push_back({path == feedback_path::indexed_cycle ? "K" : "J",
+                         "output", "output", "input"});
+        auto graph = decoding_task_graph::from_topology(
+            std::move(nodes), std::move(edges),
+            {.async_streaming = async,
+             .async_queue_capacity = 16,
+             .async_num_workers = 2});
+        ASSERT_TRUE(graph->supports_streaming())
+            << graph->streaming_incompatibility_reason();
+        const uint8_t bit = 1;
+        ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::BULK));
+        ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+        EXPECT_EQ(graph->streaming_result().status,
+                  task_graph_streaming_status::complete)
+            << graph->streaming_result().error;
+        EXPECT_EQ(graph->streaming_result().values, std::vector<uint8_t>{1});
+        for (const auto *node : {"J", "K"}) {
+          auto fired = probe->records(node);
+          std::sort(fired.begin(), fired.end());
+          EXPECT_EQ(fired, (std::vector<std::size_t>{0, 1})) << node;
+        }
+      }
+    }
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph,
+  // IndexedFinalResolvesPendingFeedbackInInstanceOrder)
+
+// An ordered relay can choose new indices independently of the source fire.
+TEST(DecodingTaskGraph, StreamingRejectsRecordOrderedFeedbackCycle) {
+  ASSERT_TRUE(index_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "double"));
+  nodes.push_back(index_node("J", "join"));
+  nodes.back().node_params.insert("guaranteed", 1);
+  nodes.push_back(index_node("R", "tag_done"));
+  nodes.push_back(index_node("K", "join_send"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "T", "input"},
+       {"T", "output", "J", "a"},
+       {"K", "send", "J", "b", -1},
+       {"J", "done", "R", "input"},
+       {"R", "output", "K", "a"},
+       {"T", "output", "K", "b", -1},
+       {"J", "output", "output", "input"}},
+      {.async_streaming = true,
+       .async_queue_capacity = 16,
+       .async_num_workers = 2});
+  EXPECT_FALSE(graph->supports_streaming());
+  EXPECT_NE(graph->streaming_incompatibility_reason().find(
+                "record-ordered node 'R' in a feedback cycle"),
+            std::string::npos);
+} // end - TEST(DecodingTaskGraph, StreamingRejectsRecordOrderedFeedbackCycle)
+
 // A flush ends a node's shot only after that node's fires in the flush
 // record finish. J1 joins T[k] with R[k - 1] and R stops at 8, so J1[9]
 // resolves at the flush; its fire completes J2[9], held, whose output J3[9]
@@ -16219,6 +16402,1422 @@ TEST(DecodingTaskGraph, LongUntaggedRecordWaitsForItsFires) {
     expect_indexed_pairs(records, rounds);
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph, LongUntaggedRecordWaitsForItsFires)
+
+// A raw node whose limit shrinks after its first chunk takes later records
+// in hundreds of chunks; each still waits for its fires, so held fires do
+// not overflow the event store.
+TEST(DecodingTaskGraph, RecordsOfANarrowingNodeWaitForTheirFires) {
+  ASSERT_TRUE(index_probe_registered);
+  constexpr std::size_t record = 256; // the node's first chunk limit
+  constexpr std::size_t records = 3;
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "asynchronous" : "synchronous");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    {
+      std::lock_guard<std::mutex> lock(index_fires_mutex);
+      index_fires.clear();
+    }
+    task_graph_options options;
+    options.async_streaming = async;
+    options.async_num_workers = 4;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "narrowing"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("R", "tag"));
+    nodes.push_back(index_node("J", "join", 1 << 30, 0, -1, /*copies=*/2));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"A", "output", "R", "input"},
+         {"T", "output", "J", "a"},
+         {"R", "output", "J", "b", /*index_offset=*/-1},
+         {"J", "output", "output", "input"}},
+        options);
+    // Hold every J fire briefly, so ingest would run ahead of them.
+    index_fire_hook = [](std::int64_t) {
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    };
+    const auto rounds = pipeline_records(records * record + 1);
+    for (std::size_t r = 0; r < records; ++r)
+      graph->enqueue_syndrome(rounds.data() + r * record, record,
+                              round_type::BULK);
+    graph->enqueue_syndrome(&rounds.back(), 1, round_type::FINAL);
+    const auto &result = graph->streaming_result();
+    index_fire_hook = nullptr;
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+        << result.error;
+    // A publishes each chunk's first round: the first record whole, then
+    // every round.
+    std::vector<uint8_t> published{rounds[0]};
+    published.insert(published.end(), rounds.begin() + record, rounds.end());
+    expect_indexed_pairs(published, published.size());
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, RecordsOfANarrowingNodeWaitForTheirFires)
+
+// Rounds queued while the graph is behind are admitted together, as one
+// record that A takes in one chunk, so its fires do not hold up its ingest.
+// A publishes every round: with J's fires held, hundreds of rounds admitted
+// together must still not queue more fires than the event store holds.
+// Released, the queued J fires run one after another, ahead of what their
+// deliveries queue, as fires leave a worker for other events, and each
+// keeps its slot until those finish: they must fit as well, whether J feeds
+// joins K and L through its output or through its `done`. When J's `done`
+// reaches nodes that join by record instead, J's fires keep their parent,
+// so those nodes see the record's rounds in order: P pairs each completion
+// with the round's value. When J reads its own previous instance through a
+// loop-carried edge, as a sliding window does, the rounds admitted behind
+// its held fire 1 wait as a chain, each fire queued by the last one's
+// delivery.
+TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
+  ASSERT_TRUE(index_probe_registered);
+  // Several times the event store, and within A's chunk limit.
+  constexpr std::size_t rounds = 600;
+  // A wait that outlasts any healthy run: a stalled scheduler fails the
+  // test rather than hanging it.
+  constexpr auto patience = std::chrono::seconds(10);
+  enum class after_j { output, joins, done, ordered, loop };
+  for (const auto shape : {after_j::output, after_j::joins, after_j::done,
+                           after_j::ordered, after_j::loop}) {
+    SCOPED_TRACE(shape == after_j::output    ? "J feeds the output"
+                 : shape == after_j::joins   ? "J feeds joins K and L"
+                 : shape == after_j::done    ? "J's done feeds K and L"
+                 : shape == after_j::ordered ? "J's done feeds C and P"
+                                             : "J feeds itself");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    {
+      std::lock_guard<std::mutex> lock(index_fires_mutex);
+      index_fires.clear();
+    }
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "wider"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("R", "tag"));
+    nodes.push_back(
+        index_node("J", shape == after_j::loop ? "join_send" : "join"));
+    std::vector<task_graph_edge> edges{
+        {"measurements", "output", "A", "input"},
+        {"A", "output", "T", "input"},
+        {"A", "output", "R", "input"},
+        {"T", "output", "J", "a"},
+        {"R", "output", "J", "b", /*index_offset=*/-1},
+        {"J", "output", "output", "input"}};
+    if (shape == after_j::loop)
+      edges[4] = {"J", "send", "J", "b", /*index_offset=*/-1};
+    if (shape == after_j::joins || shape == after_j::done) {
+      const bool done = shape == after_j::done;
+      const std::string port = done ? "done" : "output";
+      nodes.push_back(index_node("K", done ? "join_done" : "join"));
+      nodes.push_back(index_node("L", done ? "join_done" : "join"));
+      task_graph_node_config x;
+      x.id = "X";
+      x.kind = "xor";
+      nodes.push_back(std::move(x));
+      if (done)
+        edges.push_back({"J", "done", "K", "a"});
+      else
+        edges.back() = {"J", "output", "K", "a"};
+      edges.push_back({"R", "output", "K", "b"});
+      edges.push_back({"J", port, "L", "a"});
+      edges.push_back({"R", "output", "L", "b"});
+      edges.push_back({"K", "output", "X", "a"});
+      edges.push_back({"L", "output", "X", "b"});
+      edges.push_back({"X", "output", "output", "input"});
+    } else if (shape == after_j::ordered) {
+      nodes.push_back(pipeline_node("C", "after"));
+      nodes.push_back(pipeline_node("P", "pair_done"));
+      edges.push_back({"J", "done", "C", "input"});
+      edges.push_back({"J", "done", "P", "a"});
+      edges.push_back({"A", "output", "P", "b"});
+    }
+    auto graph =
+        decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
+                                           {.async_streaming = true,
+                                            .async_queue_capacity = 1024,
+                                            .async_num_workers = 2});
+    // J's fire 0 holds round 0's record until the rest are queued; fire 1
+    // holds J, so the fires of the rounds admitted after it wait. (K and L
+    // pass the hook only after J's fires 0 and 1.)
+    std::mutex gate_mutex;
+    std::condition_variable gate;
+    bool first_fired = false;
+    bool queued = false;
+    bool released = false;
+    index_fire_hook = [&](std::int64_t k) {
+      std::unique_lock<std::mutex> lock(gate_mutex);
+      if (k == 0) {
+        first_fired = true;
+        gate.notify_all();
+        gate.wait_for(lock, patience, [&] { return queued; });
+      } else if (k == 1) {
+        gate.wait_for(lock, patience, [&] { return released; });
+      }
+    };
+    const auto open = [&](bool &flag) {
+      std::lock_guard<std::mutex> lock(gate_mutex);
+      flag = true;
+      gate.notify_all();
+    };
+    // Wait, for up to 2 s, until `count` stops growing.
+    const auto settle = [](const std::function<std::size_t()> &count) {
+      std::size_t seen = count();
+      for (int i = 0; i < 200; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const auto now = count();
+        if (now == seen)
+          return;
+        seen = now;
+      }
+    };
+    const auto fires = [] {
+      std::lock_guard<std::mutex> lock(index_fires_mutex);
+      return index_fires.size();
+    };
+    const auto records = pipeline_records(rounds);
+    std::string error;
+    try {
+      graph->enqueue_syndrome(&records[0], 1, round_type::BULK);
+      bool started = false;
+      {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        started = gate.wait_for(lock, patience, [&] { return first_fired; });
+      }
+      EXPECT_TRUE(started) << "J's fire 0 never ran";
+      for (std::size_t i = 1; i + 1 < rounds; ++i)
+        graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+      // Round 0's record retires, and the queued rounds are admitted
+      // together into its context; let A take as many as it will.
+      open(queued);
+      settle([&] { return probe->records("A").size(); });
+      open(released);
+      settle(fires);
+      graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+    } catch (const std::exception &e) {
+      error = e.what();
+    }
+    open(queued);
+    open(released);
+    const auto &result = graph->streaming_result();
+    index_fire_hook = nullptr;
+    EXPECT_EQ(error, "");
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+        << result.error;
+    std::vector<std::size_t> all(rounds);
+    std::iota(all.begin(), all.end(), std::size_t{0});
+    // Every join fired every instance once.
+    std::vector<const char *> joins{"J"};
+    if (shape == after_j::joins || shape == after_j::done)
+      joins = {"J", "K", "L"};
+    for (const char *node : joins) {
+      auto fired = probe->records(node);
+      std::sort(fired.begin(), fired.end());
+      EXPECT_EQ(fired, all) << node;
+    }
+    if (shape == after_j::output)
+      expect_indexed_pairs(records, rounds);
+    if (shape == after_j::ordered) {
+      // One completion per round, and each paired with its own round.
+      EXPECT_EQ(probe->records("C"), all);
+      EXPECT_EQ(probe->records("P.mixed").size(), 0u);
+      EXPECT_EQ(probe->records("P.value"),
+                std::vector<std::size_t>(records.begin(), records.end()));
+    }
+  } // end - for(shape)
+} // end - TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires)
+
+// Hold an indexed feedback fire during a coalesced record while an
+// independent detached fire occupies the same record's event store.
+static void expect_feedback_stays_attached(bool multi_node) {
+  ASSERT_TRUE(index_probe_registered);
+  constexpr std::size_t rounds = 600;
+  // Rounds admitted one record each, one per record context, before the
+  // rest queue up and are admitted together into the first one to retire.
+  constexpr std::size_t singles = 15;
+  const std::int64_t k_held = multi_node ? 40 : 100;
+  const std::int64_t feedback_held = multi_node ? 45 : 110;
+  constexpr auto patience = std::chrono::seconds(10);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  {
+    std::lock_guard<std::mutex> lock(index_fires_mutex);
+    index_fires.clear();
+  }
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "wider"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("R", "tag"));
+  nodes.push_back(index_node("J", "join_send"));
+  if (multi_node)
+    nodes.push_back(index_node("M", "join_send"));
+  nodes.push_back(index_node("K", "join"));
+  task_graph_node_config x;
+  x.id = "X";
+  x.kind = "xor";
+  nodes.push_back(std::move(x));
+  // Leave a worker for deliveries and enough others for the feedback
+  // chain to run even while the independent replicas are held.
+  std::vector<task_graph_edge> edges{
+      {"measurements", "output", "A", "input"},
+      {"A", "output", "T", "input"},
+      {"A", "output", "R", "input"},
+      {"T", "output", "J", "a"},
+      {multi_node ? "M" : "J", "send", "J", "b", /*index_offset=*/-1},
+      {"T", "output", "K", "a"},
+      {"R", "output", "K", "b", /*index_offset=*/-1},
+      {"J", "output", "X", "a"},
+      {"K", "output", "X", "b"},
+      {"X", "output", "output", "input"}};
+  if (multi_node) {
+    edges.push_back({"J", "output", "M", "a"});
+    edges.push_back({"R", "output", "M", "b", /*index_offset=*/-1});
+  }
+  auto graph =
+      decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
+                                         {.async_streaming = true,
+                                          .async_queue_capacity = 1024,
+                                          .async_num_workers = 3});
+  std::mutex gate_mutex;
+  std::condition_variable gate;
+  bool first_fired = false, queued = false; // K's fire 0 holds record 0
+  bool feedback_holding = false, feedback_released = false;
+  bool k_released = false;
+  index_node_fire_hook = [&](const std::string &id, std::int64_t k) {
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    if (id == "K" && k == 0) {
+      first_fired = true;
+      gate.notify_all();
+      gate.wait_for(lock, patience, [&] { return queued; });
+    } else if (id == "K" && k == k_held) {
+      gate.wait_for(lock, patience, [&] { return k_released; });
+    } else if (id == "J" && k == feedback_held) {
+      feedback_holding = true;
+      gate.notify_all();
+      gate.wait_for(lock, patience, [&] { return feedback_released; });
+    }
+  };
+  const auto open = [&](bool &flag) {
+    std::lock_guard<std::mutex> lock(gate_mutex);
+    flag = true;
+    gate.notify_all();
+  };
+  const auto wait_for = [&](const std::function<bool()> &done) {
+    for (int i = 0; i < 1000 && !done(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return done();
+  };
+  // Wait, for up to 2 s, until `count` stops growing.
+  const auto settle = [](const std::function<std::size_t()> &count) {
+    std::size_t seen = count();
+    for (int i = 0; i < 200; ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      const auto now = count();
+      if (now == seen)
+        return;
+      seen = now;
+    }
+  };
+  const auto ingested = [&] { return probe->records("A").size(); };
+  const auto j_fires = [&] { return probe->records("J").size(); };
+  const auto records = pipeline_records(rounds);
+  std::string error;
+  try {
+    graph->enqueue_syndrome(&records[0], 1, round_type::BULK);
+    EXPECT_TRUE(wait_for([&] {
+      std::lock_guard<std::mutex> lock(gate_mutex);
+      return first_fired;
+    })) << "K's fire 0 never ran";
+    // One round per record, each waiting behind K's fire 0, until every
+    // record context is in use.
+    for (std::size_t i = 1; i <= singles; ++i) {
+      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+      EXPECT_TRUE(wait_for([&] { return ingested() == i + 1; }))
+          << "round " << i << " was not admitted alone";
+    }
+    for (std::size_t i = singles + 1; i + 1 < rounds; ++i)
+      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+    open(queued);
+    EXPECT_TRUE(wait_for([&] {
+      std::lock_guard<std::mutex> lock(gate_mutex);
+      return feedback_holding;
+    })) << "J never reached its held fire";
+    settle(ingested);
+    EXPECT_EQ(ingested(), static_cast<std::size_t>(feedback_held + 1));
+    open(feedback_released);
+    EXPECT_TRUE(wait_for([&] {
+      return j_fires() > static_cast<std::size_t>(feedback_held + 1);
+    })) << "J did not resume while K was held";
+    open(k_released);
+    graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+  } catch (const std::exception &e) {
+    error = e.what();
+  }
+  open(queued);
+  open(feedback_released);
+  open(k_released);
+  const auto &result = graph->streaming_result();
+  index_node_fire_hook = nullptr;
+  EXPECT_EQ(error, "");
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+      << result.error;
+  std::vector<std::size_t> all(rounds);
+  std::iota(all.begin(), all.end(), std::size_t{0});
+  std::vector<const char *> indexed_nodes{"J", "K"};
+  if (multi_node)
+    indexed_nodes.push_back("M");
+  for (const char *node : indexed_nodes) {
+    auto fired = probe->records(node);
+    std::sort(fired.begin(), fired.end());
+    EXPECT_EQ(fired, all) << node;
+  }
+} // end - expect_feedback_stays_attached()
+
+// Check both self-feedback and a two-node cycle under the same load.
+TEST(DecodingTaskGraph, FeedbackStaysAttachedWithDetachedWorkInFlight) {
+  for (const bool multi_node : {false, true}) {
+    SCOPED_TRACE(multi_node);
+    expect_feedback_stays_attached(multi_node);
+  }
+}
+
+// An absent value can fan out to more deliveries than a feedback fire.
+TEST(DecodingTaskGraph, FeedbackReservesMissingInputNotifications) {
+  ASSERT_TRUE(index_probe_registered);
+  constexpr std::size_t rounds = 600;
+  constexpr std::size_t branches = 4;
+  constexpr std::int64_t held = 32;
+  constexpr auto patience = std::chrono::seconds(10);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "wider"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("R", "tag"));
+  nodes.push_back(index_node("U", "tag", /*limit=*/0));
+  for (std::size_t i = 0; i < branches; ++i)
+    nodes.push_back(index_node("J" + std::to_string(i), "join"));
+  nodes.push_back(index_node("M", "join_send"));
+  std::vector<task_graph_edge> edges{{"measurements", "output", "A", "input"},
+                                     {"A", "output", "T", "input"},
+                                     {"A", "output", "R", "input"},
+                                     {"A", "output", "U", "input"},
+                                     {"T", "output", "M", "a"},
+                                     {"R", "output", "M", "b", -1},
+                                     {"M", "output", "output", "input"}};
+  for (std::size_t i = 0; i < branches; ++i) {
+    const auto join = "J" + std::to_string(i);
+    // M[k] delivers to J[k+1], whose required input names a negative index.
+    // J drops and announces that absence to both downstream joins.
+    edges.push_back({"U", "output", join, "a", -std::int64_t{rounds + 1}});
+    edges.push_back({"M", "send", join, "b", -1});
+    for (std::size_t j = 0; j < 2; ++j) {
+      const auto leaf = "L" + std::to_string(2 * i + j);
+      nodes.push_back(index_node(leaf, "join"));
+      edges.push_back({join, "output", leaf, "b"});
+      edges.push_back({"R", "output", leaf, "a", -1});
+    }
+  }
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), std::move(edges),
+      {.async_streaming = true,
+       .async_queue_capacity = 1024,
+       .async_num_workers = 2 * branches + 2});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+
+  std::mutex mutex;
+  std::condition_variable gate;
+  bool first_started = false, first_released = false;
+  bool batch_started = false, batch_released = false;
+  std::size_t leaves_started = 0;
+  bool leaves_released = false;
+  index_node_fire_hook = [&](const std::string &id, std::int64_t k) {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (id == "M" && k == 0) {
+      first_started = true;
+      gate.notify_all();
+      gate.wait_for(lock, patience, [&] { return first_released; });
+    } else if (id == "M" && k == held) {
+      batch_started = true;
+      gate.notify_all();
+      gate.wait_for(lock, patience, [&] { return batch_released; });
+    } else if (id.starts_with("L") && k == held + 1) {
+      ++leaves_started;
+      gate.notify_all();
+      gate.wait_for(lock, patience, [&] { return leaves_released; });
+    }
+  };
+  const auto release = [&](bool &flag) {
+    std::lock_guard<std::mutex> lock(mutex);
+    flag = true;
+    gate.notify_all();
+  };
+  const auto wait_for = [&](const auto &ready) {
+    std::unique_lock<std::mutex> lock(mutex);
+    return gate.wait_for(lock, patience, ready);
+  };
+  const auto wait_until_settled = [&](const std::string &node) {
+    for (int i = 0; i < 40; ++i) {
+      const auto seen = probe->count(node);
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      if (probe->count(node) == seen)
+        return;
+    }
+  };
+
+  const auto records = pipeline_records(rounds);
+  std::string error;
+  try {
+    graph->enqueue_syndrome(&records[0], 1, round_type::BULK);
+    EXPECT_TRUE(wait_for([&] { return first_started; }));
+    // Fill the other 15 contexts individually so the queued rounds that
+    // follow are admitted together after M releases the first context.
+    for (std::size_t k = 1; k < 16; ++k) {
+      graph->enqueue_syndrome(&records[k], 1, round_type::BULK);
+      EXPECT_TRUE(probe->wait_for_count("A", k + 1));
+    }
+    for (std::size_t k = 16; k + 1 < rounds; ++k)
+      graph->enqueue_syndrome(&records[k], 1, round_type::BULK);
+    release(first_released);
+    EXPECT_TRUE(wait_for([&] { return batch_started; }));
+    wait_until_settled("A");
+    // With the record's budget occupied, the notifications queue leaves
+    // under their deliveries. Hold the leaves while M drains its backlog.
+    release(batch_released);
+    EXPECT_TRUE(wait_for([&] { return leaves_started == 2 * branches; }));
+    wait_until_settled("M");
+    release(leaves_released);
+    graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+  } catch (const std::exception &e) {
+    error = e.what();
+  }
+  release(first_released);
+  release(batch_released);
+  release(leaves_released);
+  const auto &result = graph->streaming_result();
+  index_node_fire_hook = nullptr;
+  EXPECT_EQ(error, "");
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+      << result.error;
+  EXPECT_EQ(probe->count("M"), rounds);
+  std::vector<std::size_t> expected(rounds);
+  std::iota(expected.begin(), expected.end(), std::size_t{1});
+  for (std::size_t i = 0; i < 2 * branches; ++i) {
+    auto fired = probe->records("L" + std::to_string(i));
+    std::sort(fired.begin(), fired.end());
+    EXPECT_EQ(fired, expected) << "L" << i;
+  }
+}
+
+class seeded_index_join : public index_probe_node {
+public:
+  using index_probe_node::index_probe_node;
+  // Add an optional input that can seed the feedback chain.
+  std::vector<std::string> inputs() const override {
+    return {"a", "b", "seed"};
+  }
+  // The seed accepts the same values as the join inputs.
+  bool supports_streaming_input(std::size_t slot) const override {
+    return slot < 3;
+  }
+};
+
+class branching_index_join : public index_probe_node {
+public:
+  using index_probe_node::index_probe_node;
+  // Receive feedback at two offsets and accept a separate seed.
+  std::vector<std::string> inputs() const override {
+    return {"a", "short_feedback", "long_feedback", "seed"};
+  }
+  // All four ports participate in the streaming join.
+  bool supports_streaming_input(std::size_t slot) const override {
+    return slot < 4;
+  }
+};
+
+class burst_index_join : public index_probe_node {
+public:
+  static constexpr std::int64_t burst_index = 135;
+  static constexpr std::int64_t publications = 90;
+
+  // Choose one instance to emit the configured burst.
+  burst_index_join(const std::string &id, std::int64_t index,
+                   std::int64_t count)
+      : index_probe_node(id, "join", 1 << 30, 0, -1, false,
+                         active_pipeline_probe),
+        index_(index), count_(count) {}
+
+  // Report the burst size for event-store accounting.
+  std::size_t max_publications_per_delivery() const override { return count_; }
+  // Publish only at the instance that starts the burst.
+  bool fire(std::int64_t k,
+            const std::vector<const edge_value *> &inputs) override {
+    if (k != index_)
+      return false;
+    current_ = k;
+    return index_probe_node::fire(k, inputs);
+  }
+  // Give each successive publication its own index.
+  std::optional<std::int64_t> published_index(std::size_t) const override {
+    return current_;
+  }
+  // Walk the burst indices while the delivery worker can queue work.
+  bool publish_next() override {
+    if (++current_ == index_ + count_)
+      return false;
+    // Give the delivery worker time to queue a leaf fire while the other
+    // two workers are both running indexed fires.
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+    return true;
+  }
+
+private:
+  std::int64_t index_, count_;
+  std::int64_t current_ = 0;
+};
+
+// With no required input, an optional feedback value can create new work
+// after every externally supplied index has been consumed.
+class optional_index_join : public index_probe_node {
+public:
+  using index_probe_node::index_probe_node;
+
+  // Let either port create a join without another required value.
+  bool requires_input(std::size_t) const override { return false; }
+};
+
+class terminal_index_join : public index_probe_node {
+public:
+  using index_probe_node::index_probe_node;
+  // Use one required input to make deliveries independent.
+  std::vector<std::string> inputs() const override { return {"a"}; }
+  // Check the snapshotted type and record the index without publishing.
+  bool fire(std::int64_t k,
+            const std::vector<const edge_value *> &inputs) override {
+    EXPECT_NE(inputs[0]->get_if<logical_outcome>(), nullptr);
+    record_fire(k);
+    return false;
+  }
+};
+
+// A node that first publishes its value during its flush callback.
+class indexed_flushing_sender : public index_probe_node {
+public:
+  // Create an indexed node whose feedback is held until FINAL.
+  explicit indexed_flushing_sender(const std::string &id)
+      : index_probe_node(id, "join_send", 1 << 30, 0, -1, false,
+                         active_pipeline_probe) {}
+
+  // Record the fire while leaving the feedback unpublished.
+  bool fire(std::int64_t k, const std::vector<const edge_value *> &) override {
+    record_fire(k);
+    return false;
+  }
+
+  // Make the withheld value available exactly once.
+  bool flush() override { return !std::exchange(flushed_, true); }
+
+  // Only the feedback port carries the withheld value.
+  const edge_value *streaming_output(std::size_t slot) const override {
+    return slot == 1 && flushed_ ? &tail_ : nullptr;
+  }
+
+  // Stamp the withheld feedback with its original index.
+  std::optional<std::int64_t> published_index(std::size_t) const override {
+    return 0;
+  }
+
+private:
+  bool flushed_ = false;
+  edge_value tail_{measurement_results{{1}}};
+};
+
+// An indexed fire makes its correction current, then its feedback port.
+class indexed_repeating_sender : public index_probe_node {
+public:
+  // An offset other than zero exercises the invalid feedback index path.
+  indexed_repeating_sender(const std::string &id, int feedback_offset)
+      : index_probe_node(id, "join_send", 1 << 30, 0, -1, false,
+                         active_pipeline_probe),
+        feedback_offset_(feedback_offset) {}
+
+  // The optional gate can hold the fire until FINAL.
+  std::vector<std::string> inputs() const override {
+    return {"a", "b", "gate"};
+  }
+
+  // The gate uses the same value types as the other join inputs.
+  bool supports_streaming_input(std::size_t slot) const override {
+    return slot < 3;
+  }
+
+  // A fire publishes one correction and one feedback value.
+  std::size_t max_publications_per_delivery() const override { return 2; }
+
+  // Start each instance with its correction current.
+  bool fire(std::int64_t k,
+            const std::vector<const edge_value *> &inputs) override {
+    feedback_current_ = false;
+    return index_probe_node::fire(k, inputs);
+  }
+
+  // Expose feedback once and clear the correction already published.
+  bool publish_next() override {
+    if (std::exchange(feedback_current_, true))
+      return false;
+    clear_corrections();
+    return true;
+  }
+
+  // Shift only the feedback index when testing the mismatch.
+  std::optional<std::int64_t> published_index(std::size_t slot) const override {
+    if (const auto index = index_probe_node::published_index(slot))
+      return *index + (slot == 1 ? feedback_offset_ : 0);
+    return std::nullopt;
+  }
+
+  // Expose one port at a time to exercise repeat publication.
+  const edge_value *streaming_output(std::size_t slot) const override {
+    return slot == (feedback_current_ ? 1u : 0u)
+               ? index_probe_node::streaming_output(slot)
+               : nullptr;
+  }
+
+private:
+  int feedback_offset_;
+  bool feedback_current_ = false;
+};
+
+class record_ordered_burst_node : public index_probe_node {
+public:
+  static constexpr std::int64_t publications = 400;
+
+  // Configure how many indexed values one ordered delivery emits.
+  record_ordered_burst_node(const std::string &id, int count)
+      : index_probe_node(id, "split", 1 << 30, 0, -1, false,
+                         active_pipeline_probe),
+        count_(count) {}
+
+  // Report the largest burst to the scheduler.
+  std::size_t max_publications_per_delivery() const override { return count_; }
+  // Number the publications in delivery order.
+  std::optional<std::int64_t> published_index(std::size_t) const override {
+    return index_;
+  }
+  // Advance to the next publication until the burst ends.
+  bool publish_next() override { return ++index_ < count_; }
+  // The second port carries a value only on the first publication.
+  const edge_value *streaming_output(std::size_t slot) const override {
+    // The first port always carries a value. The second is empty after the
+    // first publication, even though the node continues to publish.
+    return slot == 0 || index_ == 0 ? index_probe_node::streaming_output(0)
+                                    : nullptr;
+  }
+
+private:
+  int count_;
+  std::int64_t index_ = 0;
+};
+
+static const bool feedback_probe_kinds_registered = [] {
+  const auto add = []<typename Probe>(std::string kind, std::string mode) {
+    task_graph_node_kind_spec spec;
+    spec.name = std::move(kind);
+    spec.requires_decoder = false;
+    spec.requires_dem = false;
+    register_node_kind(
+        std::move(spec), {}, [mode = std::move(mode)](node_build_context &ctx) {
+          return std::make_unique<Probe>(ctx.id, mode, 1 << 30, 0, -1, false,
+                                         active_pipeline_probe);
+        });
+  };
+  add.operator()<seeded_index_join>("test_seeded_index_join", "join_send");
+  add.operator()<branching_index_join>("test_branching_index_join",
+                                       "join_send");
+  add.operator()<optional_index_join>("test_optional_index_join", "join_send");
+  add.operator()<terminal_index_join>("test_terminal_index_join", "join");
+  task_graph_node_kind_spec sender;
+  sender.name = "test_indexed_flushing_sender";
+  sender.requires_decoder = false;
+  sender.requires_dem = false;
+  register_node_kind(std::move(sender), {}, [](node_build_context &ctx) {
+    return std::make_unique<indexed_flushing_sender>(ctx.id);
+  });
+  task_graph_node_kind_spec repeating_sender;
+  repeating_sender.name = "test_indexed_repeating_sender";
+  repeating_sender.requires_decoder = false;
+  repeating_sender.requires_dem = false;
+  decoding::config::decoder_schema repeating_schema;
+  repeating_schema.params.push_back(
+      {"feedback_offset", decoding::config::param_kind::int32});
+  register_node_kind(std::move(repeating_sender), std::move(repeating_schema),
+                     [](node_build_context &ctx) {
+                       return std::make_unique<indexed_repeating_sender>(
+                           ctx.id,
+                           ctx.node_params->get<int>("feedback_offset"));
+                     });
+  task_graph_node_kind_spec ordered_burst;
+  ordered_burst.name = "test_record_ordered_burst";
+  ordered_burst.requires_decoder = false;
+  ordered_burst.requires_dem = false;
+  using decoding::config::param_kind;
+  decoding::config::decoder_schema ordered_schema;
+  ordered_schema.params.push_back(
+      {"count", param_kind::int32, /*required=*/false});
+  register_node_kind(
+      std::move(ordered_burst), std::move(ordered_schema),
+      [](node_build_context &ctx) {
+        return std::make_unique<record_ordered_burst_node>(
+            ctx.id, ctx.node_params->get<int>(
+                        "count", record_ordered_burst_node::publications));
+      });
+  task_graph_node_kind_spec burst;
+  burst.name = "test_burst_index_join";
+  burst.requires_decoder = false;
+  burst.requires_dem = false;
+  decoding::config::decoder_schema schema;
+  schema.params.push_back({"index", param_kind::int32, /*required=*/false});
+  schema.params.push_back({"count", param_kind::int32, /*required=*/false});
+  register_node_kind(
+      std::move(burst), std::move(schema), [](node_build_context &ctx) {
+        return std::make_unique<burst_index_join>(
+            ctx.id,
+            ctx.node_params->get<int>("index", burst_index_join::burst_index),
+            ctx.node_params->get<int>("count", burst_index_join::publications));
+      });
+  return true;
+}();
+
+// Require an input that limits the instances a cycle can create.
+TEST(DecodingTaskGraph, StreamingRejectsFeedbackWithoutRequiredInput) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  active_pipeline_probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "tag"));
+  task_graph_node_config join;
+  join.id = "J";
+  join.kind = "test_optional_index_join";
+  nodes.push_back(std::move(join));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"measurements", "output", "A", "input"},
+                         {"A", "output", "T", "input"},
+                         {"T", "output", "J", "a"},
+                         {"J", "send", "J", "b", -1},
+                         {"J", "output", "output", "input"}});
+  EXPECT_FALSE(graph->supports_streaming());
+  EXPECT_NE(graph->streaming_incompatibility_reason().find(
+                "indexed node 'J' in a feedback cycle needs a required input"),
+            std::string::npos);
+} // end - TEST(DecodingTaskGraph, StreamingRejectsFeedbackWithoutRequiredInput)
+
+// Leave the optional gate silent to force these fires to run during FINAL.
+static std::unique_ptr<decoding_task_graph>
+make_repeating_feedback_graph(bool async, bool hold_until_final,
+                              int feedback_offset) {
+  std::vector<task_graph_node_config> nodes;
+  task_graph_node_config join;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("G", "tag", hold_until_final ? 0 : 2));
+  join.id = "J";
+  join.kind = "test_indexed_repeating_sender";
+  join.node_params.insert("feedback_offset", feedback_offset);
+  nodes.push_back(std::move(join));
+  return decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "T", "input"},
+       {"A", "output", "G", "input"},
+       {"T", "output", "J", "a"},
+       {"G", "output", "J", "gate"},
+       {"J", "send", "J", "b", -1},
+       {"J", "output", "output", "input"}},
+      {.async_streaming = async, .async_num_workers = 2});
+} // end - make_repeating_feedback_graph()
+
+// An indexed fire can publish feedback after its first publication.
+TEST(DecodingTaskGraph, IndexedFireCanRepeatFeedbackAtItsOwnIndex) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    for (const bool hold_until_final : {false, true}) {
+      SCOPED_TRACE(hold_until_final);
+      auto probe = std::make_shared<pipeline_probe>();
+      active_pipeline_probe = probe;
+      auto graph = make_repeating_feedback_graph(async, hold_until_final, 0);
+      const uint8_t bit = 1;
+      ASSERT_TRUE(graph->supports_streaming())
+          << graph->streaming_incompatibility_reason();
+      ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::BULK));
+      ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+      EXPECT_EQ(probe->records("J"), (std::vector<std::size_t>{0, 1}));
+      EXPECT_EQ(graph->streaming_result().values, std::vector<uint8_t>{1});
+    } // end - for(hold_until_final)
+  } // end - for(async)
+} // end - TEST(IndexedFireCanRepeatFeedbackAtItsOwnIndex)
+
+// Moving the publication to another index would change FINAL dependencies.
+TEST(DecodingTaskGraph, IndexedFireCannotChangeItsFeedbackIndex) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    active_pipeline_probe = std::make_shared<pipeline_probe>();
+    auto graph = make_repeating_feedback_graph(async, true, 1);
+    const uint8_t bit = 1;
+    ASSERT_TRUE(graph->supports_streaming())
+        << graph->streaming_incompatibility_reason();
+    try {
+      graph->enqueue_syndrome(&bit, 1, round_type::FINAL);
+      ADD_FAILURE() << "Expected the feedback index mismatch to fail the shot";
+    } catch (const std::logic_error &e) {
+      EXPECT_NE(std::string(e.what()).find("feedback index 1 differs from "
+                                           "firing index 0"),
+                std::string::npos);
+    }
+  } // end - for(async)
+} // end - TEST(IndexedFireCannotChangeItsFeedbackIndex)
+
+// The same callback is valid on a one-way edge between components.
+TEST(DecodingTaskGraph, FinalCallbackCannotPublishInsideAFeedbackCycle) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    for (const bool cycle : {false, true}) {
+      SCOPED_TRACE(cycle);
+      auto probe = std::make_shared<pipeline_probe>();
+      active_pipeline_probe = probe;
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pipeline_node("A", "source"));
+      nodes.push_back(index_node("T", "tag"));
+      nodes.push_back(index_node("J", "join"));
+      task_graph_node_config sender;
+      sender.id = "K";
+      sender.kind = "test_indexed_flushing_sender";
+      nodes.push_back(std::move(sender));
+      std::vector<task_graph_edge> edges{
+          {"measurements", "output", "A", "input"},
+          {"A", "output", "T", "input"},
+          {"T", "output", "J", "a"},
+          {"T", "output", "K", "b", -1},
+          {"K", "send", "J", "b", -1},
+          {"J", "output", "output", "input"},
+          {cycle ? "J" : "T", "output", "K", "a"}};
+      auto graph =
+          decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
+                                             {.async_streaming = async,
+                                              .async_queue_capacity = 16,
+                                              .async_num_workers = 2});
+      ASSERT_TRUE(graph->supports_streaming())
+          << graph->streaming_incompatibility_reason();
+      const uint8_t bit = 1;
+      ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::BULK));
+      if (cycle) {
+        try {
+          graph->enqueue_syndrome(&bit, 1, round_type::FINAL);
+          ADD_FAILURE() << "Expected an internal feedback publication error";
+        } catch (const std::logic_error &e) {
+          EXPECT_NE(std::string(e.what()).find("flush published inside a "
+                                               "feedback cycle"),
+                    std::string::npos);
+        }
+      } else {
+        ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+        EXPECT_EQ(graph->streaming_result().status,
+                  task_graph_streaming_status::complete);
+        auto fired = probe->records("J");
+        std::sort(fired.begin(), fired.end());
+        EXPECT_EQ(fired, (std::vector<std::size_t>{0, 1}));
+      }
+    } // end - for(cycle)
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph,
+  // FinalCallbackCannotPublishInsideAFeedbackCycle)
+
+// Drain a finite absence cascade around a cycle without firing a join.
+TEST(DecodingTaskGraph, MissingInputNotificationsCanCircleAFeedbackLoop) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  constexpr std::int64_t lookback = 300;
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "wider"));
+    nodes.push_back(index_node("T", "tag", /*limit=*/0));
+    nodes.push_back(index_node("U", "tag"));
+    task_graph_node_config j;
+    j.id = "J";
+    j.kind = "test_seeded_index_join";
+    nodes.push_back(std::move(j));
+    nodes.push_back(index_node("K", "join_send"));
+    nodes.push_back(index_node("M", "join_send"));
+    // M[0] triggers J[1]. J and K drop and notify one another until the
+    // required input no longer reads an index below zero.
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"A", "output", "U", "input"},
+         {"T", "output", "J", "a", -lookback},
+         {"T", "output", "K", "a", -lookback},
+         {"K", "send", "J", "b", -1},
+         {"J", "send", "K", "b"},
+         {"M", "send", "J", "seed", -1},
+         {"U", "output", "M", "a"},
+         {"U", "output", "M", "b", -1},
+         {"M", "output", "output", "input"}},
+        {.async_streaming = async,
+         .async_queue_capacity = 16,
+         .async_num_workers = 2});
+    const uint8_t bit = 1;
+    ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+    const auto &result = graph->streaming_result();
+    EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+        << result.error;
+    EXPECT_EQ(probe->count("M"), 1u);
+    EXPECT_EQ(probe->count("J"), 0u);
+    EXPECT_EQ(probe->count("K"), 0u);
+  }
+}
+
+// An absence cycle through required inputs must fail instead of looping.
+TEST(DecodingTaskGraph, MissingInputNotificationsRejectAnUnboundedCycle) {
+  ASSERT_TRUE(index_probe_registered);
+  active_pipeline_probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "wider"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("J", "join_send"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"measurements", "output", "A", "input"},
+                         {"A", "output", "T", "input"},
+                         {"T", "output", "J", "b"},
+                         {"J", "send", "J", "a", -1},
+                         {"J", "output", "output", "input"}});
+  const uint8_t bit = 1;
+  try {
+    graph->enqueue_syndrome(&bit, 1, round_type::FINAL);
+    ADD_FAILURE() << "The missing required input should fail the shot";
+  } catch (const std::logic_error &e) {
+    EXPECT_STREQ(e.what(),
+                 "decoding_task_graph: missing input propagates around a "
+                 "cycle of required inputs");
+  }
+}
+
+// A branching absence cascade must drain a bounded event store.
+TEST(DecodingTaskGraph, BranchingMissingInputNotificationsFitTheEventStore) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  constexpr std::int64_t lookback = 45000;
+  constexpr std::size_t watched = lookback - 1;
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "wider"));
+    nodes.push_back(index_node("T", "tag", /*limit=*/0));
+    nodes.push_back(index_node("U", "tag"));
+    task_graph_node_config j;
+    j.id = "J";
+    j.kind = "test_branching_index_join";
+    nodes.push_back(std::move(j));
+    nodes.push_back(index_node("M", "join_send"));
+    nodes.push_back(index_node("W", "join"));
+    // Every early J instance drops and notifies two future instances. W
+    // needs the last drop as an optional input before the shot is flushed.
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"A", "output", "U", "input"},
+         {"T", "output", "J", "a", -lookback},
+         {"J", "send", "J", "short_feedback", -1},
+         {"J", "send", "J", "long_feedback", -180},
+         {"M", "send", "J", "seed", -1},
+         {"U", "output", "M", "a"},
+         {"U", "output", "M", "b", -1},
+         {"M", "output", "output", "input"},
+         {"U", "output", "W", "a", 1 - lookback},
+         {"J", "output", "W", "b"}},
+        {.async_streaming = async,
+         .async_queue_capacity = 16,
+         .async_num_workers = 2});
+    const uint8_t bit = 1;
+    ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::BULK));
+    ASSERT_NO_THROW(
+        (void)graph->get_obs_corrections()); // drain without flushing
+    EXPECT_EQ(probe->records("W"), std::vector<std::size_t>{watched});
+    EXPECT_EQ(probe->count("J"), 0u);
+    EXPECT_EQ(probe->count("M"), 1u);
+    ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete)
+        << graph->streaming_result().error;
+  }
+}
+
+// An attached burst waits for room alongside independent detached fires.
+TEST(DecodingTaskGraph, AttachedBurstWaitsForDetachedFireCapacity) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  constexpr auto patience = std::chrono::seconds(10);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "wider"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("R", "tag"));
+  nodes.push_back(index_node("K", "join"));
+  task_graph_node_config m;
+  m.id = "M";
+  m.kind = "test_burst_index_join";
+  nodes.push_back(std::move(m));
+  task_graph_node_config l;
+  l.id = "L";
+  l.kind = "test_terminal_index_join";
+  nodes.push_back(std::move(l));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "T", "input"},
+       {"A", "output", "R", "input"},
+       {"T", "output", "K", "a"},
+       {"R", "output", "K", "b", -1},
+       {"T", "output", "M", "a", -burst_index_join::burst_index},
+       {"R", "output", "M", "b", -1},
+       {"M", "output", "L", "a"},
+       {"K", "output", "output", "input"}},
+      {.async_streaming = true,
+       .async_queue_capacity = 1024,
+       .async_num_workers = 3});
+  std::mutex mutex;
+  std::condition_variable gate;
+  bool first_started = false, first_released = false;
+  bool batch_started = false, batch_released = false;
+  index_node_fire_hook = [&](const std::string &id, std::int64_t k) {
+    if (id != "K")
+      return;
+    std::unique_lock<std::mutex> lock(mutex);
+    if (k == 0) {
+      first_started = true;
+      gate.notify_all();
+      gate.wait_for(lock, patience, [&] { return first_released; });
+    } else if (k == 40) {
+      batch_started = true;
+      gate.notify_all();
+      gate.wait_for(lock, patience, [&] { return batch_released; });
+    }
+  };
+  const auto wait = [&](const bool &flag) {
+    std::unique_lock<std::mutex> lock(mutex);
+    return gate.wait_for(lock, patience, [&] { return flag; });
+  };
+  const auto release = [&](bool &flag) {
+    std::lock_guard<std::mutex> lock(mutex);
+    flag = true;
+    gate.notify_all();
+  };
+  constexpr std::size_t rounds = 251;
+  const uint8_t bit = 1;
+  std::string error;
+  try {
+    graph->enqueue_syndrome(&bit, 1, round_type::BULK);
+    EXPECT_TRUE(wait(first_started));
+    for (std::size_t k = 1; k < 16; ++k) {
+      graph->enqueue_syndrome(&bit, 1, round_type::BULK);
+      EXPECT_TRUE(probe->wait_for_count("A", k + 1));
+    }
+    for (std::size_t k = 16; k + 1 < rounds; ++k)
+      graph->enqueue_syndrome(&bit, 1, round_type::BULK);
+    release(first_released);
+    EXPECT_TRUE(wait(batch_started));
+    // The shifted required input keeps earlier instances of M from firing.
+    EXPECT_TRUE(probe->wait_for_count("A", burst_index_join::burst_index));
+    // M fits in the store by itself. It must wait for K's reserved backlog
+    // to drain before it starts publishing to L.
+    EXPECT_FALSE(probe->wait_for_count("M", 1));
+  } catch (const std::exception &e) {
+    error = e.what();
+  }
+  release(first_released);
+  release(batch_released);
+  EXPECT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+  const auto &result = graph->streaming_result();
+  index_node_fire_hook = nullptr;
+  EXPECT_EQ(error, "");
+  EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+      << result.error;
+  EXPECT_EQ(probe->count("K"), rounds);
+  EXPECT_EQ(probe->count("M"), 1u);
+}
+
+// Deliver a long skipped range before the first value following it.
+TEST(DecodingTaskGraph, LongPublicationGapDrainsBeforeItsValue) {
+  ASSERT_TRUE(index_probe_registered);
+  constexpr std::size_t first = 400;
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag", 1 << 30, 0, -1, 1, false, first));
+    nodes.push_back(index_node("R", "tag"));
+    nodes.push_back(index_node("J", "join"));
+    nodes.push_back(index_node("W", "join"));
+    // T is required for J and optional for W. W must discover the missing
+    // indices when T publishes, while J only sees the actual value.
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"A", "output", "R", "input"},
+         {"T", "output", "J", "a"},
+         {"R", "output", "J", "b", -1},
+         {"R", "output", "W", "a"},
+         {"T", "output", "W", "b"},
+         {"J", "output", "output", "J"},
+         {"W", "output", "output", "W"}},
+        {.async_streaming = async,
+         .async_queue_capacity = 32,
+         .async_num_workers = 1});
+    const uint8_t bit = 1;
+    for (std::size_t k = 0; k <= first; ++k)
+      ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::BULK));
+    ASSERT_NO_THROW((void)graph->get_obs_corrections());
+    EXPECT_EQ(probe->records("J"), std::vector<std::size_t>{first});
+    std::vector<std::size_t> expected(first + 1);
+    std::iota(expected.begin(), expected.end(), 0u);
+    auto fired = probe->records("W");
+    std::sort(fired.begin(), fired.end());
+    EXPECT_EQ(fired, expected);
+    ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete)
+        << graph->streaming_result().error;
+  }
+}
+
+// Drain oversized publication and FINAL batches through the same store.
+TEST(DecodingTaskGraph, LargePublicationBurstsAndFlushBatchesFitTheStore) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  for (const bool flush : {false, true}) {
+    SCOPED_TRACE(flush);
+    const int count = flush ? 80 : 400;
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("S", "tag", /*limit=*/0));
+    task_graph_node_config m;
+    m.id = "M";
+    m.kind = "test_burst_index_join";
+    m.node_params.insert("index", 0);
+    m.node_params.insert("count", count);
+    nodes.push_back(std::move(m));
+    task_graph_node_config l;
+    l.id = "L";
+    l.kind = "test_terminal_index_join";
+    nodes.push_back(std::move(l));
+    std::vector<task_graph_edge> edges{
+        {"measurements", "output", "A", "input"},
+        {"A", "output", "T", "input"},
+        {"A", "output", "S", "input"},
+        {"T", "output", "M", "a"},
+        {"S", "output", "M", "b", flush ? 0 : -1},
+        {"M", "output", "L", "a"},
+        {"M", "output", "output", "input"}};
+    if (!flush) {
+      nodes.push_back(index_node("C", "join_done"));
+      edges.push_back({"M", "done", "C", "a"});
+      edges.push_back({"T", "output", "C", "b", -1});
+    }
+    // With an offset, the first instance can fire during enqueue. Otherwise
+    // all instances wait for flush to resolve their missing optional input.
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes), std::move(edges),
+        {.async_streaming = true,
+         .async_queue_capacity = 32,
+         .async_num_workers = flush ? 2u : 1u});
+    const uint8_t bit = 1;
+    for (int k = 0; flush && k < 200; ++k)
+      ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::BULK));
+    ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete)
+        << graph->streaming_result().error;
+    EXPECT_EQ(probe->count("M"), 1u);
+    std::vector<std::size_t> expected(count);
+    std::iota(expected.begin(), expected.end(), 0u);
+    auto fired = probe->records("L");
+    std::sort(fired.begin(), fired.end());
+    EXPECT_EQ(fired, expected);
+    if (!flush)
+      EXPECT_EQ(probe->records("C"), std::vector<std::size_t>{0});
+  }
+}
+
+// Keep record-ordered completions in publication order across a burst.
+TEST(DecodingTaskGraph, LargePublicationBurstDeliversOrderedCompletions) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  task_graph_node_config t;
+  t.id = "T";
+  t.kind = "test_record_ordered_burst";
+  nodes.push_back(std::move(t));
+  nodes.push_back(pipeline_node("C", "after_pair"));
+  nodes.push_back(pipeline_node("D", "after"));
+  task_graph_node_config l;
+  l.id = "L";
+  l.kind = "test_terminal_index_join";
+  nodes.push_back(std::move(l));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "T", "input"},
+       {"T", "output", "L", "a"},
+       {"T", "done", "C", "a"},
+       {"T", "done", "C", "b"},
+       {"C", "done", "D", "input"},
+       {"A", "output", "output", "input"}},
+      {.async_streaming = true,
+       .async_queue_capacity = 16,
+       .async_num_workers = 1});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const uint8_t bit = 1;
+  ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+  EXPECT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::complete)
+      << graph->streaming_result().error;
+  std::vector<std::size_t> indices(record_ordered_burst_node::publications);
+  std::iota(indices.begin(), indices.end(), 0u);
+  auto fired = probe->records("L");
+  std::sort(fired.begin(), fired.end());
+  EXPECT_EQ(fired, indices);
+  auto completions = probe->events();
+  std::erase_if(completions, [](const auto &event) {
+    return event.first != "C.slot" && event.first != "D";
+  });
+  std::vector<std::pair<std::string, std::size_t>> expected;
+  for (auto index : indices) {
+    expected.emplace_back("C.slot", 0);
+    expected.emplace_back("C.slot", 1);
+    expected.emplace_back("D", index);
+  }
+  EXPECT_EQ(completions, expected);
+}
+
+// Empty repeat publications must preserve the first value's snapshot.
+TEST(DecodingTaskGraph, EmptyPublicationsPreserveOrderedValueAndCompletions) {
+  ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    for (const int count : {2, 400}) {
+      SCOPED_TRACE(count);
+      auto probe = std::make_shared<pipeline_probe>();
+      active_pipeline_probe = probe;
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pipeline_node("A", "source"));
+      task_graph_node_config t;
+      t.id = "T";
+      t.kind = "test_record_ordered_burst";
+      t.node_params.insert("count", count);
+      nodes.push_back(std::move(t));
+      nodes.push_back(pipeline_node("C", "pass"));
+      nodes.push_back(pipeline_node("D", "after"));
+      std::vector<task_graph_edge> edges{
+          {"measurements", "output", "A", "input"},
+          {"A", "output", "T", "input"},
+          {"T", "odd", "C", "input"},
+          {"C", "done", "D", "input"},
+          {"A", "output", "output", "input"}};
+      if (async) {
+        task_graph_node_config l;
+        l.id = "L";
+        l.kind = "test_terminal_index_join";
+        nodes.push_back(std::move(l));
+        edges.push_back({"T", "output", "L", "a"});
+      }
+      auto graph =
+          decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
+                                             {.async_streaming = async,
+                                              .async_queue_capacity = 16,
+                                              .async_num_workers = 1});
+      ASSERT_TRUE(graph->supports_streaming())
+          << graph->streaming_incompatibility_reason();
+      const uint8_t bit = 1;
+      ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+      EXPECT_EQ(graph->streaming_result().status,
+                task_graph_streaming_status::complete)
+          << graph->streaming_result().error;
+      EXPECT_EQ(probe->records("C.value"), std::vector<std::size_t>{1});
+      EXPECT_EQ(probe->count("D"), static_cast<std::size_t>(count));
+      if (async)
+        EXPECT_EQ(probe->count("L"), static_cast<std::size_t>(count));
+    }
+  }
+}
+
+// A completion-triggered second delivery must retain its own value.
+TEST(DecodingTaskGraph, CompletionBranchesKeepEachDeliveryValue) {
+  ASSERT_TRUE(pipeline_probe_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(pipeline_node("S", "pass"));
+  nodes.push_back(pipeline_node("T", "relay_done"));
+  nodes.push_back(pipeline_node("U", "pass"));
+  nodes.push_back(pipeline_node("V", "pass"));
+  // T publishes once per completion. Both can run in a single record
+  // before U consumes either value, and U can do the same to V.
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "S", "input"},
+       {"A", "done", "T", "a"},
+       {"S", "done", "T", "b"},
+       {"T", "output", "U", "input"},
+       {"U", "output", "V", "input"},
+       {"V", "output", "output", "input"}},
+      {.async_streaming = true,
+       .async_queue_capacity = 1,
+       .async_num_workers = 1});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const uint8_t bit = 1;
+  ASSERT_NO_THROW(graph->enqueue_syndrome(&bit, 1, round_type::FINAL));
+  const std::vector<std::size_t> expected{0, 1};
+  EXPECT_EQ(probe->records("U.value"), expected);
+  EXPECT_EQ(probe->records("V.value"), expected);
+}
+
+// Reject a completion whose producer cannot identify an instance.
+TEST(DecodingTaskGraph, IndexedJoinRejectsAnUnindexedCompletionAtBuild) {
+  ASSERT_TRUE(index_probe_registered);
+  active_pipeline_probe = std::make_shared<pipeline_probe>();
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(index_node("C", "join_done"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"measurements", "output", "A", "input"},
+                         {"A", "output", "T", "input"},
+                         {"T", "done", "C", "a"},
+                         {"T", "output", "C", "b", -1},
+                         {"C", "output", "output", "input"}});
+  EXPECT_FALSE(graph->supports_streaming());
+  EXPECT_NE(graph->streaming_incompatibility_reason().find(
+                "T.done' supplies an unindexed completion"),
+            std::string::npos);
+}
 
 // An instance fires once, however its inputs are told absent: J[k] joins
 // T[k] with T[k - 1], so J[0]'s b is absent by its offset. T's first

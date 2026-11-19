@@ -858,6 +858,10 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
       if (*options.async_num_workers == 0)
         throw std::invalid_argument(
             "task_graph_options: async_num_workers must be at least 1");
+      if (*options.async_num_workers == std::numeric_limits<std::size_t>::max())
+        throw std::invalid_argument(
+            "task_graph_options: async_num_workers "
+            "leaves no room for the coordinator thread");
       i->pool_width = *options.async_num_workers;
     } else if (indexed) {
       // Indexed fires leave one worker for other events: one more than the

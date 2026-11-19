@@ -773,12 +773,18 @@ void decoding_task_graph::impl::compile_wires() {
       // An indexed node's instances complete in any order, so a consumer
       // that sees records in order would read them out of order.
       const auto &producer = streaming_nodes[streaming_by_node[w.from_node]];
-      if (!is_done_slot(w.from_node, w.from_slot) &&
-          !producer.indexed.empty() && consumer.indexed.empty())
+      if (is_done_slot(w.from_node, w.from_slot)) {
+        if (producer.indexed.empty() && !consumer.indexed.empty())
+          record_streaming_conflict(
+              "node '" + node_ids[w.from_node] +
+              ".done' supplies an unindexed completion to node '" +
+              node_ids[w.to_node] + "', which joins its inputs by index");
+      } else if (!producer.indexed.empty() && consumer.indexed.empty()) {
         record_streaming_conflict("node '" + node_ids[w.to_node] +
                                   "' joins its inputs by record but node '" +
                                   node_ids[w.from_node] +
                                   "' publishes them by index");
+      }
     }
 
     // Classify every input edge to a streaming node. enqueue() has one implicit
@@ -2062,6 +2068,7 @@ std::size_t decoding_task_graph::async_thread_count() const noexcept {
   return impl_->async_streaming.enabled ? impl_->pool_width + 1 : 0;
 }
 
+// Report the queue's resolved capacity after applying the graph defaults.
 std::size_t decoding_task_graph::async_queue_capacity() const noexcept {
   return impl_->async_streaming.enabled ? impl_->async_streaming.capacity : 0;
 }
