@@ -33,7 +33,7 @@ struct nvtx_indexed_range {
       attributes.payload.llValue = index;
     }
     nvtxRangePushEx(&attributes);
-  }
+  } // end - nvtx_indexed_range()
   ~nvtx_indexed_range() { nvtxRangePop(); }
   nvtx_indexed_range(const nvtx_indexed_range &) = delete;
   nvtx_indexed_range &operator=(const nvtx_indexed_range &) = delete;

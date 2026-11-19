@@ -765,8 +765,14 @@ void decoding_task_graph::impl::compile_wires() {
         w.id = static_cast<int>(streaming_value_wire_count++);
         streaming_wires_from[w.from_node].push_back(w);
       }
-      ++streaming_wires_to_count[w.to_node];
       const auto &consumer = streaming_nodes[streaming_by_node[w.to_node]];
+      const auto &producer = streaming_nodes[streaming_by_node[w.from_node]];
+      // An indexed completion into a record-ordered node is out of step with
+      // its records, so it does not count toward the node's window.
+      const bool unordered_completion =
+          completion && !producer.indexed.empty() && consumer.indexed.empty();
+      if (!unordered_completion)
+        ++streaming_wires_to_count[w.to_node];
       if (!consumer.capability->supports_streaming_input(w.to_slot))
         record_streaming_conflict("node '" + node_ids[w.to_node] +
                                   "' has no streaming input on slot '" +
@@ -774,7 +780,6 @@ void decoding_task_graph::impl::compile_wires() {
       // Indexed instances can complete in any order. Both ends of a
       // completion wire must agree on how it identifies an instance, unless
       // the consumer's input handles each completion on its own.
-      const auto &producer = streaming_nodes[streaming_by_node[w.from_node]];
       if (!producer.indexed.empty() && consumer.indexed.empty()) {
         if (completion) {
           if (!consumer.capability->accepts_unordered_completions(w.to_slot))
@@ -785,6 +790,11 @@ void decoding_task_graph::impl::compile_wires() {
                 "' joins its inputs by record and its input '" +
                 node_input_names[w.to_node][w.to_slot] +
                 "' does not accept unordered completions");
+          // A fire pool leases a copy for each record's window.
+          else if (consumer.replicas.size() > 1)
+            record_streaming_conflict(
+                "node '" + node_ids[w.to_node] +
+                "' runs as a fire pool and cannot take unordered completions");
         } else
           record_streaming_conflict("node '" + node_ids[w.to_node] +
                                     "' joins its inputs by record but node '" +

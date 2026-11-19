@@ -16565,6 +16565,7 @@ TEST(DecodingTaskGraph, LongUntaggedRecordWaitsForItsFires) {
 TEST(DecodingTaskGraph, RecordsOfANarrowingNodeWaitForTheirFires) {
   ASSERT_TRUE(index_probe_registered);
   constexpr std::size_t record = 256; // the node's first chunk limit
+  // The first record in one chunk, then two narrowed into hundreds each.
   constexpr std::size_t records = 3;
   for (const bool async : {false, true}) {
     SCOPED_TRACE(async ? "asynchronous" : "synchronous");
@@ -17224,6 +17225,7 @@ private:
 
 class record_ordered_burst_node : public index_probe_node {
 public:
+  // One delivery's burst, more than the event store holds.
   static constexpr std::int64_t publications = 400;
 
   // Configure how many indexed values one ordered delivery emits.
@@ -17682,6 +17684,93 @@ TEST(DecodingTaskGraph, UnorderedCompletionsAreDeclaredPerInput) {
   } // end - for(async)
 } // end - TEST(DecodingTaskGraph, UnorderedCompletionsAreDeclaredPerInput)
 
+// Indexed completions are out of step with records, and a dropped instance
+// sends none, so they do not count toward a record-ordered node's window. R's
+// own completion follows its record-ordered input, one per record, while J
+// drops the instances T no longer feeds.
+TEST(DecodingTaskGraph, DeclaredCompletionsDoNotCountTowardTheWindow) {
+  ASSERT_TRUE(index_probe_registered && pipeline_probe_registered);
+  // More rounds than T publishes, so J's last instance drops.
+  constexpr std::size_t rounds = 12;
+  // T's publications: J fires this many instances.
+  constexpr int published = 8;
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag", published));
+    nodes.push_back(index_node("J", "join"));
+    auto observer = pipeline_node("R", "after_pair");
+    observer.node_params.insert("unordered_completion_slot", 1);
+    nodes.push_back(std::move(observer));
+    nodes.push_back(pipeline_node("X", "after"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"T", "output", "J", "b", -1},
+         {"A", "done", "R", "a"},
+         {"J", "done", "R", "b"},
+         {"R", "done", "X", "input"},
+         {"J", "output", "output", "input"}},
+        {.async_streaming = async,
+         .async_queue_capacity = 16,
+         .async_num_workers = 2});
+    ASSERT_TRUE(graph->supports_streaming())
+        << graph->streaming_incompatibility_reason();
+    const auto records = pipeline_records(rounds);
+    for (std::size_t i = 0; i + 1 < rounds; ++i)
+      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+    graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete)
+        << graph->streaming_result().error;
+    EXPECT_EQ(probe->records("J").size(), static_cast<std::size_t>(published));
+    // R saw every completion, but completed once per record.
+    EXPECT_EQ(probe->records("R").size(), rounds + published);
+    EXPECT_EQ(probe->records("X").size(), rounds);
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, DeclaredCompletionsDoNotCountTowardTheWindow)
+
+// A fire pool leases a copy for each record's window, which an unordered
+// completion does not belong to. Only an asynchronous graph builds the pool.
+TEST(DecodingTaskGraph, StreamingRejectsUnorderedCompletionsIntoAFirePool) {
+  ASSERT_TRUE(index_probe_registered && pipeline_probe_registered);
+  active_pipeline_probe = std::make_shared<pipeline_probe>();
+  const auto build = [](bool async) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("J", "join"));
+    auto observer = pipeline_node("R", "count_done", 0, -1,
+                                  /*max_in_flight=*/2);
+    observer.node_params.insert("unordered_completion_slot", 0);
+    nodes.push_back(std::move(observer));
+    return decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"T", "output", "J", "b"},
+         {"J", "done", "R", "input"},
+         {"J", "output", "output", "input"}},
+        {.async_streaming = async});
+  };
+  EXPECT_TRUE(build(false)->supports_streaming());
+  try {
+    (void)build(true);
+    ADD_FAILURE() << "Expected the fire pool to reject async startup";
+  } catch (const std::logic_error &e) {
+    EXPECT_NE(std::string(e.what()).find("node 'R' runs as a fire pool and "
+                                         "cannot take unordered completions"),
+              std::string::npos)
+        << e.what();
+  }
+} // end - TEST(StreamingRejectsUnorderedCompletionsIntoAFirePool)
+
 // FINAL runs the pending fire before its flush callback. Only the fire
 // sends an indexed completion, even when the callback publishes a burst.
 TEST(DecodingTaskGraph, IndexedFlushWaitsForFiresQueuedByItsResolver) {
@@ -17812,6 +17901,7 @@ TEST(DecodingTaskGraph, IndexedFlushCompletesRecordOrderedPublications) {
 // Drain a finite absence cascade around a cycle without firing a join.
 TEST(DecodingTaskGraph, MissingInputNotificationsCanCircleAFeedbackLoop) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  // Early instances that drop: more laps than the event store holds.
   constexpr std::int64_t lookback = 300;
   for (const bool async : {false, true}) {
     SCOPED_TRACE(async);
@@ -17981,6 +18071,8 @@ TEST(DecodingTaskGraph, AttachedBurstWaitsForDetachedFireCapacity) {
     else if (k == 40)
       batch_fire.hold();
   };
+  // More rounds than burst_index, so M's burst starts while K's batch is
+  // still queued.
   constexpr std::size_t rounds = 251;
   const uint8_t bit = 1;
   std::string error;

@@ -65,7 +65,7 @@ std::size_t windowed_queue_capacity(
           capacity, (cfg.max_in_flight + 1) *
                         static_cast<std::size_t>(layer->second.second.period));
   return capacity;
-}
+} // end - windowed_queue_capacity()
 
 /// Every type a node's ports name must be registered: a wire into an
 /// unregistered one would fail as a bare type mismatch, and an edge_value

@@ -1471,8 +1471,11 @@ struct decoding_task_graph::impl::record_scheduler {
     const auto &values = owner.streaming_wires_from[node_idx];
     const auto &completions = owner.completion_wires_from[node_idx];
     auto &delivery = c.slots[parent];
+    // Like a value delivery, publish at once only while more than half the
+    // store stays free. Detached fires may hold the other half.
+    const auto fanout = values.size() + completions.size();
     if (!defer_drop_notifications[si] && delivery.first_delivery == no_event &&
-        values.size() + completions.size() <= c.free_slots.size()) {
+        fanout + c.slots.size() / 2 < c.free_slots.size()) {
       publish_wires_locked(c, parent, root, values, k, /*absent=*/true);
       publish_wires_locked(c, parent, root, completions, k, /*absent=*/true);
       notify_workers();
@@ -1480,7 +1483,8 @@ struct decoding_task_graph::impl::record_scheduler {
     }
 
     // Replay a saturated cascade in the same slot, holding the parent and
-    // its reservation until the queue drains.
+    // its reservation until the queue drains. Unlike a direct absence on a
+    // loop edge, a deferred one stays in this slot: replays drain in order.
     for (const auto *wires : {&values, &completions})
       for (const auto &wire : *wires) {
         const auto consumer =
@@ -1747,9 +1751,10 @@ struct decoding_task_graph::impl::record_scheduler {
     return entry.used && entry.k == k && entry.pending != 0;
   }
 
-  // Add a join created during FINAL. The heap was reserved for every join
-  // table entry, and each live join appears in it once, so dropping stale
-  // elements first keeps it within that reservation.
+  // Add a join created during FINAL. The heap was reserved for the join
+  // tables' preallocated entries, and each live join appears in it once, so
+  // dropping stale elements first keeps it within that reservation unless a
+  // table has grown, which already allocates.
   void push_feedback_join_locked(feedback_flush &group,
                                  const feedback_join &join) {
     auto &pending = group.pending;
@@ -1761,7 +1766,7 @@ struct decoding_task_graph::impl::record_scheduler {
     }
     pending.push_back(join);
     std::push_heap(pending.begin(), pending.end(), std::greater<>{});
-  }
+  } // end - push_feedback_join_locked()
 
   // Whether an indexed node's flush may resolve its instances: no delivery
   // to it is in flight. Its own fires may still run unless a loop-carried
@@ -1885,7 +1890,11 @@ struct decoding_task_graph::impl::record_scheduler {
       (void)publish_all(c, id, event.root, event.node, consumer_node);
     // An edge-fed node completes the window after its last delivery. A
     // pooled node counts per record; a record-ordered one counts across
-    // records, as its producers may fire in different ones.
+    // records, as its producers may fire in different ones. An indexed
+    // completion is out of step with records and does not count.
+    const auto source = owner.streaming_by_node[event.wire.from_node];
+    if (event.wire.id < 0 && indexed(static_cast<std::size_t>(source)))
+      return fired;
     auto &seen =
         pool ? c.deliveries_seen[consumer] : node_deliveries_seen[consumer];
     if (++seen == owner.streaming_wires_to_count[consumer]) {
