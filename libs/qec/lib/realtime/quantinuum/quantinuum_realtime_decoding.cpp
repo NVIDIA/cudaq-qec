@@ -8,7 +8,10 @@
 
 #include "quantinuum_decoding.h"
 #include "../realtime_decoding.h"
+#include <array>
 #include <dlfcn.h>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 // Get an environment variable to determine if we should use the simulated
@@ -33,6 +36,8 @@ public:
                                                 std::uint64_t) = nullptr;
   std::uint64_t (*get_corrections_ui64_private)(std::uint64_t, std::uint64_t,
                                                 std::uint64_t) = nullptr;
+  std::uint64_t (*get_logical_measurements_ui64_private)(
+      std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t) = nullptr;
   void (*reset_decoder_ui64_private)(std::uint64_t) = nullptr;
 
   /// Constructor
@@ -52,6 +57,10 @@ public:
       get_corrections_ui64_private = reinterpret_cast<std::uint64_t (*)(
           std::uint64_t, std::uint64_t, std::uint64_t)>(
           dlsym(handle, "get_corrections_ui64_private"));
+      get_logical_measurements_ui64_private =
+          reinterpret_cast<std::uint64_t (*)(std::uint64_t, std::uint64_t,
+                                             std::uint64_t, std::uint64_t)>(
+              dlsym(handle, "get_logical_measurements_ui64_private"));
       reset_decoder_ui64_private = reinterpret_cast<void (*)(std::uint64_t)>(
           dlsym(handle, "reset_decoder_ui64_private"));
     }
@@ -62,9 +71,10 @@ public:
             "libcudaq-qec-realtime-decoding-quantinuum-private.so not found. "
             "Cannot run with CUDAQ_QTM_PRIVATE_IMPL=1.");
       }
-      // enqueue_syndromes_mapped_ui64_private is optional: private libraries
-      // built before it existed still serve every other call, and
-      // enqueue_syndromes_mapped_ui64() reports its absence when called.
+      // enqueue_syndromes_mapped_ui64_private and
+      // get_logical_measurements_ui64_private are optional: private libraries
+      // built before them still serve every other call, and each call that
+      // needs one reports its absence.
       if (!enqueue_syndromes_ui64_private || !get_corrections_ui64_private ||
           !reset_decoder_ui64_private) {
         throw std::runtime_error(
@@ -84,6 +94,7 @@ public:
     enqueue_syndromes_ui64_private = nullptr;
     enqueue_syndromes_mapped_ui64_private = nullptr;
     get_corrections_ui64_private = nullptr;
+    get_logical_measurements_ui64_private = nullptr;
     reset_decoder_ui64_private = nullptr;
   }
 };
@@ -153,6 +164,35 @@ std::uint64_t get_corrections_ui64(std::uint64_t decoder_id,
   }
   return 0; // should never get here
 }
+
+std::uint64_t get_logical_measurements_ui64(std::uint64_t decoder_id,
+                                            std::uint64_t first,
+                                            std::uint64_t return_size,
+                                            std::uint64_t reset) {
+  std::array<uint8_t, 64> logical{}; // one per bit of the result
+  std::uint64_t logical_int = 0;
+  CUDA_QEC_INFO("Entering get_logical_measurements_ui64 for decoder id: {}",
+                decoder_id);
+  if (return_size > logical.size())
+    throw std::invalid_argument("get_logical_measurements_ui64: return_size " +
+                                std::to_string(return_size) +
+                                " exceeds the 64 bits of its result");
+  if (z_use_private_impl) {
+    if (!z_quantinuum_private_handler.get_logical_measurements_ui64_private)
+      throw std::runtime_error(
+          "get_logical_measurements_ui64_private not found in "
+          "libcudaq-qec-realtime-decoding-quantinuum-private.so; that library "
+          "predates get_logical_measurements. Update it to read logical "
+          "measurements with CUDAQ_QTM_PRIVATE_IMPL=1.");
+    return z_quantinuum_private_handler.get_logical_measurements_ui64_private(
+        decoder_id, first, return_size, reset);
+  }
+  cudaq::qec::decoding::host::get_logical_measurements(
+      decoder_id, first, logical.data(), return_size, static_cast<bool>(reset));
+  for (std::size_t i = 0; i < return_size; i++)
+    logical_int |= static_cast<std::uint64_t>(logical[i]) << i;
+  return logical_int;
+} // end - get_logical_measurements_ui64()
 
 void reset_decoder_ui64(std::uint64_t decoder_id) {
   CUDA_QEC_INFO("Entering reset_decoder_ui64 for decoder id: {}", decoder_id);

@@ -147,6 +147,8 @@ public:
   void reset(std::size_t slot);
   /// The layer's request.
   const window_request &request() const { return request_; }
+  /// The experiment template whose shots clip the layer's commit intervals.
+  const experiment_template &context() const { return *context_; }
   /// The fire @p slot holds, unfired when it holds none. Reads only that
   /// slot, so it may run while other slots fire.
   /// @throws std::invalid_argument if the slot does not exist.

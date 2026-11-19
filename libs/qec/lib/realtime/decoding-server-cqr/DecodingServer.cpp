@@ -163,6 +163,8 @@ void DecodingServer::print_session_stats() const {
               << " decodes=" << session->decode_count.load()
               << " enqueues=" << session->enqueue_count.load()
               << " corrections=" << session->get_corrections_count.load()
+              << " logical_measurements="
+              << session->get_logical_measurements_count.load()
               << " resets=" << session->reset_count.load()
               << " errors=" << session->error_count.load() << std::endl;
   }

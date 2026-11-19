@@ -16,6 +16,9 @@
 
 ARG base_image=nvcr.io/nvidia/nightly/cuda-quantum:cu12-latest
 ARG cuda_version=12.6
+# DOCA release to take libibverbs from. Keep in step with DOCA_VERSION in
+# cuda-quantum's realtime/scripts/deps_common.sh at the .cudaq_version pin.
+ARG doca_version=3.4.0
 FROM $base_image
 
 # Set build-time variables for architecture-specific files
@@ -39,9 +42,27 @@ RUN apt-get update && apt-get install -y unzip && \
     rm /tmp/installed_files-${TARGETARCH}-cu${cuda_version}.zip && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# The QEC Python extension links the playback emulator's cpu_roce transport
+# against libibverbs and needs IBVERBS_1.12. The CUDA-Q base image carries the
+# Mellanox OFED 5.3 libibverbs (IBVERBS_1.11), so upgrade rdma-core from the
+# DOCA release CUDA-Q pins, as the dev and decoding-server images do.
+ARG doca_version
+RUN set -e; \
+    DOCA_ARCH=$(uname -m); case "$DOCA_ARCH" in aarch64|arm64) DOCA_ARCH="arm64-sbsa" ;; esac; \
+    curl -fsSL https://linux.mellanox.com/public/repo/doca/public_keys/nvidia-doca-rpm-gpg-public-key.asc \
+        -o /usr/share/keyrings/nvidia-doca.asc; \
+    echo "deb [signed-by=/usr/share/keyrings/nvidia-doca.asc] https://linux.mellanox.com/public/repo/doca/${doca_version}/ubuntu24.04/${DOCA_ARCH} /" \
+        > /etc/apt/sources.list.d/doca.list; \
+    apt-get update && apt-get install -y --no-install-recommends libibverbs1 ibverbs-providers; \
+    rm -f /etc/apt/sources.list.d/doca.list /usr/share/keyrings/nvidia-doca.asc; \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Copy CUDA-QX examples and tests
 COPY docs/sphinx/examples /home/cudaq/cudaqx-examples
 COPY libs/qec/python/tests /home/cudaq/cudaqx_pytests/qec
+# Reference data the Python tests resolve relative to their own location
+# (tests/../../test_data), e.g. test_chromobius.py.
+COPY libs/qec/test_data /home/cudaq/cudaqx_pytests/test_data
 
 # Bake in CUDA-Q import check helper (used by QA validation scripts)
 RUN mkdir -p /home/cudaq/cudaqx-scripts/validation

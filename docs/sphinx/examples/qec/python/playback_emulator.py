@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import sys
+import cudaq_qec as qec
+if not hasattr(qec, "playback"):
+    print("The playback emulator is not available with your current CUDA-Q "
+          "QEC installation. Skipping this example...")
+    sys.exit(0)
 
 # [Begin Documentation]
 import cudaq

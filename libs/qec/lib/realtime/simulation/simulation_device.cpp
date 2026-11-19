@@ -34,6 +34,11 @@ extern "C" __attribute__((visibility("default"))) void
 simulation_get_corrections(std::uint64_t decoder_id,
                            std::vector<bool> &corrections, bool reset);
 
+extern "C" __attribute__((visibility("default"))) void
+simulation_get_logical_measurements(std::uint64_t decoder_id,
+                                    std::uint64_t first,
+                                    std::vector<bool> &logical, bool reset);
+
 namespace cudaq::qec::decoding {
 
 __qpu__ void
@@ -65,6 +70,16 @@ __qpu__ std::vector<bool> get_corrections(std::uint64_t decoder_id,
                                           bool reset) {
   std::vector<bool> result(return_size);
   cudaq::device_call(simulation_get_corrections, decoder_id, result, reset);
+  return result;
+}
+
+__qpu__ std::vector<bool> get_logical_measurements(std::uint64_t decoder_id,
+                                                   std::uint64_t first,
+                                                   std::uint64_t return_size,
+                                                   bool reset) {
+  std::vector<bool> result(return_size);
+  cudaq::device_call(simulation_get_logical_measurements, decoder_id, first,
+                     result, reset);
   return result;
 }
 

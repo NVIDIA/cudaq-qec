@@ -32,6 +32,21 @@ if [ -z "$CUDAQ_REALTIME_ROOT" ]; then
   HSB_BUILD=${HSB_ROOT}/build
   bash /tmp/cudaq-realtime-src/realtime/scripts/install_devdeps.sh
 
+  # The script keeps the devcontainer's rdma-core, which is DOCA-OFED 3.1.0:
+  # too old for the DOCA 3.4.0 libdoca_common it installs (MLX5_1.27 needed,
+  # 1.25 present), so RoCE targets fail to link. Install rdma-core from the
+  # DOCA repo the script registered, and check libmlx5 covers libdoca_common's
+  # MLX5 symbol versions. Mirrors docker/release/Dockerfile.decoding-server.
+  apt-get install -y --no-install-recommends \
+    libibverbs1 libibverbs-dev ibverbs-providers librdmacm1 librdmacm-dev
+  libmlx5=$(ldconfig -p | awk '/libmlx5\.so\.1 /{print $NF; exit}')
+  libdoca=$(ls /opt/mellanox/doca/lib/*/libdoca_common.so | head -1)
+  for v in $(objdump -p "$libdoca" | grep -o 'MLX5_1\.[0-9]*' | sort -u); do
+    objdump -T "$libmlx5" | grep -q "$v" \
+      || { echo "ERROR: $libmlx5 lacks $v, required by $libdoca"; exit 1; }
+  done
+  echo "== libmlx5 satisfies libdoca_common ($libmlx5)"
+
   # Build cuda-quantum realtime with HSB tools enabled,
   # which produces libcudaq-realtime-bridge-gpu-roce.so needed by the bridge.
   cd /tmp/cudaq-realtime-src/realtime

@@ -1,0 +1,4 @@
+circuits/
+results/*.npz
+plots/
+__pycache__/

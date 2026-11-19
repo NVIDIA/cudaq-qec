@@ -52,24 +52,40 @@ enqueue_syndromes(std::uint64_t decoder_id, std::uint64_t counter,
       decoder_id, bits.data(), num_syndromes, counter, syndrome_mapping_id);
 }
 
-extern "C" __attribute__((visibility("hidden"))) void
-get_corrections(std::uint64_t decoder_id, byte_span corrections, bool reset) {
-  // corrections is a std::vector<bool> span: `length` is the logical bit count
-  // (the return size) and `buffer` points at the LSB-first bit-packed bytes.
-  const std::uint64_t return_size = corrections.length;
-  std::vector<std::uint8_t> bits(return_size);
-  cudaq::qec::decoding::host::get_corrections(decoder_id, bits.data(),
-                                              return_size, reset);
-  std::uint64_t num_bytes = (return_size + 7) / 8;
+namespace {
+// Pack @p bits, one per byte, into @p out's LSB-first bit-packed bytes.
+void pack_bits(const std::vector<std::uint8_t> &bits, byte_span out) {
+  const std::uint64_t num_bytes = (bits.size() + 7) / 8;
   for (std::uint64_t byte = 0; byte < num_bytes; ++byte) {
     std::uint8_t value = 0;
     for (std::uint64_t bit = 0; bit < 8; ++bit) {
       std::uint64_t index = byte * 8 + bit;
-      if (index < return_size && bits[index])
+      if (index < bits.size() && bits[index])
         value |= static_cast<std::uint8_t>(1u << bit); // LSB-first
     }
-    corrections.buffer[byte] = value;
+    out.buffer[byte] = value;
   }
+}
+} // namespace
+
+extern "C" __attribute__((visibility("hidden"))) void
+get_corrections(std::uint64_t decoder_id, byte_span corrections, bool reset) {
+  // corrections is a std::vector<bool> span: `length` is the logical bit count
+  // (the return size) and `buffer` points at the LSB-first bit-packed bytes.
+  std::vector<std::uint8_t> bits(corrections.length);
+  cudaq::qec::decoding::host::get_corrections(decoder_id, bits.data(),
+                                              bits.size(), reset);
+  pack_bits(bits, corrections);
+}
+
+extern "C" __attribute__((visibility("hidden"))) void
+get_logical_measurements(std::uint64_t decoder_id, std::uint64_t first,
+                         byte_span logical, bool reset) {
+  // As get_corrections: `length` is the bit count, `buffer` the packed bytes.
+  std::vector<std::uint8_t> bits(logical.length);
+  cudaq::qec::decoding::host::get_logical_measurements(
+      decoder_id, first, bits.data(), bits.size(), reset);
+  pack_bits(bits, logical);
 }
 
 extern "C" __attribute__((visibility("hidden"))) void

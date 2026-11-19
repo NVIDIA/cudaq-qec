@@ -21,6 +21,11 @@ get_corrections(std::uint64_t decoder_id, uint8_t *corrections,
                 std::uint64_t correction_length, bool reset);
 
 __attribute__((visibility("default"))) void
+get_logical_measurements(std::uint64_t decoder_id, std::uint64_t first,
+                         uint8_t *logical, std::uint64_t logical_length,
+                         bool reset);
+
+__attribute__((visibility("default"))) void
 reset_decoder(std::uint64_t decoder_id);
 
 } // namespace cudaq::qec::decoding::simulation

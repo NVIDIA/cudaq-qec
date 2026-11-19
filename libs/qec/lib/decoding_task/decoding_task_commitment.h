@@ -121,15 +121,14 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
 
 /// Check a topology's windowed decoding before any node is built, and do
 /// nothing for a topology with no ingest or decode_window node. Every ingest
-/// node is fed by measurements alone and has a template, with a readout map
-/// when it reads the logical value. Every decode_window node is fed by one
-/// window port of an ingest node, which gives its layer, and receives only
-/// from decode_window nodes, on ports below its num_receives, from its own
-/// or earlier instances; the receives from the same instance close no
-/// cycle, in which a window would wait on itself. Two ingest nodes are two
-/// shots: no send joins their windows, and ones with different templates
-/// reach no common node. Each ingest node's layers and sends then pass
-/// validate_commitment().
+/// node is fed by measurements alone and has a template. Every decode_window
+/// node is fed by one window port of an ingest node, which gives its layer,
+/// and receives only from decode_window nodes, on ports below its
+/// num_receives, from its own or earlier instances; the receives from the
+/// same instance close no cycle, in which a window would wait on itself. Two
+/// ingest nodes are two shots: no send joins their windows, and ones with
+/// different templates reach no common node. Each ingest node's layers and
+/// sends then pass validate_commitment().
 /// Each ingest node's template is registered in @p store, and its layers'
 /// windows are built there as validate_commitment() checks them.
 /// @return Each ingest node's layers, by node id: the decode_window nodes

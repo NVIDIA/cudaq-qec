@@ -5,7 +5,8 @@
 
 // The `parallel_window` pattern: written as one node, wired measurements ->
 // <id> -> output, it stands for the parallel-window graph of an ingest node,
-// two decode_window layers A and B, and their xor. Its kind registers the
+// two decode_window layers A and B, and their xor (plus a logical_readout
+// node when its template has a readout map). Its kind registers the
 // parameters, so configurations that use it parse and validate, and is
 // registered as a pattern: the graph builder lowers it into those nodes
 // before anything is built, and a configuration declares its layers'
@@ -16,23 +17,30 @@
 #include "decoding_task_window_kind_params.h"
 #include "cudaq/qec/decoder_config_schema.h"
 #include <algorithm>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace cudaq::qec {
 namespace {
 
 /// Throws std::runtime_error unless string parameter @p key, when set, is
-/// one of @p first or @p second.
+/// one of @p choices.
 void check_choice(const cudaqx::heterogeneous_map &p, const std::string &key,
-                  const std::string &first, const std::string &second) {
+                  std::initializer_list<std::string_view> choices) {
+  std::string listed;
   if (!p.contains(key))
     return;
   const auto value = p.get<std::string>(key);
-  if (value != first && value != second)
-    throw std::runtime_error("parallel_window: " + key + " must be " + first +
-                             " or " + second + "; got '" + value + "'");
+  for (const auto choice : choices) {
+    if (value == choice)
+      return;
+    listed += (listed.empty() ? "" : " or ") + std::string(choice);
+  }
+  throw std::runtime_error("parallel_window: " + key + " must be " + listed +
+                           "; got '" + value + "'");
 }
 
 /// A's commit and buffer zones are required; B's gap defaults to
@@ -50,9 +58,16 @@ decoding::config::decoder_schema parallel_window_params() {
   schema.params.push_back({"conflicting_parallel", param_kind::string});
   schema.params.push_back({"verify_residual", param_kind::string});
   schema.validate = [](const cudaqx::heterogeneous_map &p) {
-    check_choice(p, "output", "corrected_logical", "corrections");
-    check_choice(p, "input_boundary", "columns", "truncate");
-    check_choice(p, "conflicting_parallel", "reject", "most_likely");
+    // Whether `output` is required needs the template; the lowering checks.
+    if (p.contains("output") &&
+        p.get<std::string>("output") == "corrected_logical")
+      throw std::runtime_error(
+          "parallel_window: output: corrected_logical is replaced by output: "
+          "corrections_and_logical, which also wires the graph's logical "
+          "output; read it with get_logical_measurements()");
+    check_choice(p, "output", {"corrections", "corrections_and_logical"});
+    check_choice(p, "input_boundary", {"columns", "truncate"});
+    check_choice(p, "conflicting_parallel", {"reject", "most_likely"});
     if (p.contains("boundary_prior")) {
       const auto prior = p.get<double>("boundary_prior");
       if (!(prior > 0.0 && prior < 1.0))
@@ -201,15 +216,22 @@ lower_parallel_window(task_graph_node_config cfg,
   const std::string id = cfg.id;
   const std::string what = "from_topology: parallel_window '" + id + "'";
   const std::string ingest = id + ".ingest", a = id + ".A", b = id + ".B",
-                    sum = id + ".sum";
+                    sum = id + ".sum", readout = id + ".readout",
+                    logical = id + ".logical";
   const auto *schema = decoding::config::find_decoder_schema(
       task_graph_node_schema_name("parallel_window"));
   std::size_t inputs_seen = 0;
-  bool corrected = false;
+  std::pair<std::string, std::string> source; ///< What feeds P's input
+  bool feeds_output = false; ///< An edge from P reaches the graph's output
+  bool has_logical = false;  ///< The graph already has a logical output
+  bool wire_logical = false;
+  std::string output; ///< `output`, or its default without a readout map
   task_graph_node_config ingest_cfg;
   task_graph_node_config a_cfg;
   task_graph_node_config b_cfg;
   task_graph_node_config sum_cfg;
+  task_graph_node_config readout_cfg;
+  task_graph_node_config logical_cfg;
   if (id.empty())
     throw std::invalid_argument("from_topology: every node needs an id");
   if (!schema)
@@ -236,8 +258,6 @@ lower_parallel_window(task_graph_node_config cfg,
   const experiment_template context(*cfg.dem);
   const auto [request_a, request_b] =
       parallel_window_requests(cfg.node_params, context);
-  corrected = cfg.node_params.get<std::string>("output", "corrected_logical") ==
-              "corrected_logical";
 
   // The outer edges: exactly one into `input`, any number out of `output`.
   for (auto &e : edges) {
@@ -245,6 +265,7 @@ lower_parallel_window(task_graph_node_config cfg,
       if (e.to_input != "input")
         throw std::invalid_argument(what + " has no input '" + e.to_input +
                                     "'");
+      source = {e.from_node, e.from_output};
       e.to_node = ingest;
       ++inputs_seen;
     }
@@ -253,24 +274,49 @@ lower_parallel_window(task_graph_node_config cfg,
         throw std::invalid_argument(what + " has no output '" + e.from_output +
                                     "'");
       e.from_node = sum;
+      feeds_output = feeds_output || e.to_node == "output";
     }
+    has_logical = has_logical ||
+                  (e.to_node == "output" && e.to_input == logical_output_name);
   }
   if (inputs_seen != 1)
     throw std::invalid_argument(what + " needs exactly one edge into 'input'");
-  // Reported here, naming the pattern, rather than by its lowered ingest.
-  if (corrected && context.readout().empty())
+  // With a readout map, `output` says whether the graph also returns the
+  // logical measurements; without one there is nothing to choose.
+  if (cfg.node_params.contains("output"))
+    output = cfg.node_params.get<std::string>("output");
+  else if (context.has_readout())
     throw std::invalid_argument(
-        what + " has output: corrected_logical, which reads the logical "
-               "value through the last phase's m2o_sparse, and its template "
-               "has none; use output: corrections, or give the last phase "
-               "m2o_sparse");
+        what + " has a readout map (m2o_sparse), so it needs `output`: "
+               "corrections, or corrections_and_logical to also wire the "
+               "graph's logical output, which get_logical_measurements() "
+               "reads");
+  wire_logical = output == "corrections_and_logical";
+  if (wire_logical && !context.has_readout())
+    throw std::invalid_argument(
+        what + " has output: corrections_and_logical, but no phase of its "
+               "template has m2o_sparse to read the logical value from");
+  if (wire_logical && has_logical)
+    throw std::invalid_argument(
+        what + " has output: corrections_and_logical, but the graph names "
+               "its own output 'logical'");
+  if (wire_logical && !feeds_output)
+    throw std::invalid_argument(
+        what + " has output: corrections_and_logical, but no edge takes its "
+               "corrections to the graph's output");
 
+  if (wire_logical) {
+    readout_cfg.id = readout;
+    readout_cfg.kind = "logical_readout";
+    readout_cfg.dem = cfg.dem;
+    logical_cfg.id = logical;
+    logical_cfg.kind = "xor";
+    logical_cfg.node_params.insert("num_inputs", std::size_t{2});
+  }
   ingest_cfg.id = ingest;
   ingest_cfg.kind = "ingest";
   ingest_cfg.dem = std::move(cfg.dem);
   ingest_cfg.windows = {{"A", request_a, ""}, {"B", request_b, ""}};
-  if (corrected)
-    ingest_cfg.node_params.insert("read_logical", true);
   for (auto *layer : {&a_cfg, &b_cfg}) {
     layer->kind = "decode_window";
     layer->decoder_type = cfg.decoder_type;
@@ -288,8 +334,7 @@ lower_parallel_window(task_graph_node_config cfg,
   b_cfg.node_params.insert("num_receives", std::size_t{2});
   sum_cfg.id = sum;
   sum_cfg.kind = "xor";
-  sum_cfg.node_params.insert("num_inputs",
-                             static_cast<std::size_t>(corrected ? 3 : 2));
+  sum_cfg.node_params.insert("num_inputs", std::size_t{2});
   out.push_back(std::move(ingest_cfg));
   out.push_back(std::move(a_cfg));
   out.push_back(std::move(b_cfg));
@@ -301,8 +346,14 @@ lower_parallel_window(task_graph_node_config cfg,
   edges.push_back({a, "backward", b, "receive_1"});
   edges.push_back({a, "output", sum, "in_0"});
   edges.push_back({b, "output", sum, "in_1"});
-  if (corrected)
-    edges.push_back({ingest, "logical", sum, "in_2"});
+  if (wire_logical) {
+    out.push_back(std::move(readout_cfg));
+    out.push_back(std::move(logical_cfg));
+    edges.push_back({source.first, source.second, readout, "input"});
+    edges.push_back({sum, "output", logical, "in_0"});
+    edges.push_back({readout, "output", logical, "in_1"});
+    edges.push_back({logical, "output", "output", logical_output_name});
+  }
   return {};
 } // end - lower_parallel_window()
 

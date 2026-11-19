@@ -106,9 +106,9 @@ node_build_context prepare_node(task_graph_node_config &cfg,
   if (kind.requires_dem && !cfg.dem.has_value() && !has_flat)
     throw std::invalid_argument(where + " of kind '" + kind.name +
                                 "' needs a DEM: set dem or d_sparse/o_sparse");
-  // A kind reading windows takes its template whole, so the shot is never
-  // expanded into matrices for it.
-  if (kind.takes_windows)
+  // A kind reading its template whole never has the shot expanded into
+  // matrices.
+  if (kind.takes_windows || kind.takes_template)
     return ctx;
   if (!kind.requires_dem) {
     if (cfg.dem.has_value() || has_flat)
@@ -727,7 +727,7 @@ const bool ensemble_registered = [] {
 /// the store need not outlive the build.
 struct graph_windows {
   data_artifact_store store;
-  /// By ingest node.
+  /// By ingest or logical_readout node.
   std::map<std::string, std::shared_ptr<const experiment_template>> templates;
   /// By decode_window node: the ingest node it reads, and its layer.
   std::map<std::string, std::pair<std::string, window_request>> layers;
@@ -738,7 +738,8 @@ struct graph_windows {
 // Record in @p windows which template and layer each node reads, from
 // @p layers, each ingest node's, as validate_window_topology() resolved
 // them. It checked every ingest node has a template, and built them and the
-// layers' windows into the store.
+// layers' windows into the store. Every other kind that takes its template
+// (a logical_readout node) gets it too, if it has dem_chunks.
 void record_graph_windows(
     const std::vector<task_graph_node_config> &nodes,
     const std::vector<task_graph_edge> &edges,
@@ -746,7 +747,7 @@ void record_graph_windows(
     graph_windows &windows) {
   for (const auto &cfg : nodes) {
     const auto *kind = find_task_graph_node_kind(cfg.kind);
-    if (kind && kind->name == "ingest")
+    if (kind && kind->takes_template && cfg.dem)
       windows.templates[cfg.id] = windows.store.add_template(*cfg.dem);
   }
   for (const auto &[ingest, ingest_layers] : layers) {
@@ -780,8 +781,9 @@ void record_graph_windows(
 } // end - record_graph_windows()
 
 // Give a windowed node what its builder reads: an ingest node its template
-// and layers, a decode_window node the store, its ingest node's template,
-// its layer and its inner decoder, which it builds per window variant.
+// and layers (a logical_readout node its template), a decode_window node the
+// store, its ingest node's template, its layer and its inner decoder, which
+// it builds per window variant.
 void attach_windows(const task_graph_node_config &cfg,
                     const graph_windows &windows, node_build_context &ctx) {
   if (const auto t = windows.templates.find(cfg.id);

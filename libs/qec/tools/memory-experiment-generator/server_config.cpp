@@ -27,7 +27,11 @@ namespace config = cudaq::qec::decoding::config;
 constexpr auto pattern_name = "parallel_window";
 constexpr auto model_name = "memory_model";
 constexpr auto node_name = "parallel_memory";
-constexpr auto corrections_output = "corrections";
+// The model embeds its terminal readout map, so a pattern must set output.
+// Corrections only, as generated configs always returned: a client may still
+// consume a shot mid-shot. --pattern-arg=output=corrections_and_logical also
+// returns the logical measurements.
+constexpr auto default_output = "corrections";
 constexpr std::uint64_t bulk_mapping_id = 0;
 constexpr std::uint64_t final_mapping_id = 1;
 
@@ -224,7 +228,7 @@ pattern_arguments(const server_config_options &options) {
   leaves.try_emplace("buffer_rounds", std::to_string(options.buffer_rounds));
   if (options.gap_rounds)
     leaves.try_emplace("gap_rounds", std::to_string(*options.gap_rounds));
-  leaves.try_emplace("output", corrections_output);
+  leaves.try_emplace("output", default_output);
   return parse_arguments(parallel_window_schema(), leaves, "pattern");
 }
 

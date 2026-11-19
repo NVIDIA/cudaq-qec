@@ -1,4 +1,4 @@
-AI Predecoder with CUDA-Q Realtime (with FPGA Data Injection)
+AI predecoder with CUDA-Q realtime (with FPGA data injection)
 =============================================================
 
 .. note::
@@ -62,7 +62,7 @@ Software
   engine is built from the ONNX file on first run (this can take 1--2 minutes
   for large models).
 
-Source Repositories
+Source repositories
 ^^^^^^^^^^^^^^^^^^^
 
 .. list-table::
@@ -95,7 +95,7 @@ that drives the predecoder graphs lives in cudaq-qec's
    ``cuda-quantum`` repository and is only needed for the emulated test.
 
 
-Repository Layout
+Repository layout
 -----------------
 
 Key files within ``cudaq-qec``:
@@ -122,7 +122,7 @@ The FPGA emulator is in the ``cuda-quantum`` repository:
        hsb_fpga_emulator.cpp              # Software FPGA emulator
 
 
-Data Directory Layout
+Data directory layout
 ---------------------
 
 .. note::
@@ -214,7 +214,7 @@ and builds ``holoscan-sensor-bridge`` at branch ``EA_CUDAQ_10_26`` under
    warning, and for ``RealtimePipeline: building``, before building the
    targets.
 
-Emulated End-to-End Test
+Emulated end-to-end test
 ------------------------
 
 The emulated test replaces the physical FPGA with a software emulator.  Three
@@ -296,7 +296,7 @@ cumulative counters must not be assumed to exist in the FPGA bitstream.
 Without loop options, the existing single-pass playback path is unchanged.
 
 
-FPGA End-to-End Test
+FPGA end-to-end test
 --------------------
 
 The FPGA test uses a real FPGA connected to the GPU via a ConnectX NIC.  Two
@@ -389,7 +389,7 @@ Key parameters for FPGA mode:
    constraints.  Smaller configs (e.g. d7) can fit more shots.
 
 
-GPU Selection
+GPU selection
 ^^^^^^^^^^^^^
 
 For lowest latency, choose a GPU that is NUMA-local to the ConnectX NIC.
@@ -400,7 +400,7 @@ use ``--gpu 2`` or ``--gpu 3``.  Check NUMA locality with:
 
    cat /sys/class/infiniband/<device>/device/numa_node
 
-Network Sanity Check
+Network sanity check
 ^^^^^^^^^^^^^^^^^^^^
 
 Before running, verify that the bridge IP is assigned to exactly one interface:
@@ -413,7 +413,7 @@ If multiple interfaces show the same IP, remove the duplicate to avoid
 routing ambiguity that silently drops RDMA packets.
 
 
-Changing the Predecoder Model
+Changing the predecoder model
 -----------------------------
 
 The ONNX model file for each configuration is set in the ``PipelineConfig``
@@ -437,7 +437,7 @@ Then rebuild:
    cmake --build build --target gpu_roce_predecoder_bridge
 
 
-Orchestration Script Reference
+Orchestration script reference
 ------------------------------
 
 .. code-block:: text
@@ -472,7 +472,7 @@ Actions
    * - ``--no-run``
      - Skip running the test
 
-Directory Options
+Directory options
 ^^^^^^^^^^^^^^^^^
 
 .. list-table::
@@ -492,7 +492,7 @@ Directory Options
      - Per-config default
      - Syndrome data directory (expects ``detectors.bin``)
 
-Network Options
+Network options
 ^^^^^^^^^^^^^^^
 
 .. list-table::
@@ -518,7 +518,7 @@ Network Options
      - ``4096``
      - MTU size
 
-Run Options
+Run options
 ^^^^^^^^^^^
 
 .. list-table::
@@ -554,9 +554,9 @@ Run Options
      - ``8193``
      - UDP control port for emulator
 
-See Also
+See also
 --------
 
-* :doc:`Realtime Decoding </components/qec/realtime_decoding>` -- concept and workflow
-* :doc:`Getting Started with Realtime Decoding </examples_rst/qec/getting_started_realtime_decoding>`
+* :doc:`Realtime decoding </components/qec/realtime_decoding>` -- concept and workflow
+* :doc:`Getting started with realtime decoding </examples_rst/qec/getting_started_realtime_decoding>`
 * :ref:`C++ <cpp_realtime_decoding_api>` and :ref:`Python <python_realtime_decoding_api>` realtime decoding API

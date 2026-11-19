@@ -728,12 +728,6 @@ validate_window_topology(const std::vector<task_graph_node_config> &nodes,
     if (!n->dem)
       reject_topology("ingest node '" + id + "' has no dem_chunks template");
     templates[id] = store.add_template(*n->dem);
-    if (n->node_params.contains("read_logical") &&
-        n->node_params.get<bool>("read_logical") &&
-        templates[id]->readout().empty())
-      reject_topology("ingest node '" + id +
-                      "' reads the logical value, but its template's last "
-                      "phase has no m2o_sparse");
   } // end - for(ingests)
 
   for (const auto &[id, n] : windows) {

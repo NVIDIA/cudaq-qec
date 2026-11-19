@@ -6,9 +6,8 @@
 // Internal header: the ingest node, the only raw-fed node of a windowed
 // graph. It cuts records into rounds through ingest_core and publishes each
 // index's windows, one output port per layer, copied as window_rows so that
-// no view of its ring is ever out. With read_logical it publishes the raw
-// logical value on `logical` once the shot ends. Never included from a
-// public header.
+// no view of its ring is ever out. A logical_readout node, not ingest, reads
+// the shot's raw logical value. Never included from a public header.
 
 #pragma once
 
@@ -29,26 +28,21 @@ namespace cudaq::qec {
 /// record may ready several indices, and FINAL readies all that remain, so
 /// enqueue() makes the first current and publish_next() hands over each of
 /// the rest; enqueue() and flush() reject a call while any still wait.
-/// flush() after FINAL publishes the logical value, alone and once, over
-/// the whole shot. Not thread-safe: one thread calls every member.
+/// Not thread-safe: one thread calls every member.
 class ingest_node final : public task_graph_node,
                           public streaming_task_graph_node {
 public:
   /// @param context The experiment template.
   /// @param windows The layers, in port order: each one's port name and
   /// request.
-  /// @param read_logical Publish the raw logical value on `logical`.
   /// @throws std::invalid_argument as ingest_core's constructor does.
   ingest_node(std::shared_ptr<const experiment_template> context,
-              const std::vector<experimental::ingest_window> &windows,
-              bool read_logical);
+              const std::vector<experimental::ingest_window> &windows);
 
   /// Make the next waiting publication current; false when none waits,
   /// leaving the last one current until enqueue() or flush().
   bool publish_next() override;
-  /// The current publication's index on a window port; none on `logical`,
-  /// whose value covers the whole shot, and none while the logical value
-  /// is current.
+  /// The current publication's index on a window port.
   std::optional<std::int64_t> published_index(std::size_t slot) const override;
 
   /// @throws std::logic_error: the node streams; it has no one-shot path.
@@ -70,21 +64,20 @@ public:
   /// @throws std::logic_error while publications wait to be handed over,
   /// or as ingest_core::enqueue() does; std::invalid_argument as it does.
   bool enqueue(const uint8_t *msyn, std::size_t len, round_type type) override;
-  /// After FINAL with read_logical, publish the logical value, once.
+  /// Note the shot's end; FINAL has readied every window, so it publishes
+  /// nothing.
   /// @throws std::logic_error while publications wait to be handed over.
   bool flush() override;
-  /// The current publication's value on @p slot: a layer's window, null
-  /// where the layer has none at its index, or the logical value.
+  /// The current publication's value on @p slot: a layer's window, or null
+  /// where the layer has none at its index.
   const edge_value *streaming_output(std::size_t slot) const override;
-  /// The logical value's: the whole shot. Windows cover no commit.
-  std::optional<committed_coverage> streaming_coverage() const override;
   /// Every publication reports its coverage exactly: a window's carries no
-  /// delta and none, the logical value's the whole shot, folded at FINAL.
+  /// delta and none.
   bool exact_interval_coverage() const override { return true; }
-  /// The logical value, once published; zero otherwise.
-  const uint8_t *corrections() const override { return corrections_.data(); }
-  /// Zero the corrections; after the shot is flushed, start the next shot,
-  /// as a caller does between shots.
+  /// Windows carry no correction.
+  const uint8_t *corrections() const override { return nullptr; }
+  /// After the shot is flushed, start the next shot, as a caller does
+  /// between shots; before, there is nothing to clear.
   void clear_corrections() override;
   void reset_streaming_state() override;
   std::size_t num_msyn_per_decode() const override {
@@ -101,8 +94,8 @@ public:
     const auto period = static_cast<std::uint32_t>(core_.period());
     return window_spec{period, period, 0, 0};
   }
-  /// The readout's observables with read_logical; none otherwise.
-  std::size_t num_observables() const override { return corrections_.size(); }
+  /// None: windows carry no correction.
+  std::size_t num_observables() const override { return 0; }
   std::optional<std::size_t> raw_chunk_limit() const override {
     return core_.record_limit();
   }
@@ -133,18 +126,13 @@ private:
 
   ingest_core core_;
   std::size_t layers_ = 0;
-  bool read_logical_ = false;
   std::vector<std::string> outputs_;
   // Ready publications, reused shot to shot: filled_ of them hold this
   // record's, and current_ is the one handed over.
   std::vector<publication> ready_;
   std::size_t filled_ = 0;
   std::size_t current_ = none;
-  bool logical_current_ = false;
-  bool logical_published_ = false;
   bool flushed_ = false; ///< flush() followed FINAL
-  edge_value logical_;   ///< logical_outcome
-  std::vector<std::uint8_t> corrections_;
 };
 
 } // namespace cudaq::qec

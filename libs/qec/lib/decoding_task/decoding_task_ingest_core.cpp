@@ -53,9 +53,8 @@ std::string rounds_text(std::size_t n) {
 // The ring holds one index's windows with their reach, a period for each
 // view a pool can have out and one more, a record, and the suffix.
 ingest_core::ingest_core(std::shared_ptr<const experiment_template> context,
-                         std::vector<ingest_layer> layers, bool read_logical)
-    : context_(std::move(context)), layers_(std::move(layers)),
-      read_logical_(read_logical) {
+                         std::vector<ingest_layer> layers)
+    : context_(std::move(context)), layers_(std::move(layers)) {
   const auto reject = [](const std::string &what) {
     throw std::invalid_argument("ingest: " + what);
   };
@@ -69,7 +68,6 @@ ingest_core::ingest_core(std::shared_ptr<const experiment_template> context,
   std::int64_t lowest = std::numeric_limits<std::int64_t>::max();
   std::int64_t highest = std::numeric_limits<std::int64_t>::min();
   std::size_t max_views = 0;
-  std::size_t readout_rows = 0;
 
   for (std::size_t l = 0; l < layers_.size(); ++l) {
     const auto &request = layers_[l].request;
@@ -166,20 +164,6 @@ ingest_core::ingest_core(std::shared_ptr<const experiment_template> context,
         reject(where + ": its phase's D_sparse has " + std::to_string(counted) +
                " rows for " + std::to_string(rows) + " detectors");
     } // end - for(r)
-
-  if (read_logical_) {
-    if (t.readout().empty())
-      reject("read_logical needs the last phase's m2o_sparse");
-    for (const auto index : t.readout()) {
-      if (index == -1)
-        ++readout_rows;
-      else if (static_cast<std::size_t>(index) >= last_width_)
-        reject("the last phase's m2o_sparse reads measurement " +
-               std::to_string(index) + ", past its round's " +
-               std::to_string(last_width_));
-    }
-    logical_.reserve(readout_rows);
-  }
 
   // Buffers. Raw rounds keep those not yet formed, with the one before them
   // and the one being cut: the suffix, and the rounds the readout round may
@@ -453,20 +437,6 @@ ingest_status ingest_core::enqueue(const std::uint8_t *data, std::size_t len,
     partial_ = 0;
     complete_round(last_width_);
   }
-  if (read_logical_) {
-    const auto *readout =
-        staged_.data() + ((R - 1) % staged_slots_) * max_width_;
-    std::uint8_t value = 0;
-    logical_.clear();
-    for (const auto index : context_->readout()) {
-      if (index == -1) {
-        logical_.push_back(value);
-        value = 0;
-      } else {
-        value ^= readout[static_cast<std::size_t>(index)] & 1;
-      }
-    }
-  }
   index_end_ = next_index_;
   for (std::size_t l = 0; l < layers_.size(); ++l) {
     final_instances_[l] = window_instances(layers_[l].request, R);
@@ -611,7 +581,6 @@ void ingest_core::reset() {
   shot_rounds_.reset();
   next_index_ = first_index();
   index_end_ = 0;
-  logical_.clear();
   failed_ = false;
 } // end - reset()
 

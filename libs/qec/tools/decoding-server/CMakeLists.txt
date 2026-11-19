@@ -5,7 +5,8 @@
 # process: the service end of a CUDA-Q device_call transport, driving the
 # libcudaq-realtime dispatcher object over a runtime-loaded transport
 # provider's rings, and serving the decoding-server-cqr function table
-# (enqueue_syndromes / get_corrections / reset_decoder).
+# (enqueue_syndromes / get_corrections / reset_decoder /
+# get_logical_measurements).
 #
 # Its decoders are selected entirely by a YAML config file (see
 # decoding_server_config.yaml) and its transport by --transport=<name|.so

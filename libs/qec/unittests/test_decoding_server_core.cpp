@@ -255,6 +255,19 @@ std::vector<uint8_t> make_get_corrections_payload(int64_t return_size,
   return payload;
 }
 
+std::vector<uint8_t>
+make_get_logical_measurements_payload(int64_t first, int64_t return_size,
+                                      bool reset, int64_t decoder_id = 0) {
+  GetLogicalMeasurementsRequestPayload req{};
+  req.decoder_id = decoder_id;
+  req.first = first;
+  req.return_size = return_size;
+  req.reset = reset ? 1 : 0;
+  std::vector<uint8_t> payload(sizeof(req));
+  std::memcpy(payload.data(), &req, sizeof(req));
+  return payload;
+}
+
 std::vector<uint8_t> make_reset_payload(int64_t decoder_id = 0) {
   ResetRequestPayload req{};
   req.decoder_id = decoder_id;
@@ -300,6 +313,29 @@ TEST(RpcSlotParse, AcceptsAnExactlySizedEnqueueRequestPayload) {
   EXPECT_EQ(view.packed_bits[0], 1u);
 }
 
+// A get_logical_measurements request is 25 bytes under its own function id;
+// each parser accepts only its own request, and a short payload is refused.
+TEST(RpcSlotParse, ParsesALogicalMeasurementsRequestAsItsOwn) {
+  auto gl = make_cqr_slot(kGetLogicalMeasurementsFunctionId, 31,
+                          make_get_logical_measurements_payload(2, 3, true, 4));
+  auto gc = make_cqr_slot(kGetCorrectionsFunctionId, 32,
+                          make_get_corrections_payload(3, true, 4));
+  auto short_logical = make_cqr_slot(kGetLogicalMeasurementsFunctionId, 33,
+                                     make_get_corrections_payload(3, true, 4));
+  slot::GetLogicalMeasurementsView view;
+  slot::GetCorrectionsView corrections;
+  ASSERT_TRUE(slot::parse_get_logical_measurements(gl.data(), gl.size(), view));
+  EXPECT_EQ(view.decoder_id, 4);
+  EXPECT_EQ(view.first, 2);
+  EXPECT_EQ(view.return_size, 3);
+  EXPECT_TRUE(view.reset);
+  EXPECT_FALSE(slot::parse_get_corrections(gl.data(), gl.size(), corrections));
+  EXPECT_FALSE(
+      slot::parse_get_logical_measurements(gc.data(), gc.size(), view));
+  EXPECT_FALSE(slot::parse_get_logical_measurements(
+      short_logical.data(), short_logical.size(), view));
+}
+
 TEST(RpcSlotParse, PeeksTheDecoderIdFromEveryRequestKind) {
   uint64_t id = 0;
   auto eq = make_cqr_slot(kEnqueueSyndromesFunctionId, 1,
@@ -313,6 +349,11 @@ TEST(RpcSlotParse, PeeksTheDecoderIdFromEveryRequestKind) {
   auto rst = make_cqr_slot(kResetDecoderFunctionId, 3, make_reset_payload(7));
   ASSERT_TRUE(slot::peek_decoder_id(rst.data(), rst.size(), id));
   EXPECT_EQ(id, 7u);
+  auto gl =
+      make_cqr_slot(kGetLogicalMeasurementsFunctionId, 5,
+                    make_get_logical_measurements_payload(0, 1, false, 8));
+  ASSERT_TRUE(slot::peek_decoder_id(gl.data(), gl.size(), id));
+  EXPECT_EQ(id, 8u);
   // Empty payload has no decoder_id to peek.
   auto bare = make_cqr_slot(kResetDecoderFunctionId, 4);
   EXPECT_FALSE(slot::peek_decoder_id(bare.data(), bare.size(), id));
@@ -1491,8 +1532,10 @@ TEST(SessionRegistryLoad, TaskGraphInnerDecoderGetsTheConfiguredId) {
 constexpr std::size_t windowed_round_bits = 4;
 
 // The parallel_window pattern over arbitrary_memory_spec(5, true), decoding
-// with a lookup table into its corrections.
-std::unique_ptr<cudaq::qec::decoding_task_graph> windowed_graph(bool async) {
+// with a lookup table into its corrections; with @p readout, the readout
+// round's first measurement is read, giving a logical output.
+std::unique_ptr<cudaq::qec::decoding_task_graph>
+windowed_graph(bool async, bool readout = false) {
   using namespace cudaq::qec;
   task_graph_node_config node;
   std::vector<task_graph_node_config> nodes;
@@ -1503,8 +1546,11 @@ std::unique_ptr<cudaq::qec::decoding_task_graph> windowed_graph(bool async) {
   node.decoder_type = "single_error_lut";
   node.node_params = {{"commit_rounds", std::size_t{2}},
                       {"buffer_rounds", std::size_t{1}},
-                      {"gap_rounds", std::size_t{3}},
-                      {"output", std::string("corrections")}};
+                      {"gap_rounds", std::size_t{3}}};
+  if (readout) {
+    node.dem->phases.back().spec.m2o_sparse = {0, -1};
+    node.node_params.insert("output", std::string("corrections_and_logical"));
+  }
   nodes.push_back(std::move(node));
   options.async_streaming = async;
   return decoding_task_graph::from_topology(std::move(nodes), {}, options);
@@ -1582,6 +1628,359 @@ TEST(DecodingSessionInline, ServesAWindowedGraphMidShotAndAtFinal) {
   EXPECT_GE(matched, shots * 3) << "too few mid-shot reads to compare";
   EXPECT_GT(ones, 0u) << "every frame read was 0";
 }
+
+// A windowed graph with a logical output answers get_logical_measurements
+// NOT_READY until FINAL, then with a synchronous twin's values. A reset read
+// of either result consumes the shot for both: after get_corrections with
+// reset, a logical read answers NOT_READY until the next shot.
+TEST(DecodingSessionInline, ServesLogicalMeasurementsOnceTheShotEnds) {
+  using cudaq::qec::round_type;
+  constexpr std::size_t R = 30;
+  constexpr std::size_t shots = 3;
+  std::uint32_t rid = 0;
+  std::size_t ones = 0; // logical measurements read as 1
+  std::vector<uint8_t> tx(64);
+  std::mt19937 rng(19);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    auto session = DecodingSession::create(windowed_graph(async, true),
+                                           /*want_device_graph=*/false,
+                                           bulk_and_final_rows());
+    auto twin = windowed_graph(false, true);
+    for (std::size_t shot = 0; shot < shots; ++shot) {
+      const bool consume_logical = shot % 2 == 0; // else get_corrections
+      twin->reset_decoder();
+      for (std::size_t r = 0; r < R; ++r) {
+        const bool last = r + 1 == R;
+        std::vector<uint8_t> bits(windowed_round_bits);
+        for (auto &bit : bits)
+          bit = (rng() & 7) == 0;
+        twin->enqueue_syndrome(bits.data(), bits.size(),
+                               last ? round_type::FINAL : round_type::BULK);
+        auto enqueue = make_cqr_slot(kEnqueueSyndromesFunctionId, ++rid,
+                                     make_enqueue_payload(r, bits, last));
+        session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
+        expect_tx_status(tx, RpcStatus::OK, rid);
+        auto read = make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                                  make_get_logical_measurements_payload(
+                                      0, 1, last && consume_logical));
+        session->handle_get_logical_measurements(read.data(), tx.data(),
+                                                 read.size());
+        if (!last) {
+          expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+          continue;
+        }
+        expect_tx_status(tx, RpcStatus::OK, rid);
+        ASSERT_EQ(reinterpret_cast<const RPCResponse *>(tx.data())->result_len,
+                  1u);
+        EXPECT_EQ(tx[sizeof(RPCResponse)] & 1u,
+                  twin->get_logical_measurements()[0] & 1u)
+            << "shot " << shot;
+        ones += tx[sizeof(RPCResponse)] & 1u;
+      } // end - for(r)
+      if (!consume_logical) {
+        auto consume = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
+                                     make_get_corrections_payload(1, true));
+        session->handle_get_corrections(consume.data(), tx.data(),
+                                        consume.size());
+        expect_tx_status(tx, RpcStatus::OK, rid);
+        auto gone =
+            make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                          make_get_logical_measurements_payload(0, 1, false));
+        session->handle_get_logical_measurements(gone.data(), tx.data(),
+                                                 gone.size());
+        expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+      }
+      // The reset read consumed the shot.
+      auto after = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
+                                 make_get_corrections_payload(1, false));
+      session->handle_get_corrections(after.data(), tx.data(), after.size());
+      expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+    } // end - for(shot)
+    EXPECT_EQ(session->get_logical_measurements_count.load(),
+              shots * R + shots / 2);
+  } // end - for(async)
+  EXPECT_GT(ones, 0u) << "every logical measurement read was 0";
+} // end - TEST(DecodingSessionInline, ServesLogicalMeasurementsOnceTheShotEnds)
+
+// A plain decoder and a graph without a logical output answer
+// get_logical_measurements with BAD_REQUEST, before or after FINAL. A graph
+// with one answers NOT_READY before its readout, then OK, and BAD_REQUEST
+// for a range past its logical measurements.
+TEST(DecodingSessionInline, RefusesLogicalMeasurementsItDoesNotHave) {
+  using cudaq::qec::round_type;
+  std::vector<uint8_t> tx(64);
+  const std::vector<uint8_t> bits(windowed_round_bits, 0);
+  auto [plain, decoder] = make_session();
+  auto read = make_cqr_slot(kGetLogicalMeasurementsFunctionId, 41,
+                            make_get_logical_measurements_payload(0, 1, false));
+  auto wide = make_cqr_slot(kGetLogicalMeasurementsFunctionId, 42,
+                            make_get_logical_measurements_payload(0, 2, false));
+  auto past = make_cqr_slot(kGetLogicalMeasurementsFunctionId, 44,
+                            make_get_logical_measurements_payload(1, 1, false));
+
+  plain->handle_get_logical_measurements(read.data(), tx.data(), read.size());
+  expect_tx_status(tx, RpcStatus::BAD_REQUEST, 41);
+  for (const bool readout : {false, true}) {
+    auto session = DecodingSession::create(windowed_graph(false, readout),
+                                           /*want_device_graph=*/false,
+                                           bulk_and_final_rows());
+    for (std::size_t r = 0; r < 30; ++r) {
+      auto enqueue = make_cqr_slot(kEnqueueSyndromesFunctionId, 43,
+                                   make_enqueue_payload(r, bits, r == 29));
+      session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
+      if (r == 0) {
+        session->handle_get_logical_measurements(read.data(), tx.data(),
+                                                 read.size());
+        expect_tx_status(
+            tx, readout ? RpcStatus::NOT_READY : RpcStatus::BAD_REQUEST, 41);
+      }
+    }
+    session->handle_get_logical_measurements(wide.data(), tx.data(),
+                                             wide.size());
+    expect_tx_status(tx, RpcStatus::BAD_REQUEST, 42);
+    session->handle_get_logical_measurements(past.data(), tx.data(),
+                                             past.size());
+    expect_tx_status(tx, RpcStatus::BAD_REQUEST, 44);
+    session->handle_get_logical_measurements(read.data(), tx.data(),
+                                             read.size());
+    expect_tx_status(tx, readout ? RpcStatus::OK : RpcStatus::BAD_REQUEST, 41);
+  } // end - for(readout)
+} // end - TEST(DecodingSessionInline, RefusesLogicalMeasurementsItDoesNotHave)
+
+// The parallel_window pattern over mid_readout_spec, with a lookup table.
+std::unique_ptr<cudaq::qec::decoding_task_graph> mid_readout_graph(bool async) {
+  using namespace cudaq::qec;
+  task_graph_node_config node;
+  std::vector<task_graph_node_config> nodes;
+  task_graph_options options;
+  node.id = "P";
+  node.kind = "parallel_window";
+  node.dem = mid_readout_spec(5);
+  node.dem->num_rounds.reset();
+  node.decoder_type = "single_error_lut";
+  node.node_params = {{"commit_rounds", std::size_t{2}},
+                      {"buffer_rounds", std::size_t{1}},
+                      {"gap_rounds", std::size_t{3}},
+                      {"output", std::string("corrections_and_logical")}};
+  nodes.push_back(std::move(node));
+  options.async_streaming = async;
+  return decoding_task_graph::from_topology(std::move(nodes), {}, options);
+}
+
+// A mid-circuit readout is served mid-shot, matching a synchronous twin,
+// while the final readout answers NOT_READY until FINAL. A reset read is
+// refused mid-shot; after FINAL it returns both values and consumes the shot.
+TEST(DecodingSessionInline, ServesAMidCircuitReadoutMidShot) {
+  using cudaq::qec::round_type;
+  constexpr std::size_t R = 30;
+  std::uint32_t rid = 0;
+  std::vector<uint8_t> tx(64);
+  std::mt19937 rng(23);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    auto session = DecodingSession::create(mid_readout_graph(async),
+                                           /*want_device_graph=*/false,
+                                           bulk_and_final_rows());
+    auto twin = mid_readout_graph(false);
+    std::size_t mid_shot = 0; // rounds whose read gave the mid-circuit value
+    twin->reset_decoder();
+    for (std::size_t r = 0; r < R; ++r) {
+      const bool last = r + 1 == R;
+      std::vector<uint8_t> bits(windowed_round_bits);
+      for (auto &bit : bits)
+        bit = (rng() & 7) == 0;
+      twin->enqueue_syndrome(bits.data(), bits.size(),
+                             last ? round_type::FINAL : round_type::BULK);
+      auto enqueue = make_cqr_slot(kEnqueueSyndromesFunctionId, ++rid,
+                                   make_enqueue_payload(r, bits, last));
+      session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
+      expect_tx_status(tx, RpcStatus::OK, rid);
+      if (last)
+        break;
+      const auto *mid = twin->get_logical_measurements(0, 1);
+      auto read =
+          make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                        make_get_logical_measurements_payload(0, 1, false));
+      session->handle_get_logical_measurements(read.data(), tx.data(),
+                                               read.size());
+      expect_tx_status(tx, mid ? RpcStatus::OK : RpcStatus::NOT_READY, rid);
+      if (mid) {
+        EXPECT_EQ(tx[sizeof(RPCResponse)] & 1u, *mid & 1u) << "round " << r;
+        ++mid_shot;
+      }
+      auto final_read =
+          make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                        make_get_logical_measurements_payload(1, 1, false));
+      session->handle_get_logical_measurements(final_read.data(), tx.data(),
+                                               final_read.size());
+      expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+      // A reset read of either result waits for FINAL.
+      auto consume_logical =
+          make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                        make_get_logical_measurements_payload(0, 1, true));
+      session->handle_get_logical_measurements(
+          consume_logical.data(), tx.data(), consume_logical.size());
+      expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+      auto consume = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
+                                   make_get_corrections_payload(2, true));
+      session->handle_get_corrections(consume.data(), tx.data(),
+                                      consume.size());
+      expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+    } // end - for(r)
+    EXPECT_GT(mid_shot, 0u) << "the mid-circuit readout waited for FINAL";
+    auto both =
+        make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                      make_get_logical_measurements_payload(0, 2, true));
+    session->handle_get_logical_measurements(both.data(), tx.data(),
+                                             both.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+    ASSERT_NE(twin->get_logical_measurements(), nullptr);
+    EXPECT_EQ(tx[sizeof(RPCResponse)] & 3u,
+              (twin->get_logical_measurements()[0] & 1u) |
+                  (twin->get_logical_measurements()[1] & 1u) << 1);
+    auto after = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
+                               make_get_corrections_payload(2, false));
+    session->handle_get_corrections(after.data(), tx.data(), after.size());
+    expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+    // The next shot releases nothing before its own readout round.
+    auto next = make_cqr_slot(
+        kEnqueueSyndromesFunctionId, ++rid,
+        make_enqueue_payload(0, std::vector<uint8_t>(windowed_round_bits, 0),
+                             false));
+    session->handle_enqueue(next.data(), tx.data(), next.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+    auto early =
+        make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                      make_get_logical_measurements_payload(0, 1, false));
+    session->handle_get_logical_measurements(early.data(), tx.data(),
+                                             early.size());
+    expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+  } // end - for(async)
+} // end - TEST(DecodingSessionInline, ServesAMidCircuitReadoutMidShot)
+
+// After a reset_decoder RPC cancels a shot whose mid-circuit readout was
+// served, a read answers NOT_READY: nothing stays released. The next shot
+// serves its own values, a synchronous twin's.
+TEST(DecodingSessionInline, ACancelledShotServesNoStaleReadout) {
+  using cudaq::qec::round_type;
+  constexpr std::size_t R = 30;
+  std::uint32_t rid = 0;
+  std::vector<uint8_t> tx(64);
+  std::mt19937 rng(29);
+  const auto random_round = [&rng] {
+    std::vector<uint8_t> bits(windowed_round_bits);
+    for (auto &bit : bits)
+      bit = (rng() & 7) == 0;
+    return bits;
+  };
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    auto session = DecodingSession::create(mid_readout_graph(async),
+                                           /*want_device_graph=*/false,
+                                           bulk_and_final_rows());
+    auto twin = mid_readout_graph(false);
+    std::size_t r = 0;
+    twin->reset_decoder();
+    for (; r + 1 < R && !twin->get_logical_measurements(0, 1); ++r) {
+      const auto bits = random_round();
+      twin->enqueue_syndrome(bits.data(), bits.size(), round_type::BULK);
+      auto enqueue = make_cqr_slot(kEnqueueSyndromesFunctionId, ++rid,
+                                   make_enqueue_payload(r, bits, false));
+      session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
+      expect_tx_status(tx, RpcStatus::OK, rid);
+    }
+    ASSERT_LT(r + 1, R) << "the mid-circuit readout waited for FINAL";
+    auto served =
+        make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                      make_get_logical_measurements_payload(0, 1, false));
+    session->handle_get_logical_measurements(served.data(), tx.data(),
+                                             served.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+
+    auto reset =
+        make_cqr_slot(kResetDecoderFunctionId, ++rid, make_reset_payload());
+    session->handle_reset(reset.data(), tx.data(), reset.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+    auto stale =
+        make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                      make_get_logical_measurements_payload(0, 1, false));
+    session->handle_get_logical_measurements(stale.data(), tx.data(),
+                                             stale.size());
+    expect_tx_status(tx, RpcStatus::NOT_READY, rid);
+
+    twin->reset_decoder();
+    for (r = 0; r < R; ++r) {
+      const bool last = r + 1 == R;
+      const auto bits = random_round();
+      twin->enqueue_syndrome(bits.data(), bits.size(),
+                             last ? round_type::FINAL : round_type::BULK);
+      auto enqueue = make_cqr_slot(kEnqueueSyndromesFunctionId, ++rid,
+                                   make_enqueue_payload(r, bits, last));
+      session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
+      expect_tx_status(tx, RpcStatus::OK, rid);
+    }
+    auto both =
+        make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                      make_get_logical_measurements_payload(0, 2, true));
+    session->handle_get_logical_measurements(both.data(), tx.data(),
+                                             both.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+    ASSERT_NE(twin->get_logical_measurements(), nullptr);
+    EXPECT_EQ(tx[sizeof(RPCResponse)] & 3u,
+              (twin->get_logical_measurements()[0] & 1u) |
+                  (twin->get_logical_measurements()[1] & 1u) << 1);
+  } // end - for(async)
+} // end - TEST(DecodingSessionInline, ACancelledShotServesNoStaleReadout)
+
+// On a graph with a logical output, a reset read of a failed shot answers
+// INTERNAL_ERROR, not the NOT_READY a client would poll on until FINAL.
+// reset_decoder starts the next shot, which ends as usual.
+TEST(DecodingSessionInline, ReportsAFailedShotToAResetRead) {
+  using cudaq::qec::round_type;
+  constexpr std::size_t R = 30;
+  std::uint32_t rid = 0;
+  std::vector<uint8_t> tx(64);
+  const std::vector<uint8_t> zeros(windowed_round_bits, 0);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    auto session = DecodingSession::create(windowed_graph(async, true),
+                                           /*want_device_graph=*/false,
+                                           bulk_and_final_rows());
+    // FINAL on the first round, shorter than the model's shortest shot.
+    auto short_shot = make_cqr_slot(kEnqueueSyndromesFunctionId, ++rid,
+                                    make_enqueue_payload(0, zeros, true));
+    session->handle_enqueue(short_shot.data(), tx.data(), short_shot.size());
+    auto corrections = make_cqr_slot(kGetCorrectionsFunctionId, ++rid,
+                                     make_get_corrections_payload(1, true));
+    session->handle_get_corrections(corrections.data(), tx.data(),
+                                    corrections.size());
+    expect_tx_status(tx, RpcStatus::INTERNAL_ERROR, rid);
+    auto logical =
+        make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                      make_get_logical_measurements_payload(0, 1, true));
+    session->handle_get_logical_measurements(logical.data(), tx.data(),
+                                             logical.size());
+    expect_tx_status(tx, RpcStatus::INTERNAL_ERROR, rid);
+
+    auto reset =
+        make_cqr_slot(kResetDecoderFunctionId, ++rid, make_reset_payload());
+    session->handle_reset(reset.data(), tx.data(), reset.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+    for (std::size_t r = 0; r < R; ++r) {
+      auto enqueue = make_cqr_slot(kEnqueueSyndromesFunctionId, ++rid,
+                                   make_enqueue_payload(r, zeros, r + 1 == R));
+      session->handle_enqueue(enqueue.data(), tx.data(), enqueue.size());
+      expect_tx_status(tx, RpcStatus::OK, rid);
+    }
+    auto consume =
+        make_cqr_slot(kGetLogicalMeasurementsFunctionId, ++rid,
+                      make_get_logical_measurements_payload(0, 1, true));
+    session->handle_get_logical_measurements(consume.data(), tx.data(),
+                                             consume.size());
+    expect_tx_status(tx, RpcStatus::OK, rid);
+  } // end - for(async)
+} // end - TEST(DecodingSessionInline, ReportsAFailedShotToAResetRead)
 
 // A document with one windowed decoder: the pattern over a two-detector
 // chain whose faults stay in their rounds, so its boundary prior is set.

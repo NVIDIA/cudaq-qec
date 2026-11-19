@@ -7,9 +7,9 @@
 // a stream of raw measurement records into rounds, forms each round's
 // detectors once into a ring of fixed size, and hands every layer's window k
 // over together, as views of that ring, once all of them are complete. At
-// FINAL it settles the shot's length and, on request, reads the raw logical
-// value. A caller polls for what is ready; publishing it to other nodes is
-// the executor's part. Never included from a public header.
+// FINAL it settles the shot's length. A caller polls for what is ready;
+// publishing it to other nodes is the executor's part. Never included from a
+// public header.
 
 #pragma once
 
@@ -87,15 +87,12 @@ class ingest_core {
 public:
   /// @param context The experiment template.
   /// @param layers The layers, which share one period.
-  /// @param read_logical Read the raw logical value at FINAL, through the
-  /// last phase's m2o_sparse.
   /// @throws std::invalid_argument naming the operation if there is no
   /// layer, a request is invalid, the periods differ, a view pool is empty,
-  /// a round holds no measurements, a round's D_sparse does not fit its
-  /// detectors or its rounds' measurements, or read_logical is set and the
-  /// last phase's m2o_sparse is missing or reads past its round.
+  /// a round holds no measurements, or a round's D_sparse does not fit its
+  /// detectors or its rounds' measurements.
   ingest_core(std::shared_ptr<const experiment_template> context,
-              std::vector<ingest_layer> layers, bool read_logical);
+              std::vector<ingest_layer> layers);
 
   /// Take one record of raw measurements, one byte each. A record may cut a
   /// round anywhere, and the readout round may arrive in records before the
@@ -139,9 +136,6 @@ public:
 
   /// The rounds in the shot, once a FINAL record is taken.
   std::optional<std::size_t> shot_rounds() const { return shot_rounds_; }
-  /// The raw logical value, m2o times the readout round's measurements, once
-  /// a FINAL record is taken with read_logical set; empty otherwise.
-  const std::vector<std::uint8_t> &logical() const { return logical_; }
   /// Whether a FINAL record is taken and every index handed over.
   bool done() const;
 
@@ -212,7 +206,6 @@ private:
 
   std::shared_ptr<const experiment_template> context_;
   std::vector<ingest_layer> layers_;
-  bool read_logical_ = false;
 
   // The template's rounds, by kind. A spec that does not repeat has only
   // prefix rounds.
@@ -270,7 +263,6 @@ private:
   std::optional<std::size_t> shot_rounds_;
   std::int64_t next_index_ = 0;
   std::int64_t index_end_ = 0; ///< Past the last index, once FINAL is taken
-  std::vector<std::uint8_t> logical_;
   bool failed_ = false;
 };
 

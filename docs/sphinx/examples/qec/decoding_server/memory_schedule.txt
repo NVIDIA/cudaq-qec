@@ -1,0 +1,6 @@
+# Synthetic distance-3 Z-memory smoke test: 26 extraction rounds plus readout.
+# Not sampled circuit data or an accuracy/performance benchmark.
+0 reset
+1 stream source=0b00000000 rounds=26 every=1
+- enqueue_data source=0b000000000
+- get_corrections 0 return_size=1

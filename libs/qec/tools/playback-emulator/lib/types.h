@@ -27,18 +27,26 @@ inline constexpr std::int32_t kNoStatus = -1;
 /// Sentinel: this event neither raises nor waits on a signal.
 inline constexpr std::uint32_t kNoSignal = ~std::uint32_t(0);
 
-/// The four operations a schedule line can name. `stream` sends
+/// The operations a schedule line can name. `stream` sends
 /// `stream_min_rounds` and returns, or continues to `stream_max_rounds`
 /// unless `until=` arrives first; `enqueue` is its one-round spelling.
 /// `enqueue_data` is wire-identical but marks a shot boundary, pulling a
 /// source's terminal readout instead of another stabilizer round, and tags it
-/// FINAL via `run_params::final_mapping_id`.
+/// FINAL via `run_params::final_mapping_id`. `get_logical_measurements` is
+/// handled as `get_corrections` is.
 enum class operation : std::uint8_t {
   reset,
   stream,
   enqueue_data,
   get_corrections,
+  get_logical_measurements,
 };
+
+/// Whether @p op reads a result: get_corrections or get_logical_measurements.
+inline bool reads_result(operation op) {
+  return op == operation::get_corrections ||
+         op == operation::get_logical_measurements;
+}
 
 /// What decides when an event dispatches: the one operand every schedule line
 /// must carry, written first, with no keyword. `tick` is a plain number, an
@@ -59,12 +67,14 @@ inline const char *to_string(operation op) {
     return "enqueue_data";
   case operation::get_corrections:
     return "get_corrections";
+  case operation::get_logical_measurements:
+    return "get_logical_measurements";
   }
   return "unknown";
 }
 
 /// Final outcome of one record: the wire `RpcStatus` for `reset`/
-/// `enqueue_data`/`get_corrections`, or one of these four termination
+/// `enqueue_data` and the reads, or one of these four termination
 /// reasons for `stream`. Disjoint by value (RpcStatus 0..6, this 100..103),
 /// so the value alone says which; `kNoStatus` (-1) means never dispatched.
 enum class stream_terminate : std::int32_t {
@@ -103,6 +113,8 @@ struct event {
   std::uint32_t expected_count = 0;
   std::uint32_t return_size = 0; // correction-bit width, overriding
                                  // expected_count when larger
+  std::uint32_t first = 0;       // get_logical_measurements: the first one read
+  bool reset = true;             // a read consumes its shot (reset=)
 
   /// The signal this event raises once its reply/acks are all collected, an
   /// index into `schedule::signal_names`, set by `signal=NAME`.
@@ -150,7 +162,7 @@ struct record {
   std::uint64_t deadline_ns = 0; // where it was supposed to fire
   std::uint64_t call_ns = 0;     // when the dispatch actually began
   // When this event's last reply/ack landed: the one request's reply for
-  // reset/get_corrections, or the max over a stream/enqueue_data's rounds.
+  // reset or a read, or the max over a stream/enqueue_data's rounds.
   std::uint64_t return_ns = 0;
 
   // -- outcome --

@@ -770,10 +770,12 @@ run_qpu_kernel() {
     fi
     "$SERVER_BIN" "${server_args[@]}" >"$server_log" 2>&1 &
     local spid=$!; PIDS+=("$spid")
-    # trt_decoder builds its TensorRT engine from model.onnx while the server
-    # constructs decoders, delaying READY; give it a longer allowance.
+    # trt_decoder builds its TensorRT engine from model.onnx, and nv-qldpc
+    # JIT-compiles its PTX on a GPU the shipped plugin carries no SASS for
+    # (e.g. compute capability 12.x: GB10 / N1X), while the server constructs
+    # decoders -- both delay READY; give them a longer allowance.
     local ready_wait=60
-    [[ "$DECODER" == "trt_decoder" ]] && ready_wait=180
+    [[ "$DECODER" == "trt_decoder" || "$DECODER" == "nv-qldpc-decoder" ]] && ready_wait=180
     wait_for_pattern "$server_log" "QEC_DECODING_SERVER_READY" "$ready_wait" "$spid" >/dev/null || {
         cat "$server_log" >&2; return 1; }
     # udp: the UDP data port; cpu_roce: the TCP rendezvous port (the RDMA wire
@@ -999,7 +1001,12 @@ start_roce_server() {
         ready="Bridge Ready"
     fi
     local spid=$!; PIDS+=("$spid"); SERVER_PID="$spid"
-    wait_for_pattern "$server_log" "$ready" 60 "$spid" >/dev/null || {
+    # nv-qldpc's first-load PTX JIT on a GPU without native SASS delays READY
+    # here too (CUDA_MODULE_LOADING=EAGER above pulls it to startup on the
+    # device_graph path); give it the same allowance as run_qpu_kernel.
+    local ready_wait=60
+    [[ "$DECODER" == "nv-qldpc-decoder" ]] && ready_wait=180
+    wait_for_pattern "$server_log" "$ready" "$ready_wait" "$spid" >/dev/null || {
         if [[ "$DISPATCH" == "device_graph" ]] && grep -qE 'device-graph component is not linked into this binary|built without device_graph dispatch support' "$server_log"; then
             echo "SKIP: device_graph dispatch requires a decoding_server built with the device-graph component (not part of released builds); re-run with --dispatch host to decode nv-qldpc on host dispatch over cpu_roce" >&2
             exit 77   # standard "skip" code

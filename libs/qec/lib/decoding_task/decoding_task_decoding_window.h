@@ -196,7 +196,7 @@ decoding_window place_window(std::shared_ptr<const experiment_template> context,
 
 /// Build window @p k of @p request in a @p num_rounds round shot.
 /// @param with_m2o Also build m2o, which needs the window to hold the
-/// shot's readout round.
+/// shot's readout round and every readout map to be the last phase's.
 /// @throws std::invalid_argument as check_window_request() if the request is
 /// invalid, or naming the operation if window k does not exist or m2o cannot
 /// be built.

@@ -70,15 +70,16 @@ struct DispatchResult {
   std::size_t reply_len = 0;
 };
 
-/// Parses \p bytes as one of the three decoder RPCs and calls the matching
-/// core on \p dec, copying (for get_corrections) the still-bit-packed
-/// result into \p reply (capacity \p reply_capacity).
+/// Parses \p bytes as one of the decoder RPCs and calls the matching core on
+/// \p dec, copying (for a read) the still-bit-packed result into \p reply
+/// (capacity \p reply_capacity).
 DispatchResult dispatch_rpc(DecodingSession &dec, const std::uint8_t *bytes,
                             std::size_t size, std::uint8_t *reply,
                             std::size_t reply_capacity) {
   namespace slot = cudaq::qec::decoding_server::slot;
   using cudaq::qec::decoding::rpc::kEnqueueSyndromesFunctionId;
   using cudaq::qec::decoding::rpc::kGetCorrectionsFunctionId;
+  using cudaq::qec::decoding::rpc::kGetLogicalMeasurementsFunctionId;
   using cudaq::qec::decoding::rpc::kResetDecoderFunctionId;
   using cudaq::qec::decoding::rpc::RpcStatus;
   using cudaq::realtime::RPCHeader;
@@ -111,6 +112,17 @@ DispatchResult dispatch_rpc(DecodingSession &dec, const std::uint8_t *bytes,
     return {status, reply_len};
   }
 
+  if (header->function_id == kGetLogicalMeasurementsFunctionId) {
+    slot::GetLogicalMeasurementsView view;
+    if (!slot::parse_get_logical_measurements(bytes, size, view))
+      return {RpcStatus::BAD_REQUEST, 0};
+    std::size_t reply_len = 0;
+    auto status = dec.get_logical_measurements_core(
+        view.first, view.return_size, view.reset, reply, reply_capacity,
+        reply_len);
+    return {status, reply_len};
+  }
+
   if (header->function_id == kResetDecoderFunctionId) {
     slot::ResetView view;
     if (!slot::parse_reset(bytes, size, view))
@@ -126,15 +138,19 @@ DispatchResult dispatch_rpc(DecodingSession &dec, const std::uint8_t *bytes,
 std::size_t reply_capacity_for(const std::uint8_t *bytes, std::size_t size) {
   namespace slot = cudaq::qec::decoding_server::slot;
   using cudaq::realtime::RPCHeader;
-  if (size < sizeof(RPCHeader) ||
-      reinterpret_cast<const RPCHeader *>(bytes)->function_id !=
-          cudaq::qec::decoding::rpc::kGetCorrectionsFunctionId)
-    return 0;
   slot::GetCorrectionsView view;
-  if (!slot::parse_get_corrections(bytes, size, view))
+  slot::GetLogicalMeasurementsView logical;
+  std::int64_t return_size = 0;
+  if (size < sizeof(RPCHeader))
+    return 0;
+  if (slot::parse_get_corrections(bytes, size, view))
+    return_size = view.return_size;
+  else if (slot::parse_get_logical_measurements(bytes, size, logical))
+    return_size = logical.return_size;
+  else
     return 0;
   return cudaq::qec::decoding::rpc::bit_packed_bytes(
-      static_cast<std::size_t>(std::max<std::int64_t>(view.return_size, 0)));
+      static_cast<std::size_t>(std::max<std::int64_t>(return_size, 0)));
 }
 
 } // namespace

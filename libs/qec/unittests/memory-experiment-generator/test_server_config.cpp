@@ -174,7 +174,7 @@ TEST(MemoryExperimentServerConfig,
   options.pattern_args = {"commit_rounds=5",
                           "buffer_rounds=2",
                           "gap_rounds=11",
-                          "output=corrected_logical",
+                          "output=corrections",
                           "boundary_prior=1.2345678901234567e-6",
                           "input_boundary=columns",
                           "merge_identical=false",
@@ -192,7 +192,7 @@ TEST(MemoryExperimentServerConfig,
     EXPECT_EQ(parameters.get<std::size_t>("commit_rounds"), 5);
     EXPECT_EQ(parameters.get<std::size_t>("buffer_rounds"), 2);
     EXPECT_EQ(parameters.get<std::size_t>("gap_rounds"), 11);
-    EXPECT_EQ(parameters.get<std::string>("output"), "corrected_logical");
+    EXPECT_EQ(parameters.get<std::string>("output"), "corrections");
     EXPECT_EQ(parameters.get<double>("boundary_prior"), 1.2345678901234567e-6);
     EXPECT_EQ(parameters.get<std::string>("input_boundary"), "columns");
     EXPECT_FALSE(parameters.get<bool>("merge_identical"));
@@ -223,6 +223,7 @@ TEST(MemoryExperimentServerConfig, PatternSchemaRejectsInvalidArguments) {
            {"boundary_prior=-0.1"},
            {"input_boundary=unknown"},
            {"output=unknown"},
+           {"output=corrected_logical"},
            {"merge_identical=1"},
            {"merge_identical=TRUE"},
            {"conflicting_parallel=unknown"},

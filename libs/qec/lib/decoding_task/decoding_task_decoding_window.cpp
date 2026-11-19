@@ -506,7 +506,8 @@ affine_map build_m2d(const experiment_template &t, const decoding_window &w,
 } // end - build_m2d()
 
 // m2o: the readout round's records, from the last phase's m2o_sparse, over
-// the window's measurements alone.
+// the window's measurements alone. It is the raw logical value only when no
+// earlier round reads observables, since this window cannot hold that round.
 affine_map build_m2o(const experiment_template &t, const decoding_window &w,
                      const measurement_layout &m) {
   affine_map map;
@@ -519,6 +520,9 @@ affine_map build_m2o(const experiment_template &t, const decoding_window &w,
          std::to_string(R));
   if (t.readout().empty())
     fail("m2o needs the last phase's m2o_sparse");
+  if (!t.reads_only_at_end())
+    fail("m2o needs every readout map on the last phase; a mid-circuit "
+         "readout lies outside the readout round's window");
   const auto base = m.start[R - 1 - w.rounds.begin] - m.v_in;
   for (const auto value : t.readout()) {
     if (value == -1) {

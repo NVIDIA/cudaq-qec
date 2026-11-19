@@ -31,6 +31,7 @@
 #include <optional>
 #include <regex>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
@@ -2885,11 +2886,11 @@ TEST(DecoderDemChunksYAMLTest, ReadoutMapAndNamesAreCheckedWhenParsed) {
   EXPECT_NO_THROW(cfg::multi_decoder_config::from_yaml_str(streaming(good)));
   rejects(dem_chunks_yaml_with_readout("bulk", "            m2o_sparse: "
                                                "[0, -1]\n"),
-          "only the last phase");
+          "a repeating phase may not");
   rejects(streaming(dem_chunks_yaml_with_readout("bulk", "            "
                                                          "m2o_sparse: "
                                                          "[0, -1]\n")),
-          "only the last phase");
+          "a repeating phase may not");
   rejects(dem_chunks_yaml_with_readout("final", "            m2o_sparse: "
                                                 "[0, -1, 0, -1]\n"),
           "2 m2o_sparse rows for 1 observables");
@@ -3189,8 +3190,8 @@ std::string pw_graph_yaml_with(const std::string &from, const std::string &to) {
   return yaml.replace(at, from.size(), to);
 }
 
-// pw_graph_yaml() with an xor of num_inputs inputs: A, B and the raw
-// logical value, as a corrected-logical graph wires it.
+// pw_graph_yaml() with an xor of num_inputs inputs: A, B and A's backward
+// send, which only parsing reads.
 std::string three_input_sum_yaml(const std::string &num_inputs) {
   auto yaml = pw_graph_yaml_with("        - id: sum\n          type: xor\n",
                                  "        - id: sum\n          type: xor\n"
@@ -3201,7 +3202,7 @@ std::string three_input_sum_yaml(const std::string &num_inputs) {
   return yaml.replace(yaml.find(edges), edges.size(),
                       "        - {from: A, to: sum.in_0}\n"
                       "        - {from: B, to: sum.in_1}\n"
-                      "        - {from: ingest.logical, to: sum.in_2}\n");
+                      "        - {from: A.backward, to: sum.in_2}\n");
 }
 
 // xor's num_inputs parses and round-trips, and below 2 or above 1024 it is
@@ -3386,10 +3387,6 @@ TEST(TaskGraphWindowKinds, BuildingValidatesTheWindowsFirst) {
   rejects("{from: ingest.A, to: A}", "{from: measurements, to: A}",
           "decode_window node 'A' is fed by 'measurements.output', which is "
           "not a window port of an ingest node");
-  rejects("          type: ingest\n",
-          "          type: ingest\n          read_logical: true\n",
-          "ingest node 'ingest' reads the logical value, but its template's "
-          "last phase has no m2o_sparse");
   rejects("to: B.receive_1}", "to: B.receive_2}",
           "decode_window node 'B' has num_receives 2, so it has no input "
           "'receive_2'");
@@ -3602,11 +3599,10 @@ TEST(TaskGraphWindowKinds, RejectsMisplacedWindowsAndBadParameters) {
                          "output: {disposition: closed}}}}\n"),
       "sets windows, which only an ingest node takes");
   rejects(pw_graph_yaml_with("          windows:\n            A:",
-                             "          read_logical: false\n"
                              "          other:\n            A:"),
           "'other'");
-  rejects(pw_graph_yaml_with("            B:\n", "            logical:\n"),
-          "layer 'logical'");
+  rejects(pw_graph_yaml_with("            B:\n", "            input:\n"),
+          "layer 'input'");
   rejects(pw_graph_yaml_with("              offset: -9\n",
                              "              offset: -9\n"
                              "              responsibility: [0]\n"),
@@ -4498,7 +4494,7 @@ decoders:
           commit_rounds: 3
           buffer_rounds: 3
           gap_rounds: 9
-          output: corrected_logical
+          output: corrections
           max_in_flight: 4
           inner: {type: single_error_lut}
       edges:
@@ -4538,7 +4534,7 @@ TEST(ParallelWindowPattern, ParsesThePatternForm) {
   EXPECT_EQ(params.get<std::size_t>("commit_rounds"), 3u);
   EXPECT_EQ(params.get<std::size_t>("buffer_rounds"), 3u);
   EXPECT_EQ(params.get<std::size_t>("gap_rounds"), 9u);
-  EXPECT_EQ(params.get<std::string>("output"), "corrected_logical");
+  EXPECT_EQ(params.get<std::string>("output"), "corrections");
   EXPECT_EQ(graph.nodes.at(0).max_in_flight, 4u);
   EXPECT_EQ(graph.options.async_num_workers, std::optional<std::size_t>{4});
   EXPECT_EQ(graph.options.async_worker_cpus, (std::vector<int>{4, 5, 6, 7}));
@@ -4558,10 +4554,10 @@ TEST(ParallelWindowPattern, ParsesThePatternForm) {
 
 // Building lowers the pattern into pw.ingest, pw.A, pw.B and pw.sum and
 // validates them as a hand-written graph, so the pattern is checked end to
-// end: corrected_logical needs the template's m2o_sparse, and two faults on
-// one detector with different observable effects are ambiguous. With
-// identical twins, or the pattern's conflicting_parallel resolving them in
-// its layers, the graph builds and streams.
+// end: two faults on one detector with different observable effects are
+// ambiguous. With identical twins, or the pattern's conflicting_parallel
+// resolving them in its layers, the graph builds and streams.
+// output: corrected_logical is refused as it is parsed.
 TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
   namespace cfg = cudaq::qec::decoding::config;
   const auto unpooled = [](std::string yaml) {
@@ -4569,17 +4565,15 @@ TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
         "      async_num_workers: 4\n      async_worker_cpus: [4, 5, 6, 7]\n";
     return yaml.replace(yaml.find(pool), pool.size(), "");
   };
-  const auto corrections = unpooled(
-      pattern_yaml_with("output: corrected_logical", "output: corrections"));
+  const auto corrections = unpooled(pattern_yaml());
   auto twins = corrections;
   for (auto at = twins.find("O_sparse: [0, -1]"); at != std::string::npos;
        at = twins.find("O_sparse: [0, -1]", at))
     twins.replace(at, 17, "O_sparse: [0, 1, -1]");
-  expect_build_error(
-      cfg::multi_decoder_config::from_yaml_str(unpooled(pattern_yaml())),
-      "from_topology: parallel_window 'pw' has output: corrected_logical, "
-      "which reads the logical value through the last phase's m2o_sparse, "
-      "and its template has none; use output: corrections");
+  expect_parse_error(
+      pattern_yaml_with("output: corrections", "output: corrected_logical"),
+      "parallel_window: output: corrected_logical is replaced by output: "
+      "corrections_and_logical");
   auto resolved = corrections;
   resolved.replace(resolved.find("          max_in_flight: 4\n"), 0,
                    "          conflicting_parallel: most_likely\n");
@@ -4591,6 +4585,81 @@ TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt) {
   expect_streams(cfg::multi_decoder_config::from_yaml_str(twins));
   expect_streams(cfg::multi_decoder_config::from_yaml_str(resolved));
 } // end - TEST(ParallelWindowPattern, BuildingLowersThePatternAndValidatesIt)
+
+// From YAML, over a template with a readout map, the pattern needs `output`:
+// corrections_and_logical gives it a logical output and corrections none.
+// A hand-written graph can wire its own to output.logical, which
+// round-trips. Both return the corrections and, after FINAL, the logical
+// measurements.
+TEST(ParallelWindowPattern, BuildsALogicalOutputFromYaml) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const std::string final_phase =
+      "{name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: "
+      "[0, -1], error_rates: [0.01, 0.01]}}";
+  const std::string read_final =
+      "{name: final, spec: {num_faults: 2, H_sparse: [0, 1, -1], O_sparse: "
+      "[0, -1], m2o_sparse: [0, -1], error_rates: [0.01, 0.01]}}";
+  // @p yaml with the readout map, every fault flipping the observable so no
+  // parallel columns conflict.
+  const auto read = [&](std::string yaml) {
+    yaml.replace(yaml.find(final_phase), final_phase.size(), read_final);
+    for (auto at = yaml.find("O_sparse: [0, -1]"); at != std::string::npos;
+         at = yaml.find("O_sparse: [0, -1]", at))
+      yaml.replace(at, 17, "O_sparse: [0, 1, -1]");
+    return yaml;
+  };
+  auto hand_written = read(pw_graph_yaml());
+  auto auto_wired = read(pattern_yaml());
+  const std::string opt_out = "          output: corrections\n";
+  const std::string sum_edge = "        - {from: sum, to: output}\n";
+  // 29 quiet rounds, then a readout round whose one measurement is 1.
+  std::vector<std::uint8_t> shot(30, 0);
+  shot.back() = 1;
+
+  hand_written.replace(hand_written.find("      edges:\n"), 0,
+                       "        - id: R\n"
+                       "          type: logical_readout\n"
+                       "        - id: L\n"
+                       "          type: xor\n");
+  hand_written.replace(hand_written.find(sum_edge), sum_edge.size(),
+                       sum_edge + "        - {from: measurements, to: R}\n"
+                                  "        - {from: sum, to: L.a}\n"
+                                  "        - {from: R, to: L.b}\n"
+                                  "        - {from: L, to: output.logical}\n");
+  EXPECT_EQ(
+      cudaq::qec::decoding::host::build_task_graph(
+          cfg::multi_decoder_config::from_yaml_str(auto_wired).decoders.at(0))
+          ->get_num_logical_measurements(),
+      0u);
+  auto unset = auto_wired;
+  unset.erase(unset.find(opt_out), opt_out.size());
+  EXPECT_THROW(
+      cudaq::qec::decoding::host::build_task_graph(
+          cfg::multi_decoder_config::from_yaml_str(unset).decoders.at(0)),
+      std::invalid_argument);
+  auto_wired.replace(auto_wired.find(opt_out), opt_out.size(),
+                     "          output: corrections_and_logical\n");
+  auto parsed = cfg::multi_decoder_config::from_yaml_str(hand_written);
+  const auto emitted = parsed.to_yaml_str(200);
+  EXPECT_NE(emitted.find("output.logical"), std::string::npos) << emitted;
+  EXPECT_EQ(cfg::multi_decoder_config::from_yaml_str(emitted), parsed)
+      << emitted;
+  for (const auto &yaml : {auto_wired, hand_written}) {
+    const auto graph = cudaq::qec::decoding::host::build_task_graph(
+        cfg::multi_decoder_config::from_yaml_str(yaml).decoders.at(0));
+    const uint8_t *corrections = nullptr;
+    ASSERT_EQ(graph->get_num_observables(), 1u);
+    ASSERT_EQ(graph->get_num_logical_measurements(), 1u);
+    graph->enqueue_syndrome(shot.data(), shot.size() - 1,
+                            cudaq::qec::round_type::BULK);
+    EXPECT_EQ(graph->get_logical_measurements(), nullptr);
+    graph->enqueue_syndrome(shot.data() + shot.size() - 1, 1,
+                            cudaq::qec::round_type::FINAL);
+    corrections = graph->get_obs_corrections();
+    ASSERT_NE(graph->get_logical_measurements(), nullptr);
+    EXPECT_EQ(graph->get_logical_measurements()[0], 1 ^ corrections[0]);
+  }
+} // end - TEST(ParallelWindowPattern, BuildsALogicalOutputFromYaml)
 
 // Filling the store from the pattern holds every variant of its two layers,
 // the very windows of the parallel-window graph written by hand with the
@@ -4752,7 +4821,7 @@ TEST(PatternKind, FillsTheStoreWithTheWindowsItsHookDeclares) {
                         "          commit_rounds: 3\n"
                         "          buffer_rounds: 3\n"
                         "          gap_rounds: 9\n"
-                        "          output: corrected_logical\n"
+                        "          output: corrections\n"
                         "          max_in_flight: 4\n"
                         "          inner: {type: single_error_lut}\n",
                         "          type: " + name +
@@ -4834,8 +4903,9 @@ TEST(ParallelWindowPattern, RejectsBadParameters) {
   expect_parse_error(pattern_yaml_with("gap_rounds: 9", "gap_rounds: 0"),
                      "parallel_window: gap_rounds must be at least 1");
   expect_parse_error(
-      pattern_yaml_with("output: corrected_logical", "output: everything"),
-      "parallel_window: output must be corrected_logical or corrections");
+      pattern_yaml_with("output: corrections", "output: everything"),
+      "parallel_window: output must be corrections or "
+      "corrections_and_logical; got 'everything'");
   expect_parse_error(pattern_yaml_with("gap_rounds: 9",
                                        "gap_rounds: 9\n"
                                        "          boundary_prior: 1.5"),
@@ -6597,3 +6667,126 @@ TEST(SyndromeMappingYAMLTest, JsonSchemaAcceptsTheSectionAndPolicesRows) {
   EXPECT_NE(schema.find("\"bulk\""), std::string::npos);
   EXPECT_NE(schema.find("\"final\""), std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Documentation examples
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The text of docs/sphinx/examples/qec/yaml/@p name.
+std::string docs_yaml(const std::string &name) {
+  const auto path =
+      std::filesystem::path(CUDAQX_QEC_DOCS_EXAMPLES_DIR) / "yaml" / name;
+  std::ifstream file(path);
+  std::stringstream text;
+  if (!file)
+    throw std::runtime_error("cannot open " + path.string());
+  text << file.rdbuf();
+  return text.str();
+}
+
+// Streams a shot of @p rounds rounds of the docs' distance-5 repetition code
+// into @p graph, a round of checks per call and the last FINAL, with data
+// qubit @p qubit flipped from round @p from on; the last round reads the data
+// qubits. Returns its corrections and logical measurements.
+std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>>
+stream_rep5_shot(cudaq::qec::decoding_task_graph &graph, std::size_t rounds,
+                 std::size_t qubit, std::size_t from) {
+  constexpr std::size_t data_qubits = 5; // the code's distance
+  const std::size_t checks = graph.get_num_msyn_per_round();
+  std::vector<std::uint8_t> round(checks, 0);
+  std::vector<std::uint8_t> readout(data_qubits, 0);
+  const std::uint8_t *corrections = nullptr;
+  const std::uint8_t *logical = nullptr;
+  graph.reset_decoder();
+  for (std::size_t r = 0; r + 1 < rounds; ++r) {
+    // Check i reads data qubits i and i + 1.
+    for (std::size_t i = 0; i < checks; ++i)
+      round[i] = r >= from && (qubit == i || qubit == i + 1);
+    graph.enqueue_syndrome(round.data(), round.size());
+  }
+  readout[qubit] = 1;
+  graph.enqueue_syndrome(readout.data(), readout.size(),
+                         cudaq::qec::round_type::FINAL);
+  corrections = graph.get_obs_corrections();
+  logical = graph.get_logical_measurements();
+  if (!logical)
+    return {{corrections, corrections + graph.get_num_observables()}, {}};
+  return {{corrections, corrections + graph.get_num_observables()},
+          {logical, logical + graph.get_num_logical_measurements()}};
+} // end - stream_rep5_shot()
+
+} // namespace
+
+// The docs' parallel_window example and the same graph written out node by
+// node build the same windows and decode alike: every single data-qubit flip,
+// at the start, middle and end of shots of every length up to 40 rounds, gives
+// the correction the repetition code's observable needs, and the logical
+// measurement reads 0. Both end shots through a final syndrome_mapping row.
+TEST(DocsExamples, ParallelWindowYamlMatchesItsLowering) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::build_task_graph;
+  using cudaq::qec::decoding::host::fill_data_artifact_store;
+  const auto pattern = cfg::multi_decoder_config::from_yaml_str(
+      docs_yaml("task_graph_parallel_window.yaml"));
+  const auto lowered = cfg::multi_decoder_config::from_yaml_str(
+      docs_yaml("task_graph_parallel_window_lowered.yaml"));
+  const auto pattern_windows =
+      records_of(fill_data_artifact_store(pattern, "."), "window");
+  ASSERT_FALSE(pattern_windows.empty());
+  EXPECT_EQ(pattern_windows,
+            records_of(fill_data_artifact_store(lowered, "."), "window"));
+  for (const auto *config : {&pattern, &lowered}) {
+    ASSERT_EQ(config->syndrome_mapping.size(), 2u);
+    EXPECT_EQ(config->syndrome_mapping.at(1).type, "final");
+  }
+
+  auto by_pattern = build_task_graph(pattern.decoders.at(0));
+  auto by_hand = build_task_graph(lowered.decoders.at(0));
+  ASSERT_TRUE(by_pattern->supports_streaming())
+      << by_pattern->streaming_incompatibility_reason();
+  for (std::size_t rounds = 3; rounds <= 40; ++rounds)
+    for (const std::size_t from : {std::size_t{0}, rounds / 2, rounds - 1})
+      for (std::size_t qubit = 0; qubit < 5; ++qubit) {
+        SCOPED_TRACE("rounds " + std::to_string(rounds) + ", qubit " +
+                     std::to_string(qubit) + " from " + std::to_string(from));
+        const std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>>
+            want{{qubit == 0}, {0}};
+        EXPECT_EQ(stream_rep5_shot(*by_pattern, rounds, qubit, from), want);
+        EXPECT_EQ(stream_rep5_shot(*by_hand, rounds, qubit, from), want);
+      }
+} // end - TEST(DocsExamples, ParallelWindowYamlMatchesItsLowering)
+
+// The docs' predecoder graph streams, and its corrections add the
+// predecoder's and the global decoder's: a data-qubit flip in a shot's last
+// round is corrected only when it flips the observable.
+TEST(DocsExamples, PredecoderYamlStreamsAndCorrects) {
+  namespace cfg = cudaq::qec::decoding::config;
+  using cudaq::qec::decoding::host::build_task_graph;
+  constexpr std::size_t rounds = 5; // the nodes' window_size
+  const auto config = cfg::multi_decoder_config::from_yaml_str(
+      docs_yaml("task_graph_predecoder.yaml"));
+  auto graph = build_task_graph(config.decoders.at(0));
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  const std::size_t checks = graph->get_num_msyn_per_round();
+  // Data qubit q flipped in the last round fires the checks beside it; -1
+  // flips nothing. Observable 0 reads data qubit 0.
+  for (const int qubit : {-1, 0, 2}) {
+    SCOPED_TRACE("qubit " + std::to_string(qubit));
+    std::vector<std::uint8_t> round(checks, 0);
+    graph->reset_decoder();
+    for (std::size_t r = 0; r < rounds; ++r) {
+      const bool last = r + 1 == rounds;
+      for (std::size_t i = 0; i < checks; ++i)
+        round[i] = last && qubit >= 0 &&
+                   (static_cast<std::size_t>(qubit) == i ||
+                    static_cast<std::size_t>(qubit) == i + 1);
+      graph->enqueue_syndrome(round.data(), round.size(),
+                              last ? cudaq::qec::round_type::FINAL
+                                   : cudaq::qec::round_type::BULK);
+    }
+    EXPECT_EQ(graph->get_obs_corrections()[0], qubit == 0 ? 1 : 0);
+  }
+} // end - TEST(DocsExamples, PredecoderYamlStreamsAndCorrects)

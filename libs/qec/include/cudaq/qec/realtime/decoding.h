@@ -72,6 +72,24 @@ __qpu__ std::vector<bool> get_corrections(std::uint64_t decoder_id,
                                           std::uint64_t return_size,
                                           bool reset = false);
 
+/// @brief Get logical measurements for a given decoder: the raw logical
+/// readout with the decoder's corrections applied. Only a task graph with a
+/// logical output, one a `logical_readout` node feeds, has them. Each is
+/// ready once its readout has arrived and every correction that can flip it
+/// is committed; all are by the FINAL round.
+/// @param decoder_id The ID of the decoder to use.
+/// @param first The first logical measurement to return.
+/// @param return_size The number of logical measurements to return.
+/// @param reset Whether to reset the decoder corrections after retrieving
+/// them. Allowed only after the FINAL round. A reset read of either this or
+/// get_corrections consumes the shot for both, so read the logical
+/// measurements before a get_corrections that resets.
+/// @return Logical measurements [first, first + return_size).
+__qpu__ std::vector<bool> get_logical_measurements(std::uint64_t decoder_id,
+                                                   std::uint64_t first,
+                                                   std::uint64_t return_size,
+                                                   bool reset = false);
+
 /// @brief Reset the decoder. This clears any queued syndromes and resets any
 /// corrections back to 0.
 /// @param decoder_id The ID of the decoder to reset.

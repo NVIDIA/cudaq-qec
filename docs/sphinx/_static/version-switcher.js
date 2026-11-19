@@ -107,7 +107,7 @@
 
     others.appendChild(dl);
     flyout.appendChild(others);
-    document.body.appendChild(flyout);
+    document.querySelector(".wy-nav-side").appendChild(flyout);
   }
 
   // The manifest lives at the site root: one level up when this page is

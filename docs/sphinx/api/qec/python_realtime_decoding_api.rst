@@ -1,13 +1,13 @@
 The Realtime Decoding API enables low-latency error correction on quantum hardware by allowing CUDA-Q quantum kernels to interact with decoders during circuit execution. This API is designed for use cases where corrections must be calculated and applied within qubit coherence times.
 
-The real-time decoding system supports simulation environments for local testing and hardware integration (e.g., on
+The realtime decoding system supports simulation environments for local testing and hardware integration (e.g., on
 `Quantinuum's Helios QPU
 <https://www.quantinuum.com/products-solutions/quantinuum-systems/helios>`_).
 
 Core Decoding Functions
 ------------------------
 
-These functions can be called from within CUDA-Q quantum kernels (``@cudaq.kernel`` decorated functions) to interact with real-time decoders.
+These functions can be called from within CUDA-Q quantum kernels (``@cudaq.kernel`` decorated functions) to interact with realtime decoders.
 
 .. py:function:: cudaq_qec.qec.enqueue_syndromes(decoder_id, syndromes, tag)
 
@@ -87,6 +87,39 @@ These functions can be called from within CUDA-Q quantum kernels (``@cudaq.kerne
           corrections = qec.get_corrections(decoder_id, 1, False)
           if corrections[0]:
               x(logical.data)  # Apply transversal X correction
+
+.. py:function:: cudaq_qec.qec.get_logical_measurements(decoder_id, first, return_size, reset)
+
+   Retrieve logical measurements from the decoder: the raw logical readout
+   with the decoder's corrections applied. Only a task graph with a logical
+   output has them; a ``parallel_window`` pattern with
+   ``output: corrections_and_logical`` wires one (see
+   :ref:`task_graph_logical_measurements`). Each is released once its readout
+   has arrived and every correction that can flip it is committed; a
+   mid-circuit readout can be released mid-shot, and all are by the
+   ``type: final`` syndrome_mapping row that ends the shot. A read of
+   measurements not yet released fails: the decoding server answers
+   ``NOT_READY``. A read with ``reset`` consumes the shot for this call and
+   ``get_corrections`` alike, so read the logical measurements before a
+   ``get_corrections`` that resets.
+
+   :param decoder_id: Unique identifier for the decoder instance
+   :param first: The first logical measurement to return
+   :param return_size: Number of logical measurements to return, from ``first``
+   :param reset: Whether to consume the shot after retrieval, as ``get_corrections`` does; only once the shot has ended, since the logical measurements apply every correction it commits
+   :returns: List of boolean values, logical measurements ``[first, first + return_size)``
+
+   **Example:**
+
+   .. code-block:: python
+
+      @cudaq.kernel
+      def read_logical(decoder_id: int, num_rounds: int) -> bool:
+          q = cudaq.qvector(4)
+          for r in range(num_rounds - 1):
+              qec.enqueue_syndromes(decoder_id, mz(q), r)
+          qec.enqueue_syndromes_mapped(decoder_id, mz(q), num_rounds - 1, 1)
+          return qec.get_logical_measurements(decoder_id, 0, 1, True)[0]
 
 .. py:function:: cudaq_qec.qec.reset_decoder(decoder_id)
 
@@ -239,7 +272,7 @@ Realtime decoding requires converting matrices to sparse format for efficient de
    :param pcm: Dense binary matrix as numpy array (e.g., ``dem.detector_error_matrix`` or ``dem.observables_flips_matrix``)
    :returns: Sparse vector (list of integers) where -1 separates rows
 
-   **Usage in real-time decoding:**
+   **Usage in realtime decoding:**
 
    .. code-block:: python
 
@@ -266,7 +299,7 @@ Realtime decoding requires converting matrices to sparse format for efficient de
                :meth:`DecoderContext.z_component`, or :meth:`DecoderContext.full_component`.
    :returns: ``-1``-terminated sparse vector suitable for ``decoder_config.D_sparse``
 
-   **Usage in real-time decoding:**
+   **Usage in realtime decoding:**
 
    .. code-block:: python
 

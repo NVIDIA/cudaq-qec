@@ -89,7 +89,7 @@ inline uint64_t now_ns() {
 constexpr int32_t kMissing = INT32_MIN; // stamp absent (mode / early return)
 
 struct Sample {
-  uint8_t kind; // 0 enqueue, 1 get_corrections, 2 reset, 3 other
+  uint8_t kind; // 0 enqueue, 1 get_corrections, 2 reset, 3 other, 4 logical
   uint32_t rid;
   int32_t total;
   int32_t stage_parse, stage_decode, stage_respond;
@@ -107,6 +107,8 @@ inline uint8_t kind_of(uint32_t function_id) {
     return 1;
   if (function_id == kResetDecoderFunctionId)
     return 2;
+  if (function_id == kGetLogicalMeasurementsFunctionId)
+    return 4;
   return 3;
 }
 
@@ -250,10 +252,11 @@ inline void report() {
       {"stage_respond", &Sample::stage_respond},
   };
   const char *kind_names[] = {"enqueue_syndromes", "get_corrections",
-                              "reset_decoder", "other"};
+                              "reset_decoder", "other",
+                              "get_logical_measurements"};
 
   std::vector<int32_t> vals;
-  for (int kind = 0; kind < 4; ++kind) {
+  for (int kind = 0; kind < 5; ++kind) {
     for (const auto &m : metrics) {
       vals.clear();
       for (std::size_t i = 0; i < n; ++i) {

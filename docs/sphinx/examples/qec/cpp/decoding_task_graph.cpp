@@ -61,8 +61,8 @@ static dem_chunks_spec rep5_spec(uint64_t num_rounds = 5) {
 // Build a single-decoder task graph from a dem_chunks_spec.
 //
 // When num_rounds is set the graph uses a fixed-T window (one call to run()
-// per shot).  When num_rounds is absent the graph uses a streaming window
-// that fires once per round (stride = 1).
+// per shot).  When num_rounds is absent the graph uses a streaming window of
+// the fewest rounds the phases allow, moving one round at a time.
 // ---------------------------------------------------------------------------
 
 static void example_from_spec() {
@@ -76,14 +76,15 @@ static void example_from_spec() {
   std::cout << "fixed-T  observables: " << fixed_graph->get_num_observables()
             << "\n";
 
-  // Streaming graph: num_rounds absent — window fires once per round.
+  // Streaming graph: num_rounds absent — a 3-round window that moves one
+  // round at a time.
   auto streaming_spec = rep5_spec();
   streaming_spec.num_rounds = std::nullopt;
   auto streaming_graph =
       decoding_task_graph::from_spec(streaming_spec, "single_error_lut");
 
   std::cout << "streaming msyn/round: "
-            << streaming_graph->get_num_msyn_per_decode() << "\n";
+            << streaming_graph->get_num_msyn_per_round() << "\n";
   std::cout << "streaming observables: "
             << streaming_graph->get_num_observables() << "\n";
 }
@@ -125,11 +126,7 @@ static void example_batch() {
 
 // ---------------------------------------------------------------------------
 // [Begin streaming]
-// Streaming interface: enqueue_syndrome accumulates syndrome bytes one round
-// at a time.  Returns true when the window fires and corrections are ready.
-// Call get_obs_corrections() immediately after to read the result, then
-// clear_corrections() to reset the XOR accumulator before the next window.
-// Call reset_decoder() between shots to clear accumulation buffers.
+// Stream a 10-round shot one round per call, tagging the last round FINAL.
 // ---------------------------------------------------------------------------
 
 static void example_streaming() {
@@ -137,28 +134,24 @@ static void example_streaming() {
   streaming_spec.num_rounds = std::nullopt;
   auto graph =
       decoding_task_graph::from_spec(streaming_spec, "single_error_lut");
-
-  // A slid window has room for one round per fire, so deliver a round per
-  // call rather than the whole window.
   const std::size_t per_round = graph->get_num_msyn_per_round();
-  const std::size_t k = graph->get_num_observables();
+  const std::size_t num_rounds = 10;
+  const std::vector<uint8_t> syndrome(per_round, 0); // no errors
 
-  // Simulate 10 rounds of zero syndromes (no errors).  The window fires once
-  // it holds get_num_msyn_per_decode() bytes, then on every round after.
-  const std::vector<uint8_t> zero_syndrome(per_round, 0);
-  for (int round = 0; round < 10; ++round) {
-    if (graph->enqueue_syndrome(zero_syndrome.data(), per_round)) {
-      const uint8_t *corr = graph->get_obs_corrections();
-      std::cout << "round " << round
-                << ": fired, corrections[0]=" << static_cast<int>(corr[0])
-                << "\n";
-      graph->clear_corrections();
-    }
-  }
+  for (std::size_t r = 0; r < num_rounds; ++r)
+    graph->enqueue_syndrome(syndrome.data(), per_round,
+                            r + 1 < num_rounds ? round_type::BULK
+                                               : round_type::FINAL);
 
-  // Full reset between shots.
-  graph->reset_decoder();
-  std::cout << "decoder reset for next shot\n";
+  const auto progress = graph->streaming_result().outputs.at(0);
+  std::cout << "complete: "
+            << (progress.status == task_graph_streaming_status::complete)
+            << "\n";
+  std::cout << "corrections[0]: "
+            << static_cast<int>(graph->get_obs_corrections()[0]) << "\n";
+
+  // Start the next shot.
+  graph->clear_corrections();
 }
 // [End streaming]
 

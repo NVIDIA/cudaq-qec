@@ -30,6 +30,9 @@ public:
   struct result_update {
     bool operation_completed = false;
     std::uint64_t completed_results = 0;
+    /// A graph's live result as this update read it, valid until the next
+    /// graph call; null for a plain decoder.
+    const cudaq::qec::task_graph_streaming_result *live = nullptr;
   };
 
   decode_target() = default;
@@ -124,7 +127,8 @@ public:
   capture_result_update(bool decoder_enqueue_result,
                         task_graph_streaming_result &graph_result) const {
     if (!graph_)
-      return {decoder_enqueue_result, decoder_enqueue_result ? 1u : 0u};
+      return {decoder_enqueue_result, decoder_enqueue_result ? 1u : 0u,
+              nullptr};
 
     const auto &result = graph_->streaming_result();
     if (result.status == task_graph_streaming_status::failed)
@@ -146,7 +150,7 @@ public:
             "task graph result snapshot does not match its output width");
       graph_result = result;
     }
-    return {operation_completed, completed_results};
+    return {operation_completed, completed_results, &result};
   }
 
   const uint8_t *obs_corrections() const {
@@ -202,6 +206,29 @@ public:
   std::size_t num_observables() const {
     return graph_ ? graph_->get_num_observables()
                   : decoder_->get_num_observables();
+  }
+
+  /// Width of a task graph's logical output; 0 without one.
+  std::size_t num_logical_measurements() const {
+    return graph_ ? graph_->get_num_logical_measurements() : 0;
+  }
+
+  /// A task graph's live result, once accepted records are processed: one
+  /// read, not a poll, as in obs_corrections(). Needs a graph.
+  const task_graph_streaming_result &streaming_result() const {
+    return graph_->streaming_result();
+  }
+
+  /// Whether a reset read may consume the shot now: always, except on a task
+  /// graph with a logical output before its FINAL round, since its logical
+  /// measurements need every correction of the shot. @p live is the graph's
+  /// live result when the caller already holds it; otherwise it is read.
+  bool may_consume(const task_graph_streaming_result *live = nullptr) const {
+    if (num_logical_measurements() == 0)
+      return true;
+    if (!live)
+      live = &graph_->streaming_result();
+    return live->status == task_graph_streaming_status::complete;
   }
 
   /// Names this target in error messages.

@@ -4,11 +4,10 @@ CUDA-Q QEC by Example
 
 Examples that illustrate how to use CUDA-Q QEC for application development are available in C++ and Python.
 
-.. toctree::
-   :maxdepth: 1
-
-      Creating New QEC Codes <creating_qec_codes.rst>
-      Experiments and Noise Modeling <modeling_noise.rst>
-      Decoders <decoders.rst>
-      Decoding Task Graphs <decoding_task_graph.rst>
-      Realtime Decoding <realtime_decoding.rst>
+* :doc:`Decoders <decoders>`
+* :doc:`Working with Detector Error Models <detector_error_models>`
+* :doc:`Decoding Task Graph <decoding_task_graph>`
+* :doc:`Realtime Decoding <realtime_decoding>`
+* :doc:`Experiments and Noise Modeling <modeling_noise>`
+* :doc:`Learning Noise and Decoding with Learned Rates <noise_learning>`
+* :doc:`Creating New QEC Codes <creating_qec_codes>`

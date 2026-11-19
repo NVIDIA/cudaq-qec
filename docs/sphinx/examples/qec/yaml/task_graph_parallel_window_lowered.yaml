@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The graph that task_graph_parallel_window.yaml's parallel_window node builds,
+# written out node by node. The model and syndrome mapping are the same.
+
+decoders:
+  - id: 0
+    dem_chunks:
+      seam: {from: next_round, to: prev_round}
+      measurements_per_round: 4        # one per check
+      connections:
+        - {from: init, to: bulk}
+        - {from: bulk, to: bulk}       # bulk repeats
+        - {from: bulk, to: final}
+      phases:
+        # Faults 0-4 flip data qubits 0-4; faults 5-8 are errors in measuring
+        # checks 0-3. Check i reads data qubits i and i + 1. Observable 0 reads
+        # data qubit 0.
+        - name: init                   # first round of checks
+          spec:
+            num_faults: 9
+            seam_specs:
+              - name: prev_round       # detectors of this round
+                spec: {H_sparse: [0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1,
+                                  3, 4, 8, -1]}
+              - name: next_round       # detectors of the next round
+                spec: {H_sparse: [5, -1, 6, -1, 7, -1, 8, -1]}
+            D_sparse: [0, -1, 1, -1, 2, -1, 3, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+        - name: bulk
+          spec:
+            num_faults: 9
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, 1, 5, -1, 1, 2, 6, -1, 2, 3, 7, -1,
+                                  3, 4, 8, -1]}
+              - name: next_round
+                spec: {H_sparse: [5, -1, 6, -1, 7, -1, 8, -1]}
+            # Detector i: check i in the previous round (index i) and in
+            # this one (index 4 + i).
+            D_sparse: [0, 4, -1, 1, 5, -1, 2, 6, -1, 3, 7, -1]
+            O_sparse: [0, -1]
+            error_rates: [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+        - name: final                  # data-qubit readout
+          spec:
+            num_faults: 5
+            num_measurements: 5        # data qubits 0-4
+            seam_specs:
+              - name: prev_round
+                spec: {H_sparse: [0, 1, -1, 1, 2, -1, 2, 3, -1, 3, 4, -1]}
+            # Detector i: check i in the previous round and data qubits i
+            # and i + 1 in this one.
+            D_sparse: [0, 4, 5, -1, 1, 5, 6, -1, 2, 6, 7, -1, 3, 7, 8, -1]
+            m2o_sparse: [0, -1]        # observable 0 reads data qubit 0
+            O_sparse: [0, -1]
+            error_rates: [0.02, 0.02, 0.02, 0.02, 0.02]
+    task_graph:
+      async_streaming: true
+      nodes:
+        - id: ingest
+          type: ingest
+          windows:                     # one output port per layer
+            A:
+              period: 12               # commit_rounds + gap_rounds
+              zones: {buffers: [[-3, 0], [3, 6]], commit: [0, 3]}
+              ports:
+                input: {disposition: open, prior: 0.02}
+                output: {disposition: open}
+              sends: [{id: forward}, {id: backward}]
+            B:
+              period: 12
+              offset: -9               # B[k] is the gap before A[k]
+              zones: {commit: [0, 9]}
+              ports:
+                input: {disposition: closed}
+                output: {disposition: closed}
+        - id: A
+          type: decode_window
+          max_in_flight: 4
+          inner: {type: pymatching, merge_strategy: smallest_weight}
+        - id: B
+          type: decode_window
+          num_receives: 2
+          max_in_flight: 4
+          inner: {type: pymatching, merge_strategy: smallest_weight}
+        - id: sum
+          type: xor
+        - id: readout                  # the raw logical value
+          type: logical_readout
+        - id: logical                  # corrections applied to it
+          type: xor
+      edges:
+        - {from: measurements, to: ingest}
+        - {from: ingest.A, to: A}
+        - {from: ingest.B, to: B}
+        - {from: A.forward, to: B.receive_0, index_offset: -1}  # A[k-1] to B[k]
+        - {from: A.backward, to: B.receive_1}                   # A[k] to B[k]
+        - {from: A, to: sum.a}
+        - {from: B, to: sum.b}
+        - {from: measurements, to: readout}
+        - {from: sum, to: output.corrections}
+        - {from: sum, to: logical.a}
+        - {from: readout, to: logical.b}
+        - {from: logical, to: output.logical}
+
+syndrome_mapping:
+  - {id: 0, type: bulk}
+  - {id: 1, type: final}

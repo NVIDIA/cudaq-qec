@@ -1270,60 +1270,67 @@ struct decoding_task_graph::impl::record_scheduler {
   void execute_one_shot(context &c, const graph_event &event) {
     const auto node = event.node;
     auto &inputs = owner.parallel_node_inputs[node];
-    for (const auto &wire : owner.wires_to[node])
-      inputs[static_cast<std::size_t>(wire.to_slot)] =
-          wire.from_node < 0
-              ? *c.measurement
-              : owner.node_outputs[static_cast<std::size_t>(wire.from_node)]
-                                  [static_cast<std::size_t>(wire.from_slot)];
-    owner.nodes[node]->execute_indexed(inputs, owner.node_outputs[node]);
+    // A node reaching only the logical output still releases its dependents,
+    // which are skipped too, so the walk completes.
+    if (!owner.one_shot_skips[node]) {
+      for (const auto &wire : owner.wires_to[node])
+        inputs[static_cast<std::size_t>(wire.to_slot)] =
+            wire.from_node < 0
+                ? *c.measurement
+                : owner.node_outputs[static_cast<std::size_t>(wire.from_node)]
+                                    [static_cast<std::size_t>(wire.from_slot)];
+      owner.nodes[node]->execute_indexed(inputs, owner.node_outputs[node]);
+    }
     release_dependencies(c, owner.dependents[node], graph_event_kind::one_shot);
   }
 
   void execute_raw(context &c, std::size_t id, const graph_event &event) {
     auto &node = *owner.streaming_nodes[event.node].capability;
-    if (c.operations > 1) {
-      execute_raw_operations(c, id, event);
+    const auto node_index = owner.streaming_nodes[event.node].node_index;
+    const bool no_deliveries = owner.streaming_wires_from[node_index].empty() &&
+                               owner.completion_wires_from[node_index].empty();
+    auto offset = event.offset;
+    auto operation = event.operation;
+    while (true) {
+      const auto end = c.operations > 1
+                           ? c.operation_ends[operation - c.first_operation]
+                           : c.len;
+      const auto limit =
+          c.type ? node.raw_chunk_limit() : node.untagged_chunk_limit();
+      const auto take = limit ? std::min(*limit, end - offset) : end - offset;
+      const auto *chunk = c.syndrome ? c.syndrome + offset : nullptr;
+      const auto next = offset + take;
+      const auto chunk_type = c.type == round_type::FINAL && next == c.len
+                                  ? round_type::FINAL
+                                  : round_type::BULK;
+      const bool fired = c.type ? node.enqueue(chunk, take, chunk_type)
+                                : node.enqueue_untagged(chunk, take);
+      if (fired)
+        c.fired.store(publish_all(c, id, event.root, event.node),
+                      std::memory_order_relaxed);
+      else if (chunk_type == round_type::FINAL && !staged(event.node))
+        snapshot_node(c, event.node); // a FINAL round may commit coverage
+      if (next < c.len && take != 0) {
+        // Recheck capacity after each chunk and let its causal deliveries
+        // finish before another operation can reuse this context's publication
+        // values.
+        if (next == end)
+          ++operation;
+        if (c.operations > 1 && (!fired || no_deliveries)) {
+          if (stop.load(std::memory_order_acquire))
+            return;
+          // No deliveries means no children can read this running event's
+          // operation tag. Captured results remain owned by this context.
+          offset = next;
+          c.slots[id].event.operation = operation;
+          continue;
+        }
+        auto continuation = event;
+        continuation.offset = next;
+        continuation.operation = operation;
+        set_continuation(c, id, continuation);
+      }
       return;
-    }
-    const auto limit =
-        c.type ? node.raw_chunk_limit() : node.untagged_chunk_limit();
-    const auto take =
-        limit ? std::min(*limit, c.len - event.offset) : c.len - event.offset;
-    const auto *chunk = c.syndrome ? c.syndrome + event.offset : nullptr;
-    const auto next = event.offset + take;
-    const auto chunk_type = c.type == round_type::FINAL && next == c.len
-                                ? round_type::FINAL
-                                : round_type::BULK;
-    const bool fired = c.type ? node.enqueue(chunk, take, chunk_type)
-                              : node.enqueue_untagged(chunk, take);
-    if (fired)
-      c.fired.store(publish_all(c, id, event.root, event.node),
-                    std::memory_order_relaxed);
-    else if (chunk_type == round_type::FINAL && !staged(event.node))
-      snapshot_node(c, event.node); // a FINAL round may commit coverage
-    if (next < c.len && take != 0)
-      set_continuation(
-          c, id,
-          {graph_event_kind::streaming_raw, event.node, {}, next, event.root});
-  }
-
-  // BULK operations admitted together, one chunk in all, reach the node one
-  // call each, as synchronously. The event's tag follows the operation, so
-  // what each call publishes follows from it; only this worker reads the
-  // tag while the event runs.
-  void execute_raw_operations(context &c, std::size_t id,
-                              const graph_event &event) {
-    auto &node = *owner.streaming_nodes[event.node].capability;
-    const auto root = event.root;
-    const auto si = event.node;
-    std::size_t offset = 0;
-    for (std::size_t k = 0; k < c.operations; ++k) {
-      const auto end = c.operation_ends[k];
-      c.slots[id].event.operation = c.first_operation + k;
-      if (node.enqueue(c.syndrome + offset, end - offset, round_type::BULK))
-        c.fired.store(publish_all(c, id, root, si), std::memory_order_relaxed);
-      offset = end;
     }
   }
 
@@ -2171,8 +2178,10 @@ void decoding_task_graph::impl::prepare_event_runtime(std::size_t context_count,
   std::size_t raw_inputs = 0;
   std::size_t chunk = 0;
   bool metered = true;
+  // A reads_logical() node takes each record whole, so it sets no chunk size.
   for (std::size_t si = 0; si < streaming_nodes.size(); ++si)
-    if (streaming_node_has_raw_input[si]) {
+    if (streaming_node_has_raw_input[si] &&
+        !nodes[streaming_nodes[si].node_index]->reads_logical()) {
       const auto limit = streaming_nodes[si].capability->raw_chunk_limit();
       ++raw_inputs;
       if (!limit)
@@ -2233,6 +2242,7 @@ decoding_task_graph::impl::apply_record_context(record_context &c) {
     return std::pair{delta.operation, delta.coverage.begin_round};
   };
   auto &pending = c.staged_nodes;
+  const std::vector<uint8_t> no_flips; // a cancelled path's delta
   std::uint64_t advanced = 0;
   std::uint64_t before = streaming_result_state.generation;
   pending.clear();
@@ -2265,6 +2275,8 @@ decoding_task_graph::impl::apply_record_context(record_context &c) {
       const auto &delta = c.staged[si][--c.staged_count[si]];
       for (const auto k : streaming_node_outputs[si])
         stage_delta(k, delta.coverage, delta.bits);
+      for (const auto k : streaming_node_cancelled_outputs[si])
+        stage_delta(k, delta.coverage, no_flips);
       if (c.staged_count[si] != 0)
         std::push_heap(pending.begin(), pending.end(), later);
       else
@@ -2308,13 +2320,13 @@ decoding_task_graph::impl::apply_record_context(record_context &c) {
   return {advanced, before};
 } // end - apply_record_context()
 
-// The least output generation: a staged output's stager's, another's
-// slowest contributor's.
+// The least correction output generation: a staged output's stager's,
+// another's slowest contributor's. The logical output is not counted.
 std::uint64_t decoding_task_graph::impl::pending_generation() const {
   const auto &outputs = streaming_result_state.outputs;
   std::uint64_t generation =
       outputs.empty() ? 0 : std::numeric_limits<std::uint64_t>::max();
-  for (std::size_t k = 0; k < outputs.size(); ++k) {
+  for (std::size_t k = 0; k < num_correction_outputs; ++k) {
     std::uint64_t output = outputs[k].generation;
     if (k < output_stagers.size() && output_stagers[k].enabled) {
       output = std::max(output, output_stagers[k].generation);

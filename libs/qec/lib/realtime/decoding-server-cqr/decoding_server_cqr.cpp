@@ -5,8 +5,9 @@
 
 /// cudaq-realtime (cqr) DeviceCallService plugin for the decoding server.
 ///
-/// The plugin registers the three default-route RPCs (enqueue_syndromes /
-/// get_corrections / reset_decoder) as CUDAQ_DISPATCH_HOST_CALL entries.
+/// The plugin registers the default-route RPCs (enqueue_syndromes /
+/// get_corrections / reset_decoder / get_logical_measurements) as
+/// CUDAQ_DISPATCH_HOST_CALL entries.
 /// Each request executes ENTIRELY on the CUDAQ dispatcher thread that
 /// delivered it: dispatch_rpc resolves the DecodingSession by the payload's
 /// decoder_id and calls its handle_* method, which parses the rx slot in
@@ -52,6 +53,7 @@ namespace {
 
 using cudaq::qec::decoding::rpc::kEnqueueSyndromesFunctionId;
 using cudaq::qec::decoding::rpc::kGetCorrectionsFunctionId;
+using cudaq::qec::decoding::rpc::kGetLogicalMeasurementsFunctionId;
 using cudaq::qec::decoding::rpc::kResetDecoderFunctionId;
 using cudaq::qec::decoding::rpc::RpcStatus;
 using cudaq::qec::decoding_server::DecodingSession;
@@ -171,6 +173,8 @@ static void dispatch_rpc(const void *rx_slot, void *tx_slot,
       session->handle_enqueue(rx_slot, tx_slot, slot_size);
     else if (function_id == kGetCorrectionsFunctionId)
       session->handle_get_corrections(rx_slot, tx_slot, slot_size);
+    else if (function_id == kGetLogicalMeasurementsFunctionId)
+      session->handle_get_logical_measurements(rx_slot, tx_slot, slot_size);
     else if (function_id == kResetDecoderFunctionId)
       session->handle_reset(rx_slot, tx_slot, slot_size);
     else
@@ -203,6 +207,11 @@ void reset_decoder_host(const void *rx_slot, void *tx_slot,
   dispatch_rpc(rx_slot, tx_slot, slot_size, kResetDecoderFunctionId);
 }
 
+void get_logical_measurements_host(const void *rx_slot, void *tx_slot,
+                                   std::size_t slot_size) {
+  dispatch_rpc(rx_slot, tx_slot, slot_size, kGetLogicalMeasurementsFunctionId);
+}
+
 // ---------------------------------------------------------------------------
 // DeviceCallService plugin
 // ---------------------------------------------------------------------------
@@ -218,7 +227,7 @@ constexpr uint8_t kSingleResult = 1;
 constexpr uint8_t kScalarU8Size = sizeof(uint8_t);
 constexpr uint8_t kScalarU64Size = sizeof(uint64_t);
 
-// Wire argument order per decoder_server_runtime.md: fixed-size scalars
+// Wire argument order per decoding-server.md: fixed-size scalars
 // first, the variable-length bit-packed byte array last.
 constexpr std::uint8_t kEnqueueDecoderIdArg = 0;
 constexpr std::uint8_t kEnqueueCounterArg = 1;
@@ -234,12 +243,22 @@ constexpr std::uint8_t kGetCorrectionsArgCount = 3;
 constexpr std::uint8_t kResetDecoderIdArg = 0;
 constexpr std::uint8_t kResetDecoderArgCount = 1;
 
+// get_logical_measurements: get_corrections' arguments, `first` before
+// return_size.
+constexpr std::uint8_t kGetLogicalDecoderIdArg = 0;
+constexpr std::uint8_t kGetLogicalFirstArg = 1;
+constexpr std::uint8_t kGetLogicalReturnSizeArg = 2;
+constexpr std::uint8_t kGetLogicalResetArg = 3;
+constexpr std::uint8_t kGetLogicalArgCount = 4;
+
 constexpr std::uint8_t kCorrectionsResult = 0;
+constexpr std::uint8_t kLogicalMeasurementsResult = 0;
 
 enum DeviceCallEntryIndex : std::size_t {
   kEnqueueSyndromesEntry,
   kGetCorrectionsEntry,
   kResetDecoderEntry,
+  kGetLogicalMeasurementsEntry,
   kDeviceCallEntryCount
 };
 
@@ -281,7 +300,7 @@ static std::array<cudaq_function_entry_t, kDeviceCallEntryCount>
 make_entries() {
   std::array<cudaq_function_entry_t, kDeviceCallEntryCount> entries{};
 
-  // enqueue_syndromes: 4-arg spec format per decoder_server_runtime.md.
+  // enqueue_syndromes: 4-arg spec format per decoding-server.md.
   // decoder_id, counter, syndrome_mapping_id (scalars) + syndrome_bits
   // (bit_packed: element-count prefix == num_syndromes, then LSB-first bits).
   auto &eq = entries[kEnqueueSyndromesEntry];
@@ -292,7 +311,7 @@ make_entries() {
   set_u64(eq.schema.args[kEnqueueMappingIdArg]);
   set_bit_packed(eq.schema.args[kEnqueueSyndromeBitsArg]);
 
-  // get_corrections: 3-arg spec format per decoder_server_runtime.md.
+  // get_corrections: 3-arg spec format per decoding-server.md.
   // decoder_id (scalar) + corrections (OUT std::vector<bool>: the request
   // carries its length as return_size) + reset (scalar).
   auto &gc = entries[kGetCorrectionsEntry];
@@ -308,14 +327,28 @@ make_entries() {
                   kResetDecoderArgCount, kNoResults);
   set_u64(rd.schema.args[kResetDecoderIdArg]);
 
+  // get_logical_measurements: 4-arg format. decoder_id and first (scalars)
+  // + logical measurements (OUT std::vector<bool>, length as return_size)
+  // + reset (scalar).
+  auto &gl = entries[kGetLogicalMeasurementsEntry];
+  configure_entry(gl, kGetLogicalMeasurementsFunctionId,
+                  get_logical_measurements_host, kGetLogicalArgCount,
+                  kSingleResult);
+  set_u64(gl.schema.args[kGetLogicalDecoderIdArg]);
+  set_u64(gl.schema.args[kGetLogicalFirstArg]);
+  set_u64(gl.schema.args[kGetLogicalReturnSizeArg]);
+  set_u8(gl.schema.args[kGetLogicalResetArg]);
+  set_bit_packed(gl.schema.results[kLogicalMeasurementsResult]);
+
   return entries;
 }
 
 } // namespace
 
-/// The HOST_CALL function table this service serves: the three default-route
-/// RPCs (enqueue_syndromes / get_corrections / reset_decoder) registered as
-/// CUDAQ_DISPATCH_HOST_CALL entries.  `count` receives the entry count.
+/// The HOST_CALL function table this service serves: the default-route RPCs
+/// (enqueue_syndromes / get_corrections / reset_decoder /
+/// get_logical_measurements) registered as CUDAQ_DISPATCH_HOST_CALL entries.
+/// `count` receives the entry count.
 /// Returns nullptr (count 0) when the decoder sessions could not be built.
 ///
 /// This is the single construction path for the table, reached two ways: the
@@ -393,6 +426,8 @@ cudaqx_qec_decoding_server_print_stats() {
                 << " decodes=" << session->decode_count.load()
                 << " enqueues=" << session->enqueue_count.load()
                 << " corrections=" << session->get_corrections_count.load()
+                << " logical_measurements="
+                << session->get_logical_measurements_count.load()
                 << " resets=" << session->reset_count.load()
                 << " errors=" << session->error_count.load() << std::endl;
     }

@@ -50,7 +50,7 @@ def __dir__():
 
 __all__ = [
     "init_tcbp_model", "inspect", "learn_noise", "plugin_path", "tying", "p25",
-    "io"
+    "io", "presets", "PRESETS", "preset"
 ]
 
 _LIB_NAME = "libcudaq-qec-nv-qldpc-decoder.so"
@@ -134,8 +134,14 @@ def _load():
 
 
 def _check(rc: int) -> None:
-    if rc != 0:
-        raise ValueError(_load().nvqldpc_last_error().decode())
+    """ValueError for a rejected argument (rc -1), RuntimeError for a failure
+    while running (rc -2, e.g. a CUDA 'out of memory')."""
+    if rc == 0:
+        return
+    msg = _load().nvqldpc_last_error().decode()
+    if rc == -1:
+        raise ValueError(msg)
+    raise RuntimeError(msg)
 
 
 def _take_json(cp) -> Dict:
@@ -302,3 +308,8 @@ def learn_noise(H,
     if design is not None:
         report["q_hat"] = q.tolist()
     return rates, report
+
+
+# Named option bundles for the decoder (see presets.py); numpy-only.
+from . import presets  # noqa: E402
+from .presets import PRESETS, preset  # noqa: E402

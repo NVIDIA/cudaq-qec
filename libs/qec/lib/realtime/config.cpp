@@ -1642,7 +1642,7 @@ struct CustomMappingTraits<windows_form> {
         });
     if (!identifier)
       throw std::runtime_error(where + " is not a port name");
-    if (layer == "logical" || layer == "input")
+    if (layer == "input")
       throw std::runtime_error(where +
                                " is reserved: ingest uses that port itself");
     // Request errors throw std::invalid_argument; config errors are
@@ -2797,8 +2797,7 @@ llvm::json::Object task_graph_json_schema() {
             llvm::json::Object{
                 {"pattern", "^[A-Za-z_][A-Za-z0-9_]*$"},
                 {"not",
-                 llvm::json::Object{
-                     {"enum", llvm::json::Array{"logical", "input"}}}}}},
+                 llvm::json::Object{{"enum", llvm::json::Array{"input"}}}}}},
            {"additionalProperties",
             llvm::json::Object{
                 {"oneOf",

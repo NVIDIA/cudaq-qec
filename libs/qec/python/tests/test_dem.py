@@ -1121,7 +1121,7 @@ def test_dem_chunks_spec_readout_map_and_observable_names():
     spec.observable_names = ["Z_L", "X_L"]
     with pytest.raises(ValueError, match="observable_names"):
         spec.validate()
-    with pytest.raises(ValueError, match="only the last phase"):
+    with pytest.raises(ValueError, match="a repeating phase may not"):
         _with_readout(_rep5_spec(3), "bulk", [0, -1]).validate()
     with pytest.raises(ValueError, match="past the 4"):
         _with_readout(_rep5_spec(3), "final", [REP5_CHECKS, -1]).validate()

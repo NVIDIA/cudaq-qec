@@ -54,6 +54,22 @@ public:
   const std::vector<std::int64_t> &readout() const {
     return spec_.get_phase(last_).m2o_sparse;
   }
+  /// Whether any phase carries m2o_sparse.
+  bool has_readout() const { return spec_.has_readout(); }
+  /// Whether the last phase carries m2o_sparse and no other does, so the
+  /// readout round reads every observable a shot reads.
+  bool reads_only_at_end() const {
+    for (const auto &e : spec_.phases)
+      if (e.id != last_ && !e.spec.m2o_sparse.empty())
+        return false;
+    return !readout().empty();
+  }
+  /// The m2o_sparse of round @p r's phase in an @p R-round shot; may be
+  /// empty.
+  const std::vector<std::int64_t> &readout_of(std::size_t r,
+                                              std::size_t R) const {
+    return spec_.get_phase(phase(r, R)).m2o_sparse;
+  }
 
   // The rounds of an R-round shot are [0, R). phase() and chunk() take r < R;
   // the offsets take r <= R, where R gives the shot's total. All throw

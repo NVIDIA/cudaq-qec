@@ -25,6 +25,8 @@
 #   7. malformed config exits non-zero with a diagnostic
 #   8. (GPU) hsb_fpga_syndrome_playback --help
 #   9. (GPU) trt_decoder builds an engine from the repo's test ONNX model
+#      (skipped when the image ships no trt_decoder (i.e. arm64 + CUDA 12.x) or
+#      when its TensorRT predates the host GPU (e.g. CUDA 12.x on sm_120)
 #  10. nvq++ compiles and runs a CUDA-Q program and a QEC program
 #  11. the shipped examples build with the shipped build.sh
 #  12. the realtime example tests from libs/qec/unittests/realtime/app_examples
@@ -64,6 +66,7 @@ PREFIX=/opt/nvidia/cudaq-qec
 BIN=$PREFIX/bin
 CONTAINER="cudaq-decoding-validate-$(date +%s)"
 num_failures=0
+num_skipped=0
 
 GPU_ARGS=()
 [[ $SKIP_GPU -eq 0 ]] && GPU_ARGS=(--gpus all)
@@ -79,15 +82,21 @@ cleanup() { docker rm -f "$CONTAINER" > /dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 # in_container <label> <script>: run <script> in a login shell inside the
-# container and record PASS/FAIL from its exit code.
+# container and record PASS/FAIL from its exit code. Exit 77 is a skip: the
+# check does not apply to this image or host, for a reason the script prints.
 in_container() {
     local label=$1 script=$2
     echo
     echo "=== $label"
-    if docker exec "$CONTAINER" bash -l -c "set -uo pipefail; BIN=$BIN; PREFIX=$PREFIX; $script"; then
+    docker exec "$CONTAINER" bash -l -c "set -uo pipefail; BIN=$BIN; PREFIX=$PREFIX; $script"
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
         echo "PASS: $label"
+    elif [[ $rc -eq 77 ]]; then
+        echo "SKIP: $label"
+        num_skipped=$((num_skipped + 1))
     else
-        echo "FAIL: $label (exit $?)"
+        echo "FAIL: $label (exit $rc)"
         num_failures=$((num_failures + 1))
     fi
 }
@@ -240,6 +249,11 @@ if [[ $SKIP_GPU -eq 0 ]]; then
     '
 
     in_container "9. trt_decoder: engine build from ONNX" "$SERVER_HELPERS"'
+        # Not built for arm64 + CUDA 12.x (no TensorRT packages), matching
+        # the Dockerfile.
+        if [[ ! -f $PREFIX/lib/decoder-plugins/libcudaq-qec-trt-decoder.so ]]; then
+            echo "SKIPPED: trt_decoder is not shipped in this image"; exit 77
+        fi
         # 24-bit syndrome; H and D are identities and O is one row, since the
         # model decodes straight to the observable and these only set sizes.
         ident=""; for i in $(seq 0 23); do ident="${ident:+$ident, }$i, -1"; done
@@ -258,7 +272,16 @@ decoders:
       engine_output_format: observables
       precision: best
 EOF
-        start_server trt.yaml || exit 1
+        if ! start_server trt.yaml; then
+            # The CUDA 12.x image pins TensorRT 10.7, which predates sm_120
+            # (Blackwell RTX); TensorRT says so explicitly. Only that message
+            # is a skip. Any other startup failure stays a FAIL.
+            if grep -q "is not supported by this TensorRT release" server.log; then
+                echo "SKIPPED: $(grep -o "Target GPU SM [0-9]* is not supported by this TensorRT release" server.log | head -1)"
+                exit 77
+            fi
+            exit 1
+        fi
         printf "010000000000000000000000\n" > rounds.txt
         printf "0 reset\n1 stream source=0 rounds=1\n2 get_corrections return_size=1\n" > schedule.txt
         run_emulator schedule.txt out.csv || exit 1
@@ -388,7 +411,7 @@ run_demo() { # <label> <decoder args...>
         log=/root/validate-demo-$1.log
         ./run_realtime_decoding.sh --source qpu-kernel --example-build-dir /root/validate-demo-build --decoder $* > \$log 2>&1
         rc=\$?
-        if [[ \$rc -eq 77 ]]; then echo 'SKIPPED: decoder not available in this image'; grep -m2 ERROR \$log; exit 0; fi
+        if [[ \$rc -eq 77 ]]; then echo 'SKIPPED: decoder not available in this image'; grep -m2 ERROR \$log; exit 77; fi
         [[ \$rc -ne 0 ]] && tail -30 \$log
         grep -E 'residual logical errors|server evidence|REALTIME DECODING' \$log
         exit \$rc
@@ -405,8 +428,8 @@ fi
 
 echo
 if [[ $num_failures -eq 0 ]]; then
-    echo "Validation complete successfully for $FINAL_IMAGE"
+    echo "Validation complete successfully for $FINAL_IMAGE ($num_skipped check(s) skipped)"
 else
-    echo "Validation failed: $num_failures check(s) failed for $FINAL_IMAGE"
+    echo "Validation failed: $num_failures check(s) failed, $num_skipped skipped, for $FINAL_IMAGE"
 fi
 exit $num_failures

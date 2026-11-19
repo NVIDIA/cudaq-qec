@@ -20,6 +20,11 @@ namespace cudaq::qec {
 
 class decoder;
 
+/// The name the parallel_window pattern gives the logical output it wires.
+/// A graph's logical output is the one a logical_readout node reaches,
+/// whatever its name; every other output carries corrections.
+inline constexpr char logical_output_name[] = "logical";
+
 struct window_spec {
   uint32_t size;        ///< total rounds in the accumulation buffer
   uint32_t stride;      ///< rounds to advance per decode
@@ -79,7 +84,8 @@ public:
   /// when it carries no delta; publications may arrive in any round order.
   /// An output whose contributors all opt in is staged: the graph folds
   /// their deltas in round order behind a frontier, and the output's
-  /// coverage is [0, frontier).
+  /// coverage runs from the frontier where its value was last consumed to
+  /// the frontier.
   virtual bool exact_interval_coverage() const { return false; }
   /// The current publication's closure: for a window, whether its solution
   /// was checked and held. None for a node that decodes no window, which
@@ -349,6 +355,16 @@ public:
   /// compile_wires() may then reduce its streaming correction paths to parity
   /// without executing the node on every fire.
   virtual bool supports_streaming_xor_fold() const { return false; }
+
+  /// True when the node publishes the raw logical value. It may reach only
+  /// the `logical` output, and does not count toward that output's progress.
+  virtual bool reads_logical() const { return false; }
+  /// For a reads_logical() node: each observable's last reading round, or
+  /// none when only FINAL fixes it.
+  virtual std::vector<std::optional<std::uint64_t>>
+  logical_completion_rounds() const {
+    return {};
+  }
 };
 
 } // namespace cudaq::qec

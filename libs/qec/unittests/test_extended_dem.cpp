@@ -1894,9 +1894,36 @@ TEST(DemChunkSpec, ObservableNamesNameEachObservableOnce) {
   expect_rejected(two, "observable_names repeats 'Z_L'");
 }
 
-// m2o_sparse sits only on the last phase, with one row per observable inside
-// that phase's round.
-TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase) {
+// No fault after an observable's last readout may flip it: a fault touches
+// only its own round and the next, so it cannot change a record already
+// read. Read on init alone, rep5's observable is flipped by bulk and final
+// faults and is refused; read again at the end, or left alone after init,
+// it is accepted.
+TEST(DemChunkSpec, NoFaultFlipsAnObservableAfterItsLastReadout) {
+  auto spec = rep5_spec(3);
+  spec.measurements_per_round = rep5_checks;
+  rep5_phase(spec, phase_name::dem_init).m2o_sparse = {1, -1};
+  expect_rejected(spec, "phase 'bulk' flips observable 0 after its last "
+                        "readout, in phase 'init'");
+  auto streaming = spec;
+  streaming.num_rounds.reset();
+  expect_rejected(streaming, "phase 'bulk' flips observable 0");
+
+  auto again = spec;
+  rep5_phase(again, phase_name::dem_final).m2o_sparse = {0, -1};
+  EXPECT_NO_THROW(again.validate());
+  auto quiet = spec;
+  rep5_phase(quiet, phase_name::dem_bulk).O_sparse = {-1};
+  rep5_phase(quiet, phase_name::dem_final).O_sparse = {-1};
+  EXPECT_NO_THROW(quiet.validate());
+  auto late = quiet;
+  rep5_phase(late, phase_name::dem_final).O_sparse = {2, -1};
+  expect_rejected(late, "phase 'final' flips observable 0");
+}
+
+// m2o_sparse may sit on any non-repeating phase, first or last, one row per
+// observable; a repeating phase may not carry it.
+TEST(DemChunkSpec, ReadoutMapIsCheckedPerPhase) {
   auto spec = rep5_spec(3);
   spec.measurements_per_round = rep5_checks;
   rep5_phase(spec, phase_name::dem_final).m2o_sparse = {0, 3, -1};
@@ -1906,8 +1933,11 @@ TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase) {
   EXPECT_NO_THROW(streaming.validate());
 
   auto early = spec;
-  rep5_phase(early, phase_name::dem_bulk).m2o_sparse = {0, -1};
-  expect_rejected(early, "only the last phase");
+  rep5_phase(early, phase_name::dem_init).m2o_sparse = {1, -1};
+  EXPECT_NO_THROW(early.validate());
+  auto bulk = spec;
+  rep5_phase(bulk, phase_name::dem_bulk).m2o_sparse = {0, -1};
+  expect_rejected(bulk, "a repeating phase may not");
 
   // A chain that ends on its repeating phase has no readout round.
   auto open = spec;
@@ -1915,7 +1945,7 @@ TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase) {
                       {phase_name::dem_bulk, phase_name::dem_bulk}};
   open.phases.pop_back();
   rep5_phase(open, phase_name::dem_bulk).m2o_sparse = {0, -1};
-  expect_rejected(open, "only the last phase");
+  expect_rejected(open, "a repeating phase may not");
 
   auto rows = spec;
   rep5_phase(rows, phase_name::dem_final).m2o_sparse = {0, -1, 1, -1};
@@ -1944,7 +1974,7 @@ TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase) {
   auto repeated = spec;
   rep5_phase(repeated, phase_name::dem_final).m2o_sparse = {1, 1, -1};
   expect_rejected(repeated, "m2o_sparse duplicate");
-} // end - TEST(DemChunkSpec, ReadoutMapIsCheckedAgainstTheLastPhase)
+} // end - TEST(DemChunkSpec, ReadoutMapIsCheckedPerPhase)
 
 // A branch has two sinks, but the chain has no last phase to read out.
 TEST(DemChunkSpec, ReadoutMapNeedsALinearChain) {

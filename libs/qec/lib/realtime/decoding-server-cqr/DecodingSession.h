@@ -77,6 +77,7 @@ struct DecodingSession {
   std::atomic<uint64_t> enqueue_count{0};
   std::atomic<uint64_t> decode_count{0};
   std::atomic<uint64_t> get_corrections_count{0};
+  std::atomic<uint64_t> get_logical_measurements_count{0};
   std::atomic<uint64_t> reset_count{0};
   std::atomic<uint64_t> error_count{0};
   std::atomic<uint64_t> busy_count{0};
@@ -145,6 +146,8 @@ struct DecodingSession {
                       std::size_t slot_size) noexcept;
   void handle_get_corrections(const void *rx_slot, void *tx_slot,
                               std::size_t slot_size) noexcept;
+  void handle_get_logical_measurements(const void *rx_slot, void *tx_slot,
+                                       std::size_t slot_size) noexcept;
   void handle_reset(const void *rx_slot, void *tx_slot,
                     std::size_t slot_size) noexcept;
 
@@ -160,10 +163,21 @@ struct DecodingSession {
   /// Core of get_corrections.  On OK, packs ceil(return_size/8) LSB-first
   /// correction bytes into \p out (capacity \p out_capacity) and sets
   /// \p out_len; a result too large for \p out fails with INTERNAL_ERROR
-  /// (truncation would advertise bytes that were never written).
+  /// (truncation would advertise bytes that were never written).  On a task
+  /// graph with a logical output, \p reset before the shot ends is
+  /// NOT_READY.
   cudaq::qec::decoding::rpc::RpcStatus
   get_corrections_core(int64_t return_size, bool reset, uint8_t *out,
                        std::size_t out_capacity, std::size_t &out_len);
+
+  /// Core of get_logical_measurements: as get_corrections_core(), for
+  /// \p return_size logical measurements from \p first.  NOT_READY until
+  /// all are released, read through the graph's release gate.  BAD_REQUEST
+  /// for a decoder without logical measurements or a range past them.
+  cudaq::qec::decoding::rpc::RpcStatus
+  get_logical_measurements_core(int64_t first, int64_t return_size, bool reset,
+                                uint8_t *out, std::size_t out_capacity,
+                                std::size_t &out_len);
 
   /// Core of reset_decoder.
   cudaq::qec::decoding::rpc::RpcStatus reset_core();
@@ -175,6 +189,17 @@ struct DecodingSession {
   }
 
 private:
+  /// Reads the logical measurements when \p logical, else the corrections
+  /// (\p first 0).
+  cudaq::qec::decoding::rpc::RpcStatus
+  read_result_core(bool logical, int64_t first, int64_t return_size, bool reset,
+                   uint8_t *out, std::size_t out_capacity,
+                   std::size_t &out_len);
+  /// Shared body of handle_get_corrections() and
+  /// handle_get_logical_measurements().
+  void handle_result_request(bool logical, const void *rx_slot, void *tx_slot,
+                             std::size_t slot_size) noexcept;
+
   /// Reused byte-per-bit unpack buffer: no per-call allocation once grown.
   std::vector<uint8_t> unpack_scratch_;
   /// Last aggregate graph publication retained for correction polling.

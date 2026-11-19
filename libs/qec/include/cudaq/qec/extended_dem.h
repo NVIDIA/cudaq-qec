@@ -320,9 +320,10 @@ struct dem_chunk_spec {
   std::optional<uint64_t> num_measurements;
 
   /// Optional readout map, -1-terminated: one row per observable, listing
-  /// the measurements of this phase's own round whose parity is the
-  /// observable's raw value. Only the last phase may carry it. The round has
-  /// its measurement count when the phases carry D_sparse rows, else one
+  /// the measurements of this phase's own round whose parity this round adds
+  /// to the observable's raw value (the XOR over every round that reads it);
+  /// an empty row adds nothing. A repeating phase may not carry it. The round
+  /// has its measurement count when the phases carry D_sparse rows, else one
   /// measurement per detector.
   std::vector<std::int64_t> m2o_sparse;
 
@@ -463,6 +464,9 @@ struct dem_chunks_spec {
   /// True when any connection is a self-loop.
   bool has_repeating_phase() const;
 
+  /// True when any phase carries m2o_sparse, so the spec reads observables.
+  bool has_readout() const;
+
   /// Shortest chain the connections admit: one round per non-self connection,
   /// plus the round the last one lands on. A repeating phase can be visited
   /// once, so this is the round count a streaming spec expands to when nothing
@@ -520,9 +524,9 @@ struct dem_chunks_spec {
   ///
   /// Also checks that every connection names a phase with a spec, the phases
   /// agree on the observable count, observable_names has one unique name per
-  /// observable, and only the last phase carries m2o_sparse, with one row per
-  /// observable inside its round: its measurement count with D_sparse, else
-  /// its detectors.
+  /// observable, and no repeating phase carries m2o_sparse, which has one row
+  /// per observable inside its round: its measurement count with D_sparse,
+  /// else its detectors.
   /// @throws std::invalid_argument on the first violation.
   void validate() const;
 };
