@@ -104,9 +104,9 @@ with ``async_streaming``, and each graph gets threads of its own.
        and the graph's threads decode it. ``false`` (default): the call
        decodes on the caller's thread and returns when done.
    * - ``async_num_workers``
-     - Worker threads that decode. Default: enough for everything that may
-       decode at once (independent branches and ``max_in_flight`` copies), up
-       to the machine's hardware threads.
+     - Worker threads that decode, from 1 to 1024. Default: enough for
+       everything that may decode at once (independent branches and
+       ``max_in_flight`` copies), up to the machine's hardware threads.
    * - ``async_worker_cpus``
      - CPUs to pin the workers to, one worker per CPU (Linux). With fewer
        CPUs than workers, the pool shrinks to match. Default: none.

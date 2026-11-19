@@ -85,6 +85,8 @@ struct deferred_fire {
 // Validate feedback cycles and order FINAL after their outside producers.
 void decoding_task_graph::impl::compile_feedback_flush() {
   const auto size = streaming_nodes.size();
+  record_dependents = streaming_dependents;
+  record_producers = streaming_producers;
   flush_dependents = streaming_dependents;
   flush_producers = streaming_producers;
   flush_predecessor_counts = streaming_predecessor_counts;
@@ -260,7 +262,6 @@ struct decoding_task_graph::impl::record_context {
     bool queued = false;
     bool running = false;
     bool self_done = false;
-    bool wait_for_siblings = false;
     bool has_continuation = false;
     // Pending deliveries borrow this slot while its saved continuation
     // and feedback boundary still belong to the original event.
@@ -652,7 +653,7 @@ struct decoding_task_graph::impl::record_scheduler {
       }
       bound = add_slots(1, outgoing);
       return *bound;
-    };
+    }; // end - count_slots()
     for (std::size_t si = M; si-- > 0;)
       count_slots(count_slots, si, /*dropped_join=*/false);
     // A detached fire reserves enough for any subtree that can reuse its slot
@@ -935,7 +936,7 @@ struct decoding_task_graph::impl::record_scheduler {
       push_locked(
           c,
           {graph_event_kind::streaming_flush, c.root_nodes[root], {}, 0, root});
-  }
+  } // end - configure_flush()
 
   // Make a populated context eligible for execution. Nodes this record never
   // touches are handed on immediately so later records need not wait.
@@ -959,11 +960,9 @@ struct decoding_task_graph::impl::record_scheduler {
   }
 
   std::size_t push(context &c, graph_event event, std::size_t parent = no_event,
-                   std::size_t blocked_by = no_event,
-                   bool wait_for_siblings = false) {
+                   std::size_t blocked_by = no_event) {
     auto lock = lock_runtime();
-    const auto id =
-        push_locked(c, event, parent, blocked_by, wait_for_siblings);
+    const auto id = push_locked(c, event, parent, blocked_by);
     notify_workers();
     return id;
   }
@@ -1530,23 +1529,31 @@ struct decoding_task_graph::impl::record_scheduler {
 
   // An absence on a loop edge keeps its enclosing indexed subtree alive.
   // Attach it directly there so each lap releases the intervening slots.
-  // If the subtree owns a reservation, keep the delivery inside it.
   std::size_t feedback_notification_parent(const context &c,
                                            std::size_t parent) const {
-    auto boundary = parent;
-    for (auto ancestor = parent; ancestor != no_event;
+    return outermost_boundary(c, parent, parent, /*absence=*/true);
+  }
+
+  // The outermost indexed fire at or above slot @p from, or @p fallback if
+  // there is none. For an absence, a delivery to an indexed node counts as
+  // well, and the walk ends at the first slot holding a reservation, so the
+  // absence stays inside the subtree that reserved its slots.
+  std::size_t outermost_boundary(const context &c, std::size_t from,
+                                 std::size_t fallback, bool absence) const {
+    auto boundary = fallback;
+    for (auto ancestor = from; ancestor != no_event;
          ancestor = c.slots[ancestor].parent) {
       const auto &candidate = c.slots[ancestor];
       const auto &event = candidate.event;
       if (candidate.fire_boundary ||
-          (event.kind == graph_event_kind::streaming_edge &&
+          (absence && event.kind == graph_event_kind::streaming_edge &&
            indexed(event.node)))
         boundary = ancestor;
-      if (candidate.reserved_slots != 0)
+      if (absence && candidate.reserved_slots != 0)
         break;
     }
     return boundary;
-  }
+  } // end - outermost_boundary()
 
   // Space left after accounting for work already queued or reserved. A
   // fire starting in an existing unreserved slot can reuse that slot.
@@ -1585,7 +1592,7 @@ struct decoding_task_graph::impl::record_scheduler {
                         !reaches_ordered[si] &&
                         owner.feedback_anchor[si] == no_event;
     return detach ? no_event : id;
-  }
+  } // end - fire_parent()
 
   // The fire of join entry @p entry of node @p si, on behalf of @p root.
   graph_event indexed_fire_event(std::size_t si, std::size_t entry,
@@ -1610,11 +1617,8 @@ struct decoding_task_graph::impl::record_scheduler {
     if (parent != no_event &&
         c.slots[parent].event.kind == graph_event_kind::streaming_edge &&
         c.slots[parent].event.wire.loop_carried()) {
-      auto boundary = c.slots[parent].fire_boundary ? parent : no_event;
-      for (auto ancestor = c.slots[parent].parent; ancestor != no_event;
-           ancestor = c.slots[ancestor].parent)
-        if (c.slots[ancestor].fire_boundary)
-          boundary = ancestor;
+      const auto boundary =
+          outermost_boundary(c, parent, no_event, /*absence=*/false);
       if (boundary != no_event) {
         defer_fire_locked(c, c.slots[boundary], fire);
         return;
@@ -1628,7 +1632,7 @@ struct decoding_task_graph::impl::record_scheduler {
     c.detached_slots += fire_slots[si];
     if (root < c.root_open.size())
       ++c.root_open[root];
-  }
+  } // end - queue_indexed_fire_locked()
 
   // Keep deferred fires in their live join entries until the shared slot
   // can run them. Count each fire now so flush waits for it too.
@@ -1699,7 +1703,7 @@ struct decoding_task_graph::impl::record_scheduler {
     entry.pending = 0;
     queue_indexed_fire_locked(c, parent, si, index, root);
     return true;
-  }
+  } // end - resolve_join_locked()
 
   // Outside producers have finished. Every internal dependency runs from
   // a lower index, or from an earlier node at the same index. Resolve joins
@@ -1818,8 +1822,9 @@ struct decoding_task_graph::impl::record_scheduler {
   // Whether the flush of pooled or indexed node `si` may resolve it: the
   // node is quiescent, and so is every node feeding it through a
   // loop-carried wire, whose fires may yet publish into its pending
-  // instances. Such a producer is later in node order, so it flushes after
-  // `si`; waiting for its flush would never end.
+  // instances. Such a producer outside the node's feedback cycle finishes
+  // its own flush first (see compile_feedback_flush()), so this waits only
+  // for its fires in earlier records.
   bool flush_ready_locked(const context &self, std::size_t si) const {
     if (!quiescent_locked(self, si))
       return false;
@@ -2339,8 +2344,7 @@ private:
 
   std::size_t push_locked(context &c, graph_event event,
                           std::size_t parent = no_event,
-                          std::size_t blocked_by = no_event,
-                          bool wait_for_siblings = false) {
+                          std::size_t blocked_by = no_event) {
     if (stop)
       return no_event;
     if (parent != no_event &&
@@ -2371,7 +2375,6 @@ private:
     created.parent = parent;
     created.blocked_by = blocked_by;
     created.sequence = c.next_sequence++;
-    created.wait_for_siblings = wait_for_siblings;
     created.occupied = true;
     created.covered = parent != no_event && c.slots[parent].covered;
     c.unreserved_slots += !created.covered;
@@ -2400,10 +2403,10 @@ private:
         c.slots[blocker.last_blocked_waiter].next_blocked_waiter = id;
       blocker.last_blocked_waiter = id;
     }
-    if (blocked_by == no_event && (!wait_for_siblings || parent == no_event))
+    if (blocked_by == no_event)
       enqueue_locked(c, id);
     return id;
-  }
+  } // end - push_locked()
 
   void enqueue_locked(context &c, std::size_t id) {
     auto &candidate = c.slots[id];
@@ -2635,9 +2638,7 @@ private:
       return;
     const bool flushing = c.kind == phase::flush;
     const auto &dependents =
-        flushing ? owner.flush_dependents
-                 : (owner.record_dependents.empty() ? owner.streaming_dependents
-                                                    : owner.record_dependents);
+        flushing ? owner.flush_dependents : owner.record_dependents;
     const auto anchor = owner.feedback_anchor[si];
     if (anchor != no_event) {
       const auto &group = owner.feedback_groups[anchor];
@@ -2658,16 +2659,14 @@ private:
       return;
     }
     const auto &producers =
-        flushing ? owner.flush_producers
-                 : (owner.record_producers.empty() ? owner.streaming_producers
-                                                   : owner.record_producers);
+        flushing ? owner.flush_producers : owner.record_producers;
     for (const auto producer : producers[si])
       if (!c.node_released[producer])
         return;
     c.node_released[si] = 1;
     node_turn[si] = c.sequence + 1;
     advance_record_dependents_locked(c, si, dependents[si]);
-  }
+  } // end - try_release_locked()
 
   // Check which dependents and following records can take the next turn.
   void
@@ -2731,10 +2730,8 @@ private:
     }
     if (completed.pending_children == 0)
       complete_or_continue_locked(c, id);
-    else if (completed.pending_children == 1)
-      enqueue_sibling_waiter_locked(c, id);
     notify_workers();
-  }
+  } // end - finish_locked()
 
   void complete_or_continue_locked(context &c, std::size_t id) {
     auto &continued = c.slots[id];
@@ -2774,9 +2771,8 @@ private:
     continued.queued = false;
     continued.running = false;
     continued.self_done = false;
-    continued.wait_for_siblings = false;
     enqueue_locked(c, id);
-  }
+  } // end - complete_or_continue_locked()
 
   // Return a delivery's snapshot after it and its descendants drain.
   void release_wire_buffer(context &c, slot &completed) {
@@ -2799,8 +2795,7 @@ private:
       const auto next = c.slots[waiting].next_blocked_waiter;
       c.slots[waiting].blocked_by = no_event;
       c.slots[waiting].next_blocked_waiter = no_event;
-      if (!c.slots[waiting].wait_for_siblings)
-        enqueue_locked(c, waiting);
+      enqueue_locked(c, waiting);
       waiting = next;
     }
 
@@ -2841,19 +2836,9 @@ private:
       throw std::logic_error(
           "decoding_task_graph: event child counter underflow");
     --ancestor.pending_children;
-    if (ancestor.self_done && ancestor.pending_children == 1)
-      enqueue_sibling_waiter_locked(c, parent);
     if (ancestor.self_done && ancestor.pending_children == 0)
       complete_or_continue_locked(c, parent);
-  }
-
-  void enqueue_sibling_waiter_locked(context &c, std::size_t parent) {
-    for (std::size_t waiting = c.slots[parent].first_child; waiting != no_event;
-         waiting = c.slots[waiting].next_sibling)
-      if (c.slots[waiting].wait_for_siblings &&
-          c.slots[waiting].blocked_by == no_event)
-        enqueue_locked(c, waiting);
-  }
+  } // end - retire_locked()
 
   void fail(context *c, std::size_t id, std::exception_ptr failure) noexcept {
     auto lock = lock_runtime();
@@ -2995,8 +2980,8 @@ public:
   };
   std::vector<dropped_instances> dropped;
   // The last index a record-ordered producer published on each value wire,
-  // by compiled_wire::id: its indices never decrease, so the ones it skipped
-  // are announced as absent when the next one is published. Cleared by the
+  // by compiled_wire::id: its indices never decrease, so the delivery of the
+  // next one first announces the ones it skipped as absent. Cleared by the
   // producer's FINAL flush, after which a shot's numbering starts over.
   std::vector<std::int64_t> wire_last;
 

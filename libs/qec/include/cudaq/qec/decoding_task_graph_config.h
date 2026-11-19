@@ -63,7 +63,7 @@ struct task_graph_options {
   /// width, including every fire pool's copies, or, with an indexed node,
   /// every copy that may fire at once (an indexed node's single copy too)
   /// plus the worker its fires leave free, capped by hardware
-  /// concurrency. Must be at least one when set. Synchronous graphs ignore
+  /// concurrency. Must be from 1 to 1024 when set. Synchronous graphs ignore
   /// it.
   std::optional<std::size_t> async_num_workers;
   /// CPUs those threads are pinned to, round-robin (Linux only). Empty

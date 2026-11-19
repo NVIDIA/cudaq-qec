@@ -11242,14 +11242,23 @@ TEST(DecodingTaskGraph, AsyncThreadCountFollowsWorkerCpuCap) {
 #endif
 }
 
-// The worker count must leave room for the coordinator in the total.
-TEST(DecodingTaskGraph, AsyncWorkerCountLeavesRoomForCoordinator) {
-  EXPECT_THROW(
-      decoding_task_graph::from_spec(
+// A worker count past the bound fails at build, before any thread starts,
+// including one that would wrap once the coordinator is added.
+TEST(DecodingTaskGraph, AsyncWorkerCountIsBounded) {
+  for (const std::size_t workers :
+       {std::size_t{1025}, std::numeric_limits<std::size_t>::max() - 1,
+        std::numeric_limits<std::size_t>::max()}) {
+    SCOPED_TRACE(workers);
+    try {
+      (void)decoding_task_graph::from_spec(
           rep5_spec(5), "single_error_lut", {},
-          {.async_streaming = true,
-           .async_num_workers = std::numeric_limits<std::size_t>::max()}),
-      std::invalid_argument);
+          {.async_streaming = true, .async_num_workers = workers});
+      ADD_FAILURE() << "Expected the worker count to be rejected";
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find("at most 1024"), std::string::npos)
+          << e.what();
+    }
+  } // end - for(workers)
 }
 
 TEST(DecodingTaskGraph, AsyncStreamingRejectsCoordinatorCpuBelowSentinel) {
@@ -16787,6 +16796,7 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
 // independent detached fire occupies the same record's event store.
 static void expect_feedback_stays_attached(bool multi_node) {
   ASSERT_TRUE(index_probe_registered);
+  // Several times the event store, and within A's chunk limit.
   constexpr std::size_t rounds = 600;
   // Rounds admitted one record each, one per record context, before the
   // rest queue up and are admitted together into the first one to retire.
@@ -16900,8 +16910,12 @@ TEST(DecodingTaskGraph, FeedbackStaysAttachedWithDetachedWorkInFlight) {
 // An absent value can fan out to more deliveries than a feedback fire.
 TEST(DecodingTaskGraph, FeedbackReservesMissingInputNotifications) {
   ASSERT_TRUE(index_probe_registered);
+  // Several times the event store, and within A's chunk limit.
   constexpr std::size_t rounds = 600;
+  // Each J drop reaches two leaves, so four joins fan one absence out past
+  // what M's fire reserves.
   constexpr std::size_t branches = 4;
+  // An M instance inside the batch admitted after the 16 single rounds.
   constexpr std::int64_t held = 32;
   // Half of this graph's 752 slots holds at most 17 detached M fires at
   // 21 slots each. An attached fire can hold up ingest sooner.
@@ -17029,7 +17043,11 @@ public:
 
 class burst_index_join : public index_probe_node {
 public:
+  // M's first instance with a T input, so A has ingested this many rounds
+  // before it fires.
   static constexpr std::int64_t burst_index = 135;
+  // A burst that fits the event store alone but not beside K's reserved
+  // backlog.
   static constexpr std::int64_t publications = 90;
 
   // Choose one instance to emit the configured burst.
@@ -17870,6 +17888,8 @@ TEST(DecodingTaskGraph, StreamingRejectsCyclesOfRequiredInputs) {
 // A branching absence cascade must drain a bounded event store.
 TEST(DecodingTaskGraph, BranchingMissingInputNotificationsFitTheEventStore) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
+  // J's early instances lack T, drop, and branch into later ones: far more
+  // of them than any event store holds, so the cascade must drain as it runs.
   constexpr std::int64_t lookback = 45000;
   constexpr std::size_t watched = lookback - 1;
   for (const bool async : {false, true}) {
@@ -17998,6 +18018,7 @@ TEST(DecodingTaskGraph, AttachedBurstWaitsForDetachedFireCapacity) {
 // Deliver a long skipped range before the first value following it.
 TEST(DecodingTaskGraph, LongPublicationGapDrainsBeforeItsValue) {
   ASSERT_TRUE(index_probe_registered);
+  // T's first index: a skipped range longer than this graph's event store.
   constexpr std::size_t first = 400;
   for (const bool async : {false, true}) {
     SCOPED_TRACE(async);

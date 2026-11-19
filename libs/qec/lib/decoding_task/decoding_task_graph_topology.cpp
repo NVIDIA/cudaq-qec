@@ -42,6 +42,11 @@ namespace {
 // so 16 cover several hundred rounds.
 constexpr std::size_t async_record_contexts = 16;
 
+// Most pool threads an asynchronous graph may ask for: Linux's CPU_SETSIZE,
+// past any machine its workers can be pinned to. More would only exhaust
+// thread creation, and adding the coordinator thread must not wrap.
+constexpr std::size_t max_async_num_workers = 1024;
+
 // Queue slots of an asynchronous graph without windows when left 0: enough to
 // batch rounds while keeping a fallen-behind FINAL's backlog to tens of
 // microseconds.
@@ -858,10 +863,10 @@ decoding_task_graph::assemble(std::unique_ptr<impl> i,
       if (*options.async_num_workers == 0)
         throw std::invalid_argument(
             "task_graph_options: async_num_workers must be at least 1");
-      if (*options.async_num_workers == std::numeric_limits<std::size_t>::max())
+      if (*options.async_num_workers > max_async_num_workers)
         throw std::invalid_argument(
-            "task_graph_options: async_num_workers "
-            "leaves no room for the coordinator thread");
+            "task_graph_options: async_num_workers must be at most " +
+            std::to_string(max_async_num_workers));
       i->pool_width = *options.async_num_workers;
     } else if (indexed) {
       // Indexed fires leave one worker for other events: one more than the
