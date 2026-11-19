@@ -160,6 +160,12 @@ public:
   /// node's indexed consumers are preallocated from it.
   virtual std::size_t max_publications_per_delivery() const { return 1; }
 
+  /// Prototype for copies of a streaming output. A variable-size payload
+  /// can supply its largest shape so each copy has room before execution.
+  virtual edge_value streaming_output_buffer(std::size_t /*slot*/) const {
+    return {};
+  }
+
   /// Room left in this node's accumulator: the most one enqueue() call can
   /// take.  nullopt for a kind that keeps none, which is handed whole chunks.
   /// enqueue_syndrome() meters to it, so a caller may cut the stream anywhere.

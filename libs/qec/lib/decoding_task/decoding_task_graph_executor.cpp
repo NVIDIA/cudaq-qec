@@ -290,9 +290,9 @@ struct decoding_task_graph::impl::record_context {
   // Edge deliveries a pooled node received in this record.
   std::vector<std::size_t> deliveries_seen;
   // By wire: deliveries keep their own typed buffers until they retire.
-  // A buffer's address stays stable while other deliveries grow the pool.
+  // Buffer addresses stay stable for the life of the record context.
   struct wire_buffers {
-    std::vector<std::unique_ptr<edge_value>> values;
+    std::vector<edge_value> values;
     std::vector<edge_value *> free;
   };
   std::vector<wire_buffers> wire_pool;
@@ -397,6 +397,7 @@ struct decoding_task_graph::impl::record_scheduler {
         pool_free(owner.streaming_nodes.size()),
         replica_busy(owner.streaming_nodes.size()),
         joins(owner.streaming_nodes.size()),
+        join_input_buffers(owner.streaming_nodes.size()),
         join_live(owner.streaming_nodes.size()),
         join_scan(owner.streaming_nodes.size()),
         self_fed(owner.streaming_nodes.size(), 0),
@@ -443,6 +444,29 @@ struct decoding_task_graph::impl::record_scheduler {
     std::vector<std::int64_t> fire_lead(M, 0), entry_lead(M, 0),
         min_required_offset(M, 0);
     std::vector<std::size_t> publications(M, 1);
+    std::vector<edge_value> wire_buffers(owner.streaming_value_wire_count);
+    if (owner.streaming_conflict.empty())
+      for (std::size_t si = 0; si < M; ++si) {
+        const auto node = owner.streaming_nodes[si].node_index;
+        if (indexed(si))
+          join_input_buffers[si].resize(owner.node_input_counts[node]);
+        for (const auto &wire : owner.streaming_wires_from[node])
+          wire_buffers[wire.id] = make_wire_buffer(si, wire.from_slot);
+      }
+    // A delivery swaps its buffer into the join; seed both sides of the
+    // swap so recycling an entry preserves the wire's payload capacity.
+    for (const auto &wires : owner.streaming_wires_from)
+      for (const auto &wire : wires) {
+        const auto consumer = owner.streaming_by_node[wire.to_node];
+        if (!join_input_buffers[consumer].empty())
+          join_input_buffers[consumer][wire.to_slot] = wire_buffers[wire.id];
+      }
+    for (const auto &wires : owner.completion_wires_from)
+      for (const auto &wire : wires) {
+        const auto consumer = owner.streaming_by_node[wire.to_node];
+        if (!join_input_buffers[consumer].empty())
+          join_input_buffers[consumer][wire.to_slot] = completion{};
+      }
     // Completion edges don't order sibling branches. A node downstream of
     // one can run twice before its first output is delivered, even when only
     // one record is active and each fire publishes once.
@@ -522,6 +546,11 @@ struct decoding_task_graph::impl::record_scheduler {
       // Instances live no further apart than the table holds; twice that
       // keeps every drop a delivery could still address.
       dropped[si].ring.assign(2 * capacity, no_index);
+      if (owner.feedback_anchor[si] != no_event) {
+        const auto prefix =
+            uint64_t{0} - static_cast<uint64_t>(min_required_offset[si]);
+        dropped[si].prefix.assign(prefix, 0);
+      }
       fire_entries[si].assign(copies, nullptr);
       fire_inputs[si].assign(copies,
                              std::vector<const edge_value *>(
@@ -538,8 +567,8 @@ struct decoding_task_graph::impl::record_scheduler {
 
     // Bound the events one delivery holds until it drains. A feedback fire
     // gets its own reservation or waits for the current subtree to drain.
-    // A dropped join instead sends its absence immediately on its value
-    // wires to indexed consumers, so those deliveries use this reservation.
+    // A dropped join can send absences on value and completion wires to
+    // indexed consumers, so those deliveries use this reservation.
     // Cap the estimates at the store's capacity to keep expensive work
     // attached.
     const auto add_slots = [event_capacity](std::size_t a, std::size_t b) {
@@ -595,15 +624,15 @@ struct decoding_task_graph::impl::record_scheduler {
       const auto node_idx = owner.streaming_nodes[si].node_index;
       const auto value_slots =
           downstream_slots(owner.streaming_wires_from[node_idx]);
+      const auto completion_slots =
+          downstream_slots(owner.completion_wires_from[node_idx]);
       if (dropped_join) {
-        defer_drop_notifications[si] = value_slots == event_capacity;
-        bound = value_slots;
+        bound = add_slots(value_slots, completion_slots);
+        defer_drop_notifications[si] = *bound == event_capacity;
         return *bound;
       }
       const auto publication_count =
           owner.streaming_nodes[si].capability->max_publications_per_delivery();
-      const auto completion_slots =
-          downstream_slots(owner.completion_wires_from[node_idx]);
       // An indexed fire sends one completion for its instance, even if it
       // publishes several values or none.
       const bool indexed_producer = this->indexed(si);
@@ -675,6 +704,9 @@ struct decoding_task_graph::impl::record_scheduler {
     }
     if (copy_outputs)
       std::fill(copy_publications.begin(), copy_publications.end(), 1);
+    std::vector<std::size_t> wire_buffer_counts(wire_buffers.size(), 0);
+    const auto replay_capacity =
+        plan_delivery_storage(event_capacity, wire_buffer_counts);
     node_deliveries_seen.assign(N, 0);
     for (auto &c : contexts) {
       c.slots.resize(event_capacity);
@@ -683,7 +715,15 @@ struct decoding_task_graph::impl::record_scheduler {
       c.root_done.reserve(M);
       c.root_open.reserve(M);
       c.deliveries_seen.assign(N, 0);
-      c.wire_pool.resize(owner.streaming_value_wire_count);
+      c.pending_deliveries.reserve(replay_capacity);
+      c.wire_pool.resize(wire_buffers.size());
+      for (std::size_t id = 0; id < wire_buffers.size(); ++id) {
+        auto &pool = c.wire_pool[id];
+        pool.values.assign(wire_buffer_counts[id], wire_buffers[id]);
+        pool.free.reserve(pool.values.size());
+        for (auto &buffer : pool.values)
+          pool.free.push_back(&buffer);
+      }
       c.node_corrections.resize(M);
       for (std::size_t si = 0; si < M; ++si)
         c.node_corrections[si].assign(
@@ -744,8 +784,8 @@ struct decoding_task_graph::impl::record_scheduler {
       }
       for (auto &pool : c.wire_pool) {
         pool.free.clear();
-        for (const auto &buffer : pool.values)
-          pool.free.push_back(buffer.get());
+        for (auto &buffer : pool.values)
+          pool.free.push_back(&buffer);
       }
     }
     c.root_nodes.clear();
@@ -1234,12 +1274,9 @@ struct decoding_task_graph::impl::record_scheduler {
       edge_value *buffer = nullptr;
       if (value && copy_publications[source]) {
         auto &pool = c.wire_pool[static_cast<std::size_t>(wire.id)];
-        // A new buffer only while the pool warms up.
-        if (pool.free.empty()) {
-          pool.values.push_back(std::make_unique<edge_value>());
-          pool.free.reserve(pool.values.capacity());
-          pool.free.push_back(pool.values.back().get());
-        }
+        if (pool.free.empty())
+          throw std::logic_error(
+              "decoding_task_graph: delivery snapshot capacity exceeded");
         buffer = pool.free.back();
         *buffer = *value;
         pool.free.pop_back();
@@ -1433,31 +1470,33 @@ struct decoding_task_graph::impl::record_scheduler {
       return;
     dropped[si].add(k);
     const auto node_idx = owner.streaming_nodes[si].node_index;
-    const auto &wires = owner.streaming_wires_from[node_idx];
+    const auto &values = owner.streaming_wires_from[node_idx];
+    const auto &completions = owner.completion_wires_from[node_idx];
     auto &delivery = c.slots[parent];
     if (!defer_drop_notifications[si] && delivery.first_delivery == no_event &&
-        wires.size() <= c.free_slots.size()) {
-      publish_wires_locked(c, parent, root, wires, k, /*absent=*/true);
+        values.size() + completions.size() <= c.free_slots.size()) {
+      publish_wires_locked(c, parent, root, values, k, /*absent=*/true);
+      publish_wires_locked(c, parent, root, completions, k, /*absent=*/true);
       notify_workers();
       return;
     }
 
-    // A cascade whose estimate filled the store may branch on every lap.
-    // File its absences here and deliver them one at a time in this slot,
-    // keeping the parent and reservation until the whole queue drains.
-    for (const auto &wire : wires) {
-      const auto consumer =
-          static_cast<std::size_t>(owner.streaming_by_node[wire.to_node]);
-      if (!indexed(consumer))
-        continue;
-      graph_event event{graph_event_kind::streaming_edge, consumer, wire, 0,
-                        root};
-      event.index = k;
-      event.absent = true;
-      event.operation = delivery.event.operation;
-      defer_delivery_locked(c, delivery, event);
-    }
-  }
+    // Replay a saturated cascade in the same slot, holding the parent and
+    // its reservation until the queue drains.
+    for (const auto *wires : {&values, &completions})
+      for (const auto &wire : *wires) {
+        const auto consumer =
+            static_cast<std::size_t>(owner.streaming_by_node[wire.to_node]);
+        if (!indexed(consumer))
+          continue;
+        graph_event event{graph_event_kind::streaming_edge, consumer, wire, 0,
+                          root};
+        event.index = k;
+        event.absent = true;
+        event.operation = delivery.event.operation;
+        defer_delivery_locked(c, delivery, event);
+      }
+  } // end - drop_instance_locked()
 
   // Schedule a delivery to borrow its producer's slot after children drain.
   void defer_delivery_locked(context &c, slot &producer,
@@ -1467,6 +1506,9 @@ struct decoding_task_graph::impl::record_scheduler {
     auto next = c.free_delivery;
     if (next == no_event) {
       next = c.pending_deliveries.size();
+      if (next == c.pending_deliveries.capacity())
+        throw std::logic_error(
+            "decoding_task_graph: delivery replay capacity exceeded");
       c.pending_deliveries.push_back(item);
     } else {
       auto &pending = c.pending_deliveries[next];
@@ -1485,7 +1527,7 @@ struct decoding_task_graph::impl::record_scheduler {
     }
     producer.last_child_delivery = next;
     ++c.node_live[event.node];
-  }
+  } // end - defer_delivery_locked()
 
   // An absence on a loop edge keeps its enclosing indexed subtree alive.
   // Attach it directly there so each lap releases the intervening slots.
@@ -2175,6 +2217,76 @@ struct decoding_task_graph::impl::record_scheduler {
   }
 
 private:
+  // Give snapshots and indexed joins the producer's largest declared shape.
+  edge_value make_wire_buffer(std::size_t producer, std::size_t slot) const {
+    const auto &entry = owner.streaming_nodes[producer];
+    const auto &node = *owner.nodes[entry.node_index];
+    auto buffer = entry.capability->streaming_output_buffer(slot);
+    if (buffer.type())
+      return buffer;
+    const auto type = node.output_type(slot);
+    const auto size = node.output_value_size(slot).value_or(0);
+    if (type == measurement_results_type)
+      return edge_value{measurement_results{std::vector<uint8_t>(size)}};
+    if (type == detection_events_type)
+      return edge_value{detection_events{std::vector<float_t>(size)}};
+    if (type == logical_outcome_type)
+      return edge_value{logical_outcome{std::vector<uint8_t>(size)}};
+    return {};
+  } // end - make_wire_buffer()
+
+  // Bound replay storage including the batches suspended on occupied slots.
+  // A raw root drains its batch before running another chunk. Other producers
+  // can have one batch on each occupied slot. A slot that replays a delivery
+  // can publish along forward edges, so it holds at most one batch per wire.
+  std::size_t
+  plan_delivery_storage(std::size_t event_capacity,
+                        std::vector<std::size_t> &wire_buffer_counts) const {
+    std::size_t replay_capacity = 0;
+    std::size_t drop_fanout = 0;
+    std::size_t prefix_drops = 0;
+    const auto add_batches = [](std::size_t &total, std::size_t batches,
+                                std::size_t size) {
+      if (size != 0 &&
+          batches > (std::numeric_limits<std::size_t>::max() - total) / size)
+        throw std::length_error(
+            "decoding_task_graph: delivery storage overflow");
+      total += batches * size;
+    };
+    if (!owner.streaming_conflict.empty())
+      return 0;
+    for (std::size_t si = 0; si < owner.streaming_nodes.size(); ++si) {
+      const auto &entry = owner.streaming_nodes[si];
+      const auto &values = owner.streaming_wires_from[entry.node_index];
+      const auto &completions = owner.completion_wires_from[entry.node_index];
+      const auto publications = std::max(
+          std::size_t{1}, entry.capability->max_publications_per_delivery());
+      const auto simultaneous =
+          owner.streaming_node_has_raw_input[si] ? 1 : event_capacity;
+      std::size_t batch_count = 0;
+      add_batches(batch_count, simultaneous, publications);
+      add_batches(replay_capacity, batch_count,
+                  values.size() + completions.size());
+      if (copy_publications[si])
+        for (const auto &wire : values)
+          wire_buffer_counts[wire.id] = batch_count;
+      if (indexed(si)) {
+        add_batches(prefix_drops, 1, dropped[si].prefix.size());
+        for (const auto *wires : {&values, &completions})
+          for (const auto &wire : *wires)
+            drop_fanout += indexed(owner.streaming_by_node[wire.to_node]);
+      }
+    } // end - for(si)
+
+    // A replayed drop follows required inputs inside any feedback component
+    // unless the next instance has a required input below zero. Between such
+    // prefix drops a replay path visits each node at most once. Its suspended
+    // siblings fit in one set of outgoing absences per slot and prefix drop.
+    add_batches(replay_capacity, event_capacity, drop_fanout);
+    add_batches(replay_capacity, prefix_drops, drop_fanout);
+    return replay_capacity;
+  } // end - plan_delivery_storage()
+
   // Spin briefly for a scheduler change before parking. Returns true when one
   // happened, so the caller re-selects instead of waiting.
   bool spin_for_ready(std::unique_lock<std::mutex> &lock) {
@@ -2760,6 +2872,7 @@ public:
     deferred_fire feedback;
   };
   std::vector<std::deque<join_entry>> joins;
+  std::vector<std::vector<edge_value>> join_input_buffers;
   // By streaming node: its used entries' table indices, unordered, so a
   // flush need not scan the whole table; and the flush's scratch to sort
   // them in. Both are reserved with the table.
@@ -2809,15 +2922,32 @@ public:
   // flush has resolved the shot's instances.
   struct dropped_instances {
     std::vector<std::int64_t> ring; ///< no_index where empty
+    // Feedback can branch back to an early drop long after it was sent.
+    // Remember every index whose required input is below zero for the shot.
+    std::vector<uint8_t> prefix;
+
+    // Tell whether this instance has sent its absence.
     bool contains(std::int64_t k) const {
-      return k >= 0 && !ring.empty() &&
-             ring[static_cast<std::size_t>(k) % ring.size()] == k;
+      const auto index = static_cast<std::size_t>(k);
+      if (index < prefix.size())
+        return prefix[index];
+      return k >= 0 && !ring.empty() && ring[index % ring.size()] == k;
     }
+
+    // Keep early drops outside the ring so later indices cannot evict them.
     void add(std::int64_t k) {
-      if (k >= 0 && !ring.empty())
-        ring[static_cast<std::size_t>(k) % ring.size()] = k;
+      const auto index = static_cast<std::size_t>(k);
+      if (index < prefix.size())
+        prefix[index] = 1;
+      else if (k >= 0 && !ring.empty())
+        ring[index % ring.size()] = k;
     }
-    void clear() { std::fill(ring.begin(), ring.end(), no_index); }
+
+    // Number the next shot's dropped instances afresh.
+    void clear() {
+      std::fill(prefix.begin(), prefix.end(), uint8_t{0});
+      std::fill(ring.begin(), ring.end(), no_index);
+    }
     /// Hold @p size instances, keeping the drops held now. Two may share a
     /// slot of the new size: re-added oldest first, the newer one keeps it.
     void grow(std::size_t size) {
@@ -2838,10 +2968,12 @@ public:
   // producer's FINAL flush, after which a shot's numbering starts over.
   std::vector<std::int64_t> wire_last;
 
+  // Add an entry with the same payload capacity as the wires feeding it.
   join_entry &add_join_entry(std::size_t si) {
     const auto inputs =
         owner.node_input_counts[owner.streaming_nodes[si].node_index];
     auto &entry = joins[si].emplace_back();
+    entry.inputs = join_input_buffers[si];
     entry.inputs.resize(inputs);
     entry.state.assign(inputs, 0);
     join_live[si].reserve(joins[si].size());

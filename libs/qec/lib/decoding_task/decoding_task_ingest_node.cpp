@@ -119,6 +119,13 @@ const edge_value *ingest_node::streaming_output(std::size_t slot) const {
   return nullptr;
 }
 
+// Allocate a snapshot for the largest window this port can emit.
+edge_value ingest_node::streaming_output_buffer(std::size_t slot) const {
+  window_rows rows;
+  rows.detectors.resize(core_.max_window_rows(slot));
+  return edge_value{std::move(rows)};
+}
+
 // Clearing the corrections of a flushed shot is how a caller starts the
 // next one, as it is for every streaming node.
 void ingest_node::clear_corrections() {

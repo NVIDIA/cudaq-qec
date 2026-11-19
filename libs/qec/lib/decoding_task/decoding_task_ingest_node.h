@@ -71,6 +71,8 @@ public:
   /// The current publication's value on @p slot: a layer's window, or null
   /// where the layer has none at its index.
   const edge_value *streaming_output(std::size_t slot) const override;
+  /// A copy buffer with room for the largest value on this streaming port.
+  edge_value streaming_output_buffer(std::size_t slot) const override;
   /// Every publication reports its coverage exactly: a window's carries no
   /// delta and none.
   bool exact_interval_coverage() const override { return true; }

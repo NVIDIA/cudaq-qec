@@ -8342,16 +8342,10 @@ TEST(WindowedGraph, OneCopyPerLayerNeverDeadlocks) {
   jitter_lut::reset();
 } // end - TEST(WindowedGraph, OneCopyPerLayerNeverDeadlocks)
 
-// Once warmed up, a windowed graph streams a shot allocating nothing on any
-// thread beyond what its decoders' decode() calls do: deliveries reuse their
-// wires' buffers, and staged publications and the output stager reuse
-// theirs. Each buffer grows once it first holds the largest window it will,
-// and buffers circulate between wires and join entries, so warm-up spreads
-// over a few shots. A synchronous graph is deterministic: after its first
-// few shots, every shot allocates only the decoders'. In an asynchronous
-// one, which record context and join entry a window lands in depends on
-// timing; it warms up for good, so over later shots some allocate only the
-// decoders' and all together allocate less than the warm-up shots did.
+// Wire snapshots and join payloads are sized at construction. Record
+// contexts can still warm up their staged correction buffers. Sync uses the
+// same contexts each shot, while async can spread that growth over more
+// shots as different contexts hold the staged corrections.
 TEST(WindowedGraph, StreamsAllocatingNothingBeyondTheDecoders) {
   if (QEC_TEST_SANITIZED)
     GTEST_SKIP() << "a sanitizer's allocator replaces the counting operator "

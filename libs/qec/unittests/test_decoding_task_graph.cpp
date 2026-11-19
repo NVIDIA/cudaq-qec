@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "allocation_counter.h"
 #include "task_graph_test_fixtures.h"
 #include "../lib/decoding_task/decoding_task_data_artifacts.h"
 #include "../lib/decoding_task/decoding_task_decode_window_node.h"
@@ -15037,7 +15038,8 @@ static std::function<void(const std::string &, std::int64_t)>
 /// at or above 0 declares its `b` guaranteed from that instance on.
 /// `join_send` is a `join` that also publishes its value on `send`, typed as
 /// measurements rather than corrections, so it may feed a loop-carried edge.
-/// `join_done` is a `join` whose `a` is a producer's `done` completion.
+/// `join_done` takes a completion on its required input, and
+/// `join_optional_done` takes one on its optional input.
 /// `tag_done` publishes a one bit at the ordinal of each completion.
 class index_probe_node : public task_graph_node,
                          public streaming_task_graph_node,
@@ -15063,7 +15065,8 @@ public:
   }
   // Expose the indexed capability only for the join modes.
   bool joins() const {
-    return mode_ == "join" || mode_ == "join_send" || mode_ == "join_done";
+    return mode_ == "join" || mode_ == "join_send" || mode_ == "join_done" ||
+           mode_ == "join_optional_done";
   }
 
   // indexed_join_node
@@ -15080,7 +15083,8 @@ public:
                           : value.get<logical_outcome>().bits[0];
     };
     const int a = mode_ == "join_done" ? 0 : bit(*inputs[0]);
-    const int b = inputs[1] ? bit(*inputs[1]) : -1;
+    const int b =
+        inputs[1] ? (mode_ == "join_optional_done" ? 1 : bit(*inputs[1])) : -1;
     if (index_fire_hook)
       index_fire_hook(k);
     if (index_node_fire_hook)
@@ -15161,6 +15165,10 @@ public:
     valid_ = true;
     return true;
   }
+  // A double publication can queue two values on the same wire.
+  std::size_t max_publications_per_delivery() const override {
+    return mode_ == "double" ? 2 : 1;
+  }
   bool publish_next() override {
     if (!second_ready_)
       return false;
@@ -15236,7 +15244,8 @@ public:
   }
   bool accepts_input_type(std::size_t slot,
                           edge_value_type type) const override {
-    if ((mode_ == "join_done" || mode_ == "tag_done") && slot == 0)
+    if (((mode_ == "join_done" || mode_ == "tag_done") && slot == 0) ||
+        (mode_ == "join_optional_done" && slot == 1))
       return type == edge_value_type("completion");
     return supports_streaming_input(slot) &&
            (type == edge_value_type("logical_outcome") ||
@@ -17588,7 +17597,7 @@ TEST(DecodingTaskGraph, BranchingMissingInputNotificationsFitTheEventStore) {
     j.kind = "test_branching_index_join";
     nodes.push_back(std::move(j));
     nodes.push_back(index_node("M", "join_send"));
-    nodes.push_back(index_node("W", "join"));
+    nodes.push_back(index_node("W", "join_optional_done"));
     // Every early J instance drops and notifies two future instances. W
     // needs the last drop as an optional input before the shot is flushed.
     auto graph = decoding_task_graph::from_topology(
@@ -17604,7 +17613,7 @@ TEST(DecodingTaskGraph, BranchingMissingInputNotificationsFitTheEventStore) {
          {"U", "output", "M", "b", -1},
          {"M", "output", "output", "input"},
          {"U", "output", "W", "a", 1 - lookback},
-         {"J", "output", "W", "b"}},
+         {"J", "done", "W", "b"}},
         {.async_streaming = async,
          .async_queue_capacity = 16,
          .async_num_workers = 2});
@@ -17805,6 +17814,102 @@ TEST(DecodingTaskGraph, LargePublicationBurstsAndFlushBatchesFitTheStore) {
   }
 }
 
+// A raw burst and an indexed sink with no allocations of their own.
+class allocation_probe_node : public index_probe_node {
+public:
+  // More deliveries than a three-wire graph's event slots can hold.
+  static constexpr std::size_t burst_size = 400;
+  static inline std::size_t received = 0;
+
+  // The source publishes one burst. The sink only counts its fires.
+  explicit allocation_probe_node(bool source)
+      : index_probe_node(source ? "A" : "J", source ? "tag" : "join", 1 << 30,
+                         0, -1, false, nullptr),
+        source_(source) {}
+
+  // The source takes one raw byte. The sink has one indexed input.
+  std::vector<std::string> inputs() const override {
+    return {source_ ? "input" : "a"};
+  }
+  // Only the source takes measurements directly.
+  bool supports_raw_streaming_input(std::size_t slot) const override {
+    return source_ && slot == 0;
+  }
+  // Meter the source one measurement at a time.
+  std::size_t num_msyn_per_decode() const override { return source_ ? 1 : 0; }
+
+  // Declare the source's one-round period and let the sink inherit it.
+  std::optional<window_spec> derive_streaming_schedule(
+      std::size_t slot,
+      const std::vector<input_schedule> &inputs) const override {
+    if (source_)
+      return streaming_schedule();
+    return index_probe_node::derive_streaming_schedule(slot, inputs);
+  }
+
+  // Make every value of the burst available without building a new payload.
+  bool enqueue(const uint8_t *, std::size_t, round_type) override {
+    index_ = 0;
+    return true;
+  }
+  // Size delivery storage for the source's whole burst.
+  std::size_t max_publications_per_delivery() const override {
+    return source_ ? burst_size : 1;
+  }
+  // Finish the burst once all its indices have been published.
+  bool publish_next() override { return ++index_ < burst_size; }
+  // Stamp the current publication with its position in the burst.
+  std::optional<std::int64_t> published_index(std::size_t) const override {
+    return index_;
+  }
+  // Reuse the same payload object for every publication.
+  const edge_value *streaming_output(std::size_t) const override {
+    return &value_;
+  }
+
+  // Count consumption without reporting a correction.
+  bool fire(std::int64_t, const std::vector<const edge_value *> &) override {
+    ++received;
+    return false;
+  }
+
+private:
+  bool source_;
+  std::size_t index_ = 0;
+  edge_value value_{logical_outcome{{1}, true}};
+};
+
+// Snapshot the first burst and replay it without constructing storage in
+// the record walk, even when it needs more deliveries than event slots.
+TEST(DecodingTaskGraph, FirstDeliveryBurstUsesPreallocatedStorage) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "the sanitizer replaces the counting operator new";
+  task_graph_node_kind_spec kind;
+  kind.name = "test_allocation_probe";
+  kind.requires_decoder = false;
+  kind.requires_dem = false;
+  register_node_kind(std::move(kind), {}, [](node_build_context &ctx) {
+    return std::make_unique<allocation_probe_node>(ctx.id == "A");
+  });
+  std::vector<task_graph_node_config> nodes(2);
+  nodes[0].id = "A";
+  nodes[1].id = "J";
+  for (auto &node : nodes)
+    node.kind = "test_allocation_probe";
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes), {{"measurements", "output", "A", "input"},
+                         {"A", "output", "J", "a"},
+                         {"J", "output", "output", "input"}});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  allocation_probe_node::received = 0;
+  const uint8_t bit = 1;
+  const auto allocations = allocation_counter::on_every_thread_during(
+      [&] { graph->enqueue_syndrome(&bit, 1, round_type::BULK); });
+  EXPECT_EQ(allocations, 0u);
+  EXPECT_EQ(allocation_probe_node::received, allocation_probe_node::burst_size);
+} // end - TEST(FirstDeliveryBurstUsesPreallocatedStorage)
+
 // Keep record-ordered completions in publication order across a burst.
 TEST(DecodingTaskGraph, LargePublicationBurstDeliversOrderedCompletions) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
@@ -17963,6 +18068,42 @@ TEST(DecodingTaskGraph, IndexedJoinRejectsAnUnindexedCompletionAtBuild) {
                 "T.done' supplies an unindexed completion"),
             std::string::npos);
 }
+
+// A downstream join can use an optional completion once its producer drops.
+TEST(DecodingTaskGraph, IndexedJoinLearnsCompletionAbsenceBeforeFinal) {
+  ASSERT_TRUE(index_probe_registered);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "even"));
+    nodes.push_back(index_node("R", "tag"));
+    nodes.push_back(index_node("J", "join"));
+    nodes.push_back(index_node("C", "join_optional_done"));
+    auto graph = decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"A", "output", "R", "input"},
+         {"T", "output", "J", "a"},
+         {"R", "output", "J", "b"},
+         {"R", "output", "C", "a"},
+         {"J", "done", "C", "b"},
+         {"C", "output", "output", "input"}},
+        {.async_streaming = async, .async_num_workers = 2});
+    const uint8_t bit = 1;
+    for (int k = 0; k < 8; ++k)
+      graph->enqueue_syndrome(&bit, 1, round_type::BULK);
+    (void)graph->streaming_result();
+    auto seen = probe->records("C");
+    std::sort(seen.begin(), seen.end());
+    EXPECT_EQ(seen, (std::vector<std::size_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+    graph->enqueue_syndrome(&bit, 1, round_type::FINAL);
+    EXPECT_EQ(probe->count("C"), 9u);
+  } // end - for(async)
+} // end - TEST(IndexedJoinLearnsCompletionAbsenceBeforeFinal)
 
 // An instance fires once, however its inputs are told absent: J[k] joins
 // T[k] with T[k - 1], so J[0]'s b is absent by its offset. T's first
