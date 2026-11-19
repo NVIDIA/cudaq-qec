@@ -1116,6 +1116,8 @@ void decoding_task_graph::impl::compile_wires() {
       streaming_parallel_width += copies - 1;
     }
 
+    compile_feedback_flush();
+
     streaming_node_generations.assign(M, 0);
     streaming_output_fire_ordinals.assign(num_sinks, 0);
     streaming_output_consumed_rounds.assign(num_sinks, 0);

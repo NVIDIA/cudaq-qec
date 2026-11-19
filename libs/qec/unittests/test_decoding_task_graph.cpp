@@ -16391,35 +16391,53 @@ TEST(DecodingTaskGraph, IndexedFinalResolvesPendingFeedbackInInstanceOrder) {
 } // end - TEST(DecodingTaskGraph,
   // IndexedFinalResolvesPendingFeedbackInInstanceOrder)
 
+// A streaming conflict permits a batch graph and rejects async startup.
+template <class build_graph>
+static void expect_feedback_streaming_conflict(build_graph build,
+                                               const char *reason) {
+  const auto graph = build(false);
+  EXPECT_FALSE(graph->supports_streaming());
+  EXPECT_NE(graph->streaming_incompatibility_reason().find(reason),
+            std::string::npos);
+  try {
+    (void)build(true);
+    ADD_FAILURE() << "Expected feedback wiring to reject async startup";
+  } catch (const std::logic_error &e) {
+    const std::string message = e.what();
+    EXPECT_NE(message.find("prepare_async_streaming"), std::string::npos);
+    EXPECT_NE(message.find(reason), std::string::npos);
+  }
+} // end - expect_feedback_streaming_conflict()
+
 // An ordered relay can choose new indices independently of the source fire.
 TEST(DecodingTaskGraph, StreamingRejectsRecordOrderedFeedbackCycle) {
   ASSERT_TRUE(index_probe_registered);
   auto probe = std::make_shared<pipeline_probe>();
   active_pipeline_probe = probe;
-  std::vector<task_graph_node_config> nodes;
-  nodes.push_back(pipeline_node("A", "source"));
-  nodes.push_back(index_node("T", "double"));
-  nodes.push_back(index_node("J", "join"));
-  nodes.back().node_params.insert("guaranteed", 1);
-  nodes.push_back(index_node("R", "tag_done"));
-  nodes.push_back(index_node("K", "join_send"));
-  auto graph = decoding_task_graph::from_topology(
-      std::move(nodes),
-      {{"measurements", "output", "A", "input"},
-       {"A", "output", "T", "input"},
-       {"T", "output", "J", "a"},
-       {"K", "send", "J", "b", -1},
-       {"J", "done", "R", "input"},
-       {"R", "output", "K", "a"},
-       {"T", "output", "K", "b", -1},
-       {"J", "output", "output", "input"}},
-      {.async_streaming = true,
-       .async_queue_capacity = 16,
-       .async_num_workers = 2});
-  EXPECT_FALSE(graph->supports_streaming());
-  EXPECT_NE(graph->streaming_incompatibility_reason().find(
-                "record-ordered node 'R' in a feedback cycle"),
-            std::string::npos);
+  const auto build = [](bool async) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "double"));
+    nodes.push_back(index_node("J", "join"));
+    nodes.back().node_params.insert("guaranteed", 1);
+    nodes.push_back(index_node("R", "tag_done"));
+    nodes.push_back(index_node("K", "join_send"));
+    return decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"K", "send", "J", "b", -1},
+         {"J", "done", "R", "input"},
+         {"R", "output", "K", "a"},
+         {"T", "output", "K", "b", -1},
+         {"J", "output", "output", "input"}},
+        {.async_streaming = async,
+         .async_queue_capacity = 16,
+         .async_num_workers = 2});
+  };
+  expect_feedback_streaming_conflict(
+      build, "record-ordered node 'R' in a feedback cycle");
 } // end - TEST(DecodingTaskGraph, StreamingRejectsRecordOrderedFeedbackCycle)
 
 // A flush ends a node's shot only after that node's fires in the flush
@@ -17265,23 +17283,25 @@ static const bool feedback_probe_kinds_registered = [] {
 TEST(DecodingTaskGraph, StreamingRejectsFeedbackWithoutRequiredInput) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);
   active_pipeline_probe = std::make_shared<pipeline_probe>();
-  std::vector<task_graph_node_config> nodes;
-  nodes.push_back(pipeline_node("A", "source"));
-  nodes.push_back(index_node("T", "tag"));
-  task_graph_node_config join;
-  join.id = "J";
-  join.kind = "test_optional_index_join";
-  nodes.push_back(std::move(join));
-  auto graph = decoding_task_graph::from_topology(
-      std::move(nodes), {{"measurements", "output", "A", "input"},
-                         {"A", "output", "T", "input"},
-                         {"T", "output", "J", "a"},
-                         {"J", "send", "J", "b", -1},
-                         {"J", "output", "output", "input"}});
-  EXPECT_FALSE(graph->supports_streaming());
-  EXPECT_NE(graph->streaming_incompatibility_reason().find(
-                "indexed node 'J' in a feedback cycle needs a required input"),
-            std::string::npos);
+  const auto build = [](bool async) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    task_graph_node_config join;
+    join.id = "J";
+    join.kind = "test_optional_index_join";
+    nodes.push_back(std::move(join));
+    return decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"J", "send", "J", "b", -1},
+         {"J", "output", "output", "input"}},
+        {.async_streaming = async});
+  };
+  expect_feedback_streaming_conflict(
+      build, "indexed node 'J' in a feedback cycle needs a required input");
 } // end - TEST(DecodingTaskGraph, StreamingRejectsFeedbackWithoutRequiredInput)
 
 // Leave the optional gate silent to force these fires to run during FINAL.
@@ -17521,30 +17541,34 @@ TEST(DecodingTaskGraph, MissingInputNotificationsCanCircleAFeedbackLoop) {
   }
 }
 
-// An absence cycle through required inputs must fail instead of looping.
-TEST(DecodingTaskGraph, MissingInputNotificationsRejectAnUnboundedCycle) {
+// A required cycle has no first instance that can publish or complete.
+TEST(DecodingTaskGraph, StreamingRejectsCyclesOfRequiredInputs) {
   ASSERT_TRUE(index_probe_registered);
   active_pipeline_probe = std::make_shared<pipeline_probe>();
-  std::vector<task_graph_node_config> nodes;
-  nodes.push_back(pipeline_node("A", "wider"));
-  nodes.push_back(index_node("T", "tag"));
-  nodes.push_back(index_node("J", "join_send"));
-  auto graph = decoding_task_graph::from_topology(
-      std::move(nodes), {{"measurements", "output", "A", "input"},
-                         {"A", "output", "T", "input"},
-                         {"T", "output", "J", "b"},
-                         {"J", "send", "J", "a", -1},
-                         {"J", "output", "output", "input"}});
-  const uint8_t bit = 1;
-  try {
-    graph->enqueue_syndrome(&bit, 1, round_type::FINAL);
-    ADD_FAILURE() << "The missing required input should fail the shot";
-  } catch (const std::logic_error &e) {
-    EXPECT_STREQ(e.what(),
-                 "decoding_task_graph: missing input propagates around a "
-                 "cycle of required inputs");
-  }
-}
+  for (const bool multi_node : {false, true}) {
+    SCOPED_TRACE(multi_node);
+    const auto build = [multi_node](bool async) {
+      std::vector<task_graph_node_config> nodes;
+      std::vector<task_graph_edge> edges{
+          {"measurements", "output", "A", "input"},
+          {"A", "output", "T", "input"},
+          {"T", "output", "J", "b"},
+          {multi_node ? "K" : "J", "send", "J", "a", -1},
+          {"J", "output", "output", "input"}};
+      nodes.push_back(pipeline_node("A", "wider"));
+      nodes.push_back(index_node("T", "tag"));
+      nodes.push_back(index_node("J", "join_send"));
+      if (multi_node) {
+        nodes.push_back(index_node("K", "join_send"));
+        edges.push_back({"J", "send", "K", "a"});
+        edges.push_back({"T", "output", "K", "b"});
+      }
+      return decoding_task_graph::from_topology(
+          std::move(nodes), std::move(edges), {.async_streaming = async});
+    };
+    expect_feedback_streaming_conflict(build, "cycle of required inputs");
+  } // end - for(multi_node)
+} // end - TEST(StreamingRejectsCyclesOfRequiredInputs)
 
 // A branching absence cascade must drain a bounded event store.
 TEST(DecodingTaskGraph, BranchingMissingInputNotificationsFitTheEventStore) {

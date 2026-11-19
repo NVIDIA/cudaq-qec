@@ -82,6 +82,148 @@ struct deferred_fire {
 
 } // namespace
 
+// Validate feedback cycles and order FINAL after their outside producers.
+void decoding_task_graph::impl::compile_feedback_flush() {
+  const auto size = streaming_nodes.size();
+  flush_dependents = streaming_dependents;
+  flush_producers = streaming_producers;
+  flush_predecessor_counts = streaming_predecessor_counts;
+  feedback_anchor.assign(size, no_event);
+
+  std::vector<std::pair<std::size_t, std::size_t>> backward;
+  for (std::size_t target = 0; target < size; ++target) {
+    const auto node = streaming_nodes[target].node_index;
+    for (const auto &wire : wires_to[node])
+      if (wire.loop_carried() && streaming_by_node[wire.from_node] >= 0)
+        backward.emplace_back(streaming_by_node[wire.from_node], target);
+  }
+  if (backward.empty())
+    return;
+
+  // Find the strongly connected components using the full streaming graph.
+  auto dependents = streaming_dependents;
+  auto producers = streaming_producers;
+  for (const auto &[source, target] : backward) {
+    dependents[source].push_back(target);
+    producers[target].push_back(source);
+  }
+  std::vector<uint8_t> visited(size, 0);
+  std::vector<std::size_t> order;
+  const auto visit = [&](auto &&self, std::size_t node) -> void {
+    if (visited[node])
+      return;
+    visited[node] = 1;
+    for (const auto next : dependents[node])
+      self(self, next);
+    order.push_back(node);
+  };
+  for (std::size_t node = 0; node < size; ++node)
+    visit(visit, node);
+
+  std::vector<std::size_t> component(size, no_event);
+  const auto collect = [&](auto &&self, std::size_t node, std::size_t leader,
+                           std::vector<std::size_t> &members) -> void {
+    if (component[node] != no_event)
+      return;
+    component[node] = leader;
+    members.push_back(node);
+    for (const auto producer : producers[node])
+      self(self, producer, leader, members);
+  };
+  const auto add_dependency = [&](std::size_t source, std::size_t target) {
+    flush_dependents[source].push_back(target);
+    flush_producers[target].push_back(source);
+    ++flush_predecessor_counts[target];
+  };
+  // Follow only required inputs. Every cycle crosses a negative offset,
+  // so no instance in a required cycle can be the first to fire.
+  enum class visit_state : uint8_t { unvisited, active, finished };
+  std::vector<visit_state> required_visits(size, visit_state::unvisited);
+  const auto required_cycle = [&](auto &&self, std::size_t node) -> bool {
+    auto &state = required_visits[node];
+    const auto &entry = streaming_nodes[node];
+    if (state == visit_state::active) {
+      record_streaming_conflict("node '" + entry.id +
+                                "' is in a feedback cycle of required inputs");
+      return true;
+    }
+    if (state == visit_state::finished)
+      return false;
+    state = visit_state::active;
+    for (const auto &wire : wires_to[entry.node_index]) {
+      if (wire.from_node < 0 ||
+          !entry.indexed.front()->requires_input(wire.to_slot))
+        continue;
+      const auto source = streaming_by_node[wire.from_node];
+      if (source >= 0 && component[source] == component[node] &&
+          self(self, source))
+        return true;
+    }
+    state = visit_state::finished;
+    return false;
+  }; // end - required_cycle()
+
+  feedback_groups.resize(size);
+  for (auto it = order.rbegin(); it != order.rend(); ++it) {
+    if (component[*it] != no_event)
+      continue;
+    std::vector<std::size_t> members;
+    collect(collect, *it, *it, members);
+    const bool cycle = members.size() > 1 ||
+                       std::find(producers[*it].begin(), producers[*it].end(),
+                                 *it) != producers[*it].end();
+    if (!cycle)
+      continue;
+    for (const auto member : members) {
+      const auto &entry = streaming_nodes[member];
+      const auto &inputs = wires_to[entry.node_index];
+      if (entry.indexed.empty())
+        record_streaming_conflict("record-ordered node '" + entry.id +
+                                  "' in a feedback cycle");
+      else if (std::none_of(
+                   inputs.begin(), inputs.end(), [&](const auto &wire) {
+                     return entry.indexed.front()->requires_input(wire.to_slot);
+                   }))
+        record_streaming_conflict(
+            "indexed node '" + entry.id +
+            "' in a feedback cycle needs a required input");
+    }
+    if (streaming_conflict.empty())
+      for (const auto member : members)
+        if (required_cycle(required_cycle, member))
+          break;
+
+    // One flush resolves the group's instances before its other node
+    // flushes can run. Wait for every producer outside the group first.
+    const auto anchor = *std::min_element(members.begin(), members.end());
+    auto &group = feedback_groups[anchor];
+    for (const auto member : members) {
+      feedback_anchor[member] = anchor;
+      if (member != anchor)
+        add_dependency(anchor, member);
+      for (const auto producer : producers[member])
+        if (component[producer] != component[member]) {
+          group.producers.push_back(producer);
+          add_dependency(producer, anchor);
+        }
+    }
+    std::sort(group.producers.begin(), group.producers.end());
+    group.producers.erase(
+        std::unique(group.producers.begin(), group.producers.end()),
+        group.producers.end());
+    std::sort(members.begin(), members.end());
+    group.members = std::move(members);
+  } // end - for(it)
+  // A backward edge between components can wait for its producer's full
+  // flush, including publications it makes while resolving its joins.
+  for (const auto &[source, target] : backward)
+    if (component[source] != component[target])
+      add_dependency(source, target);
+
+  record_dependents = std::move(dependents);
+  record_producers = std::move(producers);
+} // end - compile_feedback_flush()
+
 // Everything one record moves between nodes or reads back from a node after a
 // fire lives here, so concurrently executing records never share data.
 struct decoding_task_graph::impl::record_context {
@@ -247,7 +389,6 @@ struct decoding_task_graph::impl::record_scheduler {
   struct feedback_flush;
   // Index and topological node order put a producer before its consumer.
   using feedback_join = std::tuple<std::int64_t, std::size_t, std::size_t>;
-  enum class drop_chain : uint8_t { unseen, finite, cyclic };
 
   record_scheduler(impl &owner, std::size_t context_count,
                    std::size_t event_capacity)
@@ -266,7 +407,6 @@ struct decoding_task_graph::impl::record_scheduler {
         join_displaced(owner.streaming_nodes.size(), 0),
         join_offsets(owner.streaming_nodes.size()),
         join_required(owner.streaming_nodes.size()),
-        required_drop_chain(owner.streaming_nodes.size(), drop_chain::unseen),
         defer_drop_notifications(owner.streaming_nodes.size(), 0),
         defer_publications(owner.streaming_nodes.size(), 0),
         copy_publications(owner.streaming_nodes.size(), 0),
@@ -387,33 +527,14 @@ struct decoding_task_graph::impl::record_scheduler {
                              std::vector<const edge_value *>(
                                  owner.node_input_counts[node_idx], nullptr));
     }
-    // An absence that reaches a cycle through required inputs propagates
-    // forever. Every lap advances the index, since feedback offsets are
-    // strictly negative. Cache this reachability before recycling slots
-    // for feedback notifications.
-    const auto reaches_required_cycle = [&](auto &&visit,
-                                            std::size_t si) -> bool {
-      auto &chain = required_drop_chain[si];
-      if (chain != drop_chain::unseen)
-        return chain == drop_chain::cyclic;
-      chain = drop_chain::cyclic; // a recursive visit closes the cycle
-      const auto node_idx = owner.streaming_nodes[si].node_index;
-      for (const auto &wire : owner.streaming_wires_from[node_idx]) {
-        if (wire.to_node < 0)
-          continue;
-        const auto consumer = owner.streaming_by_node[wire.to_node];
-        if (consumer >= 0 && indexed(consumer) &&
-            join_required[consumer][wire.to_slot] && visit(visit, consumer))
-          return true;
-      }
-      chain = drop_chain::finite;
-      return false;
-    };
-    for (std::size_t si = M; si-- > 0;)
-      if (indexed(si))
-        reaches_required_cycle(reaches_required_cycle, si);
-
-    configure_feedback_flush();
+    // Each live join in a feedback group can wait in its anchor's flush heap.
+    feedback_flushes.resize(owner.feedback_groups.size());
+    for (std::size_t anchor = 0; anchor < feedback_flushes.size(); ++anchor) {
+      std::size_t capacity = 0;
+      for (const auto member : owner.feedback_groups[anchor].members)
+        capacity += joins[member].size();
+      feedback_flushes[anchor].pending.reserve(capacity);
+    }
 
     // Bound the events one delivery holds until it drains. A feedback fire
     // gets its own reservation or waits for the current subtree to drain.
@@ -760,9 +881,10 @@ struct decoding_task_graph::impl::record_scheduler {
   // Start FINAL at the roots of the graph's flush dependencies.
   void configure_flush(context &c) {
     auto lock = lock_runtime();
-    c.dependency_remaining = flush_predecessor_counts;
-    for (std::size_t node = 0; node < flush_predecessor_counts.size(); ++node)
-      if (flush_predecessor_counts[node] == 0)
+    c.dependency_remaining = owner.flush_predecessor_counts;
+    for (std::size_t node = 0; node < owner.flush_predecessor_counts.size();
+         ++node)
+      if (owner.flush_predecessor_counts[node] == 0)
         c.root_nodes.push_back(node);
     c.root_done.resize(c.root_nodes.size());
     std::fill(c.root_done.begin(), c.root_done.end(), uint8_t{0});
@@ -963,7 +1085,7 @@ struct decoding_task_graph::impl::record_scheduler {
       capability = owner.streaming_nodes[producer].capability;
     const auto &wires = owner.streaming_wires_from[node_idx];
     const auto &completions = owner.completion_wires_from[node_idx];
-    const auto anchor = feedback_anchor[producer];
+    const auto anchor = owner.feedback_anchor[producer];
     auto lock = lock_runtime();
     // Captured in the record holding the operation it follows from, as a
     // synchronous graph would.
@@ -995,7 +1117,7 @@ struct decoding_task_graph::impl::record_scheduler {
       if (!value && indexed(consumer))
         continue;
       const bool internal_feedback =
-          anchor != no_event && anchor == feedback_anchor[consumer];
+          anchor != no_event && anchor == owner.feedback_anchor[consumer];
       if (internal_feedback && event.kind == graph_event_kind::streaming_flush)
         throw std::logic_error("decoding_task_graph: node '" +
                                owner.streaming_nodes[producer].id +
@@ -1248,7 +1370,7 @@ struct decoding_task_graph::impl::record_scheduler {
       }
     }
     if (entry->pending != 0) {
-      const auto anchor = feedback_anchor[si];
+      const auto anchor = owner.feedback_anchor[si];
       if (fresh && c.kind == phase::flush && anchor != no_event) {
         auto &group = feedback_flushes[anchor];
         if (group.resolving) {
@@ -1309,10 +1431,6 @@ struct decoding_task_graph::impl::record_scheduler {
                             std::int64_t k, std::size_t root) {
     if (is_dropped(si, k))
       return;
-    if (required_drop_chain[si] == drop_chain::cyclic)
-      throw std::logic_error(
-          "decoding_task_graph: missing input propagates around a cycle of "
-          "required inputs");
     dropped[si].add(k);
     const auto node_idx = owner.streaming_nodes[si].node_index;
     const auto &wires = owner.streaming_wires_from[node_idx];
@@ -1423,7 +1541,8 @@ struct decoding_task_graph::impl::record_scheduler {
                       fire_slots[si] <= budget - c.detached_slots &&
                       fire_slots[si] <= available_fire_slots(c);
     const bool detach = c.kind == phase::enqueue && one_chunk && room &&
-                        !reaches_ordered[si] && feedback_anchor[si] == no_event;
+                        !reaches_ordered[si] &&
+                        owner.feedback_anchor[si] == no_event;
     return detach ? no_event : id;
   }
 
@@ -1551,7 +1670,7 @@ struct decoding_task_graph::impl::record_scheduler {
     auto &pending = group.pending;
     if (!group.resolving) {
       pending.clear();
-      for (const auto node : group.members)
+      for (const auto node : owner.feedback_groups[event.node].members)
         for (const auto index : join_live[node]) {
           const auto &entry = joins[node][index];
           if (entry.pending != 0)
@@ -1583,13 +1702,13 @@ struct decoding_task_graph::impl::record_scheduler {
   bool flush_may_start_locked(const context &self,
                               const graph_event &flush) const {
     const auto si = flush.node;
-    const auto anchor = feedback_anchor[si];
-    if (anchor == si)
-      return std::all_of(feedback_flushes[si].members.begin(),
-                         feedback_flushes[si].members.end(),
-                         [&](std::size_t node) {
-                           return quiescent_locked(self, node, node == si);
-                         });
+    const auto anchor = owner.feedback_anchor[si];
+    if (anchor == si) {
+      const auto &members = owner.feedback_groups[si].members;
+      return std::all_of(members.begin(), members.end(), [&](std::size_t node) {
+        return quiescent_locked(self, node, node == si);
+      });
+    }
     if (anchor != no_event)
       return quiescent_locked(self, si);
     if (!indexed(si) || self_fed[si] || flush.offset == flush_resolved)
@@ -1732,7 +1851,7 @@ struct decoding_task_graph::impl::record_scheduler {
       execute_flush(c, id, event);
       return;
     case graph_event_kind::streaming_flush_release:
-      release_dependencies(c, flush_dependents[event.node],
+      release_dependencies(c, owner.flush_dependents[event.node],
                            graph_event_kind::streaming_flush);
       return;
     case graph_event_kind::streaming_indexed_fire:
@@ -1842,7 +1961,7 @@ struct decoding_task_graph::impl::record_scheduler {
       bool more;
       {
         auto lock = lock_runtime();
-        more = feedback_anchor[event.node] == event.node
+        more = owner.feedback_anchor[event.node] == event.node
                    ? resolve_feedback_joins_locked(c, id, event)
                    : resolve_joins_locked(c, id, event.node, event.root);
       }
@@ -2056,119 +2175,6 @@ struct decoding_task_graph::impl::record_scheduler {
   }
 
 private:
-  // Group feedback cycles and order FINAL after their outside producers.
-  void configure_feedback_flush() {
-    const auto size = owner.streaming_nodes.size();
-    flush_dependents = owner.streaming_dependents;
-    flush_producers = owner.streaming_producers;
-    flush_predecessor_counts = owner.streaming_predecessor_counts;
-    feedback_anchor.assign(size, no_event);
-
-    std::vector<std::pair<std::size_t, std::size_t>> backward;
-    for (std::size_t target = 0; target < size; ++target) {
-      const auto node = owner.streaming_nodes[target].node_index;
-      for (const auto &wire : owner.wires_to[node])
-        if (wire.loop_carried() && owner.streaming_by_node[wire.from_node] >= 0)
-          backward.emplace_back(owner.streaming_by_node[wire.from_node],
-                                target);
-    }
-    if (backward.empty())
-      return;
-
-    // Find the strongly connected components using the full streaming graph.
-    auto dependents = owner.streaming_dependents;
-    auto producers = owner.streaming_producers;
-    for (const auto &[source, target] : backward) {
-      dependents[source].push_back(target);
-      producers[target].push_back(source);
-    }
-    std::vector<uint8_t> visited(size, 0);
-    std::vector<std::size_t> order;
-    const auto visit = [&](auto &&self, std::size_t node) -> void {
-      if (visited[node])
-        return;
-      visited[node] = 1;
-      for (const auto next : dependents[node])
-        self(self, next);
-      order.push_back(node);
-    };
-    for (std::size_t node = 0; node < size; ++node)
-      visit(visit, node);
-
-    std::vector<std::size_t> component(size, no_event);
-    const auto collect = [&](auto &&self, std::size_t node, std::size_t leader,
-                             std::vector<std::size_t> &members) -> void {
-      if (component[node] != no_event)
-        return;
-      component[node] = leader;
-      members.push_back(node);
-      for (const auto producer : producers[node])
-        self(self, producer, leader, members);
-    };
-    const auto add_dependency = [&](std::size_t source, std::size_t target) {
-      flush_dependents[source].push_back(target);
-      flush_producers[target].push_back(source);
-      ++flush_predecessor_counts[target];
-    };
-    feedback_flushes.resize(size);
-    for (auto it = order.rbegin(); it != order.rend(); ++it) {
-      if (component[*it] != no_event)
-        continue;
-      std::vector<std::size_t> members;
-      collect(collect, *it, *it, members);
-      const bool cycle = members.size() > 1 ||
-                         std::find(producers[*it].begin(), producers[*it].end(),
-                                   *it) != producers[*it].end();
-      if (!cycle)
-        continue;
-      for (const auto member : members) {
-        const auto &id = owner.streaming_nodes[member].id;
-        if (!indexed(member))
-          owner.record_streaming_conflict("record-ordered node '" + id +
-                                          "' in a feedback cycle");
-        else if (std::none_of(join_required[member].begin(),
-                              join_required[member].end(),
-                              [](bool required) { return required; }))
-          owner.record_streaming_conflict("indexed node '" + id +
-                                          "' in a feedback cycle needs a "
-                                          "required input");
-      }
-
-      // One flush resolves the group's instances before its other node
-      // flushes can run. Wait for every producer outside the group first.
-      const auto anchor = *std::min_element(members.begin(), members.end());
-      auto &group = feedback_flushes[anchor];
-      for (const auto member : members) {
-        feedback_anchor[member] = anchor;
-        if (member != anchor)
-          add_dependency(anchor, member);
-        for (const auto producer : producers[member])
-          if (component[producer] != component[member]) {
-            group.producers.push_back(producer);
-            add_dependency(producer, anchor);
-          }
-      }
-      std::sort(group.producers.begin(), group.producers.end());
-      group.producers.erase(
-          std::unique(group.producers.begin(), group.producers.end()),
-          group.producers.end());
-      std::sort(members.begin(), members.end());
-      std::size_t capacity = 0;
-      for (const auto member : members)
-        capacity += joins[member].size();
-      group.pending.reserve(capacity);
-      group.members = std::move(members);
-    }
-    // A backward edge between components can wait for its producer's full
-    // flush, including publications it makes while resolving its joins.
-    for (const auto &[source, target] : backward)
-      if (component[source] != component[target])
-        add_dependency(source, target);
-
-    record_dependents = std::move(dependents);
-    record_producers = std::move(producers);
-  }
-
   // Spin briefly for a scheduler change before parking. Returns true when one
   // happened, so the caller re-selects instead of waiting.
   bool spin_for_ready(std::unique_lock<std::mutex> &lock) {
@@ -2485,12 +2491,12 @@ private:
       return;
     const bool flushing = c.kind == phase::flush;
     const auto &dependents =
-        flushing ? flush_dependents
-                 : (record_dependents.empty() ? owner.streaming_dependents
-                                              : record_dependents);
-    const auto anchor = feedback_anchor[si];
+        flushing ? owner.flush_dependents
+                 : (owner.record_dependents.empty() ? owner.streaming_dependents
+                                                    : owner.record_dependents);
+    const auto anchor = owner.feedback_anchor[si];
     if (anchor != no_event) {
-      const auto &group = feedback_flushes[anchor];
+      const auto &group = owner.feedback_groups[anchor];
       // One member can generate new work for another over a backward edge.
       // Advance every member's turn together once all such work has drained.
       for (const auto member : group.members)
@@ -2508,9 +2514,9 @@ private:
       return;
     }
     const auto &producers =
-        flushing ? flush_producers
-                 : (record_producers.empty() ? owner.streaming_producers
-                                             : record_producers);
+        flushing ? owner.flush_producers
+                 : (owner.record_producers.empty() ? owner.streaming_producers
+                                                   : owner.record_producers);
     for (const auto producer : producers[si])
       if (!c.node_released[producer])
         return;
@@ -2759,19 +2765,11 @@ public:
   // them in. Both are reserved with the table.
   std::vector<std::vector<std::size_t>> join_live;
   std::vector<std::vector<std::size_t>> join_scan;
-  std::vector<std::vector<std::size_t>> record_producers;
-  std::vector<std::vector<std::size_t>> record_dependents;
-  std::vector<std::vector<std::size_t>> flush_producers;
-  std::vector<std::vector<std::size_t>> flush_dependents;
-  std::vector<int32_t> flush_predecessor_counts;
   struct feedback_flush {
-    std::vector<std::size_t> members;
-    std::vector<std::size_t> producers;
     std::vector<feedback_join> pending;
     bool resolving = false;
   };
   // A feedback group's first node owns its flush work and heap.
-  std::vector<std::size_t> feedback_anchor;
   std::vector<feedback_flush> feedback_flushes;
   // By streaming node: whether a loop-carried edge feeds it, so its own
   // fires may still deliver to it.
@@ -2797,7 +2795,6 @@ public:
   // an instance exists only if that input is delivered.
   std::vector<std::vector<std::int64_t>> join_offsets;
   std::vector<std::vector<uint8_t>> join_required;
-  std::vector<drop_chain> required_drop_chain;
   // Dropped instances whose notification subtree can fill the event store.
   std::vector<uint8_t> defer_drop_notifications;
   // Publications whose delivery subtrees can fill the event store.
