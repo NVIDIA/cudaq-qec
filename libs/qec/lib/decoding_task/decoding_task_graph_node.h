@@ -190,6 +190,15 @@ public:
     return false;
   }
 
+  /// Opt-in: input `slot` handles each completion on its own, so a node that
+  /// joins by record may take an indexed producer's `done` there. Indexed
+  /// completions arrive in any order, and a dropped instance sends none. An
+  /// input that pairs completions with other inputs, or counts on one per
+  /// instance, must leave this false and its node must join by index.
+  virtual bool accepts_unordered_completions(std::size_t /*slot*/) const {
+    return false;
+  }
+
   /// Called after this node fires during streaming execution.
   /// Returns a pointer to the pre-allocated output value on `slot`, or nullptr
   /// if not supported.  The pointer is valid until the next call that mutates

@@ -13961,17 +13961,21 @@ static std::shared_ptr<pipeline_probe> active_pipeline_probe;
 /// and records the pair it saw so cross-record mixing is detectable. `after`
 /// takes a producer's `done` completion and publishes nothing. `after_pair`
 /// takes two completion inputs and logs their arrival order. `relay_done`
-/// publishes the completion's input slot as a bit. Each node numbers the
-/// records it handles itself. `rendezvous_pass` relays one
-/// input and allows sibling branches to reach it in either order.
+/// publishes the completion's input slot as a bit. `count_done` takes a
+/// producer's `done` and publishes the parity of the completions it has seen.
+/// Each node numbers the records it handles itself. `rendezvous_pass` relays
+/// one input and allows sibling branches to reach it in either order.
+/// `unordered_slot` names the one input, if any, that accepts unordered
+/// completions.
 class pipeline_probe_node : public task_graph_node,
                             public streaming_task_graph_node {
 public:
   pipeline_probe_node(std::string id, std::string mode,
                       std::shared_ptr<pipeline_probe> probe,
-                      std::size_t hold_ms = 0, int hold_bit = -1)
+                      std::size_t hold_ms = 0, int hold_bit = -1,
+                      int unordered_slot = -1)
       : id_(std::move(id)), mode_(std::move(mode)), probe_(std::move(probe)),
-        hold_(hold_ms), hold_bit_(hold_bit) {
+        hold_(hold_ms), hold_bit_(hold_bit), unordered_slot_(unordered_slot) {
     logical_outcome output;
     output.bits = {0};
     output.converged = true;
@@ -14007,6 +14011,14 @@ public:
       probe_->log(id_, record);
       probe_->maybe_block(id_, record);
       return false;
+    }
+    if (mode_ == "count_done") {
+      const auto record = records_++;
+      probe_->log(id_, record);
+      value_out_.get<logical_outcome>().bits[0] =
+          static_cast<uint8_t>(records_ & 1u);
+      valid_ = true;
+      return true;
     }
     const uint8_t bit = value.get<logical_outcome>().bits[0];
     probe_->log(id_ + ".value", bit);
@@ -14082,6 +14094,10 @@ public:
   bool supports_streaming_input(std::size_t slot) const override {
     return !raw() && slot < (joins() ? 2u : 1u);
   }
+  bool accepts_unordered_completions(std::size_t slot) const override {
+    return unordered_slot_ >= 0 &&
+           slot == static_cast<std::size_t>(unordered_slot_);
+  }
   std::optional<window_spec> derive_streaming_schedule(
       std::size_t output_slot,
       const std::vector<input_schedule> &inputs) const override {
@@ -14107,7 +14123,7 @@ public:
     if (mode_ == "after_pair" || mode_ == "relay_done")
       return supports_streaming_input(slot) &&
              type == edge_value_type("completion");
-    if (mode_ == "after")
+    if (mode_ == "after" || mode_ == "count_done")
       return slot == 0 && type == edge_value_type("completion");
     return supports_streaming_input(slot) &&
            type == edge_value_type("logical_outcome");
@@ -14139,6 +14155,7 @@ private:
   std::shared_ptr<pipeline_probe> probe_;
   std::size_t hold_;
   int hold_bit_;
+  int unordered_slot_;
   uint8_t correction_ = 0;
   bool valid_ = false;
   std::size_t received_ = 0;
@@ -14161,14 +14178,18 @@ static const bool pipeline_probe_registered = [] {
       {"hold_ms", decoding::config::param_kind::uint64, /*required=*/false});
   schema.params.push_back(
       {"hold_bit", decoding::config::param_kind::int32, /*required=*/false});
-  register_node_kind(std::move(spec), std::move(schema),
-                     [](node_build_context &ctx) {
-                       return std::make_unique<pipeline_probe_node>(
-                           ctx.id, ctx.node_params->get<std::string>("mode"),
-                           active_pipeline_probe,
-                           ctx.node_params->get<std::size_t>("hold_ms", 0),
-                           ctx.node_params->get<int>("hold_bit", -1));
-                     });
+  schema.params.push_back({"unordered_completion_slot",
+                           decoding::config::param_kind::int32,
+                           /*required=*/false});
+  register_node_kind(
+      std::move(spec), std::move(schema), [](node_build_context &ctx) {
+        return std::make_unique<pipeline_probe_node>(
+            ctx.id, ctx.node_params->get<std::string>("mode"),
+            active_pipeline_probe,
+            ctx.node_params->get<std::size_t>("hold_ms", 0),
+            ctx.node_params->get<int>("hold_bit", -1),
+            ctx.node_params->get<int>("unordered_completion_slot", -1));
+      });
   return true;
 }();
 
@@ -14183,6 +14204,14 @@ static task_graph_node_config pipeline_node(std::string id, std::string mode,
   config.node_params.insert("hold_ms", hold_ms);
   config.node_params.insert("hold_bit", hold_bit);
   config.max_in_flight = max_in_flight;
+  return config;
+}
+
+// A record-ordered node that counts completions on its one input, which
+// accepts them in any order.
+static task_graph_node_config completion_observer(std::string id) {
+  auto config = pipeline_node(std::move(id), "count_done");
+  config.node_params.insert("unordered_completion_slot", 0);
   return config;
 }
 
@@ -16636,13 +16665,14 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
   constexpr std::size_t rounds = 600;
   // Fill the record contexts' worth of rounds behind a detached fire.
   constexpr std::size_t coalesced_progress = 16;
-  enum class after_j { output, joins, done, loop };
-  for (const auto shape :
-       {after_j::output, after_j::joins, after_j::done, after_j::loop}) {
-    SCOPED_TRACE(shape == after_j::output  ? "J feeds the output"
-                 : shape == after_j::joins ? "J feeds joins K and L"
-                 : shape == after_j::done  ? "J's done feeds K and L"
-                                           : "J feeds itself");
+  enum class after_j { output, joins, done, observed, loop };
+  for (const auto shape : {after_j::output, after_j::joins, after_j::done,
+                           after_j::observed, after_j::loop}) {
+    SCOPED_TRACE(shape == after_j::output     ? "J feeds the output"
+                 : shape == after_j::joins    ? "J feeds joins K and L"
+                 : shape == after_j::done     ? "J's done feeds K and L"
+                 : shape == after_j::observed ? "J's done feeds observer C"
+                                              : "J feeds itself");
     auto probe = std::make_shared<pipeline_probe>();
     active_pipeline_probe = probe;
     {
@@ -16683,6 +16713,9 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
       edges.push_back({"K", "output", "X", "a"});
       edges.push_back({"L", "output", "X", "b"});
       edges.push_back({"X", "output", "output", "input"});
+    } else if (shape == after_j::observed) {
+      nodes.push_back(completion_observer("C"));
+      edges.push_back({"J", "done", "C", "input"});
     }
     auto graph =
         decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
@@ -16710,7 +16743,8 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
       first_fire.release();
       batch_fire.wait_for_arrivals();
       // Observe ingest running ahead on paths where the held fire detaches.
-      if (shape != after_j::loop)
+      // A record-ordered observer of J keeps J's fires attached.
+      if (shape != after_j::loop && shape != after_j::observed)
         wait_for_scheduler_records(*probe, "A", coalesced_progress);
       batch_fire.release();
       graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
@@ -16737,6 +16771,9 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
     }
     if (shape == after_j::output)
       expect_indexed_pairs(records, rounds);
+    // One completion per instance reached the observer.
+    if (shape == after_j::observed)
+      EXPECT_EQ(probe->records("C"), all);
   } // end - for(shape)
 } // end - TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires)
 
@@ -17669,7 +17706,8 @@ TEST(DecodingTaskGraph, FinalHandlesReconvergentRequiredFeedbackPaths) {
   EXPECT_TRUE(probe->records("K").empty());
 } // end - TEST(FinalHandlesReconvergentRequiredFeedbackPaths)
 
-// A positional consumer cannot tell which instance sent an indexed completion.
+// A positional consumer cannot tell which instance sent an indexed completion,
+// unless its input declares that it handles each completion on its own.
 TEST(DecodingTaskGraph, StreamingRejectsIndexedDoneToRecordOrderedConsumer) {
   ASSERT_TRUE(index_probe_registered);
   active_pipeline_probe = std::make_shared<pipeline_probe>();
@@ -17691,9 +17729,112 @@ TEST(DecodingTaskGraph, StreamingRejectsIndexedDoneToRecordOrderedConsumer) {
   };
   expect_streaming_build_conflict(build,
                                   "node 'J.done' requires an indexed consumer");
+  expect_streaming_build_conflict(build,
+                                  "does not accept unordered completions");
   const auto batch = build(false);
   EXPECT_NO_THROW((void)batch->run(measurement_results{{0}}));
 } // end - TEST(StreamingRejectsIndexedDoneToRecordOrderedConsumer)
+
+// A record-ordered input that accepts unordered completions may observe an
+// indexed producer's `done` in either streaming mode. It sees one completion
+// per instance and may publish what it counts.
+TEST(DecodingTaskGraph, DeclaredObserverTakesIndexedCompletions) {
+  ASSERT_TRUE(index_probe_registered && pipeline_probe_registered);
+  // Several instances per shot, so fires overlap on the pool.
+  constexpr std::size_t rounds = 24;
+  for (const bool async : {false, true}) {
+    for (const bool publishes : {false, true}) {
+      SCOPED_TRACE(std::string(async ? "async" : "sync") +
+                   (publishes ? ", R publishes to S" : ", R is terminal"));
+      auto probe = std::make_shared<pipeline_probe>();
+      active_pipeline_probe = probe;
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pipeline_node("A", "source"));
+      nodes.push_back(index_node("T", "tag"));
+      nodes.push_back(index_node("J", "join"));
+      nodes.push_back(completion_observer("R"));
+      std::vector<task_graph_edge> edges{
+          {"measurements", "output", "A", "input"},
+          {"A", "output", "T", "input"},
+          {"T", "output", "J", "a"},
+          {"T", "output", "J", "b"},
+          {"J", "done", "R", "input"},
+          {"J", "output", "output", "input"}};
+      if (publishes) {
+        nodes.push_back(pipeline_node("S", "pass"));
+        edges.push_back({"R", "output", "S", "input"});
+      }
+      auto graph =
+          decoding_task_graph::from_topology(std::move(nodes), std::move(edges),
+                                             {.async_streaming = async,
+                                              .async_queue_capacity = 16,
+                                              .async_num_workers = 2});
+      ASSERT_TRUE(graph->supports_streaming())
+          << graph->streaming_incompatibility_reason();
+      const auto records = pipeline_records(rounds);
+      for (std::size_t i = 0; i + 1 < rounds; ++i)
+        graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+      graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+      const auto &result = graph->streaming_result();
+      EXPECT_EQ(result.status, task_graph_streaming_status::complete)
+          << result.error;
+      EXPECT_EQ(probe->records("J").size(), rounds);
+      EXPECT_EQ(probe->records("R").size(), rounds);
+      if (publishes)
+        EXPECT_EQ(probe->records("S").size(), rounds);
+    } // end - for(publishes)
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, DeclaredObserverTakesIndexedCompletions)
+
+// The declaration is per input: an indexed completion may reach only an
+// input that accepts unordered completions.
+TEST(DecodingTaskGraph, UnorderedCompletionsAreDeclaredPerInput) {
+  ASSERT_TRUE(index_probe_registered && pipeline_probe_registered);
+  // A few rounds, enough to deliver each kind of completion more than once.
+  constexpr std::size_t rounds = 8;
+  const auto build = [](bool indexed_into_declared) {
+    return [indexed_into_declared](bool async) {
+      std::vector<task_graph_node_config> nodes;
+      nodes.push_back(pipeline_node("A", "source"));
+      nodes.push_back(index_node("T", "tag"));
+      nodes.push_back(index_node("J", "join"));
+      auto observer = pipeline_node("R", "after_pair");
+      observer.node_params.insert("unordered_completion_slot", 1);
+      nodes.push_back(std::move(observer));
+      const std::string indexed_input = indexed_into_declared ? "b" : "a";
+      const std::string ordered_input = indexed_into_declared ? "a" : "b";
+      return decoding_task_graph::from_topology(
+          std::move(nodes),
+          {{"measurements", "output", "A", "input"},
+           {"A", "output", "T", "input"},
+           {"T", "output", "J", "a"},
+           {"T", "output", "J", "b"},
+           {"J", "done", "R", indexed_input},
+           {"A", "done", "R", ordered_input},
+           {"J", "output", "output", "input"}},
+          {.async_streaming = async});
+    };
+  };
+  expect_streaming_build_conflict(build(false),
+                                  "node 'J.done' requires an indexed consumer");
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async ? "async" : "sync");
+    auto probe = std::make_shared<pipeline_probe>();
+    active_pipeline_probe = probe;
+    auto graph = build(true)(async);
+    ASSERT_TRUE(graph->supports_streaming())
+        << graph->streaming_incompatibility_reason();
+    const auto records = pipeline_records(rounds);
+    for (std::size_t i = 0; i + 1 < rounds; ++i)
+      graph->enqueue_syndrome(&records[i], 1, round_type::BULK);
+    graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete)
+        << graph->streaming_result().error;
+    // One completion from A and one from J per round.
+    EXPECT_EQ(probe->records("R").size(), 2 * rounds);
+  } // end - for(async)
+} // end - TEST(DecodingTaskGraph, UnorderedCompletionsAreDeclaredPerInput)
 
 // FINAL runs the pending fire before its flush callback. Only the fire
 // sends an indexed completion, even when the callback publishes a burst.

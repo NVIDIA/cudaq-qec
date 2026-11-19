@@ -772,15 +772,20 @@ void decoding_task_graph::impl::compile_wires() {
                                   "' has no streaming input on slot '" +
                                   node_input_names[w.to_node][w.to_slot] + "'");
       // Indexed instances can complete in any order. Both ends of a
-      // completion wire must agree on how it identifies an instance.
+      // completion wire must agree on how it identifies an instance, unless
+      // the consumer's input handles each completion on its own.
       const auto &producer = streaming_nodes[streaming_by_node[w.from_node]];
       if (!producer.indexed.empty() && consumer.indexed.empty()) {
-        if (completion)
-          record_streaming_conflict(
-              "node '" + node_ids[w.from_node] +
-              ".done' requires an indexed consumer in streaming, but node '" +
-              node_ids[w.to_node] + "' joins its inputs by record");
-        else
+        if (completion) {
+          if (!consumer.capability->accepts_unordered_completions(w.to_slot))
+            record_streaming_conflict(
+                "node '" + node_ids[w.from_node] +
+                ".done' requires an indexed consumer in streaming, but node '" +
+                node_ids[w.to_node] +
+                "' joins its inputs by record and its input '" +
+                node_input_names[w.to_node][w.to_slot] +
+                "' does not accept unordered completions");
+        } else
           record_streaming_conflict("node '" + node_ids[w.to_node] +
                                     "' joins its inputs by record but node '" +
                                     node_ids[w.from_node] +

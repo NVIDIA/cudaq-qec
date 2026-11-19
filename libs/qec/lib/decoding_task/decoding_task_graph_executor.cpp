@@ -412,6 +412,7 @@ struct decoding_task_graph::impl::record_scheduler {
         join_scan(owner.streaming_nodes.size()),
         self_fed(owner.streaming_nodes.size(), 0),
         fire_slots(owner.streaming_nodes.size(), 0),
+        reaches_ordered(owner.streaming_nodes.size(), 0),
         join_grew(owner.streaming_nodes.size(), join_growth::none),
         join_home(owner.streaming_nodes.size(), 1),
         join_displaced(owner.streaming_nodes.size(), 0),
@@ -682,8 +683,9 @@ struct decoding_task_graph::impl::record_scheduler {
     for (std::size_t si = M; si-- > 0;)
       count_slots(count_slots, si, /*dropped_join=*/false);
     // A detached fire reserves enough for any subtree that can reuse its slot
-    // through feedback. Loop-carried wires lead to earlier nodes, so repeat
-    // until nothing changes.
+    // through feedback. A fire whose completion reaches a record-ordered node
+    // stays attached (see fire_parent()). Loop-carried wires lead to earlier
+    // nodes, so repeat until nothing changes.
     for (bool changed = true; changed;) {
       changed = false;
       for (std::size_t si = M; si-- > 0;) {
@@ -691,6 +693,7 @@ struct decoding_task_graph::impl::record_scheduler {
           continue;
         const auto node_idx = owner.streaming_nodes[si].node_index;
         auto slots = fire_slots[si];
+        auto ordered = reaches_ordered[si];
         for (const auto *wires : {&owner.streaming_wires_from[node_idx],
                                   &owner.completion_wires_from[node_idx]})
           for (const auto &wire : *wires) {
@@ -699,9 +702,13 @@ struct decoding_task_graph::impl::record_scheduler {
             const auto consumer =
                 static_cast<std::size_t>(owner.streaming_by_node[wire.to_node]);
             slots = std::max(slots, fire_slots[consumer]);
+            if (!this->indexed(consumer) || reaches_ordered[consumer])
+              ordered = 1;
           }
-        changed = changed || slots != fire_slots[si];
+        changed = changed || slots != fire_slots[si] ||
+                  ordered != reaches_ordered[si];
         fire_slots[si] = slots;
+        reaches_ordered[si] = ordered;
       } // end - for(si)
     } // end - for(changed)
     for (std::size_t k = 0; k < owner.output_stagers.size(); ++k) {
@@ -1616,7 +1623,9 @@ struct decoding_task_graph::impl::record_scheduler {
   // included, it needs none and ingest goes on while it decodes, as long as
   // the record's fires without a parent, each with the slots it holds until
   // its deliveries drain, fit in half the event store. A feedback cycle keeps
-  // its fires attached so each lap drains before the record advances.
+  // its fires attached so each lap drains before the record advances. So does
+  // a fire whose completion reaches a record-ordered node: each operation's
+  // completions then reach it before the next operation's.
   std::size_t fire_parent(const context &c, std::size_t id) const {
     const auto si = c.slots[id].event.node;
     const bool one_chunk = owner.record_bytes != 0 &&
@@ -1627,9 +1636,10 @@ struct decoding_task_graph::impl::record_scheduler {
                       fire_slots[si] <= budget - c.detached_slots &&
                       fire_slots[si] <= available_fire_slots(c);
     const bool detach = c.kind == phase::enqueue && one_chunk && room &&
+                        !reaches_ordered[si] &&
                         owner.feedback_anchor[si] == no_event;
     return detach ? no_event : id;
-  }
+  } // end - fire_parent()
 
   // The fire of join entry @p entry of node @p si, on behalf of @p root.
   graph_event indexed_fire_event(std::size_t si, std::size_t entry,
@@ -3361,6 +3371,9 @@ public:
   // By indexed node: the largest subtree its slot may run, including
   // feedback, capped at the event store capacity.
   std::vector<std::size_t> fire_slots;
+  // By indexed node: whether its completions reach a record-ordered node,
+  // directly or through indexed consumers.
+  std::vector<uint8_t> reaches_ordered;
   // By streaming node: whether its join table grew, and whether that was
   // reported, which happens once.
   enum class join_growth : uint8_t { none, unreported, reported };

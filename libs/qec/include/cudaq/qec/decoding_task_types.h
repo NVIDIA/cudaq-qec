@@ -47,7 +47,8 @@ struct measurement_results {
 /// node has completed execution. It lets an edge express "after this node"
 /// without an explicit data dependence. In streaming, indexed fires send
 /// completions at their instance index. A streaming `done` wire connects
-/// nodes that both join by index or both join by record.
+/// nodes that both join by index or both join by record, or an indexed node
+/// to a record-joined input that accepts unordered completions.
 struct completion {};
 
 /// Aggregated detection events: s = D * m (mod 2).
