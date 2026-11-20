@@ -8,6 +8,17 @@ tools to build and simulate quantum codes, model noise, and decode measurements
 using CPU or GPU decoders. These tools support both offline experiments and
 realtime decoding during quantum circuit execution.
 
+.. _qec_v091_highlights:
+
+Highlights in 0.9.1
+-------------------
+
+* :ref:`Relay BP <qldpc_decoder>` now processes groups of shots together on
+  the GPU when using ``decode_batch()`` for offline decoding.
+* :ref:`Jittered OSD Beam Search <qldpc_tcbp_jobs>` now supports models with
+  more than 8192 detectors. The decoder selects the kernels automatically;
+  the maximum detector count depends on the GPU's shared-memory capacity.
+
 .. _qec_v090_highlights:
 
 Highlights in 0.9.0
