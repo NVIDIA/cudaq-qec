@@ -16,7 +16,9 @@ option is to use the Docker container as described below.)
     # Install QEC library
     pip install cudaq-qec
 
-CUDA-Q QEC provides optional pip-installable components:
+CUDA-Q QEC provides optional pip-installable components. For the Tensor
+Network Decoder on CUDA 12, first read the
+:ref:`PyTorch compatibility note <pytorch-cuda12-compatibility>` below.
 
 .. code-block:: bash
 
@@ -92,7 +94,8 @@ PyTorch is automatically installed when you install the optional components:
     # Installs PyTorch as a dependency
     pip install cudaq-qec[tensor-network-decoder]
 
-Alternatively, you can install PyTorch directly. For detailed installation instructions, visit the 
+Alternatively, you can install PyTorch directly. For CUDA 12 installations,
+use the version combination below. For other configurations, visit the
 `PyTorch installation page <https://pytorch.org/get-started/locally/>`_.
 
 .. code-block:: bash
@@ -102,6 +105,31 @@ Alternatively, you can install PyTorch directly. For detailed installation instr
 .. note::
     Users with NVIDIA Blackwell architecture GPUs require PyTorch with CUDA 12.8 or later support. 
     When installing PyTorch, make sure to select the appropriate CUDA version for your system.
+
+.. Link 0.9.1 to https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.1
+   once the release notes are published.
+
+.. _cuda-12-pytorch-and-cuda-core-compatibility:
+.. _pytorch-cuda12-compatibility:
+
+.. note::
+
+    If you use the Tensor Network Decoder with a CUDA 12 installation of CUDA-Q QEC
+    `0.9.0 <https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.0>`_ or
+    0.9.1, you may encounter a PyTorch dependency conflict. We recommend using
+    PyTorch 2.9.0 with compatible CUDA 12 bindings:
+
+    .. code-block:: bash
+
+        python3 -m pip install "torch==2.9.0" \
+            --index-url https://download.pytorch.org/whl/cu128
+        python3 -m pip install --upgrade \
+            "cuda-bindings>=12.9.8,<13"
+
+    Retain the PyTorch version pin when updating dependencies. See the
+    `CUDA Python compatibility requirements
+    <https://nvidia.github.io/cuda-python/cuda-core/1.3.0/release/1.3.0-notes.html>`_
+    for details.
 
 Once CUDA-Q QEC is installed, run the :doc:`Quick Start <quick_start>` to check
 your installation with a small offline decoding experiment.

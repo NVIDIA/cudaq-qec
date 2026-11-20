@@ -1,17 +1,20 @@
 Release History
 ===============
 
-The current version of CUDA-Q QEC is 0.9.0. Documentation and release notes for
-earlier versions are listed below.
+This documentation covers CUDA-Q QEC 0.9.1. Documentation and release notes
+for earlier versions are listed below.
 
-0.9.0 — Current Version
+0.9.1 — Current Version
 ------------------------
 
-See the `0.9.0 release notes
-<https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.0>`__ for new features,
-performance improvements, bug fixes, and API changes. The
-:ref:`0.9.0 highlights <qec_v090_highlights>` introduce the key features, and
-the :doc:`examples <examples_rst/qec/examples>` show how to use them.
+The :ref:`0.9.1 highlights <qec_v091_highlights>` introduce batched Relay BP
+and :ref:`JOBS support for larger detector models <qldpc_tcbp_jobs>`.
+See the :doc:`examples <examples_rst/qec/examples>` for usage and the
+:ref:`CUDA 12 compatibility note <pytorch-cuda12-compatibility>` when
+installing the Tensor Network Decoder.
+
+.. Add https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.1 once the
+   release notes are published.
 
 Published Releases
 ------------------
@@ -23,6 +26,9 @@ Published Releases
    * - Version
      - Documentation
      - Release Notes
+   * - 0.9.0
+     - `0.9.0 documentation <https://nvidia.github.io/cudaq-qec/0.9.0/>`__
+     - `0.9.0 release notes <https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.0>`__
    * - 0.8.1
      - `0.8.1 documentation <https://nvidia.github.io/cudaq-qec/0.8.1/>`__
      - `0.8.1 release notes <https://github.com/NVIDIA/cudaq-qec/releases/tag/0.8.1>`__

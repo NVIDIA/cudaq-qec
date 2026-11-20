@@ -286,8 +286,11 @@ options are:
   and supports at most 12 observables.
 
 TCBP and JOBS require the sparse GPU path (``use_sparsity=True``) and
-``composition=0``; JOBS supports at most 8192 detector rows and a beam width
-of 64. See the complete ``nv-qldpc-decoder`` option reference for
+``composition=0``. Starting in 0.9.1, JOBS automatically selects kernels
+for models with more than 8192 detector rows. The maximum detector count
+depends on the GPU's shared-memory capacity; construction reports the
+supported count if the model exceeds it. The maximum beam width is 64.
+See the complete ``nv-qldpc-decoder`` option reference for
 :ref:`Python <nv_qldpc_decoder_api_python>` or
 :ref:`C++ <nv_qldpc_decoder_api_cpp>` for types, constraints and memory
 behavior.
