@@ -1943,6 +1943,44 @@ TEST(Commitment, UncheckedSeamsKeepEveryOtherRule) {
       "a boundary or truncated column");
 } // end - TEST(Commitment, UncheckedSeamsKeepEveryOtherRule)
 
+// single_round_spec() as a fixed three-round chain whose last round has no
+// faults. Its bulk round has a fifth fault, which flips only the next
+// round's detector 0, the one detector of the last round any fault flips.
+dem_chunks_spec faultless_last_round_spec() {
+  auto spec = single_round_spec();
+  auto &bulk = phase_of(spec, phase_name::dem_bulk);
+  auto &last = phase_of(spec, phase_name::dem_final);
+  spec.connections = {{phase_name::dem_init, phase_name::dem_bulk},
+                      {phase_name::dem_bulk, phase_name::dem_final}};
+  spec.num_rounds.reset();
+  bulk.num_faults = 5;
+  bulk.error_rates.assign(5, 0.02);
+  bulk.seam_specs[1].spec.H_sparse = {4, -1, -1, -1, -1};
+  last.num_faults = 0;
+  last.error_rates.clear();
+  last.O_sparse = {-1};
+  last.seam_specs = {{seam_name::prev_round, {{-1, -1, -1, -1}, {}}},
+                     {seam_name::next_round, {{-1, -1, -1, -1}, {}}}};
+  return spec;
+}
+
+// Unchecked seams relax only a row some window holds. Here no window holds
+// round 2, whose row 8 round 1's fault 4 flips: the round has no faults, so
+// F4 passes, and the row is still rejected by F1.
+TEST(Commitment, UncheckedSeamsStillNeedAHolder) {
+  window_graph g;
+  window_request w;
+  w.period = 3;
+  w.commit = round_range{0, 2};
+  w.input = {port_disposition::open, 0.01};
+  w.output = {port_disposition::open, std::nullopt};
+  w.soundness = soundness_class::unchecked_seams;
+  g.layers = {{"W", "w", w}};
+  expect_error([&] { validate(faultless_last_round_spec(), g); },
+               "validate_commitment: F1: row 8 (round 2) of the 3-round shot "
+               "has no finalizer; held by no window");
+}
+
 // F1: B with an open input has a boundary column on its first round, where
 // A[k-1] has its trailing buffer, so no window finalizes the round.
 TEST(Commitment, RejectsARowWithoutAFinalizer) {
@@ -7332,19 +7370,22 @@ TEST(WindowedGraph, DescribesItsSchedule) {
                   .windows.empty());
 } // end - TEST(WindowedGraph, DescribesItsSchedule)
 
-// A guard window W over arbitrary_memory_spec(5, true), written by hand:
-// ingest's one layer feeds W, with no edge between W's windows.
-std::vector<task_graph_node_config> guard_nodes(soundness_class soundness) {
+namespace {
+
+// A guard window W over wide_readout_spec(), written by hand: ingest's one
+// layer feeds W, with no edge between W's windows, and @p max_in_flight
+// copies of W.
+std::vector<task_graph_node_config> guard_nodes(const window_request &request,
+                                                std::size_t max_in_flight = 1) {
   std::vector<task_graph_node_config> nodes(2);
-  auto request = guard(2, 1, 1);
-  request.soundness = soundness;
   nodes[0].id = "ingest";
   nodes[0].kind = "ingest";
-  nodes[0].dem = arbitrary_memory_spec(5, true);
+  nodes[0].dem = wide_readout_spec();
   nodes[0].windows = {{"W", request, ""}};
   nodes[1].id = "W";
   nodes[1].kind = "decode_window";
   nodes[1].decoder_type = "single_error_lut";
+  nodes[1].max_in_flight = max_in_flight;
   return nodes;
 }
 
@@ -7354,15 +7395,39 @@ std::vector<task_graph_edge> guard_edges() {
           {"W", "output", "output", "input"}};
 }
 
+// The warnings about unchecked seams that building @p nodes logs.
+std::vector<std::string>
+unchecked_seam_warnings(std::vector<task_graph_node_config> nodes,
+                        const std::vector<task_graph_edge> &edges) {
+  namespace logging = cudaq::qec::detail;
+  std::mutex mutex;
+  std::vector<std::string> warnings;
+  logging::forwarder_config config;
+  config.callback = [&](logging::forwarded_log_record &&record) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (record.level == logging::log_level::warn &&
+        record.message.find("unchecked_seams") != std::string::npos)
+      warnings.push_back(record.message);
+  };
+  logging::set_forwarder(std::move(config));
+  decoding_task_graph::from_topology(std::move(nodes), edges);
+  logging::flush_logs();
+  logging::clear_forwarder();
+  return warnings;
+}
+
+} // namespace
+
 // A guard layout builds once its seams are unchecked, and is refused as
 // exact, naming the row without a finalizer.
 TEST(WindowedGraph, BuildsAGuardLayoutOnlyWithUncheckedSeams) {
+  auto exact = guard(2, 1, 1);
+  exact.soundness = soundness_class::exact;
   EXPECT_NO_THROW(decoding_task_graph::from_topology(
-      guard_nodes(soundness_class::unchecked_seams), guard_edges()));
+      guard_nodes(guard(2, 1, 1)), guard_edges()));
   expect_error(
       [&] {
-        decoding_task_graph::from_topology(guard_nodes(soundness_class::exact),
-                                           guard_edges());
+        decoding_task_graph::from_topology(guard_nodes(exact), guard_edges());
       },
       "F1: row", "has no finalizer; held by W[");
 }
@@ -7371,7 +7436,7 @@ TEST(WindowedGraph, BuildsAGuardLayoutOnlyWithUncheckedSeams) {
 // round of each commit zone but W[0]'s, where W[k-1]'s trailing buffer and
 // W[k]'s lead buffer meet.
 TEST(WindowedGraph, DescribesTheRowsItLeavesUnfinalized) {
-  const experiment_template tmpl(arbitrary_memory_spec(5, true));
+  const experiment_template tmpl(wide_readout_spec());
   for (auto R = tmpl.min_rounds(); R <= 20; ++R) {
     SCOPED_TRACE("R=" + std::to_string(R));
     std::vector<std::size_t> expected;
@@ -7379,13 +7444,73 @@ TEST(WindowedGraph, DescribesTheRowsItLeavesUnfinalized) {
       for (auto row = tmpl.row_offset(q, R); row < tmpl.row_offset(q + 1, R);
            ++row)
         expected.push_back(row);
-    const auto schedule = describe_schedule(
-        guard_nodes(soundness_class::unchecked_seams), guard_edges(), {}, R);
+    const auto schedule =
+        describe_schedule(guard_nodes(guard(2, 1, 1)), guard_edges(), {}, R);
     EXPECT_EQ(schedule.unfinalized_rows,
               (std::map<std::string, std::vector<std::size_t>>{
                   {"ingest", expected}}));
   }
 }
+
+// Building a graph with an unchecked layer warns, naming its ingest node and
+// layer, how many rows of its longest probe shot no window finalizes: the
+// rows of rounds 2, 4, ..., 12 of 13 rounds, 4 rows a round. A graph with
+// only exact layers does not warn.
+TEST(WindowedGraph, WarnsOfTheRowsItLeavesUnchecked) {
+  std::vector<task_graph_node_config> exact;
+  exact.push_back(
+      pattern_node(wide_readout_spec(), {{"commit_rounds", std::size_t{2}},
+                                         {"buffer_rounds", std::size_t{1}},
+                                         {"gap_rounds", std::size_t{3}}}));
+  EXPECT_EQ(
+      unchecked_seam_warnings(guard_nodes(guard(2, 1, 1)), guard_edges()),
+      std::vector<std::string>{
+          "task graph: ingest node 'ingest', unchecked_seams layers 'W': 24 "
+          "of the 52 detector rows of the 13-round probe shot have no "
+          "finalizer, so verify_residual does not cover the committed "
+          "correction there"});
+  EXPECT_TRUE(
+      unchecked_seam_warnings(std::move(exact), pattern_edges()).empty());
+}
+
+// A guard window, whose windows decode apart, streams as the reference
+// decodes it: synchronously, asynchronously, and with four copies of W
+// decoding at once, in records of a round or of 5 measurements. Its open
+// input takes boundary columns, or truncates the previous round's crossing
+// faults, with no prior. Every shot's last window is cut short; an odd
+// length cuts its commit zone too.
+TEST(WindowedGraph, StreamsAGuardWindowAsTheReference) {
+  task_graph_options async;
+  async.async_streaming = true;
+  const auto last =
+      schedule_windows(
+          std::make_shared<const experiment_template>(wide_readout_spec()),
+          guard_graph(2, 1, 1).layers, {}, 21)
+          .windows.back();
+  EXPECT_EQ(last.rounds, (round_range{19, 21}));
+  EXPECT_EQ(last.commit, (round_range{20, 21}));
+  for (const bool truncate : {false, true}) {
+    SCOPED_TRACE(truncate ? "truncate" : "columns");
+    auto g = guard_graph(2, 1, 1);
+    if (truncate)
+      g.layers[0].request.input = {port_disposition::open, std::nullopt,
+                                   input_boundary::truncate};
+    for (const std::size_t record : {std::size_t{0}, std::size_t{5}}) {
+      SCOPED_TRACE("record " + std::to_string(record));
+      for (const auto &[options, copies] :
+           {std::pair{task_graph_options{}, std::size_t{1}},
+            std::pair{async, std::size_t{1}},
+            std::pair{async, std::size_t{4}}}) {
+        SCOPED_TRACE((options.async_streaming ? "async, " : "sync, ") +
+                     std::to_string(copies) + " copies");
+        expect_graph_streams(*decoding_task_graph::from_topology(
+                                 guard_nodes(g.layers[0].request, copies),
+                                 guard_edges(), options),
+                             g, record);
+      }
+    } // end - for(record)
+  } // end - for(truncate)
+} // end - TEST(WindowedGraph, StreamsAGuardWindowAsTheReference)
 
 // A shot's closure says whether every window's solution was checked and
 // held: not_checked without verify_residual; closed with report when every

@@ -15,6 +15,7 @@
 
 #include "decoding_task_commitment.h"
 #include "decoding_task_data_artifacts.h"
+#include "cudaq/qec/logger.h"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -734,6 +735,28 @@ std::vector<std::string> same_index_cycle(
   return {};
 } // end - same_index_cycle()
 
+// Warns, for an ingest node with unchecked_seams layers, how many rows of its
+// longest probe shot no window finalizes. The layers have passed
+// validate_commitment(), so nothing here throws.
+void warn_unchecked_seams(const std::string &ingest,
+                          std::shared_ptr<const experiment_template> context,
+                          const std::vector<window_layer> &layers,
+                          const std::vector<task_graph_edge> &edges) {
+  std::string names; // the unchecked layers, quoted
+  for (const auto &node : unchecked_layers(layers))
+    names += (names.empty() ? "'" : ", '") + node + "'";
+  if (names.empty())
+    return;
+  const auto R = commitment_probe_rounds(*context, layers, edges) - 1;
+  const auto rows = unfinalized_rows(
+      *context, layers, schedule_windows(context, layers, edges, R));
+  CUDA_QEC_WARN("task graph: ingest node '{}', unchecked_seams layers {}: {} "
+                "of the {} detector rows of the {}-round probe shot have no "
+                "finalizer, so verify_residual does not cover the committed "
+                "correction there",
+                ingest, names, rows.size(), context->row_offset(R, R), R);
+} // end - warn_unchecked_seams()
+
 } // namespace
 
 // Shape first, so a mistake is named for what it is rather than as the
@@ -862,8 +885,10 @@ validate_window_topology(const std::vector<task_graph_node_config> &nodes,
   for (const auto &[id, fed] : fed_by)
     layers[fed.first].push_back(
         {id, fed.second, *layer_request(*ingests.at(fed.first), fed.second)});
-  for (const auto &[id, ingest_layers] : layers)
+  for (const auto &[id, ingest_layers] : layers) {
     validate_commitment(templates.at(id), ingest_layers, sends[id], &store);
+    warn_unchecked_seams(id, templates.at(id), ingest_layers, sends[id]);
+  }
   return layers;
 } // end - validate_window_topology()
 

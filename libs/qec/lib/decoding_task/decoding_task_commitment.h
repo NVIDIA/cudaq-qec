@@ -140,7 +140,8 @@ unfinalized_rows(const experiment_template &context,
 /// same instance close no cycle, in which a window would wait on itself. Two
 /// ingest nodes are two shots: no send joins their windows, and ones with
 /// different templates reach no common node. Each ingest node's layers and
-/// sends then pass validate_commitment().
+/// sends then pass validate_commitment(); one with unchecked_seams layers
+/// warns how many rows of its longest probe shot no window finalizes.
 /// Each ingest node's template is registered in @p store, and its layers'
 /// windows are built there as validate_commitment() checks them.
 /// @return Each ingest node's layers, by node id: the decode_window nodes

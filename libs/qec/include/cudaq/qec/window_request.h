@@ -51,7 +51,10 @@ enum class parallel_resolution { reject, most_likely };
 /// What commitment validation asks of a layer's rows: every row a fault
 /// touches has exactly one finalizer, or a row that only unchecked layers
 /// hold may have none, as at the seams of independent overlapping windows.
-/// Every other rule holds for both.
+/// Every other rule holds for both. No window answers for such a row: every
+/// window can satisfy its own detectors, and verify_residual report the shot
+/// closed, while the committed correction leaves a seam detector flipped.
+/// Building a graph with such a layer warns how many rows it leaves so.
 enum class soundness_class { exact, unchecked_seams };
 
 /// The windows of one layer: window k is anchored at offset + k * period,
