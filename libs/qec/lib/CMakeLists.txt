@@ -12,6 +12,10 @@ include(FetchContent)
 add_compile_options(-Wno-attributes) 
 
 find_package(CUDAToolkit REQUIRED)
+
+# NVTX ranges for Nsight Systems: the task-graph executor's events and idle
+# workers, and the realtime pipeline.
+option(ENABLE_NVTX "Enable NVTX profiling ranges" OFF)
 find_package(Threads REQUIRED)
 
 # cuStabilizer is shipped inside the cuquantum-python-cuXX pip wheels
@@ -114,6 +118,11 @@ add_library(${DECODERS_LIBRARY_NAME} SHARED ${DECODERS_SOURCES})
 set_target_properties(${DECODERS_LIBRARY_NAME} PROPERTIES
   VISIBILITY_INLINES_HIDDEN ON
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+if(ENABLE_NVTX)
+  target_compile_definitions(${DECODERS_LIBRARY_NAME} PRIVATE ENABLE_NVTX)
+  target_link_libraries(${DECODERS_LIBRARY_NAME} PRIVATE CUDA::nvtx3)
+  message(STATUS "NVTX profiling enabled for ${DECODERS_LIBRARY_NAME}")
+endif()
 
 if(NOT CUDAQ_QEC_DECODERS_ONLY)
   # FIXME?: This must be a shared library. Trying to build a static one will fail.
