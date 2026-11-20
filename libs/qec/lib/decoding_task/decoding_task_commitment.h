@@ -81,6 +81,9 @@ struct window_schedule {
   std::vector<variant_decoders> decoders;
   /// By ingest node: the sha256 the store records its template under.
   std::map<std::string, std::string> templates;
+  /// By ingest node: the rows of its shot no window finalizes, which only
+  /// unchecked_seams layers leave (unfinalized_rows()).
+  std::map<std::string, std::vector<std::size_t>> unfinalized_rows;
 };
 
 /// The windows of a @p num_rounds round shot and their dependencies.
@@ -108,7 +111,8 @@ std::size_t commitment_probe_rounds(const experiment_template &context,
 /// committed elsewhere and delivered to the finalizer by a send covering
 /// the row, and that every detectable fault is committed exactly once
 /// (F1-F4); that sends match receives, none twice; and that no commit
-/// column has an ambiguous parallel column.
+/// column has an ambiguous parallel column. A row that only unchecked_seams
+/// layers hold may have no finalizer.
 /// @param store Where the layers' windows are built and read, once each, so
 /// the graph's nodes read the very windows checked; null to build them for
 /// the check alone. @p context must be the store's own template.
@@ -119,6 +123,14 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
                          const std::vector<task_graph_edge> &edges,
                          data_artifact_store *store = nullptr);
 
+/// The detector rows of @p schedule, a shot of @p layers that
+/// validate_commitment() accepts, that no window finalizes: rows only
+/// unchecked_seams layers hold. In row order.
+std::vector<std::size_t>
+unfinalized_rows(const experiment_template &context,
+                 const std::vector<window_layer> &layers,
+                 const window_schedule &schedule);
+
 /// Check a topology's windowed decoding before any node is built, and do
 /// nothing for a topology with no ingest or decode_window node. Every ingest
 /// node is fed by measurements alone and has a template. Every decode_window
@@ -128,7 +140,8 @@ void validate_commitment(std::shared_ptr<const experiment_template> context,
 /// same instance close no cycle, in which a window would wait on itself. Two
 /// ingest nodes are two shots: no send joins their windows, and ones with
 /// different templates reach no common node. Each ingest node's layers and
-/// sends then pass validate_commitment().
+/// sends then pass validate_commitment(); one with unchecked_seams layers
+/// warns how many rows of its longest probe shot no window finalizes.
 /// Each ingest node's template is registered in @p store, and its layers'
 /// windows are built there as validate_commitment() checks them.
 /// @return Each ingest node's layers, by node id: the decode_window nodes

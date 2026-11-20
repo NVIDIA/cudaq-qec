@@ -248,4 +248,23 @@ inline experimental::window_request sliding(std::int64_t step,
   return w;
 }
 
+/// A guard sliding window: commit step rounds between lead rounds before
+/// and trail rounds after, with open ports and no sends, so its windows are
+/// independent and the first rows of each commit zone have no finalizer.
+inline experimental::window_request guard(std::int64_t step, std::int64_t lead,
+                                          std::int64_t trail) {
+  using experimental::port_disposition;
+  experimental::window_request w;
+  w.period = step;
+  w.commit = experimental::round_range{0, step};
+  if (lead > 0)
+    w.buffers.push_back({-lead, 0});
+  if (trail > 0)
+    w.buffers.push_back({step, step + trail});
+  w.input = {port_disposition::open, 0.01};
+  w.output = {port_disposition::open, std::nullopt};
+  w.soundness = experimental::soundness_class::unchecked_seams;
+  return w;
+}
+
 } // namespace cudaq::qec
