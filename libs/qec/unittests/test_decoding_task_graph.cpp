@@ -18711,6 +18711,70 @@ TEST(DecodingTaskGraph, DeliverySnapshotsGrowAndSaySoOnce) {
   EXPECT_NE(warnings[0].find("grew past"), std::string::npos) << warnings[0];
 } // end - TEST(DeliverySnapshotsGrowAndSaySoOnce)
 
+// Storage a node's input reach reserves, before it is allocated, is checked
+// against one budget: join-table entries for the instances its inputs lead
+// by, payloads included, and, in a feedback cycle, drop storage in every
+// record context. Past it the build names the node and its reach; a modest
+// reach still builds.
+TEST(DecodingTaskGraph, InputReachPastTheStorageBudgetIsRefused) {
+  ASSERT_TRUE(index_probe_registered && snapshot_probe_kinds_registered);
+  // T feeds J's required input `reach` instances back, and J's own output
+  // feeds `b` one back when `feedback`, else T does at the same instance.
+  const auto join = [](std::int64_t reach, bool feedback) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(index_node("J", "join_send"));
+    std::vector<task_graph_edge> edges{{"measurements", "output", "A", "input"},
+                                       {"A", "output", "T", "input"},
+                                       {"T", "output", "J", "a", -reach},
+                                       {"J", "output", "output", "input"}};
+    edges.push_back(feedback ? task_graph_edge{"J", "send", "J", "b", -1}
+                             : task_graph_edge{"T", "output", "J", "b"});
+    return decoding_task_graph::from_topology(
+        std::move(nodes), std::move(edges),
+        {.async_streaming = true, .async_queue_capacity = 16});
+  };
+  // K reads J's 64 KiB frame `reach` instances back.
+  const auto frames = [](std::int64_t reach) {
+    std::vector<task_graph_node_config> nodes;
+    nodes.push_back(pipeline_node("A", "source"));
+    nodes.push_back(index_node("T", "tag"));
+    nodes.push_back(kind_node("J", "test_large_send_join"));
+    nodes.push_back(kind_node("K", "test_bit_reader_join"));
+    return decoding_task_graph::from_topology(
+        std::move(nodes),
+        {{"measurements", "output", "A", "input"},
+         {"A", "output", "T", "input"},
+         {"T", "output", "J", "a"},
+         {"T", "output", "J", "b", /*index_offset=*/-1},
+         {"J", "send", "K", "a", -reach},
+         {"A", "output", "output", "input"}},
+        {.async_streaming = true, .async_queue_capacity = 16});
+  };
+  const auto refused = [](const auto &build, const std::string &text) {
+    try {
+      build();
+      ADD_FAILURE() << "expected: " << text;
+    } catch (const std::invalid_argument &e) {
+      EXPECT_NE(std::string(e.what()).find(text), std::string::npos)
+          << e.what();
+    }
+  };
+  EXPECT_NO_THROW(join(1024, /*feedback=*/true));
+  EXPECT_NO_THROW(join(1024, /*feedback=*/false));
+  EXPECT_NO_THROW(frames(16));
+  // Drop storage: 2^20 instances of absences in 16 record contexts.
+  refused([&] { join(std::int64_t{1} << 20, /*feedback=*/true); },
+          "node 'J' reaches 1048576 instances back through its inputs");
+  // Join entries alone, without feedback: 2^30 of them.
+  refused([&] { join(std::int64_t{1} << 30, /*feedback=*/false); },
+          "node 'J' reaches 1073741824 instances back through its inputs");
+  // Payloads: 2^15 entries of a 64 KiB frame take 2 GiB.
+  refused([&] { frames(std::int64_t{1} << 15); },
+          "node 'K' reaches 32768 instances back through its inputs");
+} // end - TEST(InputReachPastTheStorageBudgetIsRefused)
+
 // Keep record-ordered completions in publication order across a burst.
 TEST(DecodingTaskGraph, LargePublicationBurstDeliversOrderedCompletions) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);

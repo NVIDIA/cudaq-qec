@@ -480,6 +480,10 @@ struct decoding_task_graph::impl::record_scheduler {
       for (const auto &wire : wires)
         copy_publications[owner.streaming_by_node[wire.to_node]] = 1;
     bool copy_outputs = context_count > 1;
+    // The storage input reach has reserved so far, saturating; see
+    // add_reach_storage().
+    std::uint64_t reach_storage = 0;
+    const auto drop_fanout = count_drop_fanout();
     for (std::size_t si = 0; si < M; ++si) {
       const auto node_idx = owner.streaming_nodes[si].node_index;
       const auto *capability = owner.streaming_nodes[si].capability;
@@ -535,6 +539,10 @@ struct decoding_task_graph::impl::record_scheduler {
       }
       fire_lead[si] = f == std::numeric_limits<std::int64_t>::max() ? 0 : f;
       entry_lead[si] = e;
+      add_reach_storage(si, static_cast<std::uint64_t>(e),
+                        uint64_t{0} -
+                            static_cast<uint64_t>(min_required_offset[si]),
+                        drop_fanout, reach_storage);
       // Entries exist only for published values or in-flight producer
       // outputs: the records in flight, each a delivery publishing as many
       // as the node's producers can, bound how far publication runs ahead.
@@ -2306,7 +2314,7 @@ private:
   // falls short.
   std::size_t plan_delivery_storage(std::size_t event_capacity) {
     std::size_t replay_capacity = 0;
-    std::size_t drop_fanout = 0;
+    const auto drop_fanout = count_drop_fanout();
     std::size_t prefix_drops = 0;
     const auto add_batches = [](std::size_t &total, std::size_t batches,
                                 std::size_t size) {
@@ -2352,12 +2360,8 @@ private:
         for (const auto &wire : values)
           wire_snapshots[wire.id] = snapshots;
       }
-      if (indexed(si)) {
+      if (indexed(si))
         add_batches(prefix_drops, 1, dropped[si].prefix.size());
-        for (const auto *wires : {&values, &completions})
-          for (const auto &wire : *wires)
-            drop_fanout += indexed(owner.streaming_by_node[wire.to_node]);
-      }
     } // end - for(si)
 
     // A replayed drop follows required inputs inside any feedback component
@@ -2368,6 +2372,83 @@ private:
     add_batches(replay_capacity, prefix_drops, drop_fanout);
     return replay_capacity;
   } // end - plan_delivery_storage()
+
+  // The absences one drop sends: an indexed node's value and completion
+  // wires to indexed consumers, summed over the graph.
+  std::size_t count_drop_fanout() const {
+    std::size_t fanout = 0;
+    for (std::size_t si = 0; si < owner.streaming_nodes.size(); ++si) {
+      if (!indexed(si))
+        continue;
+      const auto node = owner.streaming_nodes[si].node_index;
+      for (const auto *wires : {&owner.streaming_wires_from[node],
+                                &owner.completion_wires_from[node]})
+        for (const auto &wire : *wires)
+          fanout += indexed(owner.streaming_by_node[wire.to_node]);
+    }
+    return fanout;
+  }
+
+  // The most storage input reach may reserve in a graph: join-table entries
+  // for the instances its inputs lead by, and feedback drop storage in every
+  // record context. Shipped graphs reach one instance back and reserve a few
+  // KiB; a reach of a million takes GiBs. 1 GiB leaves room for tens of
+  // thousands.
+  static constexpr std::size_t reach_storage_budget = std::size_t{1} << 30;
+
+  // One join-table entry's storage for node @p si: the entry and its input
+  // copies, with the payloads of the types make_wire_buffer() prototypes,
+  // its places in join_live and join_scan, two dropped-ring slots and, in a
+  // feedback cycle, a flush-heap element.
+  std::size_t join_entry_bytes(std::size_t si) const {
+    std::size_t bytes =
+        sizeof(join_entry) + 2 * sizeof(std::size_t) + 2 * sizeof(std::int64_t);
+    if (owner.feedback_anchor[si] != no_event)
+      bytes += sizeof(feedback_join);
+    for (const auto &input : join_input_buffers[si]) {
+      bytes += sizeof(edge_value) + 1; // the copy and its state
+      if (const auto *m = input.get_if<measurement_results>())
+        bytes += m->bits.size();
+      else if (const auto *d = input.get_if<detection_events>())
+        bytes += d->bits.size() * sizeof(float_t);
+      else if (const auto *l = input.get_if<logical_outcome>())
+        bytes += l->bits.size();
+    }
+    return bytes;
+  } // end - join_entry_bytes()
+
+  // Add to @p total the storage node @p si's input reach reserves: a join
+  // entry for each of the @p entries instances its inputs lead by, and, in a
+  // feedback cycle, drop storage in every record context for each of the
+  // @p prefix instances its required inputs reach before the shot's first
+  // (see plan_delivery_storage()). Refuse the graph, before the node's
+  // storage is allocated, once @p total passes reach_storage_budget.
+  void add_reach_storage(std::size_t si, std::uint64_t entries,
+                         std::uint64_t prefix, std::size_t fanout,
+                         std::uint64_t &total) const {
+    constexpr auto most = std::numeric_limits<std::uint64_t>::max();
+    const auto add = [](std::uint64_t a, std::uint64_t b) {
+      return b > most - a ? most : a + b;
+    };
+    const auto multiply = [](std::uint64_t a, std::uint64_t b) {
+      return b != 0 && a > most / b ? most : a * b;
+    };
+    // A prefix instance's flag, and its absences in every record context.
+    const std::uint64_t per_prefix =
+        1 + fanout * sizeof(context::pending_delivery) * contexts.size();
+    auto bytes = multiply(entries, join_entry_bytes(si));
+    if (owner.feedback_anchor[si] != no_event)
+      bytes = add(bytes, multiply(prefix, per_prefix));
+    total = add(total, bytes);
+    if (total <= reach_storage_budget)
+      return;
+    throw std::invalid_argument(
+        "decoding_task_graph: node '" + owner.streaming_nodes[si].id +
+        "' reaches " + std::to_string(std::max(entries, prefix)) +
+        " instances back through its inputs; the storage that reserves "
+        "exceeds the " +
+        std::to_string(reach_storage_budget >> 20) + " MiB budget");
+  } // end - add_reach_storage()
 
   // Spin briefly for a scheduler change before parking. Returns true when one
   // happened, so the caller re-selects instead of waiting.
