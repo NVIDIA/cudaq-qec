@@ -145,12 +145,20 @@ public:
     return slot == 0 &&
            (type == measurement_results_type || type == detection_events_type);
   }
-  /// The lowering wires the input edge before any edge leaving `output`, so
-  /// the pass-through type is known by the time a member's edge is checked.
+  /// The lowering wires the input first, so the forwarded type and size
+  /// are available when validating members and preparing delivery buffers.
   void validate_input_shape(std::size_t slot, edge_value_type type,
-                            std::optional<std::size_t>) const override {
-    if (slot == 0)
+                            std::optional<std::size_t> size) const override {
+    if (slot == 0) {
       data_type_ = type;
+      data_size_ = size;
+    }
+  }
+
+  // Forward the declared data width to the members and their snapshots.
+  std::optional<std::size_t>
+  output_value_size(std::size_t slot) const override {
+    return slot == 0 ? data_size_ : std::nullopt;
   }
   streaming_task_graph_node *streaming() override { return this; }
 
@@ -179,6 +187,10 @@ public:
   const edge_value *streaming_output(std::size_t slot) const override {
     return fired_ && slot < out_.size() ? &out_[slot] : nullptr;
   }
+  // Type the handles at graph construction. Slot zero uses its data width.
+  edge_value streaming_output_buffer(std::size_t slot) const override {
+    return out_[slot];
+  }
 
 private:
   /// Start a run with handles of its own: a new sink, cancellation source,
@@ -200,6 +212,7 @@ private:
   }
 
   mutable std::optional<edge_value_type> data_type_;
+  mutable std::optional<std::size_t> data_size_;
   selection_strategy_factory factory_;
   cudaqx::heterogeneous_map params_;
   /// Outputs parallel to outputs(); refilled per run.

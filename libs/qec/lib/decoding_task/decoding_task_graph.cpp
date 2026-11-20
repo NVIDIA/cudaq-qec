@@ -510,8 +510,10 @@ void decoding_task_graph::impl::compile_wires() {
         }
       if (!indexed.front())
         indexed.clear();
-      streaming_nodes.push_back({static_cast<int>(i), streaming,
-                                 std::move(replicas), std::move(indexed)});
+      streaming_nodes.push_back(
+          {static_cast<int>(i), streaming, std::move(replicas),
+           std::move(indexed),
+           i < node_ids.size() ? node_ids[i] : "node " + std::to_string(i)});
       streaming_by_node[i] = static_cast<int>(streaming_nodes.size() - 1);
     }
   }
@@ -756,27 +758,55 @@ void decoding_task_graph::impl::compile_wires() {
           streaming_by_node[w.from_node] < 0 ||
           streaming_by_node[w.to_node] < 0)
         continue; // not an edge between two streaming nodes
-      if (is_done_slot(w.from_node, w.from_slot)) {
+      const bool completion = is_done_slot(w.from_node, w.from_slot);
+      if (completion) {
         completion_wires_from[w.from_node].push_back(w);
       } else {
         w.id = static_cast<int>(streaming_value_wire_count++);
         streaming_wires_from[w.from_node].push_back(w);
       }
-      ++streaming_wires_to_count[w.to_node];
       const auto &consumer = streaming_nodes[streaming_by_node[w.to_node]];
+      const auto &producer = streaming_nodes[streaming_by_node[w.from_node]];
+      // An indexed completion into a record-ordered node is out of step with
+      // its records, so it does not count toward the node's window.
+      const bool unordered_completion =
+          completion && !producer.indexed.empty() && consumer.indexed.empty();
+      if (!unordered_completion)
+        ++streaming_wires_to_count[w.to_node];
       if (!consumer.capability->supports_streaming_input(w.to_slot))
         record_streaming_conflict("node '" + node_ids[w.to_node] +
                                   "' has no streaming input on slot '" +
                                   node_input_names[w.to_node][w.to_slot] + "'");
-      // An indexed node's instances complete in any order, so a consumer
-      // that sees records in order would read them out of order.
-      const auto &producer = streaming_nodes[streaming_by_node[w.from_node]];
-      if (!is_done_slot(w.from_node, w.from_slot) &&
-          !producer.indexed.empty() && consumer.indexed.empty())
-        record_streaming_conflict("node '" + node_ids[w.to_node] +
-                                  "' joins its inputs by record but node '" +
-                                  node_ids[w.from_node] +
-                                  "' publishes them by index");
+      // Indexed instances can complete in any order. Both ends of a
+      // completion wire must agree on how it identifies an instance, unless
+      // the consumer's input handles each completion on its own.
+      if (!producer.indexed.empty() && consumer.indexed.empty()) {
+        if (completion) {
+          if (!consumer.capability->accepts_unordered_completions(w.to_slot))
+            record_streaming_conflict(
+                "node '" + node_ids[w.from_node] +
+                ".done' requires an indexed consumer in streaming, but node '" +
+                node_ids[w.to_node] +
+                "' joins its inputs by record and its input '" +
+                node_input_names[w.to_node][w.to_slot] +
+                "' does not accept unordered completions");
+          // A fire pool leases a copy for each record's window.
+          else if (consumer.replicas.size() > 1)
+            record_streaming_conflict(
+                "node '" + node_ids[w.to_node] +
+                "' runs as a fire pool and cannot take unordered completions");
+        } else
+          record_streaming_conflict("node '" + node_ids[w.to_node] +
+                                    "' joins its inputs by record but node '" +
+                                    node_ids[w.from_node] +
+                                    "' publishes them by index");
+      } else if (completion && producer.indexed.empty() &&
+                 !consumer.indexed.empty()) {
+        record_streaming_conflict(
+            "node '" + node_ids[w.from_node] +
+            ".done' supplies an unindexed completion to node '" +
+            node_ids[w.to_node] + "', which joins its inputs by index");
+      }
     }
 
     // Classify every input edge to a streaming node. enqueue() has one implicit
@@ -858,12 +888,20 @@ void decoding_task_graph::impl::compile_wires() {
       const auto &entry = streaming_nodes[si];
       const int idx = entry.node_index;
       std::vector<streaming_task_graph_node::input_schedule> input_schedules;
+      std::vector<streaming_task_graph_node::input_schedule>
+          unordered_schedules;
       for (const auto &sw : wires_to[idx]) {
         // A loop-carried producer's schedule is not derived yet; its
         // consumer's schedule follows its forward inputs.
         if (sw.from_node < 0 || streaming_by_node[sw.from_node] < 0 ||
             sw.loop_carried())
           continue;
+        // An indexed completion into a record-ordered node is out of step
+        // with the windows of its other inputs.
+        const bool unordered =
+            is_done_slot(sw.from_node, sw.from_slot) &&
+            !streaming_nodes[streaming_by_node[sw.from_node]].indexed.empty() &&
+            entry.indexed.empty();
         const auto &producer_schedule =
             effective_schedule[sw.from_node][sw.from_slot];
         if (!producer_schedule) {
@@ -882,11 +920,15 @@ void decoding_task_graph::impl::compile_wires() {
                                     "' is incompatible: " + validation_error);
           break;
         }
-        input_schedules.push_back(
-            {static_cast<std::size_t>(sw.to_slot), *producer_schedule});
+        (unordered ? unordered_schedules : input_schedules)
+            .push_back(
+                {static_cast<std::size_t>(sw.to_slot), *producer_schedule});
       }
       if (!streaming_conflict.empty())
         break;
+      // A node fed only by unordered completions follows them.
+      if (input_schedules.empty())
+        input_schedules = std::move(unordered_schedules);
       const auto derivation_error = derive_streaming_output_schedules(
           *entry.capability, input_schedules, effective_schedule[idx]);
       if (!derivation_error.empty())
@@ -1107,6 +1149,8 @@ void decoding_task_graph::impl::compile_wires() {
                                   " and cannot take raw measurements");
       streaming_parallel_width += copies - 1;
     }
+
+    compile_feedback_flush();
 
     streaming_node_generations.assign(M, 0);
     streaming_output_fire_ordinals.assign(num_sinks, 0);
@@ -2058,6 +2102,11 @@ std::size_t decoding_task_graph::get_num_observables() const {
 
 std::size_t decoding_task_graph::async_thread_count() const noexcept {
   return impl_->async_streaming.enabled ? impl_->pool_width + 1 : 0;
+}
+
+// Report the queue's resolved capacity after applying the graph defaults.
+std::size_t decoding_task_graph::async_queue_capacity() const noexcept {
+  return impl_->async_streaming.enabled ? impl_->async_streaming.capacity : 0;
 }
 
 bool decoding_task_graph::supports_streaming() const noexcept {

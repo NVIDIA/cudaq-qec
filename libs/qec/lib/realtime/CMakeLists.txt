@@ -304,7 +304,6 @@ elseif(CMAKE_CUDA_COMPILER AND CUDAQ_REALTIME_INCLUDE_DIR AND CUDAQ_REALTIME_LIB
     PRIVATE ${CUDAQ_REALTIME_LIBRARY}
   )
 
-  option(ENABLE_NVTX "Enable NVTX profiling ranges" OFF)
   if(ENABLE_NVTX)
     target_compile_definitions(cudaq-realtime-pipeline PRIVATE ENABLE_NVTX)
     message(STATUS "NVTX profiling enabled for cudaq-realtime-pipeline")

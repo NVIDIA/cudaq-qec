@@ -121,6 +121,8 @@ public:
   bool enqueue(const uint8_t *msyn, std::size_t len, round_type type) override;
   /// The last fire's frame update on `output`, or a send on its port.
   const edge_value *streaming_output(std::size_t slot) const override;
+  /// A copy buffer with room for the largest value on this streaming port.
+  edge_value streaming_output_buffer(std::size_t slot) const override;
   /// The last fire's commit zone: the rounds its frame update covers.
   std::optional<committed_coverage> streaming_coverage() const override;
   /// Every fire's frame update since the corrections were last cleared,
