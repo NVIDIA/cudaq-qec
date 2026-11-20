@@ -304,10 +304,11 @@ void bindExtendedDem(nb::module_ &mod) {
       .def("has_repeating_phase", &dem_chunks_spec::has_repeating_phase,
            "True when any connection is a self-loop.")
       .def("is_linear_chain", &dem_chunks_spec::is_linear_chain,
-           "True when the connections form a linear chain, in which the\n"
-           "non-self connections form one simple path and at most one phase\n"
-           "repeats. A phase graph (False) validates, but phase_sequence()\n"
-           "and the other consumers that place phases by round refuse it.")
+           "True when the connections form a linear chain, in which each\n"
+           "connection is listed once, the non-self connections form one\n"
+           "simple path and at most one phase repeats. A phase graph (False)\n"
+           "validates, but phase_sequence() and the other consumers that\n"
+           "place phases by round refuse it.")
       .def("minimum_rounds", &dem_chunks_spec::minimum_rounds,
            "Shortest shot the connections admit, in rounds along the\n"
            "shortest path from the start phase to a terminal phase, visiting\n"

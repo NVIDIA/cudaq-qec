@@ -473,9 +473,10 @@ struct dem_chunks_spec {
   bool has_readout() const;
 
   /// @brief True when the connections form a linear chain, the form
-  /// phase_sequence() and repeating_phase() need: the non-self connections
-  /// form one simple path and at most one phase repeats. True without
-  /// connections. Reads the connections only; validate() checks the rest.
+  /// phase_sequence() and repeating_phase() need: each connection is listed
+  /// once, the non-self connections form one simple path and at most one
+  /// phase repeats. True without connections. Reads the connections only;
+  /// validate() checks the rest.
   bool is_linear_chain() const;
 
   /// Shortest shot the connections admit: the rounds on the shortest path
@@ -543,7 +544,7 @@ struct dem_chunks_spec {
   /// least one terminal phase, which leads to no other phase (it may repeat);
   /// and every phase reachable from the start and able to reach a terminal.
   /// The seam bands each connection joins agree in width where both have
-  /// rows.
+  /// rows, a self-loop's included even when num_rounds leaves it unused.
   ///
   /// Also checks that every connection names a phase with a spec, the phases
   /// agree on the observable count, observable_names has one unique name per

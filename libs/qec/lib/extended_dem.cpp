@@ -821,15 +821,24 @@ static std::string chain_violation(const phase_graph &graph) {
   return {};
 } // end - chain_violation()
 
-// Rejects a connection listed twice, which graph_of() would merge silently.
-static void reject_repeated_connection(const dem_chunks_spec &spec) {
+// The first connection @p spec lists a second time, or nullptr; graph_of()
+// would merge the two silently.
+static const phase_connection *
+repeated_connection(const dem_chunks_spec &spec) {
   std::set<std::pair<uint32_t, uint32_t>> listed;
 
   for (const auto &c : spec.connections)
     if (!listed.insert({c.from_phase.value, c.to_phase.value}).second)
-      throw std::invalid_argument("dem_chunks_spec: connection '" +
-                                  c.from_phase.name() + "' -> '" +
-                                  c.to_phase.name() + "' is listed twice");
+      return &c;
+  return nullptr;
+}
+
+// Rejects a connection listed twice.
+static void reject_repeated_connection(const dem_chunks_spec &spec) {
+  if (const auto *c = repeated_connection(spec))
+    throw std::invalid_argument("dem_chunks_spec: connection '" +
+                                c->from_phase.name() + "' -> '" +
+                                c->to_phase.name() + "' is listed twice");
 }
 
 // A shot's length places a chain's phases; only round tags, which are not
@@ -935,8 +944,11 @@ bool dem_chunks_spec::has_repeating_phase() const {
   return false;
 }
 
+// As require_linear_chain() decides, so it holds exactly when phase_sequence()
+// and repeating_phase() get past that check.
 bool dem_chunks_spec::is_linear_chain() const {
-  return chain_violation(graph_of(*this)).empty();
+  return !repeated_connection(*this) &&
+         chain_violation(graph_of(*this)).empty();
 }
 
 // Breadth-first from the start phases, so the first terminal phase taken off

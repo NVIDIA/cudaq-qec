@@ -2190,6 +2190,48 @@ TEST(DemChunkSpec, SeamWidthsAgreeAcrossEveryConnection) {
                          "seam width mismatch (4 vs 1)");
 }
 
+// A phase of one fault whose incoming and outgoing seam bands have
+// @p incoming and @p outgoing rows.
+dem_chunk_spec banded_phase(std::size_t incoming, std::size_t outgoing) {
+  dem_chunk_spec phase;
+  std::vector<std::int64_t> in_rows;
+  std::vector<std::int64_t> out_rows;
+
+  for (std::size_t i = 0; i < incoming; ++i)
+    in_rows.insert(in_rows.end(), {0, -1});
+  for (std::size_t i = 0; i < outgoing; ++i)
+    out_rows.insert(out_rows.end(), {0, -1});
+  phase.num_faults = 1;
+  phase.error_rates = {0.01};
+  phase.seam_specs = {{seam_name::prev_round, {in_rows, {}}},
+                      {seam_name::next_round, {out_rows, {}}}};
+  return phase;
+}
+
+// A self-loop joins its phase's outgoing seam band to its own incoming one.
+// validate() checks every connection a spec lists without reading
+// num_rounds, so the two agree in width even when num_rounds leaves the loop
+// unused.
+TEST(DemChunkSpec, SelfLoopSeamWidthsAgreeWhateverTheRoundCount) {
+  const auto init = phase_name::dem_init;
+  const auto bulk = phase_name::dem_bulk;
+  const auto final = phase_name::dem_final;
+  auto spec = rep5_spec(3);
+
+  rep5_phase(spec, init) = banded_phase(1, 1);
+  rep5_phase(spec, bulk) = banded_phase(1, 2);
+  rep5_phase(spec, final) = banded_phase(2, 2);
+  spec.connections = {{init, bulk}, {bulk, bulk}, {bulk, final}};
+  expect_rejected(spec, "dem_chunks_spec: connection 'bulk' -> 'bulk': "
+                        "seam width mismatch (2 vs 1)");
+  EXPECT_THROW(dem_chunks_from_spec(spec), std::invalid_argument);
+
+  // Without the self-loop the same phases are a three-round chain.
+  spec.connections = {{init, bulk}, {bulk, final}};
+  EXPECT_NO_THROW(spec.validate());
+  EXPECT_EQ(dem_chunks_from_spec(spec).size(), 3u);
+}
+
 // A readout belongs to a round a shot has once, so a phase a shot can visit
 // twice, on a self-loop or on a cycle, may not carry m2o_sparse.
 TEST(DemChunkSpec, ReadoutMapIsRefusedOnACycle) {
@@ -2288,7 +2330,8 @@ TEST(DemChunkSpec, ChainsKeepTheirErrors) {
   }
 }
 
-// A chain consumer names a connection listed twice as validate() does.
+// A chain consumer names a connection listed twice as validate() does, and
+// is_linear_chain() agrees that the spec is not a chain.
 TEST(DemChunkSpec, ChainConsumersRefuseARepeatedConnection) {
   const auto init = phase_name::dem_init;
   const auto bulk = phase_name::dem_bulk;
@@ -2297,6 +2340,7 @@ TEST(DemChunkSpec, ChainConsumersRefuseARepeatedConnection) {
       rep5_graph({{init, bulk}, {bulk, bulk}, {bulk, bulk}, {bulk, final}});
   auto edge =
       rep5_graph({{init, bulk}, {init, bulk}, {bulk, bulk}, {bulk, final}});
+  auto twice = rep5_graph({{init, final}, {init, final}});
   const auto expect = [](const std::function<void()> &call,
                          const std::string &text) {
     try {
@@ -2314,7 +2358,11 @@ TEST(DemChunkSpec, ChainConsumersRefuseARepeatedConnection) {
          "dem_chunks_spec: connection 'bulk' -> 'bulk' is listed twice");
   expect([&] { edge.phase_sequence(); },
          "dem_chunks_spec: connection 'init' -> 'bulk' is listed twice");
-}
+  expect([&] { twice.phase_sequence(); },
+         "dem_chunks_spec: connection 'init' -> 'final' is listed twice");
+  for (const auto *spec : {&loop, &edge, &twice})
+    EXPECT_FALSE(spec->is_linear_chain());
+} // end - TEST(DemChunkSpec, ChainConsumersRefuseARepeatedConnection)
 
 // detectors_of() counts a phase's incoming seam band in either chunk form.
 TEST(DemChunkSpec, DetectorsOfCountsTheIncomingSeamBand) {

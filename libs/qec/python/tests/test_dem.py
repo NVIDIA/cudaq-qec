@@ -1278,6 +1278,17 @@ def test_dem_chunks_spec_phase_graph_is_refused_by_chain_consumers():
         qec.dem_chunks_from_spec(spec)
 
 
+def test_dem_chunks_spec_repeated_connection_is_not_a_linear_chain():
+    spec = _rep5_spec()
+    spec.connections = [
+        _make_connection("init", "final"),
+        _make_connection("init", "final"),
+    ]
+    assert not spec.is_linear_chain()
+    with pytest.raises(ValueError, match="'init' -> 'final' is listed twice"):
+        spec.phase_sequence()
+
+
 # ---------------------------------------------------------------------------
 # Matrix interop: sparse_binary_matrix has no Python class, so the bindings
 # accept/return NumPy and scipy matrices on its behalf.

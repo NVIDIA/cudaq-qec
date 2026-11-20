@@ -2991,7 +2991,51 @@ TEST(DecoderDemChunksYAMLTest, PhaseGraphIsCheckedWhenParsed) {
           << e.what();
     }
   }
-}
+} // end - TEST(..., PhaseGraphIsCheckedWhenParsed)
+
+// A node's own dem_chunks is validated when parsed, also on a node without a
+// window_size, so a mistake in it is not left for the decoder build to find.
+TEST(DecoderDemChunksYAMLTest, NodeDemIsCheckedWhenParsedWithoutAWindow) {
+  namespace cfg = cudaq::qec::decoding::config;
+  const std::string once = "              - {from: init, to: final}\n";
+  const std::string text = "Invalid dem_chunks for decoder 0: task_graph node "
+                           "'lut': dem_chunks_spec: connection 'init' -> "
+                           "'final' is listed twice";
+  const std::string yaml = R"(
+decoders:
+  - id: 0
+    task_graph:
+      nodes:
+        - id: lut
+          type: single_error_lut
+          dem_chunks:
+            seam: {from: next_round, to: prev_round}
+            connections:
+)" + once + R"(            phases:
+              - name: init
+                spec:
+                  num_faults: 2
+                  H_sparse: [0, 1, -1]
+                  O_sparse: [0, -1]
+                  error_rates: [0.01, 0.01]
+              - name: final
+                spec:
+                  num_faults: 2
+                  H_sparse: [0, 1, -1]
+                  O_sparse: [0, -1]
+                  error_rates: [0.01, 0.01]
+)";
+  auto twice = yaml;
+
+  twice.insert(twice.find(once), once);
+  EXPECT_NO_THROW((void)cfg::multi_decoder_config::from_yaml_str(yaml));
+  try {
+    (void)cfg::multi_decoder_config::from_yaml_str(twice);
+    ADD_FAILURE() << "expected: " << text;
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+  }
+} // end - TEST(..., NodeDemIsCheckedWhenParsedWithoutAWindow)
 
 // ---------------------------------------------------------------------------
 // Window requests
