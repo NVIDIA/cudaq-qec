@@ -29,7 +29,8 @@ struct task_graph_edge {
   std::string to_node;                ///< node id, or "output"
   std::string to_input = "input";     ///< named input on to_node
   /// Consumer instance k reads producer instance k + index_offset, between
-  /// nodes that join their inputs by index. Zero or negative.
+  /// nodes that join their inputs by index. Zero or negative, and no less
+  /// than -2^31.
   std::int64_t index_offset = 0;
 
   bool operator==(const task_graph_edge &) const = default;

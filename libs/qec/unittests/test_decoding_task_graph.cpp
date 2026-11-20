@@ -18564,6 +18564,73 @@ private:
                          edge_value{logical_outcome{{1}, true}}};
 };
 
+// A 64 KiB window payload of type Payload, as a decode window sends or
+// ingest hands over.
+template <typename Payload>
+Payload large_window_payload();
+template <>
+window_send_payload large_window_payload<window_send_payload>() {
+  window_send_payload send;
+  send.values.resize(snapshot_relay_probe::frame_bytes);
+  return send;
+}
+template <>
+window_rows large_window_payload<window_rows>() {
+  window_rows rows;
+  rows.detectors.resize(snapshot_relay_probe::frame_bytes);
+  return rows;
+}
+
+// An indexed join whose `send` output is a 64 KiB window payload.
+template <typename Payload>
+class window_payload_join : public index_probe_node {
+public:
+  explicit window_payload_join(const std::string &id)
+      : index_probe_node(id, "join_send", 1 << 30, 0, -1, false,
+                         active_pipeline_probe),
+        payload_(large_window_payload<Payload>()) {}
+
+  // Send the window payload instead of a measurement frame.
+  std::optional<edge_value_type> output_type(std::size_t slot) const override {
+    if (slot == 1)
+      return edge_value_type::of<Payload>();
+    return index_probe_node::output_type(slot);
+  }
+  // Size the graph's buffers for it, as a window node does.
+  edge_value streaming_output_buffer(std::size_t slot) const override {
+    if (slot == 1)
+      return payload_;
+    return index_probe_node::streaming_output_buffer(slot);
+  }
+  // Publish it wherever the base node publishes its send value.
+  const edge_value *streaming_output(std::size_t slot) const override {
+    const auto *value = index_probe_node::streaming_output(slot);
+    return slot == 1 && value ? &payload_ : value;
+  }
+
+private:
+  edge_value payload_;
+};
+
+// An indexed sink with one input of any type, which it ignores.
+class payload_reader_join : public index_probe_node {
+public:
+  explicit payload_reader_join(const std::string &id)
+      : index_probe_node(id, "join", 1 << 30, 0, -1, false,
+                         active_pipeline_probe) {}
+
+  // One required input.
+  std::vector<std::string> inputs() const override { return {"a"}; }
+  // Take whatever the producer sends.
+  bool accepts_input_type(std::size_t slot, edge_value_type) const override {
+    return slot == 0;
+  }
+  // Fire without publishing.
+  bool fire(std::int64_t, const std::vector<const edge_value *> &) override {
+    return false;
+  }
+};
+
 static const bool snapshot_probe_kinds_registered = [] {
   const auto add = []<typename Probe>(std::string name) {
     task_graph_node_kind_spec kind;
@@ -18577,6 +18644,10 @@ static const bool snapshot_probe_kinds_registered = [] {
   add.operator()<large_send_join>("test_large_send_join");
   add.operator()<bit_reader_join>("test_bit_reader_join");
   add.operator()<alternating_burst_node>("test_alternating_burst");
+  add.operator()<window_payload_join<window_send_payload>>(
+      "test_window_send_join");
+  add.operator()<window_payload_join<window_rows>>("test_window_rows_join");
+  add.operator()<payload_reader_join>("test_payload_reader_join");
   return true;
 }();
 
@@ -18715,19 +18786,20 @@ TEST(DecodingTaskGraph, DeliverySnapshotsGrowAndSaySoOnce) {
 // against one budget: join-table entries for the instances its inputs lead
 // by, payloads included, and, in a feedback cycle, drop storage in every
 // record context. Past it the build names the node and its reach; a modest
-// reach still builds.
+// reach still builds. An offset past any shot is refused first, before any
+// arithmetic on it.
 TEST(DecodingTaskGraph, InputReachPastTheStorageBudgetIsRefused) {
   ASSERT_TRUE(index_probe_registered && snapshot_probe_kinds_registered);
-  // T feeds J's required input `reach` instances back, and J's own output
-  // feeds `b` one back when `feedback`, else T does at the same instance.
-  const auto join = [](std::int64_t reach, bool feedback) {
+  // T feeds J's required input at `offset`, and J's own output feeds `b` one
+  // back when `feedback`, else T does at the same instance.
+  const auto join = [](std::int64_t offset, bool feedback) {
     std::vector<task_graph_node_config> nodes;
     nodes.push_back(pipeline_node("A", "source"));
     nodes.push_back(index_node("T", "tag"));
     nodes.push_back(index_node("J", "join_send"));
     std::vector<task_graph_edge> edges{{"measurements", "output", "A", "input"},
                                        {"A", "output", "T", "input"},
-                                       {"T", "output", "J", "a", -reach},
+                                       {"T", "output", "J", "a", offset},
                                        {"J", "output", "output", "input"}};
     edges.push_back(feedback ? task_graph_edge{"J", "send", "J", "b", -1}
                              : task_graph_edge{"T", "output", "J", "b"});
@@ -18735,13 +18807,14 @@ TEST(DecodingTaskGraph, InputReachPastTheStorageBudgetIsRefused) {
         std::move(nodes), std::move(edges),
         {.async_streaming = true, .async_queue_capacity = 16});
   };
-  // K reads J's 64 KiB frame `reach` instances back.
-  const auto frames = [](std::int64_t reach) {
+  // K reads the 64 KiB payload of J, of node kind `sender`, `reach`
+  // instances back.
+  const auto payloads = [](const std::string &sender, std::int64_t reach) {
     std::vector<task_graph_node_config> nodes;
     nodes.push_back(pipeline_node("A", "source"));
     nodes.push_back(index_node("T", "tag"));
-    nodes.push_back(kind_node("J", "test_large_send_join"));
-    nodes.push_back(kind_node("K", "test_bit_reader_join"));
+    nodes.push_back(kind_node("J", sender));
+    nodes.push_back(kind_node("K", "test_payload_reader_join"));
     return decoding_task_graph::from_topology(
         std::move(nodes),
         {{"measurements", "output", "A", "input"},
@@ -18761,18 +18834,32 @@ TEST(DecodingTaskGraph, InputReachPastTheStorageBudgetIsRefused) {
           << e.what();
     }
   };
-  EXPECT_NO_THROW(join(1024, /*feedback=*/true));
-  EXPECT_NO_THROW(join(1024, /*feedback=*/false));
-  EXPECT_NO_THROW(frames(16));
+  const std::vector<std::string> senders{
+      "test_large_send_join", "test_window_send_join", "test_window_rows_join"};
+  EXPECT_NO_THROW(join(-1024, /*feedback=*/true));
+  EXPECT_NO_THROW(join(-1024, /*feedback=*/false));
+  for (const auto &sender : senders)
+    EXPECT_NO_THROW(payloads(sender, 16)) << sender;
   // Drop storage: 2^20 instances of absences in 16 record contexts.
-  refused([&] { join(std::int64_t{1} << 20, /*feedback=*/true); },
+  refused([&] { join(-(std::int64_t{1} << 20), /*feedback=*/true); },
           "node 'J' reaches 1048576 instances back through its inputs");
   // Join entries alone, without feedback: 2^30 of them.
-  refused([&] { join(std::int64_t{1} << 30, /*feedback=*/false); },
+  refused([&] { join(-(std::int64_t{1} << 30), /*feedback=*/false); },
           "node 'J' reaches 1073741824 instances back through its inputs");
-  // Payloads: 2^15 entries of a 64 KiB frame take 2 GiB.
-  refused([&] { frames(std::int64_t{1} << 15); },
-          "node 'K' reaches 32768 instances back through its inputs");
+  // Payloads: 2^15 entries of a 64 KiB measurement frame, window send or
+  // window's rows take 2 GiB.
+  for (const auto &sender : senders) {
+    SCOPED_TRACE(sender);
+    refused([&] { payloads(sender, std::int64_t{1} << 15); },
+            "node 'K' reaches 32768 instances back through its inputs");
+  }
+  // Past any shot: refused while the edges are compiled.
+  for (const auto offset :
+       {-(std::int64_t{1} << 31) - 1, std::numeric_limits<std::int64_t>::min()})
+    refused([&] { join(offset, /*feedback=*/false); },
+            "has index_offset " + std::to_string(offset) +
+                "; it must be zero or negative, and no less than "
+                "-2147483648");
 } // end - TEST(InputReachPastTheStorageBudgetIsRefused)
 
 // Keep record-ordered completions in publication order across a burst.

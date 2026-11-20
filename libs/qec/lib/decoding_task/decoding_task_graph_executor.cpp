@@ -10,6 +10,7 @@
 /// and every value the record moves between nodes. The scheduler lets several
 /// streaming records execute at once while each node still sees them in order.
 
+#include "decoding_task_decode_window_core.h"
 #include "decoding_task_graph_impl.h"
 #include "../hardware_guards.h"
 #include "cudaq/qec/logger.h"
@@ -2397,7 +2398,7 @@ private:
   static constexpr std::size_t reach_storage_budget = std::size_t{1} << 30;
 
   // One join-table entry's storage for node @p si: the entry and its input
-  // copies, with the payloads of the types make_wire_buffer() prototypes,
+  // copies, with the payloads of the built-in and window edge-value types,
   // its places in join_live and join_scan, two dropped-ring slots and, in a
   // feedback cycle, a flush-heap element.
   std::size_t join_entry_bytes(std::size_t si) const {
@@ -2413,6 +2414,10 @@ private:
         bytes += d->bits.size() * sizeof(float_t);
       else if (const auto *l = input.get_if<logical_outcome>())
         bytes += l->bits.size();
+      else if (const auto *rows = input.get_if<window_rows>())
+        bytes += rows->detectors.size();
+      else if (const auto *send = input.get_if<window_send_payload>())
+        bytes += send->values.size();
     }
     return bytes;
   } // end - join_entry_bytes()

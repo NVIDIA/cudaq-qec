@@ -430,11 +430,16 @@ void decoding_task_graph::impl::compile_wires() {
           "its consumer joins by index");
 
     validate_core_edge(nodes, e, fn, fs, tn, ts, output_type_at(fn, fs));
-    if (e.index_offset > 0)
+    // As in a YAML config: no shot holds an instance further back, and the
+    // scheduler's reach arithmetic on offsets stays within int64.
+    if (e.index_offset > 0 ||
+        e.index_offset < -experimental::window_round_limit)
       throw std::invalid_argument(
           "compile_wires: edge " + e.from_node + "." + e.from_output + " -> " +
           e.to_node + "." + e.to_input + " has index_offset " +
-          std::to_string(e.index_offset) + "; it must be zero or negative");
+          std::to_string(e.index_offset) +
+          "; it must be zero or negative, and no less than -" +
+          std::to_string(experimental::window_round_limit));
     if (e.index_offset != 0 && (tn < 0 || !nodes[tn]->indexed_join()))
       throw std::invalid_argument(
           "compile_wires: edge " + e.from_node + "." + e.from_output + " -> " +
