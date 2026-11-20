@@ -547,10 +547,51 @@ _CONNECTIONS = (
     "      connections:\n        - {from: init, to: bulk}\n"
     "        - {from: bulk, to: bulk}\n        - {from: bulk, to: final}\n")
 
+# _CHUNKS as a phase graph: bulk may hand over to a mid-circuit readout
+# phase and back any number of times, so it sets no num_rounds.
+_PHASE_GRAPH = _CHUNKS.replace(
+    _CONNECTIONS + "      num_rounds: 3\n",
+    _CONNECTIONS + "        - {from: bulk, to: readout}\n"
+    "        - {from: readout, to: bulk}\n").replace(
+        _CHUNK_PHASES, _CHUNK_PHASES + "        - name: readout\n"
+        "          spec: {num_faults: 2, H_sparse: [0, 1, -1], "
+        "O_sparse: [0, -1], error_rates: [0.02, 0.02]}\n")
+
 
 def _chunks(old, new):
     assert old in _CHUNKS, old
     return _CHUNKS.replace(old, new)
+
+
+def _graph(*edits):
+    """_PHASE_GRAPH with each (old, new) edit applied."""
+    text = _PHASE_GRAPH
+    for old, new in edits:
+        assert old in text, old
+        text = text.replace(old, new)
+    return text
+
+
+def _rows(count):
+    """H_sparse of ``count`` one-entry rows."""
+    return "[" + ", ".join(["0, -1"] * count) + "]"
+
+
+def _banded_bulk(incoming, outgoing):
+    """The bulk phase in the per-seam form, with ``incoming`` and
+    ``outgoing`` rows in its prev_round and next_round seam bands."""
+    return ("- name: bulk\n          spec: {num_faults: 2, seam_specs: ["
+            f"{{name: prev_round, spec: {{H_sparse: {_rows(incoming)}}}}}, "
+            f"{{name: next_round, spec: {{H_sparse: {_rows(outgoing)}}}}}], "
+            "O_sparse: [0, -1], error_rates: [0.02, 0.02]}")
+
+
+_BULK = ("- name: bulk\n          spec: {num_faults: 2, H_sparse: [0, 1, -1], "
+         "O_sparse: [0, -1], error_rates: [0.02, 0.02]}")
+# final's H_sparse, one row as in _CHUNKS and two rows.
+_FINAL_H = "- name: final\n          spec: {num_faults: 2, H_sparse: [0, 1, -1]"
+_FINAL_H2 = ("- name: final\n          spec: {num_faults: 2, H_sparse: " +
+             _rows(2))
 
 
 def _sm(rows):
@@ -737,6 +778,8 @@ def _round6_cases():
         # dem_chunks form
         "chunks baseline":
             _CHUNKS,
+        "chunks phase graph":
+            _PHASE_GRAPH,
         "chunks num_rounds 1":
             _chunks("num_rounds: 3", "num_rounds: 1"),
         "chunks num_rounds absent":
@@ -811,6 +854,32 @@ def _round6_cases():
                               "error_rates: [0.02, 0.02, 0.02]")),
         "chunks connection to unknown phase":
             _chunks("- {from: bulk, to: final}", "- {from: bulk, to: fnal}"),
+        # dem_chunks connection shape and seam widths
+        "chunks connection listed twice":
+            _chunks("        - {from: bulk, to: final}\n",
+                    "        - {from: bulk, to: final}\n" * 2),
+        "chunks self-loop listed twice":
+            _chunks("        - {from: bulk, to: bulk}\n",
+                    "        - {from: bulk, to: bulk}\n" * 2),
+        "chunks two start phases":
+            _chunks("- {from: init, to: bulk}", "- {from: init, to: final}"),
+        "chunks no start phase":
+            _chunks("- {from: bulk, to: bulk}", "- {from: bulk, to: init}"),
+        "chunks no terminal phase":
+            _chunks("- {from: bulk, to: bulk}", "- {from: final, to: bulk}"),
+        "chunks unreachable phase":
+            _graph(("- {from: init, to: bulk}", "- {from: init, to: final}"),
+                   ("        - {from: bulk, to: final}\n", "")),
+        "chunks phase that cannot end":
+            _graph(("- {from: bulk, to: final}", "- {from: init, to: final}")),
+        "chunks seam width mismatch":
+            _chunks(_FINAL_H, _FINAL_H2),
+        "chunks per-seam bands agree":
+            _chunks(_BULK, _banded_bulk(1, 1)),
+        "chunks per-seam placeholder band":
+            _chunks(_BULK, _banded_bulk(0, 1)),
+        "chunks self-loop seam width mismatch":
+            _chunks(_BULK, _banded_bulk(1, 2)).replace(_FINAL_H, _FINAL_H2),
         "chunks seam bad key":
             _chunks("seam: {from: next_round, to: prev_round}",
                     "seam: {frm: next_round, to: prev_round}"),
@@ -1386,6 +1455,13 @@ def test_validator_agrees_with_server_parser(tool, live_validator, label, text):
     assert (not problems) == _server_accepts(text), (
         f"{label}: validator says {'OK' if not problems else problems}, "
         f"server says {'OK' if _server_accepts(text) else 'reject'}")
+
+
+def test_phase_graph_passes_the_schema_and_the_parser(tool, live_validator):
+    validator, known = live_validator
+    assert "readout" in _PHASE_GRAPH and "num_rounds" not in _PHASE_GRAPH
+    assert not tool.validate_text(_PHASE_GRAPH, validator, False, known)
+    assert _server_accepts(_PHASE_GRAPH)
 
 
 def test_corpus_has_both_outcomes(live_validator, tool):

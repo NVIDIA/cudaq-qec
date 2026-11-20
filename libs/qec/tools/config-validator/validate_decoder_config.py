@@ -31,10 +31,12 @@ matrices, ``dem_chunks``, or ``stim_dem_path``), the parameter names of each
 decoder type, and the cross-field rules the server applies while parsing
 (required fields per form, ``H_sparse``/``D_sparse`` row counts against
 ``syndrome_size``, matrix entries below ``block_size``, fields a form
-derives and therefore forbids). What cannot be checked here: the per-decoder
-``validate`` hooks, DEM-chunk seam consistency, and anything that needs the
-constructed decoder. Those run only when the server loads the configuration,
-so a file that passes here may still be rejected at load.
+derives and therefore forbids, and the ``dem_chunks`` connection graph and
+the seam widths each connection joins). What cannot be checked here: the
+per-decoder ``validate`` hooks, the DEM-chunk seam checks made when the
+chunks are built, and anything that needs the constructed decoder. Those
+run only when the server loads the configuration, so a file that passes
+here may still be rejected at load.
 
 Task-graph configurations (a decoder entry with a ``task_graph`` block) are
 reported as invalid unless ``--allow-task-graph`` is given.
@@ -442,7 +444,8 @@ def unknown_type_locations(doc, known_types):
 # decoder entry, so they are part of parsing and the offline validator applies
 # them too. They are a transcription of that code and use its wording. Only
 # the per-decoder validate hooks and the checks that need the constructed
-# decoder (D row count against a Stim model, DEM chunk seams) stay server-only.
+# decoder (D row count against a Stim model, seams of built DEM chunks) stay
+# server-only.
 
 
 def _ints(value):
@@ -580,7 +583,92 @@ def dem_chunks_checks(chunks, who, where):
                 return fail(f"Invalid dem_chunks for {who}: dem_chunks_spec: "
                             f"a connection names phase '{conn[key]}', which "
                             "has no spec")
+    message = _connection_problem(chunks["seam"], connections, phases)
+    if message:
+        return fail(f"Invalid dem_chunks for {who}: dem_chunks_spec: {message}")
     return problems
+
+
+def _reachable(seeds, adjacent):
+    """The phases reachable from ``seeds`` along ``adjacent``."""
+    seen = set(seeds)
+    queue = list(seeds)
+    while queue:
+        for name in adjacent[queue.pop()]:
+            if name not in seen:
+                seen.add(name)
+                queue.append(name)
+    return seen
+
+
+def _seam_rows(spec, seam):
+    """seam_rows() in extended_dem.cpp: the rows a phase puts in seam
+    ``seam``. Shorthand H_sparse rows fill every seam, else the seam's own
+    rows count; 0 without either."""
+    entries = spec.get("seam_specs")
+    if not isinstance(entries, list) or not entries:
+        return _ints(spec.get("H_sparse")).count(-1)
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("name") == seam:
+            inner = entry.get("spec")
+            if isinstance(inner, dict):
+                return _ints(inner.get("H_sparse")).count(-1)
+    return 0
+
+
+def _connection_problem(seam, connections, phases):
+    """validate_connections() in extended_dem.cpp, on connections whose
+    phases all have specs: the connection shape, read from the connections
+    directly, then the seam bands each connection joins. Returns the
+    message of the first violation, or None."""
+    order = []  # phases by first mention, as the server indexes them
+    succ, pred = {}, {}  # non-self successors and predecessors
+    listed = set()
+    for conn in connections:
+        edge = (conn["from"], conn["to"])
+        if edge in listed:
+            return f"connection '{edge[0]}' -> '{edge[1]}' is listed twice"
+        listed.add(edge)
+        for name in edge:
+            if name not in succ:
+                order.append(name)
+                succ[name], pred[name] = [], []
+        if edge[0] != edge[1]:
+            succ[edge[0]].append(edge[1])
+            pred[edge[1]].append(edge[0])
+
+    starts = [name for name in order if not pred[name]]
+    terminals = [name for name in order if not succ[name]]
+    if not starts:
+        return (f"no start phase; every phase, '{order[0]}' included, is "
+                "entered from another phase")
+    if len(starts) > 1:
+        return (f"phases '{starts[0]}' and '{starts[1]}' are both start "
+                "phases (entered from no other phase); a shot has one")
+    if not terminals:
+        return (f"no terminal phase; every phase, '{order[0]}' included, "
+                "leads to another phase")
+    reached = _reachable(starts, succ)
+    ending = _reachable(terminals, pred)
+    for name in order:
+        if name not in reached:
+            return (f"phase '{name}' is not reachable from start phase "
+                    f"'{starts[0]}'")
+    for name in order:
+        if name not in ending:
+            return (f"phase '{name}' cannot reach a terminal phase, so a "
+                    "shot that enters it never ends")
+
+    specs = {}
+    for phase in phases:
+        specs.setdefault(phase["name"], phase["spec"])
+    for conn in connections:
+        width_from = _seam_rows(specs[conn["from"]], seam["from"])
+        width_to = _seam_rows(specs[conn["to"]], seam["to"])
+        if width_from and width_to and width_from != width_to:
+            return (f"connection '{conn['from']}' -> '{conn['to']}': seam "
+                    f"width mismatch ({width_from} vs {width_to})")
+    return None
 
 
 def syndrome_mapping_checks(rows, where):

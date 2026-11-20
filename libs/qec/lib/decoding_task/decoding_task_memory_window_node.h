@@ -97,6 +97,7 @@ private:
   std::vector<std::size_t> prefix_widths_;
   std::size_t bulk_width_ = 0, final_width_ = 0;
   std::size_t tail_lookahead_ = 0;
+  std::uint64_t minimum_rounds_ = 0; // spec_->minimum_rounds(), read once
   std::size_t partial_bytes_ = 0;
   std::uint64_t rounds_ = 0, committed_ = 0, next_fire_ = 0;
   bool terminal_complete_ = false, flushed_ = false;

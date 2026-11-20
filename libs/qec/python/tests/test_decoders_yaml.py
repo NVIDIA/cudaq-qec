@@ -350,6 +350,35 @@ def test_chunk_form_parses_with_no_flat_matrices():
     assert len(config.H_sparse) == 0
 
 
+def phase_graph_yaml():
+    """chunk_form_yaml as a phase graph: bulk may hand over to a mid-circuit
+    readout phase and back any number of times, so it sets no num_rounds."""
+    yaml = chunk_form_yaml(None).replace(
+        "    - {from: bulk, to: final}\n", "    - {from: bulk, to: readout}\n"
+        "    - {from: readout, to: bulk}\n"
+        "    - {from: bulk, to: final}\n")
+    return yaml + f"""    - name: readout
+      spec:
+        num_faults: 9
+        H_sparse: {BULK_H_SPARSE}
+        O_sparse: [ 0, -1 ]
+        error_rates: {BULK_RATES}
+"""
+
+
+def test_phase_graph_round_trips_and_is_refused_when_expanded():
+    config = qec.decoder_config.from_yaml_str(phase_graph_yaml())
+    emitted = config.to_yaml_str(200)
+    round_tripped = qec.decoder_config.from_yaml_str(emitted)
+
+    assert len(config.dem_chunks.connections) == 5
+    assert not config.dem_chunks.is_linear_chain()
+    assert config.dem_chunks.minimum_rounds() == 3
+    assert round_tripped.to_yaml_str(200) == emitted
+    with pytest.raises(RuntimeError, match=r"a phase graph \(phase 'bulk'"):
+        qec.qecrt.config.expand_dem_chunks(config)
+
+
 def test_expand_dem_chunks_fills_the_flat_fields():
     config = qec.decoder_config.from_yaml_str(chunk_form_yaml(5))
     closed = qec.qecrt.config.expand_dem_chunks(config)

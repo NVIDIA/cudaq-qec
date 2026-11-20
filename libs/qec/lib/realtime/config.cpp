@@ -363,6 +363,19 @@ static void validate_ensemble_node(
     }
 }
 
+// Runs dem_chunks_spec::validate() on @p dem and rethrows its error as a
+// std::runtime_error, the type of every configuration error out of parsing,
+// naming @p where: the decoder, node or entry the model belongs to.
+static void validate_dem_chunks(const cudaq::qec::dem_chunks_spec &dem,
+                                const std::string &where) {
+  try {
+    dem.validate();
+  } catch (const std::invalid_argument &e) {
+    throw std::runtime_error("Invalid dem_chunks for " + where + ": " +
+                             e.what());
+  }
+}
+
 static void validate_task_graph(const decoder_config &config) {
   const auto &tg = *config.task_graph;
   const std::string who = "decoder " + std::to_string(config.id);
@@ -557,6 +570,10 @@ static void validate_task_graph(const decoder_config &config) {
       validate_custom_args(*schema, node.node_params.map(),
                            where + " parameters");
 
+    // A node's own DEM is validated here, whatever its parameters; the
+    // entry-level one after parsing (validate_parsed_dem_chunks()).
+    if (node.dem_chunks.has_value())
+      validate_dem_chunks(*node.dem_chunks, where);
     if (!node.node_params.map().contains("window_size"))
       continue;
     const auto window_size =
@@ -565,6 +582,10 @@ static void validate_task_graph(const decoder_config &config) {
         node.dem_chunks.has_value() ? node.dem_chunks : config.dem_chunks;
     if (!dem.has_value())
       continue;
+    // minimum_rounds() below throws on connections validate() rejects, so an
+    // entry-level DEM is validated first, for the clearer error.
+    if (!node.dem_chunks.has_value())
+      validate_dem_chunks(*dem, who);
     // window_size is the round count the phases expand to, so it has to name a
     // chain the connections can actually describe.
     if (dem->num_rounds.has_value() && window_size > *dem->num_rounds)
@@ -802,14 +823,8 @@ void cudaq::qec::decoding::config::validate_data_artifacts(
         throw std::runtime_error(where + ": " + e.what());
       }
     }
-    if (entry.dem_chunks) {
-      try {
-        entry.dem_chunks->validate();
-      } catch (const std::invalid_argument &e) {
-        throw std::runtime_error("Invalid dem_chunks for " + where + ": " +
-                                 e.what());
-      }
-    }
+    if (entry.dem_chunks)
+      validate_dem_chunks(*entry.dem_chunks, where);
   } // end - for(entry)
 } // end - validate_data_artifacts()
 
@@ -2471,19 +2486,13 @@ void cudaq::qec::decoding::config::syndrome_mapping_config::validate() const {
 
 namespace {
 
-// Run dem_chunks_spec's cross-phase checks after a successful parse, and
-// present failures as std::runtime_error so every configuration error out of
-// from_yaml_str() has the one type callers already catch.
+// Run dem_chunks_spec's cross-phase checks on the entry-level DEM after a
+// successful parse; validate_task_graph() checks each node's own.
 void validate_parsed_dem_chunks(
     const cudaq::qec::decoding::config::decoder_config &config) {
-  if (!config.dem_chunks)
-    return;
-  try {
-    config.dem_chunks->validate();
-  } catch (const std::invalid_argument &e) {
-    throw std::runtime_error("Invalid dem_chunks for decoder " +
-                             std::to_string(config.id) + ": " + e.what());
-  }
+  if (config.dem_chunks)
+    cudaq::qec::decoding::config::validate_dem_chunks(
+        *config.dem_chunks, "decoder " + std::to_string(config.id));
 }
 
 } // namespace
