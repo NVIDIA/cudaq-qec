@@ -402,9 +402,10 @@ struct decoding_task_graph::impl::record_scheduler {
   // Index and topological node order put a producer before its consumer.
   using feedback_join = std::tuple<std::int64_t, std::size_t, std::size_t>;
 
-  // The runtime lock. Releasing it sends the wakes notify_workers() queued
-  // under it, so a woken worker never blocks on its waker's lock. A wait on
-  // a condition variable releases it without them: send them first.
+  // The runtime lock. Releasing it sends the change a worker owes and the
+  // wakes notify_workers() queued under it, so a woken worker never blocks on
+  // its waker's lock. A wait on a condition variable releases it without
+  // them: settle them first.
   class runtime_lock : public std::unique_lock<std::mutex> {
   public:
     runtime_lock() = default;
@@ -431,6 +432,7 @@ struct decoding_task_graph::impl::record_scheduler {
     void unlock() {
       if (!owns_lock())
         return;
+      owner_->settle_owed_change_locked();
       const auto wakes = owner_->take_wakes_locked();
       std::unique_lock<std::mutex>::unlock();
       owner_->send_wakes(wakes);
@@ -2246,6 +2248,8 @@ struct decoding_task_graph::impl::record_scheduler {
     bool searching = false;
     // The lock the last event's final scheduler step still holds, if any.
     runtime_lock carried;
+    // This thread's changes wait for its lock's release or its next pick.
+    const deferring_scope deferring(*this);
     try {
       detail_affinity::CudaDeviceGuard device_guard(cuda_device_id);
       while (true) {
@@ -2266,6 +2270,7 @@ struct decoding_task_graph::impl::record_scheduler {
               searching = false;
             }
             if (stop) {
+              owes_change = false; // the stop woke every worker
               if (running == 0)
                 return;
               wake.wait(lock);
@@ -2282,6 +2287,7 @@ struct decoding_task_graph::impl::record_scheduler {
               if (!has_waiting_workers)
                 throw std::logic_error(
                     "decoding_task_graph: event queue stalled");
+              owes_change = false; // nothing is left to run
               if (!spin_for_ready(lock, searching)) {
                 ++parked;
                 send_wakes(take_wakes_locked());
@@ -2302,10 +2308,13 @@ struct decoding_task_graph::impl::record_scheduler {
           claim_locked(*c, selected);
           event = selected.event;
           // Spinners skip changes a search covered, and a parked worker wakes
-          // only on demand: hand another runnable event to an idle worker. A
-          // finisher's pick needs none, as its finish published a change.
-          if (spin_while_active && after_idle && any_runnable_locked())
-            notify_workers();
+          // only on demand: hand another runnable event to an idle worker.
+          // A finisher's own changes waited for this pick, which may have
+          // taken the only event they made runnable.
+          const bool owed = std::exchange(owes_change, false);
+          if (spin_while_active && (after_idle || owed) &&
+              any_runnable_locked())
+            send_change_locked();
         }
 
         active_context = c;
@@ -2382,10 +2391,29 @@ struct decoding_task_graph::impl::record_scheduler {
   // Publish a scheduler change; called under the runtime lock. In an
   // asynchronous session a spinner searches it, or, when none spins, one
   // parked worker wakes once the lock is released; a stop, a session's end or
-  // a synchronous run wakes every worker at once.
+  // a synchronous run wakes every worker at once. A worker's own change waits
+  // until it releases the lock or, if it carries the lock to its next pick,
+  // until that pick (see execute_loop()), so an idle worker is not sent to
+  // search for an event the publisher takes itself.
   void notify_workers() {
     if (!has_waiting_workers)
       return;
+    if (deferring_worker == this && spin_while_active && !stop &&
+        !session_done) {
+      owes_change = true;
+      return;
+    }
+    send_change_locked();
+  } // end - notify_workers()
+
+  // Send the change a worker owes, if any, before it releases the lock.
+  void settle_owed_change_locked() {
+    if (std::exchange(owes_change, false))
+      send_change_locked();
+  }
+
+  // notify_workers(), now.
+  void send_change_locked() {
     idle_gate.publish();
     if (stop || session_done || !spin_while_active) {
       park.notify_all();
@@ -2394,7 +2422,7 @@ struct decoding_task_graph::impl::record_scheduler {
     }
     if (spinning == 0 && parked > wakes_due)
       ++wakes_due;
-  } // end - notify_workers()
+  } // end - send_change_locked()
 
   // The parked-worker wakes queued so far, now owed by the caller.
   std::size_t take_wakes_locked() {
@@ -3216,6 +3244,18 @@ public:
   std::size_t spinning = 0;
   std::size_t parked = 0;
   std::size_t wakes_due = 0;
+  // A change the lock holder published and has not sent (see
+  // notify_workers()); false whenever the lock is free.
+  bool owes_change = false;
+  // The scheduler whose worker loop runs on this thread, whose changes it
+  // defers; set for the loop's life.
+  inline static thread_local record_scheduler *deferring_worker = nullptr;
+  struct deferring_scope {
+    explicit deferring_scope(record_scheduler &owner) {
+      deferring_worker = &owner;
+    }
+    ~deferring_scope() { deferring_worker = nullptr; }
+  };
   // Idle workers spin on this; it keeps its state on cache lines of its own,
   // apart from the mutex every worker takes and the state written under it.
   detail::idle_search_gate idle_gate;
