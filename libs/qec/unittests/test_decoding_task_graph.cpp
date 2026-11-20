@@ -16803,11 +16803,13 @@ TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires) {
   } // end - for(shape)
 } // end - TEST(DecodingTaskGraph, RoundsAdmittedTogetherWaitForTheirFires)
 
-// Hold an indexed feedback fire during a coalesced record while an
-// independent detached fire occupies the same record's event store. A cycle
-// of two nodes keeps its fires attached, so its held lap stops the record's
-// ingest. A node that feeds only itself detaches its fires, so ingest goes
-// on past the held lap. Either way the store holds and every instance fires.
+// Hold an independent fire, K's, and a feedback lap during a coalesced
+// record. A cycle of two nodes keeps its fires attached, so its held lap
+// stops the record's ingest. A node that feeds only itself detaches its laps,
+// so ingest goes on until K's later fires, queued behind the held one, fill
+// the record's half of the store. Released then, the self-loop's later laps
+// cannot detach and must still drain every round ingested. Either way every
+// instance fires.
 static void expect_feedback_with_detached_work(bool multi_node) {
   ASSERT_TRUE(index_probe_registered);
   // Several times the event store, and within A's chunk limit.
@@ -16883,14 +16885,26 @@ static void expect_feedback_with_detached_work(bool multi_node) {
     first_fire.release();
     detached_fire.wait_for_arrivals();
     feedback_fire.wait_for_arrivals();
-    const auto held_count = static_cast<std::size_t>(feedback_held + 1);
-    if (multi_node)
+    if (multi_node) {
+      const auto held_count = static_cast<std::size_t>(feedback_held + 1);
       EXPECT_EQ(probe->count("A"), held_count);
-    else
-      wait_for_scheduler_records(*probe, "A", held_count + 1);
-    feedback_fire.release();
-    // Observe a later feedback fire while the detached fire is still held.
-    wait_for_scheduler_records(*probe, "J", held_count + 1);
+      feedback_fire.release();
+      // Observe a later feedback fire while the detached fire is still held.
+      wait_for_scheduler_records(*probe, "J", held_count + 1);
+    } else {
+      // Ingest stops once K's queued fires fill the budget, short of the
+      // shot's end; until then each round arrives within the default wait.
+      std::size_t stopped = probe->count("A");
+      while (probe->wait_for_count("A", stopped + 1))
+        stopped = probe->count("A");
+      // Past the held lap, which was detached, and short of the shot's end.
+      EXPECT_GT(stopped, static_cast<std::size_t>(feedback_held + 1));
+      EXPECT_LT(stopped, rounds - 1);
+      // The self-loop's later laps cannot detach, yet drain every round.
+      feedback_fire.release();
+      wait_for_scheduler_records(*probe, "J", stopped);
+      EXPECT_EQ(probe->count("A"), stopped);
+    }
     detached_fire.release();
     graph->enqueue_syndrome(&records.back(), 1, round_type::FINAL);
   } catch (const std::exception &e) {
