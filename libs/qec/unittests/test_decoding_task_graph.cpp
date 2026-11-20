@@ -18451,6 +18451,266 @@ TEST(DecodingTaskGraph, SerialRelayPreallocatesOneSnapshotBatchPerRecord) {
   EXPECT_EQ(probe->records("C.value"), expected);
 } // end - TEST(SerialRelayPreallocatesOneSnapshotBatchPerRecord)
 
+// An indexed join whose `send` output is a 64 KiB measurement frame.
+class large_send_join : public index_probe_node {
+public:
+  explicit large_send_join(const std::string &id)
+      : index_probe_node(id, "join_send", 1 << 30, 0, -1, false,
+                         active_pipeline_probe) {}
+
+  // Copy the join's bit into the frame.
+  bool fire(std::int64_t k,
+            const std::vector<const edge_value *> &inputs) override {
+    const bool published = index_probe_node::fire(k, inputs);
+    frame_.get<measurement_results>().bits[0] =
+        index_probe_node::streaming_output(1)
+            ->get<measurement_results>()
+            .bits[0];
+    return published;
+  }
+
+  // Declare the frame size so the graph can preallocate its snapshots.
+  std::optional<std::size_t>
+  output_value_size(std::size_t slot) const override {
+    if (slot == 1)
+      return snapshot_relay_probe::frame_bytes;
+    return index_probe_node::output_value_size(slot);
+  }
+
+  // Publish the frame wherever the base node publishes its send value.
+  const edge_value *streaming_output(std::size_t slot) const override {
+    const auto *value = index_probe_node::streaming_output(slot);
+    return slot == 1 && value ? &frame_ : value;
+  }
+
+private:
+  edge_value frame_{measurement_results{
+      std::vector<uint8_t>(snapshot_relay_probe::frame_bytes)}};
+};
+
+// An indexed sink with one input that logs instance k's bit b as 2k + b
+// under "<id>.kv", since its fires can run in any order.
+class bit_reader_join : public index_probe_node {
+public:
+  explicit bit_reader_join(const std::string &id)
+      : index_probe_node(id, "join", 1 << 30, 0, -1, false,
+                         active_pipeline_probe),
+        id_(id) {}
+
+  // One required input.
+  std::vector<std::string> inputs() const override { return {"a"}; }
+
+  // Log the bit of either payload type without publishing.
+  bool fire(std::int64_t k,
+            const std::vector<const edge_value *> &inputs) override {
+    const auto *frame = inputs[0]->get_if<measurement_results>();
+    const auto bit =
+        frame ? frame->bits[0] : inputs[0]->get<logical_outcome>().bits[0];
+    active_pipeline_probe->log(id_ + ".kv",
+                               2 * static_cast<std::size_t>(k) + bit);
+    return false;
+  }
+
+private:
+  std::string id_;
+};
+
+// Publish `burst` consecutive indices from each delivery, with values that
+// alternate in pairs of indices, so a delivery reading another one's
+// snapshot shows.
+class alternating_burst_node : public index_probe_node {
+public:
+  // Several times a single-copy join's initial snapshot pool, and few
+  // enough that the burst's deliveries are not held back to replay one
+  // subtree at a time.
+  static constexpr std::int64_t burst = 8;
+
+  explicit alternating_burst_node(const std::string &id)
+      : index_probe_node(id, "tag", 1 << 30, 0, -1, false,
+                         active_pipeline_probe) {}
+
+  // Start the next run of indices.
+  bool enqueue_edge_value(const edge_value &, std::size_t) override {
+    end_ = next_ + burst;
+    return true;
+  }
+  // Size delivery storage for the whole burst.
+  std::size_t max_publications_per_delivery() const override { return burst; }
+  // Number the publications across the shot.
+  std::optional<std::int64_t> published_index(std::size_t) const override {
+    return next_;
+  }
+  // Advance to the next index until the run ends.
+  bool publish_next() override { return ++next_ < end_; }
+  // Index k carries the bit floor(k / 2) mod 2.
+  const edge_value *streaming_output(std::size_t slot) const override {
+    return slot == 0 ? &bits_[(next_ >> 1) & 1] : nullptr;
+  }
+  // Each shot numbers from 0.
+  bool flush() override {
+    next_ = end_ = 0;
+    return false;
+  }
+  // Forget the shot's numbering with the rest of the node's state.
+  void reset_streaming_state() override {
+    index_probe_node::reset_streaming_state();
+    next_ = end_ = 0;
+  }
+
+private:
+  std::int64_t next_ = 0;
+  std::int64_t end_ = 0;
+  edge_value bits_[2] = {edge_value{logical_outcome{{0}, true}},
+                         edge_value{logical_outcome{{1}, true}}};
+};
+
+static const bool snapshot_probe_kinds_registered = [] {
+  const auto add = []<typename Probe>(std::string name) {
+    task_graph_node_kind_spec kind;
+    kind.name = std::move(name);
+    kind.requires_decoder = false;
+    kind.requires_dem = false;
+    register_node_kind(std::move(kind), {}, [](node_build_context &ctx) {
+      return std::make_unique<Probe>(ctx.id);
+    });
+  };
+  add.operator()<large_send_join>("test_large_send_join");
+  add.operator()<bit_reader_join>("test_bit_reader_join");
+  add.operator()<alternating_burst_node>("test_alternating_burst");
+  return true;
+}();
+
+// A node config of one of the kinds registered above, with one copy.
+static task_graph_node_config kind_node(std::string id, std::string kind) {
+  task_graph_node_config config;
+  config.id = std::move(id);
+  config.kind = std::move(kind);
+  config.max_in_flight = 1;
+  return config;
+}
+
+// The sorted "<id>.kv" entries for instances 0..count-1 of a join that
+// reads T[k] at `a` and T[k - 1] at `b`, where T[k] is bit_of(k).
+template <typename bit_function>
+static std::vector<std::size_t> expected_pair_bits(std::size_t count,
+                                                   bit_function bit_of) {
+  std::vector<std::size_t> expected(count);
+  for (std::size_t k = 0; k < count; ++k)
+    expected[k] = 2 * k + (k == 0 ? bit_of(0) : bit_of(k) ^ bit_of(k - 1));
+  return expected;
+}
+
+// An indexed producer's snapshots are sized for the deliveries it can have
+// in flight, not for the whole event store of every record context.
+TEST(DecodingTaskGraph, IndexedProducerPreallocatesFewSnapshotsPerRecord) {
+  if (QEC_TEST_SANITIZED)
+    GTEST_SKIP() << "the sanitizer replaces the counting operator new";
+  ASSERT_TRUE(index_probe_registered && snapshot_probe_kinds_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(index_node("T", "tag"));
+  nodes.push_back(kind_node("J", "test_large_send_join"));
+  nodes.push_back(kind_node("K", "test_bit_reader_join"));
+  std::unique_ptr<decoding_task_graph> graph;
+  std::size_t bytes = 0;
+  allocation_counter::during(
+      [&] {
+        graph = decoding_task_graph::from_topology(
+            std::move(nodes),
+            {{"measurements", "output", "A", "input"},
+             {"A", "output", "T", "input"},
+             {"T", "output", "J", "a"},
+             {"T", "output", "J", "b", /*index_offset=*/-1},
+             {"J", "send", "K", "a"},
+             {"A", "output", "output", "input"}},
+            {.async_streaming = true, .async_num_workers = 2});
+      },
+      &bytes);
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  // Two frame snapshots per record context and K's join table, sized by the
+  // record contexts too, take about 5 MB. An event store's worth of
+  // snapshots per record took about 150 MB.
+  EXPECT_LT(bytes, 8 * 1024 * 1024u);
+  const auto rounds = pipeline_records(40);
+  for (std::size_t i = 0; i + 1 < rounds.size(); ++i)
+    graph->enqueue_syndrome(&rounds[i], 1, round_type::BULK);
+  graph->enqueue_syndrome(&rounds.back(), 1, round_type::FINAL);
+  EXPECT_EQ(graph->streaming_result().status,
+            task_graph_streaming_status::complete)
+      << graph->streaming_result().error;
+  auto read = probe->records("K.kv");
+  std::sort(read.begin(), read.end());
+  EXPECT_EQ(read, expected_pair_bits(rounds.size(), [&](std::size_t k) {
+              return std::size_t{rounds[k]};
+            }));
+} // end - TEST(IndexedProducerPreallocatesFewSnapshotsPerRecord)
+
+// T's burst lets J fire many times in one record. With one worker, which
+// takes events in the order they were queued, every fire runs before K's
+// deliveries do, so J's wire to K needs more snapshots than its pool starts
+// with. The pool grows rather than fail, every delivery reads its own
+// value, and J's FINAL flush says so once.
+TEST(DecodingTaskGraph, DeliverySnapshotsGrowAndSaySoOnce) {
+  namespace logging = cudaq::qec::detail;
+  ASSERT_TRUE(index_probe_registered && snapshot_probe_kinds_registered);
+  auto probe = std::make_shared<pipeline_probe>();
+  active_pipeline_probe = probe;
+  std::vector<task_graph_node_config> nodes;
+  nodes.push_back(pipeline_node("A", "source"));
+  nodes.push_back(kind_node("T", "test_alternating_burst"));
+  nodes.push_back(index_node("J", "join"));
+  nodes.push_back(kind_node("K", "test_bit_reader_join"));
+  auto graph = decoding_task_graph::from_topology(
+      std::move(nodes),
+      {{"measurements", "output", "A", "input"},
+       {"A", "output", "T", "input"},
+       {"T", "output", "J", "a"},
+       {"T", "output", "J", "b", /*index_offset=*/-1},
+       {"J", "output", "K", "a"},
+       {"A", "output", "output", "input"}},
+      {.async_streaming = true, .async_num_workers = 1});
+  ASSERT_TRUE(graph->supports_streaming())
+      << graph->streaming_incompatibility_reason();
+  std::mutex mutex;
+  std::vector<std::string> warnings;
+  logging::forwarder_config config;
+  config.callback = [&](logging::forwarded_log_record &&record) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (record.level == logging::log_level::warn &&
+        record.message.find("snapshots") != std::string::npos)
+      warnings.push_back(record.message);
+  };
+  logging::set_forwarder(std::move(config));
+  // Two records of one burst each per shot.
+  constexpr std::size_t instances = 2 * alternating_burst_node::burst;
+  const uint8_t bit = 0;
+  std::vector<std::size_t> expected;
+  for (int shot = 0; shot < 2; ++shot) {
+    SCOPED_TRACE(shot);
+    graph->reset_decoder();
+    graph->enqueue_syndrome(&bit, 1, round_type::BULK);
+    graph->enqueue_syndrome(&bit, 1, round_type::FINAL);
+    EXPECT_EQ(graph->streaming_result().status,
+              task_graph_streaming_status::complete)
+        << graph->streaming_result().error;
+    // The log keeps the earlier shot's entries.
+    const auto shot_expected = expected_pair_bits(
+        instances, [](std::size_t k) { return (k >> 1) & 1u; });
+    expected.insert(expected.end(), shot_expected.begin(), shot_expected.end());
+    std::sort(expected.begin(), expected.end());
+    auto read = probe->records("K.kv");
+    std::sort(read.begin(), read.end());
+    EXPECT_EQ(read, expected);
+  } // end - for(shot)
+  logging::flush_logs();
+  logging::clear_forwarder();
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("grew past"), std::string::npos) << warnings[0];
+} // end - TEST(DeliverySnapshotsGrowAndSaySoOnce)
+
 // Keep record-ordered completions in publication order across a burst.
 TEST(DecodingTaskGraph, LargePublicationBurstDeliversOrderedCompletions) {
   ASSERT_TRUE(index_probe_registered && feedback_probe_kinds_registered);

@@ -293,9 +293,10 @@ struct decoding_task_graph::impl::record_context {
   // Edge deliveries a pooled node received in this record.
   std::vector<std::size_t> deliveries_seen;
   // By wire: deliveries keep their own typed buffers until they retire.
-  // Buffer addresses stay stable for the life of the record context.
+  // Buffer addresses stay stable for the life of the record context; a
+  // deque keeps them in place when a pool grows.
   struct wire_buffers {
-    std::vector<edge_value> values;
+    std::deque<edge_value> values;
     std::vector<edge_value *> free;
   };
   std::vector<wire_buffers> wire_pool;
@@ -406,7 +407,7 @@ struct decoding_task_graph::impl::record_scheduler {
         self_fed(owner.streaming_nodes.size(), 0),
         fire_slots(owner.streaming_nodes.size(), 0),
         reaches_ordered(owner.streaming_nodes.size(), 0),
-        join_grew(owner.streaming_nodes.size(), join_growth::none),
+        join_grew(owner.streaming_nodes.size(), growth::none),
         join_home(owner.streaming_nodes.size(), 1),
         join_displaced(owner.streaming_nodes.size(), 0),
         join_offsets(owner.streaming_nodes.size()),
@@ -414,6 +415,9 @@ struct decoding_task_graph::impl::record_scheduler {
         defer_drop_notifications(owner.streaming_nodes.size(), 0),
         defer_publications(owner.streaming_nodes.size(), 0),
         copy_publications(owner.streaming_nodes.size(), 0),
+        snapshot_grew(owner.streaming_nodes.size(), growth::none),
+        wire_prototypes(owner.streaming_value_wire_count),
+        wire_snapshots(owner.streaming_value_wire_count, 0),
         dropped(owner.streaming_nodes.size()),
         wire_last(owner.streaming_value_wire_count, no_index),
         fire_inputs(owner.streaming_nodes.size()),
@@ -447,14 +451,13 @@ struct decoding_task_graph::impl::record_scheduler {
     std::vector<std::int64_t> fire_lead(M, 0), entry_lead(M, 0),
         min_required_offset(M, 0);
     std::vector<std::size_t> publications(M, 1);
-    std::vector<edge_value> wire_buffers(owner.streaming_value_wire_count);
     if (owner.streaming_conflict.empty())
       for (std::size_t si = 0; si < M; ++si) {
         const auto node = owner.streaming_nodes[si].node_index;
         if (indexed(si))
           join_input_buffers[si].resize(owner.node_input_counts[node]);
         for (const auto &wire : owner.streaming_wires_from[node])
-          wire_buffers[wire.id] = make_wire_buffer(si, wire.from_slot);
+          wire_prototypes[wire.id] = make_wire_buffer(si, wire.from_slot);
       }
     // A delivery swaps its buffer into the join; seed both sides of the
     // swap so recycling an entry preserves the wire's payload capacity.
@@ -462,7 +465,7 @@ struct decoding_task_graph::impl::record_scheduler {
       for (const auto &wire : wires) {
         const auto consumer = owner.streaming_by_node[wire.to_node];
         if (!join_input_buffers[consumer].empty())
-          join_input_buffers[consumer][wire.to_slot] = wire_buffers[wire.id];
+          join_input_buffers[consumer][wire.to_slot] = wire_prototypes[wire.id];
       }
     for (const auto &wires : owner.completion_wires_from)
       for (const auto &wire : wires) {
@@ -707,9 +710,7 @@ struct decoding_task_graph::impl::record_scheduler {
     }
     if (copy_outputs)
       std::fill(copy_publications.begin(), copy_publications.end(), 1);
-    std::vector<std::size_t> wire_buffer_counts(wire_buffers.size(), 0);
-    const auto replay_capacity =
-        plan_delivery_storage(event_capacity, wire_buffer_counts);
+    const auto replay_capacity = plan_delivery_storage(event_capacity);
     node_deliveries_seen.assign(N, 0);
     for (auto &c : contexts) {
       c.slots.resize(event_capacity);
@@ -719,10 +720,10 @@ struct decoding_task_graph::impl::record_scheduler {
       c.root_open.reserve(M);
       c.deliveries_seen.assign(N, 0);
       c.pending_deliveries.reserve(replay_capacity);
-      c.wire_pool.resize(wire_buffers.size());
-      for (std::size_t id = 0; id < wire_buffers.size(); ++id) {
+      c.wire_pool.resize(wire_prototypes.size());
+      for (std::size_t id = 0; id < wire_prototypes.size(); ++id) {
         auto &pool = c.wire_pool[id];
-        pool.values.assign(wire_buffer_counts[id], wire_buffers[id]);
+        pool.values.assign(wire_snapshots[id], wire_prototypes[id]);
         pool.free.reserve(pool.values.size());
         for (auto &buffer : pool.values)
           pool.free.push_back(&buffer);
@@ -1279,8 +1280,8 @@ struct decoding_task_graph::impl::record_scheduler {
       if (value && copy_publications[source]) {
         auto &pool = c.wire_pool[static_cast<std::size_t>(wire.id)];
         if (pool.free.empty())
-          throw std::logic_error(
-              "decoding_task_graph: delivery snapshot capacity exceeded");
+          grow_wire_pool_locked(pool, static_cast<std::size_t>(wire.id),
+                                source);
         buffer = pool.free.back();
         *buffer = *value;
         pool.free.pop_back();
@@ -1345,8 +1346,8 @@ struct decoding_task_graph::impl::record_scheduler {
       // fall short, grow rather than fail. The node's FINAL flush says so,
       // once, outside the lock. A deque keeps entries in use where they are.
       if (index == table.size()) {
-        if (join_grew[si] == join_growth::none)
-          join_grew[si] = join_growth::unreported;
+        if (join_grew[si] == growth::none)
+          join_grew[si] = growth::unreported;
         add_join_entry(si);
         // Live instances may now lie as far apart as the table holds, and
         // the dropped ring covers twice that.
@@ -2081,9 +2082,9 @@ struct decoding_task_graph::impl::record_scheduler {
       {
         auto lock = lock_runtime();
         dropped[event.node].clear();
-        grew = join_grew[event.node] == join_growth::unreported;
+        grew = join_grew[event.node] == growth::unreported;
         if (grew)
-          join_grew[event.node] = join_growth::reported;
+          join_grew[event.node] = growth::reported;
       }
       if (grew)
         CUDA_QEC_WARN("decoding_task_graph: the join table of node {} grew "
@@ -2092,15 +2093,25 @@ struct decoding_task_graph::impl::record_scheduler {
                       join_home[event.node]);
     } // end - if(indexed(event.node))
     flush_node(c, id, event);
+    const auto node_idx = owner.streaming_nodes[event.node].node_index;
+    bool snapshots_grew = false;
     {
       // The flush was the shot's last publication on the node's wires; the
       // next shot's indices start a new run.
       auto lock = lock_runtime();
-      const auto node_idx = owner.streaming_nodes[event.node].node_index;
       for (const auto &wire : owner.streaming_wires_from[node_idx])
         if (wire.id >= 0)
           wire_last[static_cast<std::size_t>(wire.id)] = no_index;
+      snapshots_grew = snapshot_grew[event.node] == growth::unreported;
+      if (snapshots_grew)
+        snapshot_grew[event.node] = growth::reported;
     }
+    if (snapshots_grew) // every wire of the node starts with the same count
+      CUDA_QEC_WARN("decoding_task_graph: delivery snapshots of node {} grew "
+                    "past their {} preallocated buffers per wire and record",
+                    node_idx,
+                    wire_snapshots[static_cast<std::size_t>(
+                        owner.streaming_wires_from[node_idx].front().id)]);
     // Release dependents after both queued and deferred deliveries drain.
     set_continuation(c, id,
                      {graph_event_kind::streaming_flush_release,
@@ -2289,9 +2300,11 @@ private:
   // can share that bound. Else a producer can have a batch on each occupied
   // slot. A replaying slot can publish along forward edges, so it holds at
   // most one batch per wire.
-  std::size_t
-  plan_delivery_storage(std::size_t event_capacity,
-                        std::vector<std::size_t> &wire_buffer_counts) const {
+  // Size snapshot pools into wire_snapshots: a serial path's one batch, or
+  // else a batch for each copy of the producer or of its widest consumer
+  // plus one waiting on them, which grow_wire_pool_locked() extends when it
+  // falls short.
+  std::size_t plan_delivery_storage(std::size_t event_capacity) {
     std::size_t replay_capacity = 0;
     std::size_t drop_fanout = 0;
     std::size_t prefix_drops = 0;
@@ -2325,9 +2338,20 @@ private:
       add_batches(batch_count, one_batch ? 1 : event_capacity, publications);
       add_batches(replay_capacity, batch_count,
                   values.size() + completions.size());
-      if (copy_publications[si])
+      if (copy_publications[si]) {
+        auto copies = entry.replicas.size();
         for (const auto &wire : values)
-          wire_buffer_counts[wire.id] = batch_count;
+          copies = std::max(
+              copies,
+              owner.streaming_nodes[owner.streaming_by_node[wire.to_node]]
+                  .replicas.size());
+        std::size_t snapshots = 0;
+        add_batches(snapshots,
+                    one_batch ? 1 : std::min(event_capacity, copies + 1),
+                    publications);
+        for (const auto &wire : values)
+          wire_snapshots[wire.id] = snapshots;
+      }
       if (indexed(si)) {
         add_batches(prefix_drops, 1, dropped[si].prefix.size());
         for (const auto *wires : {&values, &completions})
@@ -2795,6 +2819,20 @@ private:
     enqueue_locked(c, id);
   } // end - complete_or_continue_locked()
 
+  // A wire's pool ran dry: add a buffer of the wire's shape, under the
+  // lock, rather than fail. The record context keeps it for later records,
+  // and the producer's FINAL flush says so, once.
+  void grow_wire_pool_locked(context::wire_buffers &pool, std::size_t wire_id,
+                             std::size_t producer) {
+    pool.values.push_back(wire_prototypes[wire_id]);
+    // Room for every buffer, so a release never allocates.
+    if (pool.free.capacity() < pool.values.size())
+      pool.free.reserve(2 * pool.values.size());
+    pool.free.push_back(&pool.values.back());
+    if (snapshot_grew[producer] == growth::none)
+      snapshot_grew[producer] = growth::unreported;
+  }
+
   // Return a delivery's snapshot after it and its descendants drain.
   void release_wire_buffer(context &c, slot &completed) {
     if (!completed.buffer)
@@ -2931,10 +2969,11 @@ public:
   // By streaming node: for an indexed one, whether its fires can deliver to
   // a node that joins its inputs by record (see fire_parent()).
   std::vector<uint8_t> reaches_ordered;
-  // By streaming node: whether its join table grew, and whether that was
+  // Whether a preallocated table or pool grew, and whether that was
   // reported, which happens once.
-  enum class join_growth : uint8_t { none, unreported, reported };
-  std::vector<join_growth> join_grew;
+  enum class growth : uint8_t { none, unreported, reported };
+  // By streaming node: whether its join table grew.
+  std::vector<growth> join_grew;
   // By streaming node: the preallocated entries, which instance k's home
   // (k modulo it) indexes, and the used entries not at their home.
   std::vector<std::size_t> join_home;
@@ -2952,6 +2991,12 @@ public:
   std::vector<uint8_t> defer_publications;
   // Producers whose next publication might replace a value still in flight.
   std::vector<uint8_t> copy_publications;
+  // By streaming node: whether a snapshot pool of its wires grew.
+  std::vector<growth> snapshot_grew;
+  // By wire: the typed buffer a snapshot pool copies when it grows, and how
+  // many snapshots each record context preallocates.
+  std::vector<edge_value> wire_prototypes;
+  std::vector<std::size_t> wire_snapshots;
   // The instances found never to exist before FINAL, kept in a ring sized
   // at build so a long shot does not grow it: each is announced to the
   // consumers once and never created afterwards. Instance k sits at k
