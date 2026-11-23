@@ -47,7 +47,7 @@ _CHILD = textwrap.dedent(f"""
     # Precondition: CUDA-Q itself keeps LLVM local. A leak here is an upstream
     # issue (or a CUDA-Q that predates cuda-quantum#5804), not a cudaq_qec one.
     if not check_scope("import cudaq", assert_true=False):
-+       print(f"SKIP: CUDA-Q exposes LLVM globally after import: {{leaked}}")
+        print(f"SKIP: CUDA-Q exposes LLVM globally after import: {{leaked}}")
         sys.exit(75)
 
     # The set-target callback registered at import dlopen()s the realtime
