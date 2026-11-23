@@ -10,7 +10,7 @@ for earlier versions are listed below.
 See the `0.9.1 release notes
 <https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.1>`__ for decoder
 updates and behavior changes. The :ref:`0.9.1 highlights <qec_v091_highlights>`
-introduce batched Relay BP and
+cover faster batched Relay BP and
 :ref:`JOBS support for larger detector models <qldpc_tcbp_jobs>`.
 See the :doc:`examples <examples_rst/qec/examples>` for usage and the
 :ref:`CUDA 12 compatibility note <pytorch-cuda12-compatibility>` when

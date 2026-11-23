@@ -564,17 +564,14 @@
     - Every error rate must be at most 0.5. A larger rate is a construction
       error.
     - Starting in 0.9.1, ``H`` can have more than 8192 detectors (rows).
-      The maximum detector count depends on the GPU's maximum shared-memory
-      allocation per block. A model beyond that limit is a construction error
-      that reports the device's supported detector count and the requested
-      count. ``jobs_beam_width`` remains limited to 64.
+      The maximum detector count is limited by the memory of the GPU. A
+      model that is too large for the device is a construction error.
+      ``jobs_beam_width`` can be at most 64. A larger value is a
+      construction error that reports the value.
     - JOBS always restricts the search to the K* window, so ``osd_sparsify``
       is not needed. ``osd_order`` is ignored. Setting
       ``osd_sparsify=false``, ``osd_batch_size`` or ``osd_sparsify_exact`` is
       a construction error.
-
-    Kernel selection is automatic; no additional option is required for
-    models with more than 8192 detectors.
 
     Device memory: the decoder allocates all device memory for the search at
     construction, sized for ``bp_batch_size`` x ``jobs_draws`` concurrent

@@ -13,11 +13,13 @@ realtime decoding during quantum circuit execution.
 Highlights in 0.9.1
 -------------------
 
-* :ref:`Relay BP <qldpc_decoder>` now processes groups of shots together on
-  the GPU when using ``decode_batch()`` for offline decoding.
+* :ref:`Relay BP <qldpc_decoder>` is faster in batched mode
+  (``decode_batch()`` with ``composition=1``). See the `0.9.1 release notes
+  <https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.1>`__ for throughput
+  measurements.
 * :ref:`Jittered OSD Beam Search <qldpc_tcbp_jobs>` now supports models with
-  more than 8192 detectors. The decoder selects the kernels automatically;
-  the maximum detector count depends on the GPU's shared-memory capacity.
+  more than 8192 detectors. The maximum detector count is limited by the
+  memory of the GPU.
 
 .. _qec_v090_highlights:
 
