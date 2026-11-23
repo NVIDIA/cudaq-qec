@@ -23,6 +23,11 @@ CUDA-Q QEC provides optional pip-installable components:
     # Install the Tensor Network Decoder from the QEC library
     pip install cudaq-qec[tensor-network-decoder]
 
+For NVIDIA QLDPC decoding without CUDA-Q or the QEC SDK, see
+:ref:`Standalone Python Package <nv_qldpc_standalone>`. Its release version
+is |nv-qldpc-version| and its CUDA 12 and CUDA 13 wheels are installed
+separately from ``cudaq-qec``.
+
 .. note::
 
     Looking for CUDA-Q Solvers? It has been removed from this repository and is

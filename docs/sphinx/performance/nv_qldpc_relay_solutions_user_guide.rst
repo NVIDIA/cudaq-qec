@@ -14,6 +14,12 @@ To try this experiment yourself, follow `Recording a run`_ below using the
 Recording a run
 +++++++++++++++
 
+This workflow requires CUDA-Q QEC for the ``relay_solutions`` post-processing
+helper. The :ref:`standalone package <nv_qldpc_standalone>` can record the
+same optional decoder outputs, but does not include this helper; its raw
+batch outputs are under ``results.opt_results["batch"]``. See
+:ref:`nv_qldpc_package_comparison`.
+
 The recording run must not itself stop early — it uses ``stopping_criterion="All"`` so every convergence in the schedule is observed — and it should return per-shot iteration counts (``num_iter``), which the sweep uses for shots that exhaust the schedule. Everything else is the decoder configuration you are tuning. The example below uses the ``[[144,12,12]]`` bivariate-bicycle (gross) code with the canonical Relay BP settings for that code:
 
 .. code-block:: python

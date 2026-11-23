@@ -4,17 +4,17 @@ Release History
 The current version of CUDA-Q QEC is 0.9.0. Documentation and release notes for
 earlier versions are listed below.
 
-0.9.0 — Current Version
-------------------------
+Standalone decoder packages have independent release versions. See
+:doc:`Decoder Release History <releases/decoders>` for their release notes.
 
-See the `0.9.0 release notes
-<https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.0>`__ for new features,
-performance improvements, bug fixes, and API changes. The
-:ref:`0.9.0 highlights <qec_v090_highlights>` introduce the key features, and
-the :doc:`examples <examples_rst/qec/examples>` show how to use them.
+.. toctree::
+   :maxdepth: 1
 
-Published Releases
-------------------
+   releases/qec_0_9_0
+   releases/decoders
+
+Published QEC Releases
+----------------------
 
 .. list-table::
    :header-rows: 1

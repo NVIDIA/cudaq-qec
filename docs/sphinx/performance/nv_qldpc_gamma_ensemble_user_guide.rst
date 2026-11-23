@@ -12,6 +12,11 @@ To run these experiments yourself, see the `gamma-ensemble benchmark README
 
 The first experiment we perform is to investigate the competing effects of reducing the mean number of iterations to converge versus increasing the time per iteration; we build the Z-component of the circuit-level detector error model (DEM) (i.e. the Z-stabilizer detectors only) for the bivariate-bicycle (BB) codes ``[[72,12,6]]``, ``[[144,12,12]]`` and ``[[288,12,18]]`` and, for each, construct the decoder with ``gamma_ensemble_size`` set to N in {1, 2, 4, 8}. We then decode many sampled syndromes, timing each ``decode()`` call and reading back the number of Relay BP iterations the decoder used to converge:
 
+For the :ref:`standalone package <nv_qldpc_standalone>`, use
+``nv_qldpc.create_decoder(H, ...)`` with the same options; see
+:ref:`nv_qldpc_package_comparison`. The measurements on this page retain
+their original software and hardware context.
+
 .. code-block:: python
 
     import cudaq_qec as qec

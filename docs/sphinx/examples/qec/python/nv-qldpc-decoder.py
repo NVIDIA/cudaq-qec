@@ -4,7 +4,8 @@
 
 import numpy as np
 from scipy.sparse import csr_matrix
-import cudaq_qec as qec
+import argparse
+from functools import partial
 import json
 import time
 
@@ -57,7 +58,7 @@ def parse_obs_csr(j, dims):
 ### Main decoder loop ###
 
 
-def run_decoder(filename, num_shots, run_as_batched):
+def run_decoder(filename, num_shots, run_as_batched, create_decoder):
     """
     Load a JSON file and decode "num_shots" syndromes.
     """
@@ -114,13 +115,10 @@ def run_decoder(filename, num_shots, run_as_batched):
         nv_dec_args['bp_batch_size'] = min(1000, num_shots)
 
     try:
-        nv_dec_gpu_and_cpu = qec.get_decoder("nv-qldpc-decoder", H,
-                                             **nv_dec_args)
+        nv_dec_gpu_and_cpu = create_decoder(H, **nv_dec_args)
     except Exception as e:
-        print(
-            'The nv-qldpc-decoder is not available with your current CUDA-Q ' +
-            'QEC installation.')
-        exit(0)
+        raise RuntimeError(
+            f'The nv-qldpc decoder could not be created: {e}') from e
     decoding_time = 0
     bp_converged_flags = []
     num_logical_errors = 0
@@ -138,9 +136,11 @@ def run_decoder(filename, num_shots, run_as_batched):
         results = nv_dec_gpu_and_cpu.decode_batch(syndrome_list)
         t1 = time.time()
         decoding_time += t1 - t0
-        for r, obs_truth in zip(results, obs_truth_list):
-            bp_converged_flags.append(r.converged)
-            dec_result = np.array(r.result, dtype=np.uint8)
+        for prediction, converged, obs_truth in zip(results.result,
+                                                    results.converged,
+                                                    obs_truth_list):
+            bp_converged_flags.append(converged)
+            dec_result = np.array(prediction, dtype=np.uint8)
 
             # See if this prediction flipped the observable
             predicted_observable = obs_mat.T @ dec_result % 2
@@ -193,7 +193,7 @@ def run_decoder(filename, num_shots, run_as_batched):
     )
 
 
-def demonstrate_bp_methods():
+def demonstrate_bp_methods(create_decoder):
     """
     Demonstrate different BP methods available in nv-qldpc-decoder.
     Shows configurations for: sum-product, min-sum, memory BP, 
@@ -211,57 +211,48 @@ def demonstrate_bp_methods():
     # Method 0: Sum-Product BP (default)
     print("\n1. Sum-Product BP (bp_method=0, default):")
     try:
-        decoder_sp = qec.get_decoder("nv-qldpc-decoder",
-                                     H,
-                                     bp_method=0,
-                                     max_iterations=30)
+        decoder_sp = create_decoder(H, bp_method=0, max_iterations=30)
     except Exception as e:
-        print(
-            'The nv-qldpc-decoder is not available with your current CUDA-Q ' +
-            'QEC installation.')
-        exit(0)
+        raise RuntimeError(
+            f'The nv-qldpc decoder could not be created: {e}') from e
     print("   Created decoder with sum-product BP")
 
     # Method 1: Min-Sum BP
     print("\n2. Min-Sum BP (bp_method=1):")
-    decoder_ms = qec.get_decoder("nv-qldpc-decoder",
-                                 H,
-                                 bp_method=1,
-                                 max_iterations=30,
-                                 scale_factor=1.0)
+    decoder_ms = create_decoder(H,
+                                bp_method=1,
+                                max_iterations=30,
+                                scale_factor=1.0)
     print("   Created decoder with min-sum BP")
 
     # Method 2: Min-Sum with uniform Memory (Mem-BP)
     print("\n3. Mem-BP (bp_method=2, uniform memory strength):")
-    decoder_mem = qec.get_decoder("nv-qldpc-decoder",
-                                  H,
-                                  bp_method=2,
-                                  max_iterations=30,
-                                  use_sparsity=True,
-                                  gamma0=0.5)
+    decoder_mem = create_decoder(H,
+                                 bp_method=2,
+                                 max_iterations=30,
+                                 use_sparsity=True,
+                                 gamma0=0.5)
     print("   Created decoder with Mem-BP (gamma0=0.5)")
 
     # Method 3: Min-Sum with Disordered Memory (DMem-BP)
     print("\n4. DMem-BP (bp_method=3, disordered memory strength):")
     # Option A: Using gamma_dist (random gammas in range)
-    decoder_dmem = qec.get_decoder("nv-qldpc-decoder",
-                                   H,
-                                   bp_method=3,
-                                   max_iterations=30,
-                                   use_sparsity=True,
-                                   gamma_dist=[0.1, 0.5],
-                                   bp_seed=42)
+    decoder_dmem = create_decoder(H,
+                                  bp_method=3,
+                                  max_iterations=30,
+                                  use_sparsity=True,
+                                  gamma_dist=[0.1, 0.5],
+                                  bp_seed=42)
     print("   Created decoder with DMem-BP (gamma_dist=[0.1, 0.5])")
 
     # Option B: Using explicit_gammas (specify exact gamma for each variable)
     block_size = H.shape[1]
     explicit_gammas = [[0.1 + 0.05 * i for i in range(block_size)]]
-    decoder_dmem_explicit = qec.get_decoder("nv-qldpc-decoder",
-                                            H,
-                                            bp_method=3,
-                                            max_iterations=30,
-                                            use_sparsity=True,
-                                            explicit_gammas=explicit_gammas)
+    decoder_dmem_explicit = create_decoder(H,
+                                           bp_method=3,
+                                           max_iterations=30,
+                                           use_sparsity=True,
+                                           explicit_gammas=explicit_gammas)
     print("   Created decoder with DMem-BP (explicit gammas)")
 
     # Method 4: Sequential Relay BP (composition=1)
@@ -276,16 +267,15 @@ def demonstrate_bp_methods():
     }
 
     # Option A: Using gamma_dist for relay legs
-    decoder_relay = qec.get_decoder("nv-qldpc-decoder",
-                                    H,
-                                    bp_method=3,
-                                    composition=1,
-                                    max_iterations=50,
-                                    use_sparsity=True,
-                                    gamma0=0.3,
-                                    gamma_dist=[0.1, 0.5],
-                                    srelay_config=srelay_config,
-                                    bp_seed=42)
+    decoder_relay = create_decoder(H,
+                                   bp_method=3,
+                                   composition=1,
+                                   max_iterations=50,
+                                   use_sparsity=True,
+                                   gamma0=0.3,
+                                   gamma_dist=[0.1, 0.5],
+                                   srelay_config=srelay_config,
+                                   bp_seed=42)
     print("   Created decoder with Relay-BP (gamma_dist, FirstConv stopping)")
 
     # Option B: Using explicit gammas for each relay leg
@@ -302,8 +292,7 @@ def demonstrate_bp_methods():
         'stopping_criterion': 'All'  # Run all relay legs
     }
 
-    decoder_relay_explicit = qec.get_decoder(
-        "nv-qldpc-decoder",
+    decoder_relay_explicit = create_decoder(
         H,
         bp_method=3,
         composition=1,
@@ -322,16 +311,15 @@ def demonstrate_bp_methods():
         'stop_nconv': 3  # Stop after 3 convergences
     }
 
-    decoder_relay_nconv = qec.get_decoder("nv-qldpc-decoder",
-                                          H,
-                                          bp_method=3,
-                                          composition=1,
-                                          max_iterations=50,
-                                          use_sparsity=True,
-                                          gamma0=0.3,
-                                          gamma_dist=[0.1, 0.6],
-                                          srelay_config=srelay_config_nconv,
-                                          bp_seed=42)
+    decoder_relay_nconv = create_decoder(H,
+                                         bp_method=3,
+                                         composition=1,
+                                         max_iterations=50,
+                                         use_sparsity=True,
+                                         gamma0=0.3,
+                                         gamma_dist=[0.1, 0.6],
+                                         srelay_config=srelay_config_nconv,
+                                         bp_seed=42)
     print("   Created decoder with Relay-BP (NConv stopping after 3)")
 
     print("\n" + "=" * 60)
@@ -340,9 +328,20 @@ def demonstrate_bp_methods():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run NVIDIA QLDPC examples")
+    parser.add_argument("--package",
+                        choices=("qec", "standalone"),
+                        default="qec")
+    args = parser.parse_args()
+    if args.package == "standalone":
+        from cudaq_decoding.nv_qldpc import create_decoder
+    else:
+        import cudaq_qec as qec
+        create_decoder = partial(qec.get_decoder, "nv-qldpc-decoder")
+
     # Demonstrate different BP methods (introduced in v0.5.0)
     print("\n### PART 1: BP Methods Demonstration ###\n")
-    demonstrate_bp_methods()
+    demonstrate_bp_methods(create_decoder)
 
     # Full decoding with test data
     print("\n\n### PART 2: Full Decoding Example with Test Data ###\n")
@@ -373,4 +372,4 @@ if __name__ == "__main__":
 
     num_shots = 100
     run_as_batched = True
-    run_decoder(filename, num_shots, run_as_batched)
+    run_decoder(filename, num_shots, run_as_batched, create_decoder)

@@ -31,6 +31,10 @@ author = 'NVIDIA Corporation & Affiliates'
 # The short X.Y version.
 version = os.getenv("CUDAQX_VERSION", "latest")
 
+# Standalone decoder releases are independent of the QEC documentation version.
+nv_qldpc_version = '0.1.0'
+rst_epilog = f'\n.. |nv-qldpc-version| replace:: {nv_qldpc_version}\n'
+
 # -- General configuration ---------------------------------------------------
 
 # Add any Sphinx extension module names here, as strings. They can be
