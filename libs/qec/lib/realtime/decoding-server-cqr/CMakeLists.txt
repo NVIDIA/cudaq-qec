@@ -233,9 +233,16 @@ if(CUDAQ_REALTIME_INCLUDE_DIR)
     PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}
       ${CUDAQ_REALTIME_INCLUDE_DIR}
-      ${CUDAQ_DEVICE_CALL_INCLUDE_DIR}
       ${CUDAToolkit_INCLUDE_DIRS}
   )
+
+  # cudaq/realtime/device_call_service.h is installed by CUDA-Q, not by
+  # cudaq-realtime, and only the shim includes it.  Without the shim the
+  # variable may be NOTFOUND, which CMake rejects as an include directory.
+  if(_server_cqr_build_device_call_shim)
+    target_include_directories(cudaq-qec-realtime-decoding-server-cqr
+      PRIVATE ${CUDAQ_DEVICE_CALL_INCLUDE_DIR})
+  endif()
 
   target_link_options(cudaq-qec-realtime-decoding-server-cqr PRIVATE
     $<$<CXX_COMPILER_ID:GNU>:-Wl,--exclude-libs,libcudaq-qec-decoding-server.a>
