@@ -38,17 +38,16 @@ _CHILD = textwrap.dedent(f"""
         with open("/proc/self/maps") as maps:
             return any(fragment in line for line in maps)
 
-    def check_scope(stage):
+    def check_scope(stage, assert_true=True):
         leaked = [s for s in probes if hasattr(process, s)]
-        assert not leaked, f"LLVM/MLIR symbols are process-global after {{stage}}: {{leaked}}"
+        if assert_true:
+            assert not leaked, f"LLVM/MLIR symbols are process-global after {{stage}}: {{leaked}}"
+        return not leaked
 
     # Precondition: CUDA-Q itself keeps LLVM local. A leak here is an upstream
     # issue (or a CUDA-Q that predates cuda-quantum#5804), not a cudaq_qec one.
-    # Check the behavior directly rather than relying on which CUDA-Q libraries
-    # happen to be installed.
-    leaked = [s for s in probes if hasattr(process, s)]
-    if leaked:
-        print(f"SKIP: CUDA-Q exposes LLVM globally after import: {{leaked}}")
+    if not check_scope("import cudaq", assert_true=False):
++       print(f"SKIP: CUDA-Q exposes LLVM globally after import: {{leaked}}")
         sys.exit(75)
 
     # The set-target callback registered at import dlopen()s the realtime
@@ -77,8 +76,8 @@ def test_import_does_not_expose_llvm_globally():
                             timeout=300,
                             env=os.environ.copy())
     if result.returncode == 75:
-        # Old CUDA-Q on a developer machine: nothing to verify. In CI the pinned
-        # CUDA-Q must keep LLVM local, so a leak there is a failure, not a skip.
+        # Old CUDA-Q on a developer machine: nothing to verify. In CI the pin
+        # includes #5811, so a missing facade is a packaging bug, not a skip.
         assert not os.environ.get("CI"), result.stdout.strip()
         pytest.skip(result.stdout.strip())
     assert result.returncode == 0, result.stdout + result.stderr
