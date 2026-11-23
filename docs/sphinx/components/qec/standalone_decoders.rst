@@ -29,8 +29,6 @@ NVIDIA QLDPC Decoder
 The standalone NVIDIA QLDPC decoder provides BP, Relay BP, OSD, JOBS, presets,
 and TCBP model fitting and inspection. It uses the same decoding algorithms
 as the :ref:`CUDA-Q QEC plugin <qldpc_decoder>`, with a separate Python interface.
-The |nv-qldpc-version| release is in preparation; locally built wheels can be
-installed for testing.
 
 .. _nv_qldpc_package_comparison:
 
@@ -110,7 +108,7 @@ is not required to run it.
 
 Install one CUDA variant per Python environment. For a wheel supplied
 directly, pass its local ``.whl`` path to ``python -m pip install``.
-Once the |nv-qldpc-version| release is available in your package index, use:
+To install version |nv-qldpc-version| from your package index, use:
 
 .. tab:: CUDA 13
 

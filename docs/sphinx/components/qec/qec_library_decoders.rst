@@ -27,7 +27,7 @@ that run without the CUDA-Q runtime.
      - Yes
      - Yes
      - Yes
-     - |nv-qldpc-version| (in preparation)
+     - |nv-qldpc-version|
 
        :ref:`Installation <nv_qldpc_standalone_installation>`
      - Supports Relay BP, BP+OSD, and :ref:`TCBP+JOBS <qldpc_tcbp_jobs>`.

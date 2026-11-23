@@ -17,10 +17,10 @@ NVIDIA QLDPC Decoder
 Distributions: ``cudaq-decoders-nv-qldpc-cu12`` and
 ``cudaq-decoders-nv-qldpc-cu13``. Python module: ``cudaq_decoding.nv_qldpc``.
 
-0.1.0 — In Preparation
-^^^^^^^^^^^^^^^^^^^^^^^
+0.1.0
+^^^^^
 
-Initial standalone Python release. This version has not yet been published.
+Initial standalone Python release.
 
 * GPU decoding with BP, Relay BP, OSD, and JOBS, plus named presets and
   TCBP model fitting and inspection.
