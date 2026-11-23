@@ -322,6 +322,8 @@ jobs:
     runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-gpu-a100-latest-1', matrix.platform) || 'ubuntu-latest' }}
     container:
       image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
+      # The default test selection includes hardware-affinity tests.
+      options: --cap-add=SYS_NICE
       env:
         NVIDIA_VISIBLE_DEVICES: ${{ env.NVIDIA_VISIBLE_DEVICES }}
     permissions:
@@ -339,6 +341,9 @@ jobs:
         with:
           set-safe-directory: true
           lfs: true # download assets file(s) for TRT tests
+
+      - name: Check CUDA devices
+        run: python3 .github/workflows/scripts/check_cuda_devices.py 1
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -393,8 +398,20 @@ jobs:
 
       - name: Run GPU C++ tests
         run: |
-          cd $GITHUB_WORKSPACE/build_qec
-          ctest --output-on-failure -R "GpuKernelsTest|test_realtime_decoding|test_realtime_pipeline|test_ai_decoder_quantized_onnx|DemSamplingGPU|TRTDecoder"
+          # New tests run by default. Only explicitly CPU-only cases stay on
+          # CPU runners, where build-and-test has already run the full suite.
+          PYTHONPATH="/cudaq-install:$GITHUB_WORKSPACE/build_qec/python" \
+            ctest --test-dir "$GITHUB_WORKSPACE/build_qec" \
+              --output-on-failure --no-tests=error -LE '^cpu_only$' \
+              --output-junit gpu-tests.xml
+
+      - name: Upload GPU C++ test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qec-gpu-tests-${{ matrix.platform }}-cu${{ matrix.cuda_version }}
+          path: build_qec/gpu-tests.xml
+          retention-days: 7
 
       - name: Run GPU Python tests
         run: |
@@ -444,6 +461,9 @@ jobs:
           set-safe-directory: true
           lfs: true # TRT tests read the ONNX asset from the source tree
 
+      - name: Check CUDA devices
+        run: python3 .github/workflows/scripts/check_cuda_devices.py 2
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -477,10 +497,20 @@ jobs:
           apt-cache search tensorrt | awk '{print "Package: "$1"\nPin: version *+cuda13.0\nPin-Priority: 1001\n"}' | tee /etc/apt/preferences.d/tensorrt-cuda13.0.pref > /dev/null
           apt install -y tensorrt-dev
 
+      - name: Install CTest Python requirements
+        run: pip install pytest pyyaml
+
       - name: Run multi-GPU C++ tests
         run: |
-          cd $GITHUB_WORKSPACE/build_qec
-          # The matching tests will be added separately; until then, this
-          # command should not fail solely because the filter finds no tests.
-          ctest --output-on-failure \
-            -R "DecoderPool|HardwarePinningGpu|PoolRunsTwoTrt|CudaDeviceId"
+          PYTHONPATH="/cudaq-install:$GITHUB_WORKSPACE/build_qec/python" \
+            ctest --test-dir "$GITHUB_WORKSPACE/build_qec" \
+              --output-on-failure --no-tests=error -LE '^cpu_only$' \
+              --output-junit multi-gpu-tests.xml
+
+      - name: Upload multi-GPU C++ test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qec-multi-gpu-tests-${{ matrix.runner.arch }}-cu${{ matrix.cuda_version }}
+          path: build_qec/multi-gpu-tests.xml
+          retention-days: 7
