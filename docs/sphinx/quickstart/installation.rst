@@ -106,9 +106,6 @@ use the version combination below. For other configurations, visit the
     Users with NVIDIA Blackwell architecture GPUs require PyTorch with CUDA 12.8 or later support. 
     When installing PyTorch, make sure to select the appropriate CUDA version for your system.
 
-.. Link 0.9.1 to https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.1
-   once the release notes are published.
-
 .. _cuda-12-pytorch-and-cuda-core-compatibility:
 .. _pytorch-cuda12-compatibility:
 
@@ -116,8 +113,9 @@ use the version combination below. For other configurations, visit the
 
     If you use the Tensor Network Decoder with a CUDA 12 installation of CUDA-Q QEC
     `0.9.0 <https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.0>`_ or
-    0.9.1, you may encounter a PyTorch dependency conflict. We recommend using
-    PyTorch 2.9.0 with compatible CUDA 12 bindings:
+    `0.9.1 <https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.1>`_, you may
+    encounter a PyTorch dependency conflict. We recommend using PyTorch 2.9.0
+    with compatible CUDA 12 bindings:
 
     .. code-block:: bash
 
