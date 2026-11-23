@@ -46,7 +46,7 @@
             NVIDIA CUDA-Q QEC
           </a>
               <div class="version">
-                0.9.0
+                0.9.1
               </div>
 <div role="search">
   <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
@@ -977,7 +977,7 @@
 <p class="caption" role="heading"><span class="caption-text">Releases</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../releases.html">Release History</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="../../releases.html#current-version">0.9.0 — Current Version</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../releases.html#current-version">0.9.1 — Current Version</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../../releases.html#published-releases">Published Releases</a></li>
 </ul>
 </li>
@@ -3255,9 +3255,11 @@ Set <code class="docutils literal notranslate"><span class="pre">jobs_search_con
 <code class="docutils literal notranslate"><span class="pre">composition=0</span></code>.</p></li>
 <li><p>Every error rate must be at most 0.5. A larger rate is a construction
 error.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">H</span></code> can have at most 8192 detectors (rows), and <code class="docutils literal notranslate"><span class="pre">jobs_beam_width</span></code>
-can be at most 64. A value outside a limit is a construction error
-that reports the value.</p></li>
+<li><p>Starting in 0.9.1, <code class="docutils literal notranslate"><span class="pre">H</span></code> can have more than 8192 detectors (rows).
+The maximum detector count is limited by the memory of the GPU. A
+model that is too large for the device is a construction error.
+<code class="docutils literal notranslate"><span class="pre">jobs_beam_width</span></code> can be at most 64. A larger value is a
+construction error that reports the value.</p></li>
 <li><p>JOBS always restricts the search to the K* window, so <code class="docutils literal notranslate"><span class="pre">osd_sparsify</span></code>
 is not needed. <code class="docutils literal notranslate"><span class="pre">osd_order</span></code> is ignored. Setting
 <code class="docutils literal notranslate"><span class="pre">osd_sparsify=false</span></code>, <code class="docutils literal notranslate"><span class="pre">osd_batch_size</span></code> or <code class="docutils literal notranslate"><span class="pre">osd_sparsify_exact</span></code> is
