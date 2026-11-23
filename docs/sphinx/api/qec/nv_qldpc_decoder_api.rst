@@ -563,9 +563,11 @@
       ``composition=0``.
     - Every error rate must be at most 0.5. A larger rate is a construction
       error.
-    - ``H`` can have at most 8192 detectors (rows), and ``jobs_beam_width``
-      can be at most 64. A value outside a limit is a construction error
-      that reports the value.
+    - Starting in 0.9.1, ``H`` can have more than 8192 detectors (rows).
+      The maximum detector count is limited by the memory of the GPU. A
+      model that is too large for the device is a construction error.
+      ``jobs_beam_width`` can be at most 64. A larger value is a
+      construction error that reports the value.
     - JOBS always restricts the search to the K* window, so ``osd_sparsify``
       is not needed. ``osd_order`` is ignored. Setting
       ``osd_sparsify=false``, ``osd_batch_size`` or ``osd_sparsify_exact`` is

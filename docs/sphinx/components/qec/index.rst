@@ -8,6 +8,19 @@ tools to build and simulate quantum codes, model noise, and decode measurements
 using CPU or GPU decoders. These tools support both offline experiments and
 realtime decoding during quantum circuit execution.
 
+.. _qec_v091_highlights:
+
+Highlights in 0.9.1
+-------------------
+
+* :ref:`Relay BP <qldpc_decoder>` is faster in batched mode
+  (``decode_batch()`` with ``composition=1``). See the `0.9.1 release notes
+  <https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.1>`__ for throughput
+  measurements.
+* :ref:`Jittered OSD Beam Search <qldpc_tcbp_jobs>` now supports models with
+  more than 8192 detectors. The maximum detector count is limited by the
+  memory of the GPU.
+
 .. _qec_v090_highlights:
 
 Highlights in 0.9.0
