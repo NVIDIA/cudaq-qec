@@ -187,7 +187,17 @@ set_target_properties(test_decoding_window PROPERTIES
     "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
 add_dependencies(test_decoding_window cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_decoding_window)
-gtest_discover_tests(test_decoding_window DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
+# These two long accuracy cases use CPU DEM sampling and PyMatching. Keep
+# other and newly added cases in the default GPU selection.
+set(_cpu_window_cases
+  "WindowedGraph.SurfaceCodeTracksMonolithicMatching:ParallelWindowReference.TracksMonolithicMatching")
+gtest_discover_tests(test_decoding_window
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "${_cpu_window_cases}"
+  PROPERTIES LABELS "cpu_only")
+gtest_discover_tests(test_decoding_window
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "-${_cpu_window_cases}")
 
 add_executable(test_decoding_task_graph test_decoding_task_graph.cpp)
 target_link_libraries(test_decoding_task_graph PRIVATE GTest::gtest_main

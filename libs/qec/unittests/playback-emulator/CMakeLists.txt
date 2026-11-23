@@ -89,7 +89,7 @@ if(TARGET playback-emulator)
       COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py" -v
         --emulator=$<TARGET_FILE:playback-emulator>)
     set_tests_properties(playback_emulator_cli PROPERTIES
-      LABELS "qec"
+      LABELS "qec;cpu_only"
       TIMEOUT 120)
   endif()
   add_dependencies(CUDAQXQECUnitTests playback-emulator)

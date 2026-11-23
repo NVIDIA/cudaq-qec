@@ -685,8 +685,13 @@ add_test(
 # End of surface code 2, --target quantinuum --emulate
 #------------------------------------------------------------------------------#
 
+set_tests_properties(
+  app_examples.surface_code-2-local-test-distance-3
+  app_examples.surface_code-2-quantinuum-emulate-test-distance-3-in-process
+  app_examples.surface_code-2-quantinuum-emulate-test-distance-5-in-process
+  PROPERTIES LABELS "cpu_only")
 
-macro(add_surface_code_test base_name exe_local exe_remote dist server)
+macro(add_surface_code_test base_name exe_local exe_remote dist server labels)
   # For now, disable 0.015 error rate because the multi_error_lut decoder is not
   # powerful enough to pass this test. The nv-qldpc-decoder can pass this test,
   # but that is not available on the GitHub repo.
@@ -702,6 +707,8 @@ macro(add_surface_code_test base_name exe_local exe_remote dist server)
             ${CMAKE_BINARY_DIR}/quantinuum_decoding_server/lib
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
       )
+      set_tests_properties(${base_name}-dist-${dist}-${prep}-err-${err_rate}
+        PROPERTIES LABELS "${labels}")
     endforeach()
   endforeach()
 endmacro()
@@ -735,13 +742,13 @@ add_surface_code_test(
   app_examples.surface_code-3-local-test
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
-  3 NULL
+  3 NULL cpu_only
 )
 add_surface_code_test(
   app_examples.surface_code-3-local-test
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
-  5 NULL
+  5 NULL cpu_only
 )
 
 # End of surface code 3, fully local, regular Stim simulator
@@ -788,13 +795,13 @@ add_surface_code_test(
   app_examples.surface_code-3-quantinuum-emulate-test-in-process
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-quantinuum-emulate
-  3 NULL
+  3 NULL cpu_only
 )
 add_surface_code_test(
   app_examples.surface_code-3-quantinuum-emulate-test-in-process
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-quantinuum-emulate
-  5 NULL
+  5 NULL cpu_only
 )
 
 # End of surface code 3, --target quantinuum --emulate
