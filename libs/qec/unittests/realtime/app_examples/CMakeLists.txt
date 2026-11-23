@@ -418,6 +418,12 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
 
+  # Both in-process cases use Stim and CPU decoders over host dispatch.
+  set_tests_properties(
+    app_examples.surface_code-1-cqr-test-distance-3
+    app_examples.surface_code-1-cqr-test-distance-3-parallel-window
+    PROPERTIES LABELS cpu_only)
+
   # Two-process: same application as the udp client, with the standard
   # decoding server (decoding_server, from tools/decoding-server) in a
   # separate process serving the decoders configured from the app's own
@@ -494,6 +500,13 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
           pymatching
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
+    # The UDP and unified-host cases also use Stim and CPU decoders.
+    set_tests_properties(
+      app_examples.surface_code-1-cqr-two-process-test-distance-3
+      app_examples.surface_code-1-cqr-two-process-test-distance-3-num-logical-2
+      app_examples.surface_code-1-cqr-two-process-test-distance-3-host-loop-unified
+      app_examples.surface_code-1-cqr-two-process-test-distance-3-parallel-window
+      PROPERTIES LABELS cpu_only)
   endif()
 endif()
 
