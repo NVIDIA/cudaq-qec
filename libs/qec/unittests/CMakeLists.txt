@@ -126,10 +126,19 @@ else()
                  "(cudaq-qec-decoding-server not built)")
 endif()
 
+add_library(qec_cc_test_plugin SHARED qec_cc_test_plugin.cpp)
+set_target_properties(qec_cc_test_plugin PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qec_cc_test_plugins"
+  PREFIX "lib"
+  OUTPUT_NAME qec_cc_test_plugin)
+
 add_executable(test_qec test_qec.cpp)
 target_include_directories(test_qec PRIVATE ${CUDAQX_QEC_SOURCE_DIR}/lib)
 target_link_libraries(test_qec PRIVATE GTest::gtest_main cudaq-qec
   cudaq::cudaq cudaq::cudaq-stim-target)
+target_compile_definitions(test_qec PRIVATE
+  QEC_CC_TEST_PLUGIN_SO="$<TARGET_FILE:qec_cc_test_plugin>")
+add_dependencies(test_qec qec_cc_test_plugin)
 add_dependencies(CUDAQXQECUnitTests test_qec)
 gtest_discover_tests(test_qec DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
@@ -139,6 +148,29 @@ target_link_libraries(test_dem_sampling PRIVATE CUDA::cudart)
 target_include_directories(test_dem_sampling PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 add_dependencies(CUDAQXQECUnitTests test_dem_sampling)
 gtest_discover_tests(test_dem_sampling DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
+
+add_executable(test_dem_sampling_sparse_retry
+  test_dem_sampling_sparse_retry.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/dem_sampling/dem_sampling_gpu.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/dem_sampling/dem_sampling_utils.cu)
+set_source_files_properties(
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/dem_sampling/dem_sampling_utils.cu
+  PROPERTIES LANGUAGE CUDA)
+target_include_directories(test_dem_sampling_sparse_retry PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/dem_sampling
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${CMAKE_SOURCE_DIR}/libs/core/include
+  ${CUDAToolkit_INCLUDE_DIRS})
+target_link_libraries(test_dem_sampling_sparse_retry PRIVATE
+  GTest::gtest
+  CUDA::cudart
+  cuStabilizer::cuStabilizer
+  cudaqx-core)
+target_link_options(test_dem_sampling_sparse_retry PRIVATE
+  "LINKER:--wrap=custabilizerSampleProbArraySparseCompute")
+add_dependencies(CUDAQXQECUnitTests test_dem_sampling_sparse_retry)
+gtest_discover_tests(test_dem_sampling_sparse_retry
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_sparse_binary_matrix test_sparse_binary_matrix.cpp)
 target_link_libraries(test_sparse_binary_matrix PRIVATE GTest::gtest_main
@@ -187,7 +219,21 @@ set_target_properties(test_decoding_window PROPERTIES
     "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
 add_dependencies(test_decoding_window cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_decoding_window)
-gtest_discover_tests(test_decoding_window DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
+# These long cases use CPU DEM sampling and CPU decoders. Keep other and
+# newly added cases in the default GPU selection.
+string(JOIN ":" _cpu_window_cases
+  "WindowedGraph.SurfaceCodeTracksMonolithicMatching"
+  "ParallelWindowReference.TracksMonolithicMatching"
+  "ParallelWindowReference.ProductionDecodesSingleFaultsAlike"
+  "WindowedGraph.StreamsThePatternAsTheReference"
+  "WindowedGraph.StreamsASlidingWindowAsTheReference")
+gtest_discover_tests(test_decoding_window
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "${_cpu_window_cases}"
+  PROPERTIES LABELS "cpu_only")
+gtest_discover_tests(test_decoding_window
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "-${_cpu_window_cases}")
 
 add_executable(test_decoding_task_graph test_decoding_task_graph.cpp)
 target_link_libraries(test_decoding_task_graph PRIVATE GTest::gtest_main
@@ -202,7 +248,16 @@ set_target_properties(test_decoding_task_graph PROPERTIES
     "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
 add_dependencies(test_decoding_task_graph cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_decoding_task_graph)
-gtest_discover_tests(test_decoding_task_graph DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
+# This million-round stress case fixes its decoder to the CPU lookup table.
+set(_cpu_task_graph_cases
+  "ArbitraryLengthMemory.LongStreamUsesFixedWindowsAndSupportsClearEpochs")
+gtest_discover_tests(test_decoding_task_graph
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "${_cpu_task_graph_cases}"
+  PROPERTIES LABELS "cpu_only")
+gtest_discover_tests(test_decoding_task_graph
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "-${_cpu_task_graph_cases}")
 
 add_executable(test_decoding_task_ensemble test_decoding_task_ensemble.cpp)
 target_link_libraries(test_decoding_task_ensemble PRIVATE GTest::gtest_main
@@ -242,6 +297,8 @@ add_dependencies(CUDAQXQECUnitTests test_node_kind_dlclose)
 gtest_discover_tests(test_node_kind_dlclose DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_dem_construction test_dem_construction.cpp)
+target_include_directories(test_dem_construction PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
 target_link_libraries(test_dem_construction PRIVATE GTest::gtest_main
                                             cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_dem_construction)
@@ -266,9 +323,26 @@ add_dependencies(CUDAQXQECUnitTests test_cancellation)
 gtest_discover_tests(test_cancellation DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
 
 add_executable(test_logger test_logger.cpp)
+target_include_directories(test_logger PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib)
 target_link_libraries(test_logger PRIVATE GTest::gtest_main cudaq-qec-decoders)
 add_dependencies(CUDAQXQECUnitTests test_logger)
 gtest_discover_tests(test_logger DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
+
+add_executable(test_logger_level_helper test_logger_level_helper.cpp)
+target_link_libraries(test_logger_level_helper PRIVATE cudaq-qec-decoders)
+add_dependencies(CUDAQXQECUnitTests test_logger_level_helper)
+function(qec_cc_logger_env_test name level)
+  add_test(NAME LoggerEnv.${name} COMMAND test_logger_level_helper ${name})
+  set_tests_properties(LoggerEnv.${name} PROPERTIES
+    ENVIRONMENT "CUDAQ_LOG_LEVEL=${level}"
+    LABELS "qec")
+endfunction()
+qec_cc_logger_env_test(trace trace)
+qec_cc_logger_env_test(debug debug)
+qec_cc_logger_env_test(info info)
+qec_cc_logger_env_test(warning warning)
+qec_cc_logger_env_test(error error)
+qec_cc_logger_env_test(invalid not-a-level)
 
 # TensorRT decoder test is only built for x86 architectures
 if(CUDAQ_QEC_TRT_DECODER_ENABLED AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(AMD64|amd64)|(^i.86$)")

@@ -44,7 +44,8 @@ function(qec_realtime_app_link_options _tgt)
 endfunction()
 
 #------------------------------------------------------------------------------#
-# Surface code 1, fully local, regular Stim simulator
+# Surface code 1, fully local, regular Stim simulator. These CPU-only cases
+# already run in build-and-test; avoid repeating them on scarce GPU runners.
 add_executable(surface_code-1-local)
 set_target_properties(surface_code-1-local PROPERTIES LINKER_LANGUAGE CXX)
 
@@ -188,6 +189,17 @@ add_test(
     pytest ${CMAKE_CURRENT_SOURCE_DIR}/surface_code-1-test.py
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+set_tests_properties(
+  app_examples.surface_code-1-local-test-distance-3
+  app_examples.surface_code-1-local-test-distance-3-sliding-window
+  app_examples.surface_code-1-local-test-distance-3-task-graph
+  app_examples.surface_code-1-local-test-distance-3-task-graph-async
+  app_examples.surface_code-1-local-test-distance-3-parallel-window-async
+  app_examples.surface_code-1-local-test-distance-3-parallel-window-sync
+  app_examples.surface_code-1-local-test-distance-5-parallel-window-async
+  app_examples.surface_code-1-local-test-distance-3-parallel-window-async-multi_error_lut
+  app_examples.py-surface_code-1-test
+  PROPERTIES LABELS "cpu_only")
 
 # --------------------------------------------------------------------------- #
 # surface_code-1 negative / error-path tests
@@ -406,6 +418,12 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
 
+  # Both in-process cases use Stim and CPU decoders over host dispatch.
+  set_tests_properties(
+    app_examples.surface_code-1-cqr-test-distance-3
+    app_examples.surface_code-1-cqr-test-distance-3-parallel-window
+    PROPERTIES LABELS cpu_only)
+
   # Two-process: same application as the udp client, with the standard
   # decoding server (decoding_server, from tools/decoding-server) in a
   # separate process serving the decoders configured from the app's own
@@ -482,6 +500,13 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
           pymatching
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
+    # The UDP and unified-host cases also use Stim and CPU decoders.
+    set_tests_properties(
+      app_examples.surface_code-1-cqr-two-process-test-distance-3
+      app_examples.surface_code-1-cqr-two-process-test-distance-3-num-logical-2
+      app_examples.surface_code-1-cqr-two-process-test-distance-3-host-loop-unified
+      app_examples.surface_code-1-cqr-two-process-test-distance-3-parallel-window
+      PROPERTIES LABELS cpu_only)
   endif()
 endif()
 
@@ -552,6 +577,12 @@ add_test(
       ${CMAKE_BINARY_DIR}/lib
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# Both cases explicitly use the Stim emulator and multi_error_lut on the CPU.
+set_tests_properties(
+  app_examples.surface_code-1-quantinuum-emulate-test-distance-3-in-process
+  app_examples.surface_code-1-quantinuum-emulate-test-distance-5-in-process
+  PROPERTIES LABELS "cpu_only")
 
 # End of surface code 1, --target quantinuum --emulate
 #------------------------------------------------------------------------------#
@@ -667,8 +698,13 @@ add_test(
 # End of surface code 2, --target quantinuum --emulate
 #------------------------------------------------------------------------------#
 
+set_tests_properties(
+  app_examples.surface_code-2-local-test-distance-3
+  app_examples.surface_code-2-quantinuum-emulate-test-distance-3-in-process
+  app_examples.surface_code-2-quantinuum-emulate-test-distance-5-in-process
+  PROPERTIES LABELS "cpu_only")
 
-macro(add_surface_code_test base_name exe_local exe_remote dist server)
+macro(add_surface_code_test base_name exe_local exe_remote dist server labels)
   # For now, disable 0.015 error rate because the multi_error_lut decoder is not
   # powerful enough to pass this test. The nv-qldpc-decoder can pass this test,
   # but that is not available on the GitHub repo.
@@ -684,6 +720,8 @@ macro(add_surface_code_test base_name exe_local exe_remote dist server)
             ${CMAKE_BINARY_DIR}/quantinuum_decoding_server/lib
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
       )
+      set_tests_properties(${base_name}-dist-${dist}-${prep}-err-${err_rate}
+        PROPERTIES LABELS "${labels}")
     endforeach()
   endforeach()
 endmacro()
@@ -717,13 +755,13 @@ add_surface_code_test(
   app_examples.surface_code-3-local-test
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
-  3 NULL
+  3 NULL cpu_only
 )
 add_surface_code_test(
   app_examples.surface_code-3-local-test
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
-  5 NULL
+  5 NULL cpu_only
 )
 
 # End of surface code 3, fully local, regular Stim simulator
@@ -770,13 +808,13 @@ add_surface_code_test(
   app_examples.surface_code-3-quantinuum-emulate-test-in-process
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-quantinuum-emulate
-  3 NULL
+  3 NULL cpu_only
 )
 add_surface_code_test(
   app_examples.surface_code-3-quantinuum-emulate-test-in-process
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-local
   ${CMAKE_CURRENT_BINARY_DIR}/surface_code-3-quantinuum-emulate
-  5 NULL
+  5 NULL cpu_only
 )
 
 # End of surface code 3, --target quantinuum --emulate
@@ -1182,6 +1220,9 @@ if(TARGET surface_code-4-yaml-cqr)
   set_property(TEST app_examples.surface_code-4-yaml-cqr-hard-patch-pymatching
     APPEND PROPERTY ENVIRONMENT
       "CHECK_HARD_PATCH_MODELS=1;REQUIRE_DECODER_CONCURRENCY=2;SKIP_LOGICAL_ERROR_CEILING=1")
+  # This expensive overlap case runs three CPU PyMatching decoders.
+  set_property(TEST app_examples.surface_code-4-yaml-cqr-hard-patch-pymatching
+    APPEND PROPERTY LABELS cpu_only)
 
 endif()
 

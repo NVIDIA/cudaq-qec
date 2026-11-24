@@ -147,18 +147,19 @@ public:
                                   : nb::none();
         bool returnsHandleVector = false;
         if (!retTyObj.is_none()) {
-          nb::object cc =
-              nb::module_::import_("cudaq.mlir.dialects").attr("cc");
-          // CUDA-Q renamed cc.StdvecType to cc.SequenceType (cuda-quantum
-          // #5089). Accept either name so this keeps working across both the
-          // pinned CUDA-Q version and main.
-          nb::object seqTy = nb::hasattr(cc, "SequenceType")
-                                 ? cc.attr("SequenceType")
-                                 : cc.attr("StdvecType");
+          nb::object dialects = nb::module_::import_("cudaq.mlir.dialects");
+          nb::object cc = dialects.attr("cc");
+          nb::object seqTy = cc.attr("SequenceType");
+          // CUDAQ-COMPAT(cuda-quantum#5956): cc.MeasureHandleType was folded
+          // into quake.MeasureType. Remove the cc branch once the pin includes
+          // #5956.
+          nb::object measTy = nb::hasattr(cc, "MeasureHandleType")
+                                  ? cc.attr("MeasureHandleType")
+                                  : dialects.attr("quake").attr("MeasureType");
           if (nb::cast<bool>(seqTy.attr("isinstance")(retTyObj))) {
             nb::object eleTy = seqTy.attr("getElementType")(retTyObj);
-            returnsHandleVector = nb::cast<bool>(
-                cc.attr("MeasureHandleType").attr("isinstance")(eleTy));
+            returnsHandleVector =
+                nb::cast<bool>(measTy.attr("isinstance")(eleTy));
           }
         }
         if (!returnsHandleVector)
