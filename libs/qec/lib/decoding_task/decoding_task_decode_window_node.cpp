@@ -222,6 +222,15 @@ const edge_value *decode_window_node::streaming_output(std::size_t slot) const {
   return slot == 0 ? &frame_ : &sends_[slot - 1];
 }
 
+// Allocate a snapshot for the frame or the largest send of any variant.
+edge_value decode_window_node::streaming_output_buffer(std::size_t slot) const {
+  if (slot == 0)
+    return frame_;
+  window_send_payload send;
+  send.values.resize(core_->max_send_rows(slot - 1));
+  return edge_value{std::move(send)};
+}
+
 std::optional<streaming_task_graph_node::committed_coverage>
 decode_window_node::streaming_coverage() const {
   return published_ ? std::optional<committed_coverage>(commit_) : std::nullopt;

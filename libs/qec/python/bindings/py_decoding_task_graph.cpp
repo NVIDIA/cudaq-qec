@@ -200,8 +200,8 @@ void bindDecodingTaskGraph(nb::module_ &mod) {
       .def_rw("async_spin_pause_iters",
               &task_graph_options::async_spin_pause_iters)
       .def_rw("async_num_workers", &task_graph_options::async_num_workers,
-              "Pool threads for an asynchronous graph; None sizes the pool\n"
-              "from the graph.")
+              "Pool threads for an asynchronous graph, 1 to 1024; None\n"
+              "sizes the pool from the graph.")
       .def_rw("async_worker_cpus", &task_graph_options::async_worker_cpus,
               "CPUs for the pool threads, round-robin; empty inherits the\n"
               "process's affinity.");

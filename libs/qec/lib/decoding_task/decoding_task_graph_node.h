@@ -160,6 +160,12 @@ public:
   /// node's indexed consumers are preallocated from it.
   virtual std::size_t max_publications_per_delivery() const { return 1; }
 
+  /// Prototype for copies of a streaming output. A variable-size payload
+  /// can supply its largest shape so each copy has room before execution.
+  virtual edge_value streaming_output_buffer(std::size_t /*slot*/) const {
+    return {};
+  }
+
   /// Room left in this node's accumulator: the most one enqueue() call can
   /// take.  nullopt for a kind that keeps none, which is handed whole chunks.
   /// enqueue_syndrome() meters to it, so a caller may cut the stream anywhere.
@@ -181,6 +187,19 @@ public:
 
   /// Whether input slot `slot` can consume an edge during streaming.
   virtual bool supports_streaming_input(std::size_t /*slot*/) const {
+    return false;
+  }
+
+  /// Opt-in: input `slot` handles each completion on its own, so a node that
+  /// joins by record may take an indexed producer's `done` there. Indexed
+  /// completions arrive in any order, and a dropped instance sends none. An
+  /// input that pairs completions with other inputs, or counts on one per
+  /// instance, must leave this false and its node must join by index. Such
+  /// a completion does not count toward the node's window. If the node has
+  /// other inputs, it does not set the node's schedule and what it makes the
+  /// node publish sends no completion, so the node's own `done` follows
+  /// those inputs. A fire pool cannot opt in.
+  virtual bool accepts_unordered_completions(std::size_t /*slot*/) const {
     return false;
   }
 
@@ -263,6 +282,11 @@ public:
 /// negative is absent. At the end of a shot, once every producer has
 /// finished, a pending instance fires with its remaining optional inputs
 /// absent; one still missing a required input never existed and is dropped.
+///
+/// A streaming feedback cycle consists of indexed nodes with at least one
+/// required input each. Inside it only fire(k) publishes, every value with
+/// index k, so the end of a shot resolves the cycle in instance order. A
+/// member's flush() may publish only to nodes outside its cycle.
 class indexed_join_node {
 public:
   virtual ~indexed_join_node() = default;
