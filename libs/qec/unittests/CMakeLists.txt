@@ -219,7 +219,21 @@ set_target_properties(test_decoding_window PROPERTIES
     "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
 add_dependencies(test_decoding_window cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_decoding_window)
-gtest_discover_tests(test_decoding_window DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
+# These long cases use CPU DEM sampling and CPU decoders. Keep other and
+# newly added cases in the default GPU selection.
+string(JOIN ":" _cpu_window_cases
+  "WindowedGraph.SurfaceCodeTracksMonolithicMatching"
+  "ParallelWindowReference.TracksMonolithicMatching"
+  "ParallelWindowReference.ProductionDecodesSingleFaultsAlike"
+  "WindowedGraph.StreamsThePatternAsTheReference"
+  "WindowedGraph.StreamsASlidingWindowAsTheReference")
+gtest_discover_tests(test_decoding_window
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "${_cpu_window_cases}"
+  PROPERTIES LABELS "cpu_only")
+gtest_discover_tests(test_decoding_window
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "-${_cpu_window_cases}")
 
 add_executable(test_decoding_task_graph test_decoding_task_graph.cpp)
 target_link_libraries(test_decoding_task_graph PRIVATE GTest::gtest_main
@@ -234,7 +248,16 @@ set_target_properties(test_decoding_task_graph PROPERTIES
     "${CMAKE_BINARY_DIR}/lib;${CMAKE_BINARY_DIR}/lib/decoder-plugins")
 add_dependencies(test_decoding_task_graph cudaq-qec-pymatching)
 add_dependencies(CUDAQXQECUnitTests test_decoding_task_graph)
-gtest_discover_tests(test_decoding_task_graph DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT})
+# This million-round stress case fixes its decoder to the CPU lookup table.
+set(_cpu_task_graph_cases
+  "ArbitraryLengthMemory.LongStreamUsesFixedWindowsAndSupportsClearEpochs")
+gtest_discover_tests(test_decoding_task_graph
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "${_cpu_task_graph_cases}"
+  PROPERTIES LABELS "cpu_only")
+gtest_discover_tests(test_decoding_task_graph
+  DISCOVERY_TIMEOUT ${CUDAQX_GTEST_DISCOVERY_TIMEOUT}
+  TEST_FILTER "-${_cpu_task_graph_cases}")
 
 add_executable(test_decoding_task_ensemble test_decoding_task_ensemble.cpp)
 target_link_libraries(test_decoding_task_ensemble PRIVATE GTest::gtest_main

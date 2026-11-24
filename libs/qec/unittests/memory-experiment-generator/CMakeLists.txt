@@ -44,7 +44,7 @@ if(TARGET memory-experiment-generator)
       COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py" -v
         --generator=$<TARGET_FILE:memory-experiment-generator>)
     set_tests_properties(memory_experiment_generator_cli PROPERTIES
-      LABELS "qec"
+      LABELS "qec;cpu_only"
       SKIP_RETURN_CODE 77
       TIMEOUT 300)
   endif()
