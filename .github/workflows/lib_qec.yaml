@@ -312,18 +312,29 @@ jobs:
   # GPU Tests - Run on GPU runners (uses build artifacts from build-and-test)
   # ==========================================================================
   gpu-test:
-    name: GPU tests
+    name: GPU tests (${{ matrix.platform }}, ${{ matrix.cuda_version }})
     needs: build-and-test
     strategy:
       fail-fast: false
       matrix:
         platform: ['amd64', 'arm64']
         cuda_version: ['12.6', '13.0']
-    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && format('linux-{0}-gpu-a100-latest-1', matrix.platform) || 'ubuntu-latest' }}
+        # Reuse the ARM L4 pair for the CUDA 13 suite and multi-GPU cases.
+        # This avoids a second run of the same suite and does not require
+        # scarce amd64 two-GPU runners. ARM CUDA 12 does not support TensorRT.
+        include:
+          - platform: arm64
+            cuda_version: '13.0'
+            gpu_runner: linux-arm64-gpu-l4-latest-2
+            cuda_devices: 2
+    runs-on: ${{ startsWith(github.repository, 'NVIDIA/cudaq-qec') && (matrix.gpu_runner || format('linux-{0}-gpu-a100-latest-1', matrix.platform)) || 'ubuntu-latest' }}
     container:
       image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.platform }}-cu${{ matrix.cuda_version }}-gcc12-main
+      # The default test selection includes hardware-affinity tests.
+      options: --cap-add=SYS_NICE
       env:
         NVIDIA_VISIBLE_DEVICES: ${{ env.NVIDIA_VISIBLE_DEVICES }}
+    timeout-minutes: ${{ matrix.cuda_devices == 2 && 45 || 360 }}
     permissions:
       actions: read
       contents: read
@@ -339,6 +350,9 @@ jobs:
         with:
           set-safe-directory: true
           lfs: true # download assets file(s) for TRT tests
+
+      - name: Check CUDA devices
+        run: python3 .github/workflows/scripts/check_cuda_devices.py ${{ matrix.cuda_devices || 1 }}
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -393,94 +407,22 @@ jobs:
 
       - name: Run GPU C++ tests
         run: |
-          cd $GITHUB_WORKSPACE/build_qec
-          ctest --output-on-failure -R "GpuKernelsTest|test_realtime_decoding|test_realtime_pipeline|test_ai_decoder_quantized_onnx|DemSamplingGPU|TRTDecoder"
+          # New tests run by default. Only explicitly CPU-only cases stay on
+          # CPU runners, where build-and-test has already run the full suite.
+          PYTHONPATH="/cudaq-install:$GITHUB_WORKSPACE/build_qec/python" \
+            ctest --test-dir "$GITHUB_WORKSPACE/build_qec" \
+              --output-on-failure --no-tests=error -LE '^cpu_only$' \
+              --output-junit gpu-tests.xml
+
+      - name: Upload GPU C++ test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qec-gpu-tests-${{ matrix.platform }}-cu${{ matrix.cuda_version }}
+          path: build_qec/gpu-tests.xml
+          retention-days: 7
 
       - name: Run GPU Python tests
         run: |
           PYTHONPATH="/cudaq-install:$GITHUB_WORKSPACE/build_qec/python" \
             pytest -v libs/qec/python/tests/
-
-  # ==========================================================================
-  # Multi-GPU tests - decoder placement across >= 2 GPUs (uses build artifacts
-  # from build-and-test).
-  #
-  # Keep this lane on the ARM L4 2-GPU runner while amd64 2-GPU runner
-  # availability is too limited for PR CI. The runner metadata remains
-  # structured so artifact and container selection stay arch-driven. Run CUDA
-  # 13.0 only because the ARM CUDA 12.6 lane does not support TensorRT.
-  # ==========================================================================
-  multi-gpu-test:
-    name: Multi-GPU tests (${{ matrix.runner.arch }}, CUDA ${{ matrix.cuda_version }})
-    needs: build-and-test
-    strategy:
-      fail-fast: false
-      matrix:
-        runner:
-          - arch: arm64
-            label: linux-arm64-gpu-l4-latest-2
-        cuda_version: ['13.0']
-    runs-on: ${{ matrix.runner.label }}
-    container:
-      image: ghcr.io/nvidia/cuda-quantum-devcontainer:${{ matrix.runner.arch }}-cu${{ matrix.cuda_version }}-gcc12-main
-      # SYS_NICE: see build-and-test.
-      options: --cap-add=SYS_NICE
-      env:
-        NVIDIA_VISIBLE_DEVICES: ${{ env.NVIDIA_VISIBLE_DEVICES }}
-    timeout-minutes: 45
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Install git for LFS
-        shell: bash
-        run: |
-          apt update
-          apt install -y --no-install-recommends git git-lfs
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          set-safe-directory: true
-          lfs: true # TRT tests read the ONNX asset from the source tree
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: qec-build-${{ matrix.runner.arch }}-cu${{ matrix.cuda_version }}
-          path: /tmp
-
-      - name: Extract build artifacts
-        run: |
-          tar xzf /tmp/qec-build-artifacts.tar.gz -C /
-
-      # The build linked against the DOCA libibverbs that CUDA-Q's
-      # install_devdeps.sh installs; the stock container's OFED libibverbs is
-      # too old for the resulting Python module to load.
-      - name: Install rdma-core runtime from DOCA
-        run: bash .github/workflows/scripts/install_doca_rdma_core.sh
-
-      - name: Configure
-        id: config
-        run: |
-          cuda_major=$(echo ${{ matrix.cuda_version }} | cut -d . -f1)
-          echo "cuda_major=$cuda_major" >> $GITHUB_OUTPUT
-
-      - name: Install cuStabilizer runtime
-        run: |
-          pip install --upgrade "cuquantum-python-cu${{ steps.config.outputs.cuda_major }}>=26.3.0"
-
-      - name: Install TensorRT (C++, arm64)
-        if: matrix.runner.arch == 'arm64' && !startsWith(matrix.cuda_version, '12')
-        run: |
-          apt update
-          apt-cache search tensorrt | awk '{print "Package: "$1"\nPin: version *+cuda13.0\nPin-Priority: 1001\n"}' | tee /etc/apt/preferences.d/tensorrt-cuda13.0.pref > /dev/null
-          apt install -y tensorrt-dev
-
-      - name: Run multi-GPU C++ tests
-        run: |
-          cd $GITHUB_WORKSPACE/build_qec
-          # The matching tests will be added separately; until then, this
-          # command should not fail solely because the filter finds no tests.
-          ctest --output-on-failure \
-            -R "DecoderPool|HardwarePinningGpu|PoolRunsTwoTrt|CudaDeviceId"
