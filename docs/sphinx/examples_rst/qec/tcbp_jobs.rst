@@ -20,6 +20,12 @@ simulated surface-code memory experiment. Its purpose is to demonstrate the
 API; the :ref:`performance study <tcbp_jobs_user_guide>` uses larger circuits
 and many more shots.
 
+The preparation block below uses QEC's DEM utilities. Standalone users who
+already have aligned ``H``, ``O``, ``rates``, ``syndromes`` and reference
+``observables`` can skip it and select the standalone tab under
+`Fit the Model and Decode`_. See :ref:`nv_qldpc_standalone` for installation.
+The standalone wheel does not include the ``tying`` utilities.
+
 Prepare a Detector Error Model and Samples
 ------------------------------------------
 
@@ -53,19 +59,36 @@ The named presets encode the matching BP, TCBP and JOBS configuration. The
 following example fits a model for a code family, constructs a decoder that
 searches every shot, and requests the complementary gap:
 
+.. tab:: Python — CUDA-Q QEC
+
+   .. code-block:: python
+
+      from functools import partial
+      import cudaq_qec as qec
+      from cudaq_qec.plugins import nv_qldpc
+
+      create_decoder = partial(qec.get_decoder, "nv-qldpc-decoder")
+
+.. tab:: Python — standalone
+
+   .. code-block:: python
+
+      from cudaq_decoding import nv_qldpc
+
+      create_decoder = nv_qldpc.create_decoder
+
+The model fitting and decoder configuration are the same for both packages:
+
 .. code-block:: python
 
    import numpy as np
-   import cudaq_qec as qec
-   from cudaq_qec.plugins import nv_qldpc
 
    # H: detector-error matrix
    # O: observable-flips matrix
    # rates: prior probability of each error mechanism
    model, report = nv_qldpc.init_tcbp_model(H, return_report=True)
 
-   decoder = qec.get_decoder(
-       "nv-qldpc-decoder",
+   decoder = create_decoder(
        H,
        O=O,
        output="observables",
@@ -76,9 +99,25 @@ searches every shot, and requests the complementary gap:
 
    results = decoder.decode_batch(syndromes)
    predicted = np.asarray(results.result)
-   gap = np.asarray([r["jobs_gap"] for r in results.opt_results])
-   competitor = np.asarray(
-       [r["jobs_gap_class"] for r in results.opt_results])
+
+Select the per-shot optional results for the package you used:
+
+.. tab:: Python — CUDA-Q QEC
+
+   .. code-block:: python
+
+      shot_results = results.opt_results
+
+.. tab:: Python — standalone
+
+   .. code-block:: python
+
+      shot_results = results.opt_results["shots"]
+
+.. code-block:: python
+
+   gap = np.asarray([r["jobs_gap"] for r in shot_results])
+   competitor = np.asarray([r["jobs_gap_class"] for r in shot_results])
 
 ``tcbp-jobs`` omits search on BP-converged shots. ``tcbp-jobs-sc`` searches
 them without allocating the logical-class table, and

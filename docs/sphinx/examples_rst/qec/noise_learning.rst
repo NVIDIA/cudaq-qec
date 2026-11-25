@@ -18,6 +18,9 @@ in the final decoding step to compare the three priors.
 Prerequisites
 -------------
 
+This workflow requires CUDA-Q QEC. Noise learning and the DEM preparation
+helpers are not included in the :ref:`standalone decoder <nv_qldpc_standalone>`.
+
 Use a CUDA-Q QEC installation with the ``nv-qldpc-decoder`` plugin, a
 compatible NVIDIA GPU, NumPy, and Stim. Internet access is needed to download
 the bivariate-bicycle memory circuit. The script writes

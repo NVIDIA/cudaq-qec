@@ -4,20 +4,17 @@ Release History
 This documentation covers CUDA-Q QEC 0.9.1. Documentation and release notes
 for earlier versions are listed below.
 
-0.9.1 — Current Version
-------------------------
+Standalone decoder packages have independent release versions. See
+:doc:`Decoder Release History <releases/decoders>` for their release notes.
 
-See the `0.9.1 release notes
-<https://github.com/NVIDIA/cudaq-qec/releases/tag/0.9.1>`__ for decoder
-updates and behavior changes. The :ref:`0.9.1 highlights <qec_v091_highlights>`
-cover faster batched Relay BP and
-:ref:`JOBS support for larger detector models <qldpc_tcbp_jobs>`.
-See the :doc:`examples <examples_rst/qec/examples>` for usage and the
-:ref:`CUDA 12 compatibility note <pytorch-cuda12-compatibility>` when
-installing the Tensor Network Decoder.
+.. toctree::
+   :maxdepth: 1
 
-Published Releases
-------------------
+   releases/qec_0_9_1
+   releases/decoders
+
+Published QEC Releases
+----------------------
 
 .. list-table::
    :header-rows: 1

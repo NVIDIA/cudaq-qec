@@ -22,6 +22,10 @@ to interpret belief-propagation information. Learning does not require Jittered
 OSD Beam Search (JOBS): JOBS is one choice for the subsequent decoding step.
 See :ref:`qldpc_tcbp_jobs` for the relationship between these components.
 
+Noise learning is a CUDA-Q QEC feature. The
+:ref:`standalone decoder <nv_qldpc_standalone>` includes TCBP model fitting
+and decoding, but does not include ``learn_noise`` or the DEM utilities.
+
 For the complete Python workflow, see :doc:`Learning Noise and Decoding with
 Learned Rates </examples_rst/qec/noise_learning>`. For measured learning time,
 rate accuracy, and decoding performance, see :ref:`noise_learning_user_guide`.

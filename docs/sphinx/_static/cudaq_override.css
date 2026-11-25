@@ -11,6 +11,11 @@ max-width: 1240px !important;
 	font-size: 92%;
 }
 
+/* Keep decoder columns readable inside the theme's horizontal table scroller. */
+.rst-content table.decoder-catalog {
+    min-width: 60rem;
+}
+
 /* Reserve the version selector's natural height below the scrolling navigation. */
 .wy-nav-side:has(> .rst-versions) {
     display: flex;

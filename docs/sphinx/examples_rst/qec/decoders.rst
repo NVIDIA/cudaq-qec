@@ -46,6 +46,29 @@ The example demonstrates:
 2. **All BP methods** including Sequential Relay BP
 3. **Batched decoding** for improved performance
 
+Choose a package once when running the script; the decoder configurations
+and the array-based result handling are shared.
+:download:`Download the example script <../../examples/qec/python/nv-qldpc-decoder.py>`:
+
+.. tab:: Python — CUDA-Q QEC
+
+    .. code-block:: bash
+
+        python nv-qldpc-decoder.py --package qec
+
+.. tab:: Python — standalone
+
+    .. code-block:: bash
+
+        python nv-qldpc-decoder.py --package standalone
+
+Install the selected package first, plus SciPy and Requests for this example.
+The script downloads its test data if it is not present. See
+:ref:`nv_qldpc_standalone` for the standalone installation instructions and
+:ref:`nv_qldpc_package_comparison` for constructor and result differences.
+The :doc:`standalone Python API </api/decoders/nv_qldpc>` documents its
+factories, methods, and result classes.
+
 .. literalinclude:: ../../examples/qec/python/nv-qldpc-decoder.py
     :language: python
     :start-after: [Begin Documentation]

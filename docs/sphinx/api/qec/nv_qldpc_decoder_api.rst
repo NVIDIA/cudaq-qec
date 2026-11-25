@@ -13,7 +13,8 @@
       Jittered OSD Beam Search (JOBS).
 
     The ``cudaq_qec.plugins.nv_qldpc`` module provides named presets for
-    common configurations. See "Presets" below.
+    common configurations. Standalone users import the same presets from
+    ``cudaq_decoding.nv_qldpc``. See "Presets" below.
 
     An [[n,k,d]] quantum error correction (QEC) code encodes k logical qubits
     into an n qubit data block, with a code distance d. Quantum low-density
@@ -31,10 +32,14 @@
     - `TCBP+JOBS: GPU-Accelerated Quantum Error Correction Decoding and Noise Learning with Near-Optimal Accuracy <https://research.nvidia.com/publication/_tcbpjobs-gpu-accelerated-quantum-error-correction-decoding-and-noise-learning-near>`_
 
     .. note::
-      It is required to create decoders with the `get_decoder` API from the CUDA-Q QEC
-      extension points API, such as
+      Choose the constructor for the Python package you installed. The
+      decoder options below are shared. See the
+      :ref:`package comparison <nv_qldpc_package_comparison>` for installation,
+      batch-result layouts and the interfaces provided by each package. The
+      :doc:`standalone Python API </api/decoders/nv_qldpc>` documents the
+      standalone constructors, methods, and result types.
 
-      .. tab:: Python
+      .. tab:: Python — CUDA-Q QEC
 
         .. code-block:: python
 
@@ -52,7 +57,23 @@
             nvdec = qec.get_decoder('nv-qldpc-decoder', H, O=O,
                                     output='observables', **opts)
 
-      .. tab:: C++
+      .. tab:: Python — standalone
+
+        .. code-block:: python
+
+            from cudaq_decoding import nv_qldpc
+            import numpy as np
+
+            H = np.array([[1, 0, 0, 1, 0, 1, 1],
+                          [0, 1, 0, 1, 1, 0, 1],
+                          [0, 0, 1, 0, 1, 1, 1]], dtype=np.uint8)
+            O = np.array([[1, 1, 1, 0, 0, 0, 0]], dtype=np.uint8)
+            opts = dict()  # see below for options
+            # Dense arrays and SciPy sparse matrices are both accepted.
+            nvdec = nv_qldpc.create_decoder(
+                H, O=O, output="observables", **opts)
+
+      .. tab:: C++ — CUDA-Q QEC
 
         .. code-block:: cpp
 
@@ -81,9 +102,15 @@
                 cudaq::qec::decode_result_type::observables, nv_custom_args);
       
     .. note::
-      The `"nv-qldpc-decoder"` implements the :class:`cudaq_qec.Decoder`
+      In CUDA-Q QEC, `"nv-qldpc-decoder"` implements the :class:`cudaq_qec.Decoder`
       interface for Python and the :cpp:class:`cudaq::qec::decoder` interface
       for C++, so it supports all the methods in those respective classes.
+      The standalone Python class provides synchronous ``decode`` and
+      ``decode_batch``; it is not a subclass of ``cudaq_qec.Decoder``.
+
+    The remaining Python snippets use CUDA-Q QEC. For standalone code, see
+    the :doc:`standalone Python API </api/decoders/nv_qldpc>` and the
+    :ref:`package comparison <nv_qldpc_package_comparison>`.
 
     :param H: Parity-check matrix with shape ``(syndrome_size, block_size)``.
     :param O: Optional observable matrix with shape

@@ -23,6 +23,11 @@ history.
 To run these experiments yourself, see the `min-LLR OSD benchmark README
 <https://github.com/NVIDIA/cudaq-qec/blob/main/benchmarks/qec/nv_qldpc_minllr_osd/README.md>`_.
 
+This example uses CUDA-Q QEC. The same decoder options are available in the
+:ref:`standalone package <nv_qldpc_standalone>`; use its constructor and the
+array-based batch-result access described in :ref:`nv_qldpc_package_comparison`.
+The measurements below retain their original software and hardware context.
+
 .. code-block:: python
 
     import cudaq_qec as qec
@@ -43,7 +48,7 @@ To run these experiments yourself, see the `min-LLR OSD benchmark README
     # Observable output is k predicted flip bits, so compare it directly to
     # the measured observables.
     results = decoder.decode_batch(syndromes)
-    predicted = [r.result for r in results]
+    predicted = results.result
 
 Note the iteration count: ten BP iterations, not the 50-100 that BP+OSD configurations
 usually run. Min-LLR ordering can use information encountered before BP converges,

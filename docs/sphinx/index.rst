@@ -68,10 +68,12 @@ cases in quantum error correction.
    api/core/cpp_api
    api/qec/cpp_api
    api/qec/python_api
+   api/decoders/nv_qldpc
 
 .. toctree::
    :maxdepth: 1
    :caption: Releases
+   :includehidden:
 
    Release History <releases>
 
