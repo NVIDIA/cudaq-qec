@@ -5,7 +5,9 @@
 
 /// @file
 ///
-/// Unit tests for the shared persistent QEC thread pool.
+/// Unit tests for the shared persistent QEC thread pool, and the idle waits
+/// its workers use: a spin bounded by time, and the gate that sends one idle
+/// worker at a time to search for work after a scheduler change.
 
 #include "../lib/decoding_task/thread_pool.h"
 
@@ -15,6 +17,7 @@
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 namespace cudaq::qec::detail {
 namespace {
@@ -116,6 +119,148 @@ TEST(QecThreadPool, RunWorkersPropagatesErrorsAndRemainsReusable) {
   }));
   EXPECT_EQ(workers.load(std::memory_order_relaxed), 4);
 } // end - RunWorkersPropagatesErrorsAndRemainsReusable
+
+using std::chrono::steady_clock;
+
+// A wait that must time out: long enough to measure, short enough to keep
+// the suite fast.
+constexpr std::chrono::milliseconds short_budget{20};
+// A wait that must end by an event, never by its budget.
+constexpr std::chrono::seconds long_budget{30};
+
+TEST(IdleSpin, SpinForReturnsOnceDone) {
+  int calls = 0;
+  const auto start = steady_clock::now();
+
+  EXPECT_TRUE(spin_for(long_budget, [&] { return ++calls == 100; }));
+  EXPECT_EQ(calls, 100);
+  EXPECT_LT(steady_clock::now() - start, long_budget);
+}
+
+TEST(IdleSpin, SpinForGivesUpAfterItsBudget) {
+  const auto start = steady_clock::now();
+
+  EXPECT_FALSE(spin_for(short_budget, [] { return false; }));
+  EXPECT_GE(steady_clock::now() - start, short_budget);
+}
+
+TEST(IdleSpin, SpinForChecksOnceWithoutABudget) {
+  int calls = 0;
+
+  EXPECT_FALSE(spin_for(std::chrono::nanoseconds{0}, [&] {
+    ++calls;
+    return false;
+  }));
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(IdleSearchGate, WaitTimesOutWithoutAChange) {
+  idle_search_gate gate;
+  const auto seen = gate.generation();
+  const auto start = steady_clock::now();
+
+  EXPECT_EQ(gate.wait(seen, short_budget), idle_wake::timeout);
+  EXPECT_GE(steady_clock::now() - start, short_budget);
+}
+
+TEST(IdleSearchGate, AChangeSendsAWaiterToSearch) {
+  idle_search_gate gate;
+  const auto seen = gate.generation();
+
+  gate.publish();
+  EXPECT_NE(gate.generation(), seen);
+  EXPECT_EQ(gate.wait(seen, long_budget), idle_wake::search);
+  gate.end_search();
+}
+
+TEST(IdleSearchGate, OnlyOneWaiterSearchesAtATime) {
+  idle_search_gate gate;
+  const auto seen = gate.generation();
+
+  gate.publish();
+  ASSERT_EQ(gate.wait(seen, long_budget), idle_wake::search);
+  // The change is not yet searched, but the gate is held.
+  EXPECT_EQ(gate.wait(seen, short_budget), idle_wake::timeout);
+  gate.end_search();
+  // Released without a search: the change still needs one.
+  EXPECT_EQ(gate.wait(seen, long_budget), idle_wake::search);
+  gate.end_search();
+}
+
+TEST(IdleSearchGate, ASearchCoversEveryEarlierChange) {
+  idle_search_gate gate;
+  const auto seen = gate.generation();
+
+  gate.publish();
+  gate.publish();
+  ASSERT_EQ(gate.wait(seen, long_budget), idle_wake::search);
+  gate.begin_search();
+  gate.end_search();
+  EXPECT_EQ(gate.wait(seen, short_budget), idle_wake::timeout);
+
+  // A change after the search still needs one.
+  gate.publish();
+  EXPECT_EQ(gate.wait(seen, long_budget), idle_wake::search);
+  gate.end_search();
+}
+
+TEST(IdleSearchGate, InterruptReleasesEveryWaiter) {
+  constexpr int waiters = 4;
+  idle_search_gate gate;
+  const auto seen = gate.generation();
+  std::atomic<int> interrupted{0};
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < waiters; ++i)
+    threads.emplace_back([&] {
+      if (gate.wait(seen, long_budget) == idle_wake::interrupted)
+        interrupted.fetch_add(1, std::memory_order_relaxed);
+    });
+  gate.interrupt();
+  for (auto &thread : threads)
+    thread.join();
+  EXPECT_EQ(interrupted.load(), waiters);
+
+  gate.clear_interrupt();
+  EXPECT_EQ(gate.wait(seen, short_budget), idle_wake::timeout);
+}
+
+// Many spinning workers and one change: one searches, and its search covers
+// the change for the rest, which keep spinning until interrupted.
+TEST(IdleSearchGate, ManyWaitersSendOneSearchPerChange) {
+  constexpr int waiters = 6;
+  idle_search_gate gate;
+  const auto seen = gate.generation();
+  std::atomic<int> searches{0};
+  std::atomic<int> interrupted{0};
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < waiters; ++i)
+    threads.emplace_back([&] {
+      const auto wake = gate.wait(seen, long_budget);
+      if (wake == idle_wake::search) {
+        gate.begin_search();
+        searches.fetch_add(1, std::memory_order_relaxed);
+        gate.end_search();
+        return;
+      }
+      if (wake == idle_wake::interrupted)
+        interrupted.fetch_add(1, std::memory_order_relaxed);
+    });
+  gate.publish();
+  const auto deadline = steady_clock::now() + long_budget;
+  while (searches.load() == 0 && steady_clock::now() < deadline)
+    std::this_thread::yield();
+  // Give the other waiters time to search the change again, as they would
+  // if the search did not cover it.
+  std::this_thread::sleep_for(short_budget);
+  gate.interrupt();
+  for (auto &thread : threads)
+    thread.join();
+
+  EXPECT_EQ(searches.load(), 1);
+  EXPECT_EQ(interrupted.load(), waiters - 1);
+}
 
 } // namespace
 } // namespace cudaq::qec::detail

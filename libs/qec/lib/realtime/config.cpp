@@ -370,11 +370,6 @@ static void validate_task_graph(const decoder_config &config) {
     return who + ": task_graph node '" + id + "'";
   };
 
-  if (tg.options.async_streaming && tg.options.async_queue_capacity == 0)
-    throw std::runtime_error(
-        who +
-        ": task_graph.async_queue_capacity must be nonzero when asynchronous "
-        "streaming is enabled");
   if (tg.options.async_coordinator_cpu < -1)
     throw std::runtime_error(
         who + ": task_graph.async_coordinator_cpu must be -1 or nonnegative");
@@ -1987,7 +1982,7 @@ struct MappingTraits<task_graph_spec_t> {
     io.mapOptional("inner_type", tg.inner_type, std::string{});
     io.mapOptional("async_streaming", tg.options.async_streaming, false);
     io.mapOptional("async_queue_capacity", tg.options.async_queue_capacity,
-                   std::size_t{8});
+                   std::size_t{0});
     io.mapOptional("async_coordinator_cpu", tg.options.async_coordinator_cpu,
                    -1);
     io.mapOptional("async_spin_pause_iters", tg.options.async_spin_pause_iters,
@@ -3049,8 +3044,8 @@ llvm::json::Object task_graph_json_schema() {
                 {"async_streaming",
                  llvm::json::Object{{"type", "boolean"}, {"default", false}}},
                 {"async_queue_capacity", llvm::json::Object{{"type", "integer"},
-                                                            {"minimum", 1},
-                                                            {"default", 32}}},
+                                                            {"minimum", 0},
+                                                            {"default", 0}}},
                 {"async_coordinator_cpu",
                  llvm::json::Object{
                      {"type", "integer"}, {"minimum", -1}, {"default", -1}}},

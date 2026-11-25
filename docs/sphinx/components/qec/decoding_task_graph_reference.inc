@@ -104,9 +104,9 @@ with ``async_streaming``, and each graph gets threads of its own.
        and the graph's threads decode it. ``false`` (default): the call
        decodes on the caller's thread and returns when done.
    * - ``async_num_workers``
-     - Worker threads that decode. Default: enough for everything that may
-       decode at once (independent branches and ``max_in_flight`` copies), up
-       to the machine's hardware threads.
+     - Worker threads that decode, from 1 to 1024. Default: enough for
+       everything that may decode at once (independent branches and
+       ``max_in_flight`` copies), up to the machine's hardware threads.
    * - ``async_worker_cpus``
      - CPUs to pin the workers to, one worker per CPU (Linux). With fewer
        CPUs than workers, the pool shrinks to match. Default: none.
@@ -119,7 +119,10 @@ with ``async_streaming``, and each graph gets threads of its own.
        no polling.
    * - ``async_queue_capacity``
      - Records that may be queued or decoding before ``enqueue_syndrome``
-       waits. Default ``32`` in code, ``8`` in YAML.
+       waits. Default ``0``: sized from the graph. A windowed graph holds
+       ``max_in_flight + 1`` window periods of its widest layer, so its
+       windows decode at once while rounds arrive one per call; any other
+       graph holds ``32``.
 
 * Each ``enqueue_syndrome`` call is queued as a record; a windowed graph may
   split a long call into several. Records overlap: a later record
@@ -149,6 +152,14 @@ uses one copy, and corrections fold in record order.
   not an already-built decoder.
 * Copies decode at once only with ``async_streaming``. Each copy beyond the
   first adds a worker to the default pool.
+
+Profiling
+^^^^^^^^^
+
+Build with ``-DENABLE_NVTX=ON`` to mark every event with an NVTX range for
+Nsight Systems, named for its kind and node (``ingest``, ``deliver``,
+``flush``, ``fire``) and carrying a window's index, and an asynchronous
+graph's admission and retirement of records.
 
 .. _task_graph_streaming_results:
 

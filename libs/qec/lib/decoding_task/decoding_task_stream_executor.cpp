@@ -93,17 +93,22 @@ void wait_until_inactive(std::atomic<bool> &active,
 
 } // namespace
 
-// Keep an active coordinator hot for a bounded interval. Waiting
-// sessions still park, so an idle prepared graph consumes no CPU.
+// Keep an active coordinator hot for a bounded interval: the configured
+// pause hints, then `min_spin` while records are in flight. Waiting sessions
+// still park, so an idle prepared graph consumes no CPU.
 bool decoding_task_graph::impl::spin_for_async_wake(
-    uint64_t observed_epoch, std::size_t pause_iters) const noexcept {
+    uint64_t observed_epoch, std::size_t pause_iters,
+    std::chrono::nanoseconds min_spin) const noexcept {
   const auto &state = async_streaming;
+  const auto woken = [&] {
+    return state.wake_epoch.load(std::memory_order_acquire) != observed_epoch;
+  };
   for (std::size_t spin = 0; spin < pause_iters; ++spin) {
-    if (state.wake_epoch.load(std::memory_order_acquire) != observed_epoch)
+    if (woken())
       return true;
     CUDAQ_REALTIME_CPU_RELAX();
   }
-  return false;
+  return min_spin.count() > 0 && detail::spin_for(min_spin, woken);
 }
 
 // Advance a monotonic event counter before notifying the coordinator. Unlike a

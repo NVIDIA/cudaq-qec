@@ -4,7 +4,8 @@
  */
 
 /// @file
-/// @brief Persistent fork-join thread pool for QEC dependency executors.
+/// @brief Persistent fork-join thread pool for QEC dependency executors, and
+/// the gate that sends one idle worker at a time to search for work.
 
 #include "thread_pool.h"
 #include "cudaq/qec/realtime/nvtx_helpers.h"
@@ -236,6 +237,70 @@ void thread_pool::rethrow_phase_error() {
   std::lock_guard<std::mutex> lock(phase_error_mutex_);
   if (phase_error_ != nullptr)
     std::rethrow_exception(phase_error_);
+}
+
+// Count one scheduler change; spinners see it on their next check.
+void idle_search_gate::publish() noexcept {
+  generation_.fetch_add(1, std::memory_order_release);
+}
+
+// The change count as of the caller's lock.
+std::uint64_t idle_search_gate::generation() const noexcept {
+  return generation_.load(std::memory_order_acquire);
+}
+
+// A change after `seen` is uncovered while no search began after it. The
+// caller searched up to `seen` itself, so only later changes count.
+bool idle_search_gate::unsearched_since(std::uint64_t seen) const noexcept {
+  const auto now = generation_.load(std::memory_order_acquire);
+  return now != seen && searched_.load(std::memory_order_acquire) < now;
+}
+
+// Spin until an uncovered change and a free gate meet. Taking the gate
+// synchronizes with the last holder's end_search(), so the change is checked
+// again after: a search may have begun and ended in between.
+idle_wake idle_search_gate::wait(std::uint64_t seen,
+                                 std::chrono::nanoseconds budget) noexcept {
+  idle_wake wake = idle_wake::timeout;
+  spin_for(budget, [&] {
+    if (interrupted_.load(std::memory_order_acquire)) {
+      wake = idle_wake::interrupted;
+      return true;
+    }
+    if (!unsearched_since(seen) || held_.load(std::memory_order_relaxed) ||
+        held_.exchange(true, std::memory_order_acquire))
+      return false;
+    if (unsearched_since(seen)) {
+      wake = idle_wake::search;
+      return true;
+    }
+    held_.store(false, std::memory_order_release);
+    return false;
+  });
+  return wake;
+} // end - wait()
+
+// Called under the scheduler lock, so no change lands between the read and
+// the search that follows.
+void idle_search_gate::begin_search() noexcept {
+  searched_.store(generation_.load(std::memory_order_acquire),
+                  std::memory_order_release);
+}
+
+// Publishes begin_search() to the next holder.
+void idle_search_gate::end_search() noexcept {
+  held_.store(false, std::memory_order_release);
+}
+
+// Sticky until cleared, so a worker that starts waiting after a session ends
+// still returns at once.
+void idle_search_gate::interrupt() noexcept {
+  interrupted_.store(true, std::memory_order_release);
+}
+
+// Called before a new session's workers start.
+void idle_search_gate::clear_interrupt() noexcept {
+  interrupted_.store(false, std::memory_order_release);
 }
 
 } // namespace cudaq::qec::detail
