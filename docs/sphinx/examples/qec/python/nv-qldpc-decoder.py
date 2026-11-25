@@ -337,6 +337,13 @@ if __name__ == "__main__":
         from cudaq_decoding.nv_qldpc import create_decoder
     else:
         import cudaq_qec as qec
+        from cudaq_qec.plugins.nv_qldpc import plugin_path
+        try:
+            plugin_path()
+        except FileNotFoundError:
+            print("Skipping nv-qldpc example: the plugin is not included in "
+                  "this QEC installation.")
+            raise SystemExit(0)
         create_decoder = partial(qec.get_decoder, "nv-qldpc-decoder")
 
     # Demonstrate different BP methods (introduced in v0.5.0)
