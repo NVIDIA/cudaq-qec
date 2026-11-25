@@ -76,15 +76,19 @@ equal `syndrome_size`, `H_sparse`/`O_sparse` entries must be below
 field (`dem_chunks`, `stim_dem_path`) rejects that field when it is also
 given. For the `dem_chunks` form the shape of `seam`, `connections` and
 `phases` (names, `spec` with `num_faults` and matching `error_rates` in
-[0, 1], every connection naming a phase that has a spec) and the
-`syndrome_mapping` rules (unique ids below 16, `bulk` or `final`) are
-checked as the parser checks them.
+[0, 1], every connection naming a phase that has a spec), its connection
+graph (each connection listed once, one start phase, at least one terminal
+phase, every phase on a path from the start to a terminal), the widths of
+the seam bands each connection joins, and the `syndrome_mapping` rules
+(unique ids below 16, `bulk` or `final`) are checked as the parser checks
+them.
 
 Not checked: per-decoder validation hooks (for example `sliding_window`'s
-`step_size` against `window_size`), DEM-chunk seam consistency and the
-`phases_supply_D_sparse` rule, and the `D_sparse` row count of a
-`stim_dem_path` decoder. Those run only when the server loads the
-configuration, so a file that passes here may still be rejected at load.
+`step_size` against `window_size`), the DEM-chunk seam checks made when the
+chunks are built and the `phases_supply_D_sparse` rule, and the `D_sparse`
+row count of a `stim_dem_path` decoder. Those run only when the server
+loads the configuration, so a file that passes here may still be rejected
+at load.
 Task-graph configurations are reported as invalid unless
 `--allow-task-graph` is given.
 
