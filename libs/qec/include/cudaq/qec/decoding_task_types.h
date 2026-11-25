@@ -66,7 +66,8 @@ struct error_pattern {
 /// Whether a shot's window solutions were checked against their detectors
 /// and held: not_checked unless every window reaching the output checks its
 /// solution (verify_residual); else closed when every solution satisfied
-/// its window, and open when one did not.
+/// its window, and open when one did not. Each check is window-local, so
+/// closed covers no row that no window finalizes (soundness_class).
 enum class task_graph_closure { not_checked, closed, open };
 
 /// Final observable correction. The role (L_raw, L_flip, or L_obs) is carried

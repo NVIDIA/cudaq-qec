@@ -2964,7 +2964,8 @@ llvm::json::Object task_graph_json_schema() {
                                         {"output", std::move(output)}})},
       {"sends",
        llvm::json::Object{{"type", "array"}, {"items", std::move(send)}}},
-      {"columns", std::move(columns)}});
+      {"columns", std::move(columns)},
+      {"soundness_class", one_of({"exact", "unchecked_seams"})}});
   window_request["required"] = llvm::json::Array{"period", "zones", "ports"};
   // A data_artifacts window entry: the request and the dem_chunks entry it
   // is built on.
