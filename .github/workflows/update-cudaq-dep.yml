@@ -20,6 +20,8 @@ jobs:
     permissions:
       contents: write  # Required to push changes
       pull-requests: write  # Required to open PRs
+    env:
+      CUDAQ_BRANCH_NAME: ${{ inputs.cudaq_branch_name || 'main' }}
 
     steps:
       - name: Checkout repository
@@ -29,7 +31,7 @@ jobs:
 
       - name: Fetch the latest commit
         run: |
-          SHA=$(curl -s "https://api.github.com/repos/NVIDIA/cuda-quantum/commits/${{ inputs.cudaq_branch_name || 'main' }}" | jq -r '.sha')
+          SHA=$(curl -s "https://api.github.com/repos/NVIDIA/cuda-quantum/commits/${CUDAQ_BRANCH_NAME}" | jq -r '.sha')
           echo "Latest SHA: $SHA"
           echo "sha=$SHA" >> $GITHUB_ENV
 
@@ -71,13 +73,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           BRANCH_NAME: ${{ steps.commit_and_push.outputs.BRANCH_NAME }}
         run: |
-          if [[ "${{ inputs.cudaq_branch_name }}" == "main" ]]; then
+          if [[ "${CUDAQ_BRANCH_NAME}" == "main" ]]; then
             TITLE_STR="Bump CUDA-Q commit"
           else
-            TITLE_STR="Bump CUDA-Q commit (${{ inputs.cudaq_branch_name }} DO NOT MERGE)"
+            TITLE_STR="Bump CUDA-Q commit (${CUDAQ_BRANCH_NAME} DO NOT MERGE)"
           fi
           gh pr create \
             --title "${TITLE_STR}" \
-            --body "Auto update to the latest CUDA-Q commit on ${{ inputs.cudaq_branch_name }} branch" \
+            --body "Auto update to the latest CUDA-Q commit on ${CUDAQ_BRANCH_NAME} branch" \
             --head "${BRANCH_NAME}" \
             --base "main"
