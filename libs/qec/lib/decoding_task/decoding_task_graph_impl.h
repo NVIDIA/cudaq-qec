@@ -55,6 +55,8 @@ struct decoding_task_graph::impl {
     /// The copies' index-join capability, parallel to replicas; null when
     /// the node joins by record.
     std::vector<indexed_join_node *> indexed;
+    /// The node's id, kept for NVTX range names after node_ids is cleared.
+    std::string id;
   };
 
   // Nodes in topological execution order.
@@ -185,6 +187,20 @@ struct decoding_task_graph::impl {
   enum class streaming_overlap_kind : uint8_t { disjoint, rendezvous, ordered };
   std::vector<std::vector<streaming_overlap_kind>> streaming_overlap;
   std::size_t streaming_parallel_width = 1;
+
+  // Feedback dependencies keep a cycle's record turns together. Its anchor
+  // waits for outside producers, then resolves all members' pending joins.
+  struct feedback_group {
+    std::vector<std::size_t> members;
+    std::vector<std::size_t> producers;
+  };
+  std::vector<std::size_t> feedback_anchor;
+  std::vector<feedback_group> feedback_groups;
+  std::vector<std::vector<std::size_t>> record_producers;
+  std::vector<std::vector<std::size_t>> record_dependents;
+  std::vector<std::vector<std::size_t>> flush_producers;
+  std::vector<std::vector<std::size_t>> flush_dependents;
+  std::vector<int32_t> flush_predecessor_counts;
 
   // Sizes cached by compile_wires() so the accessors do not have to nominate a
   // representative node.  n_msyn is the largest window among the raw-input
@@ -347,6 +363,9 @@ struct decoding_task_graph::impl {
   // Resolve string edges to integer-indexed compiled_wires; clear build-time
   // fields on return.  Defined in decoding_task_graph.cpp.
   void compile_wires();
+
+  /// Validate feedback cycles and compile their record and flush dependencies.
+  void compile_feedback_flush();
 
   /// Record the first streaming-only incompatibility found during compilation.
   void record_streaming_conflict(std::string msg);
