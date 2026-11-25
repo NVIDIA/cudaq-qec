@@ -24,23 +24,20 @@
 # this binary as a subprocess.
 
 if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET cudaq-qec-realtime-decoding-server-cqr)
-  # The server needs the DeviceCallService plugin headers and the
-  # libcudaq-realtime shared lib (bridge loader + dispatcher object; the
-  # HOST-path ring loop is linked into it).  Transports are runtime provider
-  # .so's, NOT link dependencies.
-  find_path(QEC_UDP_DEVICE_CALL_INCLUDE_DIR
-    NAMES cudaq/realtime/device_call_service.h
-    HINTS ${CUDAQ_REALTIME_ROOT} ${CUDAQ_INSTALL_DIR}
-    PATH_SUFFIXES include)
+  # The server needs the libcudaq-realtime shared lib (bridge loader +
+  # dispatcher object; the HOST-path ring loop is linked into it) and its
+  # headers, already located as CUDAQ_REALTIME_INCLUDE_DIR.  It does not
+  # include the CUDA-Q DeviceCallService header, so a cudaq-realtime-only
+  # install is enough.  Transports are runtime provider .so's, NOT link
+  # dependencies.
   find_library(QEC_UDP_REALTIME_LIBRARY cudaq-realtime
     HINTS ${CUDAQ_REALTIME_ROOT} ${CUDAQ_INSTALL_DIR}
     PATH_SUFFIXES lib)
 
-  if(QEC_UDP_DEVICE_CALL_INCLUDE_DIR AND QEC_UDP_REALTIME_LIBRARY)
+  if(QEC_UDP_REALTIME_LIBRARY)
     add_executable(decoding_server decoding_server.cpp)
     target_include_directories(decoding_server PRIVATE
       ${CUDAQ_REALTIME_INCLUDE_DIR}
-      ${QEC_UDP_DEVICE_CALL_INCLUDE_DIR}
       ${CUDAToolkit_INCLUDE_DIRS}
     )
     target_link_directories(decoding_server
