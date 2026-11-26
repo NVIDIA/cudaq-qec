@@ -220,6 +220,13 @@ function(cudaqx_import_cudaq_targets)
     include("${CUDAQ_CMAKE_DIR}/CUDAQTargets.cmake")
   endif()
 
+  # Define a dummy `cudaq::nvqpp` target for CUDA-Q versions before #6003.
+  if(NOT TARGET cudaq::nvqpp)
+    add_library(cudaq::nvqpp INTERFACE IMPORTED)
+    target_link_libraries(cudaq::nvqpp INTERFACE
+      cudaq::cudaq cudaq::cudaq-common)
+  endif()
+
   set(__base_nvtarget_name "custatevec")
   find_library(CUDAQ_CUSVSIM_PATH NAMES cusvsim-fp32 HINTS ${CUDAQ_LIBRARY_DIR})
   if (CUDAQ_CUSVSIM_PATH)

@@ -12,6 +12,9 @@ extern "C" {
 __attribute__((visibility("default"))) void __cudaq_deviceCodeHolderAdd() {}
 __attribute__((visibility("default"))) void __cudaq_registerLinkableKernel() {}
 __attribute__((visibility("default"))) void __cudaq_registerRunnableKernel() {}
+__attribute__((visibility("default"))) void __cudaq_registerArgsCreator() {}
+__attribute__((visibility("default"))) void __cudaq_registerKernelName() {}
+// Old spellings, pre-rename of the runtime C API.
 __attribute__((visibility("default"))) void cudaqRegisterArgsCreator() {}
 __attribute__((visibility("default"))) void cudaqRegisterKernelName() {}
 }

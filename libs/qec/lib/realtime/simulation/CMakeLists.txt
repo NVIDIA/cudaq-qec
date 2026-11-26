@@ -14,7 +14,7 @@ cudaqx_add_device_code(cudaq-qec-realtime-decoding-simulation
 )
 
 target_include_directories(cudaq-qec-realtime-decoding-simulation
-  PUBLIC 
+  PUBLIC
     $<BUILD_INTERFACE:${CUDAQX_QEC_INCLUDE_DIR}>
     $<INSTALL_INTERFACE:${CUDAQ_INCLUDE_DIR}>
     $<INSTALL_INTERFACE:include>
@@ -28,7 +28,7 @@ target_link_options(cudaq-qec-realtime-decoding-simulation PRIVATE
 )
 
 target_link_libraries(cudaq-qec-realtime-decoding-simulation
-  PUBLIC 
+  PUBLIC
     cudaq-qec-decoders
     cudaq-qec-realtime-decoding
 )
@@ -43,4 +43,3 @@ install(TARGETS cudaq-qec-realtime-decoding-simulation
   COMPONENT qec-lib
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-

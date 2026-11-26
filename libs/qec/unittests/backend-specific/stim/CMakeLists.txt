@@ -23,7 +23,7 @@ target_link_libraries(test_qec_stim
   PRIVATE
     GTest::gtest_main
     cudaq-qec
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
     nvqir nvqir-stim)
 
 add_dependencies(CUDAQXQECUnitTests test_qec_stim)
