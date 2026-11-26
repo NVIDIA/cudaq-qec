@@ -321,7 +321,7 @@ if(CUDAQ_REALTIME_INCLUDE_DIR AND TARGET decoding_server)
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-simulation-cqr
     cudaq-device-call-runtime
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
     nvqir nvqir-stim
   )
 

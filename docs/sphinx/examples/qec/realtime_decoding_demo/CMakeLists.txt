@@ -108,6 +108,15 @@ set(_cudaq_core_libs
   cudaq cudaq-platform-default cudaq-em-default
   cudaq-common cudaq-operator cudaq-logger)
 
+# The C entrypoints called by nvq++-generated code must be included manually
+# when linking object files using standard C++ tooling. Older versions of CUDA-Q
+# may not define this library (and don't need it).
+find_library(_nvqpp_capi_lib libcudaq-nvqpp-capi.a
+  HINTS "${CUDAQ_INSTALL_DIR}/lib" NO_DEFAULT_PATH)
+if(_nvqpp_capi_lib)
+  list(PREPEND _cudaq_core_libs "${_nvqpp_capi_lib}")
+endif()
+
 # ---------------------------------------------------------------------------- #
 # Helper: compile the source with nvq++ into an object, in an isolated working
 # directory (nvq++ drops intermediates named after the source, so two compiles

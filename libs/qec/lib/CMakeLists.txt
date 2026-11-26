@@ -9,7 +9,7 @@ set(DEM_LIBRARY_NAME cudaq-qec-dem)
 
 include(FetchContent)
 
-add_compile_options(-Wno-attributes) 
+add_compile_options(-Wno-attributes)
 
 find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
@@ -20,13 +20,13 @@ find_package(Threads REQUIRED)
 # default "Could NOT find cuStabilizer" message.
 # Decoders-only builds skip it: only libcudaq-qec.so (DEM sampling) needs it.
 if(NOT CUDAQ_QEC_DECODERS_ONLY)
-find_package(cuStabilizer QUIET)
-if(NOT cuStabilizer_FOUND)
-  set(_cuda_major "${CUDAToolkit_VERSION_MAJOR}")
-  if(NOT _cuda_major)
-    set(_cuda_major "<CUDA major version, e.g. 12 or 13>")
-  endif()
-  message(FATAL_ERROR
+  find_package(cuStabilizer QUIET)
+  if(NOT cuStabilizer_FOUND)
+    set(_cuda_major "${CUDAToolkit_VERSION_MAJOR}")
+    if(NOT _cuda_major)
+      set(_cuda_major "<CUDA major version, e.g. 12 or 13>")
+    endif()
+    message(FATAL_ERROR
     "cuStabilizer was not found.\n"
     "It is required to build cudaq-qec and is distributed as part of the "
     "cuQuantum SDK pip wheels. Install it into the Python environment used "
@@ -38,7 +38,7 @@ if(NOT cuStabilizer_FOUND)
     "    -DCUQUANTUM_ROOT=<site-packages>/cuquantum\n"
     "    -DCUSTABILIZER_ROOT=/path/to/custabilizer\n"
     "(both are also honored as environment variables).")
-endif()
+  endif()
 endif() # NOT CUDAQ_QEC_DECODERS_ONLY
 
 set(DEM_SOURCES
@@ -170,11 +170,11 @@ if(NOT CUDAQ_QEC_DECODERS_ONLY)
 endif()
 
 if (CUDAQX_QEC_USE_FLOAT)
-   target_compile_definitions(${DEM_LIBRARY_NAME} PUBLIC -DCUDAQX_QEC_FLOAT_TYPE=float)
-   target_compile_definitions(${DECODERS_LIBRARY_NAME} PUBLIC -DCUDAQX_QEC_FLOAT_TYPE=float)
-   if(TARGET ${LIBRARY_NAME})
-     target_compile_definitions(${LIBRARY_NAME} PUBLIC -DCUDAQX_QEC_FLOAT_TYPE=float)
-   endif()
+  target_compile_definitions(${DEM_LIBRARY_NAME} PUBLIC -DCUDAQX_QEC_FLOAT_TYPE=float)
+  target_compile_definitions(${DECODERS_LIBRARY_NAME} PUBLIC -DCUDAQX_QEC_FLOAT_TYPE=float)
+  if(TARGET ${LIBRARY_NAME})
+    target_compile_definitions(${LIBRARY_NAME} PUBLIC -DCUDAQX_QEC_FLOAT_TYPE=float)
+  endif()
 endif()
 
 target_include_directories(${DEM_LIBRARY_NAME}
@@ -232,6 +232,7 @@ if(TARGET ${LIBRARY_NAME})
     PRIVATE
       cudaq::cudaq-common
       cudaq::cudaq-em-default
+      cudaq::nvqpp
   )
 
   target_link_libraries(${LIBRARY_NAME} PRIVATE
@@ -244,7 +245,7 @@ if(TARGET ${LIBRARY_NAME})
   )
 endif()
 
-# RPATH configuration 
+# RPATH configuration
 # ==============================================================================
 
 if (NOT TARGET ${LIBRARY_NAME})
@@ -284,7 +285,7 @@ else()
   )
 endif()
 
-# Install 
+# Install
 # ==============================================================================
 # cudaq-qec-dem.a is intentionally omitted: it is a private build artifact
 # folded into cudaq-qec-decoders.so.
@@ -297,7 +298,7 @@ install(TARGETS ${_qec_install_targets}
   COMPONENT qec-lib
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-    
+
 install(DIRECTORY ${CUDAQX_QEC_INCLUDE_DIR}/cudaq
   COMPONENT qec-headers
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}

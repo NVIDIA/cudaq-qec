@@ -64,7 +64,7 @@ target_link_libraries(surface_code-1-local
     cudaq-qec
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-simulation
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
     nvqir nvqir-stim)
 qec_realtime_app_link_options(surface_code-1-local)
 
@@ -383,7 +383,7 @@ if(TARGET cudaq-qec-realtime-decoding-server-cqr)
       cudaq-qec-realtime-decoding-simulation-cqr
       cudaq-qec-realtime-decoding-server-cqr
       cudaq-device-call-runtime
-      cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+      cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
       nvqir nvqir-stim)
   qec_realtime_app_link_options(surface_code-1-cqr)
 
@@ -544,7 +544,7 @@ target_link_libraries(surface_code-1-quantinuum-emulate
     cudaq-qec
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-quantinuum
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime cudaq-rest-qpu
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime cudaq-rest-qpu
     nvqir nvqir-stim)
 qec_realtime_app_link_options(surface_code-1-quantinuum-emulate)
 
@@ -607,7 +607,7 @@ target_link_libraries(surface_code-2-local
     cudaq-qec
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-simulation
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
     nvqir nvqir-stim)
 qec_realtime_app_link_options(surface_code-2-local)
 
@@ -669,7 +669,7 @@ target_link_libraries(surface_code-2-quantinuum-emulate
     cudaq-qec
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-quantinuum
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime cudaq-rest-qpu
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime cudaq-rest-qpu
     nvqir nvqir-stim)
 qec_realtime_app_link_options(surface_code-2-quantinuum-emulate)
 
@@ -746,7 +746,7 @@ target_link_libraries(surface_code-3-local
     cudaq-qec
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-simulation
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
     nvqir nvqir-stim)
 qec_realtime_app_link_options(surface_code-3-local)
 
@@ -798,7 +798,7 @@ target_link_libraries(surface_code-3-quantinuum-emulate
     cudaq-qec
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-quantinuum
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime cudaq-rest-qpu
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime cudaq-rest-qpu
     nvqir nvqir-stim)
 qec_realtime_app_link_options(surface_code-3-quantinuum-emulate)
 
@@ -842,7 +842,7 @@ target_link_libraries(surface_code-4-yaml
     cudaq-qec
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-simulation
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
     nvqir nvqir-stim)
 qec_realtime_app_link_options(surface_code-4-yaml)
 
@@ -880,7 +880,7 @@ if(TARGET decoding_server
       cudaq-qec-realtime-decoding
       cudaq-qec-realtime-decoding-simulation-cqr
       cudaq-device-call-runtime
-      cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+      cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
       nvqir nvqir-stim)
   qec_realtime_app_link_options(surface_code-4-yaml-cqr)
 
@@ -1555,7 +1555,7 @@ if(TARGET cudaq-qec-realtime-decoding-simulation-cqr
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-simulation-cqr
     cudaq-qec-realtime-decoding-server-cqr
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime
     CUDA::cudart
     nvqir nvqir-stim
   )
@@ -1602,7 +1602,7 @@ target_link_libraries(surface_code-6-mapped-enqueue
     cudaq-qec
     cudaq-qec-realtime-decoding
     cudaq-qec-realtime-decoding-quantinuum
-    cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime cudaq-rest-qpu
+    cudaq::nvqpp cudaq::cudaq cudaq::cudaq-common cudaq-mlir-runtime cudaq-rest-qpu
     nvqir nvqir-stim)
 qec_realtime_app_link_options(surface_code-6-mapped-enqueue)
 add_dependencies(surface_code-6-mapped-enqueue cudaq-qec-pymatching)

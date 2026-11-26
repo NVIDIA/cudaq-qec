@@ -5,7 +5,7 @@ add_library(cudaq-qec-realtime-decoding-quantinuum SHARED
   quantinuum_realtime_decoding.cpp
 )
 
-target_compile_options(cudaq-qec-realtime-decoding-quantinuum 
+target_compile_options(cudaq-qec-realtime-decoding-quantinuum
   PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
 
 cudaqx_add_device_code(cudaq-qec-realtime-decoding-quantinuum
@@ -14,7 +14,7 @@ cudaqx_add_device_code(cudaq-qec-realtime-decoding-quantinuum
 )
 
 target_include_directories(cudaq-qec-realtime-decoding-quantinuum
-  PUBLIC 
+  PUBLIC
     $<BUILD_INTERFACE:${CUDAQX_QEC_INCLUDE_DIR}>
     $<INSTALL_INTERFACE:${CUDAQ_INCLUDE_DIR}>
     $<INSTALL_INTERFACE:include>
@@ -28,7 +28,7 @@ target_link_options(cudaq-qec-realtime-decoding-quantinuum PRIVATE
 )
 
 target_link_libraries(cudaq-qec-realtime-decoding-quantinuum
-  PUBLIC 
+  PUBLIC
     cudaq-qec-decoders
     cudaq-qec-realtime-decoding
   PRIVATE
@@ -64,4 +64,3 @@ set_target_properties(cudaq-qec-realtime-decoding-cudaq-stubs PROPERTIES
 install(TARGETS cudaq-qec-realtime-decoding-cudaq-stubs
   COMPONENT qec-lib
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-
